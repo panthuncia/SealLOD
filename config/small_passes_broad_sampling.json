@@ -1,0 +1,47 @@
+{
+  "name": "BasicRenderer broad small-pass optimization",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 30,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 80,
+    "maximum_samples": 160,
+    "confidence_level": 0.95,
+    "relative_half_width": 0.005
+  },
+  "output": {
+    "database": "out/small_passes_broad_sampling.sqlite",
+    "last_run_summary": "out/small_passes_broad_sampling.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "render_graph_gpu_time",
+      "output_name": "GPU time",
+      "unit": "ms",
+      "source": "render_graph_gpu_time",
+      "relative_half_width": 0.005
+    }
+  ],
+  "passes": [
+    { "id": "material_reset", "name": "MaterialPixelCounterResetPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "material_histogram", "name": "MaterialHistogramPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "material_block_scan", "name": "MaterialBlockScanPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "material_block_offsets", "name": "MaterialBlockOffsetsPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "build_pixel_list", "name": "BuildPixelListPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "build_material_commands", "name": "BuildMaterialIndirectCommandBufferPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "luminance_histogram", "name": "luminanceHistogramPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "luminance_average", "name": "LuminanceAveragePass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "bloom_down_0", "name": "BloomDownsamplePass0", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "bloom_down_1", "name": "BloomDownsamplePass1", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "bloom_down_2", "name": "BloomDownsamplePass2", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "bloom_down_3", "name": "BloomDownsamplePass3", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "bloom_down_4", "name": "BloomDownsamplePass4", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "bloom_up_4", "name": "BloomUpsamplePass4", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "bloom_up_3", "name": "BloomUpsamplePass3", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "bloom_up_2", "name": "BloomUpsamplePass2", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "tonemapping", "name": "TonemappingPass", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] }
+  ]
+}

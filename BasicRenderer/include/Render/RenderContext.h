@@ -14,7 +14,9 @@ class ViewManager;
 class LightManager;
 class EnvironmentManager;
 class MaterialManager;
-class PixelBuffer;
+class SkeletonManager;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 namespace br::render {
 class CLodRayTracingSystem;
@@ -62,6 +64,7 @@ struct UpdateContext {
 	LightManager* lightManager = nullptr;
 	EnvironmentManager* environmentManager = nullptr;
 	MaterialManager* materialManager = nullptr;
+	SkeletonManager* skeletonManager = nullptr;
 
 	Scene* currentScene = nullptr;
 	Components::Camera primaryCamera;

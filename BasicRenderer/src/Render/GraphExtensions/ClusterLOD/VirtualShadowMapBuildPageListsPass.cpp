@@ -14,11 +14,13 @@
 VirtualShadowMapBuildPageListsPass::VirtualShadowMapBuildPageListsPass(
     std::shared_ptr<PixelBuffer> pageTableTexture,
     std::shared_ptr<Buffer> pageMetadataBuffer,
+    std::shared_ptr<Buffer> allocationCountBuffer,
     std::shared_ptr<Buffer> freePhysicalPagesBuffer,
     std::shared_ptr<Buffer> reusablePhysicalPagesBuffer,
     std::shared_ptr<Buffer> pageListHeaderBuffer)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
+    , m_allocationCountBuffer(std::move(allocationCountBuffer))
     , m_freePhysicalPagesBuffer(std::move(freePhysicalPagesBuffer))
     , m_reusablePhysicalPagesBuffer(std::move(reusablePhysicalPagesBuffer))
     , m_pageListHeaderBuffer(std::move(pageListHeaderBuffer))
@@ -33,7 +35,7 @@ VirtualShadowMapBuildPageListsPass::VirtualShadowMapBuildPageListsPass(
 
 void VirtualShadowMapBuildPageListsPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
-    builder->WithShaderResource(m_pageTableTexture, m_pageMetadataBuffer)
+    builder->WithShaderResource(m_pageTableTexture, m_pageMetadataBuffer, m_allocationCountBuffer)
         .WithUnorderedAccess(
             m_freePhysicalPagesBuffer,
             m_reusablePhysicalPagesBuffer,
@@ -64,6 +66,8 @@ PassReturn VirtualShadowMapBuildPageListsPass::Execute(PassExecutionContext& exe
     rootConstants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_HEADER_DESCRIPTOR_INDEX] = m_pageListHeaderBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PHYSICAL_PAGE_COUNT] = virtualShadowConfig.maxPhysicalPages;
     rootConstants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
+    rootConstants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_ALLOCATION_COUNT_DESCRIPTOR_INDEX] =
+        m_allocationCountBuffer->GetSRVInfo(0).slot.index;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

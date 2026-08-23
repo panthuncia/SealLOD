@@ -53,6 +53,7 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
     switch (outputType) {
         case OUTPUT_NORMAL:
         case OUTPUT_ALBEDO:
+        case OUTPUT_TERRAIN_GRASS_OVERLAY:
         case OUTPUT_METALLIC:
         case OUTPUT_ROUGHNESS:
         case OUTPUT_EMISSIVE:
@@ -62,13 +63,36 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
         case OUTPUT_SPECULAR_IBL:
         case OUTPUT_MODEL_NORMALS:
         case OUTPUT_MOTION_VECTORS:
+        case OUTPUT_MATERIAL_UV:
+        case OUTPUT_MATERIAL_UV_DERIVATIVE:
+        case OUTPUT_VOXEL_UV_DENSITY:
+        case OUTPUT_REYES_SOURCE_BARYCENTRICS:
+        case OUTPUT_MATERIAL_EVAL_FEATURES:
         case OUTPUT_REYES_GEOMETRY_PATH:
         case OUTPUT_VOXEL_GEOMETRY_PATH:
+        case OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE:
         case OUTPUT_VSM_PREFERRED_CLIPMAP:
         case OUTPUT_VSM_SAMPLED_CLIPMAP:
         case OUTPUT_VSM_PAGE_STATE:
         case OUTPUT_VSM_RERENDERED_THIS_FRAME:
+        case OUTPUT_VSM_CACHED_BASIS_CORRECTION:
+        case OUTPUT_VSM_PAGE_LOCAL_TEXEL:
+        case OUTPUT_VSM_DEPTH_MARGIN:
+        case OUTPUT_VSM_CLIP_COMPARISON:
+        case OUTPUT_VSM_CLIP_GRID_OFFSET:
+        case OUTPUT_VSM_TRACE_FOOTPRINT:
         case OUTPUT_TRANSPARENT_DEPTH_COMPLEXITY:
+        case OUTPUT_PARALLAX_PIXELS:
+        case OUTPUT_TERRAIN_RVT_HIT:
+        case OUTPUT_TERRAIN_RVT_PAGE_UV:
+        case OUTPUT_TERRAIN_RVT_ATLAS_UV:
+        case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO:
+        case OUTPUT_TERRAIN_RVT_PHYSICAL_TILE_UV:
+        case OUTPUT_TERRAIN_RVT_SAMPLED_NORMAL:
+        case OUTPUT_TERRAIN_RVT_SAMPLED_MATERIAL:
+        case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO_POINT:
+        case OUTPUT_TERRAIN_RVT_HEIGHT_SCALE:
+        case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT:
             color = UnpackDebugFloat3(payload);
             break;
         case OUTPUT_TRANSPARENT_VBOIT_TRANSMITTANCE:
@@ -90,14 +114,23 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
             break;
         case OUTPUT_MESHLETS:
         case OUTPUT_GEOMETRY_GROUP:
+        case OUTPUT_CLOD_ASSEMBLY_PARTS:
         case OUTPUT_LIGHT_CLUSTER_ID:
         case OUTPUT_VSM_PHYSICAL_PAGE:
+        case OUTPUT_TERRAIN_RVT_VIRTUAL_PAGE:
+        case OUTPUT_TERRAIN_RVT_PHYSICAL_PAGE:
+        case OUTPUT_TERRAIN_RVT_ATLAS_POOL:
+        case OUTPUT_TERRAIN_RVT_FALLBACK_REASON:
+        case OUTPUT_TERRAIN_RVT_OWNER_PAGE:
+        case OUTPUT_TERRAIN_RVT_PAGE_DELTA:
             color = HashToColor(UnpackDebugUint(payload));
             break;
         case OUTPUT_LIGHT_CLUSTER_LIGHT_COUNT:
             color = HashToColor(UnpackDebugUint(payload));
             break;
         case OUTPUT_MATERIAL_SELECTED_MIP:
+        case OUTPUT_TERRAIN_RVT_REQUESTED_MIP:
+        case OUTPUT_TERRAIN_RVT_RESIDENT_MIP:
             color = MaterialSelectedMipDebugColor(payload.x, max(payload.x, payload.y));
             break;
     }

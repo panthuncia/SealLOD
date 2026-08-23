@@ -4,8 +4,10 @@
 #include <memory>
 #include <utility>
 
+#include <tracy/Tracy.hpp>
+
+#include "Interfaces/IResourceResolver.h"
 #include "RenderPasses/Base/CopyPass.h"
-#include "interfaces/IResourceResolver.h"
 
 struct CLodDirectStorageLaunchInputs {
 	std::unique_ptr<IResourceResolver> targetSlabResolver;
@@ -21,11 +23,13 @@ public:
 	void Cleanup() override {}
 
 	PassReturn Execute(PassExecutionContext&) override {
+		ZoneScopedN("CLodDirectStorageLaunchPass::Execute");
 		return m_inputs.launchCallback ? m_inputs.launchCallback() : PassReturn{};
 	}
 
 private:
 	void DeclareResourceUsages(CopyPassBuilder* builder) override {
+		ZoneScopedN("CLodDirectStorageLaunchPass::DeclareResourceUsages");
 		if (m_inputs.targetSlabResolver) {
 			builder->WithCopyDest(*m_inputs.targetSlabResolver);
 		}

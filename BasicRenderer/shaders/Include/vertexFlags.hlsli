@@ -5,5 +5,6 @@
 #define VERTEX_NORMAL 1 << 1
 #define VERTEX_TEXCOORDS 1 << 2
 #define VERTEX_SKINNED 1 << 3
+#define VERTEX_TANGENTS 1 << 4
 
 #endif // VERTEX_FLAGS_HLSLI

@@ -2,7 +2,8 @@
 
 #include <memory>
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 class TextureFactory;
 
 struct OpenPBRLookupResources {

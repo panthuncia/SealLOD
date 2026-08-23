@@ -110,14 +110,12 @@ PSInput VSMain(uint vertexID : SV_VertexID) {
     prevPosition = mul(prevPosition, mainCamera.prevView);
     output.prevClipPosition = mul(prevPosition, mainCamera.prevUnjitteredProjection);
     
-    if (vertexFlags & VERTEX_SKINNED) {
-        output.normalWorldSpace = normalize(input.normal);
-    }
-    else {
-        StructuredBuffer<float4x4> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
-        float3x3 normalMatrix = (float3x3) normalMatrixBuffer[objectBuffer.normalMatrixBufferIndex];
-        output.normalWorldSpace = normalize(mul(input.normal, normalMatrix));
-    }
+    StructuredBuffer<SingleMatrix> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
+    float3x3 normalMatrix = (float3x3) normalMatrixBuffer[objectBuffer.normalMatrixBufferIndex].value;
+    output.normalWorldSpace = normalize(mul(input.normal, normalMatrix));
+    output.tangentWorldSpace = (vertexFlags & VERTEX_TANGENTS)
+        ? float4(normalize(mul(input.tangent.xyz, normalMatrix)), input.tangent.w)
+        : float4(1.0f, 0.0f, 0.0f, 0.0f);
 
     output.color = input.color;
 
@@ -242,6 +240,7 @@ PSMain(PSInput input, bool isFrontFace : SV_IsFrontFace) : SV_TARGET
                 payload = PackDebugFloat3(fragmentInfo.normalWS * 0.5 + 0.5);
                 break;
             case OUTPUT_ALBEDO:
+            case OUTPUT_TERRAIN_GRASS_OVERLAY:
                 payload = PackDebugFloat3(fragmentInfo.albedo.rgb);
                 break;
             case OUTPUT_METALLIC:
@@ -255,6 +254,9 @@ PSMain(PSInput input, bool isFrontFace : SV_IsFrontFace) : SV_TARGET
                 break;
             case OUTPUT_AO:
                 payload = PackDebugFloat3(fragmentInfo.diffuseAmbientOcclusion.xxx);
+                break;
+            case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT:
+                payload = PackDebugFloat3(fragmentInfo.geometricHeightDebug.xxx);
                 break;
             case OUTPUT_DEPTH: {
                 float depth = abs(input.positionViewSpace.z) * 0.1;
@@ -294,6 +296,9 @@ PSMain(PSInput input, bool isFrontFace : SV_IsFrontFace) : SV_TARGET
                 if (fragmentInfo.selectedMaterialMipLevel != MATERIAL_DEBUG_INVALID_MIP_LEVEL) {
                     payload = PackDebugUint2(fragmentInfo.selectedMaterialMipLevel, fragmentInfo.selectedMaterialMipMaxLevel);
                 }
+                break;
+            case OUTPUT_PARALLAX_PIXELS:
+                payload = PackDebugFloat3(fragmentInfo.parallaxApplied != 0u ? 1.0f.xxx : 0.0f.xxx);
                 break;
         }
         if (payload.x != DEBUG_SENTINEL) {

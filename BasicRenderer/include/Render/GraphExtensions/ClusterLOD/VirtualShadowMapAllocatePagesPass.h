@@ -7,8 +7,10 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
-class PixelBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class VirtualShadowMapAllocatePagesPass final : public ComputePass {
 public:
@@ -22,8 +24,8 @@ public:
         std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
         std::shared_ptr<Buffer> freePhysicalPagesBuffer,
         std::shared_ptr<Buffer> reusablePhysicalPagesBuffer,
-        std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
-        std::shared_ptr<Buffer> pageListHeaderBuffer);
+        std::shared_ptr<Buffer> pageListHeaderBuffer,
+        std::shared_ptr<Buffer> statsBuffer);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -42,6 +44,6 @@ private:
     std::shared_ptr<Buffer> m_dirtyPageFlagsBuffer;
     std::shared_ptr<Buffer> m_freePhysicalPagesBuffer;
     std::shared_ptr<Buffer> m_reusablePhysicalPagesBuffer;
-    std::shared_ptr<Buffer> m_directionalPageViewInfoBuffer;
     std::shared_ptr<Buffer> m_pageListHeaderBuffer;
+    std::shared_ptr<Buffer> m_statsBuffer;
 };

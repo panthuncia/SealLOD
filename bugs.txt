@@ -1,2 +1,4 @@
 D3D12 ERROR: ID3D12CommandQueue1::ExecuteCommandLists: Barrier layout(D3D12_BARRIER_LAYOUT_COMMON), pResource = 0x000001F8BE6D6360:'Upscaled HDR Color Target', subresource = [2], does not support the required access (D3D12_BARRIER_ACCESS_RENDER_TARGET) using D3D12_COMMAND_LIST_TYPE_DIRECT command list 0x000001FADFD91AA0:'ORG Graphics CommandList #132') in Draw for use as a render target [ STATE_SETTING ERROR #1334: INCOMPATIBLE_BARRIER_LAYOUT]
 D3D12: **BREAK** enabled for the previous message, which was: [ ERROR STATE_SETTING #1334: INCOMPATIBLE_BARRIER_LAYOUT ]
+
+- DirectStorage CLod path might freeze under heavy load? Investigate.

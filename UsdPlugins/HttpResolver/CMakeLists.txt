@@ -9,6 +9,9 @@ set(USDPLUGINS_OUTPUT_ROOT "${CMAKE_BINARY_DIR}/BasicRenderer")
 # Find OpenUSD (must provide USD_INCLUDE_DIRS and USD_LIBRARIES)
 find_package(pxr REQUIRED)
 find_package(spdlog REQUIRED)
+if(COMMAND basicrenderer_use_release_library_for_debug)
+    basicrenderer_use_release_library_for_debug(fmt::fmt)
+endif()
 
 # Find CURL for HTTP fetching
 find_package(curl REQUIRED)
@@ -56,24 +59,33 @@ function(add_symlink_or_copy_per_config source destination IS_DIRECTORY target_n
         get_filename_component(target_name "${destination}" NAME)
     endif()
 
+    set(_sync_stamp "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>/${target_name}.stamp")
+    set(_sync_stamp_dir "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>")
+
     if (IS_DIRECTORY)
-        add_custom_target(
-            "${target_name}_sync" ALL
+        add_custom_command(
+            OUTPUT "${_sync_stamp}"
             COMMENT "Syncing directory ${destination} <- ${source}"
             VERBATIM
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_sync_stamp_dir}"
             COMMAND ${CMAKE_COMMAND} -E remove_directory "${destination}"
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Release>,copy_directory,create_symlink> "${source}" "${destination}"
+            COMMAND ${CMAKE_COMMAND} -E touch "${_sync_stamp}"
         )
     else()
-        add_custom_target(
-            "${target_name}_sync" ALL
+        add_custom_command(
+            OUTPUT "${_sync_stamp}"
             COMMENT "Syncing file ${destination} <- ${source}"
             VERBATIM
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_sync_stamp_dir}"
             COMMAND ${CMAKE_COMMAND} -E remove "${destination}"
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Release>,copy,create_symlink> "${source}" "${destination}"
+            COMMAND ${CMAKE_COMMAND} -E touch "${_sync_stamp}"
+            DEPENDS "${source}"
         )
     endif()
 
+    add_custom_target("${target_name}_sync" DEPENDS "${_sync_stamp}")
     if(TARGET "${USDPLUGINS_HOST_TARGET}")
         add_dependencies("${USDPLUGINS_HOST_TARGET}" "${target_name}_sync")
     endif()

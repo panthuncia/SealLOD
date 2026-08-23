@@ -22,7 +22,7 @@ public:
 	~DebugSpherePass() {
 	}
 
-	void DeclareResourceUsages(RenderPassBuilder* builder) {
+	void DeclareResourceUsages(RenderPassBuilder* builder) override {
 		builder->WithShaderResource(Builtin::PerObjectBuffer, Builtin::PerMeshBuffer, Builtin::CameraBuffer)
 			.WithDepthReadWrite(Builtin::PrimaryCamera::DepthTexture)
 			.IsGeometryPass();
@@ -32,9 +32,6 @@ public:
 	void Setup() override {
 	
 		m_pPrimaryDepthBuffer = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PrimaryCamera::DepthTexture);
-
-		m_cameraBufferSRVIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index;
-		m_objectBufferSRVIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PerObjectBuffer)->GetSRVInfo(0).slot.index;
 	}
 
 	PassReturn Execute(PassExecutionContext& executionContext) override {
@@ -67,8 +64,8 @@ public:
 		constants.center[2] = 0.0;
 		constants.radius = 1.0;
 		constants.perObjectIndex = 0;
-		constants.cameraBufferIndex = m_cameraBufferSRVIndex;
-		constants.objectBufferIndex = m_objectBufferSRVIndex;
+		constants.cameraBufferIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index;
+		constants.objectBufferIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PerObjectBuffer)->GetSRVInfo(0).slot.index;
 
 		commandList.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, 8, (uint32_t*)&constants);
 
@@ -188,9 +185,6 @@ private:
 	bool m_wireframe;
 
 	PixelBuffer* m_pPrimaryDepthBuffer;
-
-	int m_cameraBufferSRVIndex = -1;
-	int m_objectBufferSRVIndex = -1;
 
 	std::function<bool()> getImageBasedLightingEnabled;
 	std::function<bool()> getPunctualLightingEnabled;

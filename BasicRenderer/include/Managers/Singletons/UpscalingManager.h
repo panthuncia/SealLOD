@@ -90,7 +90,8 @@ inline sl::DLSSMode ToSLQualityMode(UpscaleQualityMode mode) {
     }
 }
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 struct RenderContext;
 
 class UpscalingManager {
@@ -100,6 +101,7 @@ public:
 	void ProxyDevice();
     void Setup();
 	void Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors);
+    void RequestHistoryReset() { m_resetUpscalerHistory = true; }
 	void Shutdown();
 
     bool InitSL();
@@ -113,6 +115,7 @@ public:
 
 private:
     UpscalingManager() = default;
+    void SyncSettingsFromSettingsManager();
     bool EnsureFSRContext();
 	void EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors);
     void EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors);
@@ -121,9 +124,16 @@ private:
     UpscaleQualityMode m_upscaleQualityMode = UpscaleQualityMode::Balanced;
     std::function<DirectX::XMUINT2()> m_getRenderRes;
 	std::function<DirectX::XMUINT2()> m_getOutputRes;
-    bool m_fsrIntialized = false;
+	bool m_fsrIntialized = false;
     ffx::Context m_fsrUpscalingContext = nullptr;
 	bool m_dlssSupported = false;
+    // Streamline history is tied to the input/output dimensions selected by
+    // Setup(). A quality-mode or output-size change must invalidate it on the
+    // first evaluation using the replacement render targets.
+    bool m_resetUpscalerHistory = true;
+    // Streamline reports memory pressure as a warning result. Avoid turning a
+    // recoverable, persistent condition into one error log entry per frame.
+    bool m_reportedDlssOutOfMemory = false;
 };
 
 inline UpscalingManager& UpscalingManager::GetInstance() {

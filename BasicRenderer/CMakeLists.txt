@@ -25,9 +25,11 @@ option(BASICRENDERER_USE_PACKAGE_DEPS "Prefer preinstalled BasicRHI/OpenRenderGr
 option(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK "Allow fallback to in-tree BasicRHI/OpenRenderGraph" ON)
 
 if(BASICRENDERER_USE_PACKAGE_DEPS)
+    find_package(BasicTelemetry CONFIG QUIET)
     find_package(BasicScene CONFIG QUIET)
     find_package(BasicRHI CONFIG QUIET)
     find_package(OpenRenderGraph CONFIG QUIET)
+    find_package(ORGModuleServices CONFIG QUIET)
 endif()
 
 if(TARGET BasicScene AND NOT TARGET BasicScene::BasicScene)
@@ -43,6 +45,12 @@ if(TARGET OpenRenderGraph AND NOT TARGET OpenRenderGraph::OpenRenderGraph)
 endif()
 
 if(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK)
+    if(NOT TARGET BasicTelemetry::Core AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../BasicTelemetry/CMakeLists.txt")
+        set(BASICTELEMETRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(BASICTELEMETRY_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../BasicTelemetry" "${CMAKE_CURRENT_BINARY_DIR}/_deps/BasicTelemetry")
+    endif()
+
     if(NOT TARGET BasicScene::BasicScene AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../BasicScene/CMakeLists.txt")
         add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../BasicScene" "${CMAKE_CURRENT_BINARY_DIR}/_deps/BasicScene")
     endif()
@@ -66,6 +74,11 @@ if(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK)
     if(TARGET OpenRenderGraph AND NOT TARGET OpenRenderGraph::OpenRenderGraph)
         add_library(OpenRenderGraph::OpenRenderGraph ALIAS OpenRenderGraph)
     endif()
+
+    if(NOT TARGET ORGModuleServices::ORGModuleServices AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../ORGModuleServices/CMakeLists.txt")
+        set(ORG_MODULE_SERVICES_ENABLE_VULKAN ${BASICRHI_ENABLE_VULKAN} CACHE BOOL "" FORCE)
+        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../ORGModuleServices" "${CMAKE_CURRENT_BINARY_DIR}/_deps/ORGModuleServices")
+    endif()
 endif()
 
 if(NOT TARGET BasicScene::BasicScene)
@@ -80,6 +93,23 @@ if(NOT TARGET OpenRenderGraph::OpenRenderGraph)
     message(FATAL_ERROR "BasicRenderer requires OpenRenderGraph::OpenRenderGraph. Install OpenRenderGraph package or provide OpenRenderGraph as submodule.")
 endif()
 
+if(NOT TARGET ORGModuleServices::ORGModuleServices)
+    message(FATAL_ERROR "BasicRenderer requires ORGModuleServices::ORGModuleServices. Install it or provide it as a submodule.")
+endif()
+
+if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    get_filename_component(_basicrenderer_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(_basicrenderer_clang_root_dir "${_basicrenderer_clang_bin_dir}" DIRECTORY)
+    set(_basicrenderer_clang_libomp "${_basicrenderer_clang_root_dir}/lib/libomp.lib")
+    if(EXISTS "${_basicrenderer_clang_libomp}")
+        set(OpenMP_C_FLAGS "/openmp" CACHE STRING "OpenMP C flags for clang-cl" FORCE)
+        set(OpenMP_CXX_FLAGS "/openmp" CACHE STRING "OpenMP CXX flags for clang-cl" FORCE)
+        set(OpenMP_C_LIB_NAMES "libomp" CACHE STRING "OpenMP C libraries for clang-cl" FORCE)
+        set(OpenMP_CXX_LIB_NAMES "libomp" CACHE STRING "OpenMP CXX libraries for clang-cl" FORCE)
+        set(OpenMP_libomp_LIBRARY "${_basicrenderer_clang_libomp}" CACHE FILEPATH "LLVM OpenMP runtime for clang-cl" FORCE)
+    endif()
+endif()
+
 find_package(spdlog CONFIG REQUIRED)
 find_package(directxtex CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
@@ -91,20 +121,84 @@ endif()
 find_package(DirectX-Headers CONFIG REQUIRED)
 find_package(flecs CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
+find_package(lz4 CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(unofficial-tree-sitter CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(pxr CONFIG REQUIRED)
+if(TARGET TBB::tbb AND NOT TARGET TBB::tbbmalloc)
+    add_library(TBB::tbbmalloc INTERFACE IMPORTED)
+endif()
+find_package(embree CONFIG REQUIRED)
 if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
+find_package(Eigen3 CONFIG REQUIRED)
 find_package(implot CONFIG REQUIRED)
-find_package(Boost REQUIRED COMPONENTS container_hash)
+find_package(Boost REQUIRED COMPONENTS container_hash interprocess)
 find_package(Tracy REQUIRED CONFIG)
+if(COMMAND basicrenderer_use_release_library_for_debug)
+    basicrenderer_use_release_library_for_debug(fmt::fmt)
+    basicrenderer_use_release_library_for_debug(polyclipping::polyclipping)
+    basicrenderer_use_release_library_for_debug(poly2tri::poly2tri)
+    basicrenderer_use_release_library_for_debug(unofficial::minizip::minizip)
+    basicrenderer_use_release_library_for_debug(ZLIB::ZLIB)
+    basicrenderer_use_release_library_for_debug(pugixml)
+    basicrenderer_use_release_library_for_debug(pugixml::static)
+    basicrenderer_use_release_library_for_debug(zip::zip)
+    basicrenderer_use_release_library_for_debug(Tracy::TracyClient)
+endif()
 find_package(slang CONFIG REQUIRED)
 
 option(BASICRENDERER_ENABLE_DIRECTSTORAGE "Enable DirectStorage integration when the SDK is available" ON)
+option(BASICRENDERER_ENABLE_NVPERF "Enable NVIDIA Nsight Perf SDK startup diagnostics and future profiling hooks" OFF)
+option(BASICRENDERER_BUILD_INTEROP_VALIDATION "Build the opt-in SARP interop validation policy module" OFF)
 set(BASICRENDERER_DIRECTSTORAGE_SDK_ROOT "" CACHE PATH "Optional DirectStorage SDK root containing include/dstorage.h and a dstorage import library")
+set(BASICRENDERER_NVPERF_SDK_ROOT "$ENV{NVPERF_SDK_ROOT}" CACHE PATH "Path to an NVIDIA Nsight Perf SDK installation")
+
+if(WIN32 AND BASICRENDERER_ENABLE_NVPERF AND NOT TARGET NVPerf::Host)
+    find_path(NVPERF_INCLUDE_DIR
+        NAMES nvperf_host.h
+        HINTS "${BASICRENDERER_NVPERF_SDK_ROOT}"
+        PATH_SUFFIXES include
+    )
+    find_path(NVPERF_PLATFORM_INCLUDE_DIR
+        NAMES nvperf_host_impl.h
+        HINTS "${BASICRENDERER_NVPERF_SDK_ROOT}"
+        PATH_SUFFIXES include/windows-desktop-x64
+    )
+    find_file(NVPERF_GRFX_HOST_DLL
+        NAMES nvperf_grfx_host.dll
+        HINTS "${BASICRENDERER_NVPERF_SDK_ROOT}"
+        PATH_SUFFIXES bin/x64
+    )
+    find_library(NVPERF_GRFX_HOST_LIBRARY
+        NAMES nvperf_grfx_host
+        HINTS "${BASICRENDERER_NVPERF_SDK_ROOT}"
+        PATH_SUFFIXES bin/x64
+    )
+
+    if(NVPERF_INCLUDE_DIR AND NVPERF_PLATFORM_INCLUDE_DIR AND NVPERF_GRFX_HOST_DLL AND NVPERF_GRFX_HOST_LIBRARY)
+        add_library(BasicRenderer_NVPerfHost INTERFACE)
+        target_include_directories(BasicRenderer_NVPerfHost INTERFACE
+            "${NVPERF_INCLUDE_DIR}"
+            "${NVPERF_PLATFORM_INCLUDE_DIR}"
+        )
+        target_link_libraries(BasicRenderer_NVPerfHost INTERFACE "${NVPERF_GRFX_HOST_LIBRARY}")
+        add_library(NVPerf::Host ALIAS BasicRenderer_NVPerfHost)
+        message(STATUS "BasicRenderer: NVIDIA Nsight Perf SDK enabled (${BASICRENDERER_NVPERF_SDK_ROOT})")
+    else()
+        message(FATAL_ERROR
+            "BASICRENDERER_ENABLE_NVPERF=ON, but the NVIDIA Nsight Perf SDK was not found. "
+            "Set BASICRENDERER_NVPERF_SDK_ROOT or NVPERF_SDK_ROOT to the SDK's NvPerf directory."
+        )
+    endif()
+endif()
+
+if(NOT TARGET BasicTelemetry::Core)
+    message(FATAL_ERROR "BasicRenderer requires BasicTelemetry::Core. Install BasicTelemetry or provide it as a sibling project.")
+endif()
 
 set(BASICRENDERER_HAS_DIRECTSTORAGE FALSE)
 unset(BASICRENDERER_DIRECTSTORAGE_INCLUDE_DIR CACHE)
@@ -214,16 +308,62 @@ set(BASICRENDERER_DEMO_TARGET BasicRendererDemo)
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 set(BASICRENDERER_DEMO_SOURCE "${BASICRENDERER_SOURCE_ROOT}/src/BasicRenderer.cpp")
-list(REMOVE_ITEM SOURCES "${BASICRENDERER_DEMO_SOURCE}")
+set(BASICRENDERER_SAMPLING_CONTROL_SOURCE "${BASICRENDERER_SOURCE_ROOT}/src/Telemetry/StatisticalSamplingControl.cpp")
+list(REMOVE_ITEM SOURCES "${BASICRENDERER_DEMO_SOURCE}" "${BASICRENDERER_SAMPLING_CONTROL_SOURCE}")
+
+if(EXISTS "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
+    add_library(xatlas STATIC "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
+    target_include_directories(xatlas PUBLIC "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas")
+    set_target_properties(xatlas PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
+endif()
+
+if(EXISTS "${BASICRENDERER_REPO_ROOT}/geometry-central/CMakeLists.txt" AND NOT TARGET geometry-central)
+    set(SUITESPARSE OFF CACHE BOOL "Enable SuiteSparse for geometry-central." FORCE)
+    add_subdirectory("${BASICRENDERER_REPO_ROOT}/geometry-central" "${CMAKE_CURRENT_BINARY_DIR}/_deps/geometry-central" EXCLUDE_FROM_ALL)
+    set_property(TARGET geometry-central PROPERTY INTERFACE_COMPILE_DEFINITIONS "")
+endif()
 
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
+if(BASICRENDERER_BUILD_INTEROP_VALIDATION)
+    add_library(SARPInteropValidation STATIC
+        "${BASICRENDERER_SOURCE_ROOT}/validation/SARPInteropValidation.cpp")
+    target_compile_features(SARPInteropValidation PRIVATE cxx_std_23)
+    target_include_directories(SARPInteropValidation PUBLIC "${BASICRENDERER_SOURCE_ROOT}/include")
+    target_link_libraries(SARPInteropValidation PRIVATE OpenRenderGraph::OpenRenderGraph spdlog::spdlog_header_only)
+    target_link_libraries(${PROJECT_NAME} PRIVATE SARPInteropValidation)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC BASICRENDERER_HAS_INTEROP_VALIDATION=1)
+else()
+    target_compile_definitions(${PROJECT_NAME} PUBLIC BASICRENDERER_HAS_INTEROP_VALIDATION=0)
+endif()
 add_executable(${BASICRENDERER_DEMO_TARGET} WIN32 "${BASICRENDERER_DEMO_SOURCE}")
+add_executable(StatisticalSamplingControl "${BASICRENDERER_SAMPLING_CONTROL_SOURCE}")
+target_compile_features(StatisticalSamplingControl PRIVATE cxx_std_23)
+target_link_libraries(StatisticalSamplingControl PRIVATE nlohmann_json::nlohmann_json)
+target_compile_definitions(StatisticalSamplingControl PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
     OUTPUT_NAME ${PROJECT_NAME}
     ARCHIVE_OUTPUT_NAME ${BASICRENDERER_DEMO_TARGET}
 )
 add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
+add_executable(SkeletonArtifactCacheTests "tests/SkeletonArtifactCacheTests.cpp")
+add_executable(PipelineRecipeTests "tests/PipelineRecipeTests.cpp")
+add_executable(MaterialEvalVariantTests "tests/MaterialEvalVariantTests.cpp")
+add_executable(VirtualShadowBudgetTests "tests/VirtualShadowBudgetTests.cpp")
+add_executable(BoundedSpscQueueTests "tests/BoundedSpscQueueTests.cpp")
+target_include_directories(BoundedSpscQueueTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/include")
+target_compile_features(BoundedSpscQueueTests PRIVATE cxx_std_23)
+add_executable(CLodCoordinatorTests "tests/CLodCoordinatorTests.cpp")
+add_executable(StatisticalSamplerTests "tests/StatisticalSamplerTests.cpp")
+target_compile_features(StatisticalSamplerTests PRIVATE cxx_std_23)
+target_compile_definitions(StatisticalSamplerTests PRIVATE
+    STATISTICAL_SAMPLER_TEST_CONFIG="${BASICRENDERER_SOURCE_ROOT}/tests/data/statistical_sampler.json")
+target_link_libraries(StatisticalSamplerTests PRIVATE ${PROJECT_NAME})
+target_include_directories(CLodCoordinatorTests PRIVATE
+    "${BASICRENDERER_SOURCE_ROOT}/include"
+    "${BASICRENDERER_REPO_ROOT}/OpenRenderGraph/include")
+target_compile_features(CLodCoordinatorTests PRIVATE cxx_std_23)
+target_link_libraries(CLodCoordinatorTests PRIVATE ${PROJECT_NAME})
 
 set(BASICRENDERER_IMGUI_SOURCE_VERSION "1.91.9" CACHE STRING "ImGui source release used when vcpkg's transient build tree is unavailable.")
 set(_basicrenderer_imgui_vulkan_backend_candidates)
@@ -306,6 +446,7 @@ if (CMAKE_VERSION VERSION_GREATER 3.14)
   set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 23)
   set_property(TARGET ${BASICRENDERER_DEMO_TARGET} PROPERTY CXX_STANDARD 23)
   set_property(TARGET ShaderPreprocessTests PROPERTY CXX_STANDARD 23)
+  set_property(TARGET SkeletonArtifactCacheTests PROPERTY CXX_STANDARD 23)
 endif()
 
 # br_generate_header(
@@ -415,24 +556,33 @@ function(add_symlink_or_copy_per_config source destination IS_DIRECTORY target_n
         get_filename_component(target_name "${destination}" NAME)
     endif()
 
+    set(_sync_stamp "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>/${target_name}.stamp")
+    set(_sync_stamp_dir "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>")
+
     if (IS_DIRECTORY)
-        add_custom_target(
-            "${target_name}_sync" ALL
+        add_custom_command(
+            OUTPUT "${_sync_stamp}"
             COMMENT "Syncing directory ${destination} <- ${source}"
             VERBATIM
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_sync_stamp_dir}"
             COMMAND ${CMAKE_COMMAND} -E remove_directory "${destination}"
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Release>,copy_directory,create_symlink> "${source}" "${destination}"
+            COMMAND ${CMAKE_COMMAND} -E touch "${_sync_stamp}"
         )
     else()
-        add_custom_target(
-            "${target_name}_sync" ALL
+        add_custom_command(
+            OUTPUT "${_sync_stamp}"
             COMMENT "Syncing file ${destination} <- ${source}"
             VERBATIM
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_sync_stamp_dir}"
             COMMAND ${CMAKE_COMMAND} -E remove "${destination}"
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Release>,copy,create_symlink> "${source}" "${destination}"
+            COMMAND ${CMAKE_COMMAND} -E touch "${_sync_stamp}"
+            DEPENDS "${source}"
         )
     endif()
 
+    add_custom_target("${target_name}_sync" DEPENDS "${_sync_stamp}")
     add_dependencies(${PROJECT_NAME} "${target_name}_sync")
     add_dependencies(${BASICRENDERER_DEMO_TARGET} "${target_name}_sync")
 endfunction()
@@ -746,12 +896,23 @@ add_symlink_or_copy_per_config(
     "USD_SDR"
 )
 
-add_symlink_or_copy_per_config(
-    "${BASICRENDERER_USD_ROOT}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>/bin/tbb$<$<CONFIG:Debug>:_debug>.dll"
-    "${BASICRENDERER_OUTPUT_ROOT}/tbb$<$<CONFIG:Debug>:_debug>.dll"
-    FALSE  # IS_DIRECTORY
-    "tbb"
+set(_tbb_config_sync_stamp "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>/tbb_config.stamp")
+add_custom_command(
+    OUTPUT "${_tbb_config_sync_stamp}"
+    COMMENT "Syncing config-specific TBB runtime"
+    VERBATIM
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>"
+    COMMAND ${CMAKE_COMMAND}
+        "-DSOURCE_DIR=${BASICRENDERER_USD_ROOT}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>/bin"
+        "-DDESTINATION_DIR=${BASICRENDERER_OUTPUT_ROOT}"
+        "-DCONFIG=$<CONFIG>"
+        -P "${CMAKE_CURRENT_LIST_DIR}/cmake/SyncTbbRuntime.cmake"
+    COMMAND ${CMAKE_COMMAND} -E touch "${_tbb_config_sync_stamp}"
+    DEPENDS "${BASICRENDERER_USD_ROOT}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>/bin/tbb.dll"
 )
+add_custom_target(tbb_config_sync DEPENDS "${_tbb_config_sync_stamp}")
+add_dependencies(${PROJECT_NAME} tbb_config_sync)
+add_dependencies(${BASICRENDERER_DEMO_TARGET} tbb_config_sync)
 
 add_symlink_or_copy_per_config(
     "${USD_DIR}/lib/usd"
@@ -763,10 +924,12 @@ add_symlink_or_copy_per_config(
 if (MSVC)
   target_compile_options(${PROJECT_NAME} PRIVATE /Zc:preprocessor)
   target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE /Zc:preprocessor)
-  target_compile_options(${PROJECT_NAME} PRIVATE /WX)
-  target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE /WX)
   target_compile_options(ShaderPreprocessTests PRIVATE /Zc:preprocessor)
-  target_compile_options(ShaderPreprocessTests PRIVATE /WX)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(${PROJECT_NAME} PRIVATE /WX)
+    target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE /WX)
+    target_compile_options(ShaderPreprocessTests PRIVATE /WX)
+  endif()
   target_compile_options(${PROJECT_NAME} PRIVATE 
       /wd4828 
       /wd4514 
@@ -818,7 +981,6 @@ if (MSVC)
   target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE /external:anglebrackets /external:W0)
   # Clang (via clang-cl) warns about MSVC-specific flags it ignores; suppress those warnings-as-errors
   target_compile_options(${PROJECT_NAME} PRIVATE $<$<CXX_COMPILER_ID:Clang>:
-      -Werror
       -Wno-unused-command-line-argument
       -Wno-unused-function
       -Wno-error=switch
@@ -838,7 +1000,6 @@ if (MSVC)
       -Wno-error=unused-lambda-capture
   >)
   target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE $<$<CXX_COMPILER_ID:Clang>:
-      -Werror
       -Wno-unused-command-line-argument
       -Wno-unused-function
       -Wno-error=switch
@@ -882,7 +1043,6 @@ if (MSVC)
   )
   target_compile_options(ShaderPreprocessTests PRIVATE /external:anglebrackets /external:W0)
   target_compile_options(ShaderPreprocessTests PRIVATE $<$<CXX_COMPILER_ID:Clang>:
-      -Werror
       -Wno-unused-command-line-argument
       -Wno-unused-function
       -Wno-error=switch
@@ -903,7 +1063,7 @@ if (MSVC)
   >)
 endif()
 
-target_include_directories(${PROJECT_NAME} BEFORE PUBLIC ${DIRECTX_HEADERS_INCLUDE_DIR} include/)
+target_include_directories(${PROJECT_NAME} BEFORE PUBLIC ${DIRECTX_HEADERS_INCLUDE_DIR} include/ generated/)
 if(BASICRENDERER_DETECTED_VULKAN_INCLUDE_DIR)
     target_include_directories(${PROJECT_NAME} BEFORE PRIVATE "${BASICRENDERER_DETECTED_VULKAN_INCLUDE_DIR}")
 endif()
@@ -953,6 +1113,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
   $<$<CONFIG:Release>:BUILD_TYPE=BUILD_TYPE_RELEASE>
   $<$<CONFIG:RelWithDebInfo>:BUILD_TYPE=BUILD_TYPE_RELEASE_DEBUG>
     BASICRENDERER_HAS_DIRECTSTORAGE=$<IF:$<BOOL:${BASICRENDERER_HAS_DIRECTSTORAGE}>,1,0>
+    BASICRENDERER_ENABLE_NVPERF=$<IF:$<AND:$<BOOL:${BASICRENDERER_ENABLE_NVPERF}>,$<TARGET_EXISTS:NVPerf::Host>>,1,0>
 )
 target_compile_definitions(${BASICRENDERER_DEMO_TARGET} PRIVATE
   BUILD_TYPE_DEBUG=0
@@ -971,13 +1132,44 @@ target_compile_definitions(ShaderPreprocessTests PRIVATE
   $<$<CONFIG:RelWithDebInfo>:BUILD_TYPE=BUILD_TYPE_RELEASE_DEBUG>
 )
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  if(TARGET Microsoft::DirectXTex)
+    get_target_property(_basicrenderer_directxtex_debug_lib Microsoft::DirectXTex IMPORTED_LOCATION_DEBUG)
+    get_target_property(_basicrenderer_directxtex_release_lib Microsoft::DirectXTex IMPORTED_LOCATION_RELEASE)
+    if(_basicrenderer_directxtex_release_lib
+        AND _basicrenderer_directxtex_debug_lib
+        AND NOT "${_basicrenderer_directxtex_debug_lib}" STREQUAL "${_basicrenderer_directxtex_release_lib}")
+      set_property(TARGET Microsoft::DirectXTex PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+      set_property(TARGET Microsoft::DirectXTex PROPERTY MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+      set_property(TARGET Microsoft::DirectXTex PROPERTY IMPORTED_LOCATION_DEBUG "${_basicrenderer_directxtex_release_lib}")
+    endif()
+  endif()
+  if(TARGET assimp::assimp)
+    get_target_property(_basicrenderer_assimp_debug_lib assimp::assimp IMPORTED_LOCATION_DEBUG)
+    get_target_property(_basicrenderer_assimp_release_lib assimp::assimp IMPORTED_LOCATION_RELEASE)
+    if(_basicrenderer_assimp_release_lib
+        AND _basicrenderer_assimp_debug_lib
+        AND NOT "${_basicrenderer_assimp_debug_lib}" STREQUAL "${_basicrenderer_assimp_release_lib}")
+      set_property(TARGET assimp::assimp PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+      set_property(TARGET assimp::assimp PROPERTY MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+      set_property(TARGET assimp::assimp PROPERTY IMPORTED_LOCATION_DEBUG "${_basicrenderer_assimp_release_lib}")
+    endif()
+  endif()
+endif()
+
 target_link_libraries(${PROJECT_NAME} 
 PRIVATE 
     dxgi.lib 
+    bcrypt.lib
+    lz4::lz4
+    xatlas
+    geometry-central
     spdlog::spdlog_header_only 
     Microsoft::DirectXTex 
     imgui::imgui 
     meshoptimizer
+    Eigen3::Eigen
+    embree
     assimp::assimp 
     flecs::flecs 
     flecs::flecs_static 
@@ -997,9 +1189,13 @@ PRIVATE
     OpenRenderGraph::OpenRenderGraph
     BasicScene::BasicScene
     BasicRHI::BasicRHI
+    ORGModuleServices::ORGModuleServices
     Boost::container_hash
+    Boost::interprocess
     TBB::tbb
     Tracy::TracyClient
+    BasicTelemetry::Core
+    unofficial::sqlite3::sqlite3
     slang::slang
     "${BASICRENDERER_SOURCE_ROOT}/WinPixEventRuntime.lib" 
     "${BASICRENDERER_SOURCE_ROOT}/sl.interposer.lib" 
@@ -1018,10 +1214,21 @@ PUBLIC
     OpenRenderGraph::OpenRenderGraph
     BasicScene::BasicScene
     BasicRHI::BasicRHI
+    geometry-central
 )
 
 if(TARGET BasicRenderer_DirectStorage)
     target_link_libraries(${PROJECT_NAME} PRIVATE BasicRenderer_DirectStorage)
+endif()
+
+if(BASICRENDERER_ENABLE_NVPERF)
+    if(TARGET NVPerf::Host)
+        target_link_libraries(${PROJECT_NAME} PRIVATE NVPerf::Host)
+        target_link_libraries(${BASICRENDERER_DEMO_TARGET} PRIVATE NVPerf::Host)
+        message(STATUS "BasicRenderer: NVIDIA Nsight Perf SDK integration enabled")
+    else()
+        message(WARNING "BasicRenderer: BASICRENDERER_ENABLE_NVPERF was requested, but NVPerf::Host is unavailable")
+    endif()
 endif()
 
 target_link_libraries(${BASICRENDERER_DEMO_TARGET}
@@ -1050,6 +1257,17 @@ if(BASICRENDERER_DIRECTSTORAGE_CORE_DLL)
         "${DIRECTSTORAGE_CORE_DEST_FILE}"
         FALSE
         "directstoragecore_dll"
+    )
+endif()
+
+if(BASICRENDERER_ENABLE_NVPERF AND NVPERF_GRFX_HOST_DLL)
+    add_custom_command(TARGET ${BASICRENDERER_DEMO_TARGET} POST_BUILD
+        COMMENT "Copying NVIDIA Nsight Perf SDK host DLL"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${BASICRENDERER_DEMO_TARGET}>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${NVPERF_GRFX_HOST_DLL}"
+            "$<TARGET_FILE_DIR:${BASICRENDERER_DEMO_TARGET}>/nvperf_grfx_host.dll"
+        VERBATIM
     )
 endif()
 
@@ -1174,8 +1392,27 @@ endif()
 target_link_libraries(ShaderPreprocessTests
 PRIVATE
     unofficial::tree-sitter::tree-sitter
+    BasicRHI::BasicRHI
     "${BASICRENDERER_SOURCE_ROOT}/hlsl_parser.lib"
 )
 
+target_link_libraries(SkeletonArtifactCacheTests PRIVATE ${PROJECT_NAME})
+target_link_libraries(PipelineRecipeTests PRIVATE ${PROJECT_NAME})
+target_link_libraries(MaterialEvalVariantTests PRIVATE ${PROJECT_NAME})
+target_link_libraries(VirtualShadowBudgetTests PRIVATE ${PROJECT_NAME})
+if(MSVC)
+    target_compile_options(SkeletonArtifactCacheTests PRIVATE /std:c++latest)
+    target_compile_options(PipelineRecipeTests PRIVATE /std:c++latest)
+    target_compile_options(MaterialEvalVariantTests PRIVATE /std:c++latest)
+    target_compile_options(VirtualShadowBudgetTests PRIVATE /std:c++latest)
+endif()
+
 enable_testing()
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
+add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)
+add_test(NAME PipelineRecipeTests COMMAND PipelineRecipeTests)
+add_test(NAME MaterialEvalVariantTests COMMAND MaterialEvalVariantTests)
+add_test(NAME VirtualShadowBudgetTests COMMAND VirtualShadowBudgetTests)
+add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
+add_test(NAME CLodCoordinatorTests COMMAND CLodCoordinatorTests)
+add_test(NAME StatisticalSamplerTests COMMAND StatisticalSamplerTests)

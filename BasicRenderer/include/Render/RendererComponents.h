@@ -11,7 +11,8 @@
 #include "Resources/Buffers/BufferView.h"
 #include "ShaderBuffers.h"
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 namespace Components {
 
@@ -48,8 +49,8 @@ namespace Components {
             perObjectCB.modelInverseMatrix = DirectX::XMMatrixIdentity();
             perObjectCB.normalMatrixBufferIndex = 0;
             perObjectCB.objectFlags = 0;
-            perObjectCB.pad[0] = 0;
-            perObjectCB.pad[1] = 0;
+            perObjectCB.stableSceneIdLo = 0;
+            perObjectCB.stableSceneIdHi = 0;
         }
         RenderableObject(PerObjectCB cb) : perObjectCB(cb) {}
         PerObjectCB perObjectCB;
@@ -62,12 +63,43 @@ namespace Components {
     };
 
     struct ObjectDrawInfo {
+        struct ActiveDrawSetRemovalBucket {
+            DrawWorkloadKey workloadKey;
+            std::vector<unsigned int> indices;
+        };
+
+        struct BufferRange {
+            uint64_t offset = 0;
+            uint64_t size = 0;
+            uint64_t stride = 0;
+            uint64_t count = 0;
+
+            bool IsValid() const {
+                return size != 0 && stride != 0 && count != 0;
+            }
+        };
+
         IndirectDrawInfo drawInfo;
+        std::vector<ActiveDrawSetRemovalBucket> activeDrawSetRemovals;
         std::vector<uint32_t> perMeshInstanceBufferIndices;
+        std::vector<uint32_t> instanceDrawRecordIndices;
+        std::vector<uint32_t> skinnedAssemblyPlacementIndices;
         std::shared_ptr<BufferView> perObjectCBView;
         uint32_t perObjectCBIndex;
         std::shared_ptr<BufferView> normalMatrixView;
         uint32_t normalMatrixIndex;
+        std::vector<std::shared_ptr<BufferView>> perObjectCBViews;
+        std::vector<std::shared_ptr<BufferView>> perInstanceTransformViews;
+        std::vector<std::shared_ptr<BufferView>> normalMatrixViews;
+        std::vector<std::shared_ptr<BufferView>> instanceDrawRecordViews;
+        BufferRange perObjectCBRange;
+        BufferRange perInstanceTransformRange;
+        BufferRange normalMatrixRange;
+        BufferRange instanceDrawRecordRange;
+        std::vector<BufferRange> ownedPerObjectCBPages;
+        std::vector<BufferRange> ownedPerInstanceTransformPages;
+        std::vector<BufferRange> ownedNormalMatrixPages;
+        std::vector<BufferRange> ownedInstanceDrawRecordPages;
     };
 
     struct PerPassMeshes {
@@ -77,5 +109,9 @@ namespace Components {
     /// Tag added to render-world entities whose data was updated during IngestSnapshot.
     /// Consumed by RunRenderResourceSyncStage to limit GPU buffer writes.
     struct RenderTransformUpdated {};
+
+    /// Keeps a renderable in transform synchronization for one frame after a
+    /// transform change so prevModel can converge to model.
+    struct RenderTransformNeedsConvergence {};
 
 } // namespace Components

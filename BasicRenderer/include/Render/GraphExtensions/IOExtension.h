@@ -18,7 +18,7 @@
 class RenderGraphIOExtension final : public RenderGraph::IRenderGraphExtension {
 public:
 	RenderGraphIOExtension(TextureFactory* textureFactory,
-		rg::runtime::IUploadService* uploadService,
+		org::runtime::IUploadService* uploadService,
 		br::ReadbackManager* readbackManager,
 		MaterialManager* materialManager)
 		: m_textureFactory(textureFactory),
@@ -28,7 +28,7 @@ public:
 	}
 
 	void OnRegistryReset(ResourceRegistry* reg) override {
-		rg::runtime::UploadResolveContext ctx;
+		org::runtime::UploadResolveContext ctx;
 		ctx.registry = reg;
 		ctx.epoch = 0; // TODO: Will this be useful?
 		if (m_uploadService) {
@@ -88,30 +88,21 @@ public:
 	}
 
 	void GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses) override {
-		// Some systems enqueue uploads during GatherFramePasses() itself
-		// (for example CLod streaming disk-IO completions materializing
-		// geometry/chunk-table updates). The structural Builtin::Uploads pass
-		// has already recorded by then, so without a second upload pass those
-		// updates would slip to the next frame. Re-run the upload pass early in
-		// the frame pass stage so newly queued uploads are visible this frame.
-		if (auto* uploadService = rg.GetUploadService()) {
-			if (auto upload = uploadService->GetUploadPass()) {
-				auto lateUploadsInsertPoint = RenderGraph::ExternalInsertPoint::After("Builtin::Uploads");
-				lateUploadsInsertPoint.AlsoBefore("ClearVisibilityBufferPass");
-				outPasses.push_back(
-					RenderGraph::ExternalPassDesc::Render("Builtin::LateUploads", upload)
-						.At(std::move(lateUploadsInsertPoint)));
-			}
-		}
+		(void)rg;
 
 		if (m_materialManager) {
-			m_materialManager->RequestTextureStreamingFeedbackReadback(rg.GetReadbackService());
+			if (auto readback = m_materialManager->CreateTextureStreamingFeedbackReadbackPass()) {
+				outPasses.push_back(
+					RenderGraph::ExternalPassDesc::Copy("Material::TextureStreamingReadback", readback)
+						.At(RenderGraph::ExternalInsertPoint::After("MenuRenderPass"))
+						.PreferQueue(QueueKind::Copy));
+			}
 		}
 	}
 
 private:
 	TextureFactory* m_textureFactory = nullptr; // non-owning
-	rg::runtime::IUploadService* m_uploadService = nullptr; // non-owning
+	org::runtime::IUploadService* m_uploadService = nullptr; // non-owning
 	br::ReadbackManager* m_readbackManager = nullptr; // non-owning
 	MaterialManager* m_materialManager = nullptr; // non-owning
 };

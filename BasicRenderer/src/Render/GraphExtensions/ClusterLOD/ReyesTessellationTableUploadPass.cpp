@@ -36,17 +36,17 @@ void ReyesTessellationTableUploadPass::Update(const UpdateExecutionContext& exec
     BUFFER_UPLOAD(
         tableData.configs.data(),
         static_cast<uint32_t>(tableData.configs.size() * sizeof(CLodReyesTessTableConfigEntry)),
-        rg::runtime::UploadTarget::FromShared(m_tessTableConfigsBuffer),
+        org::runtime::UploadTarget::FromShared(m_tessTableConfigsBuffer),
         0);
     BUFFER_UPLOAD(
         tableData.vertices.data(),
         static_cast<uint32_t>(tableData.vertices.size() * sizeof(uint32_t)),
-        rg::runtime::UploadTarget::FromShared(m_tessTableVerticesBuffer),
+        org::runtime::UploadTarget::FromShared(m_tessTableVerticesBuffer),
         0);
     BUFFER_UPLOAD(
         tableData.triangles.data(),
         static_cast<uint32_t>(tableData.triangles.size() * sizeof(uint32_t)),
-        rg::runtime::UploadTarget::FromShared(m_tessTableTrianglesBuffer),
+        org::runtime::UploadTarget::FromShared(m_tessTableTrianglesBuffer),
         0);
 
     m_uploaded = true;

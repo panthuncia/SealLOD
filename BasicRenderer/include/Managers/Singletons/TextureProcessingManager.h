@@ -6,6 +6,8 @@
 #include <string>
 #include <unordered_map>
 
+#include <DirectXMath.h>
+
 #include "Resources/Texture.h"
 
 enum class TextureProcessingJobState : uint8_t {
@@ -34,6 +36,37 @@ struct TextureProcessingJobHandle {
 	std::string error;
 };
 
+enum class StochasticTextureTransformMode : uint8_t {
+	None = 0,
+	DecorrelatedColor,
+	NormalXY,
+	Scalar,
+};
+
+struct StochasticTextureArtifactSettings {
+	TextureSemantic semantic = TextureSemantic::Unknown;
+	bool preferSRGB = false;
+	NormalMapConvention normalConvention = NormalMapConvention::DirectX;
+	std::string sourceIdentity;
+	std::uint32_t lutWidth = 256;
+	std::uint32_t algorithmVersion = 4;
+};
+
+struct StochasticTextureArtifactResult {
+	bool ready = false;
+	bool loadedFromCache = false;
+	std::string failureReason;
+	std::wstring gaussianCachePath;
+	std::wstring inverseLutCachePath;
+	std::uint32_t lutWidth = 0;
+	std::uint32_t lutHeight = 0;
+	StochasticTextureTransformMode transformMode = StochasticTextureTransformMode::None;
+	DirectX::XMFLOAT3 colorSpaceOrigin = { 0.0f, 0.0f, 0.0f };
+	DirectX::XMFLOAT3 colorSpaceVector0 = { 1.0f, 0.0f, 0.0f };
+	DirectX::XMFLOAT3 colorSpaceVector1 = { 0.0f, 1.0f, 0.0f };
+	DirectX::XMFLOAT3 colorSpaceVector2 = { 0.0f, 0.0f, 1.0f };
+};
+
 class TextureProcessingManager {
 public:
 	static TextureProcessingManager& GetInstance();
@@ -53,6 +86,10 @@ public:
 	bool ShouldProcess(const TextureFileMeta& meta) const;
 	bool NeedsProcessing(const TextureSourceData& sourceData, const TextureFileMeta& meta) const;
 	std::wstring GetExistingCachePathForFile(const TextureFileMeta& meta) const;
+	StochasticTextureArtifactResult RequestStochasticArtifactsBlocking(
+		const std::shared_ptr<TextureSourceData>& sourceData,
+		const TextureFileMeta& meta,
+		const StochasticTextureArtifactSettings& settings);
 
 private:
 	TextureProcessingManager() = default;
@@ -64,5 +101,5 @@ private:
 		const TextureFileMeta& meta) const;
 
 	std::mutex m_mutex;
-	std::unordered_map<std::string, std::weak_ptr<TextureProcessingJobHandle>> m_jobsByKey;
+	std::unordered_map<std::string, std::shared_ptr<TextureProcessingJobHandle>> m_jobsByKey;
 };

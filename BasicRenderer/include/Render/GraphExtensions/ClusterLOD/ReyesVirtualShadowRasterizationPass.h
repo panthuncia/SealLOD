@@ -11,13 +11,16 @@
 #include "RenderPasses/Base/ComputePass.h"
 #include "Resources/PixelBuffer.h"
 
-class Buffer;
-class ResourceGroup;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 class ReyesVirtualShadowRasterizationPass final : public ComputePass, public IDynamicDeclaredResources {
 public:
     ReyesVirtualShadowRasterizationPass(
         std::shared_ptr<Buffer> visibleClustersBuffer,
+        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> diceQueueBuffer,
         std::shared_ptr<Buffer> diceQueueCounterBuffer,
         std::shared_ptr<Buffer> rasterWorkBuffer,
@@ -29,6 +32,7 @@ public:
         std::shared_ptr<Buffer> telemetryBuffer,
         std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
         std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
+        std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
         std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
         std::shared_ptr<ResourceGroup> slabResourceGroup,
         std::string_view resourceName,
@@ -43,6 +47,7 @@ public:
 
 private:
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_diceQueueBuffer;
     std::shared_ptr<Buffer> m_diceQueueCounterBuffer;
     std::shared_ptr<Buffer> m_rasterWorkBuffer;
@@ -54,6 +59,7 @@ private:
     std::shared_ptr<Buffer> m_telemetryBuffer;
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     std::shared_ptr<Buffer> m_viewRasterInfoBuffer;

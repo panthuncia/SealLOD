@@ -11,9 +11,11 @@
 
 using namespace Microsoft::WRL;
 
-class BufferView;
+namespace org { class BufferView; }
+using org::BufferView;
 class SortedUnsignedIntBuffer;
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class ResourceManager {
 public:

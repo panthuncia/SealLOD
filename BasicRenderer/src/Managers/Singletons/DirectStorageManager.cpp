@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
 #include <mutex>
+#include <sstream>
 #include <unordered_set>
 #include <unordered_map>
 #include <utility>
@@ -74,6 +76,18 @@ bool IsDirectStorageDisabledByEnvironment() {
     const bool disabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
     free(value);
     return disabled;
+}
+
+bool IsDirectStorageBreakOnErrorEnabledByEnvironment() {
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "BASICRENDERER_DIRECTSTORAGE_BREAK_ON_ERROR") != 0 || value == nullptr) {
+        return false;
+    }
+
+    const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+    free(value);
+    return enabled;
 }
 
 constexpr uint32_t kDefaultDirectStorageStagingBufferSizeBytes = 128u * 1024u * 1024u;
@@ -240,7 +254,11 @@ void DirectStorageManager::Initialize() {
     }
 
 #if BUILD_TYPE == BUILD_TYPE_DEBUG || BUILD_TYPE == BUILD_TYPE_RELEASE_DEBUG
-    impl->factory->SetDebugFlags(DSTORAGE_DEBUG_SHOW_ERRORS | DSTORAGE_DEBUG_BREAK_ON_ERROR);
+    UINT32 debugFlags = DSTORAGE_DEBUG_SHOW_ERRORS;
+    if (IsDirectStorageBreakOnErrorEnabledByEnvironment()) {
+        debugFlags |= DSTORAGE_DEBUG_BREAK_ON_ERROR;
+    }
+    impl->factory->SetDebugFlags(debugFlags);
 #endif
 
     m_stagingBufferSizeBytes = kDefaultDirectStorageStagingBufferSizeBytes;
@@ -1613,6 +1631,8 @@ DirectStorageAsyncRequestStatus DirectStorageManager::PollRequest(const DirectSt
 
     const auto& state = handle.m_state;
     status.fenceValue = state->fenceValue;
+    status.queueKind = state->queueKind;
+    status.debugLabel = state->debugLabel;
 #if BASICRENDERER_HAS_DIRECTSTORAGE
     status.fence = state->fence.Get();
 #endif
@@ -1639,6 +1659,7 @@ DirectStorageAsyncRequestStatus DirectStorageManager::PollRequest(const DirectSt
     }
 
     const HRESULT requestHr = state->statusArray ? state->statusArray->GetHResult(0u) : E_FAIL;
+    status.hresult = static_cast<uint32_t>(requestHr);
     if (requestHr == E_PENDING) {
         status.state = DirectStorageAsyncRequestState::Pending;
         std::scoped_lock lock(state->mutex);
@@ -1655,11 +1676,15 @@ DirectStorageAsyncRequestStatus DirectStorageManager::PollRequest(const DirectSt
     }
 
     state->state.store(DirectStorageAsyncRequestState::Failed, std::memory_order_release);
+    std::ostringstream detail;
+    detail << (state->failureMessage.empty() ? "DirectStorage request failed" : state->failureMessage)
+        << " label='" << state->debugLabel << "'"
+        << " queue=" << (state->queueKind == DirectStorageQueueKind::Gpu ? "gpu" : "system_memory")
+        << " hr=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0')
+        << static_cast<unsigned int>(requestHr);
     {
         std::scoped_lock lock(state->mutex);
-        if (state->failureMessage.empty()) {
-            state->failureMessage = "DirectStorage request failed";
-        }
+        state->failureMessage = detail.str();
         status.message = state->failureMessage;
     }
     status.state = DirectStorageAsyncRequestState::Failed;

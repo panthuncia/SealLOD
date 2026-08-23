@@ -3,7 +3,7 @@
 #ifndef __BLOOM_DOWNSAMPLE_ROOT_CONSTANTS_H__
 #define __BLOOM_DOWNSAMPLE_ROOT_CONSTANTS_H__
 
-#define MIP_INDEX UintRootConstant0
+#define SOURCE_TEXTURE_DESCRIPTOR_INDEX UintRootConstant0
 #define MIP_WIDTH UintRootConstant1
 #define MIP_HEIGHT UintRootConstant2
 

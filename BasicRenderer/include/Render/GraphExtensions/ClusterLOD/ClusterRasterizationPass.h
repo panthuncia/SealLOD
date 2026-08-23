@@ -15,8 +15,10 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Resources/PixelBuffer.h"
 
-class Buffer;
-class ResourceGroup;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 struct ClusterRasterizationPassInputs {
     bool wireframe;
@@ -32,6 +34,7 @@ public:
     ClusterRasterizationPass(
         ClusterRasterizationPassInputs inputs,
         std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
+        std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
         std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
         std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
@@ -49,14 +52,15 @@ public:
         std::shared_ptr<PixelBuffer> AVBOITShadingExtinctionTexture = nullptr,
         std::shared_ptr<Buffer> visibleClustersResolveBuffer = nullptr,
         std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
-        std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture = nullptr,
-        std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture = nullptr,
-        std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer = nullptr,
+          std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture = nullptr,
+          std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture = nullptr,
+          std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer = nullptr,
         std::shared_ptr<PixelBuffer> AVBOITOccupancySliceMaskTexture = nullptr,
         std::shared_ptr<PixelBuffer> AVBOITEarlyDepthTexture = nullptr,
-        std::shared_ptr<Buffer> telemetryBuffer = nullptr,
-        std::shared_ptr<Buffer> sourceGroupMismatchCounterBuffer = nullptr,
-        std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer = nullptr);
+          std::shared_ptr<Buffer> telemetryBuffer = nullptr,
+          std::shared_ptr<Buffer> sourceGroupMismatchCounterBuffer = nullptr,
+          std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer = nullptr,
+          std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture = nullptr);
     ~ClusterRasterizationPass();
 
     void DeclareResourceUsages(RenderPassBuilder* builder) override;
@@ -77,6 +81,7 @@ private:
     std::vector<std::shared_ptr<PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
 
     std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
+    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_rasterBucketsHistogramBuffer;
     std::shared_ptr<Buffer> m_rasterBucketsIndirectArgsBuffer;
     std::shared_ptr<Buffer> m_sortedToUnsortedMappingBuffer;
@@ -97,6 +102,7 @@ private:
     std::shared_ptr<Buffer> m_visibleClustersResolveBuffer;
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     std::shared_ptr<Buffer> m_telemetryBuffer;
     std::shared_ptr<Buffer> m_sourceGroupMismatchCounterBuffer;

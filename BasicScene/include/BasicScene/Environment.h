@@ -6,9 +6,11 @@
 #include "ShaderBuffers.h"
 
 class TextureAsset;
-class BufferView;
+namespace org { class BufferView; }
+using org::BufferView;
 class EnvironmentManager;
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 class Environment {
 public:
     Environment(EnvironmentManager* manager, std::wstring name = L"") : m_currentManager(manager), m_name(name) {

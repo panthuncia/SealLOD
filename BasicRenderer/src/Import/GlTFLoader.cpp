@@ -1004,7 +1004,7 @@ std::shared_ptr<TextureAsset> LoadTexture(
     auto textureBytes = ReadImageBytes(gltf, sourcePath, cache.bufferSources, imageIndex);
     auto texture = LoadTextureFromMemory(textureBytes.data(), textureBytes.size(), sampler, {}, preferSRGB);
     texture->Meta().filePath = cacheProbeMeta.filePath;
-    texture->SetProcessingSettings(MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, preservePackedChannels, normalConvention));
+    texture->SetProcessingSettings(cacheProbeMeta.processing);
     texture->SetGenerateMipmaps(true);
     cache.textureCache[cacheKey] = texture;
 
@@ -1161,7 +1161,8 @@ std::shared_ptr<Material> LoadMaterial(
 
     desc.forceDoubleSided = materialNode.value("doubleSided", false);
 
-    cache.materialCache[materialIndex] = Material::CreateShared(desc);
+    auto material = Material::CreateShared(desc);
+    cache.materialCache[materialIndex] = material;
 
     {
         std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <cassert>
 #include <set>
+#include <span>
 
 #include <spdlog/spdlog.h>
 
@@ -37,6 +38,88 @@ namespace
 	constexpr float kAnimatedBoundsPaddingScale = 1.0001f;
 	constexpr float kAnimationBoundsMaxUniformSampleStep = 1.0f / 30.0f;
 	constexpr uint32_t kAnimationBoundsMaxUniformSamples = 256u;
+
+	DirectX::XMFLOAT3 ReadPositionFromVertexBytes(const std::vector<std::byte>& vertices, uint32_t vertexStrideBytes, uint32_t vertexIndex)
+	{
+		DirectX::XMFLOAT3 position{};
+		const size_t offset = static_cast<size_t>(vertexIndex) * static_cast<size_t>(vertexStrideBytes);
+		if (vertexStrideBytes >= sizeof(position) && offset + sizeof(position) <= vertices.size()) {
+			std::memcpy(&position, vertices.data() + offset, sizeof(position));
+		}
+		return position;
+	}
+
+	DirectX::XMFLOAT3 SubFloat3(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b)
+	{
+		return { a.x - b.x, a.y - b.y, a.z - b.z };
+	}
+
+	DirectX::XMFLOAT3 MulFloat3(const DirectX::XMFLOAT3& value, float scale)
+	{
+		return { value.x * scale, value.y * scale, value.z * scale };
+	}
+
+	float LengthFloat3(const DirectX::XMFLOAT3& value)
+	{
+		return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
+	}
+
+	DirectX::XMFLOAT2 EstimateUvDensityForSet(
+		const std::vector<std::byte>& vertices,
+		uint32_t vertexStrideBytes,
+		const std::vector<UINT32>& indices,
+		const MeshUvSetData& uvSet)
+	{
+		DirectX::XMFLOAT2 density{ 1.0f, 1.0f };
+		if (vertexStrideBytes < sizeof(DirectX::XMFLOAT3) || indices.size() < 3u || uvSet.values.empty()) {
+			return density;
+		}
+
+		const uint32_t vertexCount = static_cast<uint32_t>(
+			std::min<size_t>(vertices.size() / static_cast<size_t>(vertexStrideBytes), uvSet.values.size()));
+		for (size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+			const uint32_t i0 = indices[tri + 0u];
+			const uint32_t i1 = indices[tri + 1u];
+			const uint32_t i2 = indices[tri + 2u];
+			if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+				continue;
+			}
+
+			const DirectX::XMFLOAT3 p0 = ReadPositionFromVertexBytes(vertices, vertexStrideBytes, i0);
+			const DirectX::XMFLOAT3 p1 = ReadPositionFromVertexBytes(vertices, vertexStrideBytes, i1);
+			const DirectX::XMFLOAT3 p2 = ReadPositionFromVertexBytes(vertices, vertexStrideBytes, i2);
+			const DirectX::XMFLOAT2 uv0 = uvSet.values[i0];
+			const DirectX::XMFLOAT2 uv1 = uvSet.values[i1];
+			const DirectX::XMFLOAT2 uv2 = uvSet.values[i2];
+
+			const DirectX::XMFLOAT3 edge1 = SubFloat3(p1, p0);
+			const DirectX::XMFLOAT3 edge2 = SubFloat3(p2, p0);
+			const DirectX::XMFLOAT2 duv1{ uv1.x - uv0.x, uv1.y - uv0.y };
+			const DirectX::XMFLOAT2 duv2{ uv2.x - uv0.x, uv2.y - uv0.y };
+			const float det = duv1.x * duv2.y - duv2.x * duv1.y;
+			if (std::abs(det) <= 1.0e-10f || !std::isfinite(det)) {
+				continue;
+			}
+
+			const float invDet = 1.0f / det;
+			const DirectX::XMFLOAT3 dPdu = MulFloat3(
+				SubFloat3(MulFloat3(edge1, duv2.y), MulFloat3(edge2, duv1.y)),
+				invDet);
+			const DirectX::XMFLOAT3 dPdv = MulFloat3(
+				SubFloat3(MulFloat3(edge2, duv1.x), MulFloat3(edge1, duv2.x)),
+				invDet);
+			const float lenU = LengthFloat3(dPdu);
+			const float lenV = LengthFloat3(dPdv);
+			if (std::isfinite(lenU) && lenU > 1.0e-6f) {
+				density.x = std::max(density.x, 1.0f / lenU);
+			}
+			if (std::isfinite(lenV) && lenV > 1.0e-6f) {
+				density.y = std::max(density.y, 1.0f / lenV);
+			}
+		}
+
+		return density;
+	}
 
 	float MaxAxisScale_RowVector(const DirectX::XMMATRIX& matrix)
 	{
@@ -185,7 +268,9 @@ namespace
 	ClusterLODRuntimeSummary BuildRuntimeSummary(
 		const std::vector<ClusterLODGroup>& groups,
 		const std::vector<ClusterLODGroupSegment>& segments,
-		const std::vector<ClusterLODGroupChunk>& groupChunks)
+		const std::vector<ClusterLODGroupChunk>& groupChunks,
+		std::span<const ClusterLODPartRecord> partRecords,
+		uint32_t rootPartIndex)
 	{
 		ClusterLODRuntimeSummary summary{};
 		summary.groupChunkHints.resize(groups.size());
@@ -197,7 +282,6 @@ namespace
 			return summary;
 		}
 
-		int32_t coarsestDepth = groups[0].depth;
 		for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
 			const auto& group = groups[groupIndex];
 			summary.firstGroupVertexByLocal[groupIndex] = group.firstGroupVertex;
@@ -218,29 +302,6 @@ namespace
 				hint.segmentCount = group.segmentCount;
 				hint.pageCount = group.pageCount;
 			}
-			coarsestDepth = std::max(coarsestDepth, group.depth);
-		}
-
-		uint32_t runStart = std::numeric_limits<uint32_t>::max();
-		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < static_cast<uint32_t>(groups.size()); ++groupLocalIndex) {
-			const bool isCoarsest = groups[groupLocalIndex].depth == coarsestDepth;
-			if (isCoarsest) {
-				if (runStart == std::numeric_limits<uint32_t>::max()) {
-					runStart = groupLocalIndex;
-				}
-				continue;
-			}
-
-			if (runStart != std::numeric_limits<uint32_t>::max()) {
-				summary.coarsestRanges.push_back({ runStart, groupLocalIndex - runStart });
-				runStart = std::numeric_limits<uint32_t>::max();
-			}
-		}
-
-		if (runStart != std::numeric_limits<uint32_t>::max()) {
-			summary.coarsestRanges.push_back({
-				runStart,
-				static_cast<uint32_t>(groups.size()) - runStart });
 		}
 
 		const uint32_t localGroupCount = static_cast<uint32_t>(groups.size());
@@ -263,7 +324,74 @@ namespace
 			}
 		}
 
+		uint32_t rootGroupBegin = 0u;
+		uint32_t rootGroupEnd = localGroupCount;
+		if (!partRecords.empty() && rootPartIndex < partRecords.size()) {
+			const ClusterLODPartRecord& rootPart = partRecords[rootPartIndex];
+			rootGroupBegin = std::min(rootPart.groupBase, localGroupCount);
+			const uint32_t availableGroups = localGroupCount - rootGroupBegin;
+			rootGroupEnd = rootGroupBegin + std::min(rootPart.groupCount, availableGroups);
+			if (rootGroupBegin == rootGroupEnd) {
+				rootGroupBegin = 0u;
+				rootGroupEnd = localGroupCount;
+			}
+		}
+
+		uint32_t runStart = std::numeric_limits<uint32_t>::max();
+		for (uint32_t groupLocalIndex = rootGroupBegin; groupLocalIndex < rootGroupEnd; ++groupLocalIndex) {
+			const bool shouldPinForStreaming = summary.parentGroupByLocal[groupLocalIndex] < 0;
+			if (shouldPinForStreaming) {
+				if (runStart == std::numeric_limits<uint32_t>::max()) {
+					runStart = groupLocalIndex;
+				}
+				continue;
+			}
+
+			if (runStart != std::numeric_limits<uint32_t>::max()) {
+				summary.coarsestRanges.push_back({ runStart, groupLocalIndex - runStart });
+				runStart = std::numeric_limits<uint32_t>::max();
+			}
+		}
+
+		if (runStart != std::numeric_limits<uint32_t>::max()) {
+			summary.coarsestRanges.push_back({
+				runStart,
+				rootGroupEnd - runStart });
+		}
+
 		return summary;
+	}
+
+	void EnsureRootPartRecord(
+		std::vector<ClusterLODPartRecord>& partRecords,
+		uint32_t& rootPartIndex,
+		uint32_t groupCount,
+		uint32_t nodeCount,
+		uint32_t transformCount,
+		uint32_t instanceCount,
+		uint32_t rootNode)
+	{
+		if (partRecords.empty()) {
+			ClusterLODPartRecord rootPart{};
+			rootPart.groupBase = 0u;
+			rootPart.groupCount = groupCount;
+			rootPart.nodeBase = 0u;
+			rootPart.nodeCount = nodeCount;
+			rootPart.transformBase = 0u;
+			rootPart.transformCount = transformCount;
+			rootPart.instanceBase = 0u;
+			rootPart.instanceCount = instanceCount;
+			rootPart.rootNode = rootNode;
+			rootPart.flags = CLOD_PART_RECORD_FLAG_ROOT;
+			partRecords.push_back(rootPart);
+			rootPartIndex = 0u;
+			return;
+		}
+
+		if (rootPartIndex >= partRecords.size()) {
+			rootPartIndex = 0u;
+		}
+		partRecords[rootPartIndex].flags |= CLOD_PART_RECORD_FLAG_ROOT;
 	}
 
 	bool HasRenderableImportedMeshPayload(
@@ -324,7 +452,7 @@ std::shared_ptr<Mesh> MeshIngestBuilder::Build(
 		skinningVertices = std::make_unique<std::vector<std::byte>>(std::move(m_skinningVertices));
 	}
 
-	return Mesh::CreateSharedFromIngest(
+	auto mesh = Mesh::CreateSharedFromIngest(
 		std::move(vertices),
 		m_vertexSize,
 		std::move(skinningVertices),
@@ -335,6 +463,14 @@ std::shared_ptr<Mesh> MeshIngestBuilder::Build(
 		m_flags,
 		std::move(prebuiltClusterLOD),
 		cpuDataPolicy);
+	if (mesh && !m_skinningDebugJoints.empty() && !m_skinningDebugWeights.empty()) {
+		mesh->SetSkinningDebugSample(
+			std::move(m_skinningDebugJoints),
+			std::move(m_skinningDebugWeights),
+			std::move(m_skinningDebugPositions),
+			std::move(m_skinningDebugNormals));
+	}
+	return mesh;
 }
 
 Mesh::Mesh(std::unique_ptr<std::vector<std::byte>> vertices, unsigned int vertexSize, std::optional<std::unique_ptr<std::vector<std::byte>>> skinningVertices, unsigned int skinningVertexSize, const std::vector<UINT32>& indices, std::vector<MeshUvSetData>&& uvSets, const std::shared_ptr<Material> material, unsigned int flags, std::optional<ClusterLODPrebuiltData>&& prebuiltClusterLOD, MeshCpuDataPolicy cpuDataPolicy, bool deferResourceCreation) {
@@ -342,6 +478,11 @@ Mesh::Mesh(std::unique_ptr<std::vector<std::byte>> vertices, unsigned int vertex
 		m_prebuiltClusterLOD = std::move(prebuiltClusterLOD);
 	}
 	m_uvSets = std::move(uvSets);
+	const uint32_t cachedUvSetCount = static_cast<uint32_t>(
+		std::min<size_t>(std::size(m_reyesUvDensityBySet), m_uvSets.size()));
+	for (uint32_t uvSetIndex = 0; uvSetIndex < cachedUvSetCount; ++uvSetIndex) {
+		m_reyesUvDensityBySet[uvSetIndex] = EstimateUvDensityForSet(*vertices, vertexSize, indices, m_uvSets[uvSetIndex]);
+	}
 	m_perMeshBufferData.vertexFlags = flags;
 	m_perMeshBufferData.vertexByteSize = vertexSize;
 	m_perMeshBufferData.numVertices = 0; //static_cast<uint32_t>(m_vertices->size() / vertexSize);
@@ -359,8 +500,21 @@ Mesh::Mesh(std::unique_ptr<std::vector<std::byte>> vertices, unsigned int vertex
 	m_skinningVertexSize = skinningVertexSize;
     this->material = material;
 
+	if (m_prebuiltClusterLOD.has_value()) {
+		ApplyPrebuiltClusterLODData(*m_prebuiltClusterLOD);
+	}
+
 	if (!deferResourceCreation) {
 		CreateBuffers(indices);
+		if (cpuDataPolicy == MeshCpuDataPolicy::ReleaseAfterUpload && m_prebuiltClusterLOD.has_value()) {
+			const auto& prebuilt = *m_prebuiltClusterLOD;
+			const bool needsCloneableDiskMetadata =
+				!prebuilt.pageDiskLocators.empty() &&
+				!prebuilt.cacheSource.containerFileName.empty();
+			if (!needsCloneableDiskMetadata) {
+				m_prebuiltClusterLOD.reset();
+			}
+		}
 
 		m_globalMeshID = GetNextGlobalIndex();
 	}
@@ -393,6 +547,20 @@ void Mesh::ReleaseCLodHierarchyCpuData()
 	m_clodGroups.shrink_to_fit();
 	m_clodSegments.clear();
 	m_clodSegments.shrink_to_fit();
+	m_clodNodes.clear();
+	m_clodNodes.shrink_to_fit();
+	m_clodNodeSkinningInfos.clear();
+	m_clodNodeSkinningInfos.shrink_to_fit();
+	m_clodNodeBoneIndices.clear();
+	m_clodNodeBoneIndices.shrink_to_fit();
+	m_clodAssemblyTransforms.clear();
+	m_clodAssemblyTransforms.shrink_to_fit();
+	m_clodAssemblyInstances.clear();
+	m_clodAssemblyInstances.shrink_to_fit();
+	m_clodAssemblyBoneRemaps.clear();
+	m_clodAssemblyBoneRemaps.shrink_to_fit();
+	m_clodAssemblyBoneRemapIndices.clear();
+	m_clodAssemblyBoneRemapIndices.shrink_to_fit();
 }
 
 void Mesh::ReleaseCLodGroupChunkMetadataCpuData()
@@ -415,7 +583,6 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 			m_clodGroupChunks[groupIndex].meshletCount = m_clodGroups[groupIndex].meshletCount;
 		}
 	}
-	m_clodRuntimeSummary = BuildRuntimeSummary(m_clodGroups, m_clodSegments, m_clodGroupChunks);
 	ClearCLodCacheBuildChunkData(false);
 	m_clodGroupDiskLocators = data.groupDiskLocators;
 	m_clodPageDiskLocators = data.pageDiskLocators;
@@ -426,9 +593,36 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 	m_clodVoxelPageCount = data.voxelPageCount;
 	m_clodCacheSource = data.cacheSource;
 	m_clodNodes = data.nodes;
+	m_clodNodeSkinningInfos = data.nodeSkinningInfos;
+	m_clodNodeBoneIndices = data.nodeBoneIndices;
+	m_clodNodeBoneLimit = data.nodeBoneLimit;
 	m_clodLodNodeRanges = data.lodNodeRanges;
 	m_clodLodLevelRoots = data.lodLevelRoots;
+	m_clodAssemblyTransforms = data.assemblyTransforms;
+	m_clodAssemblyInstances = data.assemblyInstances;
+	m_clodAssemblyBoneRemaps = data.assemblyBoneRemaps;
+	m_clodAssemblyBoneRemapIndices = data.assemblyBoneRemapIndices;
+	m_clodPartRecords = data.partRecords;
+	m_clodRootPartIndex = data.rootPartIndex;
 	m_clodTopRootNode = 0;
+	EnsureRootPartRecord(
+		m_clodPartRecords,
+		m_clodRootPartIndex,
+		static_cast<uint32_t>(m_clodGroups.size()),
+		static_cast<uint32_t>(m_clodNodes.size()),
+		static_cast<uint32_t>(m_clodAssemblyTransforms.size()),
+		static_cast<uint32_t>(m_clodAssemblyInstances.size()),
+		m_clodTopRootNode);
+	m_clodRuntimeSummary = BuildRuntimeSummary(
+		m_clodGroups,
+		m_clodSegments,
+		m_clodGroupChunks,
+		m_clodPartRecords,
+		m_clodRootPartIndex);
+	if (m_prebuiltClusterLOD.has_value()) {
+		m_prebuiltClusterLOD->partRecords = m_clodPartRecords;
+		m_prebuiltClusterLOD->rootPartIndex = m_clodRootPartIndex;
+	}
 	m_perMeshBufferData.boundingSphere = data.objectBoundingSphere;
 	{
 		uint32_t voxelGroupCount = 0;
@@ -438,7 +632,7 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 			}
 		}
 		if (voxelGroupCount != 0u) {
-			spdlog::info(
+			spdlog::debug(
 				"ClusterLOD runtime adoption: groups={} voxel_groups={} nodes={} cache_hash=0x{:016X}",
 				m_clodGroups.size(),
 				voxelGroupCount,
@@ -488,6 +682,28 @@ void Mesh::AdoptCLodDiskStreamingMetadata(const ClusterLODPrebuiltData& data)
 	m_clodVoxelPageBase = data.voxelPageBase;
 	m_clodVoxelPageCount = data.voxelPageCount;
 	m_clodCacheSource = data.cacheSource;
+	m_clodPartRecords = data.partRecords;
+	m_clodRootPartIndex = data.rootPartIndex;
+	EnsureRootPartRecord(
+		m_clodPartRecords,
+		m_clodRootPartIndex,
+		static_cast<uint32_t>(m_clodGroups.size()),
+		static_cast<uint32_t>(m_clodNodes.size()),
+		static_cast<uint32_t>(m_clodAssemblyTransforms.size()),
+		static_cast<uint32_t>(m_clodAssemblyInstances.size()),
+		m_clodTopRootNode);
+	if (m_prebuiltClusterLOD.has_value()) {
+		m_prebuiltClusterLOD->groupDiskLocators = data.groupDiskLocators;
+		m_prebuiltClusterLOD->pageDiskLocators = data.pageDiskLocators;
+		m_prebuiltClusterLOD->groupPageReferences = data.groupPageReferences;
+		m_prebuiltClusterLOD->groupPageReferenceOffsets = data.groupPageReferenceOffsets;
+		m_prebuiltClusterLOD->trianglePageCount = data.trianglePageCount;
+		m_prebuiltClusterLOD->voxelPageBase = data.voxelPageBase;
+		m_prebuiltClusterLOD->voxelPageCount = data.voxelPageCount;
+		m_prebuiltClusterLOD->cacheSource = data.cacheSource;
+		m_prebuiltClusterLOD->partRecords = m_clodPartRecords;
+		m_prebuiltClusterLOD->rootPartIndex = m_clodRootPartIndex;
+	}
 
 	if (m_clodGroupChunks.size() != m_clodGroups.size()) {
 		m_clodGroupChunks.assign(m_clodGroups.size(), {});
@@ -497,18 +713,29 @@ void Mesh::AdoptCLodDiskStreamingMetadata(const ClusterLODPrebuiltData& data)
 		}
 	}
 
-	m_clodRuntimeSummary = BuildRuntimeSummary(m_clodGroups, m_clodSegments, m_clodGroupChunks);
+	m_clodRuntimeSummary = BuildRuntimeSummary(
+		m_clodGroups,
+		m_clodSegments,
+		m_clodGroupChunks,
+		m_clodPartRecords,
+		m_clodRootPartIndex);
 
 	ClearCLodCacheBuildChunkData(false);
 }
 
 ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 {
-	ClusterLODPrebuiltData out{};
-	out.groups = m_clodGroups;
-	out.segments = m_clodSegments;
+	ClusterLODPrebuiltData out = m_prebuiltClusterLOD.value_or(ClusterLODPrebuiltData{});
+	if (!m_clodGroups.empty()) {
+		out.groups = m_clodGroups;
+	}
+	if (!m_clodSegments.empty()) {
+		out.segments = m_clodSegments;
+	}
 	out.objectBoundingSphere = m_perMeshBufferData.boundingSphere;
-	out.groupChunks = m_clodGroupChunks;
+	if (!m_clodGroupChunks.empty()) {
+		out.groupChunks = m_clodGroupChunks;
+	}
 	out.groupDiskLocators = m_clodGroupDiskLocators;
 	out.pageDiskLocators = m_clodPageDiskLocators;
 	out.groupPageReferences = m_clodGroupPageReferences;
@@ -517,9 +744,34 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	out.voxelPageBase = m_clodVoxelPageBase;
 	out.voxelPageCount = m_clodVoxelPageCount;
 	out.cacheSource = m_clodCacheSource;
-	out.nodes = m_clodNodes;
-	out.lodNodeRanges = m_clodLodNodeRanges;
-	out.lodLevelRoots = m_clodLodLevelRoots;
+	if (!m_clodNodes.empty()) {
+		out.nodes = m_clodNodes;
+	}
+	if (!m_clodNodeSkinningInfos.empty()) out.nodeSkinningInfos = m_clodNodeSkinningInfos;
+	if (!m_clodNodeBoneIndices.empty()) out.nodeBoneIndices = m_clodNodeBoneIndices;
+	out.nodeBoneLimit = m_clodNodeBoneLimit;
+	if (!m_clodLodNodeRanges.empty()) {
+		out.lodNodeRanges = m_clodLodNodeRanges;
+	}
+	if (!m_clodLodLevelRoots.empty()) {
+		out.lodLevelRoots = m_clodLodLevelRoots;
+	}
+	if (!m_clodAssemblyTransforms.empty()) {
+		out.assemblyTransforms = m_clodAssemblyTransforms;
+	}
+	if (!m_clodAssemblyInstances.empty()) {
+		out.assemblyInstances = m_clodAssemblyInstances;
+	}
+	if (!m_clodAssemblyBoneRemaps.empty()) {
+		out.assemblyBoneRemaps = m_clodAssemblyBoneRemaps;
+	}
+	if (!m_clodAssemblyBoneRemapIndices.empty()) {
+		out.assemblyBoneRemapIndices = m_clodAssemblyBoneRemapIndices;
+	}
+	if (!m_clodPartRecords.empty()) {
+		out.partRecords = m_clodPartRecords;
+	}
+	out.rootPartIndex = m_clodRootPartIndex;
 	out.maxDepth = m_clodMaxDepth;
 	out.maxTraversalDepth = m_clodMaxTraversalDepth;
 	return out;
@@ -533,6 +785,16 @@ ClusterLODCacheBuildPayload Mesh::GetClusterLODCacheBuildPayload() const
 	return payload;
 }
 
+DirectX::XMFLOAT2 Mesh::EstimateReyesUvDensity(uint32_t uvSetIndex) const
+{
+	if (uvSetIndex < std::size(m_reyesUvDensityBySet) &&
+		m_reyesUvDensityBySet[uvSetIndex].x > 0.0f &&
+		m_reyesUvDensityBySet[uvSetIndex].y > 0.0f) {
+		return m_reyesUvDensityBySet[uvSetIndex];
+	}
+	return { 1.0f, 1.0f };
+}
+
 ClusterLODCacheBuildOwnedData Mesh::GetClusterLODCacheBuildOwnedData() const
 {
 	ClusterLODCacheBuildOwnedData owned{};
@@ -543,8 +805,9 @@ ClusterLODCacheBuildOwnedData Mesh::GetClusterLODCacheBuildOwnedData() const
 
 void Mesh::CreateBuffers(const std::vector<UINT32>& indices) {
 	if (m_prebuiltClusterLOD.has_value()) {
-		ApplyPrebuiltClusterLODData(m_prebuiltClusterLOD.value());
-		m_prebuiltClusterLOD.reset();
+		if (m_clodGroups.empty() || m_clodSegments.empty() || m_clodNodes.empty()) {
+			ApplyPrebuiltClusterLODData(m_prebuiltClusterLOD.value());
+		}
 	} else {
 		throw std::runtime_error("Mesh was created without prebuilt ClusterLOD data");
 	}
@@ -561,11 +824,23 @@ uint64_t Mesh::GetGlobalID() const {
 void Mesh::SetCLodBufferViews(
 	std::unique_ptr<BufferView> clusterLODGroupsView,
 	std::unique_ptr<BufferView> clusterLODSegmentsView,
-	std::unique_ptr<BufferView> clusterLODNodesView
+	std::unique_ptr<BufferView> clusterLODNodesView,
+	std::unique_ptr<BufferView> clusterLODNodeSkinningInfosView,
+	std::unique_ptr<BufferView> clusterLODNodeBoneIndicesView,
+	std::unique_ptr<BufferView> clusterLODAssemblyTransformsView,
+	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView,
+	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView,
+	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapIndicesView
 ) {
 	m_clusterLODGroupsView = std::move(clusterLODGroupsView);
 	m_clusterLODSegmentsView = std::move(clusterLODSegmentsView);
 	m_clusterLODNodesView = std::move(clusterLODNodesView);
+	m_clusterLODNodeSkinningInfosView = std::move(clusterLODNodeSkinningInfosView);
+	m_clusterLODNodeBoneIndicesView = std::move(clusterLODNodeBoneIndicesView);
+	m_clusterLODAssemblyTransformsView = std::move(clusterLODAssemblyTransformsView);
+	m_clusterLODAssemblyInstancesView = std::move(clusterLODAssemblyInstancesView);
+	m_clusterLODAssemblyBoneRemapsView = std::move(clusterLODAssemblyBoneRemapsView);
+	m_clusterLODAssemblyBoneRemapIndicesView = std::move(clusterLODAssemblyBoneRemapIndicesView);
 
 	auto firstChunkOffsetDiv = [](const auto& chunkViews, uint32_t divisor) -> uint32_t {
 		uint32_t minGroupIndex = std::numeric_limits<uint32_t>::max();
@@ -689,7 +964,7 @@ void Mesh::EnsureAnimatedBoundingSpheresBuilt_() const
 
 			BoundingSphere sampledSphere{};
 			for (size_t boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
-				const DirectX::XMMATRIX skinMatrix = DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]);
+				const DirectX::XMMATRIX skinMatrix = DirectX::XMMatrixMultiply(inverseBindMatrices[boneIndex], boneMatrices[boneIndex]);
 				const BoundingSphere transformedSphere = TransformBoundingSphere(staticSphere, skinMatrix);
 				if (!initialized && boneIndex == 0) {
 					sampledSphere = transformedSphere;
@@ -717,7 +992,30 @@ void Mesh::EnsureAnimatedBoundingSpheresBuilt_() const
 }
 
 void Mesh::SetMaterialDataIndex(unsigned int index) {
+	const unsigned int previousIndex = m_perMeshBufferData.materialDataIndex;
+	if (previousIndex != index && previousIndex != 0u && m_perMeshBufferView != nullptr) {
+		spdlog::warn(
+			"Mesh material slot changed for resident mesh globalID={} oldSlot={} newSlot={} perMeshOffset={}",
+			GetGlobalID(),
+			previousIndex,
+			index,
+			m_perMeshBufferView->GetOffset());
+	}
 	m_perMeshBufferData.materialDataIndex = index;
+	if (m_pCurrentMeshManager != nullptr) {
+		m_pCurrentMeshManager->UpdatePerMeshBuffer(m_perMeshBufferView, m_perMeshBufferData);
+	}
+}
+
+void Mesh::SetMaterialEvalCompileFlagsID(unsigned int index) {
+	m_perMeshBufferData.materialEvalCompileFlagsID = index;
+	if (m_pCurrentMeshManager != nullptr) {
+		m_pCurrentMeshManager->UpdatePerMeshBuffer(m_perMeshBufferView, m_perMeshBufferData);
+	}
+}
+
+void Mesh::SetMaterialReyesEvalCompileFlagsID(unsigned int index) {
+	m_perMeshBufferData.materialReyesEvalCompileFlagsID = index;
 	if (m_pCurrentMeshManager != nullptr) {
 		m_pCurrentMeshManager->UpdatePerMeshBuffer(m_perMeshBufferView, m_perMeshBufferData);
 	}

@@ -41,12 +41,12 @@ public:
         BUFFER_UPLOAD(
             &gtaoInfo,
             sizeof(GTAOInfo),
-            rg::runtime::UploadTarget::FromHandle(m_gtaoConstantsHandle),
+            org::runtime::UploadTarget::FromHandle(m_gtaoConstantsHandle),
             0);
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder){
-        builder->WithShaderResource(Builtin::GBuffer::Normals)
+    void DeclareResourceUsages(ComputePassBuilder* builder)override {
+        builder->WithShaderResource(Builtin::Surface::NormalRoughness)
             .WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
             .WithUnorderedAccess(Builtin::GTAO::WorkingDepths)
             .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
@@ -114,7 +114,7 @@ private:
         samplerDesc.borderPreset = rhi::BorderPreset::TransparentBlack;
         samplerDesc.minLod = 0.0f;
         samplerDesc.maxLod = 0.0f;
-        m_samplerIndex = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(samplerDesc);
+        m_samplerIndex = org::runtime::CreateIndexedSamplerFromActiveDescriptorService(samplerDesc);
     }
 
     void CreateXeGTAOComputePSO()

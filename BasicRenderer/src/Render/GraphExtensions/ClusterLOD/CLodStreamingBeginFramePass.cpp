@@ -1,8 +1,6 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodStreamingBeginFramePass.h"
 
 #include <algorithm>
-
-#include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -24,7 +22,7 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     std::shared_ptr<Buffer> nonResidentBits,
     std::shared_ptr<Buffer> activeGroupsBits,
     std::shared_ptr<Buffer> runtimeState,
-    std::function<bool(std::vector<uint32_t>&, uint32_t&)> tryConsumeNonResidentBitsUpload,
+    std::function<bool(std::vector<uint32_t>&, uint32_t&, UploadInstance*)> queueNonResidentBitsUpload,
     std::function<bool(std::vector<uint32_t>&, uint32_t&)> getActiveGroupsBitsUpload,
     std::function<void()> scheduleStreamingReadbacks,
     std::function<void()> processStreamingRequests)
@@ -35,7 +33,7 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     , m_nonResidentBits(std::move(nonResidentBits))
     , m_activeGroupsBits(std::move(activeGroupsBits))
     , m_runtimeState(std::move(runtimeState))
-    , m_tryConsumeNonResidentBitsUpload(std::move(tryConsumeNonResidentBitsUpload))
+    , m_queueNonResidentBitsUpload(std::move(queueNonResidentBitsUpload))
     , m_getActiveGroupsBitsUpload(std::move(getActiveGroupsBitsUpload))
     , m_scheduleStreamingReadbacks(std::move(scheduleStreamingReadbacks))
     , m_processStreamingRequests(std::move(processStreamingRequests))
@@ -65,15 +63,18 @@ PassReturn CLodStreamingBeginFramePass::Execute(PassExecutionContext& executionC
     commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
     commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
 
-    if (m_loadRequestKeys) {
-        ZoneScopedN("CLodStreamingBeginFramePass::ClearRequestKeys");
+    auto clearUintBuffer = [&](const std::shared_ptr<Buffer>& buffer, uint32_t value, uint32_t count) {
+        if (!buffer || count == 0u) {
+            return;
+        }
+
         BindResourceDescriptorIndices(commandList, m_clearUintPipeline.GetResourceDescriptorSlots());
         commandList.BindPipeline(m_clearUintPipeline.GetAPIPipelineState().GetHandle());
 
         uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
-        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = m_loadRequestKeys->GetUAVShaderVisibleInfo(0).slot.index;
-        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0xffffffffu;
-        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodStreamingRequestCapacity;
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = buffer->GetUAVShaderVisibleInfo(0).slot.index;
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = value;
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = count;
         commandList.PushConstants(
             rhi::ShaderStage::Compute,
             0,
@@ -81,7 +82,19 @@ PassReturn CLodStreamingBeginFramePass::Execute(PassExecutionContext& executionC
             0,
             NumMiscUintRootConstants,
             clearRootConstants);
-        commandList.Dispatch((CLodStreamingRequestCapacity + 63u) / 64u, 1u, 1u);
+        commandList.Dispatch((count + 63u) / 64u, 1u, 1u);
+    };
+
+    {
+        ZoneScopedN("CLodStreamingBeginFramePass::ClearFeedbackCounters");
+        clearUintBuffer(m_loadCounter, 0u, 1u);
+        clearUintBuffer(m_usedGroupsCounter, 0u, 1u);
+        clearUintBuffer(m_sourceGroupMismatchCounter, 0u, 1u);
+    }
+
+    if (m_loadRequestKeys) {
+        ZoneScopedN("CLodStreamingBeginFramePass::ClearRequestKeys");
+        clearUintBuffer(m_loadRequestKeys, 0xffffffffu, CLodStreamingRequestCapacity);
     }
     return {};
 }
@@ -110,18 +123,6 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
         m_processStreamingRequests();
     }
 
-    // Counters and metadata go through BUFFER_UPLOAD (graphics-queue upload
-    // manager) so they are visible to culling passes this frame.
-    const uint32_t zero = 0u;
-    {
-        ZoneScopedN("CLodStreamingBeginFramePass::UploadCounters");
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_loadCounter), 0);
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_usedGroupsCounter), 0);
-        if (m_sourceGroupMismatchCounter) {
-            BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_sourceGroupMismatchCounter), 0);
-        }
-    }
-
     uint32_t activeGroupScanCount = 0u;
     {
         ZoneScopedN("CLodStreamingBeginFramePass::UploadActiveGroupsBits");
@@ -131,7 +132,7 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
             BUFFER_UPLOAD(
                 m_activeGroupsBitsUploadScratch.data(),
                 static_cast<uint32_t>(m_activeGroupsBitsUploadScratch.size() * sizeof(uint32_t)),
-                rg::runtime::UploadTarget::FromShared(m_activeGroupsBits),
+                org::runtime::UploadTarget::FromShared(m_activeGroupsBits),
                 0);
         }
     }
@@ -145,7 +146,7 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
         BUFFER_UPLOAD(
             &state,
             sizeof(CLodStreamingRuntimeState),
-            rg::runtime::UploadTarget::FromShared(m_runtimeState),
+            org::runtime::UploadTarget::FromShared(m_runtimeState),
             0);
     }
 
@@ -156,15 +157,18 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
     uint32_t nonResidentFirstWord = 0u;
     {
         ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits");
-        if (m_tryConsumeNonResidentBitsUpload
-            && m_tryConsumeNonResidentBitsUpload(m_nonResidentBitsUploadScratch, nonResidentFirstWord)
-            && !m_nonResidentBitsUploadScratch.empty()) {
-            uploadInstance->UploadData(
-                m_nonResidentBitsUploadScratch.data(),
-                static_cast<uint32_t>(m_nonResidentBitsUploadScratch.size() * sizeof(uint32_t)),
-                rg::runtime::UploadTarget::FromShared(m_nonResidentBits),
-                nonResidentFirstWord * sizeof(uint32_t));
+        bool hasNonResidentBitsUpload = false;
+        {
+            ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits::Consume");
+            hasNonResidentBitsUpload = m_queueNonResidentBitsUpload
+                && m_queueNonResidentBitsUpload(
+                    m_nonResidentBitsUploadScratch,
+                    nonResidentFirstWord,
+                    uploadInstance);
         }
+        TracyPlot(
+            "CLodBeginFrame.NonResidentBits.UploadWords",
+            static_cast<int64_t>(hasNonResidentBitsUpload ? m_nonResidentBitsUploadScratch.size() : 0u));
     }
 }
 

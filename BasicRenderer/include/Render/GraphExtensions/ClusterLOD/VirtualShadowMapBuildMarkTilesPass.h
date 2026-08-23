@@ -5,7 +5,8 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class VirtualShadowMapBuildMarkTilesPass final : public ComputePass {
 public:

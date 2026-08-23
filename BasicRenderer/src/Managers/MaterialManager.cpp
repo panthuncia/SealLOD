@@ -1,14 +1,22 @@
 #include "Managers/MaterialManager.h"
 #include "../generated/BuiltinResources.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
+#include "Materials/MaterialTextureStreaming.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/RasterBucketFlags.h"
 #include "Render/Runtime/IReadbackService.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
+#include <string>
 #include <unordered_set>
+
+#include <tracy/Tracy.hpp>
 
 namespace {
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
@@ -16,6 +24,69 @@ namespace {
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
 	constexpr uint64_t kTextureStreamingIdleFramesBeforeCoarsen = 180u;
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
+
+	const std::string& MaterialTextureTraceFilter() {
+		static const std::string filter = [] {
+			char* value = nullptr;
+			size_t valueLength = 0;
+			if (_dupenv_s(&value, &valueLength, "SARP_MATERIAL_TEXTURE_TRACE_FILTER") != 0 ||
+				value == nullptr) {
+				std::free(value);
+				return std::string{};
+			}
+			std::string result(value);
+			std::free(value);
+			std::ranges::transform(result, result.begin(), [](unsigned char ch) {
+				return static_cast<char>(std::tolower(ch));
+			});
+			return result;
+		}();
+		return filter;
+	}
+
+	bool ShouldTraceMaterialTexture(std::string_view identifier) {
+		const auto& filter = MaterialTextureTraceFilter();
+		if (filter.empty() || identifier.empty()) {
+			return false;
+		}
+		std::string normalized(identifier);
+		std::ranges::transform(normalized, normalized.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		return normalized.find(filter) != std::string::npos;
+	}
+
+	const std::wstring& MaterialTextureReadbackPath() {
+		static const std::wstring path = [] {
+			wchar_t* value = nullptr;
+			size_t valueLength = 0;
+			if (_wdupenv_s(&value, &valueLength, L"SARP_MATERIAL_TEXTURE_READBACK_PATH") != 0 ||
+				value == nullptr) {
+				std::free(value);
+				return std::wstring{};
+			}
+			std::wstring result(value);
+			std::free(value);
+			return result;
+		}();
+		return path;
+	}
+
+	const std::wstring& MaterialTextureLateReadbackPath() {
+		static const std::wstring path = [] {
+			wchar_t* value = nullptr;
+			size_t valueLength = 0;
+			if (_wdupenv_s(&value, &valueLength, L"SARP_MATERIAL_TEXTURE_LATE_READBACK_PATH") != 0 ||
+				value == nullptr) {
+				std::free(value);
+				return std::wstring{};
+			}
+			std::wstring result(value);
+			std::free(value);
+			return result;
+		}();
+		return path;
+	}
 
 	uint64_t ComputeTextureResidentBytes(const TextureDescription& desc) {
 		uint64_t totalBytes = 0;
@@ -108,9 +179,10 @@ namespace {
 				return;
 			}
 
-			textureIndex = binding.texture->Image().GetSRVInfo(0).slot.index;
+			auto image = binding.texture->ImagePtr();
+			textureIndex = image ? image->GetSRVInfo(0).slot.index : kInvalidDescriptor;
 			samplerIndex = binding.texture->SamplerDescriptorIndex();
-			streamingTextureID = binding.texture->GetStreamingTextureID();
+			streamingTextureID = IsMaterialTextureStreamingEnabledSetting() ? binding.texture->GetStreamingTextureID() : kInvalidStreamingTextureID;
 			if (binding.channels.size() > 0u) channels.x = binding.channels[0];
 			if (binding.channels.size() > 1u) channels.y = binding.channels[1];
 			if (binding.channels.size() > 2u) channels.z = binding.channels[2];
@@ -133,9 +205,10 @@ namespace {
 				return;
 			}
 
-			textureIndex = binding.texture->Image().GetSRVInfo(0).slot.index;
+			auto image = binding.texture->ImagePtr();
+			textureIndex = image ? image->GetSRVInfo(0).slot.index : kInvalidDescriptor;
 			samplerIndex = binding.texture->SamplerDescriptorIndex();
-			streamingTextureID = binding.texture->GetStreamingTextureID();
+			streamingTextureID = IsMaterialTextureStreamingEnabledSetting() ? binding.texture->GetStreamingTextureID() : kInvalidStreamingTextureID;
 			if (!binding.channels.empty()) {
 				channel = binding.channels[0];
 			}
@@ -210,6 +283,8 @@ namespace {
 		result.baseColorFactor = base.baseColorFactor;
 		result.emissiveFactor = base.emissiveFactor;
 		result.baseColorChannels = base.baseColorChannels;
+		result.normalChannels = base.normalChannels;
+		result.terrainSetIndex = base.terrainSetIndex;
 		result.aoChannel = base.aoChannel;
 		result.heightChannel = base.heightChannel;
 		result.metallicChannel = base.metallicChannel;
@@ -232,6 +307,15 @@ namespace {
 		result.aoStreamingTextureID = base.aoStreamingTextureID;
 		result.heightStreamingTextureID = base.heightStreamingTextureID;
 		result.opacityStreamingTextureID = base.opacityStreamingTextureID;
+		result.reyesUvDensity = base.reyesUvDensity;
+		result.objectSurfaceTexelDensity = base.objectSurfaceTexelDensity;
+		result.objectSurfaceSamplingMode = base.objectSurfaceSamplingMode;
+		result.sourceMaterialId = base.sourceMaterialId;
+		result.semanticFamily = base.semanticFamily;
+		result.surfaceFlags = base.surfaceFlags;
+		result.glintParameters = base.glintParameters;
+		result.glintEnabled = base.glintEnabled;
+		result.diagnosticReason = base.diagnosticReason;
 		return result;
 	}
 
@@ -256,8 +340,11 @@ namespace {
 	std::vector<std::shared_ptr<TextureAsset>> CollectMaterialTextureAssets(const Material& material) {
 		std::vector<std::shared_ptr<TextureAsset>> textures;
 		std::unordered_set<uint32_t> seenStreamingIds;
+		const auto externallyStreamedHeightAtlas = material.IsObjectReyesAtlasHeightMaterial()
+			? material.GetHeightMapTexture()
+			: nullptr;
 		material.ForEachReferencedTexture([&](const std::shared_ptr<TextureAsset>& texture) {
-			if (!texture) {
+			if (!texture || texture == externallyStreamedHeightAtlas) {
 				return;
 			}
 
@@ -279,41 +366,41 @@ namespace {
 
 // TODO: Use LazyDynamicStructuredBuffer and active indices buffer like draw calls? Would reduce number of no-op indirect arguments
 MaterialManager::MaterialManager() {
-	auto& rm = ResourceManager::GetInstance();
-	m_activeMaterialTextureGroup = std::make_shared<ResourceGroup>("ActiveMaterialTextures");
+	auto& rm = ::ResourceManager::GetInstance();
 
-	// Primary material data buffer
-	m_perMaterialDataBuffer = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(m_compileFlagsSlotsUsed, "Builtin::PerMaterialDataBuffer", true);
-	m_perMaterialEvalDataBuffer = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(m_compileFlagsSlotsUsed, "Builtin::PerMaterialEvalDataBuffer", true);
-	m_perMaterialOpenPBRDataBuffer = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(m_compileFlagsSlotsUsed, "Builtin::PerMaterialOpenPBRDataBuffer", true);
-	m_textureStreamingMetadataBuffer = DynamicStructuredBuffer<TextureStreamingGPUInfo>::CreateShared(m_textureStreamingMetadataCapacity, "Builtin::Material::TextureStreamingMetadataBuffer", true);
-	m_textureStreamingFeedbackBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_textureStreamingMetadataCapacity, "Builtin::Material::TextureStreamingFeedbackBuffer", true);
-	rg::memory::SetResourceUsageHint(*m_perMaterialDataBuffer, "Material buffers");
-	rg::memory::SetResourceUsageHint(*m_perMaterialEvalDataBuffer, "Material buffers");
-	rg::memory::SetResourceUsageHint(*m_perMaterialOpenPBRDataBuffer, "Material buffers");
-	rg::memory::SetResourceUsageHint(*m_textureStreamingMetadataBuffer, "Material buffers");
-	rg::memory::SetResourceUsageHint(*m_textureStreamingFeedbackBuffer, "Material buffers");
-	m_textureStreamingMetadataBuffer->UpdateAt(0u, TextureStreamingGPUInfo{});
-	m_textureStreamingFeedbackBuffer->UpdateAt(0u, kTextureStreamingFeedbackUnused);
+	// Primary material data buffer. Normally streamed scenes should reserve enough
+	// slots to avoid reallocating GPU backing resources while frames are executing.
+	// The forced-resize path is intentionally left on while validating upload and
+	// descriptor lifetime safety under worst-case cell-streaming pressure.
+	m_materialBufferCapacity = kForceMaterialBufferResizeEveryMaterial
+		? m_compileFlagsRegistry.GetSlotsUsed()
+		: kInitialMaterialBufferCapacity;
+	m_perMaterialDataBuffer = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(m_materialBufferCapacity, "Builtin::PerMaterialDataBuffer", true);
+	m_perMaterialEvalDataBuffer = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(m_materialBufferCapacity, "Builtin::PerMaterialEvalDataBuffer", true);
+	m_perMaterialOpenPBRDataBuffer = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(m_materialBufferCapacity, "Builtin::PerMaterialOpenPBRDataBuffer", true);
+	m_textureStreamingManager = TextureStreamingManager::CreateUnique();
+	org::memory::SetResourceUsageHint(*m_perMaterialDataBuffer, "Material buffers");
+	org::memory::SetResourceUsageHint(*m_perMaterialEvalDataBuffer, "Material buffers");
+	org::memory::SetResourceUsageHint(*m_perMaterialOpenPBRDataBuffer, "Material buffers");
 
 	// Visibility buffer resources
-    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsSlotsUsed, "VisUtil::MaterialPixelCountBuffer", true);
-    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsSlotsUsed, "VisUtil::MaterialOffsetBuffer", true);
-	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsSlotsUsed, "VisUtil::MaterialWriteCursorBuffer", true);
-	rg::memory::SetResourceUsageHint(*m_materialPixelCountBuffer, "Material evaluation buffers");
-	rg::memory::SetResourceUsageHint(*m_materialOffsetBuffer, "Material evaluation buffers");
-	rg::memory::SetResourceUsageHint(*m_materialWriteCursorBuffer, "Material evaluation buffers");
+    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialPixelCountBuffer", true);
+    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialOffsetBuffer", true);
+	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialWriteCursorBuffer", true);
+	org::memory::SetResourceUsageHint(*m_materialPixelCountBuffer, "Material evaluation buffers");
+	org::memory::SetResourceUsageHint(*m_materialOffsetBuffer, "Material evaluation buffers");
+	org::memory::SetResourceUsageHint(*m_materialWriteCursorBuffer, "Material evaluation buffers");
 
 	// Per-block arrays for hierarchical scan
-	const uint32_t numBlocks = (m_compileFlagsSlotsUsed + kScanBlockSize - 1u) / kScanBlockSize;
+	const uint32_t numBlocks = (m_compileFlagsRegistry.GetSlotsUsed() + kScanBlockSize - 1u) / kScanBlockSize;
 	m_blockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::BlockSumsBuffer", true);
 	m_scannedBlockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::ScannedBlockSumsBuffer", true);
-	rg::memory::SetResourceUsageHint(*m_blockSumsBuffer, "Material evaluation buffers");
-	rg::memory::SetResourceUsageHint(*m_scannedBlockSumsBuffer, "Material evaluation buffers");
+	org::memory::SetResourceUsageHint(*m_blockSumsBuffer, "Material evaluation buffers");
+	org::memory::SetResourceUsageHint(*m_scannedBlockSumsBuffer, "Material evaluation buffers");
 
 	// Indirect command buffer for material evaluation
-	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(m_compileFlagsSlotsUsed, "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
-	rg::memory::SetResourceUsageHint(*m_materialEvaluationCommandBuffer, "Indirect command buffers");
+	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
+	org::memory::SetResourceUsageHint(*m_materialEvaluationCommandBuffer, "Indirect command buffers");
 
 	m_resources["Builtin::VisUtil::MaterialPixelCountBuffer"] = m_materialPixelCountBuffer;
 	m_resources["Builtin::VisUtil::MaterialOffsetBuffer"] = m_materialOffsetBuffer;
@@ -324,203 +411,37 @@ MaterialManager::MaterialManager() {
 	m_resources[Builtin::PerMaterialDataBuffer] = m_perMaterialDataBuffer;
 	m_resources["Builtin::PerMaterialEvalDataBuffer"] = m_perMaterialEvalDataBuffer;
 	m_resources[Builtin::PerMaterialOpenPBRDataBuffer] = m_perMaterialOpenPBRDataBuffer;
-	m_resources[Builtin::Material::TextureStreamingMetadataBuffer] = m_textureStreamingMetadataBuffer;
-	m_resources[Builtin::Material::TextureStreamingFeedbackBuffer] = m_textureStreamingFeedbackBuffer;
-	m_resolvers[Builtin::Material::TextureGroup] = std::make_shared<ResourceGroupResolver>(m_activeMaterialTextureGroup);
 
 	// Reserve built-in material bins up front so render-graph material evaluation buffers are
 	// fully sized before passes/materialization/upload steps touch them.
-	GetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel);
+	AcquireCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel);
+	CommitGpuVisibleSnapshot();
 }
 
 void MaterialManager::BeginTextureStreamingFeedbackFrame(uint64_t frameIndex) {
-	std::vector<std::pair<uint32_t, uint32_t>> pendingFeedback;
-	{
-		std::lock_guard lock(m_textureStreamingFeedbackMutex);
-		pendingFeedback.swap(m_pendingTextureStreamingFeedback);
-	}
-
-	std::vector<uint32_t> expiredTextureIDs;
-	for (const auto& [streamingTextureID, requestedTopMip] : pendingFeedback) {
-		auto it = m_streamingTexturesByID.find(streamingTextureID);
-		if (it == m_streamingTexturesByID.end()) {
-			continue;
-		}
-
-		auto texture = it->second.lock();
-		if (!texture) {
-			expiredTextureIDs.push_back(streamingTextureID);
-			continue;
-		}
-
-		if (!texture->IsMipStreamingEnabled()) {
-			continue;
-		}
-
-		const uint64_t previousRevision = texture->GetStreamingStateRevision();
-		texture->ApplyStreamingSystemRequest(requestedTopMip, frameIndex);
-		if (texture->GetStreamingStateRevision() != previousRevision) {
-			MarkTextureStreamingMetadataDirty(texture, true);
-		}
-	}
-
-	for (uint32_t streamingTextureID : expiredTextureIDs) {
-		m_streamingTexturesByID.erase(streamingTextureID);
-	}
-
-	for (auto it = m_streamingTexturesByID.begin(); it != m_streamingTexturesByID.end();) {
-		auto texture = it->second.lock();
-		if (!texture) {
-			it = m_streamingTexturesByID.erase(it);
-			continue;
-		}
-
-		if (!texture->IsMipStreamingEnabled()) {
-			++it;
-			continue;
-		}
-
-		const TextureStreamingState& state = texture->GetStreamingState();
-		if (state.lastSeenFrame == 0u || frameIndex <= state.lastSeenFrame + kTextureStreamingIdleFramesBeforeCoarsen) {
-			++it;
-			continue;
-		}
-
-		const uint32_t coarsenedTopMip = (std::min)(
-			state.residency.totalMipCount - 1u,
-			(std::max)(state.requestedTopMip, state.residency.residentTopMip + 1u));
-		if (coarsenedTopMip != state.requestedTopMip) {
-			const uint64_t previousRevision = texture->GetStreamingStateRevision();
-			texture->ApplyStreamingSystemRequest(coarsenedTopMip, frameIndex);
-			if (texture->GetStreamingStateRevision() != previousRevision) {
-				MarkTextureStreamingMetadataDirty(texture, true);
-			}
-		}
-
-		++it;
-	}
-
-	for (const uint32_t streamingTextureID : m_activeTextureStreamingFeedbackIDs) {
-		if (streamingTextureID < m_textureStreamingMetadataCapacity) {
-			m_textureStreamingFeedbackBuffer->UpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused);
-		}
+	(void)frameIndex;
+}
+void MaterialManager::InitializeTextureStreaming(TextureFactory& textureFactory, uint32_t framesInFlight) {
+	if (m_textureStreamingManager) {
+		m_textureStreamingManager->Initialize(textureFactory, framesInFlight);
 	}
 }
-void MaterialManager::RequestTextureStreamingFeedbackReadback(rg::runtime::IReadbackService* readbackService) {
-	if (!readbackService || !m_textureStreamingFeedbackBuffer || m_activeTextureStreamingFeedbackIDs.empty()) {
-		return;
+void MaterialManager::ShutdownTextureStreaming() {
+	if (m_textureStreamingManager) {
+		m_textureStreamingManager->Shutdown();
 	}
-
-	std::vector<uint32_t> activeStreamingTextureIDs = m_activeTextureStreamingFeedbackIDs;
-	readbackService->RequestReadbackCapture(
-		std::string(kTextureStreamingFeedbackReadbackAnchorPass),
-		m_textureStreamingFeedbackBuffer.get(),
-		RangeSpec{},
-		[this, activeStreamingTextureIDs = std::move(activeStreamingTextureIDs)](ReadbackCaptureResult&& result) {
-			if (result.desc.kind != ReadbackResourceKind::Buffer || result.data.empty()) {
-				return;
-			}
-
-			TaskSchedulerManager::GetInstance().RunBackgroundTask(
-				"MaterialManager::DecodeTextureStreamingFeedback",
-				[this,
-				 activeStreamingTextureIDs = std::move(activeStreamingTextureIDs),
-				 resultData = std::move(result.data)]() mutable {
-					std::vector<std::pair<uint32_t, uint32_t>> decodedFeedback;
-					decodedFeedback.reserve(activeStreamingTextureIDs.size());
-					const size_t wordCount = resultData.size() / sizeof(uint32_t);
-					for (uint32_t streamingTextureID : activeStreamingTextureIDs) {
-						if (streamingTextureID >= wordCount) {
-							continue;
-						}
-
-						uint32_t requestedTopMip = kTextureStreamingFeedbackUnused;
-						std::memcpy(
-							&requestedTopMip,
-							resultData.data() + static_cast<size_t>(streamingTextureID) * sizeof(uint32_t),
-							sizeof(uint32_t));
-						if (requestedTopMip == kTextureStreamingFeedbackUnused) {
-							continue;
-						}
-
-						decodedFeedback.emplace_back(streamingTextureID, requestedTopMip);
-					}
-
-					if (decodedFeedback.empty()) {
-						return;
-					}
-
-					std::lock_guard lock(m_textureStreamingFeedbackMutex);
-					m_pendingTextureStreamingFeedback.insert(
-						m_pendingTextureStreamingFeedback.end(),
-						decodedFeedback.begin(),
-						decodedFeedback.end());
-				});
-		},
-		QueueKind::Copy);
+}
+std::shared_ptr<CopyPass> MaterialManager::CreateTextureStreamingFeedbackReadbackPass() {
+	if (!m_textureStreamingManager || m_textureStreamingFeedbackSuppressed) {
+		return {};
+	}
+	return m_textureStreamingManager->CreateTextureStreamingFeedbackReadbackPass();
 }
 
 MaterialTextureStreamingStats MaterialManager::GetMaterialTextureStreamingStats() const {
-	MaterialTextureStreamingStats stats{};
-	std::unordered_set<uint64_t> seenImageResourceIDs;
-
-	for (const auto& [_, textures] : m_trackedMaterialTextures) {
-		for (const auto& textureResource : textures) {
-			if (!textureResource) {
-				continue;
-			}
-
-			auto image = std::dynamic_pointer_cast<PixelBuffer>(textureResource);
-			if (!image) {
-				continue;
-			}
-
-			const uint64_t imageResourceID = image->GetGlobalResourceID();
-			if (!seenImageResourceIDs.insert(imageResourceID).second) {
-				continue;
-			}
-
-			stats.uniqueMaterialTextureCount++;
-			stats.totalResidentBytes += ComputeTextureResidentBytes(image->GetDescription());
-
-			uint32_t residentTopMip = 0u;
-			auto textureIt = m_materialTextureAssetsByImageResourceID.find(imageResourceID);
-			if (textureIt != m_materialTextureAssetsByImageResourceID.end()) {
-				auto texture = textureIt->second.lock();
-				if (!texture) {
-					continue;
-				}
-
-				const TextureStreamingState& streamingState = texture->GetStreamingState();
-				residentTopMip = streamingState.residency.residentTopMip;
-				if (streamingState.eligible) {
-					stats.uniqueStreamableTextureCount++;
-					stats.streamableResidentBytes += ComputeTextureResidentBytes(image->GetDescription());
-					if (streamingState.enabled) {
-						stats.uniqueStreamingEnabledTextureCount++;
-					}
-					if (streamingState.residency.residentTopMip == 0u) {
-						stats.streamableFullResolutionResidentTextureCount++;
-					}
-					if (streamingState.requestedTopMip != streamingState.residency.residentTopMip ||
-						streamingState.pendingTopMip != streamingState.residency.residentTopMip) {
-						stats.pendingReloadTextureCount++;
-					}
-				}
-			}
-
-			if (residentTopMip == 0u) {
-				stats.fullResolutionResidentTextureCount++;
-			}
-
-			if (stats.residentTopMipHistogram.size() <= residentTopMip) {
-				stats.residentTopMipHistogram.resize(static_cast<size_t>(residentTopMip) + 1u, 0u);
-			}
-			stats.residentTopMipHistogram[residentTopMip]++;
-		}
-	}
-
-	return stats;
+	return m_textureStreamingManager
+		? m_textureStreamingManager->GetTextureStreamingStats(CollectActiveMaterialTextureResources())
+		: MaterialTextureStreamingStats{};
 }
 
 void MaterialManager::MarkMaterialDirty(Material& material) {
@@ -530,95 +451,145 @@ void MaterialManager::MarkMaterialDirty(Material& material) {
 	}
 }
 
-void MaterialManager::MarkTextureStreamingMetadataDirty(const std::shared_ptr<TextureAsset>& texture, bool needsUploadAdvance) {
-	if (!texture) {
-		return;
+void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
+	ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates");
+	const auto updateStart = std::chrono::steady_clock::now();
+	const auto streamingStart = std::chrono::steady_clock::now();
+	if (m_textureStreamingManager) {
+		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming");
+		m_textureStreamingManager->EnqueueFrameTick(frameIndex);
+		m_textureStreamingManager->DrainPendingBindingChanges();
 	}
-
-	const uint32_t streamingTextureID = texture->GetStreamingTextureID();
-	if (streamingTextureID == 0u) {
-		return;
-	}
-
-	m_streamingTexturesByID[streamingTextureID] = texture;
-	if (m_dirtyTextureStreamingIDSet.insert(streamingTextureID).second) {
-		m_dirtyTextureStreamingIDs.push_back(streamingTextureID);
-	}
-	if (needsUploadAdvance && m_texturesNeedingUploadAdvanceSet.insert(streamingTextureID).second) {
-		m_texturesNeedingUploadAdvance.push_back(streamingTextureID);
-	}
-}
-
-void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex, TextureFactory& textureFactory) {
-	BeginTextureStreamingFeedbackFrame(frameIndex);
-
-	std::vector<uint32_t> texturesToAdvance;
-	texturesToAdvance.swap(m_texturesNeedingUploadAdvance);
-	m_texturesNeedingUploadAdvanceSet.clear();
-	for (const uint32_t streamingTextureID : texturesToAdvance) {
-		auto it = m_streamingTexturesByID.find(streamingTextureID);
-		if (it == m_streamingTexturesByID.end()) {
-			continue;
+	const auto streamingEnd = std::chrono::steady_clock::now();
+	const auto& lateReadbackPath = MaterialTextureLateReadbackPath();
+	if (!m_traceLateReadbackRequested && frameIndex >= 600u && !lateReadbackPath.empty()) {
+		if (const auto texture = m_traceBaseColorTexture.lock()) {
+			const auto published = texture->GetPublishedBindingSnapshot().image;
+			if (published && published->HasValidBackingResource() && m_requestTextureReadback) {
+				m_traceLateReadbackRequested = true;
+				const uint64_t resourceID = published->GetGlobalResourceID();
+				spdlog::info(
+					"SARP material texture trace: requesting late base-color readback resource={} frame={}.",
+					resourceID,
+					frameIndex);
+				m_requestTextureReadback(
+					published,
+					lateReadbackPath,
+					[resourceID, lateReadbackPath]() {
+						spdlog::info(
+							"SARP material texture trace: completed late base-color readback resource={} output='{}'.",
+							resourceID,
+							std::filesystem::path(lateReadbackPath).string());
+					});
+			}
 		}
-
-		auto texture = it->second.lock();
-		if (!texture) {
-			m_streamingTexturesByID.erase(it);
-			continue;
-		}
-
-		EnsureTextureUploadAdvanced(texture, textureFactory);
 	}
 
 	std::vector<uint32_t> dirtyMaterialIDs;
-	dirtyMaterialIDs.swap(m_dirtyMaterialIDs);
-	m_dirtyMaterialIDSet.clear();
-	for (const uint32_t materialID : dirtyMaterialIDs) {
-		auto materialIt = m_activeMaterialsByID.find(materialID);
-		if (materialIt == m_activeMaterialsByID.end() || materialIt->second == nullptr) {
-			continue;
-		}
-
-		FlushDirtyMaterial(*materialIt->second, &textureFactory);
+	{
+		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::CollectDirtyMaterials");
+		dirtyMaterialIDs.swap(m_dirtyMaterialIDs);
+		m_dirtyMaterialIDSet.clear();
+		TracyPlot("MaterialManager.DirtyMaterialCount", static_cast<int64_t>(dirtyMaterialIDs.size()));
 	}
+	const auto dirtyMaterialStart = std::chrono::steady_clock::now();
+	std::size_t dirtyMaterialsVisited = 0;
+	std::size_t dirtyMaterialsFlushed = 0;
+	{
+		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials");
+		for (const uint32_t materialID : dirtyMaterialIDs) {
+			ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials::Material");
+			ZoneValue(materialID);
+			++dirtyMaterialsVisited;
+			auto materialIt = m_activeMaterialsByID.find(materialID);
+			if (materialIt == m_activeMaterialsByID.end() || materialIt->second == nullptr) {
+				continue;
+			}
 
-	std::vector<uint32_t> dirtyTextureIDs;
-	dirtyTextureIDs.swap(m_dirtyTextureStreamingIDs);
-	m_dirtyTextureStreamingIDSet.clear();
-	for (const uint32_t streamingTextureID : dirtyTextureIDs) {
-		auto it = m_streamingTexturesByID.find(streamingTextureID);
-		if (it == m_streamingTexturesByID.end()) {
-			continue;
+			FlushDirtyMaterial(*materialIt->second, nullptr);
+			++dirtyMaterialsFlushed;
 		}
+	}
+	if (m_textureStreamingManager) {
+		m_textureStreamingManager->RetirePatchedBindingResources();
+	}
+	const auto dirtyMaterialEnd = std::chrono::steady_clock::now();
 
-		auto texture = it->second.lock();
-		if (!texture) {
-			m_streamingTexturesByID.erase(it);
-			m_textureStreamingMetadataRevisions.erase(streamingTextureID);
-			continue;
-		}
-
-		FlushDirtyTextureMetadata(texture);
+	const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now() - updateStart).count();
+	const auto streamingUs = std::chrono::duration_cast<std::chrono::microseconds>(streamingEnd - streamingStart).count();
+	const auto dirtyMaterialUs = std::chrono::duration_cast<std::chrono::microseconds>(dirtyMaterialEnd - dirtyMaterialStart).count();
+	const auto now = std::chrono::steady_clock::now();
+	const bool hadWork =
+		dirtyMaterialsVisited != 0 ||
+		elapsedUs >= 2000;
+	if (hadWork && now - m_lastMaterialUpdateStatsLog >= std::chrono::seconds(1)) {
+		m_lastMaterialUpdateStatsLog = now;
+		spdlog::debug(
+			"MaterialManager::ProcessPendingMaterialUpdates stats: elapsed_us={} textureStreaming_us={} dirtyMaterial_us={} dirtyMaterials visited={} flushed={} activeMaterials={}",
+			elapsedUs,
+			streamingUs,
+			dirtyMaterialUs,
+			dirtyMaterialsVisited,
+			dirtyMaterialsFlushed,
+			m_activeMaterialsByID.size());
 	}
 }
 
-void MaterialManager::IncrementMaterialUsageCount(Material& material) {
+unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory, unsigned int count) {
+	ZoneScopedN("MaterialManager::IncrementMaterialUsageCount");
+	ZoneValue(material.GetMaterialID());
 	//std::lock_guard<std::mutex> lock(m_materialSlotMappingMutex);
-	auto& flags = material.Technique().compileFlags;
-	unsigned int flagsSlot = GetCompileFlagsSlot(flags);
-	m_compileFlagsUsageCounts[flagsSlot]++;
-	uint32_t materialID = material.GetMaterialID();
-	material.SetCompileFlagsID(flagsSlot);
-	unsigned int materialSlot = GetMaterialSlot(materialID);
-	material.SetOpenPBRMaterialDataIndex(materialSlot);
-	m_activeMaterialsByID[materialID] = &material;
-
-	m_materialUsageCounts[materialSlot]++;
-	if (m_materialUsageCounts[materialSlot] == 1u) {
-		UpdateMaterialTextureUsage(material, 1);
-		TrackMaterialTextureAssets(material, 1);
-		MarkMaterialDirty(material);
+	if (count == 0u) {
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::CountZeroSlotLookup");
+		return GetMaterialSlot(material.GetMaterialID());
 	}
+
+	uint32_t materialID = material.GetMaterialID();
+	decltype(m_materialIDSlotMapping)::iterator existingSlotIt;
+	bool alreadyResident = false;
+	{
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::ResidentLookup");
+		existingSlotIt = m_materialIDSlotMapping.find(materialID);
+		alreadyResident =
+			existingSlotIt != m_materialIDSlotMapping.end()
+			&& existingSlotIt->second < m_materialUsageCounts.size()
+			&& m_materialUsageCounts[existingSlotIt->second] > 0u;
+		TracyPlot("MaterialManager.IncrementUsage.AlreadyResident", alreadyResident ? int64_t{ 1 } : int64_t{ 0 });
+	}
+
+	unsigned int materialSlot = 0;
+	{
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::ResolveMaterialSlot");
+		materialSlot = alreadyResident
+			? existingSlotIt->second
+			: GetMaterialSlot(materialID, textureFactory ? std::optional<PerMaterialCB>{ material.GetData() } : std::nullopt);
+		material.SetOpenPBRMaterialDataIndex(materialSlot);
+		m_activeMaterialsByID[materialID] = &material;
+	}
+
+	m_materialUsageCounts[materialSlot] += count;
+	if (m_materialUsageCounts[materialSlot] == 1u) {
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse");
+		if (textureFactory) {
+			ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::FlushDirtyMaterial");
+			FlushDirtyMaterial(material, textureFactory);
+		} else {
+			{
+				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::UpdateTextureUsage");
+				UpdateMaterialTextureUsage(material, 1);
+			}
+			{
+				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::TrackTextureAssets");
+				TrackMaterialTextureAssets(material, 1);
+			}
+			{
+				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::MarkDirty");
+				MarkMaterialDirty(material);
+			}
+		}
+	}
+	return materialSlot;
 }
 
 void MaterialManager::UpdateMaterialDataBuffer(Material& material) {
@@ -626,151 +597,278 @@ void MaterialManager::UpdateMaterialDataBuffer(Material& material) {
 }
 
 void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* textureFactory) {
+	ZoneScopedN("MaterialManager::FlushDirtyMaterial");
+	ZoneValue(material.GetMaterialID());
 	const unsigned int materialSlot = GetMaterialSlot(material.GetMaterialID());
 	material.SetOpenPBRMaterialDataIndex(materialSlot);
-	if (textureFactory) {
-		material.EnsureTexturesUploaded(*textureFactory);
+	const bool textureAssetsChanged = MaterialTextureAssetBindingsChanged(material);
+	const bool refreshedTextures = textureFactory != nullptr || textureAssetsChanged;
+	if (textureAssetsChanged) {
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UntrackTextureBindings");
+			TrackMaterialTextureAssets(material, -1);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::TrackTextureBindings");
+			TrackMaterialTextureAssets(material, 1);
+		}
 	}
 
-	const PerMaterialCB materialData = material.GetData();
-	const PerMaterialEvalCB evalData = BuildMaterialEvalData(material);
-	const PerMaterialOpenPBRCB openPBRData = BuildOpenPBRMaterialData(material);
+	PerMaterialCB materialData{};
+	PerMaterialEvalCB evalData{};
+	PerMaterialOpenPBRCB openPBRData{};
+	{
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs");
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::RefreshTextureBindings");
+			material.RefreshTextureBindings();
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Base");
+			materialData = material.GetData();
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Eval");
+			evalData = BuildMaterialEvalData(material);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::OpenPBR");
+			openPBRData = BuildOpenPBRMaterialData(material);
+		}
+	}
 	if (materialSlot >= m_materialUploadSignatures.size()) {
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::ResizeSignatures");
 		m_materialUploadSignatures.resize(static_cast<size_t>(materialSlot) + 1u);
 	}
 
 	auto& signature = m_materialUploadSignatures[materialSlot];
-	const bool dataChanged =
-		!signature.valid ||
-		!BytewiseEqual(signature.materialData, materialData) ||
-		!BytewiseEqual(signature.evalData, evalData) ||
-		!BytewiseEqual(signature.openPBRData, openPBRData);
-	if (dataChanged) {
-		m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
-		m_perMaterialEvalDataBuffer->UpdateAt(materialSlot, evalData);
-		m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, openPBRData);
-		signature.materialData = materialData;
-		signature.evalData = evalData;
-		signature.openPBRData = openPBRData;
-		signature.valid = true;
+	bool dataChanged = false;
+	{
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::CompareUploadSignature");
+		dataChanged =
+			!signature.valid ||
+			!BytewiseEqual(signature.materialData, materialData) ||
+			!BytewiseEqual(signature.evalData, evalData) ||
+			!BytewiseEqual(signature.openPBRData, openPBRData);
 	}
+	const auto descForAtlasDebug = material.ToCacheDescription();
+	if (ShouldTraceMaterialTexture(descForAtlasDebug.baseColor.sourcePath) ||
+		ShouldTraceMaterialTexture(descForAtlasDebug.normal.sourcePath)) {
+		auto textureState = [](const std::shared_ptr<TextureAsset>& texture) {
+			if (!texture) {
+				return std::string("texture=null");
+			}
+			const auto published = texture->GetPublishedBindingSnapshot();
+			const auto prepared = texture->PreparedImagePtr();
+			const auto streaming = texture->GetStreamingState();
+			const auto pending = texture->GetPendingDebugInfo();
+			const auto srv = [](const std::shared_ptr<PixelBuffer>& image) {
+				return image && image->HasValidBackingResource()
+					? image->GetSRVInfo(0).slot.index
+					: UINT32_MAX;
+			};
+			return fmt::format(
+				"streamingID={} bindingRevision={} publishedRevision={} publishedResource={} publishedSrv={} "
+				"preparedResource={} preparedSrv={} residentTopMip={} requestedTopMip={} pendingTopMip={} "
+				"usable={} fallback={} pendingWork={} processing={} reload={} directStorage={} "
+				"initialData='{}' loadPath={} uploadPath={}",
+				texture->GetStreamingTextureID(),
+				texture->GetBindingRevision(),
+				published.bindingRevision,
+				published.image ? published.image->GetGlobalResourceID() : 0u,
+				srv(published.image),
+				prepared ? prepared->GetGlobalResourceID() : 0u,
+				srv(prepared),
+				streaming.residency.residentTopMip,
+				streaming.requestedTopMip,
+				streaming.pendingTopMip,
+				texture->HasUsableImage(),
+				texture->IsUsingFallbackImage(),
+				texture->HasPendingUploadWork(),
+				pending.processingState,
+				pending.reloadState,
+				pending.directStorageState,
+				pending.initialData,
+				pending.loadPath,
+				pending.uploadPath);
+		};
+		spdlog::info(
+			"SARP material texture trace: materialID={} slot={} name='{}' dataChanged={} refreshedTextures={} "
+			"flags=0x{:x} compileFlags=0x{:x} baseFactor=({},{},{},{}) baseChannels=({},{},{},{}) "
+			"baseUv={} normalUv={} basePath='{}' baseCB=(descriptor={},sampler={},streamingID={}) baseState=[{}] "
+			"normalPath='{}' normalCB=(descriptor={},streamingID={}) normalState=[{}]",
+			material.GetMaterialID(),
+			materialSlot,
+			descForAtlasDebug.name,
+			dataChanged,
+			refreshedTextures,
+			materialData.materialFlags,
+			static_cast<std::uint64_t>(material.Technique().compileFlags),
+			materialData.baseColorFactor.x,
+			materialData.baseColorFactor.y,
+			materialData.baseColorFactor.z,
+			materialData.baseColorFactor.w,
+			materialData.baseColorChannels.x,
+			materialData.baseColorChannels.y,
+			materialData.baseColorChannels.z,
+			materialData.baseColorChannels.w,
+			materialData.baseColorUvSetIndex,
+			materialData.normalUvSetIndex,
+			descForAtlasDebug.baseColor.sourcePath,
+			materialData.baseColorTextureIndex,
+			materialData.baseColorSamplerIndex,
+			materialData.baseColorStreamingTextureID,
+			textureState(descForAtlasDebug.baseColor.texture),
+			descForAtlasDebug.normal.sourcePath,
+			materialData.normalTextureIndex,
+			materialData.normalStreamingTextureID,
+			textureState(descForAtlasDebug.normal.texture));
 
-	if (dataChanged) {
-		RefreshMaterialTextureUsage(material);
-		TrackMaterialTextureAssets(material, -1);
-		TrackMaterialTextureAssets(material, 1);
-	}
-}
-
-void MaterialManager::EnsureTextureUploadAdvanced(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory) {
-	if (!texture) {
-		return;
-	}
-
-	const uint64_t previousBindingRevision = texture->GetBindingRevision();
-	const uint64_t previousStreamingRevision = texture->GetStreamingStateRevision();
-	texture->SetGenerateMipmaps(true);
-	texture->EnsureUploaded(textureFactory);
-
-	const uint32_t streamingTextureID = texture->GetStreamingTextureID();
-	if (texture->GetStreamingStateRevision() != previousStreamingRevision) {
-		MarkTextureStreamingMetadataDirty(texture, false);
-	}
-	if (texture->HasPendingUploadWork()) {
-		MarkTextureStreamingMetadataDirty(texture, true);
-	}
-	if (texture->GetBindingRevision() != previousBindingRevision) {
-		auto materialIdsIt = m_streamingTextureMaterialIDs.find(streamingTextureID);
-		if (materialIdsIt != m_streamingTextureMaterialIDs.end()) {
-			for (const uint32_t materialID : materialIdsIt->second) {
-				if (auto materialIt = m_activeMaterialsByID.find(materialID);
-					materialIt != m_activeMaterialsByID.end() && materialIt->second) {
-					MarkMaterialDirty(*materialIt->second);
+		const auto& readbackPath = MaterialTextureReadbackPath();
+		const auto& baseTexture = descForAtlasDebug.baseColor.texture;
+		if (ShouldTraceMaterialTexture(descForAtlasDebug.baseColor.sourcePath) && baseTexture) {
+			m_traceBaseColorTexture = baseTexture;
+		}
+		if (!readbackPath.empty() &&
+			ShouldTraceMaterialTexture(descForAtlasDebug.baseColor.sourcePath) &&
+			baseTexture &&
+			baseTexture->GetStreamingState().residency.residentTopMip == 0u) {
+			const auto published = baseTexture->GetPublishedBindingSnapshot().image;
+			if (published && published->HasValidBackingResource()) {
+				const uint64_t resourceID = published->GetGlobalResourceID();
+				if (m_requestTextureReadback && m_traceReadbackResourceIDs.insert(resourceID).second) {
+					spdlog::info(
+						"SARP material texture trace: requesting published base-color readback resource={} path='{}'.",
+						resourceID,
+						descForAtlasDebug.baseColor.sourcePath);
+					m_requestTextureReadback(
+						published,
+						readbackPath,
+						[resourceID, readbackPath]() {
+							spdlog::info(
+								"SARP material texture trace: completed published base-color readback resource={} output='{}'.",
+								resourceID,
+								std::filesystem::path(readbackPath).string());
+						});
 				}
 			}
 		}
 	}
+	const bool isObjectReyesAtlasHeightMaterial =
+		descForAtlasDebug.heightMap.sourcePath.find("object_reyes_atlas_height") != std::string::npos ||
+		descForAtlasDebug.heightMap.uvSetName == "__object_reyes_atlas_height" ||
+		materialData.objectSurfaceSamplingMode == static_cast<std::uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
+	if (isObjectReyesAtlasHeightMaterial && (dataChanged || refreshedTextures)) {
+		static std::atomic<std::uint32_t> loggedAtlasPublications{ 0 };
+		const auto logIndex = loggedAtlasPublications.fetch_add(1, std::memory_order_relaxed);
+		if (logIndex < 4096u) {
+			const auto* heightTexture = descForAtlasDebug.heightMap.texture.get();
+			spdlog::info(
+				"SARP Object Reyes atlas material publication: id={} slot={} name='{}' base='{}' atlas='{}' dataChanged={} refreshedTextures={} heightIndex={} heightSampler={} heightUv={} heightScale={} geom=[{},{}] geometric={} fallbackHeight={} usableHeight={} objectSurfaceMode={} flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x}.",
+				material.GetMaterialID(),
+				materialSlot,
+				descForAtlasDebug.name,
+				descForAtlasDebug.baseColor.sourcePath,
+				descForAtlasDebug.heightMap.sourcePath,
+				dataChanged ? 1 : 0,
+				refreshedTextures ? 1 : 0,
+				materialData.heightMapIndex,
+				materialData.heightSamplerIndex,
+				materialData.heightUvSetIndex,
+				materialData.heightMapScale,
+				materialData.geometricDisplacementMin,
+				materialData.geometricDisplacementMax,
+				materialData.geometricDisplacementEnabled,
+				heightTexture ? heightTexture->IsUsingFallbackImage() : false,
+				heightTexture ? heightTexture->HasUsableImage() : false,
+				materialData.objectSurfaceSamplingMode,
+				materialData.materialFlags,
+				static_cast<std::uint64_t>(material.Technique().compileFlags),
+				static_cast<std::uint32_t>(material.Technique().rasterFlags));
+		}
+	}
+	if (dataChanged) {
+		if (materialData.geometricDisplacementEnabled != 0u &&
+			(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u) {
+			static std::atomic<std::uint32_t> loggedGeometricMaterials{ 0 };
+			const auto logIndex = loggedGeometricMaterials.fetch_add(1, std::memory_order_relaxed);
+			const auto& desc = descForAtlasDebug;
+			const bool forceAtlasHeightLog =
+				desc.heightMap.sourcePath.find("object_reyes_atlas_height") != std::string::npos ||
+				desc.heightMap.uvSetName == "__object_reyes_atlas_height";
+			if (logIndex < 128u || forceAtlasHeightLog) {
+				const auto* heightTexture = desc.heightMap.texture.get();
+				spdlog::info(
+					"SARP material upload: non-terrain geometric material id={} slot={} name='{}' base='{}' height='{}' flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x} baseIndex={} baseSampler={} normalIndex={} mrIndex=({}, {}) aoIndex={} heightIndex={} heightSampler={} heightUv={} heightChannel={} heightScale={} geomMin={} geomMax={} fallbackHeight={} usableHeight={} reyesUvDensity=({}, {}) objectSurfaceMode={} objectSurfaceDensity={}",
+					material.GetMaterialID(),
+					materialSlot,
+					desc.name,
+					desc.baseColor.sourcePath,
+					desc.heightMap.sourcePath,
+					materialData.materialFlags,
+					static_cast<std::uint64_t>(material.Technique().compileFlags),
+					static_cast<std::uint32_t>(material.Technique().rasterFlags),
+					materialData.baseColorTextureIndex,
+					materialData.baseColorSamplerIndex,
+					materialData.normalTextureIndex,
+					materialData.metallicTextureIndex,
+					materialData.roughnessTextureIndex,
+					materialData.aoMapIndex,
+					materialData.heightMapIndex,
+					materialData.heightSamplerIndex,
+					materialData.heightUvSetIndex,
+					materialData.heightChannel,
+					materialData.heightMapScale,
+					materialData.geometricDisplacementMin,
+					materialData.geometricDisplacementMax,
+					heightTexture ? heightTexture->IsUsingFallbackImage() : false,
+					heightTexture ? heightTexture->HasUsableImage() : false,
+					materialData.reyesUvDensity.x,
+					materialData.reyesUvDensity.y,
+					materialData.objectSurfaceSamplingMode,
+					materialData.objectSurfaceTexelDensity);
+			}
+		}
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs");
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Base");
+			m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Eval");
+			m_perMaterialEvalDataBuffer->UpdateAt(materialSlot, evalData);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::OpenPBR");
+			m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, openPBRData);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::StoreUploadSignature");
+			signature.materialData = materialData;
+			signature.evalData = evalData;
+			signature.openPBRData = openPBRData;
+			signature.valid = true;
+		}
+	}
+
+	if (dataChanged || refreshedTextures) {
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::RefreshTextureUsage");
+		RefreshMaterialTextureUsage(material);
+	}
 }
 
-void MaterialManager::FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture) {
+void MaterialManager::RegisterStreamingTexture(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory) {
 	if (!texture) {
 		return;
 	}
 
-	const uint32_t streamingTextureID = texture->GetStreamingTextureID();
-	if (streamingTextureID == 0u) {
-		return;
-	}
-
-	const uint64_t revision = texture->GetStreamingStateRevision();
-	auto revisionIt = m_textureStreamingMetadataRevisions.find(streamingTextureID);
-	if (revisionIt != m_textureStreamingMetadataRevisions.end() && revisionIt->second == revision) {
-		return;
-	}
-
-	UpdateTextureStreamingMetadata(texture);
-	m_textureStreamingMetadataRevisions[streamingTextureID] = revision;
-}
-
-void MaterialManager::UpdateTextureStreamingMetadata(const Material& material) {
-	std::unordered_set<uint32_t> updatedStreamingTextureIDs;
-	material.ForEachReferencedTexture([&](const std::shared_ptr<TextureAsset>& texture) {
-		if (!texture) {
-			return;
-		}
-
-		const uint32_t streamingTextureID = texture->GetStreamingTextureID();
-		if (streamingTextureID == 0u || !updatedStreamingTextureIDs.insert(streamingTextureID).second) {
-			return;
-		}
-
-		UpdateTextureStreamingMetadata(texture);
-	});
-}
-
-void MaterialManager::UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture) {
-	if (!texture) {
-		return;
-	}
-
-	const uint32_t streamingTextureID = texture->GetStreamingTextureID();
-	if (streamingTextureID == 0u) {
-		return;
-	}
-
-	if (streamingTextureID >= m_textureStreamingMetadataCapacity) {
-		uint32_t newCapacity = m_textureStreamingMetadataCapacity;
-		while (streamingTextureID >= newCapacity) {
-			newCapacity *= 2u;
-		}
-		m_textureStreamingMetadataBuffer->Resize(newCapacity);
-		m_textureStreamingFeedbackBuffer->Resize(newCapacity);
-		m_textureStreamingMetadataCapacity = newCapacity;
-	}
-
-	m_textureStreamingMetadataBuffer->UpdateAt(streamingTextureID, BuildTextureStreamingGPUInfo(*texture));
-	m_textureStreamingFeedbackBuffer->UpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused);
-	if (auto image = texture->ImagePtr()) {
-		m_materialTextureAssetsByImageResourceID[image->GetGlobalResourceID()] = texture;
-	}
-	m_streamingTexturesByID[streamingTextureID] = texture;
-	if (m_activeTextureStreamingFeedbackIDSet.insert(streamingTextureID).second) {
-		m_activeTextureStreamingFeedbackIDs.push_back(streamingTextureID);
+	if (m_textureStreamingManager) {
+		m_textureStreamingManager->EnqueueTextureUploadAdvance(texture, "register_streaming_texture");
 	}
 }
 
 void MaterialManager::DecrementMaterialUsageCount(const Material& material) {
 	//std::lock_guard<std::mutex> lock(m_materialSlotMappingMutex);
-	auto& flags = material.Technique().compileFlags;
-	unsigned int flagsSlot = GetCompileFlagsSlot(flags);
-	m_compileFlagsUsageCounts[flagsSlot]--;
-	if (m_compileFlagsUsageCounts[flagsSlot] == 0) {
-		m_freeCompileFlagsSlots.push_back(flagsSlot);
-		m_compileFlagsSlotMapping.erase(flags);
-		m_activeCompileFlagsSlots.erase(std::remove(m_activeCompileFlagsSlots.begin(), m_activeCompileFlagsSlots.end(), flagsSlot), m_activeCompileFlagsSlots.end());
-		m_activeCompileFlags.erase(std::remove(m_activeCompileFlags.begin(), m_activeCompileFlags.end(), flags), m_activeCompileFlags.end());
-	}
-
 	const uint32_t materialID = material.GetMaterialID();
 	const unsigned int materialSlot = GetMaterialSlot(materialID);
 	m_materialUsageCounts[materialSlot]--;
@@ -792,8 +890,7 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 	const uint32_t materialId = material.GetMaterialID();
 	if (delta > 0) {
 		auto textures = CollectMaterialTextureResources(material);
-		m_trackedMaterialTextures[materialId] = textures;
-		UpdateTrackedMaterialTextureRefs(textures, delta);
+		m_trackedMaterialTextures[materialId] = std::move(textures);
 		return;
 	}
 
@@ -802,15 +899,37 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 		return;
 	}
 
-	UpdateTrackedMaterialTextureRefs(trackedIt->second, delta);
 	m_trackedMaterialTextures.erase(trackedIt);
 }
 
+bool MaterialManager::MaterialTextureAssetBindingsChanged(const Material& material) const {
+	std::vector<uint32_t> currentTextureIDs;
+	for (const auto& texture : CollectMaterialTextureAssets(material)) {
+		if (texture && texture->GetStreamingTextureID() != 0u) currentTextureIDs.push_back(texture->GetStreamingTextureID());
+	}
+	const auto trackedIt = m_materialTextureStreamingTextureIDs.find(material.GetMaterialID());
+	return trackedIt == m_materialTextureStreamingTextureIDs.end() || trackedIt->second != currentTextureIDs;
+}
+
 void MaterialManager::TrackMaterialTextureAssets(const Material& material, int delta) {
+	ZoneScopedN("MaterialManager::TrackMaterialTextureAssets");
 	const uint32_t materialID = material.GetMaterialID();
+	ZoneValue(materialID);
 	if (delta > 0) {
+		if (!m_textureStreamingManager) {
+			return;
+		}
+		std::vector<uint64_t> bindingIDs;
 		std::vector<uint32_t> streamingTextureIDs;
-		for (const auto& texture : CollectMaterialTextureAssets(material)) {
+		std::vector<std::shared_ptr<TextureAsset>> textureAssets;
+		{
+			ZoneScopedN("MaterialManager::TrackMaterialTextureAssets::CollectAssets");
+			textureAssets = CollectMaterialTextureAssets(material);
+			TracyPlot("MaterialManager.TrackedTextureAssetCount", static_cast<int64_t>(textureAssets.size()));
+		}
+		for (const auto& texture : textureAssets) {
+			ZoneScopedN("MaterialManager::TrackMaterialTextureAssets::RegisterBinding");
+			ZoneValue(materialID);
 			if (!texture) {
 				continue;
 			}
@@ -819,40 +938,46 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 			if (streamingTextureID == 0u) {
 				continue;
 			}
+			TracyPlot("MaterialManager.RegisterBinding.StreamingTextureID", static_cast<int64_t>(streamingTextureID));
+			const bool alphaTested =
+				(material.Technique().compileFlags & MaterialCompileFlags::MaterialCompileAlphaTest) != 0u;
 
-			streamingTextureIDs.push_back(streamingTextureID);
-			m_streamingTexturesByID[streamingTextureID] = texture;
-			m_streamingTextureMaterialIDs[streamingTextureID].insert(materialID);
-			MarkTextureStreamingMetadataDirty(texture, true);
-		}
-		m_materialStreamingTextureIDs[materialID] = std::move(streamingTextureIDs);
-		return;
-	}
-
-	auto trackedIt = m_materialStreamingTextureIDs.find(materialID);
-	if (trackedIt == m_materialStreamingTextureIDs.end()) {
-		return;
-	}
-
-	for (const uint32_t streamingTextureID : trackedIt->second) {
-		auto materialIdsIt = m_streamingTextureMaterialIDs.find(streamingTextureID);
-		if (materialIdsIt != m_streamingTextureMaterialIDs.end()) {
-			materialIdsIt->second.erase(materialID);
-			if (materialIdsIt->second.empty()) {
-				m_streamingTextureMaterialIDs.erase(materialIdsIt);
-				m_streamingTexturesByID.erase(streamingTextureID);
-				m_textureStreamingMetadataRevisions.erase(streamingTextureID);
-				m_dirtyTextureStreamingIDSet.erase(streamingTextureID);
-				m_texturesNeedingUploadAdvanceSet.erase(streamingTextureID);
-				m_activeTextureStreamingFeedbackIDSet.erase(streamingTextureID);
-				std::erase(m_dirtyTextureStreamingIDs, streamingTextureID);
-				std::erase(m_texturesNeedingUploadAdvance, streamingTextureID);
-				std::erase(m_activeTextureStreamingFeedbackIDs, streamingTextureID);
+			const uint64_t bindingID = m_textureStreamingManager->RegisterTextureBinding(
+				texture,
+				[this, materialID](TextureAsset&) {
+					if (auto materialIt = m_activeMaterialsByID.find(materialID);
+						materialIt != m_activeMaterialsByID.end() && materialIt->second) {
+						MarkMaterialDirty(*materialIt->second);
+					}
+				},
+				"material:" + std::to_string(materialID),
+				TextureStreamingBindingOptions{
+					.alphaTested = alphaTested,
+				});
+			if (bindingID != 0u) {
+				bindingIDs.push_back(bindingID);
+				streamingTextureIDs.push_back(streamingTextureID);
 			}
 		}
+		TracyPlot("MaterialManager.RegisteredBindingCountForMaterial", static_cast<int64_t>(bindingIDs.size()));
+		m_materialTextureStreamingBindingIDs[materialID] = std::move(bindingIDs);
+		m_materialTextureStreamingTextureIDs[materialID] = std::move(streamingTextureIDs);
+		return;
 	}
 
-	m_materialStreamingTextureIDs.erase(trackedIt);
+	auto trackedIt = m_materialTextureStreamingBindingIDs.find(materialID);
+	if (trackedIt == m_materialTextureStreamingBindingIDs.end()) {
+		m_materialTextureStreamingTextureIDs.erase(materialID);
+		return;
+	}
+
+	if (m_textureStreamingManager) {
+		ZoneScopedN("MaterialManager::TrackMaterialTextureAssets::UnregisterBindings");
+		m_textureStreamingManager->UnregisterTextureBindings(trackedIt->second);
+	}
+
+	m_materialTextureStreamingBindingIDs.erase(trackedIt);
+	m_materialTextureStreamingTextureIDs.erase(materialID);
 }
 
 void MaterialManager::RefreshMaterialTextureUsage(const Material& material) {
@@ -867,78 +992,31 @@ void MaterialManager::RefreshMaterialTextureUsage(const Material& material) {
 
 	auto currentTextures = CollectMaterialTextureResources(material);
 	auto& trackedTextures = m_trackedMaterialTextures[material.GetMaterialID()];
-
-	std::unordered_set<uint64_t> currentIds;
-	currentIds.reserve(currentTextures.size());
-	for (const auto& texture : currentTextures) {
-		if (texture) {
-			currentIds.insert(texture->GetGlobalResourceID());
-		}
-	}
-
-	std::unordered_set<uint64_t> trackedIds;
-	trackedIds.reserve(trackedTextures.size());
-	for (const auto& texture : trackedTextures) {
-		if (texture) {
-			trackedIds.insert(texture->GetGlobalResourceID());
-		}
-	}
-
-	std::vector<std::shared_ptr<Resource>> removedTextures;
-	for (const auto& texture : trackedTextures) {
-		if (texture && !currentIds.contains(texture->GetGlobalResourceID())) {
-			removedTextures.push_back(texture);
-		}
-	}
-
-	std::vector<std::shared_ptr<Resource>> addedTextures;
-	for (const auto& texture : currentTextures) {
-		if (texture && !trackedIds.contains(texture->GetGlobalResourceID())) {
-			addedTextures.push_back(texture);
-		}
-	}
-
-	UpdateTrackedMaterialTextureRefs(removedTextures, -1);
-	UpdateTrackedMaterialTextureRefs(addedTextures, 1);
 	trackedTextures = std::move(currentTextures);
 }
 
-void MaterialManager::UpdateTrackedMaterialTextureRefs(const std::vector<std::shared_ptr<Resource>>& textures, int delta) {
-	if (delta == 0) {
-		return;
+std::vector<std::shared_ptr<Resource>> MaterialManager::CollectActiveMaterialTextureResources() const {
+	std::vector<std::shared_ptr<Resource>> textures;
+	std::unordered_set<uint64_t> seenResourceIds;
+	for (const auto& [_, trackedTextures] : m_trackedMaterialTextures) {
+		for (const auto& texture : trackedTextures) {
+			if (!texture) {
+				continue;
+			}
+			if (seenResourceIds.insert(texture->GetGlobalResourceID()).second) {
+				textures.push_back(texture);
+			}
+		}
 	}
-
-	for (const auto& texture : textures) {
-		if (!texture) {
-			continue;
-		}
-
-		const uint64_t resourceId = texture->GetGlobalResourceID();
-		if (delta > 0) {
-			auto& usageCount = m_materialTextureUsageCounts[resourceId];
-			usageCount += static_cast<uint32_t>(delta);
-			m_activeMaterialTextureGroup->AddResource(texture);
-			continue;
-		}
-
-		auto usageIt = m_materialTextureUsageCounts.find(resourceId);
-		if (usageIt == m_materialTextureUsageCounts.end()) {
-			continue;
-		}
-
-		const uint32_t releaseCount = static_cast<uint32_t>(-delta);
-		if (usageIt->second <= releaseCount) {
-			m_materialTextureUsageCounts.erase(usageIt);
-			m_activeMaterialTextureGroup->RemoveResource(texture.get());
-			continue;
-		}
-
-		usageIt->second -= releaseCount;
-	}
+	return textures;
 }
 
 std::shared_ptr<Resource> MaterialManager::ProvideResource(ResourceIdentifier const& key) {
-	return m_resources[key];
+	auto it = m_resources.find(key);
+	if (it != m_resources.end()) {
+		return it->second;
+	}
+	return m_textureStreamingManager ? m_textureStreamingManager->ProvideResource(key) : nullptr;
 }
 
 std::vector<ResourceIdentifier> MaterialManager::GetSupportedKeys() {
@@ -946,6 +1024,10 @@ std::vector<ResourceIdentifier> MaterialManager::GetSupportedKeys() {
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources) {
 		keys.push_back(key);
+	}
+	if (m_textureStreamingManager) {
+		auto streamingKeys = m_textureStreamingManager->GetSupportedKeys();
+		keys.insert(keys.end(), streamingKeys.begin(), streamingKeys.end());
 	}
 	return keys;
 }
@@ -967,107 +1049,257 @@ std::shared_ptr<IResourceResolver> MaterialManager::ProvideResolver(ResourceIden
 	return it->second;
 }
 
-// TODO: Don't grow buffers one slot at a time
 // TODO: C++26 will allow optional references
 unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::optional<PerMaterialCB> data) {
+	ZoneScopedN("MaterialManager::GetMaterialSlot");
+	ZoneValue(materialID);
 	unsigned int slot;
-	auto it = m_materialIDSlotMapping.find(materialID);
-	if (it != m_materialIDSlotMapping.end()) {
-		slot = it->second;
-		return slot;
+	{
+		ZoneScopedN("MaterialManager::GetMaterialSlot::Lookup");
+		auto it = m_materialIDSlotMapping.find(materialID);
+		if (it != m_materialIDSlotMapping.end()) {
+			TracyPlot("MaterialManager.GetMaterialSlot.Existing", int64_t{ 1 });
+			slot = it->second;
+			return slot;
+		}
 	}
+	TracyPlot("MaterialManager.GetMaterialSlot.Existing", int64_t{ 0 });
 	if (!m_freeMaterialSlots.empty()) {
-		slot = m_freeMaterialSlots.back();
-		m_freeMaterialSlots.pop_back();
-		if (slot >= m_materialUploadSignatures.size()) {
-			m_materialUploadSignatures.resize(static_cast<size_t>(slot) + 1u);
+		ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot");
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot::Pop");
+			slot = m_freeMaterialSlots.back();
+			m_freeMaterialSlots.pop_back();
 		}
-		m_materialUploadSignatures[slot].valid = false;
-		if (data.has_value()) {
-			m_perMaterialDataBuffer->UpdateAt(slot, data.value());
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot::ResizeSignatures");
+			if (slot >= m_materialUploadSignatures.size()) {
+				m_materialUploadSignatures.resize(static_cast<size_t>(slot) + 1u);
+			}
+			m_materialUploadSignatures[slot].valid = false;
 		}
-		else {
-			m_perMaterialDataBuffer->UpdateAt(slot, PerMaterialCB{});
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot::ClearBuffers");
+			if (data.has_value()) {
+				m_perMaterialDataBuffer->UpdateAt(slot, data.value());
+			}
+			else {
+				m_perMaterialDataBuffer->UpdateAt(slot, PerMaterialCB{});
+			}
+			m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
+			m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
 		}
-		m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
-		m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
 	}
 	else {
-		slot = m_materialSlotsUsed++;
-		m_materialUsageCounts.push_back(0);
-		// Resize resources to accommodate new material slot
-		m_perMaterialDataBuffer->Resize(m_materialSlotsUsed);
-		m_perMaterialEvalDataBuffer->Resize(m_materialSlotsUsed);
-		m_perMaterialOpenPBRDataBuffer->Resize(m_materialSlotsUsed);
-		m_materialUploadSignatures.resize(m_materialSlotsUsed);
-		m_materialUploadSignatures[slot].valid = false;
-		if (data.has_value()) {
-			m_perMaterialDataBuffer->UpdateAt(slot, data.value());
+		ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot");
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::BumpCounters");
+			slot = m_materialSlotsUsed++;
+			m_materialUsageCounts.push_back(0);
 		}
-		else {
-			m_perMaterialDataBuffer->UpdateAt(slot, PerMaterialCB{});
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::EnsureCapacity");
+			if constexpr (kForceMaterialBufferResizeEveryMaterial) {
+				m_perMaterialDataBuffer->Resize(m_materialSlotsUsed);
+				m_perMaterialEvalDataBuffer->Resize(m_materialSlotsUsed);
+				m_perMaterialOpenPBRDataBuffer->Resize(m_materialSlotsUsed);
+				m_materialBufferCapacity = m_materialSlotsUsed;
+			} else {
+				EnsureMaterialBufferCapacity(m_materialSlotsUsed);
+			}
 		}
-		m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
-		m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::ResizeSignatures");
+			m_materialUploadSignatures.resize(m_materialSlotsUsed);
+			m_materialUploadSignatures[slot].valid = false;
+		}
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::ClearBuffers");
+			if (data.has_value()) {
+				m_perMaterialDataBuffer->UpdateAt(slot, data.value());
+			}
+			else {
+				m_perMaterialDataBuffer->UpdateAt(slot, PerMaterialCB{});
+			}
+			m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
+			m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
+		}
 	}
-	m_materialIDSlotMapping[materialID] = slot;
+	{
+		ZoneScopedN("MaterialManager::GetMaterialSlot::StoreMapping");
+		m_materialIDSlotMapping[materialID] = slot;
+	}
 	return slot;
 }
 
-unsigned int MaterialManager::GetCompileFlagsSlot(MaterialCompileFlags flags) {
-	unsigned int slot;
-	auto it = m_compileFlagsSlotMapping.find(flags);
-	if (it != m_compileFlagsSlotMapping.end()) {
-		slot = it->second;
-		return slot;
+void MaterialManager::EnsureMaterialBufferCapacity(unsigned int requiredSlots) {
+	ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity");
+	ZoneValue(requiredSlots);
+	if (requiredSlots <= m_materialBufferCapacity) {
+		TracyPlot("MaterialManager.MaterialBufferGrow", int64_t{ 0 });
+		return;
 	}
-	if (!m_freeCompileFlagsSlots.empty()) {
-		slot = m_freeCompileFlagsSlots.back();
-		m_freeCompileFlagsSlots.pop_back();
-	}
-	else {
-		slot = m_nextCompileFlagsSlot++;
-		m_compileFlagsSlotsUsed++;
-		m_compileFlagsUsageCounts.push_back(0);
-		// Resize resources to accommodate new material slot
-		m_materialPixelCountBuffer->Resize(m_compileFlagsSlotsUsed);
-		m_materialOffsetBuffer->Resize(m_compileFlagsSlotsUsed);
-		m_materialWriteCursorBuffer->Resize(m_compileFlagsSlotsUsed);
-		m_materialEvaluationCommandBuffer->Resize(m_compileFlagsSlotsUsed);
+	TracyPlot("MaterialManager.MaterialBufferGrow", int64_t{ 1 });
 
-		// Resize per-block buffers to match new block count
-		const uint32_t numBlocks = (m_compileFlagsSlotsUsed + kScanBlockSize - 1u) / kScanBlockSize;
+	unsigned int newCapacity = std::max(kInitialMaterialBufferCapacity, m_materialBufferCapacity);
+	while (newCapacity < requiredSlots) {
+		newCapacity *= 2u;
+	}
+	TracyPlot("MaterialManager.MaterialBufferOldCapacity", static_cast<int64_t>(m_materialBufferCapacity));
+	TracyPlot("MaterialManager.MaterialBufferNewCapacity", static_cast<int64_t>(newCapacity));
+
+	spdlog::info("MaterialManager: growing material buffers oldCapacity={} newCapacity={} requiredSlots={}",
+		m_materialBufferCapacity,
+		newCapacity,
+		requiredSlots);
+
+	{
+		ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity::ResizeMaterialData");
+		m_perMaterialDataBuffer->Resize(newCapacity);
+	}
+	{
+		ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity::ResizeMaterialEval");
+		m_perMaterialEvalDataBuffer->Resize(newCapacity);
+	}
+	{
+		ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity::ResizeOpenPBR");
+		m_perMaterialOpenPBRDataBuffer->Resize(newCapacity);
+	}
+	m_materialBufferCapacity = newCapacity;
+}
+
+void MaterialManager::EnsureCompileFlagsBufferCapacity(unsigned int requiredSlots) {
+	ZoneScopedN("MaterialManager::EnsureCompileFlagsBufferCapacity");
+	ZoneValue(requiredSlots);
+	const auto currentCapacity = m_materialPixelCountBuffer ? m_materialPixelCountBuffer->Capacity() : 0u;
+	if (requiredSlots <= currentCapacity) {
+		TracyPlot("MaterialManager.CompileFlagsBufferGrow", int64_t{ 0 });
+		return;
+	}
+	TracyPlot("MaterialManager.CompileFlagsBufferGrow", int64_t{ 1 });
+
+	unsigned int newCapacity = std::max(1u, currentCapacity);
+	while (newCapacity < requiredSlots) {
+		newCapacity *= 2u;
+	}
+	TracyPlot("MaterialManager.CompileFlagsBufferOldCapacity", static_cast<int64_t>(currentCapacity));
+	TracyPlot("MaterialManager.CompileFlagsBufferNewCapacity", static_cast<int64_t>(newCapacity));
+
+	spdlog::info("MaterialManager: growing compile-flags buffers oldCapacity={} newCapacity={} requiredSlots={}",
+		currentCapacity,
+		newCapacity,
+		requiredSlots);
+
+	{
+		ZoneScopedN("MaterialManager::EnsureCompileFlagsBufferCapacity::ResizeSlotBuffers");
+		m_materialPixelCountBuffer->Resize(newCapacity);
+		m_materialOffsetBuffer->Resize(newCapacity);
+		m_materialWriteCursorBuffer->Resize(newCapacity);
+		m_materialEvaluationCommandBuffer->Resize(newCapacity);
+	}
+	{
+		ZoneScopedN("MaterialManager::EnsureCompileFlagsBufferCapacity::ResizeBlockBuffers");
+		const uint32_t numBlocks = (newCapacity + kScanBlockSize - 1u) / kScanBlockSize;
 		m_blockSumsBuffer->Resize(std::max(1u, numBlocks));
-		m_scannedBlockSumsBuffer->Resize(std::max(1u, numBlocks));		
+		m_scannedBlockSumsBuffer->Resize(std::max(1u, numBlocks));
 	}
-	m_compileFlagsSlotMapping[flags] = slot;
-	if (std::find(m_activeCompileFlagsSlots.begin(), m_activeCompileFlagsSlots.end(), slot) == m_activeCompileFlagsSlots.end()) {
-		m_activeCompileFlagsSlots.push_back(slot);
-	}
-	if (std::find(m_activeCompileFlags.begin(), m_activeCompileFlags.end(), flags) == m_activeCompileFlags.end()) {
-		m_activeCompileFlags.push_back(flags);
-	}
-	return slot;
 }
 
-unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlags) {
+bool MaterialManager::TryGetCompileFlagsSlot(MaterialCompileFlags flags, unsigned int& slot) const {
+	return m_compileFlagsRegistry.TryGet(flags, slot);
+}
+
+bool MaterialManager::RequestExternalMaterialTextureReadback(
+	const std::shared_ptr<PixelBuffer>& image,
+	std::wstring outputFile,
+	std::function<void()> callback)
+{
+	return m_textureStreamingManager &&
+		m_textureStreamingManager->RequestExternalMaterialTextureReadback(
+			image, std::move(outputFile), std::move(callback));
+}
+
+void MaterialManager::CommitGpuVisibleSnapshot() {
+	const unsigned int compileFlagsSlotsUsed = m_compileFlagsRegistry.GetSlotsUsed();
+	if (m_materialPixelCountBuffer && compileFlagsSlotsUsed > m_materialPixelCountBuffer->Capacity()) {
+		EnsureCompileFlagsBufferCapacity(compileFlagsSlotsUsed);
+	}
+
+	const auto slotResidentCapacity = static_cast<unsigned int>((std::min<uint64_t>)(
+		(std::min<uint64_t>)(m_materialPixelCountBuffer ? m_materialPixelCountBuffer->ResidentCapacity() : 0u,
+			m_materialOffsetBuffer ? m_materialOffsetBuffer->ResidentCapacity() : 0u),
+		(std::min<uint64_t>)(m_materialWriteCursorBuffer ? m_materialWriteCursorBuffer->ResidentCapacity() : 0u,
+			m_materialEvaluationCommandBuffer ? m_materialEvaluationCommandBuffer->ResidentCapacity() : 0u)));
+	const auto blockResidentCapacity = static_cast<unsigned int>((std::min<uint64_t>)(
+		m_blockSumsBuffer ? m_blockSumsBuffer->ResidentCapacity() : 0u,
+		m_scannedBlockSumsBuffer ? m_scannedBlockSumsBuffer->ResidentCapacity() : 0u));
+	const auto scanCoveredSlots = blockResidentCapacity * kScanBlockSize;
+	const auto publishedSlots = (std::min<unsigned int>)(
+		compileFlagsSlotsUsed,
+		(std::min<unsigned int>)(slotResidentCapacity, scanCoveredSlots));
+
+	m_publishedCompileFlagsSlotsUsed = publishedSlots;
+	m_publishedActiveCompileFlags.clear();
+	m_publishedActiveCompileFlagsSlots.clear();
+	const auto& activeCompileFlags = m_compileFlagsRegistry.GetActiveFlags();
+	m_publishedActiveCompileFlags.reserve(activeCompileFlags.size());
+	m_publishedActiveCompileFlagsSlots.reserve(m_compileFlagsRegistry.GetActiveSlots().size());
+	for (MaterialCompileFlags flags : activeCompileFlags) {
+		unsigned int slot = 0u;
+		if (!TryGetCompileFlagsSlot(flags, slot) || slot >= publishedSlots) {
+			continue;
+		}
+		m_publishedActiveCompileFlags.push_back(flags);
+		m_publishedActiveCompileFlagsSlots.push_back(slot);
+	}
+}
+
+unsigned int MaterialManager::AcquireCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count) {
+	ZoneScopedN("MaterialManager::AcquireCompileFlagsSlot");
+	if (count == 0u) {
+		throw std::invalid_argument("AcquireCompileFlagsSlot requires a non-zero count");
+	}
+	const auto result = m_compileFlagsRegistry.Acquire(flags, count);
+	if (result.createdSlot) {
+		EnsureCompileFlagsBufferCapacity(m_compileFlagsRegistry.GetSlotsUsed());
+	}
+	return result.slot;
+}
+
+bool MaterialManager::ReleaseCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count) {
+	ZoneScopedN("MaterialManager::ReleaseCompileFlagsSlot");
+	if (!m_compileFlagsRegistry.Release(flags, count)) {
+		spdlog::error(
+			"MaterialManager::ReleaseCompileFlagsSlot rejected flags=0x{:X} count={}",
+			static_cast<uint64_t>(flags),
+			count);
+		return false;
+	}
+	return true;
+}
+
+unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlags, unsigned int count) {
+	if (count == 0u) {
+		return GetRasterBucketForFlags(rasterFlags);
+	}
+
 	unsigned int slot;
 	auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
 	if (it != m_rasterFlagToBucketMapping.end()) {
 		slot = it->second;
-		m_rasterBucketUsageCounts[slot]++;
+		m_rasterBucketUsageCounts[slot] += count;
 		return slot;
 	}
 	if (!m_freeRasterBuckets.empty()) {
 		slot = m_freeRasterBuckets.back();
 		m_freeRasterBuckets.pop_back();
 		m_bucketToRasterFlagMapping[slot] = rasterFlags;
-		m_rasterBucketUsageCounts[slot] = 1u;
+		m_rasterBucketUsageCounts[slot] = count;
 	}
 	else {
 		slot = m_rasterBucketsUsed++;
 		m_bucketToRasterFlagMapping.push_back(rasterFlags);
-		m_rasterBucketUsageCounts.push_back(1u);
+		m_rasterBucketUsageCounts.push_back(count);
 	}
 
 	m_rasterFlagToBucketMapping[static_cast<uint32_t>(rasterFlags)] = slot;

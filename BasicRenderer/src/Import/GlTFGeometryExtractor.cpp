@@ -1024,7 +1024,7 @@ MeshPreprocessResult BuildPrimitivePreprocessData(
 
 	auto prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
 
-	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
+	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings(cacheIdentity.sourceIdentifier);
 	builderSettings.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	MeshIngestBuilder ingest(vertexSize, skinningVertexSize, meshFlags, builderSettings);
     std::vector<MeshUvSetData> uvSets;

@@ -13,12 +13,14 @@ RasterBucketCreateCommandPass::RasterBucketCreateCommandPass(
     std::shared_ptr<Buffer> histogramIndirectCommand,
     std::shared_ptr<Buffer> occlusionReplayStateBuffer,
     std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
+    uint32_t visibleClustersCapacity,
     bool runWhenComputeSWRasterEnabledOnly,
     bool patchReplayNodeInputs)
     : m_visibleClustersCounterBuffer(std::move(visibleClustersCounterBuffer))
     , m_histogramIndirectCommand(std::move(histogramIndirectCommand))
     , m_occlusionReplayStateBuffer(std::move(occlusionReplayStateBuffer))
     , m_occlusionNodeGpuInputsBuffer(std::move(occlusionNodeGpuInputsBuffer))
+    , m_visibleClustersCapacity(visibleClustersCapacity)
     , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly)
     , m_patchReplayNodeInputs(patchReplayNodeInputs) {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -61,6 +63,7 @@ PassReturn RasterBucketCreateCommandPass::Execute(PassExecutionContext& executio
     rc[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = m_patchReplayNodeInputs ? m_occlusionReplayStateBuffer->GetSRVInfo(0).slot.index : 0xFFFFFFFFu;
     rc[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = m_patchReplayNodeInputs ? m_occlusionNodeGpuInputsBuffer->GetUAVShaderVisibleInfo(0).slot.index : 0xFFFFFFFFu;
     rc[CLOD_CREATE_NUM_RASTER_BUCKETS] = context.materialManager->GetRasterBucketCount();
+    rc[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = m_visibleClustersCapacity;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

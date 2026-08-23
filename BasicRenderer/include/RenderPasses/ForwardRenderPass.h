@@ -15,6 +15,7 @@
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Mesh/MeshInstance.h"
 #include "Managers/LightManager.h"
+#include "Resources/Buffers/Buffer.h"
 #include "Resources/Resolvers/ECSResourceResolver.h"
 #include "../../shaders/PerPassRootConstants/amplificationShaderRootConstants.h"
 #include "boost/container_hash/hash.hpp"
@@ -65,7 +66,6 @@ public:
             Builtin::PerMeshInstanceBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
 			Builtin::OpenPBR::FuzzLTC,
 			Builtin::OpenPBR::IdealMetalEnergyComplement,
             Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
@@ -80,6 +80,7 @@ public:
                 Builtin::Shadows::CLodCompactMainCamera,
                 Builtin::Shadows::CLodCompactShadowCameras,
                 Builtin::Shadows::CLodDirectionalPageViewInfo,
+                Builtin::Shadows::CLodPageMetadata,
                 Builtin::Shadows::CLodPageTable,
                 Builtin::Shadows::CLodPhysicalPages);
         }
@@ -271,6 +272,22 @@ private:
 			commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
 
             auto apiResource = workload.second.buffer->GetAPIResource();
+            const auto commandCount = workload.second.count;
+            if (commandCount == 0u) {
+                continue;
+            }
+            if (const auto backing = std::dynamic_pointer_cast<Buffer>(workload.second.buffer->GetResource())) {
+                const auto requiredBytes = static_cast<uint64_t>(commandCount) * sizeof(DispatchMeshIndirectCommand);
+                if (backing->GetSize() < requiredBytes) {
+                    spdlog::error(
+                        "ForwardRenderPass: skipping indirect workload with undersized args flags={} count={} bytes={} required={}",
+                        static_cast<uint64_t>(materialCompileFlags),
+                        commandCount,
+                        backing->GetSize(),
+                        requiredBytes);
+                    continue;
+                }
+            }
 
 			commandList.ExecuteIndirect(
 				commandSignature.GetHandle(), 
@@ -278,7 +295,7 @@ private:
                 0, 
                 apiResource.GetHandle(), 
                 workload.second.buffer->GetResource()->GetUAVCounterOffset(),
-                workload.second.count);
+                commandCount);
         }
     }
 

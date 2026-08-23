@@ -51,7 +51,41 @@ struct LightingParameters {
     float3 fuzzColor;
     float fuzzWeight;
     float fuzzRoughness;
+    uint glintEnabled;
+    float4 glintParameters;
 };
+
+float GlintHash(float3 p)
+{
+    p = frac(p * 0.1031f);
+    p += dot(p, p.yzx + 33.33f);
+    return frac((p.x + p.y) * p.z);
+}
+
+float3 EvaluateGlintContribution(LightFragmentData light, LightingParameters lightingParameters)
+{
+    if (lightingParameters.glintEnabled == 0u)
+    {
+        return 0.0f.xxx;
+    }
+
+    const float screenSpaceScale = max(lightingParameters.glintParameters.x, 0.001f);
+    const float logDensity = clamp(40.0f - lightingParameters.glintParameters.y, 0.0f, 64.0f);
+    const float microfacetRoughness = clamp(lightingParameters.glintParameters.z, 0.001f, 0.25f);
+    const float densityRandomization = max(lightingParameters.glintParameters.w, 0.0f);
+    const float3 halfVector = normalize(light.lightToFrag + lightingParameters.viewDir);
+    const float ndotl = saturate(dot(lightingParameters.normal, light.lightToFrag));
+    const float ndoth = saturate(dot(lightingParameters.normal, halfVector));
+    const float sparkleDensity = exp2(clamp(logDensity - 36.0f, -12.0f, 12.0f));
+    const float3 cell = floor(lightingParameters.fragPos * screenSpaceScale * sparkleDensity);
+    const float noise = GlintHash(cell + floor(halfVector * 127.0f));
+    const float randomThreshold = saturate(0.985f - 0.01f * densityRandomization);
+    const float microMask = smoothstep(randomThreshold, 1.0f, noise);
+    const float exponent = max(2.0f, 2.0f / max(microfacetRoughness * microfacetRoughness, 1.0e-4f));
+    const float glintLobe = pow(ndoth, exponent) * microMask * ndotl;
+    const float3 glintF0 = saturate(lerp(lightingParameters.dielectricSpecularF0, lightingParameters.weightedBaseColor, lightingParameters.metallic));
+    return glintLobe * glintF0 * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation;
+}
 
 struct LightingOutput { // Lighting + debug info
     float3 lighting;
@@ -113,21 +147,21 @@ LightFragmentData getLightParametersForFragment(LightInfo light, float3 fragPos)
 }
 
 
-float3 calculateLightContributionPBR(LightFragmentData light, LightingParameters lightingParameters)
+float3 calculateLightContributionPBR(
+    LightFragmentData light,
+    LightingParameters lightingParameters,
+    OpenPBRBaseLayerState baseState)
 {
     float normDotView = saturate(dot(lightingParameters.normal, lightingParameters.viewDir));
     float normDotLight = saturate(dot(lightingParameters.normal, light.lightToFrag));
-    const OpenPBRBaseLayerState baseState = MakeOpenPBRBaseLayerState(
-        lightingParameters.weightedBaseColor,
-        lightingParameters.diffuseColor,
-        lightingParameters.baseDiffuseRoughness,
-        lightingParameters.specularAlpha,
-        lightingParameters.weightedSpecularIor,
-        lightingParameters.dielectricSpecularF0,
-        lightingParameters.dielectricSpecularWeight,
-        lightingParameters.metalAverageFresnel,
-        lightingParameters.metalSpecularF0,
-        lightingParameters.metalSpecularWeight);
+    // A light at or below the geometric shading horizon has no direct surface
+    // contribution. Besides avoiding needless BRDF work, returning here keeps
+    // the GGX horizon singularity from becoming Inf * 0 when NoL is zero.
+    if (normDotLight <= 0.0f || normDotView <= 0.0f)
+    {
+        return 0.0f.xxx;
+    }
+#if !defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT
     const OpenPBRCoatLayerState coatState = MakeOpenPBRCoatLayerState(
         baseState,
         lightingParameters.coatColor,
@@ -135,18 +169,30 @@ float3 calculateLightContributionPBR(LightFragmentData light, LightingParameters
         lightingParameters.coatIor,
         lightingParameters.coatRoughness,
         lightingParameters.coatDarkening);
+#endif
+#if !defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ
     const OpenPBRFuzzLayerState fuzzState = MakeOpenPBRFuzzLayerState(
         lightingParameters.normal,
         lightingParameters.viewDir,
         lightingParameters.fuzzColor,
         lightingParameters.fuzzWeight,
         lightingParameters.fuzzRoughness);
+#endif
     const OpenPBRBaseLayerEvaluation baseEvaluation =
         EvaluateOpenPBRBaseLayerDirect(baseState, lightingParameters.normal, lightingParameters.viewDir, light.lightToFrag);
+#if !defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ
     const float fuzzLayerScale = OpenPBRFuzzBaseLayerScaleComplete(fuzzState, light.lightToFrag);
+#else
+    const float fuzzLayerScale = 1.0f;
+#endif
+#if !defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT
     const float3 baseLayerScale = OpenPBRCoatBaseLayerScaleComplete(coatState, normDotView, normDotLight);
+#else
+    const float3 baseLayerScale = 1.0f.xxx;
+#endif
 
     float3 coatFr = 0.0f.xxx;
+#if !defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT
     if (coatState.presence > 0.0f)
     {
         float3 halfwayDir = normalize(light.lightToFrag + lightingParameters.viewDir);
@@ -155,41 +201,57 @@ float3 calculateLightContributionPBR(LightFragmentData light, LightingParameters
         coatFr = specularLobe(lightingParameters.coatRoughness, lightingParameters.coatF0, halfwayDir, normDotView, normDotLight, normDotHalf, lightDotHalf);
         coatFr *= mx_ggx_energy_compensation(normDotView, lightingParameters.coatRoughness, lightingParameters.coatF0) * coatState.presence;
     }
+#endif
 
+#if !defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ
     float3 fuzzFr = OpenPBRFuzzSheenBRDF(fuzzState, light.lightToFrag);
+#else
+    float3 fuzzFr = 0.0f.xxx;
+#endif
     float3 baseAttenuation = fuzzLayerScale.xxx * baseLayerScale;
     float3 BRDF = (baseEvaluation.diffuse + baseEvaluation.specular) * baseAttenuation + coatFr * fuzzLayerScale.xxx + fuzzFr;
-    
-    return BRDF * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation * normDotLight;
+
+    float3 result = BRDF * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation * normDotLight;
+#if !defined(CLOD_FORWARD_GLINT) || CLOD_FORWARD_GLINT
+    result += EvaluateGlintContribution(light, lightingParameters);
+#endif
+    return result;
 }
 
 uint3 ComputeClusterID(float2 pixelCoords, float viewDepth,
-                         ConstantBuffer<PerFrameBuffer> perFrame, Camera mainCamera) {
+                          ConstantBuffer<PerFrameBuffer> perFrame, Camera mainCamera) {
 
-    float2 tileSize = float2(perFrame.screenResX, perFrame.screenResY) / float2(perFrame.lightClusterGridSizeX, perFrame.lightClusterGridSizeY);
-    uint2 tile = uint2(pixelCoords / tileSize);
+    uint gridX = max(perFrame.lightClusterGridSizeX, 1u);
+    uint gridY = max(perFrame.lightClusterGridSizeY, 1u);
+    uint totalZ = max(perFrame.lightClusterGridSizeZ, 1u);
+
+    float2 tileSize = float2(perFrame.screenResX, perFrame.screenResY) / float2(gridX, gridY);
+    uint2 tile = min(uint2(pixelCoords / max(tileSize, float2(1.0f, 1.0f))), uint2(gridX - 1u, gridY - 1u));
     
     // Z slice piecewise
-    float z = abs(viewDepth);
-    uint totalZ = perFrame.lightClusterGridSizeZ;
-    uint nearSlices = perFrame.nearClusterCount;
-    float zSplit = perFrame.clusterZSplitDepth;
-    float zNear = mainCamera.zNear;
-    float zFar = mainCamera.zFar;
+    float zNear = max(mainCamera.zNear, 1.0e-5f);
+    float z = max(abs(viewDepth), zNear);
+    uint nearSlices = min(perFrame.nearClusterCount, totalZ);
+    float zSplit = max(perFrame.clusterZSplitDepth, zNear + 1.0e-4f);
+    float zFar = max(mainCamera.zFar, zSplit + 1.0e-4f);
     uint sliceZ;
 
-    if (z < zSplit) {
+    if (nearSlices > 0u && z < zSplit) {
         // uniform up close
-        float t = (z - zNear) / (zSplit - zNear);
-        sliceZ = uint(t * nearSlices);
+        float t = saturate((z - zNear) / max(zSplit - zNear, 1.0e-5f));
+        sliceZ = min(uint(t * nearSlices), nearSlices - 1u);
     }
-    else {
+    else if (totalZ > nearSlices) {
         // logarithmic beyond zSplit
         float logStart = log(zSplit / zNear);
         float logEnd = log(zFar / zNear);
         float logZ = log(z / zNear);
-        float u = (logZ - logStart) / (logEnd - logStart);
-        sliceZ = nearSlices + uint(u * (totalZ - nearSlices));
+        float u = saturate((logZ - logStart) / max(logEnd - logStart, 1.0e-5f));
+        uint logSlices = totalZ - nearSlices;
+        sliceZ = nearSlices + min(uint(u * logSlices), logSlices - 1u);
+    }
+    else {
+        sliceZ = totalZ - 1u;
     }
     
     return uint3(tile.x, tile.y, sliceZ);
@@ -264,6 +326,23 @@ float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint act
         lightingParameters.fuzzColor = fragmentInfo.fuzzColor;
         lightingParameters.fuzzWeight = fragmentInfo.fuzzWeight;
         lightingParameters.fuzzRoughness = fragmentInfo.fuzzRoughness;
+        lightingParameters.glintEnabled = fragmentInfo.glintEnabled;
+        lightingParameters.glintParameters = fragmentInfo.glintParameters;
+
+        // This state depends only on the material/view inputs. Keep it outside
+        // the light loop so multi-light forward passes do not rebuild it for
+        // every punctual light.
+        const OpenPBRBaseLayerState directBaseState = MakeOpenPBRBaseLayerState(
+            lightingParameters.weightedBaseColor,
+            lightingParameters.diffuseColor,
+            lightingParameters.baseDiffuseRoughness,
+            lightingParameters.specularAlpha,
+            lightingParameters.weightedSpecularIor,
+            lightingParameters.dielectricSpecularF0,
+            lightingParameters.dielectricSpecularWeight,
+            lightingParameters.metalAverageFresnel,
+            lightingParameters.metalSpecularF0,
+            lightingParameters.metalSpecularWeight);
 
         StructuredBuffer<unsigned int> pointShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::PointLightCubemapBuffer)];
         StructuredBuffer<unsigned int> spotShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::SpotLightMatrixBuffer)];
@@ -347,12 +426,18 @@ float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint act
                 }
             }
 
+            // Full occlusion makes every direct-light term exactly zero.
+            if (shadow >= 1.0f)
+            {
+                continue;
+            }
+
             LightFragmentData lightFragmentInfo = getLightParametersForFragment(light, fragmentInfo.fragPosWorldSpace.xyz);
             if (light.type != 2 && lightFragmentInfo.distance > light.maxRange)
             {
                 continue;
             }
-            lighting += (1.0 - shadow) * calculateLightContributionPBR(lightFragmentInfo, lightingParameters);
+            lighting += (1.0 - shadow) * calculateLightContributionPBR(lightFragmentInfo, lightingParameters, directBaseState);
         }
 #if defined(PSO_CLUSTERED_LIGHTING)
             remainingLights -= lightsInPage;
@@ -362,6 +447,8 @@ float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint act
 #endif
     }
 
+#if !defined(CLOD_FORWARD_EMISSION) || CLOD_FORWARD_EMISSION
+#if (!defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT) || (!defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ)
     const OpenPBRBaseLayerState emissiveBaseState = MakeOpenPBRBaseLayerState(
         fragmentInfo.albedo,
         fragmentInfo.diffuseColor,
@@ -386,6 +473,12 @@ float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint act
         fragmentInfo.fuzzWeight,
         fragmentInfo.fuzzRoughness,
         fragmentInfo.NdotV);
+#else
+    return lighting + fragmentInfo.emissive;
+#endif
+#else
+    return lighting;
+#endif
 }
 
 LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint activeEnvironmentIndex, uint environmentBufferDescriptorIndex, bool isFrontFace) {
@@ -472,7 +565,21 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
         lightingParameters.fuzzColor = fragmentInfo.fuzzColor;
         lightingParameters.fuzzWeight = fragmentInfo.fuzzWeight;
         lightingParameters.fuzzRoughness = fragmentInfo.fuzzRoughness;
-        
+        lightingParameters.glintEnabled = fragmentInfo.glintEnabled;
+        lightingParameters.glintParameters = fragmentInfo.glintParameters;
+
+        const OpenPBRBaseLayerState directBaseState = MakeOpenPBRBaseLayerState(
+            lightingParameters.weightedBaseColor,
+            lightingParameters.diffuseColor,
+            lightingParameters.baseDiffuseRoughness,
+            lightingParameters.specularAlpha,
+            lightingParameters.weightedSpecularIor,
+            lightingParameters.dielectricSpecularF0,
+            lightingParameters.dielectricSpecularWeight,
+            lightingParameters.metalAverageFresnel,
+            lightingParameters.metalSpecularF0,
+            lightingParameters.metalSpecularWeight);
+
         // TODO: Parallax shadows will require a forward pass
         //parallaxShadowParameters parallaxShadowParams;
         //if (materialInfo.materialFlags & MATERIAL_PARALLAX)
@@ -591,6 +698,24 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
                                 case OUTPUT_VSM_RERENDERED_THIS_FRAME:
                                     output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugRerenderedThisFrameColor(shadowDebugInfo));
                                     break;
+                                case OUTPUT_VSM_CACHED_BASIS_CORRECTION:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugCachedBasisColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_PAGE_LOCAL_TEXEL:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugPageLocalTexelColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_DEPTH_MARGIN:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugDepthMarginColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_CLIP_COMPARISON:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipComparisonColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_CLIP_GRID_OFFSET:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipGridOffsetColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_TRACE_FOOTPRINT:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugTraceFootprintColor(shadowDebugInfo));
+                                    break;
                                 }
                             }
                             break;
@@ -599,16 +724,18 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
                 }
             }
             
+            // Full occlusion makes every direct-light term exactly zero.
+            if (shadow >= 1.0f)
+            {
+                continue;
+            }
+
             LightFragmentData lightFragmentInfo = getLightParametersForFragment(light, fragmentInfo.fragPosWorldSpace.xyz);
-            // if (shadow > 0.95)
-            // {
-            //     continue; // skip light if shadowed
-            // }
             if (light.type != 2 && lightFragmentInfo.distance > light.maxRange)
             {
                 continue;
             }
-            lighting += (1.0 - shadow) * calculateLightContributionPBR(lightFragmentInfo, lightingParameters);
+            lighting += (1.0 - shadow) * calculateLightContributionPBR(lightFragmentInfo, lightingParameters, directBaseState);
             //if (materialInfo.materialFlags & MATERIAL_PARALLAX)
             //{
             //    float parallaxShadow = getParallaxShadow(parallaxShadowParams);
@@ -622,30 +749,33 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
 #endif
     }
 
-    const OpenPBRBaseLayerState emissiveBaseState = MakeOpenPBRBaseLayerState(
-        fragmentInfo.albedo,
-        fragmentInfo.diffuseColor,
-        fragmentInfo.baseDiffuseRoughness,
-        fragmentInfo.specularAlpha,
-        fragmentInfo.weightedSpecularIor,
-        fragmentInfo.dielectricSpecularF0,
-        fragmentInfo.dielectricSpecularWeight,
-        fragmentInfo.metalAverageFresnel,
-        fragmentInfo.metalSpecularF0,
-        fragmentInfo.metalSpecularWeight);
-    const OpenPBRCoatLayerState emissiveCoatState = MakeOpenPBRCoatLayerState(
-        emissiveBaseState,
-        fragmentInfo.coatColor,
-        fragmentInfo.coatWeight,
-        fragmentInfo.coatIor,
-        fragmentInfo.coatRoughness,
-        fragmentInfo.coatDarkening);
-    lighting += EvaluateOpenPBREmissive(
-        fragmentInfo.emissive,
-        emissiveCoatState,
-        fragmentInfo.fuzzWeight,
-        fragmentInfo.fuzzRoughness,
-        fragmentInfo.NdotV);
+    if (any(fragmentInfo.emissive != 0.0f.xxx))
+    {
+        const OpenPBRBaseLayerState emissiveBaseState = MakeOpenPBRBaseLayerState(
+            fragmentInfo.albedo,
+            fragmentInfo.diffuseColor,
+            fragmentInfo.baseDiffuseRoughness,
+            fragmentInfo.specularAlpha,
+            fragmentInfo.weightedSpecularIor,
+            fragmentInfo.dielectricSpecularF0,
+            fragmentInfo.dielectricSpecularWeight,
+            fragmentInfo.metalAverageFresnel,
+            fragmentInfo.metalSpecularF0,
+            fragmentInfo.metalSpecularWeight);
+        const OpenPBRCoatLayerState emissiveCoatState = MakeOpenPBRCoatLayerState(
+            emissiveBaseState,
+            fragmentInfo.coatColor,
+            fragmentInfo.coatWeight,
+            fragmentInfo.coatIor,
+            fragmentInfo.coatRoughness,
+            fragmentInfo.coatDarkening);
+        lighting += EvaluateOpenPBREmissive(
+            fragmentInfo.emissive,
+            emissiveCoatState,
+            fragmentInfo.fuzzWeight,
+            fragmentInfo.fuzzRoughness,
+            fragmentInfo.NdotV);
+    }
     
     output.lighting = lighting;
     

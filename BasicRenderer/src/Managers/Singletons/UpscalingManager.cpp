@@ -44,6 +44,17 @@ namespace {
         return disabled;
     }
 
+    bool IsUpscalingDisabledByEnvironment() {
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, "BASICRENDERER_DISABLE_UPSCALING") != 0 || value == nullptr) {
+            return false;
+        }
+        const bool disabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+        free(value);
+        return disabled;
+    }
+
     bool IsStreamlineEnabledSetting() {
         if (IsStreamlineDisabledByEnvironment()) {
             return false;
@@ -61,6 +72,24 @@ namespace {
             return UpscalingMode::None;
         }
         return requestedMode;
+    }
+
+    UpscalingMode ReadUpscalingModeSetting(UpscalingMode fallback) {
+        try {
+            return SettingsManager::GetInstance().getSettingGetter<UpscalingMode>("upscalingMode")();
+        }
+        catch (const std::exception&) {
+            return fallback;
+        }
+    }
+
+    UpscaleQualityMode ReadUpscalingQualityModeSetting(UpscaleQualityMode fallback) {
+        try {
+            return SettingsManager::GetInstance().getSettingGetter<UpscaleQualityMode>("upscalingQualityMode")();
+        }
+        catch (const std::exception&) {
+            return fallback;
+        }
     }
 
     bool MakeStreamlineVulkanTextureResource(
@@ -98,6 +127,27 @@ namespace {
         return resource.nativeFormat != VK_FORMAT_UNDEFINED;
     }
 
+}
+
+void UpscalingManager::SyncSettingsFromSettingsManager()
+{
+    m_upscalingMode = ReadUpscalingModeSetting(m_upscalingMode);
+    m_upscaleQualityMode = ReadUpscalingQualityModeSetting(m_upscaleQualityMode);
+    // Vulkan temporal upscaling is not yet stable (including the single-device
+    // path, where Streamline can fail while setting constants and corrupt its
+    // teardown state). Keep it disabled until that integration is validated;
+    // this also prevents motion-vector/history defects from masking interop.
+    const auto& deviceManager = DeviceManager::GetInstance();
+    const bool forceDisabled = IsUpscalingDisabledByEnvironment()
+        || deviceManager.GetBackend() == rhi::Backend::Vulkan;
+    if (forceDisabled && m_upscalingMode != UpscalingMode::None) {
+        static bool logged = false;
+        if (!logged) {
+            spdlog::info("UpscalingManager: forcing upscaling off for Vulkan stability");
+            logged = true;
+        }
+        m_upscalingMode = UpscalingMode::None;
+    }
 }
 
 bool CheckDLSSSupport(rhi::Device dev, rhi::Backend backend) {
@@ -156,6 +206,7 @@ inline void StoreFloat4x4(const DirectX::XMMATRIX& m, sl::float4x4& target, bool
 
 void UpscalingManager::InitializeAdapter()
 {
+    SyncSettingsFromSettingsManager();
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
     if (!IsStreamlineEnabledSetting()) {
         m_dlssSupported = false;
@@ -171,6 +222,7 @@ void UpscalingManager::InitializeAdapter()
 }
 
 void UpscalingManager::ProxyDevice() { // TODO: RHI now handles this internally
+    SyncSettingsFromSettingsManager();
     switch (m_upscalingMode)
     {
     case UpscalingMode::DLSS: {
@@ -218,6 +270,7 @@ bool UpscalingManager::EnsureFSRContext() {
 }
 
 DirectX::XMFLOAT2 UpscalingManager::GetJitter(uint64_t frameNumber) {
+    SyncSettingsFromSettingsManager();
 
     switch (m_upscalingMode)
     {
@@ -275,6 +328,7 @@ DirectX::XMFLOAT2 UpscalingManager::GetJitter(uint64_t frameNumber) {
 }
 
 bool UpscalingManager::InitSL() {
+    SyncSettingsFromSettingsManager();
     if (!IsStreamlineEnabledSetting()) {
         m_dlssSupported = false;
         if (m_upscalingMode == UpscalingMode::DLSS) {
@@ -287,6 +341,7 @@ bool UpscalingManager::InitSL() {
 }
 
 void UpscalingManager::Setup() {
+    SyncSettingsFromSettingsManager();
     auto outputRes = m_getOutputRes();
     const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(m_upscalingMode, m_dlssSupported);
     switch (effectiveMode)
@@ -334,6 +389,7 @@ void UpscalingManager::Setup() {
         {
             // Handle error here, check the logs
         }
+        m_resetUpscalerHistory = true;
 
         break;
     }
@@ -429,7 +485,12 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     consts.depthInverted = sl::Boolean::eTrue; // Reverse-Z: near=1, far=0
     consts.cameraMotionIncluded = sl::Boolean::eTrue;
     consts.motionVectors3D = sl::Boolean::eFalse;
-    consts.reset = sl::Boolean::eFalse;
+    consts.motionVectorsDilated = SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()
+        ? sl::Boolean::eTrue
+        : sl::Boolean::eFalse;
+    consts.motionVectorsJittered = sl::Boolean::eFalse;
+    const bool resetHistory = m_resetUpscalerHistory;
+    consts.reset = resetHistory ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 
     if (SL_FAILED(result, slSetConstants(consts, *frameToken, myViewport))) // constants are changing per frame so frame index is required
     {
@@ -470,7 +531,7 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
 
     void* nativeCommandList = backend == rhi::Backend::Vulkan
         ? static_cast<void*>(rhi::vulkan::get_cmd_list(commandList))
-        : static_cast<void*>(rhi::dx12::get_cmd_list(commandList));
+		: static_cast<void*>(rhi::dx12::get_streamline_cmd_list(commandList));
 
     if (backend == rhi::Backend::Vulkan) {
         const sl::ResourceTag tags[] = {
@@ -487,7 +548,32 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         const sl::BaseStructure* inputs[] = { &myViewport };
         if (SL_FAILED(result, slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList)))
         {
-            spdlog::error("DLSS evaluation failed!");
+            if (result == sl::Result::eWarnOutOfVRAM) {
+                if (!m_reportedDlssOutOfMemory) {
+                    m_reportedDlssOutOfMemory = true;
+                    spdlog::warn("DLSS skipped because Streamline reported GPU memory pressure at frame {}", frameNumber);
+                }
+            } else {
+                spdlog::error(
+                    "DLSS evaluation failed: result={} frame={} colorIn={} colorOut={} depth={} motionVectors={}",
+                    static_cast<int32_t>(result),
+                    frameNumber,
+                    static_cast<const void*>(pHDRTarget),
+                    static_cast<const void*>(pUpscaledHDRTarget),
+                    static_cast<const void*>(pDepthTexture),
+                    static_cast<const void*>(pMotionVectors));
+            }
+        }
+        else if (resetHistory)
+        {
+            m_resetUpscalerHistory = false;
+            spdlog::info(
+                "DLSS history reset submitted for frame {} render={}x{} output={}x{}",
+                frameNumber,
+                renderRes.x,
+                renderRes.y,
+                outputRes.x,
+                outputRes.y);
         }
 
         rhi::TextureBarrier streamlineOutputBarrier{};
@@ -514,7 +600,32 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         const sl::BaseStructure* inputs[] = { &myViewport, &depthTag, &mvecTag, &colorInTag, &colorOutTag };
         if (SL_FAILED(result, slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList)))
         {
-            spdlog::error("DLSS evaluation failed!");
+            if (result == sl::Result::eWarnOutOfVRAM) {
+                if (!m_reportedDlssOutOfMemory) {
+                    m_reportedDlssOutOfMemory = true;
+                    spdlog::warn("DLSS skipped because Streamline reported GPU memory pressure at frame {}", frameNumber);
+                }
+            } else {
+                spdlog::error(
+                    "DLSS evaluation failed: result={} frame={} colorIn={} colorOut={} depth={} motionVectors={}",
+                    static_cast<int32_t>(result),
+                    frameNumber,
+                    static_cast<const void*>(pHDRTarget),
+                    static_cast<const void*>(pUpscaledHDRTarget),
+                    static_cast<const void*>(pDepthTexture),
+                    static_cast<const void*>(pMotionVectors));
+            }
+        }
+        else if (resetHistory)
+        {
+            m_resetUpscalerHistory = false;
+            spdlog::info(
+                "DLSS history reset submitted for frame {} render={}x{} output={}x{}",
+                frameNumber,
+                renderRes.x,
+                renderRes.y,
+                outputRes.x,
+                outputRes.y);
         }
         else
         {
@@ -673,6 +784,7 @@ void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Compone
 }
 
 void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+    SyncSettingsFromSettingsManager();
     const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(m_upscalingMode, m_dlssSupported);
     switch (effectiveMode)
     {

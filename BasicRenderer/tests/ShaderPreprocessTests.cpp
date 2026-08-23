@@ -167,6 +167,111 @@ float Overload(int value)
             "expected Overload in discovered definitions");
         }, failureCount);
 
+    RunTest("catalog handles dxc line marker between work graph signature and body", []() {
+        const std::string source = R"(
+struct TraverseNodeRecord
+{
+    uint nodeIdPacked;
+};
+
+template<typename T>
+struct GroupNodeInputRecords
+{
+};
+
+template<typename T>
+struct NodeOutput
+{
+};
+
+[Shader("node")]
+[NodeID("TraverseNodes")]
+[NodeLaunch("coalescing")]
+[NumThreads(32, 1, 1)]
+void WG_TraverseNodes(
+    [MaxRecords(32)] GroupNodeInputRecords<TraverseNodeRecord> inRecs,
+    uint GI : SV_GroupIndex,
+    [MaxRecords(128)] NodeOutput<TraverseNodeRecord> TraverseNodes,
+    [NodeID("LeafNodes")] [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<TraverseNodeRecord> LeafNodes)
+#line 2204 "hlsl.hlsl"
+{
+}
+)";
+
+        ShaderPreprocessDiagnostics diagnostics =
+            AnalyzeShaderSourceCatalog(source.c_str(), source.size());
+
+        Require(diagnostics.parseSucceeded, "tree-sitter failed to produce a root for work graph signature");
+        Require(diagnostics.safeToPrune, "work graph signature with dxc line marker should be safe to prune");
+        Require(Contains(JoinStrings(diagnostics.discoveredFunctionDefinitions, ","), "WG_TraverseNodes"),
+            "expected WG_TraverseNodes in discovered definitions");
+        }, failureCount);
+
+    RunTest("catalog masks dxc line markers inside parameter and argument lists", []() {
+        const std::string source = R"(
+float LineMarkedHelper(
+    float first
+#line 120 "included.hlsli"
+    , float second)
+{
+    return first + second;
+}
+
+[numthreads(1, 1, 1)]
+void LineMarkedCS()
+{
+    const float result = LineMarkedHelper(
+        1.0f
+# 240 "shader.hlsl"
+        , 2.0f);
+}
+)";
+
+        ShaderPreprocessDiagnostics diagnostics =
+            AnalyzeShaderSourceCatalog(source.c_str(), source.size());
+
+        Require(diagnostics.parseSucceeded, "tree-sitter failed to produce a root for line-marked lists");
+        Require(diagnostics.errorNodeCount == 0, "line markers inside lists should not create parse errors");
+        Require(diagnostics.safeToPrune, "line-marked parameter and argument lists should be safe to prune");
+        const std::string definitions = JoinStrings(diagnostics.discoveredFunctionDefinitions, ",");
+        Require(Contains(definitions, "LineMarkedHelper"), "expected line-marked helper definition");
+        Require(Contains(definitions, "LineMarkedCS"), "expected line-marked entry-point definition");
+        }, failureCount);
+
+    RunTest("line marker masking preserves pruning byte offsets", []() {
+        const std::string source = R"(
+float RetainedHelper(float first
+#line 40 "included.hlsli"
+    , float second)
+{
+    return first + second;
+}
+
+float RemovedHelper()
+{
+    return 3.0f;
+}
+
+[numthreads(1, 1, 1)]
+void OffsetPreservingCS()
+{
+    const float result = RetainedHelper(1.0f
+#line 80 "shader.hlsl"
+        , 2.0f);
+}
+)";
+
+        PreparedShaderSource prepared =
+            PrepareShaderSourceForEntryPoint(MakeBuffer(source), "OffsetPreservingCS");
+
+        Require(prepared.diagnostics.safeToPrune, "line-marked source should remain safe to prune");
+        Require(prepared.diagnostics.pruningApplied, "unused helper should be pruned");
+        Require(Contains(prepared.sourceBeforeRewrite, "RetainedHelper"), "retained helper was removed");
+        Require(Contains(prepared.sourceBeforeRewrite, "OffsetPreservingCS"), "entry point was removed");
+        Require(!Contains(prepared.sourceBeforeRewrite, "RemovedHelper"),
+            "tree-sitter offsets did not remove the intended helper");
+        }, failureCount);
+
     RunTest("per-view depth copy drops unreachable helper chain", []() {
         const std::string source = R"(
 float UsedHelper()

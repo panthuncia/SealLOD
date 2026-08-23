@@ -1,0 +1,32 @@
+{
+  "name": "BasicRenderer VSM large-rerender NVPerf attribution",
+  "readiness": { "stable_frames": 120, "settling_frames": 30, "timeout_ms": 300000 },
+  "statistics": { "minimum_samples": 3, "maximum_samples": 5, "confidence_level": 0.95, "relative_half_width": 1.0 },
+  "output": {
+    "database": "out/vsm_large_rerender_nvperf.sqlite",
+    "last_run_summary": "out/vsm_large_rerender_nvperf.md"
+  },
+  "metrics": [
+    { "id": "gpu_time", "name": "gpu__time_duration", "output_name": "GPU duration", "unit": "ns", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "instructions", "name": "smsp__inst_executed", "output_name": "Instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "active_warps", "name": "smsp__warps_active", "output_name": "Active warps/cycle", "unit": "warps/cycle", "type": "counter", "rollup": "avg", "submetric": "per_cycle_active", "required": false },
+    { "id": "occupancy", "name": "sm__warps_active", "output_name": "Achieved occupancy", "unit": "%", "type": "counter", "rollup": "avg", "submetric": "pct_of_peak_sustained_active", "required": false },
+    { "id": "shared_bytes", "name": "tpc__average_sharedmem_bytes_per_cta", "output_name": "Shared memory/CTA", "unit": "bytes", "type": "ratio", "rollup": "avg", "submetric": "ratio", "required": false },
+    { "id": "launch_stall", "name": "tpc__warp_launch_cycles_stalled", "output_name": "Warp-launch stalls", "unit": "%", "type": "counter", "rollup": "sum", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "long_scoreboard", "name": "smsp__warp_issue_stalled_long_scoreboard", "output_name": "Long scoreboard", "unit": "cycles/warp", "type": "counter", "rollup": "avg", "submetric": "per_warp_active", "required": false },
+    { "id": "barrier", "name": "smsp__warp_issue_stalled_barrier", "output_name": "Barrier stalls", "unit": "cycles/warp", "type": "counter", "rollup": "avg", "submetric": "per_warp_active", "required": false },
+    { "id": "sm_throughput", "name": "sm__throughput", "output_name": "SM throughput", "unit": "%", "type": "counter", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "l1_throughput", "name": "l1tex__throughput", "output_name": "L1/TEX throughput", "unit": "%", "type": "counter", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "l2_throughput", "name": "lts__throughput", "output_name": "L2 throughput", "unit": "%", "type": "counter", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "dram_throughput", "name": "dram__throughput", "output_name": "DRAM throughput", "unit": "%", "type": "counter", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "atomic_stall", "name": "smsp__warp_issue_stalled_mio_throttle", "output_name": "MIO/atomic throttle", "unit": "cycles/warp", "type": "counter", "rollup": "avg", "submetric": "per_warp_active", "required": false },
+    { "id": "mesh_primitives", "name": "prop__output_primitives", "output_name": "Output primitives", "unit": "primitives", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "pixel_threads", "name": "smsp__thread_inst_executed_pred_on_shader_ps", "output_name": "Pixel thread instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+  ],
+  "passes": [
+    { "id": "block_histogram", "name": "CLodShadow::VirtualShadowBlockHistogramPassSW1", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time","instructions","active_warps","occupancy","shared_bytes","launch_stall","long_scoreboard","barrier","sm_throughput","l1_throughput","l2_throughput","dram_throughput","atomic_stall"] },
+    { "id": "block_emit", "name": "CLodShadow::VirtualShadowBlockEmitPassSW1", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time","instructions","active_warps","occupancy","shared_bytes","launch_stall","long_scoreboard","barrier","sm_throughput","l1_throughput","l2_throughput","dram_throughput","atomic_stall"] },
+    { "id": "culling", "name": "CLodShadow::HierarchicalCullingPass1", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time","instructions","active_warps","occupancy","shared_bytes","launch_stall","long_scoreboard","barrier","sm_throughput","l1_throughput","l2_throughput","dram_throughput","atomic_stall"] },
+    { "id": "hardware_raster", "name": "CLodShadow::RasterizeClustersPass1", "queue": "Graphics", "occurrence": 0, "metrics": ["gpu_time","instructions","active_warps","occupancy","shared_bytes","launch_stall","long_scoreboard","barrier","sm_throughput","l1_throughput","l2_throughput","dram_throughput","mesh_primitives","pixel_threads"] }
+  ]
+}

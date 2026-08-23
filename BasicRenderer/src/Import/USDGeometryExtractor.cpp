@@ -1,20 +1,34 @@
 #include "Import/USDGeometryExtractor.h"
+#include "Import/USDMaterialCache.h"
 
 #include <cstring>
 #include <cmath>
+#include <cctype>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <set>
 #include <algorithm>
 #include <optional>
+#include <atomic>
+#include <array>
+#include <chrono>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <condition_variable>
+#include <map>
+#include <thread>
 
 #include <pxr/usd/usd/primRange.h>
+#include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/gprim.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/primvar.h>
+#include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdSkel/bindingAPI.h>
 #include <pxr/usd/usdSkel/skeleton.h>
 #include <pxr/usd/usdSkel/skeletonQuery.h>
@@ -22,22 +36,120 @@
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec4f.h>
+#include <pxr/base/gf/rotation.h>
 
 #include <DirectXMath.h>
 #include <spdlog/spdlog.h>
+#include <tracy/Tracy.hpp>
 
 #include "Import/CLodCacheLoader.h"
+#include "Utilities/CachePathUtilities.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Mesh/ClusterLODTypes.h"
+#include "Mesh/ClusterLODUtilities.h"
 #include "Mesh/VertexLayout.h"
 #include "Mesh/VertexFlags.h"
 #include "Mesh/DefaultCLodSettings.h"
+#include "Render/GraphExtensions/ClusterLOD/ReyesTessellationTable.h"
 
 using namespace pxr;
 
 namespace {
 
 constexpr size_t kMaxSkinInfluences = 8u;
+constexpr const char* kSkinningPayloadAbiSuffix = "#skinning_payloads=3";
+
+class ScopedCLodBuildHeartbeat
+{
+public:
+	ScopedCLodBuildHeartbeat(
+		std::string source,
+		std::string prim,
+		std::string subset,
+		size_t vertexCount,
+		size_t triangleCount) :
+		_source(std::move(source)),
+		_prim(std::move(prim)),
+		_subset(std::move(subset)),
+		_vertexCount(vertexCount),
+		_triangleCount(triangleCount),
+		_started(std::chrono::steady_clock::now()),
+		_thread([this] { Run(); })
+	{}
+
+	ScopedCLodBuildHeartbeat(const ScopedCLodBuildHeartbeat&) = delete;
+	ScopedCLodBuildHeartbeat& operator=(const ScopedCLodBuildHeartbeat&) = delete;
+
+	~ScopedCLodBuildHeartbeat()
+	{
+		{
+			std::lock_guard lock(_mutex);
+			_done = true;
+		}
+		_wake.notify_all();
+		if (_thread.joinable()) {
+			_thread.join();
+		}
+	}
+
+private:
+	void Run()
+	{
+		std::unique_lock lock(_mutex);
+		while (!_wake.wait_for(lock, std::chrono::seconds(10), [this] { return _done; })) {
+			const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+				std::chrono::steady_clock::now() - _started).count();
+			lock.unlock();
+			spdlog::info(
+				"    CLod build active: elapsed={}s source='{}' prim='{}' subset='{}' vertices={} triangles={}",
+				elapsed,
+				_source,
+				_prim,
+				_subset,
+				_vertexCount,
+				_triangleCount);
+			lock.lock();
+		}
+	}
+
+	std::string _source;
+	std::string _prim;
+	std::string _subset;
+	size_t _vertexCount = 0;
+	size_t _triangleCount = 0;
+	std::chrono::steady_clock::time_point _started;
+	std::mutex _mutex;
+	std::condition_variable _wake;
+	bool _done = false;
+	std::thread _thread;
+};
+
+std::mutex& GetClusterLODCacheBuildMutex(const CLodCacheLoader::MeshCacheIdentity& identity)
+{
+	static std::mutex tableMutex;
+	static std::unordered_map<std::string, std::unique_ptr<std::mutex>> mutexes;
+	std::string key;
+	key.reserve(
+		identity.sourceIdentifier.size() +
+		identity.primPath.size() +
+		identity.subsetName.size() +
+		32u);
+	key.append(identity.sourceIdentifier);
+	key.push_back('|');
+	key.append(identity.primPath);
+	key.push_back('|');
+	key.append(identity.subsetName);
+	key.push_back('|');
+	key.append(identity.doubleSidedVoxelSourceNormals ? "ds1" : "ds0");
+
+	std::lock_guard<std::mutex> lock(tableMutex);
+	auto& mutex = mutexes[key];
+	if (!mutex) {
+		mutex = std::make_unique<std::mutex>();
+	}
+	return *mutex;
+}
 
 // Interpolation
 
@@ -169,6 +281,130 @@ static std::vector<float> ComputeFacetedNormals(
 	return normals;
 }
 
+struct ControlPointPositionKey
+{
+	uint32_t x;
+	uint32_t y;
+	uint32_t z;
+
+	bool operator==(const ControlPointPositionKey&) const = default;
+};
+
+struct ControlPointPositionKeyHash
+{
+	size_t operator()(const ControlPointPositionKey& key) const noexcept
+	{
+		size_t h = static_cast<size_t>(key.x);
+		h ^= static_cast<size_t>(key.y) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+		h ^= static_cast<size_t>(key.z) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+		return h;
+	}
+};
+
+static uint32_t FloatBits(float value)
+{
+	uint32_t bits = 0;
+	std::memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
+static ControlPointPositionKey MakeControlPointPositionKey(const std::vector<float>& ctrlPos, size_t index)
+{
+	const size_t base = index * 3u;
+	return ControlPointPositionKey{
+		FloatBits(ctrlPos[base + 0u]),
+		FloatBits(ctrlPos[base + 1u]),
+		FloatBits(ctrlPos[base + 2u])
+	};
+}
+
+static std::vector<float> ComputeSmoothControlPointNormals(
+	const std::vector<float>& ctrlPos,
+	const VtArray<int>& faceVertCounts,
+	const VtArray<int>& faceVertIndices,
+	const std::vector<uint8_t>& useFace,
+	const std::vector<uint8_t>& holedFaces,
+	bool hasSubset,
+	bool reverseMeshWinding)
+{
+	const size_t controlPointCount = ctrlPos.size() / 3u;
+	std::vector<float> normals(controlPointCount * 3u, 0.0f);
+
+	size_t fvOffset = 0;
+	for (size_t faceIndex = 0; faceIndex < faceVertCounts.size(); ++faceIndex) {
+		const int fvCount = faceVertCounts[faceIndex];
+		if ((hasSubset && !useFace[faceIndex]) || holedFaces[faceIndex] || fvCount < 3) {
+			fvOffset += fvCount;
+			continue;
+		}
+
+		for (int i = 1; i + 1 < fvCount; ++i) {
+			const size_t fv0 = fvOffset;
+			const size_t fv1 = fvOffset + static_cast<size_t>(reverseMeshWinding ? (i + 1) : i);
+			const size_t fv2 = fvOffset + static_cast<size_t>(reverseMeshWinding ? i : (i + 1));
+			if (fv2 >= faceVertIndices.size()) {
+				continue;
+			}
+
+			const uint32_t i0 = static_cast<uint32_t>(faceVertIndices[fv0]);
+			const uint32_t i1 = static_cast<uint32_t>(faceVertIndices[fv1]);
+			const uint32_t i2 = static_cast<uint32_t>(faceVertIndices[fv2]);
+			if (i0 >= controlPointCount || i1 >= controlPointCount || i2 >= controlPointCount) {
+				continue;
+			}
+
+			const GfVec3f p0(ctrlPos[i0 * 3u + 0u], ctrlPos[i0 * 3u + 1u], ctrlPos[i0 * 3u + 2u]);
+			const GfVec3f p1(ctrlPos[i1 * 3u + 0u], ctrlPos[i1 * 3u + 1u], ctrlPos[i1 * 3u + 2u]);
+			const GfVec3f p2(ctrlPos[i2 * 3u + 0u], ctrlPos[i2 * 3u + 1u], ctrlPos[i2 * 3u + 2u]);
+			const GfVec3f faceNormal = GfCross(p1 - p0, p2 - p0);
+			const float len2 = GfDot(faceNormal, faceNormal);
+			if (len2 <= 1e-20f) {
+				continue;
+			}
+
+			normals[i0 * 3u + 0u] += faceNormal[0];
+			normals[i0 * 3u + 1u] += faceNormal[1];
+			normals[i0 * 3u + 2u] += faceNormal[2];
+			normals[i1 * 3u + 0u] += faceNormal[0];
+			normals[i1 * 3u + 1u] += faceNormal[1];
+			normals[i1 * 3u + 2u] += faceNormal[2];
+			normals[i2 * 3u + 0u] += faceNormal[0];
+			normals[i2 * 3u + 1u] += faceNormal[1];
+			normals[i2 * 3u + 2u] += faceNormal[2];
+		}
+
+		fvOffset += fvCount;
+	}
+
+	std::unordered_map<ControlPointPositionKey, GfVec3f, ControlPointPositionKeyHash> coincidentNormalSums;
+	coincidentNormalSums.reserve(controlPointCount);
+	for (size_t index = 0; index < controlPointCount; ++index) {
+		const GfVec3f n(normals[index * 3u + 0u], normals[index * 3u + 1u], normals[index * 3u + 2u]);
+		auto [it, inserted] = coincidentNormalSums.try_emplace(
+			MakeControlPointPositionKey(ctrlPos, index),
+			0.0f,
+			0.0f,
+			0.0f);
+		it->second += n;
+	}
+
+	for (size_t index = 0; index < controlPointCount; ++index) {
+		GfVec3f n = coincidentNormalSums[MakeControlPointPositionKey(ctrlPos, index)];
+		const float len2 = GfDot(n, n);
+		if (len2 > 1e-20f) {
+			n *= (1.0f / std::sqrt(len2));
+			normals[index * 3u + 0u] = n[0];
+			normals[index * 3u + 1u] = n[1];
+			normals[index * 3u + 2u] = n[2];
+		}
+		else {
+			normals[index * 3u + 1u] = 1.0f;
+		}
+	}
+
+	return normals;
+}
+
 static UsdTimeCode GetUsdGeometrySampleTime(const UsdStageRefPtr& stage)
 {
 	if (stage && stage->HasAuthoredTimeCodeRange()) {
@@ -176,6 +412,389 @@ static UsdTimeCode GetUsdGeometrySampleTime(const UsdStageRefPtr& stage)
 	}
 
 	return UsdTimeCode::Default();
+}
+
+static std::uint32_t TessellationSubdivisionForFactor(std::uint32_t tessellationFactor)
+{
+	if (tessellationFactor <= 1u) {
+		return 1u;
+	}
+
+	const double root = std::sqrt(static_cast<double>(tessellationFactor));
+	std::uint32_t subdivision = static_cast<std::uint32_t>(std::ceil(root));
+	return std::max(1u, subdivision);
+}
+
+static std::uint32_t ReyesTessellationLookupIndex(std::uint32_t edge01Segments, std::uint32_t edge12Segments, std::uint32_t edge20Segments)
+{
+	constexpr uint32_t kLookupSize = 16u;
+	constexpr uint32_t kLookupIndexBias =
+		1u +
+		kLookupSize +
+		kLookupSize * kLookupSize;
+	const uint32_t rawIndex =
+		edge01Segments +
+		edge12Segments * kLookupSize +
+		edge20Segments * kLookupSize * kLookupSize;
+	return rawIndex - kLookupIndexBias;
+}
+
+static DirectX::XMFLOAT3 DecodeReyesTessellationVertexBarycentrics(std::uint32_t packedVertex)
+{
+	constexpr float kCoordScale = 32768.0f;
+	const float u = static_cast<float>(packedVertex & 0xFFFFu) / kCoordScale;
+	const float v = static_cast<float>(packedVertex >> 16u) / kCoordScale;
+	return DirectX::XMFLOAT3{ 1.0f - u - v, u, v };
+}
+
+static DirectX::XMUINT3 DecodeReyesTessellationTriangleIndices(std::uint32_t packedTriangle)
+{
+	return DirectX::XMUINT3{
+		packedTriangle & 0xFFu,
+		(packedTriangle >> 8u) & 0xFFu,
+		(packedTriangle >> 16u) & 0xFFu
+	};
+}
+
+struct TessellationPattern
+{
+	std::vector<DirectX::XMFLOAT3> vertices;
+	std::vector<DirectX::XMUINT3> triangles;
+	bool fromReyesTable{ false };
+};
+
+static std::uint32_t TriangularLatticeVertexIndex(std::uint32_t subdivision, std::uint32_t i, std::uint32_t j)
+{
+	return i * (subdivision + 1u) - (i * (i - 1u)) / 2u + j;
+}
+
+static std::shared_ptr<const TessellationPattern> BuildReyesTessellationPattern(std::uint32_t subdivision)
+{
+	const ReyesTessellationTableData& reyesTable = GetReyesTessellationTableData();
+	const std::uint32_t configIndex = ReyesTessellationLookupIndex(subdivision, subdivision, subdivision);
+	if (configIndex >= reyesTable.configs.size()) {
+		return nullptr;
+	}
+
+	const CLodReyesTessTableConfigEntry& config = reyesTable.configs[configIndex];
+	if (config.numVertices == 0u || config.numTriangles == 0u) {
+		return nullptr;
+	}
+
+	auto pattern = std::make_shared<TessellationPattern>();
+	pattern->fromReyesTable = true;
+	pattern->vertices.reserve(config.numVertices);
+	for (std::uint32_t i = 0; i < config.numVertices; ++i) {
+		pattern->vertices.push_back(DecodeReyesTessellationVertexBarycentrics(reyesTable.vertices[config.firstVertex + i]));
+	}
+	pattern->triangles.reserve(config.numTriangles);
+	for (std::uint32_t i = 0; i < config.numTriangles; ++i) {
+		pattern->triangles.push_back(DecodeReyesTessellationTriangleIndices(reyesTable.triangles[config.firstTriangle + i]));
+	}
+	return pattern;
+}
+
+static std::shared_ptr<const TessellationPattern> BuildLatticeTessellationPattern(std::uint32_t subdivision)
+{
+	if (subdivision == 0u) {
+		return nullptr;
+	}
+
+	const std::uint64_t vertexCount64 =
+		(static_cast<std::uint64_t>(subdivision) + 1ull) *
+		(static_cast<std::uint64_t>(subdivision) + 2ull) / 2ull;
+	const std::uint64_t triangleCount64 = static_cast<std::uint64_t>(subdivision) * subdivision;
+	if (vertexCount64 > std::numeric_limits<std::uint32_t>::max() ||
+		triangleCount64 > std::numeric_limits<std::uint32_t>::max()) {
+		return nullptr;
+	}
+
+	auto pattern = std::make_shared<TessellationPattern>();
+	pattern->vertices.reserve(static_cast<size_t>(vertexCount64));
+	pattern->triangles.reserve(static_cast<size_t>(triangleCount64));
+
+	const float invSubdivision = 1.0f / static_cast<float>(subdivision);
+	for (std::uint32_t i = 0; i <= subdivision; ++i) {
+		for (std::uint32_t j = 0; j <= subdivision - i; ++j) {
+			const float wb = static_cast<float>(i) * invSubdivision;
+			const float wc = static_cast<float>(j) * invSubdivision;
+			pattern->vertices.push_back(DirectX::XMFLOAT3{ 1.0f - wb - wc, wb, wc });
+		}
+	}
+
+	for (std::uint32_t i = 0; i < subdivision; ++i) {
+		for (std::uint32_t j = 0; j < subdivision - i; ++j) {
+			pattern->triangles.push_back(DirectX::XMUINT3{
+				TriangularLatticeVertexIndex(subdivision, i, j),
+				TriangularLatticeVertexIndex(subdivision, i + 1u, j),
+				TriangularLatticeVertexIndex(subdivision, i, j + 1u)
+			});
+			if (j + 1u < subdivision - i) {
+				pattern->triangles.push_back(DirectX::XMUINT3{
+					TriangularLatticeVertexIndex(subdivision, i + 1u, j),
+					TriangularLatticeVertexIndex(subdivision, i + 1u, j + 1u),
+					TriangularLatticeVertexIndex(subdivision, i, j + 1u)
+				});
+			}
+		}
+	}
+
+	return pattern;
+}
+
+static std::shared_ptr<const TessellationPattern> GetTessellationPattern(std::uint32_t subdivision)
+{
+	static std::mutex cacheMutex;
+	static std::unordered_map<std::uint32_t, std::shared_ptr<const TessellationPattern>> cache;
+
+	std::lock_guard<std::mutex> lock(cacheMutex);
+	if (auto it = cache.find(subdivision); it != cache.end()) {
+		return it->second;
+	}
+
+	auto pattern = subdivision <= 11u
+		? BuildReyesTessellationPattern(subdivision)
+		: BuildLatticeTessellationPattern(subdivision);
+	if (!pattern) {
+		pattern = BuildLatticeTessellationPattern(subdivision);
+	}
+	if (pattern) {
+		cache.emplace(subdivision, pattern);
+	}
+	return pattern;
+}
+
+static void InterpolateFloatTuple(
+	std::byte* dst,
+	const std::byte* a,
+	const std::byte* b,
+	const std::byte* c,
+	size_t offset,
+	size_t components,
+	float wa,
+	float wb,
+	float wc)
+{
+	auto* out = reinterpret_cast<float*>(dst + offset);
+	const auto* av = reinterpret_cast<const float*>(a + offset);
+	const auto* bv = reinterpret_cast<const float*>(b + offset);
+	const auto* cv = reinterpret_cast<const float*>(c + offset);
+	for (size_t component = 0; component < components; ++component) {
+		out[component] = av[component] * wa + bv[component] * wb + cv[component] * wc;
+	}
+}
+
+static void NormalizeFloat3(std::byte* dst, size_t offset)
+{
+	auto* value = reinterpret_cast<float*>(dst + offset);
+	const float len2 = value[0] * value[0] + value[1] * value[1] + value[2] * value[2];
+	if (len2 > 1e-20f) {
+		const float invLen = 1.0f / std::sqrt(len2);
+		value[0] *= invLen;
+		value[1] *= invLen;
+		value[2] *= invLen;
+	}
+}
+
+static const std::byte* NearestBarycentricVertex(
+	const std::byte* a,
+	const std::byte* b,
+	const std::byte* c,
+	float wa,
+	float wb,
+	float wc)
+{
+	if (wb >= wa && wb >= wc) {
+		return b;
+	}
+	if (wc >= wa && wc >= wb) {
+		return c;
+	}
+	return a;
+}
+
+static void WriteInterpolatedVertex(
+	std::vector<std::byte>& out,
+	const std::byte* a,
+	const std::byte* b,
+	const std::byte* c,
+	size_t vertexSize,
+	unsigned int vertexFlags,
+	float wa,
+	float wb,
+	float wc)
+{
+	const std::byte* nearest = NearestBarycentricVertex(a, b, c, wa, wb, wc);
+	const size_t dstOffset = out.size();
+	out.insert(out.end(), nearest, nearest + vertexSize);
+	std::byte* dst = out.data() + dstOffset;
+
+	InterpolateFloatTuple(dst, a, b, c, 0, 3, wa, wb, wc);
+	if ((vertexFlags & VertexFlags::VERTEX_NORMALS) != 0) {
+		InterpolateFloatTuple(dst, a, b, c, MeshVertexLayout::NormalOffset, 3, wa, wb, wc);
+		NormalizeFloat3(dst, MeshVertexLayout::NormalOffset);
+	}
+	if ((vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0) {
+		const size_t tangentOffset = MeshVertexLayout::TangentOffset(vertexFlags);
+		InterpolateFloatTuple(dst, a, b, c, tangentOffset, 3, wa, wb, wc);
+		NormalizeFloat3(dst, tangentOffset);
+		reinterpret_cast<float*>(dst + tangentOffset)[3] =
+			reinterpret_cast<const float*>(nearest + tangentOffset)[3];
+	}
+	if ((vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0) {
+		InterpolateFloatTuple(dst, a, b, c, MeshVertexLayout::TexcoordOffset(vertexFlags), 2, wa, wb, wc);
+	}
+	if ((vertexFlags & VertexFlags::VERTEX_COLORS) != 0) {
+		InterpolateFloatTuple(dst, a, b, c, MeshVertexLayout::ColorOffset(vertexFlags), 3, wa, wb, wc);
+	}
+}
+
+static void WriteInterpolatedSkinningVertex(
+	std::vector<std::byte>& out,
+	const std::byte* a,
+	const std::byte* b,
+	const std::byte* c,
+	size_t skinningVertexSize,
+	float wa,
+	float wb,
+	float wc)
+{
+	const std::byte* nearest = NearestBarycentricVertex(a, b, c, wa, wb, wc);
+	const size_t dstOffset = out.size();
+	out.insert(out.end(), nearest, nearest + skinningVertexSize);
+	std::byte* dst = out.data() + dstOffset;
+	InterpolateFloatTuple(dst, a, b, c, 0, 3, wa, wb, wc);
+	InterpolateFloatTuple(dst, a, b, c, sizeof(DirectX::XMFLOAT3), 3, wa, wb, wc);
+	NormalizeFloat3(dst, sizeof(DirectX::XMFLOAT3));
+}
+
+static void TessellateExtractedTriangles(
+	std::unique_ptr<std::vector<std::byte>>& rawData,
+	std::optional<std::unique_ptr<std::vector<std::byte>>>& skinningData,
+	unsigned int vertexSize,
+	unsigned int skinningVertexSize,
+	std::vector<UINT32>& indices,
+	unsigned int vertexFlags,
+	std::vector<MeshUvSetData>& uvSets,
+	std::uint32_t tessellationFactor,
+	const std::string& primName)
+{
+	const std::uint32_t subdivision = TessellationSubdivisionForFactor(tessellationFactor);
+	if (subdivision <= 1u || !rawData || vertexSize == 0u || indices.size() < 3u) {
+		return;
+	}
+
+	const std::uint64_t inputTriangleCount = indices.size() / 3u;
+	const std::shared_ptr<const TessellationPattern> pattern = GetTessellationPattern(subdivision);
+	if (!pattern || pattern->vertices.empty() || pattern->triangles.empty()) {
+		spdlog::warn(
+			"Mesh '{}' tessellation factor {} subdivision {} could not build a tessellation pattern; skipping tessellation.",
+			primName,
+			tessellationFactor,
+			subdivision);
+		return;
+	}
+
+	const std::uint64_t outputTriangleCount = inputTriangleCount * static_cast<std::uint64_t>(pattern->triangles.size());
+	const std::uint64_t outputVertexCount = inputTriangleCount * static_cast<std::uint64_t>(pattern->vertices.size());
+	if (outputVertexCount > std::numeric_limits<UINT32>::max() ||
+		outputTriangleCount > (std::numeric_limits<std::uint64_t>::max() / 3ull)) {
+		spdlog::warn(
+			"Mesh '{}' tessellation factor {} subdivision {} would produce {} vertices and {} triangles; skipping tessellation.",
+			primName,
+			tessellationFactor,
+			subdivision,
+			outputVertexCount,
+			outputTriangleCount);
+		return;
+	}
+
+	const std::uint64_t outputIndexCount = outputTriangleCount * 3ull;
+	if (outputIndexCount > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()) ||
+		outputVertexCount > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)() / std::max<std::size_t>(1u, vertexSize))) {
+		spdlog::warn(
+			"Mesh '{}' tessellation factor {} subdivision {} would produce too many indices for this process; skipping tessellation.",
+			primName,
+			tessellationFactor,
+			subdivision);
+		return;
+	}
+
+	std::vector<std::byte> tessellatedVertices;
+	std::vector<UINT32> tessellatedIndices;
+	tessellatedVertices.reserve(static_cast<size_t>(outputVertexCount) * static_cast<size_t>(vertexSize));
+	tessellatedIndices.reserve(static_cast<size_t>(outputIndexCount));
+
+	const bool hasSkinning = skinningData && *skinningData && skinningVertexSize != 0u;
+	std::vector<std::byte> tessellatedSkinningVertices;
+	if (hasSkinning) {
+		tessellatedSkinningVertices.reserve(static_cast<size_t>(outputVertexCount) * static_cast<size_t>(skinningVertexSize));
+	}
+
+	std::vector<MeshUvSetData> tessellatedUvSets;
+	tessellatedUvSets.resize(uvSets.size());
+	for (size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+		tessellatedUvSets[uvSetIndex].name = uvSets[uvSetIndex].name;
+		tessellatedUvSets[uvSetIndex].values.reserve(static_cast<size_t>(outputVertexCount));
+	}
+
+	const auto emitVertex = [&](UINT32 ia, UINT32 ib, UINT32 ic, float wa, float wb, float wc) {
+		const std::byte* a = rawData->data() + static_cast<size_t>(ia) * vertexSize;
+		const std::byte* b = rawData->data() + static_cast<size_t>(ib) * vertexSize;
+		const std::byte* c = rawData->data() + static_cast<size_t>(ic) * vertexSize;
+		WriteInterpolatedVertex(tessellatedVertices, a, b, c, vertexSize, vertexFlags, wa, wb, wc);
+		if (hasSkinning) {
+			const std::byte* sa = (*skinningData)->data() + static_cast<size_t>(ia) * skinningVertexSize;
+			const std::byte* sb = (*skinningData)->data() + static_cast<size_t>(ib) * skinningVertexSize;
+			const std::byte* sc = (*skinningData)->data() + static_cast<size_t>(ic) * skinningVertexSize;
+			WriteInterpolatedSkinningVertex(tessellatedSkinningVertices, sa, sb, sc, skinningVertexSize, wa, wb, wc);
+		}
+		for (size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+			const auto sampleUv = [&](UINT32 index) {
+				return index < uvSets[uvSetIndex].values.size()
+					? uvSets[uvSetIndex].values[index]
+					: DirectX::XMFLOAT2{ 0.0f, 0.0f };
+			};
+			const DirectX::XMFLOAT2 uva = sampleUv(ia);
+			const DirectX::XMFLOAT2 uvb = sampleUv(ib);
+			const DirectX::XMFLOAT2 uvc = sampleUv(ic);
+			tessellatedUvSets[uvSetIndex].values.push_back(DirectX::XMFLOAT2{
+				uva.x * wa + uvb.x * wb + uvc.x * wc,
+				uva.y * wa + uvb.y * wb + uvc.y * wc });
+		}
+	};
+
+	for (size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+		const UINT32 ia = indices[tri + 0u];
+		const UINT32 ib = indices[tri + 1u];
+		const UINT32 ic = indices[tri + 2u];
+		const auto baseVertex = static_cast<UINT32>(tessellatedVertices.size() / vertexSize);
+		for (const DirectX::XMFLOAT3& bary : pattern->vertices) {
+			emitVertex(ia, ib, ic, bary.x, bary.y, bary.z);
+		}
+		for (const DirectX::XMUINT3& local : pattern->triangles) {
+			tessellatedIndices.push_back(baseVertex + local.x);
+			tessellatedIndices.push_back(baseVertex + local.y);
+			tessellatedIndices.push_back(baseVertex + local.z);
+		}
+	}
+
+	*rawData = std::move(tessellatedVertices);
+	indices = std::move(tessellatedIndices);
+	if (hasSkinning) {
+		**skinningData = std::move(tessellatedSkinningVertices);
+	}
+	uvSets = std::move(tessellatedUvSets);
+
+	spdlog::debug(
+		"Mesh '{}' tessellated: requested_factor={} subdivision={} source={} triangles {} -> {} vertices_per_source_triangle={}",
+		primName,
+		tessellationFactor,
+		subdivision,
+		pattern->fromReyesTable ? "reyes-table" : "lattice",
+		inputTriangleCount,
+		outputTriangleCount,
+		pattern->vertices.size());
 }
 
 static bool HasMultipleAuthoredTimeSamples(const UsdAttribute& attr)
@@ -194,7 +813,7 @@ static bool HasMultipleAuthoredTimeSamples(const UsdAttribute& attr)
 
 // LoadGeom
 // Extracts raw vertex + index arrays from a UsdGeomMesh (optionally
-// limited to a subset).  Handles face-varying expansion, optional
+// limited to one or more subsets).  Handles face-varying expansion, optional
 // normals, texture coordinates, and skinning vertex streams.
 
 static void LoadGeom(
@@ -206,13 +825,14 @@ static void LoadGeom(
 	unsigned int& vertexFlags,
     std::vector<MeshUvSetData>& uvSets,
 	const UsdGeomMesh& mesh,
-	const std::optional<UsdGeomSubset> subset,
+	const std::vector<UsdGeomSubset>& subsets,
 	UsdTimeCode geomTimeCode,
 	double metersPerUnit,
 	const std::vector<std::string>& requiredUvSetNames,
 	const std::optional<UsdSkelSkinningQuery>& skinQ,
 	const VtTokenArray& skelJointOrderRaw,
-	const VtTokenArray& skelJointOrderMapped)
+	const VtTokenArray& skelJointOrderMapped,
+	const USDGeometryExtractor::ExtractOptions& options)
 {
 	rawData = std::make_unique<std::vector<std::byte>>();
 	skinningData.reset();
@@ -268,9 +888,10 @@ static void LoadGeom(
 
 	// subset face mask
 	std::vector<uint8_t> useFace(faceVertCounts.size(), 0);
-	if (subset) {
+	const bool limitToSubsetFaces = !subsets.empty();
+	for (const UsdGeomSubset& subset : subsets) {
 		VtArray<int> subsetFaceIndices;
-		subset->GetIndicesAttr().Get(&subsetFaceIndices);
+		subset.GetIndicesAttr().Get(&subsetFaceIndices);
 		for (int fi : subsetFaceIndices)
 			if (fi >= 0 && (size_t)fi < useFace.size()) useFace[fi] = 1;
 	}
@@ -313,7 +934,7 @@ static void LoadGeom(
 	// Count output corners
 	size_t cornerCount = 0;
 	for (size_t faceIndex = 0; faceIndex < faceVertCounts.size(); ++faceIndex) {
-		if ((subset && !useFace[faceIndex]) || holedFaces[faceIndex]) continue;
+		if ((limitToSubsetFaces && !useFace[faceIndex]) || holedFaces[faceIndex]) continue;
 		const int fvCount = faceVertCounts[faceIndex];
 		if (fvCount == 3)
 			cornerCount += 3;
@@ -379,6 +1000,35 @@ static void LoadGeom(
 		}
 	}
 
+	if (isPolygonalMesh || previewSubdiv || previewTopology) {
+		if (options.brniflyModelSpaceNormals) {
+			rawNormals = ComputeFacetedNormals(ctrlPos, faceVertCounts, faceVertIndices, reverseMeshWinding);
+			if (!rawNormals.empty()) {
+				gotNormals = true;
+				normInterp = InterpolationType::Uniform;
+				vertexFlags |= VertexFlags::VERTEX_NORMALS;
+				spdlog::info("Using faceted CLod source normals for model-space normal map mesh '{}'.", primName);
+			}
+		}
+		else {
+			auto smoothNormals = ComputeSmoothControlPointNormals(
+				ctrlPos,
+				faceVertCounts,
+				faceVertIndices,
+				useFace,
+				holedFaces,
+				limitToSubsetFaces,
+				reverseMeshWinding);
+			if (!smoothNormals.empty()) {
+				rawNormals = std::move(smoothNormals);
+				gotNormals = true;
+				normInterp = InterpolationType::Vertex;
+				vertexFlags |= VertexFlags::VERTEX_NORMALS;
+				spdlog::info("Using calculated smooth CLod source normals for mesh '{}'.", primName);
+			}
+		}
+	}
+
 	bool gotColors = false;
 	InterpolationType colorInterp = InterpolationType::Vertex;
 	std::vector<float> rawColors;
@@ -392,10 +1042,57 @@ static void LoadGeom(
 			vertexFlags |= VertexFlags::VERTEX_COLORS;
 		}
 		else {
-			spdlog::warn(
+			spdlog::debug(
 				"Mesh '{}' authored primvars:displayColor but it could not be flattened at geometry sample time {}; ignoring vertex colors for preview extraction.",
 				primName,
 				geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue());
+		}
+	}
+
+	bool gotOpacity = false;
+	InterpolationType opacityInterp = InterpolationType::Vertex;
+	std::vector<float> rawOpacities;
+	UsdGeomPrimvar displayOpacityPrimvar = primvarsAPI.FindPrimvarWithInheritance(TfToken("displayOpacity"));
+	if (displayOpacityPrimvar) {
+		VtArray<float> usdOpacities;
+		if (displayOpacityPrimvar.ComputeFlattened(&usdOpacities, geomTimeCode)) {
+			rawOpacities.assign(usdOpacities.begin(), usdOpacities.end());
+			opacityInterp = GetInterpolationType(displayOpacityPrimvar.GetInterpolation());
+			gotOpacity = true;
+		}
+		else {
+			spdlog::debug(
+				"Mesh '{}' authored primvars:displayOpacity but it could not be flattened at geometry sample time {}; ignoring vertex opacity for preview extraction.",
+				primName,
+				geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue());
+		}
+	}
+
+	bool gotTangents = false;
+	InterpolationType tangentInterp = InterpolationType::Vertex;
+	std::vector<float> rawTangents;
+	{
+		UsdGeomPrimvar tangentPrimvar = primvarsAPI.GetPrimvar(TfToken("brnifly:tangents"));
+		if (tangentPrimvar) {
+			VtArray<GfVec4f> usdTangents;
+			if (tangentPrimvar.ComputeFlattened(&usdTangents, geomTimeCode)) {
+				rawTangents.reserve(usdTangents.size() * 4u);
+				for (const GfVec4f& tangent : usdTangents) {
+					rawTangents.push_back(tangent[0]);
+					rawTangents.push_back(tangent[1]);
+					rawTangents.push_back(tangent[2]);
+					rawTangents.push_back(tangent[3]);
+				}
+				tangentInterp = GetInterpolationType(tangentPrimvar.GetInterpolation());
+				gotTangents = true;
+				vertexFlags |= VertexFlags::VERTEX_TANGENTS;
+			}
+			else {
+				spdlog::warn(
+					"Mesh '{}' authored primvars:brnifly:tangents but it could not be flattened at geometry sample time {}; falling back to derivative tangent basis.",
+					primName,
+					geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue());
+			}
 		}
 	}
 
@@ -484,7 +1181,7 @@ static void LoadGeom(
 	InterpolationType jointInterp = InterpolationType::Vertex,
 		weightInterp = InterpolationType::Vertex;
 
-	if (skinQ) {
+	if (skinQ && !options.importSkinningAsRigidBindPose) {
 		VtIntArray   jointIndices;
 		VtFloatArray jointWeights;
 		skinQ.value().ComputeVaryingJointInfluences(
@@ -524,6 +1221,54 @@ static void LoadGeom(
 			bindAPI.GetJointWeightsPrimvar().GetInterpolation());
 
 		vertexFlags |= VertexFlags::VERTEX_SKINNED;
+	}
+	else if (!options.importSkinningAsRigidBindPose) {
+		UsdGeomPrimvar jointIndexPrimvar = primvarsAPI.GetPrimvar(TfToken("brnifly:jointIndices"));
+		UsdGeomPrimvar jointWeightPrimvar = primvarsAPI.GetPrimvar(TfToken("brnifly:jointWeights"));
+		if (jointIndexPrimvar && jointWeightPrimvar) {
+			VtArray<int> jointIndices;
+			VtArray<float> jointWeights;
+			if (jointIndexPrimvar.ComputeFlattened(&jointIndices, geomTimeCode) &&
+				jointWeightPrimvar.ComputeFlattened(&jointWeights, geomTimeCode)) {
+				unsigned int indexElementSize = (std::max)(1, jointIndexPrimvar.GetElementSize());
+				unsigned int weightElementSize = (std::max)(1, jointWeightPrimvar.GetElementSize());
+				if (indexElementSize == 1 && weightElementSize == 1 &&
+					jointIndices.size() == usdPts.size() * kMaxSkinInfluences &&
+					jointWeights.size() == usdPts.size() * kMaxSkinInfluences) {
+					indexElementSize = kMaxSkinInfluences;
+					weightElementSize = kMaxSkinInfluences;
+				}
+				const unsigned int tupleCount = static_cast<unsigned int>((std::min)(
+					jointIndices.size() / indexElementSize,
+					jointWeights.size() / weightElementSize));
+				const unsigned int maxInfluencesPerJoint = static_cast<unsigned int>(kMaxSkinInfluences);
+				rawJoints.reserve(static_cast<size_t>(tupleCount) * maxInfluencesPerJoint);
+				rawWeights.reserve(static_cast<size_t>(tupleCount) * maxInfluencesPerJoint);
+
+				for (unsigned int tuple = 0; tuple < tupleCount; ++tuple) {
+					for (unsigned int slot = 0; slot < maxInfluencesPerJoint; ++slot) {
+						if (slot < indexElementSize && slot < weightElementSize) {
+							rawJoints.push_back(static_cast<uint32_t>(jointIndices[static_cast<size_t>(tuple) * indexElementSize + slot]));
+							rawWeights.push_back(jointWeights[static_cast<size_t>(tuple) * weightElementSize + slot]);
+						}
+						else {
+							rawJoints.push_back(0u);
+							rawWeights.push_back(0.0f);
+						}
+					}
+				}
+
+				jointInterp = GetInterpolationType(jointIndexPrimvar.GetInterpolation());
+				weightInterp = GetInterpolationType(jointWeightPrimvar.GetInterpolation());
+				vertexFlags |= VertexFlags::VERTEX_SKINNED;
+			}
+			else {
+				spdlog::warn(
+					"Mesh '{}' has BRNifly skinning primvars, but they could not be flattened at geometry sample time {}; importing as rigid geometry.",
+					primName,
+					geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue());
+			}
+		}
 	}
 
 	// allocate output buffers
@@ -570,6 +1315,31 @@ static void LoadGeom(
 		std::memcpy(dst, raw.data() + base, numComponents * sizeof(float));
 	};
 
+	auto sampleScalar = [&](const std::vector<float>& raw,
+		InterpolationType interp,
+		size_t faceIndex,
+		size_t fvIndex,
+		uint32_t vertIndex,
+		float defaultValue,
+		bool& warned,
+		const char* attributeName) -> float
+	{
+		const size_t base = tupleBase(interp, faceIndex, fvIndex, vertIndex, 1);
+		if (base >= raw.size()) {
+			if (!warned) {
+				spdlog::warn(
+					"Mesh '{}' sampled '{}' scalar data out of range at geometry sample time {}; using default value {}.",
+					primName,
+					attributeName,
+					geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue(),
+					defaultValue);
+				warned = true;
+			}
+			return defaultValue;
+		}
+		return raw[base];
+	};
+
 	auto copyTupleUInt = [&](std::byte* dst, const std::vector<uint32_t>& raw,
 		size_t numComponents, InterpolationType interp,
 		size_t faceIndex, size_t fvIndex, uint32_t vertIndex,
@@ -596,16 +1366,19 @@ static void LoadGeom(
 	bool warnedInvalidPositionIndex = false;
 	bool warnedInvalidFaceVertexIndex = false;
 	bool warnedNormalTupleRange = false;
+	bool warnedTangentTupleRange = false;
 	bool warnedUvTupleRange = false;
 	bool warnedColorTupleRange = false;
+	bool warnedOpacityTupleRange = false;
 	bool warnedJointTupleRange = false;
 	bool warnedWeightTupleRange = false;
+	size_t alphaRejectedTriangles = 0;
 
 	size_t fvOffset = 0;
 	size_t outVertex = 0;
 	for (size_t f = 0; f < faceVertCounts.size(); ++f) {
 		int fc = faceVertCounts[f];
-		if ((!subset || useFace[f]) && !holedFaces[f]) {
+		if ((!limitToSubsetFaces || useFace[f]) && !holedFaces[f]) {
 			for (int i = 1; i + 1 < fc; ++i) {
 				int cornerIdxs[3] = { 0, reverseMeshWinding ? (i + 1) : i, reverseMeshWinding ? i : (i + 1) };
 				uint32_t triVertIdxs[3] = {};
@@ -646,6 +1419,24 @@ static void LoadGeom(
 					continue;
 				}
 
+				if (options.vertexAlphaCutoff.has_value() && gotOpacity) {
+					bool allBelowCutoff = true;
+					for (int c = 0; c < 3; ++c) {
+						const size_t fvIndex = fvOffset + static_cast<size_t>(cornerIdxs[c]);
+						const uint32_t vertIdx = triVertIdxs[c];
+						const float opacity = sampleScalar(rawOpacities, opacityInterp, f, fvIndex, vertIdx, 1.0f, warnedOpacityTupleRange, "displayOpacity");
+						if (opacity >= options.vertexAlphaCutoff.value()) {
+							allBelowCutoff = false;
+							break;
+						}
+					}
+
+					if (allBelowCutoff) {
+						++alphaRejectedTriangles;
+						continue;
+					}
+				}
+
 				for (int c = 0; c < 3; ++c) {
 					size_t fvIndex = fvOffset + cornerIdxs[c];
 					uint32_t vertIdx = triVertIdxs[c];
@@ -660,6 +1451,10 @@ static void LoadGeom(
 						copyTupleFloat(outPtr + MeshVertexLayout::NormalOffset, rawNormals, 3, normInterp, f, fvIndex, vertIdx, warnedNormalTupleRange, "normals");
 					else
 						std::memcpy(outPtr + MeshVertexLayout::NormalOffset, &defaultNormal, sizeof(defaultNormal));
+
+					if (gotTangents) {
+						copyTupleFloat(outPtr + MeshVertexLayout::TangentOffset(vertexFlags), rawTangents, 4, tangentInterp, f, fvIndex, vertIdx, warnedTangentTupleRange, "brnifly:tangents");
+					}
 
                     if (primaryUvSetIndex < uvSetBuildData.size()) {
                         DirectX::XMFLOAT2 packedUv = { 0.0f, 0.0f };
@@ -704,6 +1499,13 @@ static void LoadGeom(
 	if (hasSkinning) {
 		skinningData.value()->resize(outVertex * static_cast<size_t>(skinningVertexSize));
 	}
+	if (alphaRejectedTriangles > 0) {
+		spdlog::info(
+			"Mesh '{}' rejected {} triangle(s) using primvars:displayOpacity and alpha cutoff {}.",
+			primName,
+			alphaRejectedTriangles,
+			options.vertexAlphaCutoff.value());
+	}
 }
 
 }
@@ -711,6 +1513,175 @@ static void LoadGeom(
 // Public API
 
 namespace USDGeometryExtractor {
+
+namespace {
+	struct AtomicBenchmarkStats {
+		std::atomic<std::uint64_t> submeshes{ 0 };
+		std::atomic<std::uint64_t> clodCacheHits{ 0 };
+		std::atomic<std::uint64_t> clodCacheMisses{ 0 };
+		std::atomic<std::uint64_t> loadGeomMs{ 0 };
+		std::atomic<std::uint64_t> clodBuildMs{ 0 };
+		std::atomic<std::uint64_t> clodSaveMs{ 0 };
+		std::atomic<std::uint64_t> clodReloadMs{ 0 };
+	};
+
+	AtomicBenchmarkStats g_benchmarkStats;
+
+	br::import::RenderablePrototypeGeometry BuildPrototypeGeometry(
+		const std::vector<std::byte>& rawData,
+		unsigned int vertexSize,
+		unsigned int vertexFlags,
+		const std::vector<UINT32>& indices)
+	{
+		br::import::RenderablePrototypeGeometry geometry;
+		geometry.vertexFlags = vertexFlags;
+		geometry.indices.assign(indices.begin(), indices.end());
+		if (vertexSize == 0u) {
+			return geometry;
+		}
+
+		const size_t vertexCount = rawData.size() / static_cast<size_t>(vertexSize);
+		geometry.vertices.reserve(vertexCount);
+		for (size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			const std::byte* vertexBytes = rawData.data() + vertexIndex * static_cast<size_t>(vertexSize);
+			br::import::RenderablePrototypeVertex vertex{};
+			std::memcpy(std::addressof(vertex.position), vertexBytes + MeshVertexLayout::PositionOffset, sizeof(vertex.position));
+			if ((vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u) {
+				std::memcpy(std::addressof(vertex.normal), vertexBytes + MeshVertexLayout::NormalOffset, sizeof(vertex.normal));
+			}
+			if ((vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u) {
+				std::memcpy(std::addressof(vertex.uv), vertexBytes + MeshVertexLayout::TexcoordOffset(vertexFlags), sizeof(vertex.uv));
+			}
+			if ((vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u) {
+				std::memcpy(std::addressof(vertex.tangent), vertexBytes + MeshVertexLayout::TangentOffset(vertexFlags), sizeof(vertex.tangent));
+			}
+			if ((vertexFlags & VertexFlags::VERTEX_COLORS) != 0u) {
+				DirectX::XMFLOAT3 color{};
+				std::memcpy(std::addressof(color), vertexBytes + MeshVertexLayout::ColorOffset(vertexFlags), sizeof(color));
+				vertex.color = DirectX::XMFLOAT4{ color.x, color.y, color.z, 1.0f };
+			}
+			geometry.vertices.push_back(vertex);
+		}
+		return geometry;
+	}
+
+	float MedianPositive(std::vector<float> values)
+	{
+		values.erase(
+			std::remove_if(values.begin(), values.end(), [](float v) { return !std::isfinite(v) || v <= 0.0f; }),
+			values.end());
+		if (values.empty()) {
+			return 0.0f;
+		}
+		const auto middle = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2u);
+		std::nth_element(values.begin(), middle, values.end());
+		return *middle;
+	}
+
+	float EstimateObjectSurfaceTexelDensity(
+		const std::vector<std::byte>& vertices,
+		unsigned int vertexStrideBytes,
+		const std::vector<UINT32>& indices,
+		const std::vector<MeshUvSetData>& uvSets)
+	{
+		if (vertexStrideBytes == 0u || uvSets.empty()) {
+			return 1.0f;
+		}
+
+		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexStrideBytes);
+		if (uvSets.front().values.size() < vertexCount) {
+			return 1.0f;
+		}
+
+		auto readPosition = [&](std::uint32_t index) {
+			DirectX::XMFLOAT3 position{};
+			std::memcpy(
+				std::addressof(position),
+				vertices.data() + static_cast<std::size_t>(index) * vertexStrideBytes + MeshVertexLayout::PositionOffset,
+				sizeof(position));
+			return position;
+		};
+		auto sub3 = [](const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b) {
+			return DirectX::XMFLOAT3{ a.x - b.x, a.y - b.y, a.z - b.z };
+		};
+		auto lengthCross = [](const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b) {
+			const float x = a.y * b.z - a.z * b.y;
+			const float y = a.z * b.x - a.x * b.z;
+			const float z = a.x * b.y - a.y * b.x;
+			return std::sqrt(x * x + y * y + z * z);
+		};
+
+		std::vector<float> densities;
+		densities.reserve(indices.size() / 3u);
+		for (std::size_t i = 0; i + 2u < indices.size(); i += 3u) {
+			const std::uint32_t i0 = indices[i + 0u];
+			const std::uint32_t i1 = indices[i + 1u];
+			const std::uint32_t i2 = indices[i + 2u];
+			if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+				continue;
+			}
+
+			const DirectX::XMFLOAT3 p0 = readPosition(i0);
+			const DirectX::XMFLOAT3 p1 = readPosition(i1);
+			const DirectX::XMFLOAT3 p2 = readPosition(i2);
+			const float objectArea = 0.5f * lengthCross(sub3(p1, p0), sub3(p2, p0));
+			if (!std::isfinite(objectArea) || objectArea <= 1.0e-12f) {
+				continue;
+			}
+
+			const DirectX::XMFLOAT2 uv0 = uvSets.front().values[i0];
+			const DirectX::XMFLOAT2 uv1 = uvSets.front().values[i1];
+			const DirectX::XMFLOAT2 uv2 = uvSets.front().values[i2];
+			const float du1 = uv1.x - uv0.x;
+			const float dv1 = uv1.y - uv0.y;
+			const float du2 = uv2.x - uv0.x;
+			const float dv2 = uv2.y - uv0.y;
+			const float uvArea = 0.5f * std::abs(du1 * dv2 - dv1 * du2);
+			if (!std::isfinite(uvArea) || uvArea <= 1.0e-12f) {
+				continue;
+			}
+
+			densities.push_back(std::sqrt(uvArea / objectArea));
+		}
+
+		const float density = MedianPositive(std::move(densities));
+		return density > 0.0f ? density : 1.0f;
+	}
+
+	std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
+	{
+		return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count());
+	}
+
+	void AddMs(std::atomic<std::uint64_t>& target, std::chrono::steady_clock::time_point begin)
+	{
+		target.fetch_add(ElapsedMs(begin, std::chrono::steady_clock::now()), std::memory_order_relaxed);
+	}
+}
+
+void ResetBenchmarkStats()
+{
+	g_benchmarkStats.submeshes.store(0, std::memory_order_relaxed);
+	g_benchmarkStats.clodCacheHits.store(0, std::memory_order_relaxed);
+	g_benchmarkStats.clodCacheMisses.store(0, std::memory_order_relaxed);
+	g_benchmarkStats.loadGeomMs.store(0, std::memory_order_relaxed);
+	g_benchmarkStats.clodBuildMs.store(0, std::memory_order_relaxed);
+	g_benchmarkStats.clodSaveMs.store(0, std::memory_order_relaxed);
+	g_benchmarkStats.clodReloadMs.store(0, std::memory_order_relaxed);
+}
+
+BenchmarkStats GetBenchmarkStats()
+{
+	BenchmarkStats stats;
+	stats.submeshes = g_benchmarkStats.submeshes.load(std::memory_order_relaxed);
+	stats.clodCacheHits = g_benchmarkStats.clodCacheHits.load(std::memory_order_relaxed);
+	stats.clodCacheMisses = g_benchmarkStats.clodCacheMisses.load(std::memory_order_relaxed);
+	stats.loadGeomMs = g_benchmarkStats.loadGeomMs.load(std::memory_order_relaxed);
+	stats.clodBuildMs = g_benchmarkStats.clodBuildMs.load(std::memory_order_relaxed);
+	stats.clodSaveMs = g_benchmarkStats.clodSaveMs.load(std::memory_order_relaxed);
+	stats.clodReloadMs = g_benchmarkStats.clodReloadMs.load(std::memory_order_relaxed);
+	return stats;
+}
 
 std::optional<UsdSkelSkinningQuery> GetSkinningQuery(
 	const UsdGeomMesh& mesh,
@@ -721,7 +1692,8 @@ std::optional<UsdSkelSkinningQuery> GetSkinningQuery(
 	if (!skel)
 		return std::nullopt;
 
-	skelCache.Populate(UsdSkelRoot(skel.GetPrim()), UsdPrimDefaultPredicate);
+	if (const UsdSkelRoot skelRoot = UsdSkelRoot::Find(skel.GetPrim()))
+		skelCache.Populate(skelRoot, UsdPrimDefaultPredicate);
 	VtTokenArray skelJoints, meshJoints;
 	skel.GetJointsAttr().Get(&skelJoints);
 	bindAPI.GetJointsAttr().Get(&meshJoints);
@@ -740,9 +1712,9 @@ std::optional<UsdSkelSkinningQuery> GetSkinningQuery(
 	return skinQ;
 }
 
-MeshPreprocessResult ExtractSubMesh(
+MeshPreprocessResult ExtractSubMeshGroup(
 	const UsdGeomMesh& mesh,
-	const std::optional<UsdGeomSubset>& subset,
+	const std::vector<UsdGeomSubset>& subsets,
 	const UsdStageRefPtr& stage,
 	UsdTimeCode geomTimeCode,
 	double metersPerUnit,
@@ -751,25 +1723,134 @@ MeshPreprocessResult ExtractSubMesh(
 	const VtTokenArray& skelJointOrderRaw,
 	const VtTokenArray& skelJointOrderMapped,
 	bool doubleSidedVoxelSourceNormals,
-	const std::string& sourceIdentifierOverride)
+	const std::string& sourceIdentifierOverride,
+	std::uint32_t tessellationFactor,
+	const ExtractOptions& options)
 {
-	std::string subsetName = subset
-		? subset->GetPrim().GetName().GetString()
-		: std::string{};
+	std::string subsetName;
+	if (!subsets.empty()) {
+		for (const UsdGeomSubset& subset : subsets) {
+			if (!subsetName.empty()) {
+				subsetName += "+";
+			}
+			subsetName += subset.GetPrim().GetName().GetString();
+		}
+	}
 
 	auto cacheIdentity = CLodCacheLoader::BuildIdentity(mesh, stage, subsetName, geomTimeCode, sourceIdentifierOverride);
+	if (subsets.size() > 1u) {
+		cacheIdentity.sourceIdentifier += "#combined_usd_subsets=" + std::to_string(subsets.size());
+	}
+	if (tessellationFactor > 1u) {
+		cacheIdentity.sourceIdentifier += "#usd_tessellation_factor=" + std::to_string(tessellationFactor);
+	}
+	if (options.vertexAlphaCutoff.has_value()) {
+		cacheIdentity.sourceIdentifier += "#usd_vertex_alpha_cutoff=" + std::to_string(options.vertexAlphaCutoff.value());
+	}
+	if (options.brniflyVertexAlpha) {
+		cacheIdentity.sourceIdentifier += "#brnifly_vertex_alpha=1";
+	}
+	if (!options.brniflyZBufferWrite) {
+		cacheIdentity.sourceIdentifier += "#brnifly_zbuffer_write=0";
+	}
+	if (options.brniflyDecal) {
+		cacheIdentity.sourceIdentifier += "#brnifly_decal=1";
+	}
+	if (options.brniflyDynamicDecal) {
+		cacheIdentity.sourceIdentifier += "#brnifly_dynamic_decal=1";
+	}
+	if (options.brniflyModelSpaceNormals) {
+		cacheIdentity.sourceIdentifier += "#brnifly_model_space_normals=1";
+	}
+	if (options.importSkinningAsRigidBindPose) {
+		cacheIdentity.sourceIdentifier += "#usd_skinning_as_rigid_bind_pose=1";
+	}
+	else if (skinQ) {
+		// A whole-asset assembly can only pick up skinning changes if its source
+		// mesh CLod pages are invalidated too. In particular, simplified trunk
+		// groups carry the joint/weight payload chosen by this build.
+		cacheIdentity.sourceIdentifier += kSkinningPayloadAbiSuffix;
+	}
+	if (options.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None) {
+		cacheIdentity.sourceIdentifier += "#object_surface_sampling=" +
+			std::to_string(static_cast<std::uint32_t>(options.objectSurfaceSamplingMode));
+		cacheIdentity.sourceIdentifier += "#object_surface_sampling_config=" + options.objectSurfaceSamplingConfigHash;
+	}
+	if (options.objectSurfaceUseTriplanarProjection) {
+		cacheIdentity.sourceIdentifier += "#object_surface_triplanar_projection=1";
+		cacheIdentity.sourceIdentifier += "#object_surface_sampling_config=" + options.objectSurfaceSamplingConfigHash;
+	}
+	if (options.objectSurfaceUseTripleTapStochastic) {
+		cacheIdentity.sourceIdentifier += "#object_surface_triple_tap_stochastic=1";
+		cacheIdentity.sourceIdentifier += "#object_surface_sampling_config=" + options.objectSurfaceSamplingConfigHash;
+	}
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
-	spdlog::info("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
+	spdlog::debug("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
 		cacheIdentity.primPath, subsetName, cacheIdentity.sourceIdentifier);
-	spdlog::info("    Geometry sample time for prim='{}' is {}",
+	spdlog::debug("    Geometry sample time for prim='{}' is {}",
 		cacheIdentity.primPath,
 		geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue());
 
-	auto prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+	g_benchmarkStats.submeshes.fetch_add(1, std::memory_order_relaxed);
+	const auto cacheLoadBegin = std::chrono::steady_clock::now();
+	std::optional<ClusterLODPrebuiltData> prebuiltData;
+	prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+	AddMs(g_benchmarkStats.clodReloadMs, cacheLoadBegin);
+	if (prebuiltData.has_value()) {
+		g_benchmarkStats.clodCacheHits.fetch_add(1, std::memory_order_relaxed);
+	}
+	else {
+		g_benchmarkStats.clodCacheMisses.fetch_add(1, std::memory_order_relaxed);
+	}
 	if (prebuiltData.has_value())
-		spdlog::info("    Cache HIT for prim='{}' subset='{}'", cacheIdentity.primPath, subsetName);
+		spdlog::debug("    Cache HIT for prim='{}' subset='{}'", cacheIdentity.primPath, subsetName);
 	else
-		spdlog::info("    Cache MISS for prim='{}' subset='{}' — will build", cacheIdentity.primPath, subsetName);
+		spdlog::debug("    Cache MISS for prim='{}' subset='{}' — will build", cacheIdentity.primPath, subsetName);
+
+	std::unique_lock<std::mutex> cacheBuildLock;
+	if (!prebuiltData.has_value()) {
+		cacheBuildLock = std::unique_lock<std::mutex>(GetClusterLODCacheBuildMutex(cacheIdentity));
+		const auto lockedReloadBegin = std::chrono::steady_clock::now();
+		prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+		AddMs(g_benchmarkStats.clodReloadMs, lockedReloadBegin);
+		if (prebuiltData.has_value()) {
+			g_benchmarkStats.clodCacheHits.fetch_add(1, std::memory_order_relaxed);
+			spdlog::info(
+				"    Cache HIT for prim='{}' subset='{}' after waiting for another worker; skipping duplicate build.",
+				cacheIdentity.primPath,
+				subsetName);
+		}
+	}
+
+	const bool cacheHitBeforeBuild = prebuiltData.has_value();
+	if (prebuiltData.has_value() && options.skipCachedClusterLODMeshBuilds) {
+		spdlog::debug("    Cache HIT for prim='{}' subset='{}'; skipping geometry extraction and CLod rebuild.",
+			cacheIdentity.primPath,
+			subsetName);
+
+		TfToken subdivisionScheme = UsdGeomTokens->catmullClark;
+		mesh.GetSubdivisionSchemeAttr().Get(&subdivisionScheme);
+		const bool previewSubdiv = (subdivisionScheme != UsdGeomTokens->none);
+		const bool previewTopology =
+			HasMultipleAuthoredTimeSamples(mesh.GetFaceVertexCountsAttr()) ||
+			HasMultipleAuthoredTimeSamples(mesh.GetFaceVertexIndicesAttr()) ||
+			HasMultipleAuthoredTimeSamples(mesh.GetHoleIndicesAttr());
+
+		MeshIngestBuilder dummyIngest(0u, 0u, 0u, GetDefaultBuilderSettings());
+		MeshPreprocessResult result(
+			std::move(dummyIngest),
+			std::move(cacheIdentity),
+			std::move(prebuiltData),
+			previewSubdiv || previewTopology);
+		result.sourcePrimPath = mesh.GetPrim().GetPath().GetString();
+		result.geometricDisplacementOptIn = options.geometricDisplacementOptIn;
+		result.objectSurfaceSamplingMode = options.objectSurfaceSamplingMode;
+		result.objectSurfaceUseTriplanarProjection = options.objectSurfaceUseTriplanarProjection;
+		result.objectSurfaceUseTripleTapStochastic = options.objectSurfaceUseTripleTapStochastic;
+		result.clodCacheHit = true;
+		result.clodCacheSkippedBuild = true;
+		return result;
+	}
 
 	// Load raw geometry
 	std::unique_ptr<std::vector<std::byte>> rawData;
@@ -779,16 +1860,62 @@ MeshPreprocessResult ExtractSubMesh(
 	std::vector<UINT32> indices;
 	unsigned int vertexFlags = 0;
     std::vector<MeshUvSetData> uvSets;
+	const auto loadGeomBegin = std::chrono::steady_clock::now();
 	LoadGeom(rawData, skinningData, vertexSize, skinningVertexSize,
-		indices, vertexFlags, uvSets, mesh, subset, geomTimeCode, metersPerUnit, requiredUvSetNames,
-		skinQ, skelJointOrderRaw, skelJointOrderMapped);
+		indices, vertexFlags, uvSets, mesh, subsets, geomTimeCode, metersPerUnit, requiredUvSetNames,
+		skinQ, skelJointOrderRaw, skelJointOrderMapped, options);
+	TessellateExtractedTriangles(
+		rawData,
+		skinningData,
+		vertexSize,
+		skinningVertexSize,
+		indices,
+		vertexFlags,
+		uvSets,
+		tessellationFactor,
+		mesh.GetPrim().GetPath().GetString());
+	AddMs(g_benchmarkStats.loadGeomMs, loadGeomBegin);
+
+	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = options.objectSurfaceSamplingMode;
+	float objectSurfaceTexelDensity = rawData
+		? EstimateObjectSurfaceTexelDensity(*rawData, vertexSize, indices, uvSets)
+		: 1.0f;
+	if (!std::isfinite(objectSurfaceTexelDensity) || objectSurfaceTexelDensity <= 0.0f) {
+		objectSurfaceTexelDensity = 1.0f;
+		if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic ||
+			objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+			spdlog::warn(
+				"Object Reyes surface sampling for prim='{}' subset='{}' could not estimate texel density; using 1.0.",
+				cacheIdentity.primPath,
+				subsetName);
+		}
+	}
+	if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic) {
+		spdlog::info(
+			"Object Reyes tri-planar stochastic sampling enabled for prim='{}' subset='{}' density={}.",
+			cacheIdentity.primPath,
+			subsetName,
+			objectSurfaceTexelDensity);
+	}
+	else if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+		spdlog::info(
+			"Object Reyes atlas-baked height sampling enabled for prim='{}' subset='{}' density={} triplanarProjection={} tripleTapStochastic={}.",
+			cacheIdentity.primPath,
+			subsetName,
+			objectSurfaceTexelDensity,
+			options.objectSurfaceUseTriplanarProjection,
+			options.objectSurfaceUseTripleTapStochastic);
+	}
 
 	const size_t loadedVertCount = rawData ? (rawData->size() / static_cast<size_t>(vertexSize > 0 ? vertexSize : 1)) : 0;
 	spdlog::info("    LoadGeom done: {} verts, {} indices, vertexSize={}, flags=0x{:X}",
 		loadedVertCount, indices.size(), vertexSize, vertexFlags);
+	auto prototypeGeometry = rawData
+		? BuildPrototypeGeometry(*rawData, vertexSize, vertexFlags, indices)
+		: br::import::RenderablePrototypeGeometry{};
 
 	// Populate MeshIngestBuilder
-	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
+	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings(cacheIdentity.sourceIdentifier);
 	builderSettings.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	MeshIngestBuilder ingest(vertexSize,
 		(skinningData && *skinningData) ? skinningVertexSize : 0,
@@ -814,20 +1941,69 @@ MeshPreprocessResult ExtractSubMesh(
 	ingest.ReserveIndices(indices.size());
 	ingest.AppendIndices(indices.data(), indices.size());
 
-	// Build CLod cache if needed
-	if (!prebuiltData.has_value()) {
-		spdlog::info("    Building CLod artifacts...");
-		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
-		ClusterLODPrebuiltData savedPrebuiltData;
-		spdlog::info("    CLod artifacts built: {} groups, {} nodes",
-			artifacts.prebuiltData.groups.size(), artifacts.prebuiltData.nodes.size());
+	std::shared_ptr<const ClusterLODPrebuildArtifacts> transientArtifacts;
+	bool builtClusterLODArtifacts = false;
 
-		spdlog::info("    Saving cache to disk...");
+	// Build CLod cache if needed. Assembly construction can request retained
+	// artifacts even on cache hits because it needs page blobs, not metadata only.
+	if (!prebuiltData.has_value() || options.retainClusterLODArtifacts) {
+		spdlog::info(
+			"    Building CLod artifacts: source='{}' prim='{}' subset='{}' vertices={} triangles={} reason={}.",
+			cacheIdentity.sourceIdentifier,
+			cacheIdentity.primPath,
+			subsetName,
+			vertexCount,
+			indices.size() / 3u,
+			prebuiltData.has_value() ? "assembly-retained-artifacts" : "cache-miss");
+		const auto clodBuildBegin = std::chrono::steady_clock::now();
+		ClusterLODPrebuildArtifacts artifacts;
+		{
+			ScopedCLodBuildHeartbeat heartbeat(
+				cacheIdentity.sourceIdentifier,
+				cacheIdentity.primPath,
+				subsetName,
+				vertexCount,
+				indices.size() / 3u);
+			artifacts = ingest.BuildClusterLODArtifacts();
+		}
+		builtClusterLODArtifacts = true;
+		AddMs(g_benchmarkStats.clodBuildMs, clodBuildBegin);
+		ClusterLODPrebuiltData savedPrebuiltData;
+		const auto clodBuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - clodBuildBegin).count();
+		spdlog::info(
+			"    CLod artifacts built: source='{}' prim='{}' subset='{}' elapsed_ms={} groups={} nodes={} triangle_pages={} voxel_pages={} mesh_pages={}.",
+			cacheIdentity.sourceIdentifier,
+			cacheIdentity.primPath,
+			subsetName,
+			clodBuildMs,
+			artifacts.prebuiltData.groups.size(),
+			artifacts.prebuiltData.nodes.size(),
+			artifacts.prebuiltData.trianglePageCount,
+			artifacts.prebuiltData.voxelPageCount,
+			artifacts.cacheBuildData.meshPageBlobs.size());
+
+		if (!prebuiltData.has_value()) {
+			spdlog::info(
+				"    Saving CLod cache: source='{}' prim='{}' subset='{}'.",
+				cacheIdentity.sourceIdentifier,
+				cacheIdentity.primPath,
+				subsetName);
+		const auto clodSaveBegin = std::chrono::steady_clock::now();
 		if (CLodCacheLoader::SavePrebuiltLocked(cacheIdentity, artifacts.prebuiltData,
 			artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData))
 		{
-			spdlog::info("    Cache SAVED successfully.");
+			AddMs(g_benchmarkStats.clodSaveMs, clodSaveBegin);
+				spdlog::info(
+					"    CLod cache saved: source='{}' prim='{}' subset='{}' elapsed_ms={}.",
+					cacheIdentity.sourceIdentifier,
+					cacheIdentity.primPath,
+					subsetName,
+					std::chrono::duration_cast<std::chrono::milliseconds>(
+						std::chrono::steady_clock::now() - clodSaveBegin).count());
+			const auto clodReloadBegin = std::chrono::steady_clock::now();
 			auto diskBackedPrebuilt = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+			AddMs(g_benchmarkStats.clodReloadMs, clodReloadBegin);
 			if (diskBackedPrebuilt.has_value())
 				prebuiltData = std::move(diskBackedPrebuilt);
 			else {
@@ -839,8 +2015,11 @@ MeshPreprocessResult ExtractSubMesh(
 		}
 		else {
 			spdlog::warn("    Cache save FAILED — using in-memory artifacts only.");
-			prebuiltData = std::move(artifacts.prebuiltData);
+			prebuiltData = artifacts.prebuiltData;
 		}
+		}
+
+		transientArtifacts = std::make_shared<ClusterLODPrebuildArtifacts>(std::move(artifacts));
 	}
 
 	TfToken subdivisionScheme = UsdGeomTokens->catmullClark;
@@ -851,16 +2030,586 @@ MeshPreprocessResult ExtractSubMesh(
 		HasMultipleAuthoredTimeSamples(mesh.GetFaceVertexIndicesAttr()) ||
 		HasMultipleAuthoredTimeSamples(mesh.GetHoleIndicesAttr());
 
-	return MeshPreprocessResult(
+	MeshPreprocessResult result(
 		std::move(ingest),
 		std::move(cacheIdentity),
 		std::move(prebuiltData),
-		previewSubdiv || previewTopology);
+		previewSubdiv || previewTopology,
+		std::move(prototypeGeometry));
+	result.sourcePrimPath = mesh.GetPrim().GetPath().GetString();
+	result.geometricDisplacementOptIn = options.geometricDisplacementOptIn;
+	result.objectSurfaceSamplingMode = objectSurfaceSamplingMode;
+	result.objectSurfaceUseTriplanarProjection = options.objectSurfaceUseTriplanarProjection;
+	result.objectSurfaceUseTripleTapStochastic = options.objectSurfaceUseTripleTapStochastic;
+	result.objectSurfaceTexelDensity = objectSurfaceTexelDensity;
+	result.transientArtifacts = std::move(transientArtifacts);
+	result.clodCacheHit = cacheHitBeforeBuild;
+	result.clodCacheBuilt = builtClusterLODArtifacts;
+	return result;
+}
+
+MeshPreprocessResult ExtractSubMesh(
+	const UsdGeomMesh& mesh,
+	const std::optional<UsdGeomSubset>& subset,
+	const UsdStageRefPtr& stage,
+	UsdTimeCode geomTimeCode,
+	double metersPerUnit,
+	const std::vector<std::string>& requiredUvSetNames,
+	const std::optional<UsdSkelSkinningQuery>& skinQ,
+	const VtTokenArray& skelJointOrderRaw,
+	const VtTokenArray& skelJointOrderMapped,
+	bool doubleSidedVoxelSourceNormals,
+	const std::string& sourceIdentifierOverride,
+	std::uint32_t tessellationFactor,
+	const ExtractOptions& options)
+{
+	std::vector<UsdGeomSubset> subsets;
+	if (subset) {
+		subsets.push_back(*subset);
+	}
+	return ExtractSubMeshGroup(
+		mesh,
+		subsets,
+		stage,
+		geomTimeCode,
+		metersPerUnit,
+		requiredUvSetNames,
+		skinQ,
+		skelJointOrderRaw,
+		skelJointOrderMapped,
+		doubleSidedVoxelSourceNormals,
+		sourceIdentifierOverride,
+		tessellationFactor,
+		options);
+}
+
+ClusterLODAssemblyTransform AssemblyTransformFromUsdMatrix(
+	const GfMatrix4d& matrix,
+	double metersPerUnit)
+{
+	auto transformPoint = [&matrix](double x, double y, double z) {
+		return matrix.Transform(GfVec3d(x, y, z));
+	};
+
+	const GfVec3d origin = transformPoint(0.0, 0.0, 0.0);
+	const GfVec3d basisX = transformPoint(1.0, 0.0, 0.0) - origin;
+	const GfVec3d basisY = transformPoint(0.0, 1.0, 0.0) - origin;
+	const GfVec3d basisZ = transformPoint(0.0, 0.0, 1.0) - origin;
+
+	ClusterLODAssemblyTransform transform{};
+	transform.row0 = DirectX::XMFLOAT4(
+		static_cast<float>(basisX[0]),
+		static_cast<float>(basisY[0]),
+		static_cast<float>(basisZ[0]),
+		static_cast<float>(origin[0] * metersPerUnit));
+	transform.row1 = DirectX::XMFLOAT4(
+		static_cast<float>(basisX[1]),
+		static_cast<float>(basisY[1]),
+		static_cast<float>(basisZ[1]),
+		static_cast<float>(origin[1] * metersPerUnit));
+	transform.row2 = DirectX::XMFLOAT4(
+		static_cast<float>(basisX[2]),
+		static_cast<float>(basisY[2]),
+		static_cast<float>(basisZ[2]),
+		static_cast<float>(origin[2] * metersPerUnit));
+	return transform;
+}
+
+static GfMatrix4d GetAssemblyStageUpAxisCorrection(const UsdStageRefPtr& stage)
+{
+	const TfToken upAxis = UsdGeomGetStageUpAxis(stage);
+	if (upAxis == UsdGeomTokens->z) {
+		return GfMatrix4d(GfRotation(GfVec3d(1.0, 0.0, 0.0), -90.0), GfVec3d(0.0));
+	}
+	if (upAxis == UsdGeomTokens->x) {
+		return GfMatrix4d(GfRotation(GfVec3d(0.0, 1.0, 0.0), -90.0), GfVec3d(0.0));
+	}
+	return GfMatrix4d(1.0);
+}
+
+std::vector<AssemblyMeshInstance> EnumerateAssemblyMeshInstances(
+	const UsdStageRefPtr& stage,
+	UsdTimeCode geomTimeCode)
+{
+	std::vector<AssemblyMeshInstance> instances;
+	if (!stage) {
+		return instances;
+	}
+
+	std::vector<UsdGeomPointInstancer> pointInstancers;
+	std::vector<SdfPath> prototypeRoots;
+	std::set<std::string> prototypeRootStrings;
+	auto primRange = UsdPrimRange(stage->GetPseudoRoot());
+	for (auto primIt = primRange.begin(); primIt != primRange.end(); ++primIt) {
+		UsdGeomPointInstancer pointInstancer(*primIt);
+		if (!pointInstancer) {
+			continue;
+		}
+		pointInstancers.push_back(pointInstancer);
+		SdfPathVector targets;
+		if (pointInstancer.GetPrototypesRel().GetTargets(&targets)) {
+			for (const SdfPath& target : targets) {
+				if (prototypeRootStrings.insert(target.GetString()).second) {
+					prototypeRoots.push_back(target);
+				}
+			}
+		}
+	}
+
+	UsdGeomXformCache xformCache(geomTimeCode);
+	auto rootRange = UsdPrimRange(stage->GetPseudoRoot());
+	for (auto primIt = rootRange.begin(); primIt != rootRange.end(); ++primIt) {
+		UsdGeomMesh mesh(*primIt);
+		const bool underPrototype = mesh && std::any_of(
+			prototypeRoots.begin(),
+			prototypeRoots.end(),
+			[&](const SdfPath& root) { return mesh.GetPrim().GetPath().HasPrefix(root); });
+		if (!mesh || underPrototype) {
+			continue;
+		}
+		if (UsdGeomImageable imageable(mesh.GetPrim());
+			imageable && imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+			continue;
+		}
+		instances.push_back({ mesh, xformCache.GetLocalToWorldTransform(mesh.GetPrim()), {} });
+	}
+
+	for (const UsdGeomPointInstancer& pointInstancer : pointInstancers) {
+		SdfPathVector prototypeTargets;
+		if (!pointInstancer.GetPrototypesRel().GetTargets(&prototypeTargets) || prototypeTargets.empty()) {
+			continue;
+		}
+		VtIntArray protoIndices;
+		if (!pointInstancer.GetProtoIndicesAttr().Get(&protoIndices, geomTimeCode)) {
+			spdlog::warn("PointInstancer '{}' has no readable protoIndices for CLod assembly.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+		std::vector<bool> mask = pointInstancer.ComputeMaskAtTime(geomTimeCode);
+		VtTokenArray assemblyBindJoints;
+		pointInstancer.GetPrim().GetAttribute(TfToken("primvars:unreal:naniteAssembly:bindJoints"))
+			.Get(&assemblyBindJoints, geomTimeCode);
+		if (!mask.empty() && !UsdGeomPointInstancer::ApplyMaskToArray(mask, &protoIndices)) {
+			spdlog::warn("PointInstancer '{}' mask application to protoIndices failed for CLod assembly.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+		if (!mask.empty() && !assemblyBindJoints.empty() &&
+			!UsdGeomPointInstancer::ApplyMaskToArray(mask, &assemblyBindJoints)) {
+			spdlog::warn("PointInstancer '{}' mask application to assembly bind joints failed; bindings disabled.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			assemblyBindJoints.clear();
+		}
+		VtArray<GfMatrix4d> instanceTransforms;
+		if (!pointInstancer.ComputeInstanceTransformsAtTime(
+			&instanceTransforms,
+			geomTimeCode,
+			geomTimeCode,
+			UsdGeomPointInstancer::IncludeProtoXform,
+			UsdGeomPointInstancer::ApplyMask)) {
+			spdlog::warn("PointInstancer '{}' failed to compute CLod assembly instance transforms.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+
+		const size_t emittedCount = std::min(protoIndices.size(), instanceTransforms.size());
+		for (size_t prototypeIndex = 0; prototypeIndex < prototypeTargets.size(); ++prototypeIndex) {
+			const UsdPrim prototypeRoot = stage->GetPrimAtPath(prototypeTargets[prototypeIndex]);
+			if (!prototypeRoot) {
+				continue;
+			}
+			const GfMatrix4d prototypeRootWorldInverse =
+				xformCache.GetLocalToWorldTransform(prototypeRoot).GetInverse();
+			std::vector<std::pair<UsdGeomMesh, GfMatrix4d>> prototypeMeshes;
+			std::function<void(const UsdPrim&)> gatherPrototypeMeshes = [&](const UsdPrim& prim) {
+				if (prim.IsA<UsdGeomImageable>()) {
+					UsdGeomImageable imageable(prim);
+					if (imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+						return;
+					}
+				}
+				if (UsdGeomMesh mesh(prim); mesh) {
+					prototypeMeshes.emplace_back(
+						mesh,
+						xformCache.GetLocalToWorldTransform(mesh.GetPrim()) * prototypeRootWorldInverse);
+				}
+				for (const UsdPrim& child : prim.GetFilteredChildren(UsdTraverseInstanceProxies())) {
+					gatherPrototypeMeshes(child);
+				}
+			};
+			gatherPrototypeMeshes(prototypeRoot);
+
+			for (size_t instanceIndex = 0; instanceIndex < emittedCount; ++instanceIndex) {
+				if (protoIndices[instanceIndex] != static_cast<int>(prototypeIndex)) {
+					continue;
+				}
+				for (const auto& [mesh, prototypeLocal] : prototypeMeshes) {
+					instances.push_back({
+						mesh,
+						prototypeLocal * instanceTransforms[instanceIndex],
+						instanceIndex < assemblyBindJoints.size()
+							? assemblyBindJoints[instanceIndex].GetString()
+							: std::string{} });
+				}
+			}
+		}
+	}
+	return instances;
+}
+
+bool PathHasAnyPrefix(const SdfPath& path, const std::vector<SdfPath>& prefixes)
+{
+	for (const SdfPath& prefix : prefixes) {
+		if (path.HasPrefix(prefix)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+std::string NormalizeHeuristicName(std::string value)
+{
+	std::replace(value.begin(), value.end(), '-', '_');
+	std::replace(value.begin(), value.end(), ' ', '_');
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+		return static_cast<char>(std::tolower(c));
+	});
+	return value;
+}
+
+bool NameSuggestsDoubleSided(const std::string& value)
+{
+	const std::string normalized = NormalizeHeuristicName(value);
+	return normalized.find("twosided") != std::string::npos ||
+		normalized.find("two_sided") != std::string::npos ||
+		normalized.find("2sided") != std::string::npos ||
+		normalized.find("2_sided") != std::string::npos ||
+		normalized.find("doublesided") != std::string::npos ||
+		normalized.find("double_sided") != std::string::npos;
+}
+
+bool ShouldForceDoubleSidedByName(
+	const UsdShadeMaterial& material,
+	const std::optional<UsdGeomSubset>& subset,
+	const ExtractOptions& options)
+{
+	if (!options.enableDoubleSidedNameHeuristic) {
+		return false;
+	}
+	if (subset && NameSuggestsDoubleSided(subset->GetPrim().GetName().GetString())) {
+		return true;
+	}
+	if (material && NameSuggestsDoubleSided(material.GetPrim().GetName().GetString())) {
+		return true;
+	}
+	return false;
+}
+
+std::uint64_t StableHashString64(const std::string& value)
+{
+	std::uint64_t hash = 1469598103934665603ull;
+	for (const unsigned char c : value) {
+		hash ^= static_cast<std::uint64_t>(c);
+		hash *= 1099511628211ull;
+	}
+	return hash;
+}
+
+std::string Hex64(std::uint64_t value)
+{
+	std::array<char, 17> chars{};
+	constexpr char kHex[] = "0123456789abcdef";
+	for (int i = 15; i >= 0; --i) {
+		chars[static_cast<std::size_t>(i)] = kHex[value & 0xfull];
+		value >>= 4u;
+	}
+	return std::string(chars.data(), 16);
+}
+
+std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentity(
+	const UsdStageRefPtr& stage,
+	const std::string& sourceIdentifier,
+	UsdTimeCode geomTimeCode,
+	const UsdGeomMesh& identityMesh)
+{
+	if (!stage) {
+		return std::nullopt;
+	}
+
+	constexpr const char* kAssetAssemblySubsetName = "CLodAssetAssembly";
+	constexpr const char* kAssetAssemblyPrimName = "__CLodAssetAssembly";
+	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=21#authored_up_axis_baked=1#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
+
+	CLodCacheLoader::MeshCacheIdentity identity{};
+	(void)identityMesh;
+	(void)geomTimeCode;
+	identity.sourceIdentifier = NormalizeCacheSourcePath(sourceIdentifier);
+	if (identity.sourceIdentifier.empty() && stage->GetRootLayer()) {
+		identity.sourceIdentifier = NormalizeCacheSourcePath(stage->GetRootLayer()->GetIdentifier());
+		identity.subsetName = kAssetAssemblySubsetName;
+	}
+
+	const UsdPrim defaultPrim = stage->GetDefaultPrim();
+	identity.primPath = defaultPrim
+		? defaultPrim.GetPath().GetString() + "/" + kAssetAssemblyPrimName
+		: std::string("/") + kAssetAssemblyPrimName;
+	identity.subsetName = kAssetAssemblySubsetName;
+	identity.sourceIdentifier += kAssetAssemblyAbiSuffix;
+	identity.sourceIdentifier += kSkinningPayloadAbiSuffix;
+	return identity;
+}
+
+std::string BuildWholeAssetAssemblyBucketIdentitySuffix(
+	bool skinned,
+	std::uint64_t skinDomain,
+	const std::string& materialPath)
+{
+	std::string suffix;
+	if (skinned) {
+		suffix += "#skinned=1";
+		suffix += "#skin_domain=" + Hex64(skinDomain);
+	}
+	if (!materialPath.empty()) {
+		suffix += "#material_domain=" + Hex64(StableHashString64(materialPath));
+	}
+	return suffix;
+}
+
+void AppendWholeAssetAssemblyBucketIdentity(
+	CLodCacheLoader::MeshCacheIdentity& identity,
+	bool skinned,
+	std::uint64_t skinDomain,
+	const std::string& materialPath)
+{
+	identity.sourceIdentifier += BuildWholeAssetAssemblyBucketIdentitySuffix(skinned, skinDomain, materialPath);
+}
+
+std::optional<MeshPreprocessResult> BuildInstancedAssemblyCache(
+	const UsdStageRefPtr& stage,
+	const std::string& sourceIdentifier,
+	UsdTimeCode geomTimeCode,
+	const std::vector<const MeshPreprocessResult*>& preprocessedSubmeshes,
+	const std::string& identitySuffix)
+{
+	std::vector<UsdGeomPointInstancer> pointInstancers;
+
+	auto primRange = UsdPrimRange(stage->GetPseudoRoot());
+	for (auto primIt = primRange.begin(); primIt != primRange.end(); ++primIt) {
+		UsdGeomPointInstancer pointInstancer(*primIt);
+		if (!pointInstancer) {
+			continue;
+		}
+
+		pointInstancers.push_back(pointInstancer);
+	}
+
+	if (pointInstancers.empty()) {
+		return std::nullopt;
+	}
+
+	std::unordered_map<std::string, std::vector<size_t>> resultsBySourcePrim;
+	for (size_t resultIndex = 0; resultIndex < preprocessedSubmeshes.size(); ++resultIndex) {
+		const MeshPreprocessResult* submeshPtr = preprocessedSubmeshes[resultIndex];
+		if (!submeshPtr) {
+			continue;
+		}
+		const MeshPreprocessResult& submesh = *submeshPtr;
+		if (!submesh.transientArtifacts) {
+			continue;
+		}
+		resultsBySourcePrim[submesh.sourcePrimPath].push_back(resultIndex);
+	}
+	if (resultsBySourcePrim.empty()) {
+		spdlog::warn("USD point-instancer assembly requested, but no transient CLod artifacts were retained.");
+		return std::nullopt;
+	}
+
+	std::vector<ClusterLODAssemblyPart> parts;
+	std::unordered_map<size_t, uint32_t> partByResultIndex;
+	auto addPart = [&](size_t resultIndex) -> uint32_t {
+		const auto existing = partByResultIndex.find(resultIndex);
+		if (existing != partByResultIndex.end()) {
+			return existing->second;
+		}
+
+		const MeshPreprocessResult& submesh = *preprocessedSubmeshes[resultIndex];
+		if (!submesh.transientArtifacts) {
+			throw std::runtime_error("USD assembly part is missing retained CLod artifacts");
+		}
+		const uint32_t partIndex = static_cast<uint32_t>(parts.size());
+		parts.push_back(ClusterLODAssemblyPart{
+			.artifacts = submesh.transientArtifacts.get(),
+			.coverageVertices = &submesh.ingest.GetVertices(),
+			.coverageIndices = &submesh.ingest.GetIndices(),
+			.coverageVertexSize = submesh.ingest.GetVertexSize(),
+			.doubleSidedCoverageTriangles = submesh.forceDoubleSidedPreview });
+		partByResultIndex.emplace(resultIndex, partIndex);
+		return partIndex;
+	};
+
+	std::vector<ClusterLODAssemblyInstanceSpec> instances;
+	UsdGeomMesh firstRootMesh;
+	const double metersPerUnit = UsdGeomGetStageMetersPerUnit(stage);
+	const GfMatrix4d upAxisCorrection = GetAssemblyStageUpAxisCorrection(stage);
+	for (const AssemblyMeshInstance& meshInstance : EnumerateAssemblyMeshInstances(stage, geomTimeCode)) {
+		const auto found = resultsBySourcePrim.find(meshInstance.mesh.GetPrim().GetPath().GetString());
+		if (found == resultsBySourcePrim.end()) {
+			continue;
+		}
+		if (!firstRootMesh) {
+			firstRootMesh = meshInstance.mesh;
+		}
+		const ClusterLODAssemblyTransform transform =
+			AssemblyTransformFromUsdMatrix(meshInstance.localToStage * upAxisCorrection, metersPerUnit);
+		for (size_t resultIndex : found->second) {
+			instances.push_back(ClusterLODAssemblyInstanceSpec{
+				.partIndex = addPart(resultIndex),
+				.rootNode = 0u,
+				.transform = transform,
+				.flags = 0u,
+			});
+		}
+	}
+
+	if (parts.empty() || instances.empty()) {
+		spdlog::warn("USD point-instancer assembly requested, but no assembly parts or instances were produced.");
+		return std::nullopt;
+	}
+
+	try {
+		ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings(sourceIdentifier);
+		assemblySettings.doubleSidedVoxelSourceNormals = std::any_of(
+			parts.begin(),
+			parts.end(),
+			[](const ClusterLODAssemblyPart& part) { return part.doubleSidedCoverageTriangles; });
+		ClusterLODPrebuildArtifacts assemblyArtifacts =
+			BuildClusterLODAssemblyArtifactsPreservingTriangleOnly(parts, instances, assemblySettings, 8u);
+		CLodCacheLoader::MeshCacheIdentity assemblyIdentity{};
+		if (firstRootMesh) {
+			assemblyIdentity = CLodCacheLoader::BuildIdentity(firstRootMesh, stage, "CLodAssembly", geomTimeCode, sourceIdentifier);
+		}
+		else {
+			assemblyIdentity.sourceIdentifier = sourceIdentifier;
+			if (assemblyIdentity.sourceIdentifier.empty() && stage && stage->GetRootLayer()) {
+				assemblyIdentity.sourceIdentifier = stage->GetRootLayer()->GetIdentifier();
+			}
+			assemblyIdentity.subsetName = "CLodAssembly";
+		}
+		const UsdPrim defaultPrim = stage->GetDefaultPrim();
+		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
+		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=9#authored_up_axis_baked=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
+		assemblyIdentity.sourceIdentifier += identitySuffix;
+
+		ClusterLODPrebuiltData savedPrebuiltData;
+		if (CLodCacheLoader::SavePrebuiltLocked(
+			assemblyIdentity,
+			assemblyArtifacts.prebuiltData,
+			assemblyArtifacts.cacheBuildData.AsPayload(),
+			&savedPrebuiltData)) {
+			auto diskBackedPrebuilt = CLodCacheLoader::TryLoadPrebuilt(assemblyIdentity);
+			if (diskBackedPrebuilt.has_value()) {
+				savedPrebuiltData = std::move(*diskBackedPrebuilt);
+			}
+
+			MeshIngestBuilder dummyIngest(0u, 0u, 0u, GetDefaultBuilderSettings());
+			MeshPreprocessResult assemblyResult(
+				std::move(dummyIngest),
+				std::move(assemblyIdentity),
+				std::make_optional(std::move(savedPrebuiltData)));
+			assemblyResult.sourcePrimPath = assemblyResult.cacheIdentity.primPath;
+			assemblyResult.transientArtifacts = std::make_shared<ClusterLODPrebuildArtifacts>(std::move(assemblyArtifacts));
+			return assemblyResult;
+		}
+		else {
+			spdlog::warn("  USD CLod assembly cache save failed.");
+		}
+	}
+	catch (const std::exception& e) {
+		spdlog::warn("  USD CLod assembly cache build failed: {}", e.what());
+	}
+	return std::nullopt;
+}
+
+void AppendPointInstancerAssemblyCaches(
+	const UsdStageRefPtr& stage,
+	const std::string& sourceIdentifier,
+	UsdTimeCode geomTimeCode,
+	StageExtractionResult& result)
+{
+	std::vector<const MeshPreprocessResult*> preprocessedSubmeshes;
+	preprocessedSubmeshes.reserve(result.submeshes.size());
+	for (const MeshPreprocessResult& submesh : result.submeshes) {
+		preprocessedSubmeshes.push_back(&submesh);
+	}
+	if (auto assembly = BuildInstancedAssemblyCache(
+		stage, sourceIdentifier, geomTimeCode, preprocessedSubmeshes)) {
+		result.submeshes.push_back(std::move(*assembly));
+		result.cachesBuilt++;
+	}
+}
+
+void AppendWholeAssetAssemblyCaches(
+	const UsdStageRefPtr& stage,
+	const std::string& sourceIdentifier,
+	UsdTimeCode geomTimeCode,
+	StageExtractionResult& result)
+{
+	ZoneScopedN("USDGeometryExtractor::AppendWholeAssetAssemblyCaches");
+	std::map<std::string, std::vector<const MeshPreprocessResult*>> materialBuckets;
+	std::map<std::string, MaterialDescription> materials;
+	const std::size_t sourceSubmeshCount = result.submeshes.size();
+	for (std::size_t index = 0; index < sourceSubmeshCount; ++index) {
+		const MeshPreprocessResult& submesh = result.submeshes[index];
+		if (!submesh.transientArtifacts) continue;
+		materialBuckets[submesh.materialPath].push_back(&submesh);
+		materials.try_emplace(submesh.materialPath, submesh.cachedMaterial);
+	}
+
+	std::vector<USDMaterialCache::AssemblyMaterialEntry> manifest;
+	std::vector<MeshPreprocessResult> completedAssemblies;
+	completedAssemblies.reserve(materialBuckets.size());
+	for (const auto& [materialPath, submeshes] : materialBuckets) {
+		const std::string suffix = BuildWholeAssetAssemblyBucketIdentitySuffix(false, 0u, materialPath);
+		auto assembly = BuildInstancedAssemblyCache(stage, sourceIdentifier, geomTimeCode, submeshes, suffix);
+		if (!assembly) {
+			spdlog::warn("USD material assembly cache build failed for material '{}'.", materialPath);
+			continue;
+		}
+		manifest.push_back(USDMaterialCache::AssemblyMaterialEntry{
+			.identity = assembly->cacheIdentity,
+			.material = materials.at(materialPath),
+		});
+		completedAssemblies.push_back(std::move(*assembly));
+	}
+	// materialBuckets contains pointers into result.submeshes. Appending while
+	// building buckets can reallocate that vector and invalidate every pointer
+	// still needed by subsequent assembly builds.
+	result.submeshes.reserve(result.submeshes.size() + completedAssemblies.size());
+	for (MeshPreprocessResult& assembly : completedAssemblies) {
+		result.submeshes.push_back(std::move(assembly));
+		result.cachesBuilt++;
+	}
+	if (manifest.size() != materialBuckets.size()) {
+		USDMaterialCache::RemoveAssemblyMaterialManifest(sourceIdentifier);
+		spdlog::warn(
+			"USD assembly material manifest not published for '{}': completed {} of {} buckets.",
+			sourceIdentifier,
+			manifest.size(),
+			materialBuckets.size());
+	}
+	else if (manifest.empty() || !USDMaterialCache::SaveAssemblyMaterialManifest(sourceIdentifier, manifest)) {
+		spdlog::warn("USD assembly material manifest save failed for '{}'.", sourceIdentifier);
+	}
+	else {
+		spdlog::info("USD assembly material manifest saved: source='{}' buckets={}", sourceIdentifier, manifest.size());
+	}
 }
 
 StageExtractionResult ExtractAllFromStage(
 	const UsdStageRefPtr& stage,
-	const std::string& sourceIdentifier) {
+	const std::string& sourceIdentifier,
+	std::uint32_t tessellationFactor,
+	const ExtractOptions& options) {
 	StageExtractionResult result;
 
 	if (!stage) {
@@ -908,7 +2657,8 @@ StageExtractionResult ExtractAllFromStage(
 			UsdSkelBindingAPI bindAPI(mesh.GetPrim());
 			UsdSkelSkeleton skel = bindAPI.GetInheritedSkeleton();
 			if (skel) {
-				skelCache.Populate(UsdSkelRoot(skel.GetPrim()), UsdPrimDefaultPredicate);
+				if (const UsdSkelRoot skelRoot = UsdSkelRoot::Find(skel.GetPrim()))
+					skelCache.Populate(skelRoot, UsdPrimDefaultPredicate);
 				auto skelQuery = skelCache.GetSkelQuery(skel);
 				skelJointOrderRaw = skelQuery.GetJointOrder();
 
@@ -941,21 +2691,38 @@ StageExtractionResult ExtractAllFromStage(
 	result.meshesProcessed = meshWorkItems.size();
 
 	const std::vector<std::string> requiredUvSetNames = { "st" };
+	std::mutex resultMutex;
 
 	TaskSchedulerManager::GetInstance().ParallelFor("USDGeometryExtractor::PreprocessMeshes", meshWorkItems.size(), [&](size_t meshIndex) {
 		const MeshWorkItem& workItem = meshWorkItems[meshIndex];
 		spdlog::info("  Found mesh #{}: '{}'", meshIndex + 1, workItem.primPath);
 
 		if (workItem.subsets.empty()) {
-			ExtractSubMesh(workItem.mesh, std::nullopt, stage, geomTimeCode, metersPerUnit,
+			UsdShadeMaterialBindingAPI bindAPI(workItem.mesh);
+			const UsdShadeMaterial material = bindAPI.ComputeBoundMaterial();
+			MeshPreprocessResult submesh = ExtractSubMesh(workItem.mesh, std::nullopt, stage, geomTimeCode, metersPerUnit,
 				requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
-				workItem.doubleSided, sourceIdentifier);
+				workItem.doubleSided || ShouldForceDoubleSidedByName(material, std::nullopt, options),
+				sourceIdentifier, tessellationFactor, options);
+			submesh.materialPath = material ? material.GetPrim().GetPath().GetString() : std::string{};
+			submesh.cachedMaterial = USDMaterialCache::ExtractMaterialDescription(material);
+			submesh.cachedMaterial.forceDoubleSided = submesh.forceDoubleSidedPreview;
+			std::lock_guard lock(resultMutex);
+			result.submeshes.push_back(std::move(submesh));
 		}
 		else {
 			TaskSchedulerManager::GetInstance().ParallelFor("USDGeometryExtractor::PreprocessSubsets", workItem.subsets.size(), [&](size_t subsetIndex) {
-				ExtractSubMesh(workItem.mesh, std::make_optional(workItem.subsets[subsetIndex]), stage, geomTimeCode, metersPerUnit,
+				const UsdGeomSubset& subset = workItem.subsets[subsetIndex];
+				const UsdShadeMaterial material = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
+				MeshPreprocessResult submesh = ExtractSubMesh(workItem.mesh, std::make_optional(workItem.subsets[subsetIndex]), stage, geomTimeCode, metersPerUnit,
 					requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
-					workItem.doubleSided, sourceIdentifier);
+					workItem.doubleSided || ShouldForceDoubleSidedByName(material, subset, options),
+					sourceIdentifier, tessellationFactor, options);
+				submesh.materialPath = material ? material.GetPrim().GetPath().GetString() : std::string{};
+				submesh.cachedMaterial = USDMaterialCache::ExtractMaterialDescription(material);
+				submesh.cachedMaterial.forceDoubleSided = submesh.forceDoubleSidedPreview;
+				std::lock_guard lock(resultMutex);
+				result.submeshes.push_back(std::move(submesh));
 				});
 		}
 		});
@@ -963,7 +2730,18 @@ StageExtractionResult ExtractAllFromStage(
 	for (const MeshWorkItem& workItem : meshWorkItems) {
 		result.submeshesProcessed += workItem.subsets.empty() ? 1 : workItem.subsets.size();
 	}
-	result.cachesBuilt = result.submeshesProcessed;
+	result.cachesBuilt = static_cast<size_t>(std::count_if(
+		result.submeshes.begin(),
+		result.submeshes.end(),
+		[](const MeshPreprocessResult& submesh) {
+			return submesh.clodCacheBuilt;
+		}));
+	if (options.buildPointInstancerAssemblyCaches) {
+		AppendPointInstancerAssemblyCaches(stage, sourceIdentifier, geomTimeCode, result);
+	}
+	if (options.buildWholeAssetAssemblyCaches) {
+		AppendWholeAssetAssemblyCaches(stage, sourceIdentifier, geomTimeCode, result);
+	}
 
 	return result;
 }

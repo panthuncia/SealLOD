@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 
 #include <directx/d3d12.h>
@@ -9,7 +9,7 @@
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx12.h>
-#if __has_include(<imgui_impl_vulkan.h>) && __has_include(<vulkan/vulkan.h>)
+#if BASICRHI_ENABLE_VULKAN && __has_include(<imgui_impl_vulkan.h>) && __has_include(<vulkan/vulkan.h>)
 #define BASICRENDERER_HAS_IMGUI_VULKAN 1
 #ifndef IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 #define IMGUI_IMPL_VULKAN_NO_PROTOTYPES 1
@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <queue>
 #include <unordered_map>
 
@@ -40,6 +41,7 @@
 #include "Import/ModelLoader.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/SettingsManager.h"
+#include "Render/RendererSettings.h"
 #include "Render/TonemapTypes.h"
 #include "Managers/Singletons/UpscalingManager.h"
 #include "DebugUI/RenderGraphInspector.h"
@@ -79,7 +81,7 @@ using PerResourceMemIndex = std::unordered_map<uint64_t, PerResourceMemInfo>;
 
 static void BuildMemorySnapshotFromRecords(
     ui::MemorySnapshot& out,
-    const std::vector<rg::memory::ResourceMemoryRecord>& records,
+    const std::vector<org::memory::ResourceMemoryRecord>& records,
     PerResourceMemIndex* outIndex /*= nullptr*/)
 {
     out.categories.clear();
@@ -139,7 +141,7 @@ struct MemInfo {
 
 static void BuildIdToMemInfoIndex(
     std::unordered_map<uint64_t, MemInfo>& out,
-    const std::vector<rg::memory::ResourceMemoryRecord>& records)
+    const std::vector<org::memory::ResourceMemoryRecord>& records)
 {
     out.clear();
     out.reserve(2048);
@@ -335,6 +337,8 @@ private:
 
     uint64_t m_selectedSceneNodeStableId = 0;
     bool m_sceneExplorerSnapshotAvailable = false;
+    bool m_sceneExplorerSnapshotTruncated = false;
+    size_t m_sceneExplorerSnapshotNodeBudget = 0;
     SceneExplorerNodeSnapshot m_sceneExplorerRootSnapshot{};
     std::unordered_map<uint64_t, SceneExplorerPendingEdit> m_sceneExplorerPendingEdits;
 
@@ -465,15 +469,17 @@ private:
 
     void DrawEnvironmentsDropdown();
 	void DrawOutputTypeDropdown();
+    void DrawWindowResolutionCombo();
+    void DrawCLodLodHeightModeCombo();
     void DrawUpscalingCombo();
     void DrawUpscalingQualityCombo();
     void DrawTonemapTypeDropdown();
     void DrawBrowseButton(const std::wstring& targetDirectory);
     void DrawLoadModelButton();
-    SceneExplorerNodeSnapshot BuildSceneExplorerSnapshot(flecs::entity node);
+    SceneExplorerNodeSnapshot BuildSceneExplorerSnapshot(flecs::entity node, size_t& remainingNodes, bool& truncated);
     const SceneExplorerNodeSnapshot* FindSceneExplorerSnapshotNode(const SceneExplorerNodeSnapshot& node, uint64_t stableId) const;
     SceneExplorerNodeSnapshot* FindSceneExplorerSnapshotNode(SceneExplorerNodeSnapshot& node, uint64_t stableId);
-    void RefreshSceneExplorerSnapshot();
+    void RefreshSceneExplorerSnapshot(size_t maxNodes);
     void OverlayPendingSceneExplorerEdits();
     void QueueSceneNodePositionChange(uint64_t stableId, const DirectX::XMFLOAT3& position);
     void QueueSceneNodeUniformScaleChange(uint64_t stableId, float uniformScale);
@@ -524,9 +530,9 @@ private:
 	std::function<bool()> getOcclusionCullingEnabled;
 	std::function<void(bool)> setOcclusionCullingEnabled;
 
-	bool meshletCulling = true;
-	std::function<bool()> getMeshletCullingEnabled;
-	std::function<void(bool)> setMeshletCullingEnabled;
+    bool m_clodFrustumCulling = true;
+    std::function<bool()> getCLodFrustumCulling;
+    std::function<void(bool)> setCLodFrustumCulling;
 
     CLodCullingBackend m_clodCullingBackend = CLodCullingBackend::WorkGraph;
     std::function<CLodCullingBackend()> getCLodCullingBackend;
@@ -551,6 +557,30 @@ private:
     bool m_clodDisableReyesRasterization = false;
     std::function<bool()> getCLodDisableReyesRasterization;
     std::function<void(bool)> setCLodDisableReyesRasterization;
+
+    bool m_clodReyesGeometricNormal = true;
+    std::function<bool()> getCLodReyesGeometricNormal;
+    std::function<void(bool)> setCLodReyesGeometricNormal;
+
+    float m_clodReyesObjectNormalMapBlend = CLodReyesObjectNormalMapBlendDefault;
+    std::function<float()> getCLodReyesObjectNormalMapBlend;
+    std::function<void(float)> setCLodReyesObjectNormalMapBlend;
+
+    float m_clodReyesTerrainNormalBlend = CLodReyesTerrainNormalBlendDefault;
+    std::function<float()> getCLodReyesTerrainNormalBlend;
+    std::function<void(float)> setCLodReyesTerrainNormalBlend;
+
+    int m_clodReyesTerrainNormalMipBias = static_cast<int>(CLodReyesTerrainNormalMipBiasDefault);
+    std::function<uint32_t()> getCLodReyesTerrainNormalMipBias;
+    std::function<void(uint32_t)> setCLodReyesTerrainNormalMipBias;
+
+    float m_clodReyesDiceRatePixels = CLodReyesDiceRatePixelsDefault;
+    std::function<float()> getCLodReyesDiceRatePixels;
+    std::function<void(float)> setCLodReyesDiceRatePixels;
+
+    bool m_clodReyesUseAabbOcclusion = false;
+    std::function<bool()> getCLodReyesUseAabbOcclusion;
+    std::function<void(bool)> setCLodReyesUseAabbOcclusion;
 
     bool m_clodDisableVirtualShadowPageCaching = false;
     std::function<bool()> getCLodDisableVirtualShadowPageCaching;
@@ -587,6 +617,10 @@ private:
     uint32_t m_clodForceTraversalDepthRoot = CLodForceTraversalDepthRootDisabled;
     std::function<uint32_t()> getCLodForceTraversalDepthRoot;
     std::function<void(uint32_t)> setCLodForceTraversalDepthRoot;
+
+    uint32_t m_clodVisibleClusterCapacity = CLodDefaultVisibleClusterCapacity;
+    std::function<uint32_t()> getCLodVisibleClusterCapacity;
+    std::function<void(uint32_t)> setCLodVisibleClusterCapacity;
 
     uint32_t m_clodDirectionalVirtualShadowMaxBackingResolution = CLodVirtualShadowDefaultBackingResolution;
     std::function<uint32_t()> getCLodDirectionalVirtualShadowMaxBackingResolution;
@@ -636,13 +670,33 @@ private:
     std::function<float()> getCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld;
     std::function<void(float)> setCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld;
 
+    bool m_clodDirectionalVirtualShadowReceiverTraceEnabled = CLodVirtualShadowDefaultReceiverTraceEnabled;
+    std::function<bool()> getCLodDirectionalVirtualShadowReceiverTraceEnabled;
+    std::function<void(bool)> setCLodDirectionalVirtualShadowReceiverTraceEnabled;
+
+    uint32_t m_clodDirectionalVirtualShadowReceiverTraceSampleCount = CLodVirtualShadowDefaultReceiverTraceSampleCount;
+    std::function<uint32_t()> getCLodDirectionalVirtualShadowReceiverTraceSampleCount;
+    std::function<void(uint32_t)> setCLodDirectionalVirtualShadowReceiverTraceSampleCount;
+
+    float m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld = CLodVirtualShadowDefaultReceiverTraceMaxDistanceWorld;
+    std::function<float()> getCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld;
+    std::function<void(float)> setCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld;
+
+    float m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale = CLodVirtualShadowDefaultReceiverTraceUncertaintyScale;
+    std::function<float()> getCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale;
+    std::function<void(float)> setCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale;
+
+    float m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale = CLodVirtualShadowDefaultReceiverTraceDepthSafetyScale;
+    std::function<float()> getCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale;
+    std::function<void(float)> setCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale;
+
     uint8_t m_numDirectionalLightCascades = 0u;
     std::function<uint8_t()> getNumDirectionalLightCascades;
     std::function<void(uint8_t)> setNumDirectionalLightCascades;
 
-    float m_directionalShadowVerticalExtent = 0.0f;
-    std::function<float()> getDirectionalShadowVerticalExtent;
-    std::function<void(float)> setDirectionalShadowVerticalExtent;
+    float m_directionalShadowDistanceLowerBound = 0.0f;
+    std::function<float()> getDirectionalShadowDistanceLowerBound;
+    std::function<void(float)> setDirectionalShadowDistanceLowerBound;
 
     bool wireframeEnabled = false;
 	std::function<bool()> getWireframeEnabled;
@@ -667,6 +721,109 @@ private:
 	bool m_visibilityRenderingEnabled = true;
 	std::function<bool()> getVisibilityRenderingEnabled;
 	std::function<void(bool)> setVisibilityRenderingEnabled;
+    bool m_terrainRegionMaterialEvaluationEnabled = false;
+    std::function<bool()> getTerrainRegionMaterialEvaluationEnabled;
+    std::function<void(bool)> setTerrainRegionMaterialEvaluationEnabled;
+    bool m_terrainRvtEnabled = false;
+    std::function<bool()> getTerrainRvtEnabled;
+    std::function<void(bool)> setTerrainRvtEnabled;
+    bool m_forceDirectTerrainRvtFallback = false;
+    std::function<bool()> getForceDirectTerrainRvtFallback;
+    std::function<void(bool)> setForceDirectTerrainRvtFallback;
+    bool m_terrainRvtTelemetryDebug = false;
+    std::function<bool()> getTerrainRvtTelemetryDebug;
+    std::function<void(bool)> setTerrainRvtTelemetryDebug;
+    int m_terrainRvtDebugView = 0;
+    std::function<uint32_t()> getTerrainRvtDebugView;
+    std::function<void(uint32_t)> setTerrainRvtDebugView;
+    int m_terrainRvtPageSize = 128;
+    std::function<uint32_t()> getTerrainRvtPageSize;
+    std::function<void(uint32_t)> setTerrainRvtPageSize;
+    int m_terrainRvtBorderTexels = 4;
+    std::function<uint32_t()> getTerrainRvtBorderTexels;
+    std::function<void(uint32_t)> setTerrainRvtBorderTexels;
+    int m_terrainRvtMipCount = 14;
+    std::function<uint32_t()> getTerrainRvtMipCount;
+    std::function<void(uint32_t)> setTerrainRvtMipCount;
+    float m_terrainRvtMipOffset = 0.0f;
+    std::function<float()> getTerrainRvtMipOffset;
+    std::function<void(float)> setTerrainRvtMipOffset;
+    float m_terrainRvtSourceTexelsPerWorld = 24.0f;
+    std::function<float()> getTerrainRvtSourceTexelsPerWorld;
+    std::function<void(float)> setTerrainRvtSourceTexelsPerWorld;
+    int m_terrainRvtPhysicalAtlasPagesWide = 32;
+    std::function<uint32_t()> getTerrainRvtPhysicalAtlasPagesWide;
+    std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPagesWide;
+    int m_terrainRvtPhysicalAtlasPagesHigh = 32;
+    std::function<uint32_t()> getTerrainRvtPhysicalAtlasPagesHigh;
+    std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPagesHigh;
+    int m_terrainRvtPhysicalAtlasPoolCount = 1;
+    std::function<uint32_t()> getTerrainRvtPhysicalAtlasPoolCount;
+    std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPoolCount;
+
+    bool m_terrainStochasticSamplingEnabled = true;
+    std::function<bool()> getTerrainStochasticSamplingEnabled;
+    std::function<void(bool)> setTerrainStochasticSamplingEnabled;
+    bool m_terrainStochasticDiffuseSamplingEnabled = true;
+    std::function<bool()> getTerrainStochasticDiffuseSamplingEnabled;
+    std::function<void(bool)> setTerrainStochasticDiffuseSamplingEnabled;
+    bool m_terrainStochasticNormalSamplingEnabled = true;
+    std::function<bool()> getTerrainStochasticNormalSamplingEnabled;
+    std::function<void(bool)> setTerrainStochasticNormalSamplingEnabled;
+    bool m_terrainStochasticDerivativeNormalSamplingEnabled = true;
+    std::function<bool()> getTerrainStochasticDerivativeNormalSamplingEnabled;
+    std::function<void(bool)> setTerrainStochasticDerivativeNormalSamplingEnabled;
+    float m_terrainStochasticBlendCurve = 0.65f;
+    std::function<float()> getTerrainStochasticBlendCurve;
+    std::function<void(float)> setTerrainStochasticBlendCurve;
+    bool m_terrainGaussianStochasticSamplingEnabled = false;
+    std::function<bool()> getTerrainGaussianStochasticSamplingEnabled;
+    std::function<void(bool)> setTerrainGaussianStochasticSamplingEnabled;
+    bool m_parallaxOcclusionMappingEnabled = true;
+    std::function<bool()> getParallaxOcclusionMappingEnabled;
+    std::function<void(bool)> setParallaxOcclusionMappingEnabled;
+    bool m_terrainParallaxOcclusionMappingEnabled = true;
+    std::function<bool()> getTerrainParallaxOcclusionMappingEnabled;
+    std::function<void(bool)> setTerrainParallaxOcclusionMappingEnabled;
+    bool m_terrainReyesDisplacementEnabled = true;
+    std::function<bool()> getTerrainReyesDisplacementEnabled;
+    std::function<void(bool)> setTerrainReyesDisplacementEnabled;
+    float m_terrainReyesDisplacementScale = 1.0f;
+    std::function<float()> getTerrainReyesDisplacementScale;
+    std::function<void(float)> setTerrainReyesDisplacementScale;
+    float m_objectReyesDisplacementScale = 1.0f;
+    std::function<float()> getObjectReyesDisplacementScale;
+    std::function<void(float)> setObjectReyesDisplacementScale;
+    float m_proceduralWindDisplacementScale = 1.0f;
+    std::function<float()> getProceduralWindDisplacementScale;
+    std::function<void(float)> setProceduralWindDisplacementScale;
+    float m_proceduralWindGrassDisplacementScale = 1.0f;
+    std::function<float()> getProceduralWindGrassDisplacementScale;
+    std::function<void(float)> setProceduralWindGrassDisplacementScale;
+    float m_proceduralWindGrassOscillationScale = 1.0f;
+    std::function<float()> getProceduralWindGrassOscillationScale;
+    std::function<void(float)> setProceduralWindGrassOscillationScale;
+    float m_proceduralWindGrassFlutterFrequency = 1.0f;
+    std::function<float()> getProceduralWindGrassFlutterFrequency;
+    std::function<void(float)> setProceduralWindGrassFlutterFrequency;
+    float m_proceduralWindEffectDistance = 10000.0f;
+    std::function<void(float)> setProceduralWindEffectDistance;
+    std::function<void(float)> setProceduralWindInnerRadius;
+    float m_terrainParallaxHeightScale = 0.03f;
+    std::function<float()> getTerrainParallaxHeightScale;
+    std::function<void(float)> setTerrainParallaxHeightScale;
+    float m_objectParallaxHeightScale = 1.0f;
+    std::function<float()> getObjectParallaxHeightScale;
+    std::function<void(float)> setObjectParallaxHeightScale;
+    uint32_t m_terrainParallaxMaxSteps = 16u;
+    std::function<uint32_t()> getTerrainParallaxMaxSteps;
+    std::function<void(uint32_t)> setTerrainParallaxMaxSteps;
+    float m_terrainParallaxFadeStartDistance = 2048.0f;
+    std::function<float()> getTerrainParallaxFadeStartDistance;
+    std::function<void(float)> setTerrainParallaxFadeStartDistance;
+    float m_terrainParallaxFadeEndDistance = 8192.0f;
+    std::function<float()> getTerrainParallaxFadeEndDistance;
+    std::function<void(float)> setTerrainParallaxFadeEndDistance;
 
 	bool m_gtaoEnabled = true;
 	std::function<bool()> getGTAOEnabled;
@@ -688,6 +845,10 @@ private:
     std::function<bool()> getJitterEnabled;
     std::function<void(bool)> setJitterEnabled;
 
+    bool m_rememberCameraPose = false;
+    std::function<bool()> getRememberCameraPose;
+    std::function<void(bool)> setRememberCameraPose;
+
     bool m_collectPassStatistics = true;
     std::function<bool()> getCollectPassStatistics;
     std::function<void(bool)> setCollectPassStatistics;
@@ -698,10 +859,21 @@ private:
 	UpscalingMode m_currentUpscalingMode = UpscalingMode::None;
 	std::function<UpscalingMode()> getUpscalingMode;
 	std::function<void(UpscalingMode)> setUpscalingMode;
+	bool m_dilatedMotionVectorsEnabled = true;
+	std::function<bool()> getDilatedMotionVectorsEnabled;
+	std::function<void(bool)> setDilatedMotionVectorsEnabled;
 
 	UpscaleQualityMode m_currentUpscalingQualityMode = UpscaleQualityMode::Balanced;
 	std::function<UpscaleQualityMode()> getUpscalingQualityMode;
     std::function<void(UpscaleQualityMode)> setUpscalingQualityMode;
+
+    WindowResolutionPreset m_currentWindowResolutionPreset = WindowResolutionPreset::P1080;
+    std::function<WindowResolutionPreset()> getWindowResolutionPreset;
+    std::function<void(WindowResolutionPreset)> setWindowResolutionPreset;
+
+    CLodLodHeightMode m_currentCLodLodHeightMode = CLodLodHeightMode::OutputHeight;
+    std::function<CLodLodHeightMode()> getCLodLodHeightMode;
+    std::function<void(CLodLodHeightMode)> setCLodLodHeightMode;
 
 	bool m_useAsyncCompute = true;
 	std::function<bool()> getUseAsyncCompute;
@@ -710,10 +882,6 @@ private:
 	bool m_heavyDebug = false;
 	std::function<bool()> getHeavyDebug;
 	std::function<void(bool)> setHeavyDebug;
-
-	bool m_renderGraphDisableCaching = false;
-	std::function<bool()> getRenderGraphDisableCaching;
-	std::function<void(bool)> setRenderGraphDisableCaching;
 
     bool m_renderGraphBatchTraceEnabled = false;
     std::function<bool()> getRenderGraphBatchTraceEnabled;
@@ -786,19 +954,60 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 			throw std::runtime_error("Menu::Initialize failed to create ImGui descriptor heap for DX12 backend");
 		}
 
-        ImGui_ImplDX12_Init(rhi::dx12::get_device(device), 
-            numFramesInFlight,
-            DXGI_FORMAT_R8G8B8A8_UNORM, 
-            rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get()),
-            rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get())->GetCPUDescriptorHandleForHeapStart(),
-            rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get())->GetGPUDescriptorHandleForHeapStart());
-
         // Cache GPU start and increment size for user-texture descriptor allocation.
-        imguiHeapGpuStart_ = rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get())->GetGPUDescriptorHandleForHeapStart().ptr;
+        auto* nativeDescriptorHeap = rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get());
+        imguiHeapGpuStart_ = nativeDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr;
         imguiHeapIncrementSize_ = device.GetDescriptorHandleIncrementSize(rhi::DescriptorHeapType::CbvSrvUav);
+
+        ImGui_ImplDX12_InitInfo initInfo{};
+        initInfo.Device = rhi::dx12::get_device(device);
+        initInfo.CommandQueue = rhi::dx12::get_queue(DeviceManager::GetInstance().GetGraphicsQueue());
+        initInfo.NumFramesInFlight = numFramesInFlight;
+        initInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        initInfo.UserData = this;
+        initInfo.SrvDescriptorHeap = nativeDescriptorHeap;
+        initInfo.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* info,
+            D3D12_CPU_DESCRIPTOR_HANDLE* cpuHandle,
+            D3D12_GPU_DESCRIPTOR_HANDLE* gpuHandle) {
+            auto* menu = static_cast<Menu*>(info->UserData);
+            const uint32_t descriptorIndex = menu->AllocateImGuiDescriptor();
+            const uint64_t descriptorOffset =
+                static_cast<uint64_t>(descriptorIndex) * menu->imguiHeapIncrementSize_;
+            *cpuHandle = info->SrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+            *gpuHandle = info->SrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+            cpuHandle->ptr += static_cast<SIZE_T>(descriptorOffset);
+            gpuHandle->ptr += descriptorOffset;
+        };
+        initInfo.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo* info,
+            D3D12_CPU_DESCRIPTOR_HANDLE,
+            D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle) {
+            auto* menu = static_cast<Menu*>(info->UserData);
+            if (gpuHandle.ptr < menu->imguiHeapGpuStart_ || menu->imguiHeapIncrementSize_ == 0) {
+                return;
+            }
+            const uint64_t descriptorOffset = gpuHandle.ptr - menu->imguiHeapGpuStart_;
+            if (descriptorOffset % menu->imguiHeapIncrementSize_ != 0) {
+                return;
+            }
+            menu->FreeImGuiDescriptor(static_cast<uint32_t>(
+                descriptorOffset / menu->imguiHeapIncrementSize_));
+        };
+
+        if (!ImGui_ImplDX12_Init(&initInfo)) {
+            throw std::runtime_error("Menu::Initialize failed to initialize ImGui DX12 backend");
+        }
         m_imguiBackend = rhi::Backend::D3D12;
     } else if (DeviceManager::GetInstance().GetBackend() == rhi::Backend::Vulkan) {
 #if BASICRENDERER_HAS_IMGUI_VULKAN
+		// The Vulkan ImGui backend currently faults in its loader/initialization
+		// path on some drivers. Keep UI optional so Vulkan rendering and interop
+		// can start independently; the renderer already treats a null UI backend
+		// as a supported headless state.
+		if (std::getenv("BASICRENDERER_ENABLE_VULKAN_IMGUI") == nullptr) {
+			spdlog::warn("Menu::Initialize: Vulkan ImGui backend disabled; set BASICRENDERER_ENABLE_VULKAN_IMGUI=1 to opt in");
+		}
+		else {
         ImGui_ImplVulkan_InitInfo initInfo{};
         initInfo.ApiVersion = rhi::vulkan::get_device_api_version(device);
         initInfo.Instance = rhi::vulkan::get_instance(device);
@@ -808,14 +1017,14 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         initInfo.Queue = rhi::vulkan::get_queue(DeviceManager::GetInstance().GetGraphicsQueue());
         initInfo.MinImageCount = numFramesInFlight;
         initInfo.ImageCount = numFramesInFlight;
-        initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+        initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
         initInfo.DescriptorPoolSize = kImGuiHeapCapacity;
         initInfo.UseDynamicRendering = true;
         m_imguiVkColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
         m_imguiVkRenderingInfo = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR };
         m_imguiVkRenderingInfo.colorAttachmentCount = 1;
         m_imguiVkRenderingInfo.pColorAttachmentFormats = &m_imguiVkColorFormat;
-        initInfo.PipelineRenderingCreateInfo = m_imguiVkRenderingInfo;
+        initInfo.PipelineInfoMain.PipelineRenderingCreateInfo = m_imguiVkRenderingInfo;
         initInfo.CheckVkResultFn = [](VkResult result) {
             if (result != VK_SUCCESS) {
                 spdlog::error("ImGui Vulkan backend returned VkResult {}", static_cast<int>(result));
@@ -864,9 +1073,6 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         if (!ImGui_ImplVulkan_Init(&initInfo)) {
             throw std::runtime_error("Menu::Initialize failed to initialize ImGui Vulkan backend");
         }
-        if (!ImGui_ImplVulkan_CreateFontsTexture()) {
-            throw std::runtime_error("Menu::Initialize failed to create ImGui Vulkan font texture");
-        }
 
         auto result = device.CreateDescriptorHeap({ rhi::DescriptorHeapType::CbvSrvUav, kImGuiHeapCapacity, true }, g_pd3dSrvDescHeap);
         if (!rhi::IsOk(result) || !g_pd3dSrvDescHeap) {
@@ -890,6 +1096,7 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         }
 
         m_imguiBackend = rhi::Backend::Vulkan;
+		}
 #else
         (void)swapChain;
         spdlog::warn("Menu::Initialize: Vulkan renderer backend was selected, but imgui_impl_vulkan.h is not available in this build environment.");
@@ -906,6 +1113,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+    // Keep keyboard navigation available without having a focused navigation
+    // window claim every key from the renderer. Active text fields and modal
+    // widgets still set WantCaptureKeyboard independently.
+    io.ConfigNavCaptureKeyboard = false;
     io.FontGlobalScale = 1.2f;
 
     ImGui::StyleColorsDark();
@@ -967,10 +1178,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	occlusionCulling = getOcclusionCullingEnabled();
 	observerSetting(occlusionCulling, "enableOcclusionCulling");
 
-	getMeshletCullingEnabled = settingsManager.getSettingGetter<bool>("enableMeshletCulling");
-	setMeshletCullingEnabled = settingsManager.getSettingSetter<bool>("enableMeshletCulling");
-	meshletCulling = getMeshletCullingEnabled();
-	observerSetting(meshletCulling, "enableMeshletCulling");
+    getCLodFrustumCulling = settingsManager.getSettingGetter<bool>(CLodFrustumCullingSettingName);
+    setCLodFrustumCulling = settingsManager.getSettingSetter<bool>(CLodFrustumCullingSettingName);
+    m_clodFrustumCulling = getCLodFrustumCulling();
+    observerSetting(m_clodFrustumCulling, CLodFrustumCullingSettingName);
 
     getCLodCullingBackend = settingsManager.getSettingGetter<CLodCullingBackend>(CLodCullingBackendSettingName);
     setCLodCullingBackend = settingsManager.getSettingSetter<CLodCullingBackend>(CLodCullingBackendSettingName);
@@ -1004,6 +1215,40 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setCLodDisableReyesRasterization = settingsManager.getSettingSetter<bool>(CLodDisableReyesRasterizationSettingName);
     m_clodDisableReyesRasterization = getCLodDisableReyesRasterization();
     observerSetting(m_clodDisableReyesRasterization, CLodDisableReyesRasterizationSettingName);
+
+    getCLodReyesGeometricNormal = settingsManager.getSettingGetter<bool>(CLodReyesGeometricNormalSettingName);
+    setCLodReyesGeometricNormal = settingsManager.getSettingSetter<bool>(CLodReyesGeometricNormalSettingName);
+    m_clodReyesGeometricNormal = getCLodReyesGeometricNormal();
+    observerSetting(m_clodReyesGeometricNormal, CLodReyesGeometricNormalSettingName);
+
+    getCLodReyesObjectNormalMapBlend = settingsManager.getSettingGetter<float>(CLodReyesObjectNormalMapBlendSettingName);
+    setCLodReyesObjectNormalMapBlend = settingsManager.getSettingSetter<float>(CLodReyesObjectNormalMapBlendSettingName);
+    m_clodReyesObjectNormalMapBlend = getCLodReyesObjectNormalMapBlend();
+    observerSetting(m_clodReyesObjectNormalMapBlend, CLodReyesObjectNormalMapBlendSettingName);
+
+    getCLodReyesTerrainNormalBlend = settingsManager.getSettingGetter<float>(CLodReyesTerrainNormalBlendSettingName);
+    setCLodReyesTerrainNormalBlend = settingsManager.getSettingSetter<float>(CLodReyesTerrainNormalBlendSettingName);
+    m_clodReyesTerrainNormalBlend = getCLodReyesTerrainNormalBlend();
+    observerSetting(m_clodReyesTerrainNormalBlend, CLodReyesTerrainNormalBlendSettingName);
+
+    getCLodReyesTerrainNormalMipBias = settingsManager.getSettingGetter<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName);
+    setCLodReyesTerrainNormalMipBias = settingsManager.getSettingSetter<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName);
+    m_clodReyesTerrainNormalMipBias = static_cast<int>(getCLodReyesTerrainNormalMipBias());
+    m_settingSubscriptions.push_back(settingsManager.addObserver<uint32_t>(
+        CLodReyesTerrainNormalMipBiasSettingName,
+        [this](const uint32_t& newValue) {
+            m_clodReyesTerrainNormalMipBias = static_cast<int>(newValue);
+        }));
+
+    getCLodReyesDiceRatePixels = settingsManager.getSettingGetter<float>(CLodReyesDiceRatePixelsSettingName);
+    setCLodReyesDiceRatePixels = settingsManager.getSettingSetter<float>(CLodReyesDiceRatePixelsSettingName);
+    m_clodReyesDiceRatePixels = getCLodReyesDiceRatePixels();
+    observerSetting(m_clodReyesDiceRatePixels, CLodReyesDiceRatePixelsSettingName);
+
+    getCLodReyesUseAabbOcclusion = settingsManager.getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName);
+    setCLodReyesUseAabbOcclusion = settingsManager.getSettingSetter<bool>(CLodReyesUseAabbOcclusionSettingName);
+    m_clodReyesUseAabbOcclusion = getCLodReyesUseAabbOcclusion();
+    observerSetting(m_clodReyesUseAabbOcclusion, CLodReyesUseAabbOcclusionSettingName);
 
     getCLodDisableVirtualShadowPageCaching = settingsManager.getSettingGetter<bool>(CLodDisableVirtualShadowPageCachingSettingName);
     setCLodDisableVirtualShadowPageCaching = settingsManager.getSettingSetter<bool>(CLodDisableVirtualShadowPageCachingSettingName);
@@ -1049,6 +1294,11 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setCLodForceTraversalDepthRoot = settingsManager.getSettingSetter<uint32_t>(CLodForceTraversalDepthRootSettingName);
     m_clodForceTraversalDepthRoot = getCLodForceTraversalDepthRoot();
     observerSetting(m_clodForceTraversalDepthRoot, CLodForceTraversalDepthRootSettingName);
+
+    getCLodVisibleClusterCapacity = settingsManager.getSettingGetter<uint32_t>(CLodVisibleClusterCapacitySettingName);
+    setCLodVisibleClusterCapacity = settingsManager.getSettingSetter<uint32_t>(CLodVisibleClusterCapacitySettingName);
+    m_clodVisibleClusterCapacity = getCLodVisibleClusterCapacity();
+    observerSetting(m_clodVisibleClusterCapacity, CLodVisibleClusterCapacitySettingName);
 
     getCLodDirectionalVirtualShadowMaxBackingResolution = settingsManager.getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName);
     setCLodDirectionalVirtualShadowMaxBackingResolution = settingsManager.getSettingSetter<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName);
@@ -1110,15 +1360,40 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld = getCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld();
     observerSetting(m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld, CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName);
 
+    getCLodDirectionalVirtualShadowReceiverTraceEnabled = settingsManager.getSettingGetter<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceEnabled = settingsManager.getSettingSetter<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceEnabled = getCLodDirectionalVirtualShadowReceiverTraceEnabled();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceEnabled, CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceSampleCount = settingsManager.getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceSampleCount = settingsManager.getSettingSetter<uint32_t>(CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceSampleCount = getCLodDirectionalVirtualShadowReceiverTraceSampleCount();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceSampleCount, CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld = settingsManager.getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld = getCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld, CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale = settingsManager.getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale = getCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale, CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale = settingsManager.getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale = getCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale, CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName);
+
     getNumDirectionalLightCascades = settingsManager.getSettingGetter<uint8_t>("numDirectionalLightCascades");
     setNumDirectionalLightCascades = settingsManager.getSettingSetter<uint8_t>("numDirectionalLightCascades");
     m_numDirectionalLightCascades = getNumDirectionalLightCascades();
     observerSetting(m_numDirectionalLightCascades, "numDirectionalLightCascades");
 
-    getDirectionalShadowVerticalExtent = settingsManager.getSettingGetter<float>("directionalShadowVerticalExtent");
-    setDirectionalShadowVerticalExtent = settingsManager.getSettingSetter<float>("directionalShadowVerticalExtent");
-    m_directionalShadowVerticalExtent = getDirectionalShadowVerticalExtent();
-    observerSetting(m_directionalShadowVerticalExtent, "directionalShadowVerticalExtent");
+    getDirectionalShadowDistanceLowerBound = settingsManager.getSettingGetter<float>("directionalShadowDistanceLowerBound");
+    setDirectionalShadowDistanceLowerBound = settingsManager.getSettingSetter<float>("directionalShadowDistanceLowerBound");
+    m_directionalShadowDistanceLowerBound = getDirectionalShadowDistanceLowerBound();
+    observerSetting(m_directionalShadowDistanceLowerBound, "directionalShadowDistanceLowerBound");
 
 	setWireframeEnabled = settingsManager.getSettingSetter<bool>("enableWireframe");
 	getWireframeEnabled = settingsManager.getSettingGetter<bool>("enableWireframe");
@@ -1144,6 +1419,179 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	getVisibilityRenderingEnabled = settingsManager.getSettingGetter<bool>("enableVisibilityRendering");
 	m_visibilityRenderingEnabled = getVisibilityRenderingEnabled();
 	observerSetting(m_visibilityRenderingEnabled, "enableVisibilityRendering");
+    setTerrainRegionMaterialEvaluationEnabled = settingsManager.getSettingSetter<bool>("enableTerrainRegionMaterialEvaluation");
+    getTerrainRegionMaterialEvaluationEnabled = settingsManager.getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation");
+    m_terrainRegionMaterialEvaluationEnabled = getTerrainRegionMaterialEvaluationEnabled();
+    observerSetting(m_terrainRegionMaterialEvaluationEnabled, "enableTerrainRegionMaterialEvaluation");
+    setTerrainRvtEnabled = settingsManager.getSettingSetter<bool>("enableTerrainRvt");
+    getTerrainRvtEnabled = settingsManager.getSettingGetter<bool>("enableTerrainRvt");
+    m_terrainRvtEnabled = getTerrainRvtEnabled();
+    observerSetting(m_terrainRvtEnabled, "enableTerrainRvt");
+    setForceDirectTerrainRvtFallback = settingsManager.getSettingSetter<bool>("forceDirectTerrainRvtFallback");
+    getForceDirectTerrainRvtFallback = settingsManager.getSettingGetter<bool>("forceDirectTerrainRvtFallback");
+    m_forceDirectTerrainRvtFallback = getForceDirectTerrainRvtFallback();
+    observerSetting(m_forceDirectTerrainRvtFallback, "forceDirectTerrainRvtFallback");
+    setTerrainRvtTelemetryDebug = settingsManager.getSettingSetter<bool>("terrainRvtTelemetryDebug");
+    getTerrainRvtTelemetryDebug = settingsManager.getSettingGetter<bool>("terrainRvtTelemetryDebug");
+    m_terrainRvtTelemetryDebug = getTerrainRvtTelemetryDebug();
+    observerSetting(m_terrainRvtTelemetryDebug, "terrainRvtTelemetryDebug");
+    setTerrainRvtDebugView = settingsManager.getSettingSetter<uint32_t>("terrainRvtDebugView");
+    getTerrainRvtDebugView = settingsManager.getSettingGetter<uint32_t>("terrainRvtDebugView");
+    m_terrainRvtDebugView = static_cast<int>(getTerrainRvtDebugView());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtDebugView",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtDebugView = static_cast<int>(newValue);
+        }));
+    setTerrainRvtPageSize = settingsManager.getSettingSetter<uint32_t>("terrainRvtPageSize");
+    getTerrainRvtPageSize = settingsManager.getSettingGetter<uint32_t>("terrainRvtPageSize");
+    m_terrainRvtPageSize = static_cast<int>(getTerrainRvtPageSize());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtPageSize",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtPageSize = static_cast<int>(newValue);
+        }));
+    setTerrainRvtBorderTexels = settingsManager.getSettingSetter<uint32_t>("terrainRvtBorderTexels");
+    getTerrainRvtBorderTexels = settingsManager.getSettingGetter<uint32_t>("terrainRvtBorderTexels");
+    m_terrainRvtBorderTexels = static_cast<int>(getTerrainRvtBorderTexels());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtBorderTexels",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtBorderTexels = static_cast<int>(newValue);
+        }));
+    setTerrainRvtMipCount = settingsManager.getSettingSetter<uint32_t>("terrainRvtMipCount");
+    getTerrainRvtMipCount = settingsManager.getSettingGetter<uint32_t>("terrainRvtMipCount");
+    m_terrainRvtMipCount = static_cast<int>(getTerrainRvtMipCount());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtMipCount",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtMipCount = static_cast<int>(newValue);
+        }));
+    setTerrainRvtMipOffset = settingsManager.getSettingSetter<float>("terrainRvtMipOffset");
+    getTerrainRvtMipOffset = settingsManager.getSettingGetter<float>("terrainRvtMipOffset");
+    m_terrainRvtMipOffset = getTerrainRvtMipOffset();
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<float>(
+        "terrainRvtMipOffset",
+        [this](const float& newValue) {
+            m_terrainRvtMipOffset = newValue;
+        }));
+    setTerrainRvtSourceTexelsPerWorld = settingsManager.getSettingSetter<float>("terrainRvtSourceTexelsPerWorld");
+    getTerrainRvtSourceTexelsPerWorld = settingsManager.getSettingGetter<float>("terrainRvtSourceTexelsPerWorld");
+    m_terrainRvtSourceTexelsPerWorld = getTerrainRvtSourceTexelsPerWorld();
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<float>(
+        "terrainRvtSourceTexelsPerWorld",
+        [this](const float& newValue) {
+            m_terrainRvtSourceTexelsPerWorld = newValue;
+        }));
+    setTerrainRvtPhysicalAtlasPagesWide = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPagesWide");
+    getTerrainRvtPhysicalAtlasPagesWide = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPagesWide");
+    m_terrainRvtPhysicalAtlasPagesWide = static_cast<int>(getTerrainRvtPhysicalAtlasPagesWide());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtPhysicalAtlasPagesWide",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtPhysicalAtlasPagesWide = static_cast<int>(newValue);
+        }));
+    setTerrainRvtPhysicalAtlasPagesHigh = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPagesHigh");
+    getTerrainRvtPhysicalAtlasPagesHigh = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPagesHigh");
+    m_terrainRvtPhysicalAtlasPagesHigh = static_cast<int>(getTerrainRvtPhysicalAtlasPagesHigh());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtPhysicalAtlasPagesHigh",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtPhysicalAtlasPagesHigh = static_cast<int>(newValue);
+        }));
+    setTerrainRvtPhysicalAtlasPoolCount = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPoolCount");
+    getTerrainRvtPhysicalAtlasPoolCount = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPoolCount");
+    m_terrainRvtPhysicalAtlasPoolCount = static_cast<int>(getTerrainRvtPhysicalAtlasPoolCount());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtPhysicalAtlasPoolCount",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtPhysicalAtlasPoolCount = static_cast<int>(newValue);
+        }));
+
+    setTerrainStochasticSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticSampling");
+    getTerrainStochasticSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticSampling");
+    m_terrainStochasticSamplingEnabled = getTerrainStochasticSamplingEnabled();
+    observerSetting(m_terrainStochasticSamplingEnabled, "enableTerrainStochasticSampling");
+    setTerrainStochasticDiffuseSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticDiffuseSampling");
+    getTerrainStochasticDiffuseSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticDiffuseSampling");
+    m_terrainStochasticDiffuseSamplingEnabled = getTerrainStochasticDiffuseSamplingEnabled();
+    observerSetting(m_terrainStochasticDiffuseSamplingEnabled, "enableTerrainStochasticDiffuseSampling");
+    setTerrainStochasticNormalSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticNormalSampling");
+    getTerrainStochasticNormalSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticNormalSampling");
+    m_terrainStochasticNormalSamplingEnabled = getTerrainStochasticNormalSamplingEnabled();
+    observerSetting(m_terrainStochasticNormalSamplingEnabled, "enableTerrainStochasticNormalSampling");
+    setTerrainStochasticDerivativeNormalSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticDerivativeNormalSampling");
+    getTerrainStochasticDerivativeNormalSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticDerivativeNormalSampling");
+    m_terrainStochasticDerivativeNormalSamplingEnabled = getTerrainStochasticDerivativeNormalSamplingEnabled();
+    observerSetting(m_terrainStochasticDerivativeNormalSamplingEnabled, "enableTerrainStochasticDerivativeNormalSampling");
+    setTerrainStochasticBlendCurve = settingsManager.getSettingSetter<float>("terrainStochasticBlendCurve");
+    getTerrainStochasticBlendCurve = settingsManager.getSettingGetter<float>("terrainStochasticBlendCurve");
+    m_terrainStochasticBlendCurve = getTerrainStochasticBlendCurve();
+    observerSetting(m_terrainStochasticBlendCurve, "terrainStochasticBlendCurve");
+    setTerrainGaussianStochasticSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainGaussianStochasticSampling");
+    getTerrainGaussianStochasticSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainGaussianStochasticSampling");
+    m_terrainGaussianStochasticSamplingEnabled = getTerrainGaussianStochasticSamplingEnabled();
+    observerSetting(m_terrainGaussianStochasticSamplingEnabled, "enableTerrainGaussianStochasticSampling");
+    setParallaxOcclusionMappingEnabled = settingsManager.getSettingSetter<bool>("enableParallaxOcclusionMapping");
+    getParallaxOcclusionMappingEnabled = settingsManager.getSettingGetter<bool>("enableParallaxOcclusionMapping");
+    m_parallaxOcclusionMappingEnabled = getParallaxOcclusionMappingEnabled();
+    observerSetting(m_parallaxOcclusionMappingEnabled, "enableParallaxOcclusionMapping");
+    setTerrainParallaxOcclusionMappingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainParallaxOcclusionMapping");
+    getTerrainParallaxOcclusionMappingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainParallaxOcclusionMapping");
+    m_terrainParallaxOcclusionMappingEnabled = getTerrainParallaxOcclusionMappingEnabled();
+    observerSetting(m_terrainParallaxOcclusionMappingEnabled, "enableTerrainParallaxOcclusionMapping");
+    setTerrainReyesDisplacementEnabled = settingsManager.getSettingSetter<bool>("enableTerrainReyesDisplacement");
+    getTerrainReyesDisplacementEnabled = settingsManager.getSettingGetter<bool>("enableTerrainReyesDisplacement");
+    m_terrainReyesDisplacementEnabled = getTerrainReyesDisplacementEnabled();
+    observerSetting(m_terrainReyesDisplacementEnabled, "enableTerrainReyesDisplacement");
+    setTerrainReyesDisplacementScale = settingsManager.getSettingSetter<float>("terrainReyesDisplacementGlobalScale");
+    getTerrainReyesDisplacementScale = settingsManager.getSettingGetter<float>("terrainReyesDisplacementGlobalScale");
+    m_terrainReyesDisplacementScale = getTerrainReyesDisplacementScale();
+    observerSetting(m_terrainReyesDisplacementScale, "terrainReyesDisplacementGlobalScale");
+    setObjectReyesDisplacementScale = settingsManager.getSettingSetter<float>("objectReyesDisplacementScale");
+    getObjectReyesDisplacementScale = settingsManager.getSettingGetter<float>("objectReyesDisplacementScale");
+    m_objectReyesDisplacementScale = getObjectReyesDisplacementScale();
+    observerSetting(m_objectReyesDisplacementScale, "objectReyesDisplacementScale");
+    setTerrainParallaxHeightScale = settingsManager.getSettingSetter<float>("terrainParallaxHeightScale");
+    getTerrainParallaxHeightScale = settingsManager.getSettingGetter<float>("terrainParallaxHeightScale");
+    m_terrainParallaxHeightScale = getTerrainParallaxHeightScale();
+    observerSetting(m_terrainParallaxHeightScale, "terrainParallaxHeightScale");
+    setObjectParallaxHeightScale = settingsManager.getSettingSetter<float>("objectParallaxHeightScale");
+    getObjectParallaxHeightScale = settingsManager.getSettingGetter<float>("objectParallaxHeightScale");
+    m_objectParallaxHeightScale = getObjectParallaxHeightScale();
+    observerSetting(m_objectParallaxHeightScale, "objectParallaxHeightScale");
+    setProceduralWindDisplacementScale = settingsManager.getSettingSetter<float>(ProceduralWindDisplacementScaleSettingName);
+    getProceduralWindDisplacementScale = settingsManager.getSettingGetter<float>(ProceduralWindDisplacementScaleSettingName);
+    m_proceduralWindDisplacementScale = getProceduralWindDisplacementScale();
+    observerSetting(m_proceduralWindDisplacementScale, ProceduralWindDisplacementScaleSettingName);
+    setProceduralWindGrassDisplacementScale = settingsManager.getSettingSetter<float>(ProceduralWindGrassDisplacementScaleSettingName);
+    getProceduralWindGrassDisplacementScale = settingsManager.getSettingGetter<float>(ProceduralWindGrassDisplacementScaleSettingName);
+    m_proceduralWindGrassDisplacementScale = getProceduralWindGrassDisplacementScale();
+    observerSetting(m_proceduralWindGrassDisplacementScale, ProceduralWindGrassDisplacementScaleSettingName);
+    setProceduralWindGrassOscillationScale = settingsManager.getSettingSetter<float>(ProceduralWindGrassOscillationScaleSettingName);
+    getProceduralWindGrassOscillationScale = settingsManager.getSettingGetter<float>(ProceduralWindGrassOscillationScaleSettingName);
+    m_proceduralWindGrassOscillationScale = getProceduralWindGrassOscillationScale();
+    observerSetting(m_proceduralWindGrassOscillationScale, ProceduralWindGrassOscillationScaleSettingName);
+    setProceduralWindGrassFlutterFrequency = settingsManager.getSettingSetter<float>(ProceduralWindGrassFlutterFrequencySettingName);
+    getProceduralWindGrassFlutterFrequency = settingsManager.getSettingGetter<float>(ProceduralWindGrassFlutterFrequencySettingName);
+    m_proceduralWindGrassFlutterFrequency = getProceduralWindGrassFlutterFrequency();
+    observerSetting(m_proceduralWindGrassFlutterFrequency, ProceduralWindGrassFlutterFrequencySettingName);
+    setProceduralWindEffectDistance = settingsManager.getSettingSetter<float>(ProceduralWindOuterRadiusSettingName);
+    setProceduralWindInnerRadius = settingsManager.getSettingSetter<float>(ProceduralWindInnerRadiusSettingName);
+    m_proceduralWindEffectDistance = settingsManager.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
+    observerSetting(m_proceduralWindEffectDistance, ProceduralWindOuterRadiusSettingName);
+    setTerrainParallaxMaxSteps = settingsManager.getSettingSetter<uint32_t>("terrainParallaxMaxSteps");
+    getTerrainParallaxMaxSteps = settingsManager.getSettingGetter<uint32_t>("terrainParallaxMaxSteps");
+    m_terrainParallaxMaxSteps = getTerrainParallaxMaxSteps();
+    observerSetting(m_terrainParallaxMaxSteps, "terrainParallaxMaxSteps");
+    setTerrainParallaxFadeStartDistance = settingsManager.getSettingSetter<float>("terrainParallaxFadeStartDistance");
+    getTerrainParallaxFadeStartDistance = settingsManager.getSettingGetter<float>("terrainParallaxFadeStartDistance");
+    m_terrainParallaxFadeStartDistance = getTerrainParallaxFadeStartDistance();
+    observerSetting(m_terrainParallaxFadeStartDistance, "terrainParallaxFadeStartDistance");
+    setTerrainParallaxFadeEndDistance = settingsManager.getSettingSetter<float>("terrainParallaxFadeEndDistance");
+    getTerrainParallaxFadeEndDistance = settingsManager.getSettingGetter<float>("terrainParallaxFadeEndDistance");
+    m_terrainParallaxFadeEndDistance = getTerrainParallaxFadeEndDistance();
+    observerSetting(m_terrainParallaxFadeEndDistance, "terrainParallaxFadeEndDistance");
 
 	getGTAOEnabled = settingsManager.getSettingGetter<bool>("enableGTAO");
 	setGTAOEnabled = settingsManager.getSettingSetter<bool>("enableGTAO");
@@ -1170,6 +1618,11 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_jitterEnabled = getJitterEnabled();
 	observerSetting(m_jitterEnabled, "enableJitter");
 
+    setRememberCameraPose = settingsManager.getSettingSetter<bool>("rememberCameraPose");
+    getRememberCameraPose = settingsManager.getSettingGetter<bool>("rememberCameraPose");
+    m_rememberCameraPose = getRememberCameraPose();
+    observerSetting(m_rememberCameraPose, "rememberCameraPose");
+
     getCollectPassStatistics = settingsManager.getSettingGetter<bool>("collectPassStatistics");
     setCollectPassStatistics = settingsManager.getSettingSetter<bool>("collectPassStatistics");
     m_collectPassStatistics = getCollectPassStatistics();
@@ -1184,10 +1637,25 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_currentUpscalingMode = getUpscalingMode();
 	observerSetting(m_currentUpscalingMode, "upscalingMode");
 
+	getDilatedMotionVectorsEnabled = settingsManager.getSettingGetter<bool>("enableDilatedMotionVectors");
+	setDilatedMotionVectorsEnabled = settingsManager.getSettingSetter<bool>("enableDilatedMotionVectors");
+	m_dilatedMotionVectorsEnabled = getDilatedMotionVectorsEnabled();
+	observerSetting(m_dilatedMotionVectorsEnabled, "enableDilatedMotionVectors");
+
 	getUpscalingQualityMode = settingsManager.getSettingGetter<UpscaleQualityMode>("upscalingQualityMode");
     setUpscalingQualityMode = settingsManager.getSettingSetter<UpscaleQualityMode>("upscalingQualityMode");
     m_currentUpscalingQualityMode = getUpscalingQualityMode();
 	observerSetting(m_currentUpscalingQualityMode, "upscalingQualityMode");
+
+    getWindowResolutionPreset = settingsManager.getSettingGetter<WindowResolutionPreset>(WindowResolutionPresetSettingName);
+    setWindowResolutionPreset = settingsManager.getSettingSetter<WindowResolutionPreset>(WindowResolutionPresetSettingName);
+    m_currentWindowResolutionPreset = getWindowResolutionPreset();
+    observerSetting(m_currentWindowResolutionPreset, WindowResolutionPresetSettingName);
+
+    getCLodLodHeightMode = settingsManager.getSettingGetter<CLodLodHeightMode>(CLodLodHeightModeSettingName);
+    setCLodLodHeightMode = settingsManager.getSettingSetter<CLodLodHeightMode>(CLodLodHeightModeSettingName);
+    m_currentCLodLodHeightMode = getCLodLodHeightMode();
+    observerSetting(m_currentCLodLodHeightMode, CLodLodHeightModeSettingName);
 
 	getUseAsyncCompute = settingsManager.getSettingGetter<bool>("useAsyncCompute");
     setUseAsyncCompute = settingsManager.getSettingSetter<bool>("useAsyncCompute");
@@ -1198,11 +1666,6 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	setHeavyDebug = settingsManager.getSettingSetter<bool>("heavyDebug");
 	m_heavyDebug = getHeavyDebug();
 	observerSetting(m_heavyDebug, "heavyDebug");
-
-	getRenderGraphDisableCaching = settingsManager.getSettingGetter<bool>("renderGraphDisableCaching");
-	setRenderGraphDisableCaching = settingsManager.getSettingSetter<bool>("renderGraphDisableCaching");
-	m_renderGraphDisableCaching = getRenderGraphDisableCaching();
-	observerSetting(m_renderGraphDisableCaching, "renderGraphDisableCaching");
 
     getRenderGraphBatchTraceEnabled = settingsManager.getSettingGetter<bool>("renderGraphBatchTraceEnabled");
     setRenderGraphBatchTraceEnabled = settingsManager.getSettingSetter<bool>("renderGraphBatchTraceEnabled");
@@ -1365,6 +1828,13 @@ static bool PassUsesResourceAdapter(const void* passAndRes, uint64_t resourceId,
 
 inline void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
     m_sceneOverlapStatus = context.sceneOverlapStatus;
+	// A platform window/context may exist while the renderer backend is
+	// deliberately disabled (currently the default for Vulkan). ImGui 1.92's
+	// font atlas update requires a live renderer backend, so do not start a UI
+	// frame in the null-backend mode.
+	if (m_imguiBackend == rhi::Backend::Null) {
+		return;
+	}
 
     if (m_imguiBackend == rhi::Backend::D3D12) {
         ImGui_ImplDX12_NewFrame();
@@ -1397,10 +1867,10 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             std::pair{ 1.0, "B" };
         return std::format("{:.2f} {}", value / divisor, suffix);
     };
-    const std::optional<MaterialTextureStreamingStats> materialTextureStreamingStats =
-        context.materialManager
-        ? std::optional<MaterialTextureStreamingStats>(context.materialManager->GetMaterialTextureStreamingStats())
-        : std::nullopt;
+    std::optional<MaterialTextureStreamingStats> materialTextureStreamingStats;
+    if (showMaterialTextureStreaming && context.materialManager) {
+        materialTextureStreamingStats.emplace(context.materialManager->GetMaterialTextureStreamingStats());
+    }
 
     const float fps = ImGui::GetIO().Framerate;
     const float msPerFrame = fps > 0.0f ? (1000.0f / fps) : 0.0f;
@@ -1456,13 +1926,19 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         return;
     }
 
-    RefreshSceneExplorerSnapshot();
-
 	{
 		static float f = 0.0f;
 		static int counter = 0;
 
-		ImGui::Begin("Renderer Configuration", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        const ImGuiIO& io = ImGui::GetIO();
+        const float margin = 12.0f;
+        const float maxWindowWidth = (std::max)(360.0f, io.DisplaySize.x - margin * 2.0f);
+        const float maxWindowHeight = (std::max)(240.0f, io.DisplaySize.y - margin * 2.0f);
+        ImGui::SetNextWindowPos(ImVec2(margin, margin), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2((std::min)(520.0f, maxWindowWidth), (std::min)(720.0f, maxWindowHeight)), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f, 240.0f), ImVec2(maxWindowWidth, maxWindowHeight));
+
+		ImGui::Begin("Renderer Configuration", nullptr, ImGuiWindowFlags_NoCollapse);
 
         if (ImGui::Checkbox("Image-Based Lighting", &imageBasedLightingEnabled)) {
 			setImageBasedLightingEnabled(imageBasedLightingEnabled);
@@ -1473,6 +1949,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 		if (ImGui::Checkbox("Shadows", &shadowsEnabled)) {
 			setShadowsEnabled(shadowsEnabled);
 		}
+        if (ImGui::Checkbox("Remember Camera Pose", &m_rememberCameraPose)) {
+            setRememberCameraPose(m_rememberCameraPose);
+        }
+        ImGui::Separator();
+
+        if (ImGui::CollapsingHeader("Geometry and Culling")) {
         if (m_meshShadersSupported) {
             if (ImGui::Checkbox("Use Mesh Shaders", &meshShaderEnabled)) {
                 setMeshShaderEnabled(meshShaderEnabled);
@@ -1487,9 +1969,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Occlusion Culling", &occlusionCulling)) {
             setOcclusionCullingEnabled(occlusionCulling);
         }
-		if (ImGui::Checkbox("Meshlet Culling", &meshletCulling)) {
-			setMeshletCullingEnabled(meshletCulling);
-		}
+        if (ImGui::Checkbox("CLod Frustum Culling", &m_clodFrustumCulling)) {
+            setCLodFrustumCulling(m_clodFrustumCulling);
+        }
         int clodCullingBackendIndex = static_cast<int>(m_clodCullingBackend);
         if (ImGui::Combo("CLod Culling Backend", &clodCullingBackendIndex, CLodCullingBackendNames, CLodCullingBackendCount)) {
             clodCullingBackendIndex = std::clamp(clodCullingBackendIndex, 0, CLodCullingBackendCount - 1);
@@ -1523,6 +2005,27 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 setCLodPureComputePhase2ExpansionFactor(m_clodPureComputePhase2ExpansionFactor);
             }
         }
+        int visibleClusterCapacityM = static_cast<int>((m_clodVisibleClusterCapacity + 999999u) / 1000000u);
+        if (ImGui::SliderInt("CLod Visible Cluster Capacity (M)", &visibleClusterCapacityM, 1, 30)) {
+            const uint32_t capacity = static_cast<uint32_t>(std::clamp(visibleClusterCapacityM, 1, 30)) * 1000000u;
+            m_clodVisibleClusterCapacity = std::clamp(
+                capacity,
+                CLodMinVisibleClusterCapacity,
+                CLodMaxVisibleClusterCapacity);
+            setCLodVisibleClusterCapacity(m_clodVisibleClusterCapacity);
+        }
+        DrawCLodLodHeightModeCombo();
+        int clodCpuUploadBudget = static_cast<int>(std::min<uint32_t>(m_clodStreamingCpuUploadBudgetRequests, 4096u));
+        if (ImGui::SliderInt("CLod CPU Upload Budget", &clodCpuUploadBudget, 1, 4096)) {
+            m_clodStreamingCpuUploadBudgetRequests = static_cast<uint32_t>(std::max(clodCpuUploadBudget, 1));
+            setCLodStreamingCpuUploadBudgetRequests(m_clodStreamingCpuUploadBudgetRequests);
+        }
+        if (ImGui::Checkbox("CLod Streaming DirectStorage", &m_clodStreamingEnableDirectStorage)) {
+            setCLodStreamingEnableDirectStorage(m_clodStreamingEnableDirectStorage);
+        }
+        }
+
+        if (ImGui::CollapsingHeader("CLod Rasterization and Reyes")) {
         int clodSoftwareRasterModeIndex = static_cast<int>(m_clodSoftwareRasterMode);
         if (ImGui::Combo("Visibility/Alpha SW Raster Mode", &clodSoftwareRasterModeIndex, CLodSoftwareRasterModeNames, CLodSoftwareRasterModeCount)) {
             clodSoftwareRasterModeIndex = std::clamp(clodSoftwareRasterModeIndex, 0, CLodSoftwareRasterModeCount - 1);
@@ -1544,8 +2047,33 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Disable Reyes Tessellation / VSM Reyes Routing", &m_clodDisableReyesRasterization)) {
             setCLodDisableReyesRasterization(m_clodDisableReyesRasterization);
         }
-        if (ImGui::Checkbox("Disable VSM Page Caching", &m_clodDisableVirtualShadowPageCaching)) {
-            setCLodDisableVirtualShadowPageCaching(m_clodDisableVirtualShadowPageCaching);
+        if (ImGui::Checkbox("Reyes Geometric Normal", &m_clodReyesGeometricNormal)) {
+            setCLodReyesGeometricNormal(m_clodReyesGeometricNormal);
+        }
+        if (ImGui::SliderFloat("Reyes Object Normal Map Blend", &m_clodReyesObjectNormalMapBlend, 0.0f, 1.0f, "%.2f")) {
+            m_clodReyesObjectNormalMapBlend = std::clamp(m_clodReyesObjectNormalMapBlend, 0.0f, 1.0f);
+            setCLodReyesObjectNormalMapBlend(m_clodReyesObjectNormalMapBlend);
+        }
+        if (ImGui::SliderFloat("Reyes Terrain Normal Blend", &m_clodReyesTerrainNormalBlend, 0.0f, 1.0f, "%.2f")) {
+            m_clodReyesTerrainNormalBlend = std::clamp(m_clodReyesTerrainNormalBlend, 0.0f, 1.0f);
+            setCLodReyesTerrainNormalBlend(m_clodReyesTerrainNormalBlend);
+        }
+        if (ImGui::SliderInt("Reyes Terrain Normal Mip Bias", &m_clodReyesTerrainNormalMipBias, 0, static_cast<int>(CLodReyesTerrainNormalMipBiasMax))) {
+            m_clodReyesTerrainNormalMipBias = std::clamp(
+                m_clodReyesTerrainNormalMipBias,
+                0,
+                static_cast<int>(CLodReyesTerrainNormalMipBiasMax));
+            setCLodReyesTerrainNormalMipBias(static_cast<uint32_t>(m_clodReyesTerrainNormalMipBias));
+        }
+        if (ImGui::SliderFloat("Reyes Dice Rate Pixels", &m_clodReyesDiceRatePixels, CLodReyesDiceRatePixelsMin, CLodReyesDiceRatePixelsMax, "%.3f")) {
+            m_clodReyesDiceRatePixels = std::clamp(
+                m_clodReyesDiceRatePixels,
+                CLodReyesDiceRatePixelsMin,
+                CLodReyesDiceRatePixelsMax);
+            setCLodReyesDiceRatePixels(m_clodReyesDiceRatePixels);
+        }
+        if (ImGui::Checkbox("Reyes AABB Occlusion", &m_clodReyesUseAabbOcclusion)) {
+            setCLodReyesUseAabbOcclusion(m_clodReyesUseAabbOcclusion);
         }
         bool forceTraversalDepthRoot = m_clodForceTraversalDepthRoot != CLodForceTraversalDepthRootDisabled;
         if (ImGui::Checkbox("Force CLod Traversal Depth Root", &forceTraversalDepthRoot)) {
@@ -1594,6 +2122,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             if (ImGui::Checkbox("Force All Opaque VSM -> Page-Job", &m_clodPageJobForceAll)) {
                 setCLodPageJobForceAll(m_clodPageJobForceAll);
             }
+        }
+        }
+
+        if (ImGui::CollapsingHeader("Virtual Shadows")) {
+        if (ImGui::Checkbox("Disable VSM Page Caching", &m_clodDisableVirtualShadowPageCaching)) {
+            setCLodDisableVirtualShadowPageCaching(m_clodDisableVirtualShadowPageCaching);
         }
         int directionalLightClipmaps = static_cast<int>(m_numDirectionalLightCascades);
         if (ImGui::SliderInt("Directional VSM Clipmaps", &directionalLightClipmaps, 1, static_cast<int>(CLodVirtualShadowMaxSupportedClipmapCount))) {
@@ -1657,7 +2191,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_clodDirectionalVirtualShadowAutoLodBiasScale = std::max(m_clodDirectionalVirtualShadowAutoLodBiasScale, 0.0f);
             setCLodDirectionalVirtualShadowAutoLodBiasScale(m_clodDirectionalVirtualShadowAutoLodBiasScale);
         }
-        if (ImGui::Checkbox("Predictive VSM LOD Invalidation", &m_clodDirectionalVirtualShadowPredictiveLodInvalidation)) {
+        if (ImGui::Checkbox("Invalidate shadows on streaming upgrade", &m_clodDirectionalVirtualShadowPredictiveLodInvalidation)) {
             setCLodDirectionalVirtualShadowPredictiveLodInvalidation(m_clodDirectionalVirtualShadowPredictiveLodInvalidation);
         }
         if (ImGui::SliderFloat("Directional VSM Source Angle", &m_clodDirectionalVirtualShadowSourceAngleDegrees, 0.0f, 10.0f, "%.2f deg")) {
@@ -1685,28 +2219,85 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             setCLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees(
                 m_clodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees);
         }
-        if (ImGui::SliderFloat(
+        if (ImGui::InputFloat(
                 "Directional VSM SMRT Ray Length Scale",
                 &m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional,
                 0.0f,
-                0.25f,
-                "%.3f")) {
+                0.0f,
+                "%.9g",
+                ImGuiInputTextFlags_CharsScientific)) {
             m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional =
                 std::max(m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional, 0.0f);
             setCLodDirectionalVirtualShadowSmrtRayLengthScaleDirectional(
                 m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional);
         }
-        if (ImGui::SliderFloat(
-                "Directional VSM SMRT Max Trace Distance",
+        if (ImGui::InputFloat(
+                "Directional VSM SMRT Max Trace Distance (world units)",
                 &m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld,
-                1.0f,
-                2000.0f,
-                "%.1f")) {
+                0.0f,
+                0.0f,
+                "%.9g",
+                ImGuiInputTextFlags_CharsScientific)) {
             m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld =
                 std::max(m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld, 1.0f);
             setCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld(
                 m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld);
         }
+        ImGui::SeparatorText("Adaptive Receiver Screen Trace");
+        if (ImGui::Checkbox(
+                "Enable VSM Receiver Screen Trace",
+                &m_clodDirectionalVirtualShadowReceiverTraceEnabled)) {
+            setCLodDirectionalVirtualShadowReceiverTraceEnabled(
+                m_clodDirectionalVirtualShadowReceiverTraceEnabled);
+        }
+        int receiverTraceSampleCount =
+            static_cast<int>(m_clodDirectionalVirtualShadowReceiverTraceSampleCount);
+        if (ImGui::SliderInt(
+                "VSM Receiver Trace Samples",
+                &receiverTraceSampleCount,
+                1,
+                32)) {
+            m_clodDirectionalVirtualShadowReceiverTraceSampleCount =
+                static_cast<uint32_t>(std::clamp(receiverTraceSampleCount, 1, 32));
+            setCLodDirectionalVirtualShadowReceiverTraceSampleCount(
+                m_clodDirectionalVirtualShadowReceiverTraceSampleCount);
+        }
+        if (ImGui::InputFloat(
+                "VSM Receiver Trace Max Distance (world units)",
+                &m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld,
+                0.0f,
+                0.0f,
+                "%.9g",
+                ImGuiInputTextFlags_CharsScientific)) {
+            m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld =
+                std::max(m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld, 1.0f);
+            setCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld(
+                m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld);
+        }
+        if (ImGui::SliderFloat(
+                "VSM Receiver Trace Uncertainty",
+                &m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale,
+                0.25f,
+                8.0f,
+                "%.2f pixels")) {
+            m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale =
+                std::max(m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale, 0.0f);
+            setCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale(
+                m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale);
+        }
+        if (ImGui::SliderFloat(
+                "VSM Trace Depth Safety",
+                &m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale,
+                0.0f,
+                16.0f,
+                "%.2f pixels")) {
+            m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale =
+                std::max(m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale, 0.0f);
+            setCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale(
+                m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale);
+        }
+        ImGui::TextDisabled(
+            "Receiver escape is tested independently for every randomized SMRT ray.");
         const CLodVirtualShadowResolutionConfig virtualShadowConfig =
             CLodVirtualShadowBuildRuntimeResolutionConfig();
         const float budgetDirectionalLodBias = m_clodDirectionalVirtualShadowAutoLodBias
@@ -1741,25 +2332,178 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_clodDirectionalVirtualShadowSmrtSamplesPerRayDirectional,
             m_clodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees,
             m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional);
-        if (ImGui::SliderFloat("Directional Shadow Vertical Extent", &m_directionalShadowVerticalExtent, 1.0f, 1000.0f, "%.1f")) {
-            m_directionalShadowVerticalExtent = std::max(m_directionalShadowVerticalExtent, 1.0f);
-            setDirectionalShadowVerticalExtent(m_directionalShadowVerticalExtent);
+        ImGui::Text(
+            "Directional VSM SMRT distance: %.1f base, %.1f effective world units",
+            m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld,
+            m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld *
+                m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional);
+        ImGui::Text(
+            "Receiver trace: %s, %u samples, %.1f world-unit cap",
+            m_clodDirectionalVirtualShadowReceiverTraceEnabled ? "enabled" : "disabled",
+            m_clodDirectionalVirtualShadowReceiverTraceSampleCount,
+            m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld);
+        if (ImGui::SliderFloat(
+                "Directional Shadow Distance Lower Bound",
+                &m_directionalShadowDistanceLowerBound,
+                1.0f,
+                1000000.0f,
+                "%.1f",
+                ImGuiSliderFlags_Logarithmic)) {
+            m_directionalShadowDistanceLowerBound = std::max(m_directionalShadowDistanceLowerBound, 1.0f);
+            setDirectionalShadowDistanceLowerBound(m_directionalShadowDistanceLowerBound);
         }
-		if (ImGui::Checkbox("Wireframe", &wireframeEnabled)) {
-			setWireframeEnabled(wireframeEnabled);
-		}
-        if (ImGui::Checkbox("Uncap Framerate", &allowTearing)) {
-			setAllowTearing(allowTearing);
         }
-		if (ImGui::Checkbox("Draw Bounding Spheres", &drawBoundingSpheres)) {
-			setDrawBoundingSpheres(drawBoundingSpheres);
-		}
+
+        if (ImGui::CollapsingHeader("Terrain and Materials")) {
         if (ImGui::Checkbox("Clustered Lighting", &clusteredLighting)) {
 			setClusteredLightingEnabled(clusteredLighting);
         }
         if (ImGui::Checkbox("Visibility Rendering", &m_visibilityRenderingEnabled)) {
             setVisibilityRenderingEnabled(m_visibilityRenderingEnabled);
-		}
+        }
+        if (ImGui::Checkbox("Terrain Region Material Evaluation", &m_terrainRegionMaterialEvaluationEnabled)) {
+            setTerrainRegionMaterialEvaluationEnabled(m_terrainRegionMaterialEvaluationEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Runtime Virtual Texture", &m_terrainRvtEnabled)) {
+            setTerrainRvtEnabled(m_terrainRvtEnabled);
+        }
+        if (ImGui::Checkbox("Force Terrain RVT Direct Fallback", &m_forceDirectTerrainRvtFallback)) {
+            setForceDirectTerrainRvtFallback(m_forceDirectTerrainRvtFallback);
+        }
+        if (ImGui::Checkbox("Terrain RVT Telemetry", &m_terrainRvtTelemetryDebug)) {
+            setTerrainRvtTelemetryDebug(m_terrainRvtTelemetryDebug);
+        }
+        if (ImGui::SliderInt("Terrain RVT Debug View", &m_terrainRvtDebugView, 0, 4)) {
+            setTerrainRvtDebugView(static_cast<uint32_t>(std::max(0, m_terrainRvtDebugView)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Page Size", &m_terrainRvtPageSize, 16, 512)) {
+            setTerrainRvtPageSize(static_cast<uint32_t>(std::clamp(m_terrainRvtPageSize, 16, 512)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Border Texels", &m_terrainRvtBorderTexels, 0, 16)) {
+            setTerrainRvtBorderTexels(static_cast<uint32_t>(std::clamp(m_terrainRvtBorderTexels, 0, 16)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Clipmaps", &m_terrainRvtMipCount, 1, 24)) {
+            setTerrainRvtMipCount(static_cast<uint32_t>(std::clamp(m_terrainRvtMipCount, 1, 24)));
+        }
+        if (ImGui::SliderFloat("Terrain RVT Mip Offset", &m_terrainRvtMipOffset, -4.0f, 4.0f, "%.2f")) {
+            setTerrainRvtMipOffset(std::clamp(m_terrainRvtMipOffset, -8.0f, 8.0f));
+        }
+        if (ImGui::SliderFloat("Terrain RVT Source Texels/World", &m_terrainRvtSourceTexelsPerWorld, 1.0f, 128.0f, "%.2f")) {
+            setTerrainRvtSourceTexelsPerWorld(std::max(0.001f, m_terrainRvtSourceTexelsPerWorld));
+        }
+        if (ImGui::SliderInt("Terrain RVT Physical Atlas Pages Wide", &m_terrainRvtPhysicalAtlasPagesWide, 1, 128)) {
+            setTerrainRvtPhysicalAtlasPagesWide(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPagesWide, 1, 128)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Physical Atlas Pages High", &m_terrainRvtPhysicalAtlasPagesHigh, 1, 128)) {
+            setTerrainRvtPhysicalAtlasPagesHigh(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPagesHigh, 1, 128)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Physical Atlas Pools", &m_terrainRvtPhysicalAtlasPoolCount, 1, 8)) {
+            setTerrainRvtPhysicalAtlasPoolCount(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPoolCount, 1, 8)));
+        }
+        if (ImGui::Checkbox("Terrain Stochastic Sampling", &m_terrainStochasticSamplingEnabled)) {
+            setTerrainStochasticSamplingEnabled(m_terrainStochasticSamplingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Stochastic Diffuse", &m_terrainStochasticDiffuseSamplingEnabled)) {
+            setTerrainStochasticDiffuseSamplingEnabled(m_terrainStochasticDiffuseSamplingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Stochastic Normals", &m_terrainStochasticNormalSamplingEnabled)) {
+            setTerrainStochasticNormalSamplingEnabled(m_terrainStochasticNormalSamplingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Derivative Normal Blend", &m_terrainStochasticDerivativeNormalSamplingEnabled)) {
+            setTerrainStochasticDerivativeNormalSamplingEnabled(m_terrainStochasticDerivativeNormalSamplingEnabled);
+        }
+        if (ImGui::SliderFloat("Terrain Stochastic Blend Curve", &m_terrainStochasticBlendCurve, 0.0f, 1.0f, "%.2f")) {
+            setTerrainStochasticBlendCurve(m_terrainStochasticBlendCurve);
+        }
+        if (ImGui::Checkbox("Terrain Gaussian Stochastic Variant", &m_terrainGaussianStochasticSamplingEnabled)) {
+            setTerrainGaussianStochasticSamplingEnabled(m_terrainGaussianStochasticSamplingEnabled);
+        }
+        if (ImGui::Checkbox("Parallax Occlusion Mapping", &m_parallaxOcclusionMappingEnabled)) {
+            setParallaxOcclusionMappingEnabled(m_parallaxOcclusionMappingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Parallax Occlusion Mapping", &m_terrainParallaxOcclusionMappingEnabled)) {
+            setTerrainParallaxOcclusionMappingEnabled(m_terrainParallaxOcclusionMappingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Reyes Displacement", &m_terrainReyesDisplacementEnabled)) {
+            setTerrainReyesDisplacementEnabled(m_terrainReyesDisplacementEnabled);
+        }
+        if (ImGui::SliderFloat("Terrain Reyes Displacement Global Scale", &m_terrainReyesDisplacementScale, 0.0f, 16.0f, "%.2f")) {
+            m_terrainReyesDisplacementScale = std::max(0.0f, m_terrainReyesDisplacementScale);
+            setTerrainReyesDisplacementScale(m_terrainReyesDisplacementScale);
+        }
+        if (ImGui::SliderFloat("Object Reyes Displacement Global Scale", &m_objectReyesDisplacementScale, 0.0f, 1000.0f, "%.2f")) {
+            m_objectReyesDisplacementScale = std::max(0.0f, m_objectReyesDisplacementScale);
+            setObjectReyesDisplacementScale(m_objectReyesDisplacementScale);
+        }
+        if (ImGui::SliderFloat("Terrain Parallax Height Scale", &m_terrainParallaxHeightScale, 0.0f, 0.20f, "%.3f")) {
+            setTerrainParallaxHeightScale(m_terrainParallaxHeightScale);
+        }
+        if (ImGui::SliderFloat("Object Parallax Height Scale", &m_objectParallaxHeightScale, 0.0f, 16.0f, "%.2f")) {
+            m_objectParallaxHeightScale = std::max(0.0f, m_objectParallaxHeightScale);
+            setObjectParallaxHeightScale(m_objectParallaxHeightScale);
+        }
+        int terrainParallaxMaxSteps = static_cast<int>(m_terrainParallaxMaxSteps);
+        if (ImGui::SliderInt("Terrain Parallax Max Steps", &terrainParallaxMaxSteps, 4, 32)) {
+            m_terrainParallaxMaxSteps = static_cast<uint32_t>(std::clamp(terrainParallaxMaxSteps, 4, 32));
+            setTerrainParallaxMaxSteps(m_terrainParallaxMaxSteps);
+        }
+        if (ImGui::SliderFloat("Height Fade Start", &m_terrainParallaxFadeStartDistance, 0.0f, 32768.0f, "%.0f")) {
+            m_terrainParallaxFadeStartDistance = std::max(0.0f, m_terrainParallaxFadeStartDistance);
+            setTerrainParallaxFadeStartDistance(m_terrainParallaxFadeStartDistance);
+        }
+        if (ImGui::SliderFloat("Height Fade End", &m_terrainParallaxFadeEndDistance, 0.0f, 65536.0f, "%.0f")) {
+            m_terrainParallaxFadeEndDistance = std::max(0.0f, m_terrainParallaxFadeEndDistance);
+            setTerrainParallaxFadeEndDistance(m_terrainParallaxFadeEndDistance);
+        }
+        }
+
+        if (ImGui::CollapsingHeader("Procedural Wind")) {
+            if (ImGui::SliderFloat("Wind Effect Distance", &m_proceduralWindEffectDistance, 0.0f, 65536.0f, "%.0f units")) {
+                m_proceduralWindEffectDistance = std::clamp(m_proceduralWindEffectDistance, 0.0f, 65536.0f);
+                setProceduralWindEffectDistance(m_proceduralWindEffectDistance);
+                const float innerRadius = std::min(
+                    SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)(),
+                    m_proceduralWindEffectDistance);
+                setProceduralWindInnerRadius(innerRadius);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Maximum world-space distance for DynamicWind. VSM skinned cascade count is derived from this distance.");
+            }
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputFloat("Tree Wind Scale", &m_proceduralWindDisplacementScale, 0.1f, 1.0f, "%.2f")) {
+                m_proceduralWindDisplacementScale = std::clamp(m_proceduralWindDisplacementScale, 0.0f, 100.0f);
+                setProceduralWindDisplacementScale(m_proceduralWindDisplacementScale);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Scales tree bend and torsion before each profile's maximum-angle clamp.");
+            }
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputFloat("Grass Lean Scale", &m_proceduralWindGrassDisplacementScale, 0.1f, 1.0f, "%.2f")) {
+                m_proceduralWindGrassDisplacementScale = std::clamp(m_proceduralWindGrassDisplacementScale, 0.0f, 100.0f);
+                setProceduralWindGrassDisplacementScale(m_proceduralWindGrassDisplacementScale);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Scales the sustained DynamicWind lean applied to grass cards.");
+            }
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputFloat("Grass Oscillation Scale", &m_proceduralWindGrassOscillationScale, 0.1f, 1.0f, "%.2f")) {
+                m_proceduralWindGrassOscillationScale = std::clamp(m_proceduralWindGrassOscillationScale, 0.0f, 100.0f);
+                setProceduralWindGrassOscillationScale(m_proceduralWindGrassOscillationScale);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Scales the animated flutter amplitude applied to grass cards.");
+            }
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputFloat("Grass Flutter Frequency", &m_proceduralWindGrassFlutterFrequency, 0.1f, 1.0f, "%.2f")) {
+                m_proceduralWindGrassFlutterFrequency = std::clamp(m_proceduralWindGrassFlutterFrequency, 0.0f, 100.0f);
+                setProceduralWindGrassFlutterFrequency(m_proceduralWindGrassFlutterFrequency);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Scales the frequency of multi-octave grass flutter noise.");
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Post Processing and Ray Tracing")) {
 		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {
 			setGTAOEnabled(m_gtaoEnabled);
 		}
@@ -1805,13 +2549,14 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Enable Jitter", &m_jitterEnabled)) {
             setJitterEnabled(m_jitterEnabled);
         }
-        if (ImGui::Checkbox("Collect Pass Statistics", &m_collectPassStatistics)) {
-            setCollectPassStatistics(m_collectPassStatistics);
         }
-		if (ImGui::Checkbox("Collect Pipeline Statistics", &m_collectPipelineStatistics)) {
-			setCollectPipelineStatistics(m_collectPipelineStatistics);
-		}
+
+        if (ImGui::CollapsingHeader("Display and Assets")) {
+        DrawWindowResolutionCombo();
         DrawUpscalingCombo();
+        if (ImGui::Checkbox("Dilated Motion Vectors", &m_dilatedMotionVectorsEnabled)) {
+            setDilatedMotionVectorsEnabled(m_dilatedMotionVectorsEnabled);
+        }
         DrawUpscalingQualityCombo();
         DrawTonemapTypeDropdown();
 
@@ -1819,32 +2564,15 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         DrawBrowseButton(environmentsDir.wstring());
 		DrawOutputTypeDropdown();
         DrawLoadModelButton();
-		if (ImGui::Checkbox("Use Async Compute", &m_useAsyncCompute)) {
-			setUseAsyncCompute(m_useAsyncCompute);
-		}
-		if (ImGui::Checkbox("Heavy Debug (1 pass/batch + GPU drain)", &m_heavyDebug)) {
-			setHeavyDebug(m_heavyDebug);
-		}
-		if (ImGui::Checkbox("Disable Render Graph Caching", &m_renderGraphDisableCaching)) {
-			setRenderGraphDisableCaching(m_renderGraphDisableCaching);
-		}
-        if (ImGui::Checkbox("Render Graph Batch Trace", &m_renderGraphBatchTraceEnabled)) {
-            setRenderGraphBatchTraceEnabled(m_renderGraphBatchTraceEnabled);
         }
-		if (ImGui::Checkbox("Render Graph Compile Summary", &m_renderGraphLightweightCompileSummaryEnabled)) {
-			setRenderGraphLightweightCompileSummaryEnabled(m_renderGraphLightweightCompileSummaryEnabled);
+
+        if (ImGui::CollapsingHeader("Statistics and Debug Windows")) {
+        if (ImGui::Checkbox("Collect Pass Statistics", &m_collectPassStatistics)) {
+            setCollectPassStatistics(m_collectPassStatistics);
+        }
+		if (ImGui::Checkbox("Collect Pipeline Statistics", &m_collectPipelineStatistics)) {
+			setCollectPipelineStatistics(m_collectPipelineStatistics);
 		}
-        if (ImGui::Checkbox("ReShape texel addressing (requires recreate)", &m_reshapeTexelAddressing)) {
-            setReshapeTexelAddressing(m_reshapeTexelAddressing);
-        }
-        int clodCpuUploadBudget = static_cast<int>(std::min<uint32_t>(m_clodStreamingCpuUploadBudgetRequests, 4096u));
-        if (ImGui::SliderInt("CLod CPU Upload Budget", &clodCpuUploadBudget, 1, 4096)) {
-            m_clodStreamingCpuUploadBudgetRequests = static_cast<uint32_t>(std::max(clodCpuUploadBudget, 1));
-            setCLodStreamingCpuUploadBudgetRequests(m_clodStreamingCpuUploadBudgetRequests);
-        }
-        if (ImGui::Checkbox("CLod Streaming DirectStorage", &m_clodStreamingEnableDirectStorage)) {
-            setCLodStreamingEnableDirectStorage(m_clodStreamingEnableDirectStorage);
-        }
         ImGui::Checkbox("Render Graph Inspector", &showRG);
         ImGui::Checkbox("Memory introspection", &showMemoryIntrospection);
         ImGui::Checkbox("CLod telemetry", &showCLodTelemetry);
@@ -1855,6 +2583,33 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         ImGui::Checkbox("GPU instrumentation", &showGpuInstrumentation);
         ImGui::Checkbox("Material texture streaming", &showMaterialTextureStreaming);
+        }
+
+        ImGui::Separator();
+		if (ImGui::Checkbox("Wireframe", &wireframeEnabled)) {
+			setWireframeEnabled(wireframeEnabled);
+		}
+        if (ImGui::Checkbox("Uncap Framerate", &allowTearing)) {
+			setAllowTearing(allowTearing);
+        }
+		if (ImGui::Checkbox("Draw Bounding Spheres", &drawBoundingSpheres)) {
+			setDrawBoundingSpheres(drawBoundingSpheres);
+		}
+		if (ImGui::Checkbox("Use Async Compute", &m_useAsyncCompute)) {
+			setUseAsyncCompute(m_useAsyncCompute);
+		}
+		if (ImGui::Checkbox("Heavy Debug (1 pass/batch + GPU drain)", &m_heavyDebug)) {
+			setHeavyDebug(m_heavyDebug);
+		}
+        if (ImGui::Checkbox("Render Graph Batch Trace", &m_renderGraphBatchTraceEnabled)) {
+            setRenderGraphBatchTraceEnabled(m_renderGraphBatchTraceEnabled);
+        }
+		if (ImGui::Checkbox("Render Graph Compile Summary", &m_renderGraphLightweightCompileSummaryEnabled)) {
+			setRenderGraphLightweightCompileSummaryEnabled(m_renderGraphLightweightCompileSummaryEnabled);
+		}
+        if (ImGui::Checkbox("ReShape texel addressing (requires recreate)", &m_reshapeTexelAddressing)) {
+            setReshapeTexelAddressing(m_reshapeTexelAddressing);
+        }
         std::string memoryString = "Memory usage: unavailable";
         const double KiB = 1024.0;
         const double MiB = KiB * 1024.0;
@@ -1887,7 +2642,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 	if (showMemoryIntrospection) {
         static ui::MemoryIntrospectionWidget g_memWidget;
 
-        std::vector<rg::memory::ResourceMemoryRecord> memoryRecords;
+        std::vector<org::memory::ResourceMemoryRecord> memoryRecords;
     if (m_renderGraph) {
         m_renderGraph->GetMemorySnapshotProvider().BuildSnapshot(memoryRecords);
     }
@@ -1911,6 +2666,115 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         g_memWidget.Draw(&open, &snap, &fgSnap);
 		ImGui::End();
 	}
+
+    if (m_renderGraph) {
+        static const bool logMemoryAccounting = [] {
+            char* value = nullptr;
+            size_t valueLength = 0;
+            const bool result = _dupenv_s(&value, &valueLength, "SARP_MEMORY_INTROSPECTION_LOG") == 0 &&
+                value != nullptr && valueLength > 1 && value[0] != '0';
+            std::free(value);
+            return result;
+        }();
+        static uint64_t memoryAccountingFrame = 0;
+        ++memoryAccountingFrame;
+        if (logMemoryAccounting && (memoryAccountingFrame == 1 || memoryAccountingFrame % 120 == 0)) {
+            std::vector<org::memory::ResourceMemoryRecord> diagnosticRecords;
+            m_renderGraph->GetMemorySnapshotProvider().BuildSnapshot(diagnosticRecords);
+            uint64_t introspectedBytes = 0;
+            uint64_t zeroSizedRecords = 0;
+            uint64_t recordsWithoutType = 0;
+            std::unordered_map<std::string, uint64_t> diagnosticCategories;
+            struct ResourceAllocationGroup {
+                uint64_t bytes = 0;
+                uint64_t count = 0;
+                org::memory::ResourceMemoryRecord representative;
+            };
+            std::unordered_map<std::string, ResourceAllocationGroup> allocationGroups;
+            for (const auto& record : diagnosticRecords) {
+                introspectedBytes += record.bytes;
+                zeroSizedRecords += record.bytes == 0 ? 1u : 0u;
+                recordsWithoutType += record.resourceType == rhi::ResourceType::Unknown ? 1u : 0u;
+                const std::string category = std::string(MajorCategory(record.resourceType)) + "/" +
+                    (record.usage.empty() ? "Unspecified" : record.usage);
+                diagnosticCategories[category] += record.bytes;
+                const std::string groupKey = std::format(
+                    "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+                    static_cast<uint32_t>(record.resourceType),
+                    record.usage,
+                    record.resourceName,
+                    record.identifier,
+                    record.bytes,
+                    record.width,
+                    record.height,
+                    record.mipLevels,
+                    record.arraySize,
+                    static_cast<uint32_t>(record.format),
+                    record.aliased);
+                auto& group = allocationGroups[groupKey];
+                group.bytes += record.bytes;
+                ++group.count;
+                if (group.count == 1u) {
+                    group.representative = record;
+                }
+            }
+
+            const auto budget = m_renderGraph->GetStatisticsService()->GetMemoryBudgetStats();
+            spdlog::info(
+                "Memory diagnostics summary: frame={} dxgi_usage={} introspected={} dxgi_minus_introspected={} "
+                "records={} zero_sized_records={} unknown_type_records={}",
+                memoryAccountingFrame,
+                budget.usageBytes,
+                introspectedBytes,
+                budget.usageBytes > introspectedBytes ? budget.usageBytes - introspectedBytes : 0,
+                diagnosticRecords.size(),
+                zeroSizedRecords,
+                recordsWithoutType);
+
+            std::vector<std::pair<std::string, uint64_t>> sortedDiagnosticCategories(
+                diagnosticCategories.begin(), diagnosticCategories.end());
+            std::sort(sortedDiagnosticCategories.begin(), sortedDiagnosticCategories.end(),
+                [](const auto& left, const auto& right) { return left.second > right.second; });
+            std::string categorySummary;
+            for (const auto& [category, bytes] : sortedDiagnosticCategories) {
+                if (!categorySummary.empty()) {
+                    categorySummary += "; ";
+                }
+                categorySummary += std::format("{}={}", category, bytes);
+            }
+            spdlog::info("Memory diagnostics categories: frame={} {}", memoryAccountingFrame, categorySummary);
+
+            std::vector<ResourceAllocationGroup> sortedAllocationGroups;
+            sortedAllocationGroups.reserve(allocationGroups.size());
+            for (auto& [_, group] : allocationGroups) {
+                sortedAllocationGroups.push_back(std::move(group));
+            }
+            std::sort(sortedAllocationGroups.begin(), sortedAllocationGroups.end(),
+                [](const auto& left, const auto& right) { return left.bytes > right.bytes; });
+            for (size_t rank = 0; rank < std::min<size_t>(sortedAllocationGroups.size(), 32u); ++rank) {
+                const auto& group = sortedAllocationGroups[rank];
+                const auto& record = group.representative;
+                spdlog::info(
+                    "Memory diagnostics resource_group: frame={} rank={} total_bytes={} allocation_bytes={} count={} "
+                    "type={} usage='{}' name='{}' identifier='{}' width={} height={} mips={} array={} format={} aliased={}",
+                    memoryAccountingFrame,
+                    rank,
+                    group.bytes,
+                    record.bytes,
+                    group.count,
+                    static_cast<uint32_t>(record.resourceType),
+                    record.usage,
+                    record.resourceName,
+                    record.identifier,
+                    record.width,
+                    record.height,
+                    record.mipLevels,
+                    record.arraySize,
+                    static_cast<uint32_t>(record.format),
+                    record.aliased);
+            }
+        }
+    }
 
     if (showMaterialTextureStreaming) {
         ImGui::Begin("Material Texture Streaming", &showMaterialTextureStreaming);
@@ -1962,8 +2826,10 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
     }
 
     {
-		ImGui::Begin("Scene Graph", nullptr);
-		DisplaySceneGraph();
+		const bool sceneGraphVisible = ImGui::Begin("Scene Graph", nullptr);
+		if (sceneGraphVisible) {
+			DisplaySceneGraph();
+		}
 		ImGui::End();
 
 		DisplaySelectedNode();
@@ -1980,12 +2846,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             opts.imguiGpuHandle = [this](uint32_t idx) { return GetImGuiGpuDescriptorHandle(idx); };
             opts.imguiHeapHandle = GetImGuiHeapHandle();
         }
-        opts.cacheOverlayProvider = [this]() -> std::vector<RGCacheOverlayRange> {
-            if (!m_renderGraph) {
-                return {};
-            }
-            return m_renderGraph->BuildReplayCacheOverlayRanges();
-        };
         RGInspector::Show(m_renderGraph->GetBatches(),
             m_renderGraph->GetQueueRegistry(),
             PassUsesResourceAdapter,
@@ -2116,6 +2976,25 @@ inline void Menu::DrawOutputTypeDropdown() {
 		ImGui::EndCombo();
 
     }
+    if (selectedItemIndex == static_cast<unsigned int>(OutputType::VSM_PAGE_STATE)) {
+        ImGui::TextDisabled(
+            "VSM sample result: violet = finite depth/lit, green = finite "
+            "depth/shadowed, yellow = preferred page dirty.");
+        ImGui::TextDisabled(
+            "This view does not indicate which static pages were rendered.");
+    }
+    else if (selectedItemIndex ==
+        static_cast<unsigned int>(OutputType::VSM_RERENDERED_THIS_FRAME)) {
+        ImGui::TextDisabled(
+            "VSM static lifecycle: orange = static page rendered this frame, "
+            "dark gray = cached, magenta = missing depth.");
+    }
+    else if (selectedItemIndex ==
+        static_cast<unsigned int>(OutputType::VSM_TRACE_FOOTPRINT)) {
+        ImGui::TextDisabled(
+            "VSM trace footprint: red = continuous LOD phase, green = sampled "
+            "texel / visual footprint excess, blue = camera / visual footprint.");
+    }
 }
 
 inline void Menu::DrawUpscalingCombo()
@@ -2137,6 +3016,28 @@ inline void Menu::DrawUpscalingQualityCombo()
     {
         m_currentUpscalingQualityMode = static_cast<UpscaleQualityMode>(modeIdx);
         setUpscalingQualityMode(m_currentUpscalingQualityMode);
+    }
+}
+
+inline void Menu::DrawWindowResolutionCombo()
+{
+    int modeIdx = static_cast<int>(m_currentWindowResolutionPreset);
+
+    if (ImGui::Combo("Window Resolution", &modeIdx, WindowResolutionPresetNames, WindowResolutionPresetCount))
+    {
+        m_currentWindowResolutionPreset = static_cast<WindowResolutionPreset>(modeIdx);
+        setWindowResolutionPreset(m_currentWindowResolutionPreset);
+    }
+}
+
+inline void Menu::DrawCLodLodHeightModeCombo()
+{
+    int modeIdx = static_cast<int>(m_currentCLodLodHeightMode);
+
+    if (ImGui::Combo("CLod LOD Height", &modeIdx, CLodLodHeightModeNames, CLodLodHeightModeCount))
+    {
+        m_currentCLodLodHeightMode = static_cast<CLodLodHeightMode>(modeIdx);
+        setCLodLodHeightMode(m_currentCLodLodHeightMode);
     }
 }
 
@@ -2209,11 +3110,17 @@ inline void Menu::DrawLoadModelButton() {
     }
 }
 
-inline Menu::SceneExplorerNodeSnapshot Menu::BuildSceneExplorerSnapshot(flecs::entity node) {
+inline Menu::SceneExplorerNodeSnapshot Menu::BuildSceneExplorerSnapshot(flecs::entity node, size_t& remainingNodes, bool& truncated) {
     SceneExplorerNodeSnapshot snapshot;
     if (!node.is_alive()) {
         return snapshot;
     }
+
+    if (remainingNodes == 0) {
+        truncated = true;
+        return snapshot;
+    }
+    --remainingNodes;
 
     if (const auto* stableSceneID = node.try_get<Components::StableSceneID>()) {
         snapshot.stableId = stableSceneID->value;
@@ -2252,9 +3159,24 @@ inline Menu::SceneExplorerNodeSnapshot Menu::BuildSceneExplorerSnapshot(flecs::e
         snapshot.skinned = node.has<Components::Skinned>();
     }
 
-    node.children([&](flecs::entity child) {
-        snapshot.children.push_back(BuildSceneExplorerSnapshot(child));
-    });
+    auto* world = node.world().c_ptr();
+    ecs_iter_t it = ecs_children(world, node.id());
+    while (ecs_children_next(&it)) {
+        for (int32_t i = 0; i < it.count; ++i) {
+            if (remainingNodes == 0) {
+                truncated = true;
+                ecs_iter_fini(&it);
+                return snapshot;
+            }
+
+            snapshot.children.push_back(BuildSceneExplorerSnapshot(flecs::entity(world, it.entities[i]), remainingNodes, truncated));
+            if (remainingNodes == 0) {
+                truncated = true;
+                ecs_iter_fini(&it);
+                return snapshot;
+            }
+        }
+    }
 
     return snapshot;
 }
@@ -2327,7 +3249,7 @@ inline void Menu::OverlayPendingSceneExplorerEdits() {
     }
 }
 
-inline void Menu::RefreshSceneExplorerSnapshot() {
+inline void Menu::RefreshSceneExplorerSnapshot(size_t maxNodes) {
     if (m_sceneOverlapStatus.taskInFlight) {
         return;
     }
@@ -2335,12 +3257,17 @@ inline void Menu::RefreshSceneExplorerSnapshot() {
     auto root = getSceneRoot();
     if (!root) {
         m_sceneExplorerSnapshotAvailable = false;
+        m_sceneExplorerSnapshotTruncated = false;
+        m_sceneExplorerSnapshotNodeBudget = 0;
         m_selectedSceneNodeStableId = 0;
         m_sceneExplorerPendingEdits.clear();
         return;
     }
 
-    m_sceneExplorerRootSnapshot = BuildSceneExplorerSnapshot(root);
+    size_t remainingNodes = std::max<size_t>(1, maxNodes);
+    m_sceneExplorerSnapshotTruncated = false;
+    m_sceneExplorerSnapshotNodeBudget = remainingNodes;
+    m_sceneExplorerRootSnapshot = BuildSceneExplorerSnapshot(root, remainingNodes, m_sceneExplorerSnapshotTruncated);
     m_sceneExplorerSnapshotAvailable = true;
     OverlayPendingSceneExplorerEdits();
 
@@ -2406,9 +3333,20 @@ inline void Menu::DisplaySceneNode(const SceneExplorerNodeSnapshot& node, bool i
 }
 
 inline void Menu::DisplaySceneGraph() {
+    const float lineHeight = std::max(1.0f, ImGui::GetTextLineHeightWithSpacing());
+    const float availableHeight = std::max(0.0f, ImGui::GetContentRegionAvail().y);
+    const size_t visibleRows = static_cast<size_t>(std::ceil(availableHeight / lineHeight));
+    RefreshSceneExplorerSnapshot(std::max<size_t>(1, visibleRows + 8));
+
     if (!m_sceneExplorerSnapshotAvailable) {
         ImGui::TextDisabled("No scene snapshot available.");
         return;
+    }
+
+    if (m_sceneExplorerSnapshotTruncated) {
+        ImGui::TextDisabled(
+            "Scene graph limited to %llu visible nodes.",
+            static_cast<unsigned long long>(m_sceneExplorerSnapshotNodeBudget));
     }
 
     DisplaySceneNode(m_sceneExplorerRootSnapshot, true);
@@ -2836,8 +3774,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 const uint32_t replayMeshletInput = counter(CLodWorkGraphCounterIndex::Phase2ReplayMeshletInputRecords);
                 const uint32_t voxelLeaves = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords);
                 const uint32_t voxelRejected = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRejectedByErrorRecords);
-                const uint32_t voxelHits = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorHits);
-                const uint32_t voxelMisses = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorMisses);
+                const uint32_t voxelHits = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageHits);
+                const uint32_t voxelMisses = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageMisses);
                 const uint32_t voxelRasterWork = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkRecords);
                 const uint32_t voxelRasterDropped = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkDropped);
                 const uint32_t sortHistInputs = counter(CLodWorkGraphCounterIndex::RasterSortHistogramInputs);
@@ -3005,8 +3943,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 const uint32_t replayMeshletInput = counter(CLodWorkGraphCounterIndex::Phase2ReplayMeshletInputRecords);
                 const uint32_t voxelLeaves = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords);
                 const uint32_t voxelRejected = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRejectedByErrorRecords);
-                const uint32_t voxelHits = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorHits);
-                const uint32_t voxelMisses = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorMisses);
+                const uint32_t voxelHits = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageHits);
+                const uint32_t voxelMisses = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageMisses);
                 const uint32_t voxelRasterWork = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkRecords);
                 const uint32_t voxelRasterDropped = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkDropped);
                 const uint32_t sortHistInputs = counter(CLodWorkGraphCounterIndex::RasterSortHistogramInputs);
@@ -3133,7 +4071,7 @@ inline void Menu::DrawCLodTelemetryWindow() {
         const uint64_t captureId = m_shadowVirtualShadowTelemetry.captureId;
 
         readbackService->RequestReadbackCapture(
-            "CLodShadow::VirtualShadowGatherStatsPass",
+            "CLodShadow::VirtualShadowClearDirtyBitsPass",
             shadowVirtualShadowStatsResource,
             RangeSpec{},
             [this, captureId](ReadbackCaptureResult&& result) {
@@ -3411,12 +4349,26 @@ inline void Menu::DrawCLodTelemetryWindow() {
             max5s.loadUnique = std::max(max5s.loadUnique, sample.stats.loadUnique);
             max5s.loadApplied = std::max(max5s.loadApplied, sample.stats.loadApplied);
             max5s.loadFailed = std::max(max5s.loadFailed, sample.stats.loadFailed);
+            max5s.decodedRequests = std::max(max5s.decodedRequests, sample.stats.decodedRequests);
+            max5s.queuedLoadRequests = std::max(max5s.queuedLoadRequests, sample.stats.queuedLoadRequests);
+            max5s.duplicateRequests = std::max(max5s.duplicateRequests, sample.stats.duplicateRequests);
 
             max5s.unloadRequested = std::max(max5s.unloadRequested, sample.stats.unloadRequested);
             max5s.unloadUnique = std::max(max5s.unloadUnique, sample.stats.unloadUnique);
             max5s.unloadApplied = std::max(max5s.unloadApplied, sample.stats.unloadApplied);
             max5s.unloadFailed = std::max(max5s.unloadFailed, sample.stats.unloadFailed);
 
+            max5s.pendingCpuRequests = std::max(max5s.pendingCpuRequests, sample.stats.pendingCpuRequests);
+            max5s.waitingForPagesRequests = std::max(max5s.waitingForPagesRequests, sample.stats.waitingForPagesRequests);
+            max5s.inProgressRequests = std::max(max5s.inProgressRequests, sample.stats.inProgressRequests);
+            max5s.diskIoRequests = std::max(max5s.diskIoRequests, sample.stats.diskIoRequests);
+            max5s.pendingCommitGroups = std::max(max5s.pendingCommitGroups, sample.stats.pendingCommitGroups);
+            max5s.readyCompletions = std::max(max5s.readyCompletions, sample.stats.readyCompletions);
+            max5s.preallocationDeferrals = std::max(max5s.preallocationDeferrals, sample.stats.preallocationDeferrals);
+            max5s.promotionDeferrals = std::max(max5s.promotionDeferrals, sample.stats.promotionDeferrals);
+            max5s.completionSuccess = std::max(max5s.completionSuccess, sample.stats.completionSuccess);
+            max5s.completionFailed = std::max(max5s.completionFailed, sample.stats.completionFailed);
+            max5s.uploadQueuedGroups = std::max(max5s.uploadQueuedGroups, sample.stats.uploadQueuedGroups);
             max5s.residentGroups = std::max(max5s.residentGroups, sample.stats.residentGroups);
             max5s.residentAllocations = std::max(max5s.residentAllocations, sample.stats.residentAllocations);
             max5s.queuedRequests = std::max(max5s.queuedRequests, sample.stats.queuedRequests);
@@ -3424,6 +4376,37 @@ inline void Menu::DrawCLodTelemetryWindow() {
             max5s.residentAllocationBytes = std::max(max5s.residentAllocationBytes, sample.stats.residentAllocationBytes);
             max5s.completedResultBytes = std::max(max5s.completedResultBytes, sample.stats.completedResultBytes);
             max5s.streamedBytesThisFrame = std::max(max5s.streamedBytesThisFrame, sample.stats.streamedBytesThisFrame);
+            max5s.uploadQueuedBytes = std::max(max5s.uploadQueuedBytes, sample.stats.uploadQueuedBytes);
+            max5s.requestToUploadSamples = std::max(max5s.requestToUploadSamples, sample.stats.requestToUploadSamples);
+            max5s.requestToUploadAvgTicks = std::max(max5s.requestToUploadAvgTicks, sample.stats.requestToUploadAvgTicks);
+            max5s.requestToUploadWorstTicks = std::max(max5s.requestToUploadWorstTicks, sample.stats.requestToUploadWorstTicks);
+            max5s.requestToUploadWorstGroup = sample.stats.requestToUploadWorstTicks >= max5s.requestToUploadWorstTicks
+                ? sample.stats.requestToUploadWorstGroup
+                : max5s.requestToUploadWorstGroup;
+            max5s.requestToResidentSamples = std::max(max5s.requestToResidentSamples, sample.stats.requestToResidentSamples);
+            max5s.requestToResidentAvgTicks = std::max(max5s.requestToResidentAvgTicks, sample.stats.requestToResidentAvgTicks);
+            max5s.requestToResidentWorstTicks = std::max(max5s.requestToResidentWorstTicks, sample.stats.requestToResidentWorstTicks);
+            max5s.requestToResidentWorstGroup = sample.stats.requestToResidentWorstTicks >= max5s.requestToResidentWorstTicks
+                ? sample.stats.requestToResidentWorstGroup
+                : max5s.requestToResidentWorstGroup;
+            max5s.diskQueueToCompleteAvgTicks = std::max(max5s.diskQueueToCompleteAvgTicks, sample.stats.diskQueueToCompleteAvgTicks);
+            max5s.diskQueueToCompleteWorstTicks = std::max(max5s.diskQueueToCompleteWorstTicks, sample.stats.diskQueueToCompleteWorstTicks);
+            max5s.uploadToResidentAvgTicks = std::max(max5s.uploadToResidentAvgTicks, sample.stats.uploadToResidentAvgTicks);
+            max5s.uploadToResidentWorstTicks = std::max(max5s.uploadToResidentWorstTicks, sample.stats.uploadToResidentWorstTicks);
+            max5s.commitToResidentAvgTicks = std::max(max5s.commitToResidentAvgTicks, sample.stats.commitToResidentAvgTicks);
+            max5s.commitToResidentWorstTicks = std::max(max5s.commitToResidentWorstTicks, sample.stats.commitToResidentWorstTicks);
+            max5s.pendingCpuMaxAgeTicks = std::max(max5s.pendingCpuMaxAgeTicks, sample.stats.pendingCpuMaxAgeTicks);
+            max5s.pendingCpuMaxAgeGroup = sample.stats.pendingCpuMaxAgeTicks >= max5s.pendingCpuMaxAgeTicks
+                ? sample.stats.pendingCpuMaxAgeGroup
+                : max5s.pendingCpuMaxAgeGroup;
+            max5s.diskIoMaxAgeTicks = std::max(max5s.diskIoMaxAgeTicks, sample.stats.diskIoMaxAgeTicks);
+            max5s.diskIoMaxAgeGroup = sample.stats.diskIoMaxAgeTicks >= max5s.diskIoMaxAgeTicks
+                ? sample.stats.diskIoMaxAgeGroup
+                : max5s.diskIoMaxAgeGroup;
+            max5s.pendingCommitMaxAgeTicks = std::max(max5s.pendingCommitMaxAgeTicks, sample.stats.pendingCommitMaxAgeTicks);
+            max5s.pendingCommitMaxAgeGroup = sample.stats.pendingCommitMaxAgeTicks >= max5s.pendingCommitMaxAgeTicks
+                ? sample.stats.pendingCommitMaxAgeGroup
+                : max5s.pendingCommitMaxAgeGroup;
         }
 
         auto formatBytes = [](uint64_t bytes) {
@@ -3451,11 +4434,27 @@ inline void Menu::DrawCLodTelemetryWindow() {
             m_clodStreamingOpsLatest.loadUnique,
             m_clodStreamingOpsLatest.loadApplied,
             m_clodStreamingOpsLatest.loadFailed);
+        ImGui::Text("Feedback: decoded=%u queued=%u duplicates=%u",
+            m_clodStreamingOpsLatest.decodedRequests,
+            m_clodStreamingOpsLatest.queuedLoadRequests,
+            m_clodStreamingOpsLatest.duplicateRequests);
         ImGui::Text("Unload: requested=%u unique=%u applied=%u failed=%u",
             m_clodStreamingOpsLatest.unloadRequested,
             m_clodStreamingOpsLatest.unloadUnique,
             m_clodStreamingOpsLatest.unloadApplied,
             m_clodStreamingOpsLatest.unloadFailed);
+        ImGui::Text("CPU backlog: pending=%u waitingPages=%u inProgress=%u diskIo=%u readyCompletions=%u commitPending=%u",
+            m_clodStreamingOpsLatest.pendingCpuRequests,
+            m_clodStreamingOpsLatest.waitingForPagesRequests,
+            m_clodStreamingOpsLatest.inProgressRequests,
+            m_clodStreamingOpsLatest.diskIoRequests,
+            m_clodStreamingOpsLatest.readyCompletions,
+            m_clodStreamingOpsLatest.pendingCommitGroups);
+        ImGui::Text("Deferrals: prealloc=%u promotion=%u completions ok=%u failed=%u",
+            m_clodStreamingOpsLatest.preallocationDeferrals,
+            m_clodStreamingOpsLatest.promotionDeferrals,
+            m_clodStreamingOpsLatest.completionSuccess,
+            m_clodStreamingOpsLatest.completionFailed);
         ImGui::Text("Resident: groups=%u allocations=%u bytes=%s",
             m_clodStreamingOpsLatest.residentGroups,
             m_clodStreamingOpsLatest.residentAllocations,
@@ -3470,8 +4469,36 @@ inline void Menu::DrawCLodTelemetryWindow() {
             const double gbPerSec = (fps > 0.0f)
                 ? (static_cast<double>(m_clodStreamingOpsLatest.streamedBytesThisFrame) * static_cast<double>(fps)) / (1024.0 * 1024.0 * 1024.0)
                 : 0.0;
-            ImGui::Text("Throughput: %.1f KB/frame  %.3f GB/s", kbPerFrame, gbPerSec);
+            ImGui::Text("Throughput: %.1f KB/frame  %.3f GB/s uploadQueued=%s groups=%u",
+                kbPerFrame,
+                gbPerSec,
+                formatBytes(m_clodStreamingOpsLatest.uploadQueuedBytes).c_str(),
+                m_clodStreamingOpsLatest.uploadQueuedGroups);
         }
+        ImGui::Text("Latency ticks: req->upload avg=%u worst=%u group=%u samples=%u",
+            m_clodStreamingOpsLatest.requestToUploadAvgTicks,
+            m_clodStreamingOpsLatest.requestToUploadWorstTicks,
+            m_clodStreamingOpsLatest.requestToUploadWorstGroup,
+            m_clodStreamingOpsLatest.requestToUploadSamples);
+        ImGui::Text("Latency ticks: req->resident avg=%u worst=%u group=%u samples=%u",
+            m_clodStreamingOpsLatest.requestToResidentAvgTicks,
+            m_clodStreamingOpsLatest.requestToResidentWorstTicks,
+            m_clodStreamingOpsLatest.requestToResidentWorstGroup,
+            m_clodStreamingOpsLatest.requestToResidentSamples);
+        ImGui::Text("Stage ticks: disk avg=%u worst=%u upload->resident avg=%u worst=%u commit->resident avg=%u worst=%u",
+            m_clodStreamingOpsLatest.diskQueueToCompleteAvgTicks,
+            m_clodStreamingOpsLatest.diskQueueToCompleteWorstTicks,
+            m_clodStreamingOpsLatest.uploadToResidentAvgTicks,
+            m_clodStreamingOpsLatest.uploadToResidentWorstTicks,
+            m_clodStreamingOpsLatest.commitToResidentAvgTicks,
+            m_clodStreamingOpsLatest.commitToResidentWorstTicks);
+        ImGui::Text("Oldest active: pendingCpu=%u group=%u diskIo=%u group=%u commit=%u group=%u",
+            m_clodStreamingOpsLatest.pendingCpuMaxAgeTicks,
+            m_clodStreamingOpsLatest.pendingCpuMaxAgeGroup,
+            m_clodStreamingOpsLatest.diskIoMaxAgeTicks,
+            m_clodStreamingOpsLatest.diskIoMaxAgeGroup,
+            m_clodStreamingOpsLatest.pendingCommitMaxAgeTicks,
+            m_clodStreamingOpsLatest.pendingCommitMaxAgeGroup);
 
         ImGui::TextUnformatted("Max in last 5 seconds");
         ImGui::Text("Load max: requested=%u unique=%u applied=%u failed=%u",
@@ -3479,11 +4506,27 @@ inline void Menu::DrawCLodTelemetryWindow() {
             max5s.loadUnique,
             max5s.loadApplied,
             max5s.loadFailed);
+        ImGui::Text("Feedback max: decoded=%u queued=%u duplicates=%u",
+            max5s.decodedRequests,
+            max5s.queuedLoadRequests,
+            max5s.duplicateRequests);
         ImGui::Text("Unload max: requested=%u unique=%u applied=%u failed=%u",
             max5s.unloadRequested,
             max5s.unloadUnique,
             max5s.unloadApplied,
             max5s.unloadFailed);
+        ImGui::Text("CPU backlog max: pending=%u waitingPages=%u inProgress=%u diskIo=%u readyCompletions=%u commitPending=%u",
+            max5s.pendingCpuRequests,
+            max5s.waitingForPagesRequests,
+            max5s.inProgressRequests,
+            max5s.diskIoRequests,
+            max5s.readyCompletions,
+            max5s.pendingCommitGroups);
+        ImGui::Text("Deferrals max: prealloc=%u promotion=%u completions ok=%u failed=%u",
+            max5s.preallocationDeferrals,
+            max5s.promotionDeferrals,
+            max5s.completionSuccess,
+            max5s.completionFailed);
         ImGui::Text("Resident max: groups=%u allocations=%u bytes=%s",
             max5s.residentGroups,
             max5s.residentAllocations,
@@ -3498,8 +4541,36 @@ inline void Menu::DrawCLodTelemetryWindow() {
             const double gbPerSec = (fps > 0.0f)
                 ? (static_cast<double>(max5s.streamedBytesThisFrame) * static_cast<double>(fps)) / (1024.0 * 1024.0 * 1024.0)
                 : 0.0;
-            ImGui::Text("Throughput max: %.1f KB/frame  %.3f GB/s", kbPerFrame, gbPerSec);
+            ImGui::Text("Throughput max: %.1f KB/frame  %.3f GB/s uploadQueued=%s groups=%u",
+                kbPerFrame,
+                gbPerSec,
+                formatBytes(max5s.uploadQueuedBytes).c_str(),
+                max5s.uploadQueuedGroups);
         }
+        ImGui::Text("Latency max ticks: req->upload avg=%u worst=%u group=%u samples=%u",
+            max5s.requestToUploadAvgTicks,
+            max5s.requestToUploadWorstTicks,
+            max5s.requestToUploadWorstGroup,
+            max5s.requestToUploadSamples);
+        ImGui::Text("Latency max ticks: req->resident avg=%u worst=%u group=%u samples=%u",
+            max5s.requestToResidentAvgTicks,
+            max5s.requestToResidentWorstTicks,
+            max5s.requestToResidentWorstGroup,
+            max5s.requestToResidentSamples);
+        ImGui::Text("Stage max ticks: disk avg=%u worst=%u upload->resident avg=%u worst=%u commit->resident avg=%u worst=%u",
+            max5s.diskQueueToCompleteAvgTicks,
+            max5s.diskQueueToCompleteWorstTicks,
+            max5s.uploadToResidentAvgTicks,
+            max5s.uploadToResidentWorstTicks,
+            max5s.commitToResidentAvgTicks,
+            max5s.commitToResidentWorstTicks);
+        ImGui::Text("Oldest active max: pendingCpu=%u group=%u diskIo=%u group=%u commit=%u group=%u",
+            max5s.pendingCpuMaxAgeTicks,
+            max5s.pendingCpuMaxAgeGroup,
+            max5s.diskIoMaxAgeTicks,
+            max5s.diskIoMaxAgeGroup,
+            max5s.pendingCommitMaxAgeTicks,
+            max5s.pendingCommitMaxAgeGroup);
     }
 
     const auto drawWorkGraphCaptureSection = [&](const char* title, const CLodWorkGraphCaptureState& captureState) {
@@ -3567,12 +4638,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 };
                 rejectionRow("Invalid bounds", objectCullInvalidBounds, objectCullRejectedTotal);
                 rejectionRow("Frustum reject", objectCullRejectedFrustum, objectCullRejectedTotal);
-                rejectionRow("Left plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneLeft), objectCullRejectedFrustum);
-                rejectionRow("Right plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneRight), objectCullRejectedFrustum);
-                rejectionRow("Bottom plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneBottom), objectCullRejectedFrustum);
-                rejectionRow("Top plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneTop), objectCullRejectedFrustum);
-                rejectionRow("Near plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneNear), objectCullRejectedFrustum);
-                rejectionRow("Far plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneFar), objectCullRejectedFrustum);
             }
             drawUtilizationRow(
                 "TraverseNodes active child threads",
@@ -3606,12 +4671,18 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 counter(CLodWorkGraphCounterIndex::TraverseNodesLeafNodeRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesCulledNodeRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesRejectedByErrorRecords));
+			ImGui::Text("Animated node bounds: explicit=%u explicitFrustumReject=%u overflowFallback=%u assemblyFallback=%u invalidFallback=%u",
+				counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitEvaluations),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitFrustumRejected),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsOverflowFallbacks),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsAssemblyFallbacks),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsInvalidFallbacks));
 
-            ImGui::Text("Voxel leaves: reached=%u rejectedByError=%u descriptorHit=%u descriptorMiss=%u rasterWork=%u rasterDrop=%u",
+            ImGui::Text("Voxel leaves: reached=%u rejectedByError=%u segmentPageHit=%u segmentPageMiss=%u rasterWork=%u rasterDrop=%u",
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRejectedByErrorRecords),
-                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorHits),
-                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorMisses),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageHits),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageMisses),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkDropped));
 
@@ -3725,7 +4796,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
             ImGui::Separator();
             ImGui::TextUnformatted("ClusterCull meshlet rejection breakdown");
             {
-                const uint32_t meshletIter = counter(CLodWorkGraphCounterIndex::ClusterCullMeshletIterations);
                 const uint32_t rejFrustum = counter(CLodWorkGraphCounterIndex::ClusterCullRejectedFrustum);
                 const uint32_t rejCond2 = counter(CLodWorkGraphCounterIndex::ClusterCullRejectedCondition2);
                 const uint32_t rejOccl = counter(CLodWorkGraphCounterIndex::ClusterCullRejectedOcclusion);
@@ -3740,7 +4810,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 const uint32_t survived = counter(CLodWorkGraphCounterIndex::ClusterCullSurvivingLanes);
                 const uint32_t totalRejected = rejFrustum + rejCond2 + rejOccl + rejOOR + rejPageBounds + rejCleanPages;
 
-                ImGui::Text("Meshlet iterations evaluated: %u", meshletIter);
                 ImGui::Text("Survived: %u", survived);
                 ImGui::Text("Rejected total: %u", totalRejected);
 
@@ -3933,6 +5002,33 @@ inline void Menu::DrawCLodTelemetryWindow() {
             allocatablePhysicalPages,
             unbackedAllocationRequests);
         ImGui::Text(
+            "Page budgets: total=%s%u upgrade=%s%u | admittedTotal=%u | normal eligible=%u admitted=%u deferred=%u | upgrade eligible=%u admitted=%u deferred=%u",
+            stats.configuredPageRenderBudget == 0u ? "unlimited/" : "",
+            stats.configuredPageRenderBudget,
+            stats.configuredUpgradePageRenderBudget == 0u ? "unlimited/" : "",
+            stats.configuredUpgradePageRenderBudget,
+            stats.admittedPageCount,
+            stats.normalEligiblePageCount,
+            stats.normalAdmittedPageCount,
+            stats.normalDeferredPageCount,
+            stats.upgradeEligiblePageCount,
+            stats.upgradeAdmittedPageCount,
+            stats.upgradeDeferredPageCount);
+        ImGui::Text(
+            "Streaming upgrades: invalidDependencies=%u",
+            stats.invalidUpgradeDependencyCount);
+        ImGui::Text(
+            "Rendered pages: normal=%u upgrade=%u | candidates input=%u",
+            stats.normalRenderedPageCount,
+            stats.upgradeRenderedPageCount,
+            stats.upgradeCandidateInputCount);
+        ImGui::Text(
+            "Upgrade queues: raw=%u rawOverflow=%u ready=%u readyOverflow=%u",
+            stats.upgradeRawPageCount,
+            stats.upgradeRawPageOverflowCount,
+            stats.readyUpgradePageCount,
+            stats.readyUpgradePageOverflowCount);
+        ImGui::Text(
             "Controller: requestAllocation=%.1f%% targetBias=%.2f smoothedBias=%.2f recoveryStableFrames=%u",
             stats.currentAllocationPercentage * 100.0f,
             stats.targetPressureLodBias,
@@ -3959,7 +5055,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
         uint32_t totalPredictiveInvalidatedPageTableEntries = 0u;
         uint32_t totalInvalidatedCurrentBoundsPageTableEntries = 0u;
         uint32_t totalInvalidatedPreviousBoundsPageTableEntries = 0u;
-        uint32_t totalInvalidatedSkinnedPageTableEntries = 0u;
         for (uint32_t clipmapIndex = 0u; clipmapIndex < displayedClipmapCount; ++clipmapIndex) {
             totalVisitedPageTableEntries += stats.visitedPageTableEntries[clipmapIndex];
             totalVisitedDirtyPageTableEntries += stats.visitedDirtyPageTableEntries[clipmapIndex];
@@ -3970,7 +5065,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
             totalPredictiveInvalidatedPageTableEntries += stats.predictiveInvalidatedPageTableEntries[clipmapIndex];
             totalInvalidatedCurrentBoundsPageTableEntries += stats.invalidatedCurrentBoundsPageTableEntries[clipmapIndex];
             totalInvalidatedPreviousBoundsPageTableEntries += stats.invalidatedPreviousBoundsPageTableEntries[clipmapIndex];
-            totalInvalidatedSkinnedPageTableEntries += stats.invalidatedSkinnedPageTableEntries[clipmapIndex];
         }
         ImGui::Text("Cache lifecycle: cleanHits=%u dirtyHits=%u requests=%u visitedPT=%u visitedDirtyPT=%u dirtyPT=%u",
             totalResidentCleanHits,
@@ -3979,11 +5073,10 @@ inline void Menu::DrawCLodTelemetryWindow() {
             totalVisitedPageTableEntries,
             totalVisitedDirtyPageTableEntries,
             totalDirtyPageTableEntries);
-        ImGui::Text("Request creators: predictiveInv=%u invalidateCurr=%u invalidatePrev=%u invalidateSkinned=%u wrapClr=%u staleClr=%u",
+        ImGui::Text("Request creators: predictiveInv=%u invalidateCurr=%u invalidatePrev=%u wrapClr=%u staleClr=%u",
             totalPredictiveInvalidatedPageTableEntries,
             totalInvalidatedCurrentBoundsPageTableEntries,
             totalInvalidatedPreviousBoundsPageTableEntries,
-            totalInvalidatedSkinnedPageTableEntries,
             std::accumulate(
                 std::begin(stats.setupWrappedClearedPageTableEntries),
                 std::end(stats.setupWrappedClearedPageTableEntries),
@@ -3993,7 +5086,7 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 std::end(stats.setupStaleDirtyClearedPageTableEntries),
                 0u));
         ImGui::TextDisabled("Dirty PT is sampled at GatherStatsPass before ClearPages re-marks cleared pages dirty for the hierarchy build.");
-        if (ImGui::BeginTable("##VirtualShadowStatsTable", 20, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        if (ImGui::BeginTable("##VirtualShadowStatsTable", 19, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
             ImGui::TableSetupColumn("Clip");
             ImGui::TableSetupColumn("Selected");
             ImGui::TableSetupColumn("Proj Reject");
@@ -4013,7 +5106,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
             ImGui::TableSetupColumn("Pred Inv");
             ImGui::TableSetupColumn("Inv Curr");
             ImGui::TableSetupColumn("Inv Prev");
-            ImGui::TableSetupColumn("Inv Skin");
             ImGui::TableHeadersRow();
 
             for (uint32_t clipmapIndex = 0u; clipmapIndex < displayedClipmapCount; ++clipmapIndex) {
@@ -4056,8 +5148,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 ImGui::Text("%u", stats.invalidatedCurrentBoundsPageTableEntries[clipmapIndex]);
                 ImGui::TableSetColumnIndex(18);
                 ImGui::Text("%u", stats.invalidatedPreviousBoundsPageTableEntries[clipmapIndex]);
-                ImGui::TableSetColumnIndex(19);
-                ImGui::Text("%u", stats.invalidatedSkinnedPageTableEntries[clipmapIndex]);
             }
 
             ImGui::EndTable();
@@ -4452,8 +5542,10 @@ inline void Menu::DrawFrameTaskGraphWindow() {
         if (frameSamples > 0) {
             const double avgLine[2] = { static_cast<double>(avgFrameEndUs) / 1000.0, static_cast<double>(avgFrameEndUs) / 1000.0 };
             const double avgX[2] = { 0.0, static_cast<double>((std::max)(size_t{ 1 }, frameHistoryMs.size())) - 1.0 };
-            ImPlot::SetNextLineStyle(ImVec4(0.95f, 0.8f, 0.2f, 1.0f), 1.5f);
-            ImPlot::PlotLine("Average", avgX, avgLine, 2);
+            ImPlotSpec avgLineSpec;
+            avgLineSpec.LineColor = ImVec4(0.95f, 0.8f, 0.2f, 1.0f);
+            avgLineSpec.LineWeight = 1.5f;
+            ImPlot::PlotLine("Average", avgX, avgLine, 2, avgLineSpec);
         }
         ImPlot::EndPlot();
     }

@@ -22,6 +22,15 @@ namespace br {
 
 class TaskSchedulerManager {
 public:
+    struct QueueStats {
+        uint32_t ioQueued = 0;
+        uint32_t ioActive = 0;
+        uint32_t backgroundQueued = 0;
+        uint32_t backgroundActive = 0;
+        uint32_t shaderCompileQueued = 0;
+        uint32_t shaderCompileActive = 0;
+    };
+
     static TaskSchedulerManager& GetInstance();
 
     void Initialize(uint32_t ioThreadCount = 2, uint32_t backgroundThreadCount = 0);
@@ -32,6 +41,8 @@ public:
     void QueueIoTask(std::string_view taskName, std::function<void()>&& task);
     void RunBackgroundTask(std::function<void()>&& task);
     void RunBackgroundTask(std::string_view taskName, std::function<void()>&& task);
+    void QueueShaderCompileTask(std::function<void()>&& task);
+    void QueueShaderCompileTask(std::string_view taskName, std::function<void()>&& task);
 
     bool IsInitialized() const {
         return m_initialized;
@@ -48,6 +59,12 @@ public:
     uint32_t GetNumBackgroundThreads() const {
         return static_cast<uint32_t>(m_backgroundThreads.size());
     }
+
+    uint32_t GetNumShaderCompileThreads() const {
+        return static_cast<uint32_t>(m_shaderCompileThreads.size());
+    }
+
+    QueueStats GetQueueStats() const;
 
     template <typename Func>
     void ParallelFor(size_t itemCount, Func&& func) {
@@ -71,20 +88,29 @@ private:
 
     void IoWorkerLoop();
     void BackgroundWorkerLoop();
+    void ShaderCompileWorkerLoop();
     void ParallelForImpl(std::string_view taskName, size_t itemCount, std::function<void(size_t)>&& func);
 
     std::unique_ptr<RuntimeState> m_runtimeState;
     std::vector<std::thread> m_ioThreads;
     std::vector<std::thread> m_backgroundThreads;
+    std::vector<std::thread> m_shaderCompileThreads;
     std::deque<std::function<void()>> m_ioTasks;
     std::deque<std::function<void()>> m_backgroundTasks;
-    std::mutex m_ioMutex;
-    std::mutex m_backgroundMutex;
+    std::deque<std::function<void()>> m_shaderCompileTasks;
+    mutable std::mutex m_ioMutex;
+    mutable std::mutex m_backgroundMutex;
+    mutable std::mutex m_shaderCompileMutex;
     std::condition_variable m_ioCv;
     std::condition_variable m_backgroundCv;
+    std::condition_variable m_shaderCompileCv;
     std::atomic<uint32_t> m_ioRoundRobin = 0;
+    std::atomic<uint32_t> m_ioActive = 0;
+    std::atomic<uint32_t> m_backgroundActive = 0;
+    std::atomic<uint32_t> m_shaderCompileActive = 0;
     std::atomic<bool> m_ioShutdownRequested = false;
     std::atomic<bool> m_backgroundShutdownRequested = false;
+    std::atomic<bool> m_shaderCompileShutdownRequested = false;
     uint32_t m_workerThreadCount = 0;
     bool m_initialized = false;
 };

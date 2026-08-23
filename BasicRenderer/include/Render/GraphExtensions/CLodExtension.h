@@ -8,22 +8,40 @@
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 class CLodStreamingSystem;
 class CLodAlphaVariant;
 class CLodShadowVariant;
 class CLodVisibilityVariant;
-class PixelBuffer;
-class ResourceGroup;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
+class VirtualShadowCasterRegistry;
+struct ProducerPersistentState;
 struct CLodVariantTraits;
+
+struct CLodExtensionOptions {
+    bool enableReyes = true;
+    bool enableVoxelRasterization = false;
+    uint32_t voxelRasterWorkCapacity = 0u;
+    std::shared_ptr<CLodStreamingSystem> streamingSystem;
+    std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters;
+    std::shared_ptr<ProducerPersistentState> persistentState;
+};
 
 class CLodExtension final : public RenderGraph::IRenderGraphExtension, public IResourceProvider {
 public:
-    explicit CLodExtension(CLodExtensionType type, uint32_t maxVisibleClusters);
+    explicit CLodExtension(
+        CLodExtensionType type,
+        uint32_t maxVisibleClusters,
+        CLodExtensionOptions options = {});
     ~CLodExtension();
 
     void PrepareForBuild(RenderGraph& rg) override;
     void Initialize(RenderGraph& rg) override;
+    void Shutdown(RenderGraph& rg) override;
     void OnRegistryReset(ResourceRegistry* reg) override;
     void GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses) override;
     void GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses) override;
@@ -63,10 +81,12 @@ private:
         uint32_t phaseIndex,
         bool uploadTessellationTable,
         bool preserveDiceCountForPhase2Replay,
+        bool workGraphReyesVisibility,
         std::vector<RenderGraph::ExternalPassDesc>& outPasses,
         std::string& shadowClearDirtyBitsAfterPassName);
 
     CLodExtensionType m_type;
+    CLodExtensionOptions m_options;
     uint32_t m_maxVisibleClusters = 0u;
     uint32_t m_visibleClusterCapacity = 0u;
     uint32_t m_reyesFullClusterOutputCapacity = 0u;
@@ -81,6 +101,7 @@ private:
     bool m_reyesBudgetLimited = false;
 
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_workGraphTelemetryBuffer;
     std::shared_ptr<Buffer> m_occlusionReplayBuffer;
@@ -116,6 +137,8 @@ private:
 
     std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
     std::shared_ptr<Buffer> m_compactedVisibleClustersBufferSw;
+    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
+    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBufferSw;
     std::shared_ptr<Buffer> m_rasterBucketsWriteCursorBuffer;
     // TODO: Raster-bucket indirect args have exhibited invalid data when reused across otherwise separate
     // CLod rasterization paths. Until the root cause is understood, keep HW, compute SW, and SW page-job
@@ -143,10 +166,16 @@ private:
     std::shared_ptr<Buffer> m_reyesSplitQueueBufferB;
     std::shared_ptr<Buffer> m_reyesSplitQueueCounterBufferB;
     std::shared_ptr<Buffer> m_reyesSplitQueueOverflowBufferB;
+    std::shared_ptr<Buffer> m_reyesReplaySplitQueueBuffer;
+    std::shared_ptr<Buffer> m_reyesReplaySplitQueueCounterBuffer;
+    std::shared_ptr<Buffer> m_reyesReplaySplitQueueOverflowBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueCounterBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueuePhase1CountBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueOverflowBuffer;
+    std::shared_ptr<Buffer> m_reyesReplayDiceQueueBuffer;
+    std::shared_ptr<Buffer> m_reyesReplayDiceQueueCounterBuffer;
+    std::shared_ptr<Buffer> m_reyesReplayDiceQueueOverflowBuffer;
     std::shared_ptr<Buffer> m_reyesRasterWorkBuffer;
     std::shared_ptr<Buffer> m_reyesRasterWorkCounterBuffer;
     std::shared_ptr<Buffer> m_reyesRasterWorkIndirectArgsBuffer;
@@ -169,7 +198,10 @@ private:
     std::shared_ptr<Buffer> m_swVisibleClustersCounterBufferPhase2;
     std::shared_ptr<Buffer> m_voxelRasterWorkBuffer;
     std::shared_ptr<Buffer> m_voxelRasterWorkCounterBuffer;
+    std::shared_ptr<Buffer> m_skinnedVoxelRasterWorkBuffer;
+    std::shared_ptr<Buffer> m_skinnedVoxelRasterWorkCounterBuffer;
     std::shared_ptr<Buffer> m_voxelRasterIndirectArgsBuffer;
+    std::shared_ptr<Buffer> m_skinnedVoxelRasterIndirectArgsBuffer;
     uint32_t m_voxelRasterWorkCapacity = 0u;
     std::shared_ptr<Buffer> m_sortedToUnsortedMappingBuffer;
     std::shared_ptr<Buffer> m_sortedToUnsortedMappingBufferSw;
@@ -197,10 +229,12 @@ private:
     std::shared_ptr<PixelBuffer> m_AVBOITEarlyDepthTexture;
     std::shared_ptr<PixelBuffer> m_shadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;
+    std::shared_ptr<PixelBuffer> m_shadowStaticPhysicalPagesTexture;
     std::shared_ptr<Buffer> m_shadowPageMetadataBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidationInputsBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidationCountBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidatedInstancesBitsetBuffer;
+    std::vector<std::shared_ptr<Buffer>> m_shadowUpgradeInvalidationUploadBuffers;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidatesBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidateCountBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveRawPagesBuffer;
@@ -217,6 +251,10 @@ private:
     std::shared_ptr<Buffer> m_shadowMarkedBlocksMaskBuffer;
     std::shared_ptr<Buffer> m_shadowMarkedBlocksListBuffer;
     std::shared_ptr<Buffer> m_shadowMarkedBlocksCountBuffer;
+    std::shared_ptr<Buffer> m_shadowReceiverSubpageMaskBuffer;
+    std::shared_ptr<Buffer> m_shadowActiveBlockMetadataBuffer;
+    std::shared_ptr<Buffer> m_shadowDynamicActiveBlockMetadataBuffer;
+    std::shared_ptr<Buffer> m_shadowBlockClusterCoverageBuffer;
     std::shared_ptr<Buffer> m_shadowFreePhysicalPagesBuffer;
     std::shared_ptr<Buffer> m_shadowReusablePhysicalPagesBuffer;
     std::shared_ptr<Buffer> m_shadowPageListHeaderBuffer;
@@ -231,8 +269,10 @@ private:
     std::shared_ptr<Buffer> m_shadowRuntimeStateBuffer;
     std::shared_ptr<Buffer> m_shadowStatsBuffer;
     std::shared_ptr<Buffer> m_swPageJobVisibleClustersBuffer;
+    std::shared_ptr<Buffer> m_swPageJobVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_swPageJobVisibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_swPageJobVisibleClustersBufferPhase2;
+    std::shared_ptr<Buffer> m_swPageJobVisibleClusterTransformIndicesBufferPhase2;
     std::shared_ptr<Buffer> m_swPageJobVisibleClustersCounterBufferPhase2;
     std::shared_ptr<Buffer> m_swPageJobRecordsBuffer;
     std::shared_ptr<Buffer> m_swPageJobRecordsBufferSkinned;
@@ -250,8 +290,9 @@ private:
     std::shared_ptr<Buffer> m_swPageJobClusterTagsBufferPhase2;
     std::shared_ptr<Buffer> m_vsmExpandedVisibleClustersBuffer;
     std::shared_ptr<Buffer> m_vsmExpandedVisibleClustersBufferSw;
+    std::shared_ptr<Buffer> m_vsmExpandedVisibleClusterTransformIndicesBufferSw;
 
-    std::unique_ptr<CLodStreamingSystem> m_streamingSystem;
+    std::shared_ptr<CLodStreamingSystem> m_streamingSystem;
     bool m_providerRegisteredForCurrentRegistry = false;
     bool m_shadowVirtualResourcesNeedReset = true;
     uint32_t m_transparencyConfiguredRenderWidth = 0u;

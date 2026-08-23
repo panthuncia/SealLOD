@@ -5,7 +5,10 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class VirtualShadowMapDeduplicatePredictedPagesPass final : public ComputePass {
 public:
@@ -14,7 +17,12 @@ public:
         std::shared_ptr<Buffer> predictiveRawPageCountBuffer,
         std::shared_ptr<Buffer> predictedScratchBitsetBuffer,
         std::shared_ptr<Buffer> predictedPagesBuffer,
-        std::shared_ptr<Buffer> predictedPageCountBuffer);
+        std::shared_ptr<Buffer> predictedPageCountBuffer,
+        std::shared_ptr<Buffer> statsBuffer,
+        std::shared_ptr<PixelBuffer> pageTableTexture,
+        std::shared_ptr<Buffer> pageMetadataBuffer,
+        std::shared_ptr<Buffer> dirtyFlagsBuffer,
+        uint32_t physicalPageCount);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -29,4 +37,9 @@ private:
     std::shared_ptr<Buffer> m_predictedScratchBitsetBuffer;
     std::shared_ptr<Buffer> m_predictedPagesBuffer;
     std::shared_ptr<Buffer> m_predictedPageCountBuffer;
+    std::shared_ptr<Buffer> m_statsBuffer;
+    std::shared_ptr<PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<Buffer> m_dirtyFlagsBuffer;
+    uint32_t m_physicalPageCount = 0u;
 };

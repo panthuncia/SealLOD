@@ -13,6 +13,8 @@
 
 #include "Animation/Animation.h"
 #include "Animation/AnimationController.h"
+#include "Animation/DynamicWindMetadata.h"
+#include "Animation/SkeletonArtifact.h"
 #include "Scene/Components.h"
 
 // Skeleton has two modes:
@@ -26,6 +28,19 @@ public:
     // This constructor extracts the CPU-only skeleton topology and rest pose and does NOT allocate GPU buffers.
     Skeleton(const std::vector<flecs::entity>& nodes,
         const std::vector<Matrix>& inverseBindMatrices);
+
+    Skeleton(std::vector<std::string> boneNames,
+        std::vector<int32_t> parentIndices,
+        std::vector<Matrix> inverseBindMatrices,
+        std::vector<Components::Transform> restLocalTransforms = {},
+        std::vector<Matrix> rootParentGlobals = {},
+        std::vector<uint32_t> windSimulationGroupIndices = {},
+        std::string windProfileIdentity = {},
+        DynamicWindMetadata dynamicWindMetadata = {},
+        std::vector<uint32_t> evaluationOrder = {},
+        std::vector<SkeletonWindBoneInvariant> windBoneInvariants = {},
+        std::vector<Matrix> bindGlobalMatrices = {},
+        std::vector<SkeletonLodVariant> lodVariants = {});
 
     // Creates an INSTANCE skeleton referencing an existing base skeleton.
     explicit Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton);
@@ -61,6 +76,8 @@ public:
     // If called on a BASE skeleton, it logs a warning and does nothing.
 	// Force parameter can be used to force update even if animation is paused.
     void UpdateTransforms(float elapsedSeconds, bool force = false);
+    void SetExternalPose(std::span<const Matrix> boneMatrices, float conservativeBoundsScale = 1.0f);
+    bool HasExternalPose() const noexcept { return m_externalPose; }
 
     // Marks pose dirty. SkeletonManager can use this to decide uploads.
     bool IsPoseDirty() const noexcept { return m_poseDirty; }
@@ -77,10 +94,20 @@ public:
     uint32_t GetBoneCount() const noexcept;
     std::span<const std::string> GetBoneNames() const;
     std::span<const int32_t> GetParentIndices() const;
+    std::span<const Matrix> GetRootParentGlobals() const;
+    std::span<const Matrix> GetBindGlobalMatrices() const;
+    std::span<const uint32_t> GetWindSimulationGroupIndices() const;
+    std::string_view GetWindProfileIdentity() const;
+    const DynamicWindMetadata& GetDynamicWindMetadata() const;
+    std::span<const SkeletonWindBoneInvariant> GetWindBoneInvariants() const;
+	std::span<const SkeletonLodVariant> GetSkeletonLodVariants() const;
+    bool HasWindSimulationGroups() const { return !GetWindSimulationGroupIndices().empty(); }
 
     // Optional hook for SkeletonManager (or draw-data) to store an instance slot/index.
     uint32_t GetSkinningInstanceSlot() const noexcept { return m_skinningInstanceSlot; }
     void     SetSkinningInstanceSlot(uint32_t slot) noexcept { m_skinningInstanceSlot = slot; }
+    uint32_t GetSkinningGPUFlags() const noexcept;
+    void     SetSkinningGPUFlags(uint32_t flags) noexcept { m_skinningGPUFlags = flags; }
 
 private:
     // Shared (BASE) data
@@ -92,6 +119,12 @@ private:
     std::vector<uint32_t>    m_evalOrder;          // parent-before-children order
     std::vector<Matrix>      m_inverseBindMatrices;
     std::vector<Matrix>      m_rootParentGlobals; // Transforms to apply to root nodes based on external hierarchy
+    std::vector<Matrix>      m_bindGlobalMatrices;
+    std::vector<uint32_t>    m_windSimulationGroupIndices;
+    std::string              m_windProfileIdentity;
+    DynamicWindMetadata      m_dynamicWindMetadata;
+    std::vector<SkeletonWindBoneInvariant> m_windBoneInvariants;
+	std::vector<SkeletonLodVariant> m_lodVariants;
 
     // Animation library (base)
 public:
@@ -105,12 +138,14 @@ private:
     std::vector<AnimationController> m_controllers;    // one per bone
     std::vector<Matrix> m_boneMatrices;                // final global pose
     bool m_poseDirty = true;
+    bool m_externalPose = false;
 
     float  m_animationSpeed = 1.0f;
     size_t m_activeAnimationIndex = size_t(-1);
     float m_currentAnimationConservativeBoundsScale = 1.0f;
 
     uint32_t m_skinningInstanceSlot = 0xFFFFFFFF;
+    uint32_t m_skinningGPUFlags = 0;
 
     bool m_isBaseSkeleton = false;
 

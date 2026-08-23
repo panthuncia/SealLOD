@@ -39,7 +39,7 @@ struct CameraInfo {
 
     unsigned int isOrtho = 0; // bool
 	DirectX::XMFLOAT2 uvScaleToNextPowerOfTwo = { 1.0f, 1.0f }; // Scale to next power of two, for linear depth buffer
-    unsigned int pad[1];
+    unsigned int lodResY = 0; // Final-presentation height used for screen-space LOD error.
 };
 
 struct CullingCameraInfo {
@@ -49,7 +49,9 @@ struct CullingCameraInfo {
     float zNear = 0.0f;
     float errorOverDistanceThreshold = 0.0f; // Threshold for (error * scale) / distance metric
     unsigned int isOrtho = 0;
-    float pad[3] = {};
+    float viewportWidth = 0.0f;
+    float viewportHeight = 0.0f;
+    float reyesDiceRatePixels = 1.0f;
     DirectX::XMFLOAT4 viewRightWorld;
     DirectX::XMFLOAT4 viewUpWorld;
     DirectX::XMFLOAT4 viewForwardWorld;
@@ -92,10 +94,62 @@ struct PerFrameCB {
     unsigned int frameIndex; // 0 to 63
     unsigned int shadowVirtualSmrtDirectionalCountsPacked = 0u;
     float shadowVirtualSmrtMaxRayAngleFromLightDegrees = 0.0f;
-    float shadowVirtualSmrtRayLengthScaleDirectional = 0.0f;
-    float shadowVirtualSmrtMaxTraceDistanceWorld = 0.0f;
-    float _padSmrt = 0.0f;
+    float shadowVirtualSmrtRayLengthScaleDirectional = 1.0f;
+    float shadowVirtualSmrtMaxTraceDistanceWorld = 1500.0f;
+    unsigned int shadowVirtualReceiverTraceEnabled = 1u;
+    unsigned int shadowVirtualReceiverTraceSampleCount = 8u;
+    float shadowVirtualReceiverTraceMaxDistanceWorld = 256.0f;
+    float shadowVirtualReceiverTraceUncertaintyScale = 1.5f;
+    float shadowVirtualReceiverTraceDepthSafetyScale = 4.0f;
+    unsigned int shadowVirtualReceiverTracePad0 = 0u;
+    unsigned int shadowVirtualReceiverTracePad1 = 0u;
+    unsigned int terrainStochasticSamplingEnabled = 1u;
+    unsigned int terrainStochasticDiffuseEnabled = 1u;
+    unsigned int terrainStochasticNormalEnabled = 1u;
+    unsigned int terrainStochasticDerivativeNormalsEnabled = 1u;
+    float terrainStochasticBlendCurve = 0.65f;
+    unsigned int terrainGaussianStochasticEnabled = 0u;
+    unsigned int terrainStochasticRegisterPad = 0u;
+    // Keep these scalar on both CPU and HLSL. An HLSL uint3 cannot straddle a
+    // 16-byte constant-buffer register, while XMUINT3 has only scalar alignment.
+    unsigned int terrainStochasticPad0 = 0u;
+    unsigned int terrainStochasticPad1 = 0u;
+    unsigned int terrainStochasticPad2 = 0u;
+    unsigned int parallaxOcclusionMappingEnabled = 1u;
+    unsigned int terrainParallaxOcclusionMappingEnabled = 1u;
+    float terrainParallaxHeightScale = 0.03f;
+    unsigned int terrainParallaxMaxSteps = 16u;
+    float heightFadeStartDistance = 2048.0f;
+    float heightFadeEndDistance = 8192.0f;
+    unsigned int terrainRvtEnabled = 0u;
+    unsigned int terrainRvtForceDirectFallback = 0u;
+    unsigned int terrainRvtDebugView = 0u;
+    unsigned int terrainRvtTelemetryEnabled = 0u;
+    float terrainReyesDisplacementScale = 8.0f;
+    float objectReyesDisplacementScale = 1.0f;
+    float objectParallaxHeightScale = 1.0f;
 };
+
+static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceEnabled) == 100, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceDepthSafetyScale) == 116, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 152, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticPad0) == 156, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticPad1) == 160, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticPad2) == 164, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, parallaxOcclusionMappingEnabled) == 168, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxOcclusionMappingEnabled) == 172, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxHeightScale) == 176, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxMaxSteps) == 180, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, heightFadeStartDistance) == 184, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, heightFadeEndDistance) == 188, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtEnabled) == 192, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtForceDirectFallback) == 196, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtDebugView) == 200, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtTelemetryEnabled) == 204, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainReyesDisplacementScale) == 208, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, objectReyesDisplacementScale) == 212, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, objectParallaxHeightScale) == 216, "PerFrameCB layout mismatch.");
+static_assert(sizeof(PerFrameCB) == 224, "PerFrameCB layout mismatch.");
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
 static constexpr unsigned int OBJECT_FLAG_REVERSE_WINDING = 1u << 0;
@@ -106,11 +160,14 @@ struct PerObjectCB {
     DirectX::XMMATRIX modelInverseMatrix;
     unsigned int normalMatrixBufferIndex;
     unsigned int objectFlags;
-    unsigned int pad[2];
+    unsigned int stableSceneIdLo;
+    unsigned int stableSceneIdHi;
 };
 
 struct PerMeshCB {
     unsigned int materialDataIndex;
+    unsigned int materialEvalCompileFlagsID;
+    unsigned int materialReyesEvalCompileFlagsID;
     unsigned int rasterBucketIndex;
     unsigned int vertexFlags;
 	unsigned int vertexByteSize;
@@ -135,6 +192,20 @@ struct PerMeshInstanceCB {
     float skinnedBoundsScale = 1.0f;
     BoundingSphere boundingSphere = {};
 };
+
+using PerInstanceTransformCB = PerObjectCB;
+
+struct InstanceDrawRecordCB {
+    unsigned int meshTemplateIndex;
+    unsigned int instanceTransformIndex;
+    unsigned int clodOffsetIndex;
+    unsigned int skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
+    // Authoritative expanded skeleton type for assembled draws. Keeping this
+    // on the draw record lets ordinary skinning resolve transient wind slots
+    // without introducing a placement-buffer dependency in every raster pass.
+    unsigned int skinningTypeSlot = 0xFFFFFFFFu;
+};
+static_assert(sizeof(InstanceDrawRecordCB) == 20u);
 
 struct PerMaterialCB {
     unsigned int materialFlags;
@@ -169,7 +240,7 @@ struct PerMaterialCB {
 	float geometricDisplacementMin;
 	float geometricDisplacementMax;
     unsigned int geometricDisplacementEnabled;
-    unsigned int perMaterialPad0;
+    unsigned int terrainSetIndex;
 
     DirectX::XMFLOAT4 baseColorFactor;
     DirectX::XMFLOAT4 emissiveFactor;
@@ -205,6 +276,16 @@ struct PerMaterialCB {
     unsigned int aoStreamingTextureID;
     unsigned int heightStreamingTextureID;
     unsigned int opacityStreamingTextureID;
+    DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
+    float objectSurfaceTexelDensity = 1.0f;
+    unsigned int objectSurfaceSamplingMode = 0u;
+    DirectX::XMUINT2 sourceMaterialId = {};
+    unsigned int semanticFamily = 0u;
+    unsigned int surfaceFlags = 0u;
+    DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
+    unsigned int glintEnabled = 0u;
+    unsigned int diagnosticReason = 0u;
+    DirectX::XMUINT2 padGlint = {};
 };
 
 struct PerMaterialEvalCB {
@@ -242,6 +323,9 @@ struct PerMaterialEvalCB {
     DirectX::XMFLOAT4 emissiveFactor;
     DirectX::XMUINT4 baseColorChannels;
 
+    DirectX::XMUINT3 normalChannels;
+    unsigned int terrainSetIndex;
+
     unsigned int aoChannel;
     unsigned int heightChannel;
     unsigned int metallicChannel;
@@ -267,6 +351,109 @@ struct PerMaterialEvalCB {
     unsigned int aoStreamingTextureID;
     unsigned int heightStreamingTextureID;
     unsigned int opacityStreamingTextureID;
+    DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
+    float objectSurfaceTexelDensity = 1.0f;
+    unsigned int objectSurfaceSamplingMode = 0u;
+    DirectX::XMUINT2 sourceMaterialId = {};
+    unsigned int semanticFamily = 0u;
+    unsigned int surfaceFlags = 0u;
+    DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
+    unsigned int glintEnabled = 0u;
+    unsigned int diagnosticReason = 0u;
+    DirectX::XMUINT2 padGlint = {};
+};
+
+static_assert(sizeof(PerMaterialEvalCB) == 320, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
+static_assert(offsetof(PerMaterialEvalCB, geometricDisplacementEnabled) == 92, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, baseColorFactor) == 96, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, emissiveStreamingTextureID) == 240, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, reyesUvDensity) == 256, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, glintParameters) == 288, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, glintEnabled) == 304, "PerMaterialEvalCB layout mismatch.");
+
+struct TerrainLayerGPU {
+    unsigned int diffuseTextureIndex;
+    unsigned int diffuseSamplerIndex;
+    unsigned int normalTextureIndex;
+    unsigned int normalSamplerIndex;
+    unsigned int heightTextureIndex;
+    unsigned int heightSamplerIndex;
+    unsigned int rmaosTextureIndex;
+    unsigned int rmaosSamplerIndex;
+    unsigned int diffuseStreamingTextureID;
+    unsigned int normalStreamingTextureID;
+    unsigned int heightStreamingTextureID;
+    unsigned int rmaosStreamingTextureID;
+    DirectX::XMUINT3 normalChannels;
+    unsigned int flags;
+    DirectX::XMFLOAT4 fallbackColor;
+    float uvScale;
+    unsigned int stochasticLayerIndex;
+    float heightScale;
+    float roughnessScale;
+    float specularLevel;
+    DirectX::XMFLOAT4 glintParameters;
+    DirectX::XMFLOAT4 farOverlayParams;
+};
+
+struct TerrainStochasticLayerGPU {
+    unsigned int diffuseGaussianTextureIndex;
+    unsigned int diffuseInverseLutTextureIndex;
+    unsigned int diffuseInverseLutSamplerIndex;
+    unsigned int diffuseFlags;
+    unsigned int normalGaussianTextureIndex;
+    unsigned int normalInverseLutTextureIndex;
+    unsigned int normalInverseLutSamplerIndex;
+    unsigned int normalFlags;
+    float stochasticScale;
+    float diffuseLutHeight;
+    float normalLutHeight;
+    float heightLutHeight;
+    DirectX::XMFLOAT4 diffuseColorSpaceOrigin;
+    DirectX::XMFLOAT4 diffuseColorSpaceVector0;
+    DirectX::XMFLOAT4 diffuseColorSpaceVector1;
+    DirectX::XMFLOAT4 diffuseColorSpaceVector2;
+    unsigned int heightGaussianTextureIndex;
+    unsigned int heightInverseLutTextureIndex;
+    unsigned int heightInverseLutSamplerIndex;
+    unsigned int heightFlags;
+};
+
+struct TerrainLayerRefGPU {
+    unsigned int layerIndex;
+    unsigned int pad0;
+    unsigned int pad1;
+    unsigned int pad2;
+};
+
+struct TerrainRegionGPU {
+    int regionX;
+    int regionY;
+    unsigned int layerRefStart;
+    unsigned int layerRefCount;
+    unsigned int weightBlockStart;
+    unsigned int weightSampleSide;
+    unsigned int weightSamplesPerLayer;
+    unsigned int pad1;
+};
+
+struct TerrainSetGPU {
+    int minRegionX;
+    int minRegionY;
+    unsigned int regionCountX;
+    unsigned int regionCountY;
+    unsigned int regionBase;
+    unsigned int regionCount;
+    unsigned int layerBase;
+    unsigned int layerCount;
+    unsigned int layerRefBase;
+    unsigned int layerRefCount;
+    unsigned int weightBlockBase;
+    unsigned int weightBlockCount;
+    float regionSizeWorld;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 struct PerMaterialOpenPBRCB {
@@ -477,15 +664,58 @@ struct VisibleClusterInfo {
 };
 
 struct SkinningInstanceGPUInfo {
+    // Offset into Builtin::SkeletonResources::BoneTransforms, which stores
+    // row-vector inverseBind * animatedGlobal skin matrices.
     uint32_t transformOffsetMatrices = 0;
+    // Kept for CPU/debug compatibility; forward skinning no longer reads this in shaders.
     uint32_t invBindOffsetMatrices = 0;
     uint32_t inverseSkinOffsetMatrices = 0;
     uint32_t boneCount = 0;
+    uint32_t flags = 0;
+    uint32_t pad0 = 0;
+    // The packed bone buffer contains ping-pong palettes. Motion-vector
+    // reconstruction reads this offset while ordinary skinning reads the
+    // current transformOffsetMatrices palette above.
+    uint32_t previousTransformOffsetMatrices = 0;
+    // Procedural-wind transient slots use this to reject history left behind
+    // when an instance-transform slot is recycled for a different placement.
+    uint32_t stableSceneId = 0;
+	uint32_t boneRemapDescriptor = 0xFFFFFFFFu;
+	uint32_t boneRemapOffset = 0u;
+	uint32_t sourceBoneCount = 0u;
+	uint32_t skeletonLodVariant = 0u;
+};
+static_assert(sizeof(SkinningInstanceGPUInfo) == 48u);
+
+// Legacy/cache compatibility bit. All current palette buffers use the canonical
+// shader-native row-vector layout regardless of this value.
+constexpr uint32_t kSkinningInstanceFlagRowVectorSkinMatrix = 1u << 0;
+constexpr uint32_t kSkinningInstanceFlagProceduralWindType = 1u << 1;
+constexpr uint32_t kProceduralWindTransientSlotBase = 65536u;
+
+struct SkinnedAssemblyPlacementGPU {
+    uint32_t instanceTransformIndex = 0;
+    uint32_t skinningTypeSlot = 0xFFFFFFFFu;
+    uint32_t stableSceneID = 0;
+    uint32_t generation = 0;
+    DirectX::XMFLOAT4 localBoundingSphere{};
+    float boundsScale = 1.0f;
+    uint32_t pad[3]{};
 };
 
 struct MeshInstanceClodOffsets
 {
     uint clodMeshMetadataIndex;
+};
+
+struct CLodRuntimeAssemblyTransform
+{
+    DirectX::XMFLOAT4 modelRow0 = {};
+    DirectX::XMFLOAT4 modelRow1 = {};
+    DirectX::XMFLOAT4 modelRow2 = {};
+    DirectX::XMFLOAT4 prevModelRow0 = {};
+    DirectX::XMFLOAT4 prevModelRow1 = {};
+    DirectX::XMFLOAT4 prevModelRow2 = {};
 };
 
 struct CLodMeshMetadata
@@ -500,7 +730,20 @@ struct CLodMeshMetadata
     uint lodLevelInfoBase;
     uint lodLevelCount;
     uint maxDepth;
+    uint assemblyTransformBase;
+    uint assemblyTransformCount;
+    uint assemblyInstanceBase;
+    uint assemblyInstanceCount;
+    uint assemblyBoneRemapBase;
+    uint assemblyBoneRemapCount;
+    uint nodeSkinningInfoBase;
+    uint nodeSkinningInfoCount;
+    uint nodeBoneIndexBase;
+    uint nodeBoneIndexCount;
+    uint nodeBoneLimit;
+    uint padNodeSkinning[3]{};
 };
+static_assert(sizeof(CLodMeshMetadata) == 96, "CLodMeshMetadata must match the HLSL structured-buffer layout");
 
 struct CLodHierarchyLevelInfo
 {
@@ -539,9 +782,10 @@ struct CLodReplayBufferState {
     uint32_t nodeDropped = 0;
     uint32_t meshletDropped = 0;
     uint32_t visibleClusterCombinedCount = 0;
-    uint32_t pad0 = 0;
-    uint32_t pad1 = 0;
-    uint32_t pad2 = 0;
+    uint32_t reyesSplitWriteCount = 0;
+    uint32_t reyesDiceWriteCount = 0;
+    uint32_t reyesSplitDropped = 0;
+    uint32_t reyesDiceDropped = 0;
 };
 
 struct CLodViewDepthSRVIndex {
@@ -570,8 +814,8 @@ struct VisibleCluster {
     unsigned int instanceID;
     unsigned int localMeshletIndex;       // page-local meshlet index
     unsigned int groupID;
-    unsigned int pageSlabDescriptorIndex; // pre-resolved page slab descriptor
-    unsigned int pageSlabByteOffset;      // pre-resolved page slab byte offset
+    unsigned int pageSlabDescriptorIndex;
+    unsigned int pageSlabByteOffset;
     unsigned int shadowClipmapIndex;      // Virtual shadow clipmap index, or 0xFFFFFFFF when not applicable
     unsigned int virtualShadowPayload;
     bool hasVirtualShadowBlockData;
@@ -589,9 +833,9 @@ inline constexpr uint32_t PackedVisibleClusterInstanceBits = 24u;
 inline constexpr uint32_t PackedVisibleClusterLocalMeshletBits = 14u;
 inline constexpr uint32_t PackedVisibleClusterGroupBits = 20u;
 inline constexpr uint32_t PackedVisibleClusterPageDescriptorBits = 20u;
-inline constexpr uint32_t PackedVisibleClusterPageIndexBits = 10u;
-inline constexpr uint32_t PackedVisibleClusterPageShift = 18u;
-inline constexpr uint32_t PackedVisibleClusterPageSizeBytes = 1u << PackedVisibleClusterPageShift;
+inline constexpr uint32_t PackedVisibleClusterPageOffsetLowBits = 10u;
+inline constexpr uint32_t PackedVisibleClusterPageOffsetHighBits = 4u;
+inline constexpr uint32_t PackedVisibleClusterPageOffsetShift = 14u;
 inline constexpr uint32_t PackedVisibleClusterInvalidShadowClipmapIndex = 0xFFFFFFFFu;
 inline constexpr uint32_t PackedVisibleClusterStrideBytes = 16u;
 inline constexpr uint32_t PackedVisibleClusterVsmClipmapBits = 5u;
@@ -626,8 +870,11 @@ inline VisibleCluster DecodePackedVisibleCluster(const std::byte* data)
     cluster.localMeshletIndex = word1 & 0x3FFFu;
     cluster.groupID = ((word1 >> PackedVisibleClusterLocalMeshletBits) & 0x3FFFFu) | ((word2 & 0x3u) << 18u);
     cluster.pageSlabDescriptorIndex = (word2 >> 2u) & 0xFFFFFu;
-    cluster.pageSlabByteOffset = ((word2 >> 22u) & 0x3FFu) << PackedVisibleClusterPageShift;
-    cluster.virtualShadowPayload = word3;
+    const uint32_t pageOffsetUnits =
+        ((word2 >> 22u) & 0x3FFu) |
+        (((word3 >> 25u) & 0xFu) << PackedVisibleClusterPageOffsetLowBits);
+    cluster.pageSlabByteOffset = pageOffsetUnits << PackedVisibleClusterPageOffsetShift;
+    cluster.virtualShadowPayload = word3 & ~(0xFu << 25u);
 
     const uint32_t encodedClipmapIndex =
         (word3 >> PackedVisibleClusterVsmClipmapShift) & PackedVisibleClusterVsmClipmapMask;
@@ -647,9 +894,12 @@ inline VisibleCluster DecodePackedVisibleCluster(const std::byte* data)
 
 
 enum RootSignatureLayout {
-    MiscUintRootParameterIndex,
-    ResourceDescriptorIndicesRootParameterIndex,
-	IndirectCommandSignatureRootSignatureIndex,
+    // RHI/DX12 root-parameter indices for the compact push-constant layout.
+    // These are not HLSL register bindings; see the *RootSignatureIndex
+    // constants below for the shader-visible binding numbers.
+    MiscUintRootParameterIndex = 0,
+    ResourceDescriptorIndicesRootParameterIndex = 1,
+	IndirectCommandSignatureRootSignatureIndex = 2,
 	NumRootSignatureParameters
 };
 
@@ -685,6 +935,25 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     UintRootConstant25,
     UintRootConstant26,
     UintRootConstant27,
+    UintRootConstant28,
+    UintRootConstant29,
+	UintRootConstant30,
+	UintRootConstant31,
+	UintRootConstant32,
+	UintRootConstant33,
+	UintRootConstant34,
+	UintRootConstant35,
+	UintRootConstant36,
+	UintRootConstant37,
+	UintRootConstant38,
+	UintRootConstant39,
+	UintRootConstant40,
+	UintRootConstant41,
+	UintRootConstant42,
+	UintRootConstant43,
+	UintRootConstant44,
+	UintRootConstant45,
+	UintRootConstant46,
     MiscPerObjectBufferIndex = UintRootConstant19,
     MiscPerMeshBufferIndex = UintRootConstant20,
     MiscPerMeshInstanceBufferIndex = UintRootConstant21,
@@ -693,7 +962,8 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     MiscEnableShadows = UintRootConstant24,
     MiscEnablePunctualLights = UintRootConstant25,
     MiscEnableGTAO = UintRootConstant26,
-	NumMiscUintRootConstants = UintRootConstant27 + 1
+	UintRootConstant47 = UintRootConstant46 + 1,
+	NumMiscUintRootConstants = UintRootConstant47 + 1
 };
 
 enum ResourceDescriptorIndicesRootConstants { // Auto-assigned, do not set manually
@@ -738,5 +1008,6 @@ enum IndirectCommandSignatureRootConstants {
     IndirectCommandSignatureRootConstant1,
     IndirectCommandSignatureRootConstant2,
     IndirectCommandSignatureRootConstant3,
+    IndirectCommandSignatureRootConstant4,
     NumIndirectCommandSignatureRootConstants
 };

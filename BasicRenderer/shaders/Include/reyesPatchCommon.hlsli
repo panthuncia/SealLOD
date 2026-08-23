@@ -2,6 +2,8 @@
 #define __REYES_PATCH_COMMON_HLSLI__
 
 #include "include/dynamicSwizzle.hlsli"
+#include "include/terrainCommon.hlsli"
+#include "include/clodReyesTransition.hlsli"
 
 static const uint REYES_PATCH_BARYCENTRIC_COORD_MAX = (1u << 15u);
 static const float REYES_PATCH_BARYCENTRIC_COORD_SCALE = float(REYES_PATCH_BARYCENTRIC_COORD_MAX);
@@ -17,6 +19,31 @@ static const uint CLodReyesRasterBatchMicroTriangleCount = 16u;
 static const uint CLodReyesHardwareRasterPackedEntryCount = 5u;
 static const uint CLodReyesHardwareRasterMaxPackedMicroTriangles =
     CLodReyesHardwareRasterPackedEntryCount * CLodReyesRasterBatchMicroTriangleCount;
+static const uint OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT = 2u;
+
+float ReyesViewportHeightPixels(CullingCameraInfo camera)
+{
+    return camera.viewportHeight > 0.0f ? camera.viewportHeight : REYES_SCREEN_SCALE_REFERENCE;
+}
+
+float ReyesDiceRatePixels(CullingCameraInfo camera)
+{
+    return camera.reyesDiceRatePixels > 0.0f ? camera.reyesDiceRatePixels : REYES_DICE_RATE_PIXELS;
+}
+
+float3 ReyesComputeVisibilityEdgeTessFactors(float3 worldPosition0, float3 worldPosition1, float3 worldPosition2, CullingCameraInfo camera)
+{
+    const float distance01 = max(camera.zNear, min(length(worldPosition0 - camera.positionWorldSpace.xyz), length(worldPosition1 - camera.positionWorldSpace.xyz)));
+    const float distance12 = max(camera.zNear, min(length(worldPosition1 - camera.positionWorldSpace.xyz), length(worldPosition2 - camera.positionWorldSpace.xyz)));
+    const float distance20 = max(camera.zNear, min(length(worldPosition2 - camera.positionWorldSpace.xyz), length(worldPosition0 - camera.positionWorldSpace.xyz)));
+
+    const float edge01 = length(worldPosition0 - worldPosition1);
+    const float edge12 = length(worldPosition1 - worldPosition2);
+    const float edge20 = length(worldPosition2 - worldPosition0);
+
+    const float scale = camera.projY * ReyesViewportHeightPixels(camera) * (0.5f / ReyesDiceRatePixels(camera));
+    return max(float3(1.0f, 1.0f, 1.0f), float3(edge01 / distance01, edge12 / distance12, edge20 / distance20) * scale);
+}
 
 float3 ReyesDecodePatchBarycentrics(uint encoded)
 {
@@ -483,44 +510,955 @@ float2 ReyesInterpolateFloat2Precise(float2 value0, float2 value1, float2 value2
     return result;
 }
 
-float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float2 uv)
+float ReyesGeometricDisplacementGlobalScale(uint materialFlags)
+{
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    return (materialFlags & MATERIAL_TERRAIN) != 0u
+        ? max(perFrameBuffer.terrainReyesDisplacementScale, 0.0f)
+        : max(perFrameBuffer.objectReyesDisplacementScale, 0.0f);
+}
+
+float ReyesGeometricDisplacementGlobalScale(MaterialInfo materialInfo)
+{
+    return ReyesGeometricDisplacementGlobalScale(materialInfo.materialFlags);
+}
+
+float ReyesGeometricDisplacementGlobalScale(MaterialEvalInfo materialInfo)
+{
+    return ReyesGeometricDisplacementGlobalScale(materialInfo.materialFlags);
+}
+
+bool ReyesGeometricDisplacementEnabled(MaterialInfo materialInfo)
 {
     if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return false;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        return true;
+    }
+
+    return (materialInfo.materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u &&
+        (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u;
+}
+
+bool ReyesGeometricDisplacementEnabled(MaterialEvalInfo materialInfo)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return false;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        return true;
+    }
+
+    return (materialInfo.materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u &&
+        (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u;
+}
+
+float ReyesGeometricDisplacementMagnitude(MaterialInfo materialInfo)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
 
+    return max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax)) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
+}
+
+float ReyesGeometricDisplacementMagnitude(MaterialEvalInfo materialInfo)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    return max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax)) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
+}
+
+float ReyesEstimateWorldUnitsPerPixel(CullingCameraInfo camera, float depth)
+{
+    const float projectionScale = max(abs(camera.projY), 1.0e-5f) * (0.5f * ReyesViewportHeightPixels(camera));
+    if (camera.isOrtho != 0u)
+    {
+        return ReyesDiceRatePixels(camera) / max(projectionScale, 1.0e-5f);
+    }
+
+    return ReyesDiceRatePixels(camera) * max(depth, max(camera.zNear, 1.0e-3f)) / projectionScale;
+}
+
+float ReyesEstimatePointDepth(CullingCameraInfo camera, float3 positionWS)
+{
+    const float3 cameraToPoint = positionWS - camera.positionWorldSpace.xyz;
+    const float viewDepth = abs(dot(cameraToPoint, normalize(camera.viewForwardWorld.xyz)));
+    return max(viewDepth, max(camera.zNear, 1.0e-3f));
+}
+
+void ReyesEstimateStableTerrainDerivatives(CullingCameraInfo camera, float3 positionWS, out float3 dpdxWS, out float3 dpdyWS)
+{
+    const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, ReyesEstimatePointDepth(camera, positionWS));
+    dpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
+    dpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
+}
+
+float2 ReyesEstimateUvDerivative(MaterialInfo materialInfo, CullingCameraInfo camera, float depth)
+{
+    const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
+    return max(materialInfo.reyesUvDensity, 1.0e-6f.xx) * worldUnitsPerPixel;
+}
+
+float2 ReyesEstimateUvDerivative(MaterialEvalInfo materialInfo, CullingCameraInfo camera, float depth)
+{
+    const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
+    return max(materialInfo.reyesUvDensity, 1.0e-6f.xx) * worldUnitsPerPixel;
+}
+
+float2 ReyesProjectToReferencePixel(CullingCameraInfo camera, float3 positionWS, out bool valid)
+{
+    const float4 clip = mul(float4(positionWS, 1.0f), camera.viewProjection);
+    valid = abs(clip.w) > 1.0e-5f;
+    const float2 ndc = valid ? clip.xy / clip.w : 0.0f.xx;
+    const float aspect = max(abs(camera.projY / max(camera.projX, 1.0e-5f)), 1.0e-5f);
+    const float viewportHeight = ReyesViewportHeightPixels(camera);
+    return float2(
+        (ndc.x * 0.5f + 0.5f) * viewportHeight * aspect,
+        (0.5f - ndc.y * 0.5f) * viewportHeight);
+}
+
+bool ReyesEstimateFloat2DerivativesFromPatch(
+    CullingCameraInfo camera,
+    float3 position0WS,
+    float3 position1WS,
+    float3 position2WS,
+    float2 value0,
+    float2 value1,
+    float2 value2,
+    out float2 dValueDx,
+    out float2 dValueDy)
+{
+    dValueDx = 0.0f.xx;
+    dValueDy = 0.0f.xx;
+
+    bool valid0;
+    bool valid1;
+    bool valid2;
+    const float2 screen0 = ReyesProjectToReferencePixel(camera, position0WS, valid0);
+    const float2 screen1 = ReyesProjectToReferencePixel(camera, position1WS, valid1);
+    const float2 screen2 = ReyesProjectToReferencePixel(camera, position2WS, valid2);
+    if (!valid0 || !valid1 || !valid2)
+    {
+        return false;
+    }
+
+    const float2 screenEdge1 = screen1 - screen0;
+    const float2 screenEdge2 = screen2 - screen0;
+    const float det = screenEdge1.x * screenEdge2.y - screenEdge1.y * screenEdge2.x;
+    if (abs(det) <= 1.0e-5f)
+    {
+        return false;
+    }
+
+    const float2 valueEdge1 = value1 - value0;
+    const float2 valueEdge2 = value2 - value0;
+    const float invDet = rcp(det);
+    dValueDx = (screenEdge2.y * valueEdge1 - screenEdge1.y * valueEdge2) * invDet;
+    dValueDy = (-screenEdge2.x * valueEdge1 + screenEdge1.x * valueEdge2) * invDet;
+
+    return all(isfinite(dValueDx)) && all(isfinite(dValueDy));
+}
+
+bool ReyesEstimateTerrainDerivativesFromPatch(
+    CullingCameraInfo camera,
+    float3 position0WS,
+    float3 position1WS,
+    float3 position2WS,
+    out float3 dpdxWS,
+    out float3 dpdyWS)
+{
+    dpdxWS = 0.0f.xxx;
+    dpdyWS = 0.0f.xxx;
+
+    float2 dTerrainDx;
+    float2 dTerrainDy;
+    const bool valid = ReyesEstimateFloat2DerivativesFromPatch(
+        camera,
+        position0WS,
+        position1WS,
+        position2WS,
+        TerrainSkyrimXYFromRendererPosition(position0WS),
+        TerrainSkyrimXYFromRendererPosition(position1WS),
+        TerrainSkyrimXYFromRendererPosition(position2WS),
+        dTerrainDx,
+        dTerrainDy);
+    if (!valid)
+    {
+        return false;
+    }
+
+    dpdxWS = float3(dTerrainDx.x, 0.0f, -dTerrainDx.y);
+    dpdyWS = float3(dTerrainDy.x, 0.0f, -dTerrainDy.y);
+    return all(isfinite(dpdxWS)) && all(isfinite(dpdyWS));
+}
+
+bool ReyesEstimateUvDerivativesFromPatch(
+    CullingCameraInfo camera,
+    float3 position0WS,
+    float3 position1WS,
+    float3 position2WS,
+    float2 uv0,
+    float2 uv1,
+    float2 uv2,
+    out float2 dUVdx,
+    out float2 dUVdy)
+{
+    return ReyesEstimateFloat2DerivativesFromPatch(
+        camera,
+        position0WS,
+        position1WS,
+        position2WS,
+        uv0,
+        uv1,
+        uv2,
+        dUVdx,
+        dUVdy);
+}
+
+float ReyesSampleMaterialDisplacementOffset(
+    MaterialInfo materialInfo,
+    float2 uv,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    const float2 sampleUv = saturate(uv);
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
+        return lerp(
+            materialInfo.geometricDisplacementMin,
+            materialInfo.geometricDisplacementMax,
+            heightValue);
+    }
+
     Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
-    const float4 heightSample = heightTexture.SampleLevel(heightSampler, uv, 0.0f);
-    const float heightValue = saturate(DynamicSwizzle(heightSample, materialInfo.heightChannel));
+    const float4 heightSample = useUvDerivatives
+        ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
+        : heightTexture.SampleLevel(heightSampler, uv, 0.0f);
+    const float heightValue = saturate(heightSample.r);
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
-float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float2 uv)
+float ReyesSampleMaterialDisplacementOffset(
+    MaterialEvalInfo materialInfo,
+    float2 uv,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
 
+    const float2 sampleUv = saturate(uv);
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
+        return lerp(
+            materialInfo.geometricDisplacementMin,
+            materialInfo.geometricDisplacementMax,
+            heightValue);
+    }
+
     Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
-    const float4 heightSample = heightTexture.SampleLevel(heightSampler, uv, 0.0f);
-    const float heightValue = saturate(DynamicSwizzle(heightSample, materialInfo.heightChannel));
+    const float4 heightSample = useUvDerivatives
+        ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
+        : heightTexture.SampleLevel(heightSampler, uv, 0.0f);
+    const float heightValue = saturate(heightSample.r);
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+}
+
+float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv, CullingCameraInfo camera, float depth)
+{
+    const float2 uvDerivative = ReyesEstimateUvDerivative(materialInfo, camera, depth);
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, true, float2(uvDerivative.x, 0.0f), float2(0.0f, uvDerivative.y));
+}
+
+float ReyesSampleMaterialDisplacementOffset(MaterialEvalInfo materialInfo, float2 uv, CullingCameraInfo camera, float depth)
+{
+    const float2 uvDerivative = ReyesEstimateUvDerivative(materialInfo, camera, depth);
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, true, float2(uvDerivative.x, 0.0f), float2(0.0f, uvDerivative.y));
+}
+
+float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        float3 dpdxWS;
+        float3 dpdyWS;
+        ReyesEstimateStableTerrainDerivatives(camera, positionOS, dpdxWS, dpdyWS);
+        const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
+}
+
+float ReyesSampleDisplacementOffset(
+    MaterialInfo materialInfo,
+    float3 positionOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        // Geometric displacement must be edge-deterministic. Per-microtriangle
+        // projected derivatives can choose different RVT clips for the same
+        // shared edge point, so terrain RVT mip selection uses the point itself.
+        float3 terrainDpdxWS;
+        float3 terrainDpdyWS;
+        ReyesEstimateStableTerrainDerivatives(camera, positionOS, terrainDpdxWS, terrainDpdyWS);
+        const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, terrainDpdxWS, terrainDpdyWS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return useUvDerivatives
+        ? ReyesSampleMaterialDisplacementOffset(materialInfo, uv, true, dUVdx, dUVdy)
+        : ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
+}
+
+float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        float3 dpdxWS;
+        float3 dpdyWS;
+        ReyesEstimateStableTerrainDerivatives(camera, positionOS, dpdxWS, dpdyWS);
+        const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
+}
+
+float ReyesSampleDisplacementOffset(
+    MaterialEvalInfo materialInfo,
+    float3 positionOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        // Geometric displacement must be edge-deterministic. Per-microtriangle
+        // projected derivatives can choose different RVT clips for the same
+        // shared edge point, so terrain RVT mip selection uses the point itself.
+        float3 terrainDpdxWS;
+        float3 terrainDpdyWS;
+        ReyesEstimateStableTerrainDerivatives(camera, positionOS, terrainDpdxWS, terrainDpdyWS);
+        const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, terrainDpdxWS, terrainDpdyWS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return useUvDerivatives
+        ? ReyesSampleMaterialDisplacementOffset(materialInfo, uv, true, dUVdx, dUVdy)
+        : ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
+}
+
+void ReyesObjectSurfaceDerivativeBasis(float3 normalOS, out float3 dpdxOS, out float3 dpdyOS)
+{
+    const float3 n = normalize(normalOS);
+    const float3 up = abs(n.z) < 0.9f ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+    dpdxOS = normalize(cross(up, n));
+    dpdyOS = normalize(cross(n, dpdxOS));
+}
+
+float ReyesSampleObjectSurfaceDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float3 normalOS)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+    Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    float3 dpdxOS;
+    float3 dpdyOS;
+    ReyesObjectSurfaceDerivativeBasis(normalOS, dpdxOS, dpdyOS);
+    MaterialTextureFeedback unusedFeedback;
+    InitializeMaterialTextureFeedback(unusedFeedback);
+    const float heightValue = saturate(ObjectSurfaceSampleTriplanarHeight(
+        heightTexture,
+        heightSampler,
+        materialInfo.heightStreamingTextureID,
+        positionOS,
+        normalOS,
+        dpdxOS,
+        dpdyOS,
+        max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f),
+        unusedFeedback));
+    return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+}
+
+float ReyesSampleObjectSurfaceDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+    Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    float3 dpdxOS;
+    float3 dpdyOS;
+    ReyesObjectSurfaceDerivativeBasis(normalOS, dpdxOS, dpdyOS);
+    MaterialTextureFeedback unusedFeedback;
+    InitializeMaterialTextureFeedback(unusedFeedback);
+    const float heightValue = saturate(ObjectSurfaceSampleTriplanarHeight(
+        heightTexture,
+        heightSampler,
+        materialInfo.heightStreamingTextureID,
+        positionOS,
+        normalOS,
+        dpdxOS,
+        dpdyOS,
+        max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f),
+        unusedFeedback));
+    return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+}
+
+float ReyesSampleObjectDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+    }
+    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    {
+        return ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS);
+    }
+    return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+}
+
+float ReyesSampleObjectDisplacementOffset(
+    MaterialInfo materialInfo,
+    float3 positionOS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth, useUvDerivatives, dUVdx, dUVdy);
+    }
+    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    {
+        return ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS);
+    }
+    return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth, useUvDerivatives, dUVdx, dUVdy);
+}
+
+float ReyesSampleObjectDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+    }
+    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    {
+        return ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS);
+    }
+    return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+}
+
+float ReyesSampleObjectDisplacementOffset(
+    MaterialEvalInfo materialInfo,
+    float3 positionOS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth, useUvDerivatives, dUVdx, dUVdy);
+    }
+    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    {
+        return ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS);
+    }
+    return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth, useUvDerivatives, dUVdx, dUVdy);
+}
+
+float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(materialInfo, positionOS, normalOS, uv, camera, depth) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(
+    MaterialInfo materialInfo,
+    float3 positionOS,
+    float3 positionWS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    float reyesFadeStartDistance,
+    float reyesFadeEndDistance)
+{
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(materialInfo, positionOS, normalOS, uv, camera, depth) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo) *
+        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(
+    MaterialInfo materialInfo,
+    float3 positionOS,
+    float3 positionWS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy,
+    float reyesFadeStartDistance,
+    float reyesFadeEndDistance)
+{
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(
+        materialInfo,
+        positionOS,
+        normalOS,
+        uv,
+        camera,
+        depth,
+        useUvDerivatives,
+        dUVdx,
+        dUVdy) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo) *
+        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(
+    MaterialInfo materialInfo,
+    float3 positionOS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(
+        materialInfo,
+        positionOS,
+        normalOS,
+        uv,
+        camera,
+        depth,
+        useUvDerivatives,
+        dUVdx,
+        dUVdy) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(materialInfo, positionOS, normalOS, uv, camera, depth) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(
+    MaterialEvalInfo materialInfo,
+    float3 positionOS,
+    float3 positionWS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    float reyesFadeStartDistance,
+    float reyesFadeEndDistance)
+{
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(materialInfo, positionOS, normalOS, uv, camera, depth) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo) *
+        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(
+    MaterialEvalInfo materialInfo,
+    float3 positionOS,
+    float3 positionWS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy,
+    float reyesFadeStartDistance,
+    float reyesFadeEndDistance)
+{
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(
+        materialInfo,
+        positionOS,
+        normalOS,
+        uv,
+        camera,
+        depth,
+        useUvDerivatives,
+        dUVdx,
+        dUVdy) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo) *
+        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(
+    MaterialEvalInfo materialInfo,
+    float3 positionOS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(
+        materialInfo,
+        positionOS,
+        normalOS,
+        uv,
+        camera,
+        depth,
+        useUvDerivatives,
+        dUVdx,
+        dUVdy) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+void ReyesApplyGeometricDisplacement3(
+    MaterialEvalInfo materialInfo,
+    inout float3 position0OS,
+    inout float3 position1OS,
+    inout float3 position2OS,
+    float3 position0WS,
+    float3 position1WS,
+    float3 position2WS,
+    float3 normal0OS,
+    float3 normal1OS,
+    float3 normal2OS,
+    float2 uv0,
+    float2 uv1,
+    float2 uv2,
+    CullingCameraInfo camera,
+    float depth,
+    bool useUvDerivatives,
+    float2 dUVdx,
+    float2 dUVdy,
+    float reyesFadeStartDistance,
+    float reyesFadeEndDistance)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        float3 terrainDpdx0WS;
+        float3 terrainDpdy0WS;
+        float3 terrainDpdx1WS;
+        float3 terrainDpdy1WS;
+        float3 terrainDpdx2WS;
+        float3 terrainDpdy2WS;
+        ReyesEstimateStableTerrainDerivatives(camera, position0OS, terrainDpdx0WS, terrainDpdy0WS);
+        ReyesEstimateStableTerrainDerivatives(camera, position1OS, terrainDpdx1WS, terrainDpdy1WS);
+        ReyesEstimateStableTerrainDerivatives(camera, position2OS, terrainDpdx2WS, terrainDpdy2WS);
+
+        float height0;
+        float height1;
+        float height2;
+        TerrainSampleGeometricHeightRvtOnlyOrDirectFallback3(
+            materialInfo.terrainSetIndex,
+            position0OS,
+            position1OS,
+            position2OS,
+            terrainDpdx0WS,
+            terrainDpdy0WS,
+            terrainDpdx1WS,
+            terrainDpdy1WS,
+            terrainDpdx2WS,
+            terrainDpdy2WS,
+            height0,
+            height1,
+            height2);
+
+        const float displacementScale = ReyesGeometricDisplacementGlobalScale(materialInfo);
+        position0OS += normalize(normal0OS) *
+            (lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height0)) *
+            displacementScale *
+            CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, position0WS));
+        position1OS += normalize(normal1OS) *
+            (lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height1)) *
+            displacementScale *
+            CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, position1WS));
+        position2OS += normalize(normal2OS) *
+            (lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height2)) *
+            displacementScale *
+            CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, position2WS));
+        return;
+    }
+
+    position0OS = ReyesApplyGeometricDisplacement(materialInfo, position0OS, position0WS, normal0OS, uv0, camera, depth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+    position1OS = ReyesApplyGeometricDisplacement(materialInfo, position1OS, position1WS, normal1OS, uv1, camera, depth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+    position2OS = ReyesApplyGeometricDisplacement(materialInfo, position2OS, position2WS, normal2OS, uv2, camera, depth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+}
+
+float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    const float2 sampleUv = materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT
+        ? saturate(uv)
+        : uv;
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
+        return lerp(
+            materialInfo.geometricDisplacementMin,
+            materialInfo.geometricDisplacementMax,
+            heightValue);
+    }
+
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
+    return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+}
+
+float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float2 uv)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        const float heightValue = saturate(TerrainSampleGeometricHeightDirect(materialInfo.terrainSetIndex, positionOS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv);
+}
+
+float ReyesSampleObjectDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
+{
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv);
+    }
+    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    {
+        return ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS);
+    }
+    return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv);
 }
 
 float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, uv);
+    const float displacementOffset = ReyesSampleObjectDisplacementOffset(materialInfo, positionOS, normalOS, uv) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
-float3 ReyesApplyGeometricDisplacement(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
+void ReyesEvaluateDisplacedPatchTriangle(
+    MaterialInfo materialInfo,
+    bool displacementEnabled,
+    CullingCameraInfo camera,
+    float reyesFadeStartDistance,
+    float reyesFadeEndDistance,
+    row_major matrix objectModelMatrix,
+    float patchDepth,
+    float3 sourcePosition0,
+    float3 sourcePosition1,
+    float3 sourcePosition2,
+    float3 sourceNormal0,
+    float3 sourceNormal1,
+    float3 sourceNormal2,
+    float2 sourceUv0,
+    float2 sourceUv1,
+    float2 sourceUv2,
+    float3 domain0,
+    float3 domain1,
+    float3 domain2,
+    float3 patchBary0,
+    float3 patchBary1,
+    float3 patchBary2,
+    out float3 sourceBary0,
+    out float3 sourceBary1,
+    out float3 sourceBary2,
+    out float3 patchPosition0,
+    out float3 patchPosition1,
+    out float3 patchPosition2)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, uv);
-    return positionOS + normalize(normalOS) * displacementOffset;
+    sourceBary0 = ReyesComposeSourceBarycentricsPoint(patchBary0, domain0, domain1, domain2);
+    sourceBary1 = ReyesComposeSourceBarycentricsPoint(patchBary1, domain0, domain1, domain2);
+    sourceBary2 = ReyesComposeSourceBarycentricsPoint(patchBary2, domain0, domain1, domain2);
+
+    patchPosition0 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, sourceBary0);
+    patchPosition1 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, sourceBary1);
+    patchPosition2 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, sourceBary2);
+
+    if (displacementEnabled)
+    {
+        const float3 patchNormal0 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary0));
+        const float3 patchNormal1 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary1));
+        const float3 patchNormal2 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary2));
+
+        if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+        {
+            float3 terrainDpdx0WS;
+            float3 terrainDpdy0WS;
+            float3 terrainDpdx1WS;
+            float3 terrainDpdy1WS;
+            float3 terrainDpdx2WS;
+            float3 terrainDpdy2WS;
+            ReyesEstimateStableTerrainDerivatives(camera, patchPosition0, terrainDpdx0WS, terrainDpdy0WS);
+            ReyesEstimateStableTerrainDerivatives(camera, patchPosition1, terrainDpdx1WS, terrainDpdy1WS);
+            ReyesEstimateStableTerrainDerivatives(camera, patchPosition2, terrainDpdx2WS, terrainDpdy2WS);
+
+            float height0;
+            float height1;
+            float height2;
+            TerrainSampleGeometricHeightRvtOnlyOrDirectFallback3(
+                materialInfo.terrainSetIndex,
+                patchPosition0,
+                patchPosition1,
+                patchPosition2,
+                terrainDpdx0WS,
+                terrainDpdy0WS,
+                terrainDpdx1WS,
+                terrainDpdy1WS,
+                terrainDpdx2WS,
+                terrainDpdy2WS,
+                height0,
+                height1,
+                height2);
+            const float3 patchPosition0WS = mul(float4(patchPosition0, 1.0f), objectModelMatrix).xyz;
+            const float3 patchPosition1WS = mul(float4(patchPosition1, 1.0f), objectModelMatrix).xyz;
+            const float3 patchPosition2WS = mul(float4(patchPosition2, 1.0f), objectModelMatrix).xyz;
+            patchPosition0 += patchNormal0 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height0)) *
+                ReyesGeometricDisplacementGlobalScale(materialInfo) *
+                CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition0WS);
+            patchPosition1 += patchNormal1 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height1)) *
+                ReyesGeometricDisplacementGlobalScale(materialInfo) *
+                CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition1WS);
+            patchPosition2 += patchNormal2 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height2)) *
+                ReyesGeometricDisplacementGlobalScale(materialInfo) *
+                CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition2WS);
+        }
+        else
+        {
+            const float2 patchUv0 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary0);
+            const float2 patchUv1 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary1);
+            const float2 patchUv2 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary2);
+            const float3 patchPosition0WS = mul(float4(patchPosition0, 1.0f), objectModelMatrix).xyz;
+            const float3 patchPosition1WS = mul(float4(patchPosition1, 1.0f), objectModelMatrix).xyz;
+            const float3 patchPosition2WS = mul(float4(patchPosition2, 1.0f), objectModelMatrix).xyz;
+            float2 dUVdx = 0.0f.xx;
+            float2 dUVdy = 0.0f.xx;
+            const bool useUvDerivatives = ReyesEstimateUvDerivativesFromPatch(
+                camera,
+                patchPosition0WS,
+                patchPosition1WS,
+                patchPosition2WS,
+                patchUv0,
+                patchUv1,
+                patchUv2,
+                dUVdx,
+                dUVdy);
+            patchPosition0 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition0, patchPosition0WS, patchNormal0, patchUv0, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+            patchPosition1 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition1, patchPosition1WS, patchNormal1, patchUv1, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+            patchPosition2 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition2, patchPosition2WS, patchNormal2, patchUv2, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+        }
+    }
 }
 
 void ReyesEvaluateDisplacedPatchTriangle(

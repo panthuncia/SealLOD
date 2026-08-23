@@ -33,7 +33,36 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     float depth = depthTexture[pixel];
     if (asuint(depth) == 0x7F7FFFFF) // TODO: When we need more shading paths, we will move to prefix sum and indirect dispatch
     {
-        // No geometry here
+        if (GetRootEnableSkybox())
+        {
+            const float2 ndc = uv * 2.0f - 1.0f;
+            const float3 viewDir = normalize(float3(
+                ndc.x * mainCamera.projectionInverse[0][0],
+                ndc.y * mainCamera.projectionInverse[1][1],
+                -1.0f));
+            const float3 worldDir = normalize(mul(float4(viewDir, 0.0f), mainCamera.viewInverse).xyz);
+
+            const float3 currentViewDir = normalize(mul(float4(worldDir, 0.0f), mainCamera.view).xyz);
+            const float4 currentClip = mul(float4(currentViewDir, 1.0f), mainCamera.unjitteredProjection);
+            const float2 currentNdc = currentClip.xy / max(abs(currentClip.w), 1e-6f);
+
+            const float3 prevViewDir = normalize(mul(float4(worldDir, 0.0f), mainCamera.prevView).xyz);
+            const float4 prevClip = mul(float4(prevViewDir, 1.0f), mainCamera.prevUnjitteredProjection);
+            const float2 prevNdc = prevClip.xy / max(abs(prevClip.w), 1e-6f);
+
+            StructuredBuffer<EnvironmentInfo> environmentInfo =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Environment::InfoBuffer)];
+            const EnvironmentInfo envInfo = environmentInfo[perFrameBuffer.activeEnvironmentIndex];
+            TextureCube<float4> skyboxTexture = ResourceDescriptorHeap[envInfo.cubeMapDescriptorIndex];
+
+            RWTexture2D<float4> hdrTarget =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Color::HDRColorTarget)];
+            hdrTarget[pixel] = float4(skyboxTexture.SampleLevel(g_linearClamp, worldDir, 0.0f).rgb, 1.0f);
+
+            RWTexture2D<float2> motionVectors =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Motion)];
+            motionVectors[pixel] = currentNdc - prevNdc;
+        }
         return;
     }
     
@@ -41,17 +70,24 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     float linearZ = depth;
 
     float2 ndc = uv * 2.0f - 1.0f;
-    float4 clipPos = float4(ndc, 1.0f, 1.0f);
-    float4 viewPosH = mul(clipPos, mainCamera.projectionInverse);
-    float3 positionVS = viewPosH.xyz * linearZ;
+    // The renderer's infinite reverse-Z perspective projection has no skew or
+    // jitter terms: projectionInverse transforms (ndc, 1, 1) to
+    // (ndc.x / xScale, ndc.y / yScale, -1, 0). Reconstruct that ray directly
+    // instead of issuing a general 4x4 matrix multiply.
+    float3 positionVS = float3(
+        ndc.x * mainCamera.projectionInverse[0][0],
+        ndc.y * mainCamera.projectionInverse[1][1],
+        -1.0f) * linearZ;
 
     float4 worldPosH = mul(float4(positionVS, 1.0f), mainCamera.viewInverse);
     float3 positionWS = worldPosH.xyz;
 
-    float3 viewDirWS = normalize(mainCamera.positionWorldSpace.xyz - positionWS);
+    float3 viewDirWS = mul(
+        float4(normalize(-positionVS), 0.0f),
+        mainCamera.viewInverse).xyz;
 
     FragmentInfo fragmentInfo;
-    GetFragmentInfoScreenSpace(pixel, viewDirWS, positionVS, positionWS, GetRootEnableGTAO(), fragmentInfo);
+    GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, GetRootEnableGTAO(), fragmentInfo);
     
     LightingOutput lightingOutput = lightFragment(fragmentInfo, mainCamera, perFrameBuffer.activeEnvironmentIndex, ResourceDescriptorIndex(Builtin::Environment::InfoBuffer), true);
     
@@ -95,6 +131,12 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             case OUTPUT_VSM_PAGE_STATE:
             case OUTPUT_VSM_PHYSICAL_PAGE:
             case OUTPUT_VSM_RERENDERED_THIS_FRAME:
+            case OUTPUT_VSM_CACHED_BASIS_CORRECTION:
+            case OUTPUT_VSM_PAGE_LOCAL_TEXEL:
+            case OUTPUT_VSM_DEPTH_MARGIN:
+            case OUTPUT_VSM_CLIP_COMPARISON:
+            case OUTPUT_VSM_CLIP_GRID_OFFSET:
+            case OUTPUT_VSM_TRACE_FOOTPRINT:
                 payload = lightingOutput.shadowDebugPayload;
                 break;
 #endif

@@ -16,8 +16,10 @@ struct SnapshotRenderable {
     StableSceneID stableID = 0;
     Components::Matrix matrix;
     Components::MeshInstances meshInstances;
+    Components::InstanceTransforms instanceTransforms;
     std::string name;
     bool transformChanged = false;
+    bool hasInstanceTransforms = false;
     bool skinned = false;
     bool skipShadowPass = false;
 };
@@ -28,6 +30,8 @@ struct SnapshotCamera {
     Components::Camera camera;
     std::string name;
     bool primary = false;
+    bool useExternalMatrices = false;
+    Components::ExternalCameraMatrices externalMatrices;
 };
 
 struct SnapshotLight {

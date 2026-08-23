@@ -54,7 +54,7 @@ void AVBOITEarlyDepthBuildPass::Update(const UpdateExecutionContext& executionCo
     BUFFER_UPLOAD(
         &zeroCount,
         sizeof(uint32_t),
-        rg::runtime::UploadTarget::FromShared(m_tileCountBuffer),
+        org::runtime::UploadTarget::FromShared(m_tileCountBuffer),
         0);
 }
 

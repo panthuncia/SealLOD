@@ -7,13 +7,21 @@
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
 
 [shader("pixel")]
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFace)
+#else
 void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFace, uint primID : SV_PrimitiveID)
+#endif
 {
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     StructuredBuffer<CLodAVBOITConfig> configBuffer = ResourceDescriptorHeap[CLOD_RASTER_AVBOIT_VBOIT_CONFIG_DESCRIPTOR_INDEX];
 
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     const ClodViewRasterInfo viewRasterInfo = viewRasterInfoBuffer[input.viewID];
+#else
+    const ClodViewRasterInfo viewRasterInfo = viewRasterInfoBuffer[input.viewID];
+#endif
     const CLodAVBOITConfig config = configBuffer[0];
 #if defined(CLOD_AVBOIT_VBOIT_OCCUPANCY_ONLY)
     if (viewRasterInfo.opaqueVisibilitySRVDescriptorIndex == 0xFFFFFFFFu ||
@@ -31,17 +39,31 @@ void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFa
         return;
     }
 
-    const uint2 pixel = input.position.xy;
-    if (pixel.x < viewRasterInfo.scissorMinX ||
-        pixel.y < viewRasterInfo.scissorMinY ||
-        pixel.x >= viewRasterInfo.scissorMaxX ||
-        pixel.y >= viewRasterInfo.scissorMaxY)
+    const uint2 rasterPixel = input.position.xy;
+    if (rasterPixel.x < viewRasterInfo.scissorMinX ||
+        rasterPixel.y < viewRasterInfo.scissorMinY ||
+        rasterPixel.x >= viewRasterInfo.scissorMaxX ||
+        rasterPixel.y >= viewRasterInfo.scissorMaxY)
     {
         return;
     }
 
+#if defined(CLOD_AVBOIT_LOW_RES_RASTER)
+    const uint2 lowPixel = rasterPixel;
+    const uint2 pixel = min(
+        rasterPixel * CLOD_AVBOIT_VBOIT_DEFAULT_DOWNSAMPLE_FACTOR +
+            CLOD_AVBOIT_VBOIT_DEFAULT_DOWNSAMPLE_FACTOR / 2u,
+        uint2(perFrameBuffer.screenResX - 1u, perFrameBuffer.screenResY - 1u));
+#else
+    const uint2 pixel = rasterPixel;
+#endif
+
 #if defined(PSO_ALPHA_TEST)
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     TestAlpha(input.texcoord, input.materialDataIndex);
+#else
+    TestAlpha(input.texcoord, input.materialDataIndex);
+#endif
 #endif
 
     Texture2D<uint64_t> opaqueVisibility =
@@ -60,7 +82,11 @@ void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFa
     }
 
     ClodShadingSample sample;
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+    if (!LoadAVBOITShadingSample(input, pixel, !isFrontFace, sample))
+#else
     if (!LoadAVBOITShadingSample(input, pixel, !isFrontFace, primID, sample))
+#endif
     {
         return;
     }
@@ -90,7 +116,9 @@ void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFa
         return;
     }
 
+#if !defined(CLOD_AVBOIT_LOW_RES_RASTER)
     const uint2 lowPixel = pixel / CLOD_AVBOIT_VBOIT_DEFAULT_DOWNSAMPLE_FACTOR;
+#endif
     if (lowPixel.x >= config.lowResolutionWidth || lowPixel.y >= config.lowResolutionHeight)
     {
         return;
@@ -116,9 +144,13 @@ void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFa
     const uint sliceIndex0 = min((uint)floor(sliceCoordinate), config.sliceCount - 1u);
     const uint sliceIndex1 = min(sliceIndex0 + 1u, config.sliceCount - 1u);
 
+#if defined(CLOD_AVBOIT_LOW_RES_RASTER)
+    const float lowResolutionPixelCoverage = 1.0f;
+#else
     const float lowResolutionPixelCoverage = rcp((float)(
         CLOD_AVBOIT_VBOIT_DEFAULT_DOWNSAMPLE_FACTOR *
         CLOD_AVBOIT_VBOIT_DEFAULT_DOWNSAMPLE_FACTOR));
+#endif
     const float opticalDepth = -log(max(1.0f - alpha, 1.0e-4f)) * lowResolutionPixelCoverage;
     const float sliceWeight1 = saturate(sliceCoordinate - (float)sliceIndex0);
     const float sliceWeight0 = 1.0f - sliceWeight1;

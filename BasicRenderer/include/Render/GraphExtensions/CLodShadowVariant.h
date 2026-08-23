@@ -10,7 +10,9 @@
 
 class CLodExtension;
 struct CLodVariantTraits;
-class ResourceGroup;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
+struct VirtualShadowCasterBuildContext;
 
 class CLodShadowVariant {
 public:
@@ -25,6 +27,11 @@ public:
         const CLodVariantTraits& traits,
         std::vector<RenderGraph::ExternalPassDesc>& outPasses,
         const std::string& shadowClearDirtyBitsAfterPassName);
+    static std::string AppendCasterRasterPasses(
+        CLodExtension& extension,
+        const CLodVariantTraits& traits,
+        std::vector<RenderGraph::ExternalPassDesc>& outPasses,
+        const std::string& afterPassName);
     static std::string AppendPhase1PageJobRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
@@ -63,6 +70,7 @@ public:
     static std::vector<ResourceIdentifier> GetSupportedKeys(const CLodExtension& extension);
 
 private:
+    static VirtualShadowCasterBuildContext MakeCasterContext(CLodExtension& extension);
     static std::string AppendPageJobRasterPassesForPhase(
         CLodExtension& extension,
         const CLodVariantTraits& traits,

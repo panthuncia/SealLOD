@@ -9,6 +9,7 @@
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/RenderContext.h"
 #include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/TerrainRvtTelemetry.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
@@ -18,6 +19,7 @@
 
 ReyesVirtualShadowRasterizationPass::ReyesVirtualShadowRasterizationPass(
     std::shared_ptr<Buffer> visibleClustersBuffer,
+    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> diceQueueBuffer,
     std::shared_ptr<Buffer> diceQueueCounterBuffer,
     std::shared_ptr<Buffer> rasterWorkBuffer,
@@ -29,11 +31,13 @@ ReyesVirtualShadowRasterizationPass::ReyesVirtualShadowRasterizationPass(
     std::shared_ptr<Buffer> telemetryBuffer,
     std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
     std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
+    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
     std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
     std::shared_ptr<ResourceGroup> slabResourceGroup,
     std::string_view resourceName,
     uint32_t phaseIndex)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
+    , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_diceQueueBuffer(std::move(diceQueueBuffer))
     , m_diceQueueCounterBuffer(std::move(diceQueueCounterBuffer))
     , m_rasterWorkBuffer(std::move(rasterWorkBuffer))
@@ -45,19 +49,24 @@ ReyesVirtualShadowRasterizationPass::ReyesVirtualShadowRasterizationPass(
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
+    , m_virtualShadowDynamicPagesTexture(std::move(virtualShadowDynamicPagesTexture))
     , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
     , m_phaseIndex(phaseIndex)
 {
     m_viewRasterInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodViewRasterInfo), false, false, false, false);
     m_viewRasterInfoBuffer->SetName(std::string(resourceName));
-    rg::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD Reyes virtual shadow");
+    org::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD Reyes virtual shadow");
 
+    auto defines = IsTerrainRvtTelemetryDebugEnabled()
+        ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } }
+        : std::vector<DxcDefine>{};
+    defines.push_back({ L"CLOD_VSM_TWO_LAYER_REYES_VERSION", L"2" });
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/reyesPatchVirtualShadowRaster.hlsl",
         L"ReyesPatchVirtualShadowRasterCS",
-        {},
+        defines,
         "CLod.ReyesPatchVirtualShadowRaster.PSO");
 
     rhi::IndirectArg dispatchArgs[] = {
@@ -75,6 +84,7 @@ void ReyesVirtualShadowRasterizationPass::DeclareResourceUsages(ComputePassBuild
 {
     builder->WithShaderResource(
             m_visibleClustersBuffer,
+            m_visibleClusterTransformIndicesBuffer,
             m_diceQueueBuffer,
             m_diceQueueCounterBuffer,
             m_rasterWorkBuffer,
@@ -86,21 +96,50 @@ void ReyesVirtualShadowRasterizationPass::DeclareResourceUsages(ComputePassBuild
             m_virtualShadowClipmapInfoBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::CullingCameraBuffer,
+            Builtin::CameraBuffer,
+            Builtin::Shadows::CLodDirectionalPageViewInfo,
             Builtin::PerMaterialDataBuffer,
+            Builtin::CLod::Offsets,
+            Builtin::CLod::MeshMetadata,
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
+            Builtin::Terrain::Sets,
+            Builtin::Terrain::Layers,
+            Builtin::Terrain::StochasticLayers,
+            Builtin::Terrain::LayerRefs,
+            Builtin::Terrain::Regions,
+            Builtin::Terrain::WeightBlocks,
+            Builtin::Terrain::TextureGroup,
+            Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
+            Builtin::Terrain::RvtPageTable,
+            Builtin::Terrain::RvtPageKeys,
+            Builtin::Terrain::RvtPhysicalPageOwner,
+            Builtin::Terrain::RvtPhysicalPageAtlas,
+            Builtin::Terrain::RvtHeightResidentCache,
+            Builtin::Terrain::RvtHeightAtlas,
+            Builtin::Terrain::RvtAlbedoAtlas,
+            Builtin::Terrain::RvtNormalAtlas,
+            Builtin::Terrain::RvtMaterialAtlas,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
-		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
+		.WithUnorderedAccess(
+            Builtin::Material::TextureStreamingFeedbackBuffer,
+            Builtin::Terrain::RvtRequestMasks,
+            Builtin::Terrain::RvtRequestList,
+            Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtStats)
         .WithIndirectArguments(m_indirectArgsBuffer)
         .WithUnorderedAccess(
             m_telemetryBuffer,
             m_virtualShadowPageTableTexture,
-            m_virtualShadowPhysicalPagesTexture)
+            m_virtualShadowPhysicalPagesTexture,
+            m_virtualShadowDynamicPagesTexture)
         .WithConstantBuffer(Builtin::PerFrameBuffer);
 
     if (m_slabResourceGroup) {
@@ -146,7 +185,7 @@ void ReyesVirtualShadowRasterizationPass::Update(const UpdateExecutionContext& e
         BUFFER_UPLOAD(
             m_viewRasterInfos.data(),
             static_cast<uint32_t>(m_viewRasterInfos.size() * sizeof(CLodViewRasterInfo)),
-            rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+            org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
             0);
         m_declaredResourcesChanged = true;
     }
@@ -174,6 +213,8 @@ PassReturn ReyesVirtualShadowRasterizationPass::Execute(PassExecutionContext& ex
 
     uint32_t uintRootConstants[NumMiscUintRootConstants] = {};
     uintRootConstants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetSRVInfo(0).slot.index;
+    uintRootConstants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
+        m_visibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_diceQueueCounterBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_WORK_BUFFER_DESCRIPTOR_INDEX] = m_rasterWorkBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_DESCRIPTOR_INDEX] = m_diceQueueBuffer->GetSRVInfo(0).slot.index;
@@ -191,6 +232,8 @@ PassReturn ReyesVirtualShadowRasterizationPass::Execute(PassExecutionContext& ex
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_virtualShadowClipmapInfoBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] =
         m_virtualShadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+    uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
+        m_virtualShadowDynamicPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = virtualShadowConfig.virtualResolution;

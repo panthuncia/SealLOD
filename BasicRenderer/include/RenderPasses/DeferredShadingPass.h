@@ -10,7 +10,8 @@
 
 class DeferredShadingPass : public ComputePass {
 public:
-	DeferredShadingPass() {
+	explicit DeferredShadingPass(bool skyboxEnabled = false)
+		: m_skyboxEnabled(skyboxEnabled) {
 		auto& settingsManager = SettingsManager::GetInstance();
 		getImageBasedLightingEnabled = settingsManager.getSettingGetter<bool>("enableImageBasedLighting");
 		getPunctualLightingEnabled = settingsManager.getSettingGetter<bool>("enablePunctualLighting");
@@ -29,13 +30,14 @@ public:
 			Builtin::Light::SpotLightMatrixBuffer,
 			Builtin::Environment::InfoBuffer,
 			Builtin::PerMaterialOpenPBRDataBuffer,
-			Builtin::Material::TextureGroup,
-			Builtin::GBuffer::Normals,
-			Builtin::GBuffer::Albedo,
-			Builtin::GBuffer::Coat,
-			Builtin::GBuffer::Emissive,
-			Builtin::GBuffer::Fuzz,
-			Builtin::GBuffer::MetallicRoughness,
+			Builtin::Surface::BaseColorOpacity,
+			Builtin::Surface::NormalRoughness,
+			Builtin::Surface::SpecularAo,
+			Builtin::Surface::Emissive,
+			Builtin::Surface::Identity,
+			Builtin::Surface::Payload0,
+			Builtin::Surface::Payload1,
+			Builtin::Surface::Records,
 			Builtin::Environment::CurrentCubemap,
 			Builtin::OpenPBR::FuzzLTC,
 			Builtin::OpenPBR::IdealMetalEnergyComplement,
@@ -45,15 +47,18 @@ public:
 			Builtin::Noise::BlueNoise2D)
 			.WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
 			.WithUnorderedAccess(Builtin::Color::HDRColorTarget,
-				Builtin::DebugVisualization);
+				Builtin::DebugVisualization,
+				Builtin::Surface::Motion);
 
 			if (getShadowsEnabled()) {
 				builder->WithShaderResource(Builtin::Shadows::CLodClipmapInfo,
 					Builtin::Shadows::CLodCompactMainCamera,
 					Builtin::Shadows::CLodCompactShadowCameras,
 					Builtin::Shadows::CLodDirectionalPageViewInfo,
+					Builtin::Shadows::CLodPageMetadata,
 					Builtin::Shadows::CLodPageTable,
-					Builtin::Shadows::CLodPhysicalPages);
+					Builtin::Shadows::CLodPhysicalPages)
+					.WithUnorderedAccess(Builtin::Shadows::CLodStats);
 			}
 
 		if (m_clusteredLightingEnabled) {
@@ -90,10 +95,15 @@ public:
 
 		BindResourceDescriptorIndices(commandList, pso.GetResourceDescriptorSlots());
 
-		unsigned int settings[] = { getShadowsEnabled(), getPunctualLightingEnabled(), m_gtaoEnabled };
+		unsigned int settings[] = {
+			getShadowsEnabled(),
+			getPunctualLightingEnabled(),
+			m_gtaoEnabled,
+			m_skyboxEnabled
+		};
 		commandList.PushConstants(rhi::ShaderStage::Compute, 0,
 			MiscUintRootSignatureIndex, MiscEnableShadows,
-			3, settings);
+			4, settings);
 
 		uint32_t w = context.renderResolution.x;
 		uint32_t h = context.renderResolution.y;
@@ -118,4 +128,5 @@ private:
 
 	bool m_gtaoEnabled = true;
 	bool m_clusteredLightingEnabled = true;
+	bool m_skyboxEnabled = false;
 };

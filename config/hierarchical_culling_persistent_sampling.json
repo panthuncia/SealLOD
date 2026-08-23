@@ -1,0 +1,43 @@
+{
+  "name": "BasicRenderer persistent hierarchical CLOD culling",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 30,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 2,
+    "maximum_samples": 2,
+    "confidence_level": 0.95,
+    "relative_half_width": 1.0
+  },
+  "output": {
+    "database": "out/hierarchical_culling_persistent_sampling.sqlite",
+    "last_run_summary": "out/hierarchical_culling_persistent_sampling.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "render_graph_gpu_time",
+      "output_name": "GPU time",
+      "unit": "ms",
+      "source": "render_graph_gpu_time"
+    }
+  ],
+  "passes": [
+    {
+      "id": "hierarchical_culling_pass1",
+      "name": "CLodOpaque::HierarchicalCullingPass1",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    },
+    {
+      "id": "hierarchical_culling_pass2",
+      "name": "CLodOpaque::HierarchicalCullingPass2",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    }
+  ]
+}

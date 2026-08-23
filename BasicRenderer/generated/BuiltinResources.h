@@ -5,13 +5,20 @@
 
 struct Builtin {
   inline static constexpr std::string_view ActiveDrawSetIndices = "Builtin::ActiveDrawSetIndices";
+  inline static constexpr std::string_view ActiveSkinnedAssemblyPlacements = "Builtin::ActiveSkinnedAssemblyPlacements";
   inline static constexpr std::string_view BRDFLUT = "Builtin::BRDFLUT";
   inline static constexpr std::string_view Backbuffer = "Builtin::Backbuffer";
   struct CLod {
+    inline static constexpr std::string_view AssemblyBoneRemapIndices = "Builtin::CLod::AssemblyBoneRemapIndices";
+    inline static constexpr std::string_view AssemblyBoneRemaps = "Builtin::CLod::AssemblyBoneRemaps";
+    inline static constexpr std::string_view AssemblyInstances = "Builtin::CLod::AssemblyInstances";
+    inline static constexpr std::string_view AssemblyTransforms = "Builtin::CLod::AssemblyTransforms";
     inline static constexpr std::string_view GroupChunks = "Builtin::CLod::GroupChunks";
     inline static constexpr std::string_view GroupPageMap = "Builtin::CLod::GroupPageMap";
     inline static constexpr std::string_view Groups = "Builtin::CLod::Groups";
     inline static constexpr std::string_view MeshMetadata = "Builtin::CLod::MeshMetadata";
+    inline static constexpr std::string_view NodeBoneIndices = "Builtin::CLod::NodeBoneIndices";
+    inline static constexpr std::string_view NodeSkinningInfos = "Builtin::CLod::NodeSkinningInfos";
     inline static constexpr std::string_view Nodes = "Builtin::CLod::Nodes";
     inline static constexpr std::string_view Offsets = "Builtin::CLod::Offsets";
     inline static constexpr std::string_view PagePoolSlabBase = "Builtin::CLod::PagePoolSlabBase";
@@ -30,8 +37,6 @@ struct Builtin {
     inline static constexpr std::string_view StreamingTouchedGroupsCounter = "Builtin::CLod::StreamingTouchedGroupsCounter";
     inline static constexpr std::string_view VoxelAttributeSamples = "Builtin::CLod::VoxelAttributeSamples";
     inline static constexpr std::string_view VoxelCubeRecords = "Builtin::CLod::VoxelCubeRecords";
-    inline static constexpr std::string_view VoxelDescriptorIndices = "Builtin::CLod::VoxelDescriptorIndices";
-    inline static constexpr std::string_view VoxelGroupDescriptors = "Builtin::CLod::VoxelGroupDescriptors";
   };
   inline static constexpr std::string_view CameraBuffer = "Builtin::CameraBuffer";
   struct Color {
@@ -49,15 +54,6 @@ struct Builtin {
     inline static constexpr std::string_view WorkingCubemapGroup = "Builtin::Environment::WorkingCubemapGroup";
     inline static constexpr std::string_view WorkingHDRIGroup = "Builtin::Environment::WorkingHDRIGroup";
   };
-  struct GBuffer {
-    inline static constexpr std::string_view Albedo = "Builtin::GBuffer::Albedo";
-    inline static constexpr std::string_view Coat = "Builtin::GBuffer::Coat";
-    inline static constexpr std::string_view Emissive = "Builtin::GBuffer::Emissive";
-    inline static constexpr std::string_view Fuzz = "Builtin::GBuffer::Fuzz";
-    inline static constexpr std::string_view MetallicRoughness = "Builtin::GBuffer::MetallicRoughness";
-    inline static constexpr std::string_view MotionVectors = "Builtin::GBuffer::MotionVectors";
-    inline static constexpr std::string_view Normals = "Builtin::GBuffer::Normals";
-  };
   struct GTAO {
     inline static constexpr std::string_view OutputAOTerm = "Builtin::GTAO::OutputAOTerm";
     inline static constexpr std::string_view WorkingAOTerm1 = "Builtin::GTAO::WorkingAOTerm1";
@@ -69,6 +65,7 @@ struct Builtin {
     inline static constexpr std::string_view Master = "Builtin::IndirectCommandBuffers::Master";
     inline static constexpr std::string_view Primary = "Builtin::IndirectCommandBuffers::Primary";
   };
+  inline static constexpr std::string_view InstanceDrawRecordBuffer = "Builtin::InstanceDrawRecordBuffer";
   inline static constexpr std::string_view LastFrameLinearDepthMaps = "Builtin::LastFrameLinearDepthMaps";
   struct Light {
     inline static constexpr std::string_view ActiveLightIndices = "Builtin::Light::ActiveLightIndices";
@@ -82,6 +79,7 @@ struct Builtin {
     inline static constexpr std::string_view SpotLightMatrixBuffer = "Builtin::Light::SpotLightMatrixBuffer";
     inline static constexpr std::string_view ViewResourceGroup = "Builtin::Light::ViewResourceGroup";
   };
+  inline static constexpr std::string_view LinearDepthMaps = "Builtin::LinearDepthMaps";
   struct Material {
     inline static constexpr std::string_view TextureGroup = "Builtin::Material::TextureGroup";
     inline static constexpr std::string_view TextureStreamingFeedbackBuffer = "Builtin::Material::TextureStreamingFeedbackBuffer";
@@ -107,6 +105,7 @@ struct Builtin {
     inline static constexpr std::string_view HeadPointerTexture = "Builtin::PPLL::HeadPointerTexture";
   };
   inline static constexpr std::string_view PerFrameBuffer = "Builtin::PerFrameBuffer";
+  inline static constexpr std::string_view PerInstanceTransformBuffer = "Builtin::PerInstanceTransformBuffer";
   inline static constexpr std::string_view PerMaterialDataBuffer = "Builtin::PerMaterialDataBuffer";
   inline static constexpr std::string_view PerMaterialOpenPBRDataBuffer = "Builtin::PerMaterialOpenPBRDataBuffer";
   inline static constexpr std::string_view PerMeshBuffer = "Builtin::PerMeshBuffer";
@@ -114,6 +113,7 @@ struct Builtin {
   inline static constexpr std::string_view PerObjectBuffer = "Builtin::PerObjectBuffer";
   struct PostProcessing {
     inline static constexpr std::string_view AdaptedLuminance = "Builtin::PostProcessing::AdaptedLuminance";
+    inline static constexpr std::string_view BloomTexture = "Builtin::PostProcessing::BloomTexture";
     inline static constexpr std::string_view LuminanceHistogram = "Builtin::PostProcessing::LuminanceHistogram";
     inline static constexpr std::string_view ScreenSpaceReflections = "Builtin::PostProcessing::ScreenSpaceReflections";
     inline static constexpr std::string_view UpscaledHDR = "Builtin::PostProcessing::UpscaledHDR";
@@ -132,14 +132,56 @@ struct Builtin {
     inline static constexpr std::string_view CLodCompactMainCamera = "Builtin::Shadows::CLodCompactMainCamera";
     inline static constexpr std::string_view CLodCompactShadowCameras = "Builtin::Shadows::CLodCompactShadowCameras";
     inline static constexpr std::string_view CLodDirectionalPageViewInfo = "Builtin::Shadows::CLodDirectionalPageViewInfo";
+    inline static constexpr std::string_view CLodPageMetadata = "Builtin::Shadows::CLodPageMetadata";
     inline static constexpr std::string_view CLodPageTable = "Builtin::Shadows::CLodPageTable";
     inline static constexpr std::string_view CLodPhysicalPages = "Builtin::Shadows::CLodPhysicalPages";
+    inline static constexpr std::string_view CLodStats = "Builtin::Shadows::CLodStats";
   };
   struct SkeletonResources {
     inline static constexpr std::string_view BoneTransforms = "Builtin::SkeletonResources::BoneTransforms";
     inline static constexpr std::string_view InverseBindMatrices = "Builtin::SkeletonResources::InverseBindMatrices";
     inline static constexpr std::string_view InverseSkinMatrices = "Builtin::SkeletonResources::InverseSkinMatrices";
     inline static constexpr std::string_view SkinningInstanceInfo = "Builtin::SkeletonResources::SkinningInstanceInfo";
+  };
+  inline static constexpr std::string_view SkinnedAssemblyPlacements = "Builtin::SkinnedAssemblyPlacements";
+  struct Surface {
+    inline static constexpr std::string_view BaseColorOpacity = "sarp.surface.base-color-opacity";
+    inline static constexpr std::string_view DeviceDepth = "sarp.surface.device-depth";
+    inline static constexpr std::string_view DilatedMotion = "sarp.surface.motion-dilated";
+    inline static constexpr std::string_view Emissive = "sarp.surface.emissive";
+    inline static constexpr std::string_view Identity = "sarp.surface.identity";
+    inline static constexpr std::string_view Motion = "sarp.surface.motion";
+    inline static constexpr std::string_view NormalRoughness = "sarp.surface.normal-roughness";
+    inline static constexpr std::string_view Payload0 = "sarp.surface.payload0";
+    inline static constexpr std::string_view Payload1 = "sarp.surface.payload1";
+    inline static constexpr std::string_view Records = "sarp.surface.records";
+    inline static constexpr std::string_view SpecularAo = "sarp.surface.specular-ao";
+  };
+  struct Terrain {
+    inline static constexpr std::string_view LayerRefs = "Builtin::Terrain::LayerRefs";
+    inline static constexpr std::string_view Layers = "Builtin::Terrain::Layers";
+    inline static constexpr std::string_view Regions = "Builtin::Terrain::Regions";
+    inline static constexpr std::string_view RvtAlbedoAtlas = "Builtin::Terrain::RvtAlbedoAtlas";
+    inline static constexpr std::string_view RvtClipInfos = "Builtin::Terrain::RvtClipInfos";
+    inline static constexpr std::string_view RvtCounters = "Builtin::Terrain::RvtCounters";
+    inline static constexpr std::string_view RvtGenerateDispatchArgs = "Builtin::Terrain::RvtGenerateDispatchArgs";
+    inline static constexpr std::string_view RvtGenerationList = "Builtin::Terrain::RvtGenerationList";
+    inline static constexpr std::string_view RvtHeightAtlas = "Builtin::Terrain::RvtHeightAtlas";
+    inline static constexpr std::string_view RvtHeightResidentCache = "Builtin::Terrain::RvtHeightResidentCache";
+    inline static constexpr std::string_view RvtInfo = "Builtin::Terrain::RvtInfo";
+    inline static constexpr std::string_view RvtMaterialAtlas = "Builtin::Terrain::RvtMaterialAtlas";
+    inline static constexpr std::string_view RvtNormalAtlas = "Builtin::Terrain::RvtNormalAtlas";
+    inline static constexpr std::string_view RvtPageKeys = "Builtin::Terrain::RvtPageKeys";
+    inline static constexpr std::string_view RvtPageTable = "Builtin::Terrain::RvtPageTable";
+    inline static constexpr std::string_view RvtPhysicalPageAtlas = "Builtin::Terrain::RvtPhysicalPageAtlas";
+    inline static constexpr std::string_view RvtPhysicalPageOwner = "Builtin::Terrain::RvtPhysicalPageOwner";
+    inline static constexpr std::string_view RvtRequestList = "Builtin::Terrain::RvtRequestList";
+    inline static constexpr std::string_view RvtRequestMasks = "Builtin::Terrain::RvtRequestMasks";
+    inline static constexpr std::string_view RvtStats = "Builtin::Terrain::RvtStats";
+    inline static constexpr std::string_view Sets = "Builtin::Terrain::Sets";
+    inline static constexpr std::string_view StochasticLayers = "Builtin::Terrain::StochasticLayers";
+    inline static constexpr std::string_view TextureGroup = "Builtin::Terrain::TextureGroup";
+    inline static constexpr std::string_view WeightBlocks = "Builtin::Terrain::WeightBlocks";
   };
 };
 

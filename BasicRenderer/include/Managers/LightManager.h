@@ -70,6 +70,8 @@ private:
     // Settings funcs
 	std::function<uint8_t()> getNumDirectionalLightCascades;
     std::function<uint16_t()> getShadowResolution;
+	std::function<float()> getMaxShadowDistance;
+	std::function<float()> getDirectionalShadowSceneExtent;
 	std::function<float()> getDirectionalVirtualShadowSourceAngleDegrees;
     std::function<void(std::shared_ptr<void>)> markForDelete;
 	ViewManager* m_pViewManager = nullptr;

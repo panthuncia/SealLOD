@@ -1,6 +1,9 @@
 #pragma once
 
+#include <unordered_map>
+
 #include <spdlog/spdlog.h>
+#include <tracy/Tracy.hpp>
 
 #include "Render/RenderGraph/RenderGraph.h"
 #include "RenderPasses/ReadbackCapturePass.h"
@@ -9,7 +12,7 @@
 
 class ReadbackCaptureExtension final : public RenderGraph::IRenderGraphExtension {
 public:
-    explicit ReadbackCaptureExtension(rg::runtime::IReadbackService* readbackService)
+    explicit ReadbackCaptureExtension(org::runtime::IReadbackService* readbackService)
         : m_readbackService(readbackService) {
     }
 
@@ -23,8 +26,12 @@ public:
         }
 
         auto captures = m_readbackService->ConsumeCaptureRequests();
+        TracyPlot("ReadbackCaptureExtension.ConsumedCaptures", static_cast<int64_t>(captures.size()));
 
         std::unordered_map<std::string, uint32_t> localIndexByAnchorPass;
+        uint64_t acceptedCaptures = 0;
+        uint64_t menuAnchorCaptures = 0;
+        uint64_t copyQueueCaptures = 0;
 
         for (auto& capture : captures) {
             QueueKind preferredQueueKind = capture.preferredQueueKind;
@@ -58,6 +65,14 @@ public:
                 continue;
             }
 
+            ++acceptedCaptures;
+            if (capture.passName == "MenuRenderPass") {
+                ++menuAnchorCaptures;
+            }
+            if (preferredQueueKind == QueueKind::Copy) {
+                ++copyQueueCaptures;
+            }
+
             auto& localIndex = localIndexByAnchorPass[capture.passName];
             const std::string passInstanceName =
                 "ReadbackCapture::" +
@@ -72,7 +87,7 @@ public:
                 ReadbackCopyCaptureInputs inputs{};
                 inputs.target = ResourceHandleAndRange(handle, capture.range);
 
-                auto pass = std::make_shared<ReadbackCopyCapturePass>(inputs, std::move(capture.callback), m_readbackService);
+                auto pass = std::make_shared<ReadbackCopyCapturePass>(inputs, std::move(capture.callback), m_readbackService, passInstanceName);
                 out.push_back(
                     RenderGraph::ExternalPassDesc::Copy(
                         passInstanceName,
@@ -88,7 +103,7 @@ public:
                 ReadbackCaptureInputs inputs{};
                 inputs.target = ResourceHandleAndRange(handle, capture.range);
 
-                auto pass = std::make_shared<ReadbackCapturePass>(inputs, std::move(capture.callback), m_readbackService);
+                auto pass = std::make_shared<ReadbackCapturePass>(inputs, std::move(capture.callback), m_readbackService, passInstanceName);
                 out.push_back(
                     RenderGraph::ExternalPassDesc::Render(
                         passInstanceName,
@@ -99,8 +114,12 @@ public:
                         .RegisterByName(false));
             }
         }
+
+        TracyPlot("ReadbackCaptureExtension.AcceptedCaptures", static_cast<int64_t>(acceptedCaptures));
+        TracyPlot("ReadbackCaptureExtension.MenuRenderPassCaptures", static_cast<int64_t>(menuAnchorCaptures));
+        TracyPlot("ReadbackCaptureExtension.CopyQueueCaptures", static_cast<int64_t>(copyQueueCaptures));
     }
 
 private:
-    rg::runtime::IReadbackService* m_readbackService = nullptr; // non-owning
+    org::runtime::IReadbackService* m_readbackService = nullptr; // non-owning
 };

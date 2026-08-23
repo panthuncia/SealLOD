@@ -20,6 +20,7 @@ public:
         uint64_t renderEntityId = 0;
         uint64_t lastSeenFrame = 0;
         uint64_t meshGeneration = 0;
+        uint64_t instanceTransformGeneration = 0;
         DirectX::XMMATRIX lastMatrix = DirectX::XMMatrixIdentity();
     };
 
@@ -29,6 +30,7 @@ public:
     void Clear(const ManagerInterface& managerInterface);
 
     bool HasPrimaryCamera() const;
+    flecs::entity GetSceneRoot() const;
     flecs::entity GetPrimaryCameraEntity() const;
     void ResyncPrimaryCameraDepth(ViewManager& viewManager, uint32_t renderWidth, uint32_t renderHeight);
 
@@ -37,6 +39,7 @@ private:
     void InvalidateExportQueries();
 
     std::unordered_map<uint64_t, BridgedEntityState> m_bridgedEntities;
+    uint64_t m_sceneRootEntityId = 0;
     uint64_t m_primaryCameraEntityId = 0;
     uint64_t m_currentIngestionFrame = 0;
 
@@ -45,7 +48,11 @@ private:
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::MeshInstances> m_exportDirtyRenderableQuery;
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::MeshInstances> m_exportTransformUpdatedRenderableQuery;
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Camera> m_exportCameraQuery;
+    mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Camera> m_exportDirtyCameraQuery;
+    mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Camera> m_exportTransformUpdatedCameraQuery;
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Light> m_exportLightQuery;
+    mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Light> m_exportDirtyLightQuery;
+    mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Light> m_exportTransformUpdatedLightQuery;
     mutable uint64_t m_cachedExportSceneID = 0;
 
     // Export-side generation cache for detecting mesh changes without scene-side flags
@@ -69,7 +76,8 @@ private:
     uint16_t m_lastShadowResolution = 0;
     uint8_t m_lastDirectionalCascadeCount = 0;
     float m_lastMaxShadowDistance = 0.0f;
-    float m_lastDirectionalShadowVerticalExtent = 0.0f;
+    float m_lastDirectionalShadowDistanceLowerBound = 0.0f;
+    float m_lastDirectionalShadowSceneExtent = 0.0f;
     bool m_lastHasPrimaryCamera = false;
     bool m_hasLightResourceSettings = false;
 };

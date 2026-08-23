@@ -27,10 +27,14 @@
 #define DEBUG_ONLY(x)   ((void)0)
 #endif
 
-class DescriptorHeap;
-class Sampler;
+namespace org { class DescriptorHeap; }
+using org::DescriptorHeap;
+namespace org { class Sampler; }
+using org::Sampler;
 class TextureAsset;
-class Buffer;
+struct TextureFileMeta;
+namespace org { class Buffer; }
+using org::Buffer;
 
 void ThrowIfFailed(HRESULT hr);
 
@@ -55,6 +59,14 @@ std::shared_ptr<TextureAsset> LoadTextureFromFile(
 	std::shared_ptr<Sampler> sampler = nullptr,
 	bool preferSRGB = false,
 	const LoadFlags& flags = {}, bool allowRTV = false, bool allowUAV = false);
+
+std::shared_ptr<TextureAsset> LoadTextureFromFileDeferred(
+	const std::wstring& filePath,
+	std::shared_ptr<Sampler> sampler = nullptr,
+	bool preferSRGB = false,
+	const TextureFileMeta* metaOverride = nullptr,
+	bool allowRTV = false,
+	bool allowUAV = false);
 
 std::shared_ptr<TextureAsset> LoadTextureFromMemory(
 	const void* bytes,
@@ -117,7 +129,7 @@ DirectX::XMMATRIX createDirectionalLightViewMatrix(DirectX::XMVECTOR lightDir, D
 
 std::vector<Cascade> setupCascades(int numCascades, const DirectX::XMVECTOR& lightDir, const DirectX::XMVECTOR& camPos, const DirectX::XMVECTOR& camDir, const DirectX::XMVECTOR& camUp, float nearPlane, float fovY, float aspectRatio, const std::vector<float>& cascadeSplits);
 
-std::vector<Cascade> setupDirectionalClipmaps(int numClipmaps, const DirectX::XMVECTOR& lightDir, const DirectX::XMVECTOR& camPos, const DirectX::XMVECTOR& camDir, const DirectX::XMVECTOR& camUp, float nearPlane, float fovY, float aspectRatio, const std::vector<float>& clipFarPlanes, float clipVerticalExtent);
+std::vector<Cascade> setupDirectionalClipmaps(int numClipmaps, const DirectX::XMVECTOR& lightDir, const DirectX::XMVECTOR& camPos, const DirectX::XMVECTOR& camDir, const DirectX::XMVECTOR& camUp, float nearPlane, float fovY, float aspectRatio, const std::vector<float>& clipFarPlanes, float shadowDistanceLowerBound, float clipSceneExtent, float resolutionScale = 1.0f);
 
 std::vector<float> calculateCascadeSplits(int numCascades, float zNear, float zFar, float maxDist, float lambda = 0.8f);
 

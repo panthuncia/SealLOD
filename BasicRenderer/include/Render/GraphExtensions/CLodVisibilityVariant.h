@@ -8,7 +8,8 @@
 
 class CLodExtension;
 struct CLodVariantTraits;
-class ResourceGroup;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 class CLodVisibilityVariant {
 public:

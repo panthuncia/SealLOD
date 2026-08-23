@@ -1,0 +1,45 @@
+{
+  "name": "BasicRenderer material evaluation hardware metrics",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 30,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 3,
+    "maximum_samples": 5,
+    "confidence_level": 0.95,
+    "relative_half_width": 1.0
+  },
+  "output": {
+    "database": "out/material_evaluation_nvperf.sqlite",
+    "last_run_summary": "out/material_evaluation_nvperf.md"
+  },
+  "metrics": [
+    { "id": "gpu_time", "name": "gpu__time_duration", "output_name": "GPU duration", "unit": "ns", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "registers", "name": "tpc__average_registers_per_thread_shader_cs", "output_name": "Registers/thread", "unit": "registers", "type": "counter", "rollup": "avg", "submetric": "none", "required": false },
+    { "id": "register_alloc_stall", "name": "tpc__warp_launch_cycles_stalled_shader_cs_reason_register_allocation", "output_name": "Launch stall: registers", "unit": "cycles", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "warps_active", "name": "smsp__warps_active", "output_name": "Active warps/cycle", "unit": "warps/cycle", "type": "counter", "rollup": "avg", "submetric": "per_cycle_active", "required": false },
+    { "id": "warps_eligible", "name": "smsp__warps_eligible", "output_name": "Eligible warps", "unit": "warps/cycle", "type": "ratio", "rollup": "avg", "submetric": "ratio", "required": false },
+    { "id": "instructions", "name": "smsp__inst_executed", "output_name": "Instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "sm", "name": "sm__throughput", "output_name": "SM throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" },
+    { "id": "l1", "name": "l1tex__throughput", "output_name": "L1/TEX throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" },
+    { "id": "l2", "name": "lts__throughput", "output_name": "L2 throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" },
+    { "id": "dram", "name": "dram__throughput", "output_name": "DRAM throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" },
+    { "id": "long_scoreboard", "name": "smsp__warp_issue_stalled_long_scoreboard_per_warp_active", "output_name": "Stall: long scoreboard", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "lg_throttle", "name": "smsp__warp_issue_stalled_lg_throttle_per_warp_active", "output_name": "Stall: LG throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "tex_throttle", "name": "smsp__warp_issue_stalled_tex_throttle_per_warp_active", "output_name": "Stall: TEX throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "mio_throttle", "name": "smsp__warp_issue_stalled_mio_throttle_per_warp_active", "output_name": "Stall: MIO throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" }
+  ],
+  "passes": [
+    {
+      "id": "material_evaluation",
+      "name": "EvaluateMaterialGroupsPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time", "registers", "register_alloc_stall", "warps_active",
+        "warps_eligible", "instructions", "sm", "l1", "l2", "dram",
+        "long_scoreboard", "lg_throttle", "tex_throttle", "mio_throttle"]
+    }
+  ]
+}

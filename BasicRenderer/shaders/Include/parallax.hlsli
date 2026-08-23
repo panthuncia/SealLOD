@@ -41,6 +41,210 @@ float2 WrapFloat2(float2 input) {
     return frac(input + 1.0);
 }
 
+float2 ParallaxUvFromBound(float2 uv, float2 parallaxDirection, float maxHeight, float bound)
+{
+    return uv + parallaxDirection * (maxHeight * (bound - 0.5f));
+}
+
+float3 ParallaxViewDirectionTS(float3x3 TBN, float3 viewDir)
+{
+    float3 viewDirTS = normalize(mul(TBN, viewDir));
+    float viewDenom = viewDirTS.z * 0.7f + 0.3f;
+    viewDenom = viewDenom >= 0.0f ? max(viewDenom, 0.15f) : min(viewDenom, -0.15f);
+    viewDirTS.xy /= viewDenom;
+    return viewDirTS;
+}
+
+uint ParallaxStepCount(float viewDirTSZ, uint maxSteps)
+{
+    const uint clampedMaxSteps = clamp(maxSteps, 4u, 64u);
+    const float grazing = saturate(1.0f - abs(viewDirTSZ));
+    return max(4u, (uint)lerp(4.0f, (float)clampedMaxSteps, grazing));
+}
+
+float ParallaxSecantBound(float boundA, float fA, float boundB, float fB)
+{
+    const float denominator = fB - fA;
+    const float root = abs(denominator) > 1.0e-5f
+        ? (boundA * fB - boundB * fA) / denominator
+        : 0.5f * (boundA + boundB);
+    return clamp(root, min(boundA, boundB), max(boundA, boundB));
+}
+
+float3 getParallaxOcclusionMappingCoordsAndHeight(
+    Texture2D<float> parallaxTexture,
+    SamplerState parallaxSampler,
+    float3x3 TBN,
+    float2 uv,
+    float3 viewDir,
+    float heightmapScale,
+    uint maxSteps,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    float3 viewDirTS = ParallaxViewDirectionTS(TBN, viewDir);
+    // Object-space material UV parallax uses the inverse of the fragment-to-camera
+    // tangent-space XY direction. Terrain has its own parallax path and basis.
+    float2 parallaxDirection = -viewDirTS.xy;
+
+    float maxHeight = max(heightmapScale, 0.0f);
+    if (maxHeight <= 1.0e-5f)
+    {
+        float height = parallaxTexture.SampleGrad(parallaxSampler, uv, dUVdx, dUVdy);
+        return float3(uv, height);
+    }
+
+    const uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
+    const float stepSize = rcp((float)numSteps);
+    float prevBound = 1.0f;
+    float2 prevUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, prevBound);
+    float prevHeight = parallaxTexture.SampleGrad(parallaxSampler, prevUv, dUVdx, dUVdy);
+    float prevF = prevBound - prevHeight;
+    float hitBound = 0.0f;
+    float hitF = prevF;
+    float missBound = prevBound;
+    float missF = prevF;
+    bool foundIntersection = false;
+
+    [loop] for (uint i = 1u; i <= numSteps; ++i)
+    {
+        const float currentBound = 1.0f - (float)i * stepSize;
+        const float2 currentUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, currentBound);
+        const float currentHeight = parallaxTexture.SampleGrad(parallaxSampler, currentUv, dUVdx, dUVdy);
+        const float currentF = currentBound - currentHeight;
+        if (currentF <= 0.0f)
+        {
+            hitBound = currentBound;
+            hitF = currentF;
+            missBound = prevBound;
+            missF = prevF;
+            foundIntersection = true;
+            break;
+        }
+        prevBound = currentBound;
+        prevF = currentF;
+    }
+
+    if (!foundIntersection)
+    {
+        const float2 bottomUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, 0.0f);
+        return float3(bottomUv, parallaxTexture.SampleGrad(parallaxSampler, bottomUv, dUVdx, dUVdy));
+    }
+
+    [unroll] for (uint refine = 0u; refine < 3u; ++refine)
+    {
+        const float rootBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
+        const float2 rootUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, rootBound);
+        const float rootF = rootBound - parallaxTexture.SampleGrad(parallaxSampler, rootUv, dUVdx, dUVdy);
+        if (rootF <= 0.0f)
+        {
+            hitBound = rootBound;
+            hitF = rootF;
+        }
+        else
+        {
+            missBound = rootBound;
+            missF = rootF;
+        }
+    }
+
+    const float finalBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
+    const float2 parallaxUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, finalBound);
+    return float3(parallaxUv, parallaxTexture.SampleGrad(parallaxSampler, parallaxUv, dUVdx, dUVdy));
+}
+
+float ParallaxSwizzle(float4 value, uint channel)
+{
+    if (channel == 0u) return value.x;
+    if (channel == 1u) return value.y;
+    if (channel == 2u) return value.z;
+    if (channel == 3u) return value.w;
+    return value.x;
+}
+
+float3 getParallaxOcclusionMappingCoordsAndHeight(
+    Texture2D<float4> parallaxTexture,
+    SamplerState parallaxSampler,
+    uint heightChannel,
+    float3x3 TBN,
+    float2 uv,
+    float3 viewDir,
+    float heightmapScale,
+    uint maxSteps,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    float3 viewDirTS = ParallaxViewDirectionTS(TBN, viewDir);
+    // Object-space material UV parallax uses the inverse of the fragment-to-camera
+    // tangent-space XY direction. Terrain has its own parallax path and basis.
+    float2 parallaxDirection = -viewDirTS.xy;
+
+    float maxHeight = max(heightmapScale, 0.0f);
+    if (maxHeight <= 1.0e-5f)
+    {
+        float height = ParallaxSwizzle(parallaxTexture.SampleGrad(parallaxSampler, uv, dUVdx, dUVdy), heightChannel);
+        return float3(uv, height);
+    }
+
+    const uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
+    const float stepSize = rcp((float)numSteps);
+    float prevBound = 1.0f;
+    float2 prevUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, prevBound);
+    float prevHeight = ParallaxSwizzle(parallaxTexture.SampleGrad(parallaxSampler, prevUv, dUVdx, dUVdy), heightChannel);
+    float prevF = prevBound - prevHeight;
+    float hitBound = 0.0f;
+    float hitF = prevF;
+    float missBound = prevBound;
+    float missF = prevF;
+    bool foundIntersection = false;
+
+    [loop] for (uint i = 1u; i <= numSteps; ++i)
+    {
+        const float currentBound = 1.0f - (float)i * stepSize;
+        const float2 currentUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, currentBound);
+        const float currentHeight = ParallaxSwizzle(parallaxTexture.SampleGrad(parallaxSampler, currentUv, dUVdx, dUVdy), heightChannel);
+        const float currentF = currentBound - currentHeight;
+        if (currentF <= 0.0f)
+        {
+            hitBound = currentBound;
+            hitF = currentF;
+            missBound = prevBound;
+            missF = prevF;
+            foundIntersection = true;
+            break;
+        }
+        prevBound = currentBound;
+        prevF = currentF;
+    }
+
+    if (!foundIntersection)
+    {
+        const float2 bottomUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, 0.0f);
+        return float3(bottomUv, ParallaxSwizzle(parallaxTexture.SampleGrad(parallaxSampler, bottomUv, dUVdx, dUVdy), heightChannel));
+    }
+
+    [unroll] for (uint refine = 0u; refine < 3u; ++refine)
+    {
+        const float rootBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
+        const float2 rootUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, rootBound);
+        const float rootF = rootBound - ParallaxSwizzle(parallaxTexture.SampleGrad(parallaxSampler, rootUv, dUVdx, dUVdy), heightChannel);
+        if (rootF <= 0.0f)
+        {
+            hitBound = rootBound;
+            hitF = rootF;
+        }
+        else
+        {
+            missBound = rootBound;
+            missF = rootF;
+        }
+    }
+
+    const float finalBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
+    const float2 parallaxUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, finalBound);
+    return float3(parallaxUv, ParallaxSwizzle(parallaxTexture.SampleGrad(parallaxSampler, parallaxUv, dUVdx, dUVdy), heightChannel));
+}
+
 // Contact-refinement parallax 
 // https://www.artstation.com/blogs/andreariccardi/3VPo/a-new-approach-for-parallax-mapping-presenting-the-contact-refinement-parallax-mapping-technique
 float3 getContactRefinementParallaxCoordsAndHeight(

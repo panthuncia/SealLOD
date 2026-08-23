@@ -1,22 +1,34 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <cstdlib>
+#include <csignal>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <sstream>
+#include <stacktrace>
 #include <string>
+#include <typeinfo>
 #include <unordered_map>
 #include <vector>
 
+#include <boost/interprocess/mapped_region.hpp>
+#include <boost/interprocess/shared_memory_object.hpp>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <tracy/Tracy.hpp>
 
 #include <pxr/pxr.h>
 #include <pxr/base/gf/vec2f.h>
@@ -40,6 +52,9 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <DbgHelp.h>
+#else
+#include <unistd.h>
 #endif
 
 using json = nlohmann::json;
@@ -47,6 +62,288 @@ namespace fs = std::filesystem;
 using namespace pxr;
 
 namespace {
+
+std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin)
+{
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count());
+}
+
+class ScopedJsonTimer
+{
+public:
+    ScopedJsonTimer(json& timings, const char* name) :
+        m_timings(timings),
+        m_name(name),
+        m_begin(std::chrono::steady_clock::now())
+    {
+    }
+
+    ~ScopedJsonTimer()
+    {
+        m_timings[m_name] = m_timings.value(m_name, std::uint64_t{ 0 }) + ElapsedMs(m_begin);
+    }
+
+private:
+    json& m_timings;
+    const char* m_name;
+    std::chrono::steady_clock::time_point m_begin;
+};
+
+std::string DumpJsonResponseWithTiming(json& response)
+{
+    auto& timings = response["timings"];
+    if (!timings.is_object()) {
+        timings = json::object();
+    }
+    const auto dumpBegin = std::chrono::steady_clock::now();
+    std::string payload = response.dump();
+    timings["jsonDumpMs"] = ElapsedMs(dumpBegin);
+    return response.dump();
+}
+
+void WriteJsonLine(json response)
+{
+    ZoneScopedN("BRNifly::WriteJsonLine");
+    std::cout << DumpJsonResponseWithTiming(response) << '\n' << std::flush;
+}
+
+class SharedMemoryRegistry
+{
+public:
+    ~SharedMemoryRegistry()
+    {
+        for (const auto& entry : m_names) {
+            boost::interprocess::shared_memory_object::remove(entry.c_str());
+        }
+    }
+
+    std::optional<json> Store(std::string_view bytes, json& timings)
+    {
+        ZoneScopedN("BRNifly::SharedMemoryRegistry::Store");
+        ScopedJsonTimer timer(timings, "sharedMemoryCreateMs");
+        const std::string name = "BRNiflyUsd_" + ProcessIdText() + "_" + std::to_string(++m_nextId);
+        const auto size = static_cast<std::uint64_t>(bytes.size());
+        try {
+            boost::interprocess::shared_memory_object::remove(name.c_str());
+            boost::interprocess::shared_memory_object sharedMemory(
+                boost::interprocess::create_only,
+                name.c_str(),
+                boost::interprocess::read_write);
+            sharedMemory.truncate(static_cast<boost::interprocess::offset_t>(bytes.size()));
+            boost::interprocess::mapped_region region(sharedMemory, boost::interprocess::read_write);
+            if (region.get_size() < bytes.size()) {
+                boost::interprocess::shared_memory_object::remove(name.c_str());
+                return std::nullopt;
+            }
+            std::memcpy(region.get_address(), bytes.data(), bytes.size());
+        }
+        catch (const std::exception&) {
+            boost::interprocess::shared_memory_object::remove(name.c_str());
+            return std::nullopt;
+        }
+
+        m_names.insert(name);
+        return json{{"name", name}, {"size", size}};
+    }
+
+    bool Release(const std::string& name)
+    {
+        const auto it = m_names.find(name);
+        if (it == m_names.end()) {
+            return false;
+        }
+        boost::interprocess::shared_memory_object::remove(name.c_str());
+        m_names.erase(it);
+        return true;
+    }
+
+private:
+    static std::string ProcessIdText()
+    {
+#ifdef _WIN32
+        return std::to_string(GetCurrentProcessId());
+#else
+        return std::to_string(static_cast<unsigned long long>(::getpid()));
+#endif
+    }
+
+    std::uint64_t m_nextId = 0;
+    std::set<std::string> m_names;
+};
+
+#ifdef _WIN32
+namespace CrashLog {
+thread_local std::string t_action;
+thread_local std::string t_inputPath;
+
+struct Context {
+    std::string action;
+    std::string inputPath;
+};
+
+void SetContext(std::string action, std::string inputPath = {})
+{
+    t_action = std::move(action);
+    t_inputPath = std::move(inputPath);
+}
+
+Context SnapshotContext()
+{
+    return { t_action, t_inputPath };
+}
+
+fs::path MakeCrashPath(std::string_view extension)
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+    (void)localtime_s(std::addressof(localTime), std::addressof(time));
+
+    std::ostringstream name;
+    name << "BRNifly-"
+         << std::put_time(std::addressof(localTime), "%Y%m%d-%H%M%S")
+         << "-pid" << GetCurrentProcessId()
+         << extension;
+
+    std::error_code ec;
+    fs::create_directories("crashes", ec);
+    return fs::current_path() / "crashes" / name.str();
+}
+
+std::string StacktraceString()
+{
+#if defined(__cpp_lib_stacktrace) && (__cpp_lib_stacktrace >= 202011L)
+    try {
+        std::ostringstream output;
+        output << std::stacktrace::current();
+        return output.str();
+    } catch (...) {
+        return "(stacktrace capture failed)";
+    }
+#else
+    return "(no <stacktrace> support in this build)";
+#endif
+}
+
+fs::path WriteMiniDump(EXCEPTION_POINTERS* exceptionPointers)
+{
+    const auto dumpPath = MakeCrashPath(".dmp");
+    const auto file = CreateFileW(
+        dumpPath.wstring().c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION exceptionInfo{};
+    exceptionInfo.ThreadId = GetCurrentThreadId();
+    exceptionInfo.ExceptionPointers = exceptionPointers;
+    exceptionInfo.ClientPointers = FALSE;
+
+    const auto dumpType = static_cast<MINIDUMP_TYPE>(
+        MiniDumpWithIndirectlyReferencedMemory |
+        MiniDumpScanMemory |
+        MiniDumpWithThreadInfo |
+        MiniDumpWithUnloadedModules);
+
+    const BOOL ok = MiniDumpWriteDump(
+        GetCurrentProcess(),
+        GetCurrentProcessId(),
+        file,
+        dumpType,
+        exceptionPointers ? std::addressof(exceptionInfo) : nullptr,
+        nullptr,
+        nullptr);
+    CloseHandle(file);
+
+    return ok ? dumpPath : fs::path{};
+}
+
+void WriteCrashTextReport(const char* title, DWORD exceptionCode, void* exceptionAddress, const fs::path& minidumpPath)
+{
+    const auto reportPath = MakeCrashPath(".txt");
+    std::ofstream report(reportPath, std::ios::trunc);
+    if (!report) {
+        return;
+    }
+
+    const auto context = SnapshotContext();
+    report << title << "\n";
+    report << "exception_code=0x" << std::hex << std::uppercase << exceptionCode << std::dec << "\n";
+    report << "exception_address=" << exceptionAddress << "\n";
+    report << "minidump='" << minidumpPath.string() << "'\n";
+    report << "action='" << context.action << "'\n";
+    report << "input_path='" << context.inputPath << "'\n\n";
+    report << "Stacktrace:\n" << StacktraceString() << "\n";
+}
+
+LONG WINAPI UnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionPointers)
+{
+    const auto exceptionRecord = exceptionPointers ? exceptionPointers->ExceptionRecord : nullptr;
+    const auto code = exceptionRecord ? exceptionRecord->ExceptionCode : 0;
+    void* const address = exceptionRecord ? exceptionRecord->ExceptionAddress : nullptr;
+    const auto context = SnapshotContext();
+    const auto dumpPath = WriteMiniDump(exceptionPointers);
+
+    try {
+        std::cerr << "BRNifly crashed: exception=0x"
+                  << std::hex << std::uppercase << code << std::dec
+                  << " address=" << address
+                  << " action='" << context.action
+                  << "' input='" << context.inputPath
+                  << "' dump='" << (dumpPath.empty() ? std::string("(dump failed)") : dumpPath.string())
+                  << "'\n";
+    } catch (...) {}
+
+    WriteCrashTextReport("BRNifly unhandled exception", code, address, dumpPath);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+[[noreturn]] void TerminateHandler() noexcept
+{
+    try {
+        if (auto exception = std::current_exception()) {
+            try {
+                std::rethrow_exception(exception);
+            } catch (const std::exception& e) {
+                std::cerr << "BRNifly terminated by uncaught exception: " << typeid(e).name() << " what(): " << e.what() << "\n";
+            } catch (...) {
+                std::cerr << "BRNifly terminated by uncaught non-std exception\n";
+            }
+        } else {
+            std::cerr << "BRNifly terminated without an active exception\n";
+        }
+
+        const auto context = SnapshotContext();
+        const auto dumpPath = WriteMiniDump(nullptr);
+        std::cerr << "Terminate context: action='" << context.action
+                  << "' input='" << context.inputPath
+                  << "' dump='" << (dumpPath.empty() ? std::string("(dump failed)") : dumpPath.string())
+                  << "'\n";
+        WriteCrashTextReport("BRNifly terminate", 0, nullptr, dumpPath);
+    } catch (...) {}
+
+    std::_Exit(EXIT_FAILURE);
+}
+
+void Install()
+{
+    SetUnhandledExceptionFilter(UnhandledExceptionFilter);
+    std::set_terminate(TerminateHandler);
+    std::signal(SIGABRT, [](int) {
+        TerminateHandler();
+    });
+}
+}
+#endif
+
+constexpr std::string_view kUsdContentIdentityVersion = "brnifly-usd-content-v8";
 
 struct Diagnostic {
     std::string level;
@@ -247,15 +544,21 @@ std::vector<std::string> SplitLines(const std::string& text)
     return lines;
 }
 
-std::string MakeUniqueName(const std::string& baseName, std::set<std::string>& usedNames)
+SdfPath MakeUniquePrimPath(
+    const UsdStageRefPtr& stage,
+    const SdfPath& parentPath,
+    const std::string& baseName)
 {
-    std::string name = SanitizePrimName(baseName);
-    std::string candidate = name;
-    int suffix = 1;
-    while (!usedNames.insert(candidate).second) {
-        candidate = name + "_" + std::to_string(suffix++);
+    const std::string name = SanitizePrimName(baseName);
+    for (std::uint32_t suffix = 0;; ++suffix) {
+        const std::string candidateName = suffix == 0
+            ? name
+            : name + "_" + std::to_string(suffix);
+        const SdfPath candidate = parentPath.AppendChild(TfToken(candidateName));
+        if (!stage->GetPrimAtPath(candidate)) {
+            return candidate;
+        }
     }
-    return candidate;
 }
 
 std::vector<std::string> ServiceList()
@@ -271,8 +574,7 @@ std::vector<std::string> ServiceList()
         "nif.stream.materials",
         "nif.stream.skeleton",
         "nif.stream.animation",
-        "nif.stream.morphs",
-        "nif.stream.collision"
+        "nif.stream.morphs"
     };
 }
 
@@ -299,6 +601,7 @@ using GetShapeBlockNameFn = int (*)(void*, char*, int);
 using GetBlockIdFn = int (*)(void*, void*);
 using GetVertsForShapeFn = int (*)(void*, void*, float*, int, int);
 using GetNormalsForShapeFn = int (*)(void*, void*, float*, int, int);
+using GetTangentsForShapeFn = int (*)(void*, void*, float*, int, int);
 using GetTrianglesFn = int (*)(void*, void*, uint16_t*, int, int);
 using GetUVsFn = int (*)(void*, void*, float*, int, int);
 using GetColorsForShapeFn = int (*)(void*, void*, float*, int);
@@ -388,10 +691,20 @@ using GetNodeNameFn = int (*)(void*, char*, int);
 using GetNodeBlocknameFn = int (*)(void*, char*, int);
 using GetNodeFlagsFn = int (*)(void*);
 using GetNodeParentFn = void* (*)(void*, void*);
+using GetNodeSwitchIndexFn = int (*)(void*);
+using GetNodeChildCountFn = int (*)(void*);
+using GetNodeChildIDByIndexFn = int (*)(void*, int);
 using GetShapeBoneCountFn = int (*)(void*, void*);
 using GetShapeBoneNamesFn = int (*)(void*, void*, char*, int);
 using GetShapeBoneWeightsCountFn = int (*)(void*, void*, int);
 using GetShapeBoneWeightsFn = int (*)(void*, void*, int, VertexWeightPair*, int);
+using GetShapeSkinBoneCountFn = int (*)(void*, void*);
+using GetShapeSkinBoneNamesFn = int (*)(void*, void*, char*, int);
+using GetShapeSkinWeightsCountFn = int (*)(void*, void*, int);
+using GetShapeSkinWeightsFn = int (*)(void*, void*, int, VertexWeightPair*, int);
+using GetShapePartitionSkinningFn = int (*)(void*, void*, uint16_t*, float*, int);
+using GetShapeSkinToBoneFn = bool (*)(void*, void*, const char*, float*);
+using GetShapeSkinToBoneByIndexFn = bool (*)(void*, void*, int, float*);
 using SegmentCountFn = int (*)(void*, void*);
 using GetSegmentFileFn = int (*)(void*, void*, char*, int);
 using GetSegmentsFn = int (*)(void*, void*, int*, int);
@@ -425,6 +738,8 @@ struct NiflyApi {
     GetBlockIdFn getBlockId = nullptr;
     GetVertsForShapeFn getVertsForShape = nullptr;
     GetNormalsForShapeFn getNormalsForShape = nullptr;
+    GetTangentsForShapeFn getTangentsForShape = nullptr;
+    GetTangentsForShapeFn getBitangentsForShape = nullptr;
     GetTrianglesFn getTriangles = nullptr;
     GetUVsFn getUVs = nullptr;
     GetColorsForShapeFn getColorsForShape = nullptr;
@@ -443,10 +758,20 @@ struct NiflyApi {
     GetNodeBlocknameFn getNodeBlockname = nullptr;
     GetNodeFlagsFn getNodeFlags = nullptr;
     GetNodeParentFn getNodeParent = nullptr;
+    GetNodeSwitchIndexFn getNodeSwitchIndex = nullptr;
+    GetNodeChildCountFn getNodeChildCount = nullptr;
+    GetNodeChildIDByIndexFn getNodeChildIDByIndex = nullptr;
     GetShapeBoneCountFn getShapeBoneCount = nullptr;
     GetShapeBoneNamesFn getShapeBoneNames = nullptr;
     GetShapeBoneWeightsCountFn getShapeBoneWeightsCount = nullptr;
     GetShapeBoneWeightsFn getShapeBoneWeights = nullptr;
+    GetShapeSkinBoneCountFn getShapeSkinBoneCount = nullptr;
+    GetShapeSkinBoneNamesFn getShapeSkinBoneNames = nullptr;
+    GetShapeSkinWeightsCountFn getShapeSkinWeightsCount = nullptr;
+    GetShapeSkinWeightsFn getShapeSkinWeights = nullptr;
+    GetShapePartitionSkinningFn getShapePartitionSkinning = nullptr;
+    GetShapeSkinToBoneFn getShapeSkinToBone = nullptr;
+    GetShapeSkinToBoneByIndexFn getShapeSkinToBoneByIndex = nullptr;
     SegmentCountFn segmentCount = nullptr;
     GetSegmentFileFn getSegmentFile = nullptr;
     GetSegmentsFn getSegments = nullptr;
@@ -490,6 +815,8 @@ struct NiflyApi {
           getBlockId(other.getBlockId),
           getVertsForShape(other.getVertsForShape),
           getNormalsForShape(other.getNormalsForShape),
+          getTangentsForShape(other.getTangentsForShape),
+          getBitangentsForShape(other.getBitangentsForShape),
           getTriangles(other.getTriangles),
           getUVs(other.getUVs),
           getColorsForShape(other.getColorsForShape),
@@ -508,10 +835,20 @@ struct NiflyApi {
           getNodeBlockname(other.getNodeBlockname),
           getNodeFlags(other.getNodeFlags),
           getNodeParent(other.getNodeParent),
+          getNodeSwitchIndex(other.getNodeSwitchIndex),
+          getNodeChildCount(other.getNodeChildCount),
+          getNodeChildIDByIndex(other.getNodeChildIDByIndex),
           getShapeBoneCount(other.getShapeBoneCount),
           getShapeBoneNames(other.getShapeBoneNames),
           getShapeBoneWeightsCount(other.getShapeBoneWeightsCount),
           getShapeBoneWeights(other.getShapeBoneWeights),
+          getShapeSkinBoneCount(other.getShapeSkinBoneCount),
+          getShapeSkinBoneNames(other.getShapeSkinBoneNames),
+          getShapeSkinWeightsCount(other.getShapeSkinWeightsCount),
+          getShapeSkinWeights(other.getShapeSkinWeights),
+          getShapePartitionSkinning(other.getShapePartitionSkinning),
+          getShapeSkinToBone(other.getShapeSkinToBone),
+          getShapeSkinToBoneByIndex(other.getShapeSkinToBoneByIndex),
           segmentCount(other.segmentCount),
           getSegmentFile(other.getSegmentFile),
           getSegments(other.getSegments),
@@ -560,6 +897,8 @@ struct NiflyApi {
             getBlockId = other.getBlockId;
             getVertsForShape = other.getVertsForShape;
             getNormalsForShape = other.getNormalsForShape;
+            getTangentsForShape = other.getTangentsForShape;
+            getBitangentsForShape = other.getBitangentsForShape;
             getTriangles = other.getTriangles;
             getUVs = other.getUVs;
             getColorsForShape = other.getColorsForShape;
@@ -578,10 +917,20 @@ struct NiflyApi {
             getNodeBlockname = other.getNodeBlockname;
             getNodeFlags = other.getNodeFlags;
             getNodeParent = other.getNodeParent;
+            getNodeSwitchIndex = other.getNodeSwitchIndex;
+            getNodeChildCount = other.getNodeChildCount;
+            getNodeChildIDByIndex = other.getNodeChildIDByIndex;
             getShapeBoneCount = other.getShapeBoneCount;
             getShapeBoneNames = other.getShapeBoneNames;
             getShapeBoneWeightsCount = other.getShapeBoneWeightsCount;
             getShapeBoneWeights = other.getShapeBoneWeights;
+            getShapeSkinBoneCount = other.getShapeSkinBoneCount;
+            getShapeSkinBoneNames = other.getShapeSkinBoneNames;
+            getShapeSkinWeightsCount = other.getShapeSkinWeightsCount;
+            getShapeSkinWeights = other.getShapeSkinWeights;
+            getShapePartitionSkinning = other.getShapePartitionSkinning;
+            getShapeSkinToBone = other.getShapeSkinToBone;
+            getShapeSkinToBoneByIndex = other.getShapeSkinToBoneByIndex;
             segmentCount = other.segmentCount;
             getSegmentFile = other.getSegmentFile;
             getSegments = other.getSegments;
@@ -691,6 +1040,8 @@ std::optional<NiflyApi> LoadNiflyApi(const char* argv0, std::vector<Diagnostic>&
     }
     api.getVertsForShape = LoadProc<GetVertsForShapeFn>(module, "getVertsForShape");
     api.getNormalsForShape = LoadProc<GetNormalsForShapeFn>(module, "getNormalsForShape");
+    api.getTangentsForShape = LoadProc<GetTangentsForShapeFn>(module, "getTangentsForShape");
+    api.getBitangentsForShape = LoadProc<GetTangentsForShapeFn>(module, "getBitangentsForShape");
     api.getTriangles = LoadProc<GetTrianglesFn>(module, "getTriangles");
     api.getUVs = LoadProc<GetUVsFn>(module, "getUVs");
     api.getColorsForShape = LoadProc<GetColorsForShapeFn>(module, "getColorsForShape");
@@ -709,10 +1060,20 @@ std::optional<NiflyApi> LoadNiflyApi(const char* argv0, std::vector<Diagnostic>&
     api.getNodeBlockname = LoadProc<GetNodeBlocknameFn>(module, "getNodeBlockname");
     api.getNodeFlags = LoadProc<GetNodeFlagsFn>(module, "getNodeFlags");
     api.getNodeParent = LoadProc<GetNodeParentFn>(module, "getNodeParent");
+    api.getNodeSwitchIndex = LoadProc<GetNodeSwitchIndexFn>(module, "getNodeSwitchIndex");
+    api.getNodeChildCount = LoadProc<GetNodeChildCountFn>(module, "getNodeChildCount");
+    api.getNodeChildIDByIndex = LoadProc<GetNodeChildIDByIndexFn>(module, "getNodeChildIDByIndex");
     api.getShapeBoneCount = LoadProc<GetShapeBoneCountFn>(module, "getShapeBoneCount");
     api.getShapeBoneNames = LoadProc<GetShapeBoneNamesFn>(module, "getShapeBoneNames");
     api.getShapeBoneWeightsCount = LoadProc<GetShapeBoneWeightsCountFn>(module, "getShapeBoneWeightsCount");
     api.getShapeBoneWeights = LoadProc<GetShapeBoneWeightsFn>(module, "getShapeBoneWeights");
+    api.getShapeSkinBoneCount = LoadProc<GetShapeSkinBoneCountFn>(module, "getShapeSkinBoneCount");
+    api.getShapeSkinBoneNames = LoadProc<GetShapeSkinBoneNamesFn>(module, "getShapeSkinBoneNames");
+    api.getShapeSkinWeightsCount = LoadProc<GetShapeSkinWeightsCountFn>(module, "getShapeSkinWeightsCount");
+    api.getShapeSkinWeights = LoadProc<GetShapeSkinWeightsFn>(module, "getShapeSkinWeights");
+    api.getShapePartitionSkinning = LoadProc<GetShapePartitionSkinningFn>(module, "getShapePartitionSkinning");
+    api.getShapeSkinToBone = LoadProc<GetShapeSkinToBoneFn>(module, "getShapeSkinToBone");
+    api.getShapeSkinToBoneByIndex = LoadProc<GetShapeSkinToBoneByIndexFn>(module, "getShapeSkinToBoneByIndex");
     api.segmentCount = LoadProc<SegmentCountFn>(module, "segmentCount");
     api.getSegmentFile = LoadProc<GetSegmentFileFn>(module, "getSegmentFile");
     api.getSegments = LoadProc<GetSegmentsFn>(module, "getSegments");
@@ -796,11 +1157,23 @@ std::string GetMessageLog(const NiflyApi& api)
 #endif
 }
 
-json DescribeServicesJson(const char* argv0)
+json DescribeServicesJson(
+    const char* argv0,
+    const NiflyApi* persistentApi = nullptr,
+    const std::vector<Diagnostic>* persistentDiagnostics = nullptr)
 {
     std::vector<Diagnostic> diagnostics;
     std::string niflyVersion = "unavailable";
-    if (auto api = LoadNiflyApi(argv0, diagnostics)) {
+    if (persistentApi) {
+        niflyVersion = VersionString(*persistentApi);
+        if (persistentDiagnostics) {
+            diagnostics.insert(diagnostics.end(), persistentDiagnostics->begin(), persistentDiagnostics->end());
+        }
+    }
+    else if (persistentDiagnostics) {
+        diagnostics.insert(diagnostics.end(), persistentDiagnostics->begin(), persistentDiagnostics->end());
+    }
+    else if (auto api = LoadNiflyApi(argv0, diagnostics)) {
         niflyVersion = VersionString(*api);
     }
 
@@ -826,14 +1199,18 @@ struct ShapeData {
     int parentBlockId = -1;
     std::string name;
     std::string blockName;
+    uint32_t flags = 0;
     TransformBuf transform;
     std::vector<float> positions;
     std::vector<float> normals;
+    std::vector<float> tangents;
     std::vector<float> uvs;
     std::vector<float> colors;
     std::vector<uint16_t> triangles;
     std::vector<std::string> textures;
     std::vector<std::string> boneNames;
+    std::vector<int> boneSourceIndices;
+    std::vector<float> skinToBoneTransforms;
     std::vector<int> jointIndices;
     std::vector<float> jointWeights;
     json shader = json::object();
@@ -842,6 +1219,36 @@ struct ShapeData {
     json extraData = json::array();
 };
 
+float Dot3(const float* a, const float* b)
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+std::array<float, 3> Cross3(const float* a, const float* b)
+{
+    return {
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0]
+    };
+}
+
+void Normalize3(float* v)
+{
+    const float lenSq = Dot3(v, v);
+    if (lenSq <= 1.0e-20f) {
+        v[0] = 1.0f;
+        v[1] = 0.0f;
+        v[2] = 0.0f;
+        return;
+    }
+
+    const float invLen = 1.0f / std::sqrt(lenSq);
+    v[0] *= invLen;
+    v[1] *= invLen;
+    v[2] *= invLen;
+}
+
 struct NodeData {
     void* handle = nullptr;
     int blockId = -1;
@@ -849,6 +1256,8 @@ struct NodeData {
     std::string name;
     std::string blockName;
     int flags = 0;
+    int switchIndex = -1;
+    int lod0ChildBlockId = -1;
     TransformBuf transform;
     SdfPath path;
 };
@@ -898,7 +1307,22 @@ void ApplyTransform(const UsdPrim& prim, const TransformBuf& transform)
     if (!xformable) {
         return;
     }
-    xformable.AddTransformOp().Set(ToUsdMatrix(transform));
+    const GfMatrix4d matrix = ToUsdMatrix(transform);
+	// GetOrderedXformOps can omit an already-authored property while a prim is
+	// being retyped. Probe the canonical attribute first so AddTransformOp never
+	// attempts to recreate it.
+	if (UsdAttribute transformAttribute = prim.GetAttribute(TfToken("xformOp:transform"))) {
+		transformAttribute.Set(matrix);
+		return;
+	}
+    bool resetsXformStack = false;
+    for (const UsdGeomXformOp& op : xformable.GetOrderedXformOps(&resetsXformStack)) {
+        if (op.GetOpType() == UsdGeomXformOp::TypeTransform && !op.IsInverseOp()) {
+            op.Set(matrix);
+            return;
+        }
+    }
+    xformable.AddTransformOp().Set(matrix);
 }
 
 json TransformJson(const TransformBuf& transform)
@@ -1018,6 +1442,14 @@ std::vector<NodeData> ReadNodes(const NiflyApi& api, void* nifHandle)
             ? ReadCString([&](char* buffer, int size) { return api.getNodeBlockname(nodeHandle, buffer, size); }).value_or("")
             : std::string();
         node.flags = api.getNodeFlags ? api.getNodeFlags(nodeHandle) : 0;
+        if (api.getNodeSwitchIndex) {
+            node.switchIndex = api.getNodeSwitchIndex(nodeHandle);
+        }
+        if (node.blockName == "NiSwitchNode" || node.blockName == "NiLODNode") {
+            if (api.getNodeChildCount && api.getNodeChildIDByIndex && api.getNodeChildCount(nodeHandle) > 0) {
+                node.lod0ChildBlockId = api.getNodeChildIDByIndex(nodeHandle, 0);
+            }
+        }
         if (api.getNodeTransform) {
             api.getNodeTransform(nodeHandle, &node.transform);
         }
@@ -1033,63 +1465,195 @@ std::vector<NodeData> ReadNodes(const NiflyApi& api, void* nifHandle)
 
 void ReadShapeSkinning(const NiflyApi& api, void* nifHandle, void* shapeHandle, int vertexCount, ShapeData& shape)
 {
-    if (!api.getShapeBoneCount || !api.getShapeBoneNames || !api.getShapeBoneWeightsCount || !api.getShapeBoneWeights) {
-        return;
-    }
-
-    const int boneCount = api.getShapeBoneCount(nifHandle, shapeHandle);
-    if (boneCount <= 0 || vertexCount <= 0) {
-        return;
-    }
-
-    const std::string namesText = ReadCStringDynamic([&](char* buffer, int size) { return api.getShapeBoneNames(nifHandle, shapeHandle, buffer, size); });
-    shape.boneNames = SplitLines(namesText);
-    if (shape.boneNames.empty()) {
-        for (int i = 0; i < boneCount; ++i) {
-            shape.boneNames.push_back("bone_" + std::to_string(i));
+    auto readSkinToBoneTransforms = [&](std::span<const int> originalBoneIndices = {}) {
+        shape.skinToBoneTransforms.clear();
+        if (shape.boneNames.empty()) {
+            return;
         }
-    }
 
-    struct Influence { int joint = 0; float weight = 0.0f; };
-    std::vector<std::vector<Influence>> influences(static_cast<size_t>(vertexCount));
-    for (int boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
-        const int weightCount = api.getShapeBoneWeightsCount(nifHandle, shapeHandle, boneIndex);
-        if (weightCount <= 0) {
-            continue;
+        constexpr size_t kTransformFloatCount = 13;
+        shape.skinToBoneTransforms.reserve(shape.boneNames.size() * kTransformFloatCount);
+        std::array<float, kTransformFloatCount> xform{};
+        for (size_t boneIndex = 0; boneIndex < shape.boneNames.size(); ++boneIndex) {
+            xform.fill(0.0f);
+            bool hasTransform = false;
+            if (api.getShapeSkinToBoneByIndex && boneIndex < originalBoneIndices.size()) {
+                // Partition skinning compacts NiSkinData indices for BasicRenderer's
+                // single mesh palette. Keep skin-to-bone binds tied to the original
+                // NiSkinData slot, since name lookup is ambiguous on actor assets with
+                // duplicated or side-remapped bone display names.
+                hasTransform = api.getShapeSkinToBoneByIndex(nifHandle, shapeHandle, originalBoneIndices[boneIndex], xform.data());
+            }
+            if (!hasTransform && api.getShapeSkinToBone) {
+                const auto& boneName = shape.boneNames[boneIndex];
+                hasTransform = api.getShapeSkinToBone(nifHandle, shapeHandle, boneName.c_str(), xform.data());
+            }
+            if (hasTransform) {
+                shape.skinToBoneTransforms.insert(shape.skinToBoneTransforms.end(), xform.begin(), xform.end());
+            } else {
+                shape.skinToBoneTransforms.clear();
+                return;
+            }
         }
-        std::vector<VertexWeightPair> weights(static_cast<size_t>(weightCount));
-        const int written = api.getShapeBoneWeights(nifHandle, shapeHandle, boneIndex, weights.data(), weightCount);
-        for (int i = 0; i < written && i < weightCount; ++i) {
-            const uint16_t vertex = weights[static_cast<size_t>(i)].vertex;
-            if (vertex < influences.size() && weights[static_cast<size_t>(i)].weight > 0.0f) {
-                influences[vertex].push_back(Influence{boneIndex, weights[static_cast<size_t>(i)].weight});
+    };
+
+    if (api.getShapePartitionSkinning && api.getShapeSkinBoneCount && api.getShapeSkinBoneNames) {
+        const int boneCount = api.getShapeSkinBoneCount(nifHandle, shapeHandle);
+        if (boneCount > 0 && vertexCount > 0) {
+            std::vector<uint16_t> partitionJointIndices(static_cast<size_t>(vertexCount) * 4u, 0);
+            std::vector<float> partitionJointWeights(static_cast<size_t>(vertexCount) * 4u, 0.0f);
+            // Skyrim loads NiSkinPartition bone indices as local palette slots and remaps
+            // them through Partition::bones before indexing NiSkinData/boneWorldTransforms.
+            const int touchedVertices = api.getShapePartitionSkinning(
+                nifHandle,
+                shapeHandle,
+                partitionJointIndices.data(),
+                partitionJointWeights.data(),
+                vertexCount);
+            if (touchedVertices > 0) {
+                const std::string namesText = ReadCStringDynamic([&](char* buffer, int size) {
+                    return api.getShapeSkinBoneNames(nifHandle, shapeHandle, buffer, size);
+                });
+                std::vector<std::string> boneNames = SplitLines(namesText);
+                if (boneNames.empty()) {
+                    for (int i = 0; i < boneCount; ++i) {
+                        boneNames.push_back("bone_" + std::to_string(i));
+                    }
+                }
+
+                std::vector<int> jointIndices;
+                jointIndices.reserve(partitionJointIndices.size());
+                std::vector<int> globalToCompact(static_cast<size_t>(boneCount), -1);
+                std::vector<std::string> compactBoneNames;
+                std::vector<int> compactToGlobalBoneIndices;
+
+                for (size_t i = 0; i < partitionJointIndices.size(); ++i) {
+                    const uint16_t globalBone = partitionJointIndices[i];
+                    if (i < partitionJointWeights.size() && partitionJointWeights[i] <= 0.0f) {
+                        jointIndices.push_back(0);
+                        continue;
+                    }
+                    if (globalBone >= static_cast<uint16_t>(boneCount)) {
+                        jointIndices.push_back(0);
+                        continue;
+                    }
+
+                    int& compactBone = globalToCompact[globalBone];
+                    if (compactBone < 0) {
+                        compactBone = static_cast<int>(compactBoneNames.size());
+                        compactToGlobalBoneIndices.push_back(static_cast<int>(globalBone));
+                        if (globalBone < boneNames.size() && !boneNames[globalBone].empty()) {
+                            compactBoneNames.push_back(boneNames[globalBone]);
+                        } else {
+                            compactBoneNames.push_back("bone_" + std::to_string(globalBone));
+                        }
+                    }
+                    jointIndices.push_back(compactBone);
+                }
+
+                // The game renders each skin partition through a compact palette of
+                // bones actually used by that partition. BasicRenderer uses one mesh
+                // palette, so collapse NiSkinData indices to the used set instead of
+                // exporting the full shape bone list; otherwise vertices can index a
+                // different palette than Skyrim's live CBuffer order.
+                shape.boneNames = std::move(compactBoneNames);
+                shape.boneSourceIndices = std::move(compactToGlobalBoneIndices);
+                readSkinToBoneTransforms(compactToGlobalBoneIndices);
+                shape.jointIndices = std::move(jointIndices);
+                shape.jointWeights = std::move(partitionJointWeights);
+                return;
             }
         }
     }
 
-    shape.jointIndices.assign(static_cast<size_t>(vertexCount) * 4u, 0);
-    shape.jointWeights.assign(static_cast<size_t>(vertexCount) * 4u, 0.0f);
-    bool hasAnyWeights = false;
-    for (size_t vertex = 0; vertex < influences.size(); ++vertex) {
-        auto& vertexInfluences = influences[vertex];
-        std::sort(vertexInfluences.begin(), vertexInfluences.end(), [](const Influence& a, const Influence& b) { return a.weight > b.weight; });
-        const size_t count = std::min<size_t>(4, vertexInfluences.size());
-        float total = 0.0f;
-        for (size_t i = 0; i < count; ++i) {
-            total += vertexInfluences[i].weight;
+    // Fallback for older NiflyDLL builds and non-partitioned skins. The raw BSTriShape
+    // weightBones stream can be in partition-local palette space on Skyrim SSE assets,
+    // so it is intentionally lower priority than getShapePartitionSkinning above.
+    const bool hasShapeWeightApi =
+        api.getShapeBoneCount &&
+        api.getShapeBoneNames &&
+        api.getShapeBoneWeightsCount &&
+        api.getShapeBoneWeights &&
+        api.getShapeBoneCount(nifHandle, shapeHandle) > 0;
+    const bool hasSkinDataFallbackApi =
+        api.getShapeSkinBoneCount &&
+        api.getShapeSkinBoneNames &&
+        api.getShapeSkinWeightsCount &&
+        api.getShapeSkinWeights &&
+        api.getShapeSkinBoneCount(nifHandle, shapeHandle) > 0;
+
+    auto readWeights = [&](auto getBoneCount, auto getBoneNames, auto getWeightsCount, auto getWeights) {
+        const int boneCount = getBoneCount(nifHandle, shapeHandle);
+        if (boneCount <= 0 || vertexCount <= 0) {
+            return false;
         }
-        if (total <= 0.0f) {
-            continue;
+
+        const std::string namesText = ReadCStringDynamic([&](char* buffer, int size) { return getBoneNames(nifHandle, shapeHandle, buffer, size); });
+        std::vector<std::string> boneNames = SplitLines(namesText);
+        if (boneNames.empty()) {
+            for (int i = 0; i < boneCount; ++i) {
+                boneNames.push_back("bone_" + std::to_string(i));
+            }
         }
-        hasAnyWeights = true;
-        for (size_t i = 0; i < count; ++i) {
-            shape.jointIndices[vertex * 4u + i] = vertexInfluences[i].joint;
-            shape.jointWeights[vertex * 4u + i] = vertexInfluences[i].weight / total;
+
+        struct Influence { int joint = 0; float weight = 0.0f; };
+        std::vector<std::vector<Influence>> influences(static_cast<size_t>(vertexCount));
+        for (int boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
+            const int weightCount = getWeightsCount(nifHandle, shapeHandle, boneIndex);
+            if (weightCount <= 0) {
+                continue;
+            }
+            std::vector<VertexWeightPair> weights(static_cast<size_t>(weightCount));
+            const int written = getWeights(nifHandle, shapeHandle, boneIndex, weights.data(), weightCount);
+            for (int i = 0; i < written && i < weightCount; ++i) {
+                const uint16_t vertex = weights[static_cast<size_t>(i)].vertex;
+                if (vertex < influences.size() && weights[static_cast<size_t>(i)].weight > 0.0f) {
+                    influences[vertex].push_back(Influence{boneIndex, weights[static_cast<size_t>(i)].weight});
+                }
+            }
         }
+
+        std::vector<int> jointIndices(static_cast<size_t>(vertexCount) * 4u, 0);
+        std::vector<float> jointWeights(static_cast<size_t>(vertexCount) * 4u, 0.0f);
+        bool hasAnyWeights = false;
+        for (size_t vertex = 0; vertex < influences.size(); ++vertex) {
+            auto& vertexInfluences = influences[vertex];
+            std::sort(vertexInfluences.begin(), vertexInfluences.end(), [](const Influence& a, const Influence& b) { return a.weight > b.weight; });
+            const size_t count = std::min<size_t>(4, vertexInfluences.size());
+            float total = 0.0f;
+            for (size_t i = 0; i < count; ++i) {
+                total += vertexInfluences[i].weight;
+            }
+            if (total <= 0.0f) {
+                continue;
+            }
+            hasAnyWeights = true;
+            for (size_t i = 0; i < count; ++i) {
+                jointIndices[vertex * 4u + i] = vertexInfluences[i].joint;
+                jointWeights[vertex * 4u + i] = vertexInfluences[i].weight / total;
+            }
+        }
+        if (!hasAnyWeights) {
+            return false;
+        }
+
+        shape.boneNames = std::move(boneNames);
+        shape.boneSourceIndices.clear();
+        shape.boneSourceIndices.reserve(static_cast<size_t>(boneCount));
+        for (int boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
+            shape.boneSourceIndices.push_back(boneIndex);
+        }
+        readSkinToBoneTransforms();
+        shape.jointIndices = std::move(jointIndices);
+        shape.jointWeights = std::move(jointWeights);
+        return true;
+    };
+
+    if (hasShapeWeightApi && readWeights(api.getShapeBoneCount, api.getShapeBoneNames, api.getShapeBoneWeightsCount, api.getShapeBoneWeights)) {
+        return;
     }
-    if (!hasAnyWeights) {
-        shape.jointIndices.clear();
-        shape.jointWeights.clear();
+    if (hasSkinDataFallbackApi && readWeights(api.getShapeSkinBoneCount, api.getShapeSkinBoneNames, api.getShapeSkinWeightsCount, api.getShapeSkinWeights)) {
+        return;
     }
 }
 
@@ -1330,6 +1894,7 @@ std::vector<ShapeData> ReadShapes(const NiflyApi& api, void* nifHandle, std::vec
         shape.blockName = api.getShapeBlockName
             ? ReadCString([&](char* buffer, int size) { return api.getShapeBlockName(shapeHandle, buffer, size); }).value_or("")
             : std::string();
+        shape.flags = api.getNodeFlags ? static_cast<uint32_t>(api.getNodeFlags(shapeHandle)) : 0u;
         if (api.getTransform) {
             api.getTransform(shapeHandle, &shape.transform);
         }
@@ -1349,6 +1914,40 @@ std::vector<ShapeData> ReadShapes(const NiflyApi& api, void* nifHandle, std::vec
             if (normalCount == vertexCount) {
                 shape.normals.resize(static_cast<size_t>(vertexCount) * 3u);
                 api.getNormalsForShape(nifHandle, shapeHandle, shape.normals.data(), static_cast<int>(shape.normals.size()), 0);
+            }
+        }
+
+        if (api.getTangentsForShape && api.getBitangentsForShape && shape.normals.size() == static_cast<size_t>(vertexCount) * 3u) {
+            const int tangentCount = api.getTangentsForShape(nifHandle, shapeHandle, nullptr, 0, 0);
+            const int bitangentCount = api.getBitangentsForShape(nifHandle, shapeHandle, nullptr, 0, 0);
+            if (tangentCount == vertexCount && bitangentCount == vertexCount) {
+                std::vector<float> tangentVectors(static_cast<size_t>(vertexCount) * 3u);
+                std::vector<float> bitangentVectors(static_cast<size_t>(vertexCount) * 3u);
+                api.getTangentsForShape(nifHandle, shapeHandle, tangentVectors.data(), static_cast<int>(tangentVectors.size()), 0);
+                api.getBitangentsForShape(nifHandle, shapeHandle, bitangentVectors.data(), static_cast<int>(bitangentVectors.size()), 0);
+
+                shape.tangents.resize(static_cast<size_t>(vertexCount) * 4u);
+                for (int vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+                    const size_t vecBase = static_cast<size_t>(vertexIndex) * 3u;
+                    const size_t tangentBase = static_cast<size_t>(vertexIndex) * 4u;
+                    float normal[3] = { shape.normals[vecBase + 0u], shape.normals[vecBase + 1u], shape.normals[vecBase + 2u] };
+                    float tangent[3] = { tangentVectors[vecBase + 0u], tangentVectors[vecBase + 1u], tangentVectors[vecBase + 2u] };
+                    const float bitangent[3] = { bitangentVectors[vecBase + 0u], bitangentVectors[vecBase + 1u], bitangentVectors[vecBase + 2u] };
+                    Normalize3(normal);
+                    const float tangentProjection = Dot3(tangent, normal);
+                    tangent[0] -= normal[0] * tangentProjection;
+                    tangent[1] -= normal[1] * tangentProjection;
+                    tangent[2] -= normal[2] * tangentProjection;
+                    Normalize3(tangent);
+                    const auto nCrossT = Cross3(normal, tangent);
+                    const float handedness = (nCrossT[0] * bitangent[0] + nCrossT[1] * bitangent[1] + nCrossT[2] * bitangent[2]) < 0.0f
+                        ? 1.0f
+                        : -1.0f;
+                    shape.tangents[tangentBase + 0u] = tangent[0];
+                    shape.tangents[tangentBase + 1u] = tangent[1];
+                    shape.tangents[tangentBase + 2u] = tangent[2];
+                    shape.tangents[tangentBase + 3u] = handedness;
+                }
             }
         }
 
@@ -1372,12 +1971,16 @@ std::vector<ShapeData> ReadShapes(const NiflyApi& api, void* nifHandle, std::vec
         api.getTriangles(nifHandle, shapeHandle, shape.triangles.data(), static_cast<int>(shape.triangles.size()), 0);
 
         if (api.getShaderTextureSlot) {
+            shape.textures.resize(10);
             for (int slot = 0; slot < 10; ++slot) {
                 std::array<char, 1024> textureBuffer{};
                 const int len = api.getShaderTextureSlot(nifHandle, shapeHandle, slot, textureBuffer.data(), static_cast<int>(textureBuffer.size()));
                 if (len > 0 && textureBuffer[0] != '\0') {
-                    shape.textures.emplace_back(textureBuffer.data());
+                    shape.textures[static_cast<size_t>(slot)] = textureBuffer.data();
                 }
+            }
+            while (!shape.textures.empty() && shape.textures.back().empty()) {
+                shape.textures.pop_back();
             }
         }
 
@@ -1564,8 +2167,10 @@ std::optional<std::string> ConvertShapesToUsd(
     const std::vector<CollisionProxyData>& collisionProxies,
     const fs::path& nifPath,
     const std::string& gameName,
-    std::vector<Diagnostic>& diagnostics)
+    std::vector<Diagnostic>& diagnostics,
+    json* timings = nullptr)
 {
+    ZoneScopedN("BRNifly::ConvertShapesToUsd");
     SdfLayerRefPtr rootLayer = SdfLayer::CreateAnonymous("brnifly.usda");
     UsdStageRefPtr stage = UsdStage::Open(rootLayer);
     if (!stage) {
@@ -1578,7 +2183,14 @@ std::optional<std::string> ConvertShapesToUsd(
 
     UsdGeomXform root = UsdGeomXform::Define(stage, SdfPath("/BRNifly"));
     stage->SetDefaultPrim(root.GetPrim());
-    root.GetPrim().SetCustomDataByKey(TfToken("brnifly:sourcePath"), VtValue(nifPath.string()));
+    // Keep generated USD independent from the absolute path BRNifly was handed.
+    // The renderer cache is keyed by the game path; baking MO2/temp/loose-file
+    // paths into the layer makes one asset produce multiple content hashes.
+    std::string sourceFileName = nifPath.filename().string();
+    std::transform(sourceFileName.begin(), sourceFileName.end(), sourceFileName.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    root.GetPrim().SetCustomDataByKey(TfToken("brnifly:sourcePath"), VtValue(sourceFileName));
     root.GetPrim().SetCustomDataByKey(TfToken("brnifly:gameName"), VtValue(gameName));
     root.GetPrim().SetCustomDataByKey(TfToken("brnifly:unsupportedDataPolicy"), VtValue(std::string("preserve-as-usd-custom-data")));
     if (!rootExtraData.empty()) {
@@ -1598,7 +2210,6 @@ std::optional<std::string> ConvertShapesToUsd(
         }
     }
 
-    std::set<std::string> usedNodePrimNames;
     std::function<SdfPath(int)> ensureNodePath = [&](int blockId) -> SdfPath {
         auto it = nodeIndexByBlockId.find(blockId);
         if (it == nodeIndexByBlockId.end()) {
@@ -1609,14 +2220,22 @@ std::optional<std::string> ConvertShapesToUsd(
             return node.path;
         }
         const SdfPath parentPath = node.parentBlockId >= 0 ? ensureNodePath(node.parentBlockId) : SdfPath("/BRNifly");
-        const std::string primName = MakeUniqueName(node.name.empty() ? "Node_" + std::to_string(node.blockId) : node.name, usedNodePrimNames);
-        node.path = parentPath.AppendChild(TfToken(primName));
+        node.path = MakeUniquePrimPath(
+            stage,
+            parentPath,
+            node.name.empty() ? "Node_" + std::to_string(node.blockId) : node.name);
         UsdGeomXform nodePrim = UsdGeomXform::Define(stage, node.path);
         nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:blockId"), VtValue(node.blockId));
         if (!node.blockName.empty()) {
             nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:blockName"), VtValue(node.blockName));
         }
         nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:flags"), VtValue(node.flags));
+        if (node.switchIndex >= 0) {
+            nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:switchIndex"), VtValue(node.switchIndex));
+        }
+        if (node.lod0ChildBlockId >= 0) {
+            nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:lod0ChildBlockId"), VtValue(node.lod0ChildBlockId));
+        }
         nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:transform"), VtValue(TransformJson(node.transform).dump()));
         ApplyTransform(nodePrim.GetPrim(), node.transform);
         return node.path;
@@ -1660,12 +2279,13 @@ std::optional<std::string> ConvertShapesToUsd(
     };
 
     size_t emittedMeshes = 0;
-    std::set<std::string> usedShapePrimNames;
     for (size_t shapeIndex = 0; shapeIndex < shapes.size(); ++shapeIndex) {
         const ShapeData& shape = shapes[shapeIndex];
-        const std::string primName = MakeUniqueName(shape.name.empty() ? "Shape_" + std::to_string(shapeIndex) : shape.name, usedShapePrimNames);
         const SdfPath parentPath = shape.parentBlockId >= 0 ? ensureNodePath(shape.parentBlockId) : SdfPath("/BRNifly");
-        const SdfPath meshPath = parentPath.AppendChild(TfToken(primName));
+        const SdfPath meshPath = MakeUniquePrimPath(
+            stage,
+            parentPath,
+            shape.name.empty() ? "Shape_" + std::to_string(shapeIndex) : shape.name);
         UsdGeomMesh mesh = UsdGeomMesh::Define(stage, meshPath);
         if (!mesh) {
             AddDiagnostic(diagnostics, "warning", "Failed to define USD mesh for shape '" + shape.name + "'.");
@@ -1676,6 +2296,7 @@ std::optional<std::string> ConvertShapesToUsd(
         if (!shape.blockName.empty()) {
             mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:blockName"), VtValue(shape.blockName));
         }
+        mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:flags"), VtValue(shape.flags));
         mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:transform"), VtValue(TransformJson(shape.transform).dump()));
 
         VtArray<GfVec3f> points;
@@ -1698,6 +2319,9 @@ std::optional<std::string> ConvertShapesToUsd(
         mesh.CreateFaceVertexCountsAttr(VtValue(faceVertexCounts));
         mesh.CreateFaceVertexIndicesAttr(VtValue(faceVertexIndices));
         mesh.CreateSubdivisionSchemeAttr(VtValue(UsdGeomTokens->none));
+        if ((shape.shader.value("shaderFlags2", 0u) & (1u << 4)) != 0u) {
+            mesh.CreateDoubleSidedAttr(VtValue(true));
+        }
 
         if (shape.normals.size() == shape.positions.size()) {
             VtArray<GfVec3f> normals;
@@ -1709,18 +2333,27 @@ std::optional<std::string> ConvertShapesToUsd(
             mesh.SetNormalsInterpolation(UsdGeomTokens->vertex);
         }
 
+        UsdGeomPrimvarsAPI primvars(mesh.GetPrim());
+        if (shape.tangents.size() == points.size() * 4u) {
+            VtArray<GfVec4f> tangents;
+            tangents.reserve(points.size());
+            for (size_t i = 0; i + 3 < shape.tangents.size(); i += 4) {
+                tangents.push_back(GfVec4f(shape.tangents[i], shape.tangents[i + 1], shape.tangents[i + 2], shape.tangents[i + 3]));
+            }
+            UsdGeomPrimvar tangentPrimvar = primvars.CreatePrimvar(TfToken("brnifly:tangents"), SdfValueTypeNames->Float4Array, UsdGeomTokens->vertex);
+            tangentPrimvar.Set(tangents);
+        }
+
         if (shape.uvs.size() == points.size() * 2u) {
             VtArray<GfVec2f> uvValues;
             uvValues.reserve(points.size());
             for (size_t i = 0; i + 1 < shape.uvs.size(); i += 2) {
                 uvValues.push_back(GfVec2f(shape.uvs[i], 1.0f - shape.uvs[i + 1]));
             }
-            UsdGeomPrimvarsAPI primvars(mesh.GetPrim());
             UsdGeomPrimvar st = primvars.CreatePrimvar(TfToken("st"), SdfValueTypeNames->TexCoord2fArray, UsdGeomTokens->vertex);
             st.Set(uvValues);
         }
 
-        UsdGeomPrimvarsAPI primvars(mesh.GetPrim());
         if (shape.colors.size() == points.size() * 4u) {
             VtArray<GfVec3f> displayColors;
             VtArray<float> displayOpacity;
@@ -1744,6 +2377,12 @@ std::optional<std::string> ConvertShapesToUsd(
             jointWeightPrimvar.SetElementSize(4);
             jointWeightPrimvar.Set(jointWeights);
             mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:jointNames"), VtValue(json(shape.boneNames).dump()));
+            if (shape.boneSourceIndices.size() == shape.boneNames.size()) {
+                mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:jointSourceIndices"), VtValue(json(shape.boneSourceIndices).dump()));
+            }
+            if (shape.skinToBoneTransforms.size() == shape.boneNames.size() * 13u) {
+                mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:skinToBoneTransforms"), VtValue(json(shape.skinToBoneTransforms).dump()));
+            }
         }
 
         if (!shape.textures.empty()) {
@@ -1764,7 +2403,7 @@ std::optional<std::string> ConvertShapesToUsd(
         }
 
         if (UsdShadeMaterial material = materialForShape(shape)) {
-            UsdShadeMaterialBindingAPI(mesh.GetPrim()).Bind(material);
+            UsdShadeMaterialBindingAPI::Apply(mesh.GetPrim()).Bind(material);
         }
 
         ++emittedMeshes;
@@ -1773,11 +2412,12 @@ std::optional<std::string> ConvertShapesToUsd(
     if (!collisionProxies.empty()) {
         const SdfPath collisionRoot("/BRNifly/Collision");
         UsdGeomXform::Define(stage, collisionRoot);
-        std::set<std::string> usedCollisionNames;
         for (size_t proxyIndex = 0; proxyIndex < collisionProxies.size(); ++proxyIndex) {
             const CollisionProxyData& proxy = collisionProxies[proxyIndex];
-            const std::string name = MakeUniqueName(proxy.name.empty() ? "Collision_" + std::to_string(proxyIndex) : proxy.name, usedCollisionNames);
-            const SdfPath proxyPath = collisionRoot.AppendChild(TfToken(name));
+            const SdfPath proxyPath = MakeUniquePrimPath(
+                stage,
+                collisionRoot,
+                proxy.name.empty() ? "Collision_" + std::to_string(proxyIndex) : proxy.name);
             VtArray<GfVec3f> points;
             points.reserve(proxy.positions.size() / 3u);
             for (size_t i = 0; i + 2 < proxy.positions.size(); i += 3) {
@@ -1812,87 +2452,250 @@ std::optional<std::string> ConvertShapesToUsd(
     }
 
     std::string usdText;
-    if (!rootLayer->ExportToString(&usdText)) {
-        AddDiagnostic(diagnostics, "error", "OpenUSD failed to export the generated layer.");
-        return std::nullopt;
+    {
+        ZoneScopedN("BRNifly::ConvertShapesToUsd::ExportToString");
+        std::optional<ScopedJsonTimer> timer;
+        if (timings) {
+            timer.emplace(*timings, "usdExportToStringMs");
+        }
+        if (!rootLayer->ExportToString(&usdText)) {
+            AddDiagnostic(diagnostics, "error", "OpenUSD failed to export the generated layer.");
+            return std::nullopt;
+        }
     }
 
     AddDiagnostic(diagnostics, "info", "Converted " + std::to_string(emittedMeshes) + " NIF shape(s), " + std::to_string(nodes.size()) + " node(s), and " + std::to_string(collisionProxies.size()) + " collision proxy/proxies to USD.");
     return usdText;
 }
 
-json ConvertUsdJson(const char* argv0, const fs::path& nifPath)
+json ConvertUsdJson(
+    const char* argv0,
+    const fs::path& nifPath,
+    const NiflyApi* persistentApi = nullptr,
+    SharedMemoryRegistry* rootLayerSharedMemory = nullptr)
 {
+    ZoneScopedN("BRNifly::ConvertUsdJson");
+    const std::string nifPathText = nifPath.string();
+    ZoneText(nifPathText.data(), nifPathText.size());
     std::vector<Diagnostic> diagnostics;
+    json timings = json::object();
     json response;
     response["status"] = "error";
-    response["sourcePath"] = nifPath.string();
-
-    auto api = LoadNiflyApi(argv0, diagnostics);
-    if (!api) {
-        response["message"] = "Unable to load niflyDLL.";
+    response["sourcePath"] = nifPathText;
+    auto finalizeResponse = [&]() {
+        response["timings"] = timings;
         response["diagnostics"] = json::array();
         for (const Diagnostic& diagnostic : diagnostics) {
             response["diagnostics"].push_back(DiagnosticJson(diagnostic));
         }
         return response;
+    };
+
+    std::optional<NiflyApi> ownedApi;
+    if (!persistentApi) {
+        ZoneScopedN("BRNifly::ConvertUsdJson::LoadNiflyApi");
+        ScopedJsonTimer timer(timings, "loadNiflyApiMs");
+        ownedApi = LoadNiflyApi(argv0, diagnostics);
+        persistentApi = ownedApi ? std::addressof(*ownedApi) : nullptr;
     }
+    if (!persistentApi) {
+        response["message"] = "Unable to load niflyDLL.";
+        return finalizeResponse();
+    }
+    const NiflyApi& api = *persistentApi;
 
 #ifdef _WIN32
-    if (api->clearMessageLog) {
-        api->clearMessageLog();
+    if (api.clearMessageLog) {
+        api.clearMessageLog();
     }
 
-    void* nifHandle = api->load(nifPath.string().c_str());
+    void* nifHandle = nullptr;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::NiflyLoad");
+        ScopedJsonTimer timer(timings, "niflyLoadMs");
+        nifHandle = api.load(nifPathText.c_str());
+    }
     if (!nifHandle) {
-        AddDiagnostic(diagnostics, "error", "niflyDLL failed to load '" + nifPath.string() + "'. " + GetMessageLog(*api));
+        AddDiagnostic(diagnostics, "error", "niflyDLL failed to load '" + nifPathText + "'. " + GetMessageLog(api));
         response["message"] = "niflyDLL failed to load the NIF file.";
-        response["diagnostics"] = json::array();
-        for (const Diagnostic& diagnostic : diagnostics) {
-            response["diagnostics"].push_back(DiagnosticJson(diagnostic));
-        }
-        return response;
+        return finalizeResponse();
     }
 
     std::string gameName = "unknown";
-    if (api->getGameName) {
-        gameName = ReadCString([&](char* buffer, int size) { return api->getGameName(nifHandle, buffer, size); }).value_or("unknown");
+    if (api.getGameName) {
+        ZoneScopedN("BRNifly::ConvertUsdJson::GetGameName");
+        ScopedJsonTimer timer(timings, "getGameNameMs");
+        gameName = ReadCString([&](char* buffer, int size) { return api.getGameName(nifHandle, buffer, size); }).value_or("unknown");
     }
 
-    std::vector<NodeData> nodes = ReadNodes(*api, nifHandle);
-    std::vector<ShapeData> shapes = ReadShapes(*api, nifHandle, diagnostics);
-    json rootExtraData = ReadExtraDataList(*api, nifHandle, nullptr);
-    std::vector<CollisionProxyData> collisionProxies = ReadCollisionProxies(*api, nifHandle, nodes);
-    api->destroy(nifHandle);
+    std::vector<NodeData> nodes;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::ReadNodes");
+        ScopedJsonTimer timer(timings, "readNodesMs");
+        nodes = ReadNodes(api, nifHandle);
+    }
+    std::vector<ShapeData> shapes;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::ReadShapes");
+        ScopedJsonTimer timer(timings, "readShapesMs");
+        shapes = ReadShapes(api, nifHandle, diagnostics);
+    }
+    json rootExtraData;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::ReadExtraData");
+        ScopedJsonTimer timer(timings, "readExtraDataMs");
+        rootExtraData = ReadExtraDataList(api, nifHandle, nullptr);
+    }
+    std::vector<CollisionProxyData> collisionProxies;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::DestroyNif");
+        ScopedJsonTimer timer(timings, "destroyNifMs");
+        api.destroy(nifHandle);
+    }
 
-    auto usdText = ConvertShapesToUsd(shapes, std::move(nodes), rootExtraData, collisionProxies, nifPath, gameName, diagnostics);
+    std::optional<std::string> usdText;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::ConvertShapesToUsd");
+        ScopedJsonTimer timer(timings, "convertShapesToUsdMs");
+        usdText = ConvertShapesToUsd(shapes, std::move(nodes), rootExtraData, collisionProxies, nifPath, gameName, diagnostics, &timings);
+    }
     if (!usdText) {
         response["message"] = "NIF-to-USD conversion failed.";
-        response["diagnostics"] = json::array();
-        for (const Diagnostic& diagnostic : diagnostics) {
-            response["diagnostics"].push_back(DiagnosticJson(diagnostic));
-        }
-        return response;
+        return finalizeResponse();
     }
 
-    const std::string hash = HexHash(Fnv1a64(nifPath.string() + *usdText));
-    response["status"] = "ok";
-    response["protocolVersion"] = "1.0";
-    response["sourcePath"] = nifPath.string();
-    response["sourceIdentifier"] = nifPath.string() + "#brnifly=" + hash;
-    response["contentHash"] = hash;
-    response["rootLayerText"] = *usdText;
-    response["dependencies"] = json::array();
-    response["textureSearchRoots"] = json::array({nifPath.parent_path().string()});
-    response["diagnostics"] = json::array();
-    for (const Diagnostic& diagnostic : diagnostics) {
-        response["diagnostics"].push_back(DiagnosticJson(diagnostic));
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::HashAndResponse");
+        ScopedJsonTimer timer(timings, "hashAndResponseMs");
+        const std::string hash = HexHash(Fnv1a64(std::string(kUsdContentIdentityVersion) + "\n" + *usdText));
+        response["status"] = "ok";
+        response["protocolVersion"] = "1.0";
+        response["sourcePath"] = nifPathText;
+        response["sourceIdentifier"] = nifPathText + "#brnifly=" + hash;
+        response["contentHash"] = hash;
+        if (rootLayerSharedMemory) {
+            if (auto descriptor = rootLayerSharedMemory->Store(*usdText, timings)) {
+                response["rootLayerSharedMemory"] = std::move(*descriptor);
+            }
+            else {
+                response["rootLayerText"] = *usdText;
+            }
+        }
+        else {
+            response["rootLayerText"] = *usdText;
+        }
+        response["dependencies"] = json::array();
+        response["textureSearchRoots"] = json::array({nifPath.parent_path().string()});
     }
-    return response;
+    return finalizeResponse();
 #else
     response["message"] = "BRNifly conversion is currently implemented for Windows only.";
-    return response;
+    return finalizeResponse();
 #endif
+}
+
+int RunStdioJsonService(const char* argv0)
+{
+    ZoneScopedN("BRNifly::RunStdioJsonService");
+#ifdef _WIN32
+    CrashLog::SetContext("--stdio-json");
+#endif
+    SharedMemoryRegistry sharedMemory;
+    std::optional<NiflyApi> persistentApi;
+    bool persistentApiLoadAttempted = false;
+    std::uint64_t persistentApiLoadMs = 0;
+    std::vector<Diagnostic> persistentApiDiagnostics;
+    auto ensurePersistentApi = [&]() -> bool {
+        if (persistentApiLoadAttempted) {
+            return persistentApi.has_value();
+        }
+        persistentApiLoadAttempted = true;
+        ZoneScopedN("BRNifly::RunStdioJsonService::LoadPersistentNiflyApi");
+        const auto loadBegin = std::chrono::steady_clock::now();
+        persistentApi = LoadNiflyApi(argv0, persistentApiDiagnostics);
+        persistentApiLoadMs = ElapsedMs(loadBegin);
+        return persistentApi.has_value();
+    };
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty()) {
+            continue;
+        }
+
+        json response;
+        try {
+            const json request = json::parse(line);
+            const std::string command = request.value("command", "");
+            if (command == "describe-services") {
+                (void)ensurePersistentApi();
+                response = DescribeServicesJson(
+                    argv0,
+                    persistentApi ? std::addressof(*persistentApi) : nullptr,
+                    std::addressof(persistentApiDiagnostics));
+            }
+            else if (command == "convert-usd") {
+                const std::string path = request.value("path", "");
+                const bool preferSharedMemory = request.value("responseTransport", "") == "shared-memory";
+#ifdef _WIN32
+                CrashLog::SetContext("--stdio-json convert-usd", path);
+#endif
+                const bool loadingApiForThisRequest = !persistentApiLoadAttempted;
+                (void)ensurePersistentApi();
+
+                if (!persistentApi) {
+                    response["status"] = "error";
+                    response["message"] = "Unable to load niflyDLL.";
+                    response["sourcePath"] = path;
+                    response["timings"] = json::object({ { "loadNiflyApiMs", persistentApiLoadMs } });
+                    response["diagnostics"] = json::array();
+                    for (const Diagnostic& diagnostic : persistentApiDiagnostics) {
+                        response["diagnostics"].push_back(DiagnosticJson(diagnostic));
+                    }
+                }
+                else {
+                    response = ConvertUsdJson(
+                        argv0,
+                        fs::path(path),
+                        std::addressof(*persistentApi),
+                        preferSharedMemory ? std::addressof(sharedMemory) : nullptr);
+                    if (loadingApiForThisRequest) {
+                        auto& timings = response["timings"];
+                        if (!timings.is_object()) {
+                            timings = json::object();
+                        }
+                        timings["loadNiflyApiMs"] = timings.value("loadNiflyApiMs", std::uint64_t{ 0 }) + persistentApiLoadMs;
+                    }
+                }
+            }
+            else if (command == "release-shared-memory") {
+                const std::string name = request.value("name", "");
+                response["status"] = sharedMemory.Release(name) ? "ok" : "error";
+                response["message"] = response.value("status", "") == "ok" ? "released" : "unknown shared memory segment";
+                response["timings"] = json::object();
+            }
+            else if (command == "shutdown") {
+                response["status"] = "ok";
+                response["message"] = "shutdown";
+                response["timings"] = json::object();
+                WriteJsonLine(std::move(response));
+                return 0;
+            }
+            else {
+                response["status"] = "error";
+                response["message"] = "unknown BRNifly stdio command";
+                response["timings"] = json::object();
+            }
+        }
+        catch (const std::exception& e) {
+            response["status"] = "error";
+            response["message"] = std::string("BRNifly stdio JSON request failed: ") + e.what();
+            response["timings"] = json::object();
+        }
+
+        WriteJsonLine(std::move(response));
+    }
+    return 0;
 }
 
 int PrintUsage()
@@ -1911,24 +2714,49 @@ int PrintUsage()
 
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    CrashLog::Install();
+    if (argc >= 2) {
+        CrashLog::SetContext(argv[1], argc >= 3 ? argv[2] : "");
+    } else {
+        CrashLog::SetContext("startup");
+    }
+#endif
+
     spdlog::set_level(spdlog::level::warn);
 
+    if (argc == 2 && std::string(argv[1]) == "--stdio-json") {
+        return RunStdioJsonService(argv[0]);
+    }
+
     if (argc == 2 && std::string(argv[1]) == "--describe-services") {
-        std::cout << DescribeServicesJson(argv[0]).dump(2) << std::endl;
+#ifdef _WIN32
+        CrashLog::SetContext("--describe-services");
+#endif
+        WriteJsonLine(DescribeServicesJson(argv[0]));
         return 0;
     }
 
     if (argc == 3 && std::string(argv[1]) == "--convert-usd-json") {
-        std::cout << ConvertUsdJson(argv[0], fs::path(argv[2])).dump(2) << std::endl;
+#ifdef _WIN32
+        CrashLog::SetContext("--convert-usd-json", argv[2]);
+#endif
+        WriteJsonLine(ConvertUsdJson(argv[0], fs::path(argv[2])));
         return 0;
     }
 
     if (argc == 3 && std::string(argv[1]) == "--shader-flags-json") {
+#ifdef _WIN32
+        CrashLog::SetContext("--shader-flags-json", argv[2]);
+#endif
         std::cout << ShaderFlagsJson(argv[0], fs::path(argv[2])).dump(2) << std::endl;
         return 0;
     }
 
     if (argc == 4 && std::string(argv[1]) == "--shader-flags-json-file") {
+#ifdef _WIN32
+        CrashLog::SetContext("--shader-flags-json-file", argv[2]);
+#endif
         json response = ShaderFlagsJson(argv[0], fs::path(argv[2]));
         std::ofstream out(argv[3], std::ios::binary);
         if (!out) {
@@ -1941,6 +2769,9 @@ int main(int argc, char** argv)
     }
 
     if (argc == 4 && std::string(argv[1]) == "--convert-usd-json-file") {
+#ifdef _WIN32
+        CrashLog::SetContext("--convert-usd-json-file", argv[2]);
+#endif
         json response = ConvertUsdJson(argv[0], fs::path(argv[2]));
         std::ofstream out(argv[3], std::ios::binary);
         if (!out) {
@@ -1953,6 +2784,9 @@ int main(int argc, char** argv)
     }
 
     if (argc == 5 && std::string(argv[1]) == "--convert" && std::string(argv[3]) == "--out") {
+#ifdef _WIN32
+        CrashLog::SetContext("--convert", argv[2]);
+#endif
         json response = ConvertUsdJson(argv[0], fs::path(argv[2]));
         if (response.value("status", "") != "ok") {
             std::cerr << response.dump(2) << std::endl;

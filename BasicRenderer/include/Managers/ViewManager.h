@@ -16,9 +16,12 @@
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 
 class IndirectCommandBufferManager;
-class ResourceGroup;
-class PixelBuffer;
-class DynamicGloballyIndexedResource;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class DynamicGloballyIndexedResource; }
+using org::DynamicGloballyIndexedResource;
 
 // Flags describing purpose/type of a view
 struct ViewFlags {
@@ -52,8 +55,6 @@ struct ViewResources {
     std::shared_ptr<BufferView> cameraBufferView;
 	std::shared_ptr<BufferView> cullingCameraBufferView;
     uint32_t cameraBufferIndex = 0;
-
-    Components::IndirectCommandBuffers indirectCommandBuffers;
 
 	std::shared_ptr<PixelBuffer> depthMap = nullptr;
     std::shared_ptr<PixelBuffer> linearDepthMap = nullptr;
@@ -203,6 +204,7 @@ private:
     std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
     std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
 
+    std::shared_ptr<ResourceGroup> m_linearDepthGroup;
     std::shared_ptr<ResourceGroup> m_lastFrameLinearDepthGroup;
     std::unordered_map<uint64_t, std::shared_ptr<PixelBuffer>> m_lastFrameLinearDepthBySource;
 

@@ -9,7 +9,9 @@
       "installDir": "${sourceDir}/out/install/${presetName}",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "cl.exe",
-        "CMAKE_CXX_COMPILER": "cl.exe"
+        "CMAKE_CXX_COMPILER": "cl.exe",
+        "CMAKE_TOOLCHAIN_FILE": "$env{BASICRENDERER_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_MANIFEST_INSTALL": "ON"
       },
       "condition": {
         "type": "equals",
@@ -25,7 +27,10 @@
       "installDir": "${sourceDir}/out/install/${presetName}",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang-cl.exe",
-        "CMAKE_CXX_COMPILER": "clang-cl.exe"
+        "CMAKE_CXX_COMPILER": "clang-cl.exe",
+        "CMAKE_TOOLCHAIN_FILE": "$env{BASICRENDERER_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_MANIFEST_INSTALL": "ON",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/out/v/${presetName}"
       },
       "condition": {
         "type": "equals",

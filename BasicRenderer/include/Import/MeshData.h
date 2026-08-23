@@ -19,6 +19,7 @@ struct MeshUvSetData {
 struct MeshData {
     std::vector<float> positions;
     std::vector<float> normals;
+    std::vector<DirectX::XMFLOAT4> tangents;
     std::vector<DirectX::XMFLOAT3> colors;
     std::vector<uint32_t> indices;
     std::vector<MeshUvSetData> uvSets;

@@ -70,7 +70,11 @@ float V_SmithGGXCorrelated(float roughness, float NoV, float NoL)
     // TODO: lambdaV can be pre-computed for all the lights, it should be moved out of this function
     float lambdaV = NoL * sqrt((NoV - a2 * NoV) * NoV + a2);
     float lambdaL = NoV * sqrt((NoL - a2 * NoL) * NoL + a2);
-    float v = 0.5 / (lambdaV + lambdaL);
+    // At the horizon both lambda terms can be zero. The direct-light caller
+    // ultimately multiplies the BRDF by NoL, but allowing infinity here turns
+    // that physically-zero contribution into Inf * 0 = NaN and contaminates
+    // later HDR/bloom passes.
+    float v = 0.5 / max(lambdaV + lambdaL, 1.0e-6f);
     // a2=0 => v = 1 / 4*NoL*NoV   => min=1/4, max=+inf
     // a2=1 => v = 1 / 2*(NoL+NoV) => min=1/4, max=+inf
     // clamp to the maximum value representable in mediump

@@ -8,7 +8,69 @@
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 
+#include <algorithm>
 #include <DirectXMath.h>
+#include <limits>
+#include <vector>
+
+namespace {
+
+struct MatrixUploadSpan {
+    size_t offsetBytes = 0;
+    const DirectX::XMMATRIX* data = nullptr;
+    uint32_t matrixCount = 0;
+};
+
+void UploadMatrixSpans(const std::shared_ptr<DynamicBuffer>& target, std::vector<MatrixUploadSpan>& spans) {
+    std::erase_if(spans, [](const MatrixUploadSpan& span) {
+        return span.data == nullptr || span.matrixCount == 0;
+    });
+    if (spans.empty()) {
+        return;
+    }
+
+    std::sort(spans.begin(), spans.end(), [](const MatrixUploadSpan& a, const MatrixUploadSpan& b) {
+        return a.offsetBytes < b.offsetBytes;
+    });
+
+    std::vector<DirectX::XMMATRIX> staging;
+    for (size_t groupStart = 0; groupStart < spans.size();) {
+        size_t groupEnd = groupStart + 1;
+        size_t groupEndOffset = spans[groupStart].offsetBytes +
+            static_cast<size_t>(spans[groupStart].matrixCount) * sizeof(DirectX::XMMATRIX);
+
+        while (groupEnd < spans.size() && spans[groupEnd].offsetBytes == groupEndOffset) {
+            groupEndOffset += static_cast<size_t>(spans[groupEnd].matrixCount) * sizeof(DirectX::XMMATRIX);
+            ++groupEnd;
+        }
+
+        const auto& first = spans[groupStart];
+        if (groupEnd == groupStart + 1) {
+            BUFFER_UPLOAD(first.data,
+                static_cast<size_t>(first.matrixCount) * sizeof(DirectX::XMMATRIX),
+                org::runtime::UploadTarget::FromShared(target),
+                first.offsetBytes);
+        }
+        else {
+            const size_t matrixCount = (groupEndOffset - first.offsetBytes) / sizeof(DirectX::XMMATRIX);
+            staging.clear();
+            staging.reserve(matrixCount);
+            for (size_t i = groupStart; i < groupEnd; ++i) {
+                const auto& span = spans[i];
+                staging.insert(staging.end(), span.data, span.data + span.matrixCount);
+            }
+
+            BUFFER_UPLOAD(staging.data(),
+                staging.size() * sizeof(DirectX::XMMATRIX),
+                org::runtime::UploadTarget::FromShared(target),
+                first.offsetBytes);
+        }
+
+        groupStart = groupEnd;
+    }
+}
+
+} // namespace
 
 static uint32_t BytesToMatrixIndex(size_t byteOffset) {
     return static_cast<uint32_t>(byteOffset / sizeof(DirectX::XMMATRIX));
@@ -17,17 +79,17 @@ static uint32_t BytesToMatrixIndex(size_t byteOffset) {
 SkeletonManager::SkeletonManager() {
     m_lifetimeToken = std::make_shared<std::atomic_bool>(true);
     m_inverseBindMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseBindMatricesPacked");
-    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "BoneTransformsPacked");
+    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "BoneSkinMatricesPacked", false, true);
     // TODO: This only exists to project skinned voxel samples back to object-space for voxel sample reconstruction.
     // Maybe we could avoid this if we changed the normal skinning path as well?
-    m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseSkinMatricesPacked");
+    m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseSkinMatricesPacked", false, true);
 
-    m_instanceInfo = DynamicStructuredBuffer<SkinningInstanceGPUInfo>::CreateShared(64, "SkinningInstanceInfo");
+    m_instanceInfo = DynamicStructuredBuffer<SkinningInstanceGPUInfo>::CreateShared(64, "SkinningInstanceInfo", true);
 
-    rg::memory::SetResourceUsageHint(*m_inverseBindMatrices, "Skinning data");
-    rg::memory::SetResourceUsageHint(*m_boneTransforms, "Skinning data");
-    rg::memory::SetResourceUsageHint(*m_inverseSkinMatrices, "Skinning data");
-    rg::memory::SetResourceUsageHint(*m_instanceInfo, "Skinning data");
+    org::memory::SetResourceUsageHint(*m_inverseBindMatrices, "Skinning data");
+    org::memory::SetResourceUsageHint(*m_boneTransforms, "Skinning data");
+    org::memory::SetResourceUsageHint(*m_inverseSkinMatrices, "Skinning data");
+    org::memory::SetResourceUsageHint(*m_instanceInfo, "Skinning data");
 
     // Expose via resource provider keys
     m_resources[Builtin::SkeletonResources::InverseBindMatrices] = m_inverseBindMatrices;
@@ -91,6 +153,92 @@ void SkeletonManager::FreeInstanceSlot(uint32_t slot) {
         m_freeInstanceSlots.push_back(slot);
 }
 
+std::vector<SkeletonManager::ActiveInstanceView> SkeletonManager::GetActiveInstanceViews() const {
+    std::vector<ActiveInstanceView> result;
+    result.reserve(m_instances.size());
+    for (const auto& [skeleton, record] : m_instances) {
+        result.push_back({
+            const_cast<Skeleton*>(skeleton),
+            record.instanceSlot,
+            record.transformOffsetMatrices,
+            record.inverseSkinOffsetMatrices,
+            record.boneCount
+        });
+    }
+    std::ranges::sort(result, {}, &ActiveInstanceView::instanceSlot);
+    return result;
+}
+
+SkeletonManager::TransientWindRegion SkeletonManager::ReserveTransientWindRegion(uint32_t matrixCapacity) {
+	if (m_transientWindRegion.valid || matrixCapacity == 0u) {
+		return m_transientWindRegion;
+	}
+	const size_t bytes = static_cast<size_t>(matrixCapacity) * sizeof(DirectX::XMMATRIX);
+	// Keep two equal forward-skin regions in one packed resource. Wind writes the
+	// current half while motion-vector reconstruction reads the untouched half
+	// produced by the previous frame.
+	m_transientWindTransformsView = m_boneTransforms->Allocate(bytes * 2u, sizeof(DirectX::XMMATRIX));
+	m_transientWindInverseSkinView = m_inverseSkinMatrices->Allocate(bytes, sizeof(DirectX::XMMATRIX));
+	if (!m_transientWindTransformsView || !m_transientWindInverseSkinView) {
+		m_transientWindTransformsView.reset();
+		m_transientWindInverseSkinView.reset();
+		return {};
+	}
+	m_transientWindAllocationBaseMatrices = BytesToMatrixIndex(m_transientWindTransformsView->GetOffset());
+	const uint32_t currentIndex = static_cast<uint32_t>(m_lastBegunFrame == std::numeric_limits<uint64_t>::max()
+		? 0u
+		: (m_lastBegunFrame & 1u));
+	m_transientWindRegion.transformBaseMatrices = m_transientWindAllocationBaseMatrices + currentIndex * matrixCapacity;
+	m_transientWindRegion.previousTransformBaseMatrices =
+		m_transientWindAllocationBaseMatrices + (1u - currentIndex) * matrixCapacity;
+	m_transientWindRegion.inverseSkinBaseMatrices = BytesToMatrixIndex(m_transientWindInverseSkinView->GetOffset());
+	m_transientWindRegion.capacityMatrices = matrixCapacity;
+	m_transientWindRegion.valid = true;
+	return m_transientWindRegion;
+}
+
+void SkeletonManager::BeginFrame(uint64_t frameNumber) {
+	if (m_lastBegunFrame == frameNumber) {
+		return;
+	}
+	m_lastBegunFrame = frameNumber;
+
+	// A CPU palette only gains history when a new pose is uploaded below. Until
+	// then previous == current, preventing a stopped animation from emitting the
+	// same motion vector repeatedly.
+	for (auto& [skeleton, rec] : m_instances) {
+		rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
+		SkinningInstanceGPUInfo info{};
+		info.transformOffsetMatrices = rec.transformOffsetMatrices;
+		info.invBindOffsetMatrices = rec.invBindOffsetMatrices;
+		info.inverseSkinOffsetMatrices = rec.inverseSkinOffsetMatrices;
+		info.boneCount = rec.boneCount;
+		info.sourceBoneCount = rec.boneCount;
+		info.flags = rec.base->GetSkinningGPUFlags() | kSkinningInstanceFlagRowVectorSkinMatrix;
+		if (rec.base->HasWindSimulationGroups()) {
+			info.flags |= kSkinningInstanceFlagProceduralWindType;
+			info.pad0 = rec.instanceSlot;
+		}
+		info.previousTransformOffsetMatrices = rec.previousTransformOffsetMatrices;
+		m_instanceInfo->UpdateAt(rec.instanceSlot, info);
+	}
+
+	if (m_transientWindRegion.valid) {
+		const uint32_t currentIndex = static_cast<uint32_t>(frameNumber & 1u);
+		m_transientWindRegion.transformBaseMatrices =
+			m_transientWindAllocationBaseMatrices + currentIndex * m_transientWindRegion.capacityMatrices;
+		m_transientWindRegion.previousTransformBaseMatrices =
+			m_transientWindAllocationBaseMatrices + (1u - currentIndex) * m_transientWindRegion.capacityMatrices;
+	}
+}
+
+void SkeletonManager::EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity) {
+	const uint64_t required = static_cast<uint64_t>(kProceduralWindTransientSlotBase) + drawRecordCapacity;
+	if (required <= std::numeric_limits<uint32_t>::max()) {
+		m_instanceInfo->EnsureSize(static_cast<uint32_t>(required));
+	}
+}
+
 uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton>& skinningInstance) {
     // Expect: skinningInstance is NOT a base skeleton.
     // It should reference a base skeleton (see "Skeleton type changes" section below).
@@ -112,8 +260,11 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
 
     // Allocate transforms region (unique per skinning instance)
     const size_t bytes = rec.boneCount * sizeof(DirectX::XMMATRIX);
-    rec.transformsView = m_boneTransforms->Allocate(bytes, sizeof(DirectX::XMMATRIX));
-    rec.transformOffsetMatrices = BytesToMatrixIndex(rec.transformsView->GetOffset());
+    rec.transformsView = m_boneTransforms->Allocate(bytes * 2u, sizeof(DirectX::XMMATRIX));
+    rec.transformOffsetsMatrices[0] = BytesToMatrixIndex(rec.transformsView->GetOffset());
+    rec.transformOffsetsMatrices[1] = rec.transformOffsetsMatrices[0] + rec.boneCount;
+    rec.transformOffsetMatrices = rec.transformOffsetsMatrices[0];
+    rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
     rec.inverseSkinView = m_inverseSkinMatrices->Allocate(bytes, sizeof(DirectX::XMMATRIX));
     rec.inverseSkinOffsetMatrices = BytesToMatrixIndex(rec.inverseSkinView->GetOffset());
     rec.invBindOffsetMatrices = baseRec.invBindOffsetMatrices;
@@ -124,7 +275,22 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
     info.transformOffsetMatrices = rec.transformOffsetMatrices;
     info.invBindOffsetMatrices = rec.invBindOffsetMatrices;
     info.inverseSkinOffsetMatrices = rec.inverseSkinOffsetMatrices;
-    info.boneCount = rec.boneCount;
+	info.boneCount = rec.boneCount;
+	info.sourceBoneCount = rec.boneCount;
+    // Retained for cache/metadata compatibility. Shader-visible skin palettes now
+    // use one canonical row-vector layout and never branch on this flag.
+    info.flags = baseShared->GetSkinningGPUFlags() | kSkinningInstanceFlagRowVectorSkinMatrix;
+	info.previousTransformOffsetMatrices = rec.previousTransformOffsetMatrices;
+	if (baseShared->HasWindSimulationGroups()) {
+		info.flags |= kSkinningInstanceFlagProceduralWindType;
+		info.pad0 = rec.instanceSlot; // Wind type IDs are stable persistent assembly slots.
+		spdlog::info(
+			"SkeletonManager: registered procedural-wind assembly type slot={} bones={} flags=0x{:X} profile='{}'",
+			rec.instanceSlot,
+			rec.boneCount,
+			info.flags,
+			baseShared->GetWindProfileIdentity());
+	}
 
     m_instanceInfo->UpdateAt(rec.instanceSlot, info);
 
@@ -132,6 +298,7 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
     skinningInstance->SetSkinningInstanceSlot(rec.instanceSlot);
 
     auto [insIt, _ok] = m_instances.emplace(skinningInstance.get(), std::move(rec));
+	++m_activeInstanceRevision;
     m_iterationListDirty = true;
     return insIt->second.instanceSlot;
 }
@@ -159,6 +326,7 @@ void SkeletonManager::ReleaseSkinningInstance(Skeleton* skinningInstance) {
     skinningInstance->SetSkinningInstanceSlot(kInvalidSlot);
 
     m_instances.erase(it);
+	++m_activeInstanceRevision;
     m_iterationListDirty = true;
 }
 
@@ -172,23 +340,41 @@ void SkeletonManager::UpdateInstanceTransforms(Skeleton& inst) {
         return;
 
     const size_t bytes = rec.boneCount * sizeof(DirectX::XMMATRIX);
-    BUFFER_UPLOAD(inst.GetBoneMatrices().data(), bytes,
-        rg::runtime::UploadTarget::FromShared(m_boneTransforms),
-        rec.transformsView->GetOffset());
-
+    std::vector<DirectX::XMMATRIX> skinMatrices(rec.boneCount);
     std::vector<DirectX::XMMATRIX> inverseSkinMatrices(rec.boneCount);
     const auto boneMatrices = inst.GetBoneMatrices();
     const auto inverseBindMatrices = rec.base->GetInverseBindMatrices();
     for (uint32_t boneIndex = 0; boneIndex < rec.boneCount; ++boneIndex) {
-        inverseSkinMatrices[boneIndex] = DirectX::XMMatrixInverse(
-            nullptr,
-            DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]));
+        // Row-vector skinning is: bindPosition * inverseBind * animatedGlobal.
+        const DirectX::XMMATRIX skinMatrix =
+            DirectX::XMMatrixMultiply(inverseBindMatrices[boneIndex], boneMatrices[boneIndex]);
+        // Convert once at the CPU upload boundary. StructuredBuffer<row_major matrix>
+        // then exposes the intended row-vector matrix directly to every shader.
+        skinMatrices[boneIndex] = DirectX::XMMatrixTranspose(skinMatrix);
+        inverseSkinMatrices[boneIndex] = DirectX::XMMatrixTranspose(
+            DirectX::XMMatrixInverse(nullptr, skinMatrix));
     }
+	if (rec.hasTransformHistory) {
+		rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
+		rec.currentTransformIndex ^= 1u;
+	}
+	rec.transformOffsetMatrices = rec.transformOffsetsMatrices[rec.currentTransformIndex];
+    BUFFER_UPLOAD(skinMatrices.data(), bytes,
+        org::runtime::UploadTarget::FromShared(m_boneTransforms),
+		static_cast<size_t>(rec.transformOffsetMatrices) * sizeof(DirectX::XMMATRIX));
     BUFFER_UPLOAD(inverseSkinMatrices.data(), bytes,
-        rg::runtime::UploadTarget::FromShared(m_inverseSkinMatrices),
+        org::runtime::UploadTarget::FromShared(m_inverseSkinMatrices),
         rec.inverseSkinView->GetOffset());
+	SkinningInstanceGPUInfo info = (*m_instanceInfo)[rec.instanceSlot];
+	info.transformOffsetMatrices = rec.transformOffsetMatrices;
+	info.previousTransformOffsetMatrices = rec.hasTransformHistory
+		? rec.previousTransformOffsetMatrices
+		: rec.transformOffsetMatrices;
+	m_instanceInfo->UpdateAt(rec.instanceSlot, info);
+	rec.hasTransformHistory = true;
 
-    //rec.dirty = false;
+    rec.dirty = false;
+    inst.ClearPoseDirty();
 }
 
 void SkeletonManager::RebuildIterationList() {
@@ -218,13 +404,88 @@ void SkeletonManager::UpdateAllDirtyInstances() {
         RebuildIterationList();
     }
 
-    TaskSchedulerManager::GetInstance().ParallelFor("SkeletonUpload", m_iterationList.size(),
-        [this](size_t i) {
-            auto& entry = m_iterationList[i];
-            if (entry.record->dirty) {
-                UpdateInstanceTransforms(*entry.skeleton);
+    struct PendingSkeletonUpload {
+        Skeleton* skeleton = nullptr;
+        InstanceRecord* record = nullptr;
+        std::vector<DirectX::XMMATRIX> skinMatrices;
+        std::vector<DirectX::XMMATRIX> inverseSkinMatrices;
+    };
+
+    std::vector<PendingSkeletonUpload> pending;
+    pending.reserve(m_iterationList.size());
+    for (auto& entry : m_iterationList) {
+        if (!entry.record->transformsView) {
+            continue;
+        }
+        if (entry.record->dirty || entry.skeleton->IsPoseDirty()) {
+            pending.push_back({ entry.skeleton, entry.record, {}, {} });
+        }
+    }
+
+    if (pending.empty()) {
+        return;
+    }
+
+    TaskSchedulerManager::GetInstance().ParallelFor("SkeletonUpload", pending.size(),
+        [&pending](size_t i) {
+            auto& upload = pending[i];
+            auto& rec = *upload.record;
+            upload.skinMatrices.resize(rec.boneCount);
+            upload.inverseSkinMatrices.resize(rec.boneCount);
+
+            const auto boneMatrices = upload.skeleton->GetBoneMatrices();
+            const auto inverseBindMatrices = rec.base->GetInverseBindMatrices();
+            for (uint32_t boneIndex = 0; boneIndex < rec.boneCount; ++boneIndex) {
+                // Row-vector skinning is: bindPosition * inverseBind * animatedGlobal.
+                const DirectX::XMMATRIX skinMatrix =
+                    DirectX::XMMatrixMultiply(inverseBindMatrices[boneIndex], boneMatrices[boneIndex]);
+                // Match UpdateInstanceTransforms: GPU buffers store matrices in the
+                // shader-native row-vector layout, so shader consumers load directly.
+                upload.skinMatrices[boneIndex] = DirectX::XMMatrixTranspose(skinMatrix);
+                upload.inverseSkinMatrices[boneIndex] = DirectX::XMMatrixTranspose(
+                    DirectX::XMMatrixInverse(nullptr, skinMatrix));
             }
         });
+
+    std::vector<MatrixUploadSpan> boneMatrixSpans;
+    std::vector<MatrixUploadSpan> inverseSkinSpans;
+    boneMatrixSpans.reserve(pending.size());
+    inverseSkinSpans.reserve(pending.size());
+
+    for (auto& upload : pending) {
+        auto& rec = *upload.record;
+		if (rec.hasTransformHistory) {
+			rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
+			rec.currentTransformIndex ^= 1u;
+		}
+		rec.transformOffsetMatrices = rec.transformOffsetsMatrices[rec.currentTransformIndex];
+        boneMatrixSpans.push_back({
+			static_cast<size_t>(rec.transformOffsetMatrices) * sizeof(DirectX::XMMATRIX),
+            upload.skinMatrices.data(),
+            rec.boneCount
+        });
+        inverseSkinSpans.push_back({
+            rec.inverseSkinView->GetOffset(),
+            upload.inverseSkinMatrices.data(),
+            rec.boneCount
+        });
+    }
+
+    UploadMatrixSpans(m_boneTransforms, boneMatrixSpans);
+    UploadMatrixSpans(m_inverseSkinMatrices, inverseSkinSpans);
+
+    for (auto& upload : pending) {
+		auto& rec = *upload.record;
+		SkinningInstanceGPUInfo info = (*m_instanceInfo)[rec.instanceSlot];
+		info.transformOffsetMatrices = rec.transformOffsetMatrices;
+		info.previousTransformOffsetMatrices = rec.hasTransformHistory
+			? rec.previousTransformOffsetMatrices
+			: rec.transformOffsetMatrices;
+		m_instanceInfo->UpdateAt(rec.instanceSlot, info);
+		rec.hasTransformHistory = true;
+        upload.record->dirty = false;
+        upload.skeleton->ClearPoseDirty();
+    }
 }
 
 std::shared_ptr<Resource> SkeletonManager::ProvideResource(ResourceIdentifier const& key) {

@@ -2,11 +2,12 @@
 
 #include "RenderPasses/Base/ComputePass.h"
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class PerViewLinearDepthCopyPass : public ComputePass {
 public:
-    PerViewLinearDepthCopyPass();
+    explicit PerViewLinearDepthCopyPass(bool writeProjectedDepth = true);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -16,4 +17,6 @@ public:
 private:
     PipelineState m_pso;
     PixelBuffer* m_pProjectedDepthTexture = nullptr;
+    PixelBuffer* m_pCanonicalDeviceDepth = nullptr;
+    bool m_writeProjectedDepth = true;
 };

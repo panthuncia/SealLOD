@@ -5,24 +5,74 @@
 #include <tbb/global_control.h>
 #include <tbb/task_arena.h>
 #include <tbb/task_group.h>
+#include <tbb/task_scheduler_observer.h>
 #include <tracy/TracyC.h>
 
+#include <Windows.h>
 #include <spdlog/spdlog.h>
 
 #include "Telemetry/FrameTaskGraphTelemetry.h"
 
 namespace br {
 
-struct TaskSchedulerManager::RuntimeState {
-    std::unique_ptr<tbb::global_control> parallelismControl;
-    std::unique_ptr<tbb::task_arena> workerArena;
-};
-
 namespace {
 constexpr bool kEnableFineGrainedSchedulerTracing = true;
 
 thread_local bool g_isIoWorkerThread = false;
 thread_local bool g_isBackgroundWorkerThread = false;
+thread_local bool g_isShaderCompileWorkerThread = false;
+
+DWORD_PTR PickHighestAllowedProcessorMask(DWORD_PTR processMask) {
+    if (processMask == 0) {
+        return 0;
+    }
+
+    DWORD_PTR selectedMask = 0;
+    for (DWORD_PTR candidateMask = 1; candidateMask != 0; candidateMask <<= 1) {
+        if ((processMask & candidateMask) != 0) {
+            selectedMask = candidateMask;
+        }
+    }
+
+    return selectedMask;
+}
+
+DWORD_PTR GetTbbWorkerAffinityMaskExcludingRenderThreadCpu() {
+    DWORD_PTR processMask = 0;
+    DWORD_PTR systemMask = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask)) {
+        spdlog::warn("Failed to query process affinity mask for TBB worker affinity: {}", GetLastError());
+        return 0;
+    }
+
+    const DWORD_PTR renderThreadMask = PickHighestAllowedProcessorMask(processMask);
+    const DWORD_PTR workerMask = processMask & ~renderThreadMask;
+    if (workerMask == 0) {
+        return processMask;
+    }
+
+    return workerMask;
+}
+
+class TbbWorkerAffinityObserver final : public tbb::task_scheduler_observer {
+public:
+    TbbWorkerAffinityObserver(tbb::task_arena& arena, DWORD_PTR workerAffinityMask)
+        : tbb::task_scheduler_observer(arena),
+        m_workerAffinityMask(workerAffinityMask) {
+        observe(true);
+    }
+
+    void on_scheduler_entry(bool is_worker) override {
+        if (!is_worker || m_workerAffinityMask == 0) {
+            return;
+        }
+
+        SetThreadAffinityMask(GetCurrentThread(), m_workerAffinityMask);
+    }
+
+private:
+    DWORD_PTR m_workerAffinityMask = 0;
+};
 
 void PlotIoQueueDepth(size_t depth) {
     if constexpr (kEnableFineGrainedSchedulerTracing) {
@@ -33,6 +83,12 @@ void PlotIoQueueDepth(size_t depth) {
 void PlotBackgroundQueueDepth(size_t depth) {
     if constexpr (kEnableFineGrainedSchedulerTracing) {
         TracyCPlotI("TaskScheduler/Background Queue Depth", static_cast<int64_t>(depth));
+    }
+}
+
+void PlotShaderCompileQueueDepth(size_t depth) {
+    if constexpr (kEnableFineGrainedSchedulerTracing) {
+        TracyCPlotI("TaskScheduler/Shader Compile Queue Depth", static_cast<int64_t>(depth));
     }
 }
 
@@ -54,9 +110,35 @@ void RecordTaskNodeForTelemetry(
 
 }
 
+struct TaskSchedulerManager::RuntimeState {
+    std::unique_ptr<tbb::global_control> parallelismControl;
+    std::unique_ptr<tbb::task_arena> workerArena;
+    std::unique_ptr<TbbWorkerAffinityObserver> affinityObserver;
+};
+
 TaskSchedulerManager& TaskSchedulerManager::GetInstance() {
     static TaskSchedulerManager instance;
     return instance;
+}
+
+TaskSchedulerManager::QueueStats TaskSchedulerManager::GetQueueStats() const {
+    QueueStats stats;
+    {
+        std::lock_guard<std::mutex> lock(m_ioMutex);
+        stats.ioQueued = static_cast<uint32_t>(m_ioTasks.size());
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_backgroundMutex);
+        stats.backgroundQueued = static_cast<uint32_t>(m_backgroundTasks.size());
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_shaderCompileMutex);
+        stats.shaderCompileQueued = static_cast<uint32_t>(m_shaderCompileTasks.size());
+    }
+    stats.ioActive = m_ioActive.load(std::memory_order_acquire);
+    stats.backgroundActive = m_backgroundActive.load(std::memory_order_acquire);
+    stats.shaderCompileActive = m_shaderCompileActive.load(std::memory_order_acquire);
+    return stats;
 }
 
 void TaskSchedulerManager::Initialize(uint32_t ioThreadCount, uint32_t backgroundThreadCount) {
@@ -65,23 +147,55 @@ void TaskSchedulerManager::Initialize(uint32_t ioThreadCount, uint32_t backgroun
     }
 
     const uint32_t detectedConcurrency = (std::max)(std::thread::hardware_concurrency(), 1u);
+    constexpr uint32_t reservedRenderThreadLogicalCpuCount = 1u;
+    const uint32_t reservedLogicalCpuCount = detectedConcurrency > 1u
+        ? reservedRenderThreadLogicalCpuCount
+        : 0u;
+    const uint32_t tbbParallelism = (std::max)(detectedConcurrency - reservedLogicalCpuCount, 1u);
     const uint32_t resolvedBackgroundThreadCount =
         backgroundThreadCount != 0 ? backgroundThreadCount : (std::clamp)(detectedConcurrency / 4u, 1u, 4u);
-    m_workerThreadCount = detectedConcurrency;
+    uint32_t resolvedShaderCompileThreadCount = (std::max)(
+        1u,
+        detectedConcurrency > reservedLogicalCpuCount + 1u
+            ? detectedConcurrency - reservedLogicalCpuCount - 1u
+            : 1u);
+    char* configured = nullptr;
+    size_t configuredLength = 0;
+    (void)_dupenv_s(&configured, &configuredLength, "BASICRENDERER_SHADER_COMPILE_THREADS");
+    if (configured && *configured) {
+        char* end = nullptr;
+        const unsigned long requested = std::strtoul(configured, &end, 10);
+        if (end != configured && requested > 0) {
+            resolvedShaderCompileThreadCount = static_cast<uint32_t>((std::min)(requested, 64ul));
+        }
+    }
+    std::free(configured);
+    m_workerThreadCount = tbbParallelism;
     m_runtimeState = std::make_unique<RuntimeState>();
     m_runtimeState->parallelismControl = std::make_unique<tbb::global_control>(
         tbb::global_control::max_allowed_parallelism,
         static_cast<size_t>(m_workerThreadCount));
     m_runtimeState->workerArena = std::make_unique<tbb::task_arena>(static_cast<int>(m_workerThreadCount));
+    const DWORD_PTR tbbWorkerAffinityMask = GetTbbWorkerAffinityMaskExcludingRenderThreadCpu();
+    if (tbbWorkerAffinityMask != 0) {
+        m_runtimeState->affinityObserver = std::make_unique<TbbWorkerAffinityObserver>(
+            *m_runtimeState->workerArena,
+            tbbWorkerAffinityMask);
+        spdlog::info("Pinned TBB worker threads to affinity mask {:#x}", tbbWorkerAffinityMask);
+    }
 
     m_ioShutdownRequested.store(false, std::memory_order_relaxed);
     m_backgroundShutdownRequested.store(false, std::memory_order_relaxed);
+    m_shaderCompileShutdownRequested.store(false, std::memory_order_relaxed);
     m_ioTasks.clear();
     m_backgroundTasks.clear();
+    m_shaderCompileTasks.clear();
     m_ioThreads.clear();
     m_backgroundThreads.clear();
+    m_shaderCompileThreads.clear();
     m_ioThreads.reserve(ioThreadCount);
     m_backgroundThreads.reserve(resolvedBackgroundThreadCount);
+    m_shaderCompileThreads.reserve(resolvedShaderCompileThreadCount);
     for (uint32_t ioThreadIndex = 0; ioThreadIndex < ioThreadCount; ++ioThreadIndex) {
         m_ioThreads.emplace_back([this]() {
             IoWorkerLoop();
@@ -92,14 +206,22 @@ void TaskSchedulerManager::Initialize(uint32_t ioThreadCount, uint32_t backgroun
             BackgroundWorkerLoop();
         });
     }
+    for (uint32_t shaderCompileThreadIndex = 0; shaderCompileThreadIndex < resolvedShaderCompileThreadCount; ++shaderCompileThreadIndex) {
+        m_shaderCompileThreads.emplace_back([this]() {
+            ShaderCompileWorkerLoop();
+        });
+    }
 
     m_initialized = true;
 
     spdlog::info(
-        "TaskSchedulerManager initialized: workerThreads={}, ioThreads={}, backgroundThreads={}",
+        "TaskSchedulerManager initialized: detectedConcurrency={}, reservedRenderThreadLogicalCpus={}, tbbMaxParallelism={}, ioThreads={}, backgroundThreads={}, shaderCompileThreads={}",
+        detectedConcurrency,
+        reservedLogicalCpuCount,
         m_workerThreadCount,
         static_cast<uint32_t>(m_ioThreads.size()),
-        static_cast<uint32_t>(m_backgroundThreads.size()));
+        static_cast<uint32_t>(m_backgroundThreads.size()),
+        static_cast<uint32_t>(m_shaderCompileThreads.size()));
 }
 
 void TaskSchedulerManager::RunIoTask(std::function<void()>&& task) {
@@ -287,6 +409,55 @@ void TaskSchedulerManager::RunBackgroundTask(std::string_view taskName, std::fun
     m_backgroundCv.notify_one();
 }
 
+void TaskSchedulerManager::QueueShaderCompileTask(std::function<void()>&& task) {
+    QueueShaderCompileTask({}, std::move(task));
+}
+
+void TaskSchedulerManager::QueueShaderCompileTask(std::string_view taskName, std::function<void()>&& task) {
+    const std::string taskNameStorage = taskName.empty()
+        ? std::string("TaskScheduler::QueueShaderCompileTask")
+        : std::string(taskName);
+
+    if (!m_initialized || m_shaderCompileThreads.empty() || g_isShaderCompileWorkerThread) {
+        const auto taskStart = std::chrono::steady_clock::now();
+        if constexpr (kEnableFineGrainedSchedulerTracing) {
+            TracyCZone(ctx, 1);
+            TracyCZoneName(ctx, taskNameStorage.c_str(), taskNameStorage.size());
+            task();
+            TracyCZoneEnd(ctx);
+        }
+        else {
+            task();
+        }
+        RecordTaskNodeForTelemetry(taskNameStorage, telemetry::CpuTaskDomain::BackgroundService, taskStart, std::chrono::steady_clock::now());
+        return;
+    }
+
+    if (m_shaderCompileShutdownRequested.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_shaderCompileMutex);
+        m_shaderCompileTasks.emplace_back([task = std::move(task), taskNameStorage]() mutable {
+            const auto taskStart = std::chrono::steady_clock::now();
+            if constexpr (kEnableFineGrainedSchedulerTracing) {
+                TracyCZone(ctx, 1);
+                TracyCZoneName(ctx, taskNameStorage.c_str(), taskNameStorage.size());
+                task();
+                TracyCZoneEnd(ctx);
+            }
+            else {
+                task();
+            }
+            RecordTaskNodeForTelemetry(taskNameStorage, telemetry::CpuTaskDomain::BackgroundService, taskStart, std::chrono::steady_clock::now());
+        });
+        PlotShaderCompileQueueDepth(m_shaderCompileTasks.size());
+    }
+
+    m_shaderCompileCv.notify_one();
+}
+
 void TaskSchedulerManager::Cleanup() {
     if (!m_initialized) {
         return;
@@ -294,8 +465,10 @@ void TaskSchedulerManager::Cleanup() {
 
     m_ioShutdownRequested.store(true, std::memory_order_release);
     m_backgroundShutdownRequested.store(true, std::memory_order_release);
+    m_shaderCompileShutdownRequested.store(true, std::memory_order_release);
     m_ioCv.notify_all();
     m_backgroundCv.notify_all();
+    m_shaderCompileCv.notify_all();
     for (std::thread& ioThread : m_ioThreads) {
         if (ioThread.joinable()) {
             ioThread.join();
@@ -304,6 +477,11 @@ void TaskSchedulerManager::Cleanup() {
     for (std::thread& backgroundThread : m_backgroundThreads) {
         if (backgroundThread.joinable()) {
             backgroundThread.join();
+        }
+    }
+    for (std::thread& shaderCompileThread : m_shaderCompileThreads) {
+        if (shaderCompileThread.joinable()) {
+            shaderCompileThread.join();
         }
     }
 
@@ -315,9 +493,14 @@ void TaskSchedulerManager::Cleanup() {
         std::lock_guard<std::mutex> lock(m_backgroundMutex);
         m_backgroundTasks.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(m_shaderCompileMutex);
+        m_shaderCompileTasks.clear();
+    }
 
     m_ioThreads.clear();
     m_backgroundThreads.clear();
+    m_shaderCompileThreads.clear();
     m_runtimeState.reset();
     m_ioRoundRobin.store(0, std::memory_order_relaxed);
     m_workerThreadCount = 0;
@@ -427,7 +610,9 @@ void TaskSchedulerManager::IoWorkerLoop() {
             PlotIoQueueDepth(m_ioTasks.size());
         }
 
+        m_ioActive.fetch_add(1, std::memory_order_acq_rel);
         task();
+        m_ioActive.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     g_isIoWorkerThread = false;
@@ -463,10 +648,50 @@ void TaskSchedulerManager::BackgroundWorkerLoop() {
             PlotBackgroundQueueDepth(m_backgroundTasks.size());
         }
 
+        m_backgroundActive.fetch_add(1, std::memory_order_acq_rel);
         task();
+        m_backgroundActive.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     g_isBackgroundWorkerThread = false;
+}
+
+void TaskSchedulerManager::ShaderCompileWorkerLoop() {
+    g_isShaderCompileWorkerThread = true;
+
+    static std::atomic<uint32_t> s_workerIdCounter = 0;
+    const uint32_t workerId = s_workerIdCounter.fetch_add(1, std::memory_order_relaxed);
+    std::array<char, 40> workerName{};
+    const int charsWritten = std::snprintf(workerName.data(), workerName.size(), "Shader Compile Worker %u", workerId);
+    if constexpr (kEnableFineGrainedSchedulerTracing) {
+        if (charsWritten > 0) {
+            TracyCSetThreadName(workerName.data());
+        }
+    }
+
+    while (!m_shaderCompileShutdownRequested.load(std::memory_order_acquire)) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(m_shaderCompileMutex);
+            m_shaderCompileCv.wait(lock, [this]() {
+                return m_shaderCompileShutdownRequested.load(std::memory_order_relaxed) || !m_shaderCompileTasks.empty();
+            });
+
+            if (m_shaderCompileShutdownRequested.load(std::memory_order_relaxed) && m_shaderCompileTasks.empty()) {
+                break;
+            }
+
+            task = std::move(m_shaderCompileTasks.front());
+            m_shaderCompileTasks.pop_front();
+            PlotShaderCompileQueueDepth(m_shaderCompileTasks.size());
+        }
+
+        m_shaderCompileActive.fetch_add(1, std::memory_order_acq_rel);
+        task();
+        m_shaderCompileActive.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    g_isShaderCompileWorkerThread = false;
 }
 
 }

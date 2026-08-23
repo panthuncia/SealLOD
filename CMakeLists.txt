@@ -3,6 +3,13 @@
 #
 cmake_minimum_required (VERSION 3.10)
 
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
+if(POLICY CMP0177)
+  cmake_policy(SET CMP0177 NEW)
+endif()
+
 foreach(_basicrenderer_cached_tool
     CMAKE_C_COMPILER
     CMAKE_CXX_COMPILER
@@ -19,11 +26,22 @@ foreach(_basicrenderer_cached_tool
   endif()
 endforeach()
 
+set(BASICRENDERER_VCPKG_ROOT "" CACHE PATH
+  "Preferred vcpkg root for BasicRenderer (takes precedence over VCPKG_ROOT)")
+
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
   set(_basicrenderer_vcpkg_toolchain "")
+  set(_basicrenderer_vcpkg_root_source "")
 
-  if(DEFINED ENV{VCPKG_ROOT})
+  if(NOT BASICRENDERER_VCPKG_ROOT STREQUAL "")
+    set(_basicrenderer_vcpkg_toolchain "${BASICRENDERER_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+    set(_basicrenderer_vcpkg_root_source "BASICRENDERER_VCPKG_ROOT")
+  elseif(DEFINED ENV{BASICRENDERER_VCPKG_ROOT} AND NOT "$ENV{BASICRENDERER_VCPKG_ROOT}" STREQUAL "")
+    set(_basicrenderer_vcpkg_toolchain "$ENV{BASICRENDERER_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+    set(_basicrenderer_vcpkg_root_source "the BASICRENDERER_VCPKG_ROOT environment variable")
+  elseif(DEFINED ENV{VCPKG_ROOT} AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
     set(_basicrenderer_vcpkg_toolchain "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+    set(_basicrenderer_vcpkg_root_source "the VCPKG_ROOT environment variable")
   endif()
 
   if(CMAKE_HOST_WIN32 AND NOT EXISTS "${_basicrenderer_vcpkg_toolchain}")
@@ -36,11 +54,12 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
   endif()
 
   if(EXISTS "${_basicrenderer_vcpkg_toolchain}")
+    message(STATUS "Using vcpkg toolchain: ${_basicrenderer_vcpkg_toolchain}")
     set(CMAKE_TOOLCHAIN_FILE "${_basicrenderer_vcpkg_toolchain}" CACHE FILEPATH "")
-  elseif(DEFINED ENV{VCPKG_ROOT})
-    message(FATAL_ERROR "VCPKG_ROOT is set, but the vcpkg toolchain file was not found at '${_basicrenderer_vcpkg_toolchain}'.")
+  elseif(NOT _basicrenderer_vcpkg_root_source STREQUAL "")
+    message(FATAL_ERROR "${_basicrenderer_vcpkg_root_source} is set, but the vcpkg toolchain file was not found at '${_basicrenderer_vcpkg_toolchain}'.")
   else()
-    message(FATAL_ERROR "Could not find vcpkg. Set VCPKG_ROOT or pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake.")
+    message(FATAL_ERROR "Could not find vcpkg. Set BASICRENDERER_VCPKG_ROOT, VCPKG_ROOT, or pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake.")
   endif()
 endif()
 
@@ -54,6 +73,36 @@ if (POLICY CMP0091)
 endif()
 
 project ("BasicRenderer")
+
+if(CMAKE_MAP_IMPORTED_CONFIG_DEBUG STREQUAL "RelWithDebInfo;Release")
+  unset(CMAKE_MAP_IMPORTED_CONFIG_DEBUG CACHE)
+endif()
+
+if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
+endif()
+
+function(basicrenderer_use_release_library_for_debug target_name)
+  if(NOT TARGET ${target_name})
+    return()
+  endif()
+
+  # vcpkg's app-local deployment searches the Debug bin directory for Debug
+  # builds.  Linking the ASan build against release fmt makes the executable
+  # import fmt.dll, while deployment provides the Debug runtime, fmtd.dll.
+  # Keep fmt's link configuration aligned with app-local deployment for ASan.
+  if(ENABLE_ADDRESS_SANITIZER AND target_name STREQUAL "fmt::fmt")
+    return()
+  endif()
+
+  set_target_properties(${target_name} PROPERTIES MAP_IMPORTED_CONFIG_DEBUG Release)
+  foreach(_basicrenderer_imported_prop IN ITEMS IMPORTED_LOCATION IMPORTED_IMPLIB)
+    get_target_property(_basicrenderer_imported_release_value ${target_name} ${_basicrenderer_imported_prop}_RELEASE)
+    if(_basicrenderer_imported_release_value)
+      set_target_properties(${target_name} PROPERTIES ${_basicrenderer_imported_prop}_DEBUG "${_basicrenderer_imported_release_value}")
+    endif()
+  endforeach()
+endfunction()
 
 if(MSVC)
   # Keep compiler debug info in .obj files (/Z7). This avoids large shared
@@ -81,6 +130,7 @@ if(MSVC)
 endif()
 
 option(BASICRHI_ENABLE_RESHAPE "Enable GPU-Reshape-backed debug instrumentation in BasicRHI" OFF)
+set(BASICRHI_ENABLE_IMGUI ON CACHE BOOL "Build ImGui instrumentation widgets required by BasicRenderer" FORCE)
 option(BASICRENDERER_BUILD_BRNIFLY "Build the GPL-separated BRNifly NIF middleware executable" ON)
 set(BASICRENDERER_VULKAN_INCLUDE_DIR "" CACHE PATH "Preferred Vulkan SDK include directory. Leave empty to auto-detect a Vulkan SDK with VK_EXT_descriptor_heap.")
 
@@ -129,7 +179,11 @@ if (WIN32)
 endif()
 
 if (MSVC)
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+  else()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+  endif()
   add_compile_definitions(_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
@@ -137,23 +191,26 @@ endif()
 
 set(_basicrenderer_clang_warning_options
   -Werror
+  -Wno-error=deprecated-declarations
+  -Wno-error=deprecated-volatile
   -Wno-unused-command-line-argument
   -Wno-unused-function
-  -Wno-error=switch
-  -Wno-error=reorder-ctor
-  -Wno-error=unused-variable
-  -Wno-error=unused-but-set-variable
-  -Wno-error=unused-private-field
-  -Wno-error=misleading-indentation
-  -Wno-error=nonportable-include-path
-  -Wno-error=inconsistent-missing-override
-  -Wno-error=format
-  -Wno-error=implicit-float-conversion
-  -Wno-error=missing-braces
-  -Wno-error=braced-scalar-init
-  -Wno-error=pessimizing-move
-  -Wno-error=self-assign-field
-  -Wno-error=unused-lambda-capture
+  -Wno-switch
+  -Wno-reorder-ctor
+  -Wno-unused-variable
+  -Wno-unused-but-set-variable
+  -Wno-unused-private-field
+  -Wno-misleading-indentation
+  -Wno-nonportable-include-path
+  -Wno-inconsistent-missing-override
+  -Wno-format
+  -Wno-implicit-float-conversion
+  -Wno-missing-braces
+  -Wno-braced-scalar-init
+  -Wno-pessimizing-move
+  -Wno-self-assign-field
+  -Wno-unused-lambda-capture
+  "-Wno-#pragma-messages"
 )
 foreach(_basicrenderer_clang_warning_option IN LISTS _basicrenderer_clang_warning_options)
   add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:Clang>>:${_basicrenderer_clang_warning_option}>)
@@ -198,6 +255,73 @@ if(NOT EXISTS "${USD_REL_DIR}")
   file(REMOVE "${USD_REL_ZIP}")
 endif()
 
+# Older TBB versions bundled with the USD artifacts use kind_type for four
+# private states, while the enum only declares the first two. Recent Clang
+# versions reject the resulting out-of-range enum constants. Extend the
+# declared range without changing the values or layout used by the prebuilt
+# TBB binaries. Newer artifacts declare the private states directly and need
+# no patch.
+function(basicrenderer_patch_usd_tbb_task_header usd_dir)
+  set(_task_header "${usd_dir}/include/tbb/task.h")
+  if(NOT EXISTS "${_task_header}")
+    return()
+  endif()
+
+  file(READ "${_task_header}" _task_header_contents)
+  if(_task_header_contents MATCHES "kind_type_max = 4" OR
+     _task_header_contents MATCHES "internal_dying")
+    return()
+  endif()
+
+  string(REGEX REPLACE
+    "enum kind_type \\{[ \t\r\n]+isolated,[ \t\r\n]+bound[ \t\r\n]+\\};"
+    "enum kind_type {\n        isolated,\n        bound,\n        kind_type_max = 4\n    };"
+    _patched_task_header_contents
+    "${_task_header_contents}"
+  )
+  if(_patched_task_header_contents STREQUAL _task_header_contents)
+    message(FATAL_ERROR "Could not apply the Clang compatibility patch to '${_task_header}'.")
+  endif()
+  file(WRITE "${_task_header}" "${_patched_task_header_contents}")
+endfunction()
+
+function(basicrenderer_patch_usd_pxr_config usd_dir)
+  set(_pxr_config "${usd_dir}/pxrConfig.cmake")
+  if(NOT EXISTS "${_pxr_config}")
+    return()
+  endif()
+
+  file(READ "${_pxr_config}" _pxr_config_contents)
+  string(FIND "${_pxr_config_contents}" "elseif(NOT TARGET TBB::tbb)" _tbb_target_guard_pos)
+  if(NOT _tbb_target_guard_pos EQUAL -1)
+    return()
+  endif()
+
+  string(REPLACE
+    "else()\n    add_library(TBB::tbb SHARED IMPORTED)"
+    "elseif(NOT TARGET TBB::tbb)\n    add_library(TBB::tbb SHARED IMPORTED)"
+    _patched_pxr_config_contents
+    "${_pxr_config_contents}"
+  )
+  if(_patched_pxr_config_contents STREQUAL _pxr_config_contents)
+    string(REPLACE
+      "else()\r\n    add_library(TBB::tbb SHARED IMPORTED)"
+      "elseif(NOT TARGET TBB::tbb)\r\n    add_library(TBB::tbb SHARED IMPORTED)"
+      _patched_pxr_config_contents
+      "${_pxr_config_contents}"
+    )
+  endif()
+  if(_patched_pxr_config_contents STREQUAL _pxr_config_contents)
+    message(FATAL_ERROR "Could not apply the existing-TBB-target compatibility patch to '${_pxr_config}'.")
+  endif()
+  file(WRITE "${_pxr_config}" "${_patched_pxr_config_contents}")
+endfunction()
+
+basicrenderer_patch_usd_tbb_task_header("${USD_DBG_DIR}")
+basicrenderer_patch_usd_tbb_task_header("${USD_REL_DIR}")
+basicrenderer_patch_usd_pxr_config("${USD_DBG_DIR}")
+basicrenderer_patch_usd_pxr_config("${USD_REL_DIR}")
+
 # Include sub-projects.
 if(NOT BASICRENDERER_USD_VARIANT)
   if(CMAKE_CONFIGURATION_TYPES)
@@ -228,15 +352,25 @@ if(BASICRHI_ENABLE_RESHAPE)
   set(ENABLE_NUGET_RESTORE OFF CACHE BOOL "" FORCE)
   set(ENABLE_X86_BOOTSTRAPPER OFF CACHE BOOL "" FORCE)
   set(ENABLE_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+  set(GPU_RESHAPE_DISABLE_VISUAL_STUDIO_COMMAND_WRAPPERS ON CACHE BOOL "" FORCE)
 
   add_subdirectory("GPU-Reshape" EXCLUDE_FROM_ALL)
 endif()
 
 add_subdirectory("ThirdParty")
 add_subdirectory("BasicRHI")
+set(ORG_MODULE_SERVICES_ENABLE_DXC ON CACHE BOOL "" FORCE)
+set(ORG_MODULE_SERVICES_ENABLE_VULKAN ${BASICRHI_ENABLE_VULKAN} CACHE BOOL "" FORCE)
+set(ORG_MODULE_SERVICES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory("ORGModuleServices")
+if(NOT TARGET BasicTelemetry::Core)
+  add_subdirectory("BasicTelemetry")
+endif()
 add_subdirectory("OpenRenderGraph")
 add_subdirectory("BasicScene")
 add_subdirectory ("BasicRenderer")
+add_subdirectory("Plugins/ProceduralWind")
+
 add_subdirectory("CLodCacheTool")
 if(BASICRENDERER_BUILD_BRNIFLY)
   add_subdirectory("BRNifly")

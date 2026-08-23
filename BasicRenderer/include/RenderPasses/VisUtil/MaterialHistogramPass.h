@@ -42,14 +42,19 @@ public:
         b->WithShaderResource(Builtin::PrimaryCamera::VisibilityTexture,
                               //Builtin::PrimaryCamera::VisibleClusterTable,
                               Builtin::PerMeshInstanceBuffer,
+                              Builtin::InstanceDrawRecordBuffer,
                               Builtin::PerMeshBuffer,
-                                                            Builtin::PerMaterialDataBuffer,
-                                                            Builtin::Material::TextureGroup)
+                              Builtin::PerMaterialDataBuffer)
          .WithUnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer");
 		b->WithConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     void Setup() override {
+        RefreshResourcePointers();
+        RefreshDescriptorIndices();
+    }
+
+    void RefreshResourcePointers() {
         std::vector<GloballyIndexedResource*> visibleClusterResources;
         m_visibleClustersQuery.each([&](flecs::entity e) {
             auto& res = e.get<Components::Resource>();
@@ -65,7 +70,8 @@ public:
             throw std::runtime_error("BuildPixelListPass: Expected exactly one visible cluster buffer resource.");
         }
 
-        m_visibleClusterBufferSRVIndex = visibleClusterResources[0]->GetSRVInfo(0).slot.index;
+        m_visibleClusterResource = visibleClusterResources[0];
+        m_reyesDiceQueueResource = nullptr;
         m_reyesDiceQueueBufferSRVIndex = 0xFFFFFFFFu;
 
         std::vector<GloballyIndexedResource*> reyesDiceQueueResources;
@@ -77,8 +83,17 @@ public:
             }
             });
         if (reyesDiceQueueResources.size() == 1) {
-            m_reyesDiceQueueBufferSRVIndex = reyesDiceQueueResources[0]->GetSRVInfo(0).slot.index;
+            m_reyesDiceQueueResource = reyesDiceQueueResources[0];
         }
+    }
+
+    void RefreshDescriptorIndices() {
+        if (m_visibleClusterResource) {
+            m_visibleClusterBufferSRVIndex = m_visibleClusterResource->GetSRVInfo(0).slot.index;
+        }
+        m_reyesDiceQueueBufferSRVIndex = m_reyesDiceQueueResource
+            ? m_reyesDiceQueueResource->GetSRVInfo(0).slot.index
+            : 0xFFFFFFFFu;
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {
@@ -91,13 +106,16 @@ public:
         cl.BindLayout(pm.GetComputeRootSignature().GetHandle());
         cl.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
         BindResourceDescriptorIndices(cl, m_pso.GetResourceDescriptorSlots());
+        RefreshDescriptorIndices();
 
         // Set per-pass root constants
         unsigned int miscRootConstants[NumMiscUintRootConstants] = {};
         miscRootConstants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClusterBufferSRVIndex;
         miscRootConstants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = m_reyesDiceQueueBufferSRVIndex;
         miscRootConstants[VISBUF_REYES_PATCH_INDEX_BASE] = m_patchVisibilityIndexBase;
-        miscRootConstants[VISBUF_VOXEL_MATERIAL_BIN_INDEX] = ctx.materialManager->GetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel);
+        unsigned int voxelMaterialBin = 0xFFFFFFFFu;
+        ctx.materialManager->TryGetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel, voxelMaterialBin);
+        miscRootConstants[VISBUF_VOXEL_MATERIAL_BIN_INDEX] = voxelMaterialBin;
         cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, miscRootConstants);
 
         const uint32_t groupSizeX = 8, groupSizeY = 8;
@@ -116,6 +134,8 @@ private:
     PipelineState m_pso;
 	flecs::query<> m_visibleClustersQuery;
     flecs::query<> m_reyesDiceQueueQuery;
+    GloballyIndexedResource* m_visibleClusterResource = nullptr;
+    GloballyIndexedResource* m_reyesDiceQueueResource = nullptr;
     uint32_t m_visibleClusterBufferSRVIndex = 0;
     uint32_t m_reyesDiceQueueBufferSRVIndex = 0xFFFFFFFFu;
     uint32_t m_patchVisibilityIndexBase = 0u;

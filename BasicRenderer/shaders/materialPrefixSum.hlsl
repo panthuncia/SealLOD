@@ -40,8 +40,8 @@ void ExclusiveScanBlock(uint Nblock, uint threadId)
     // Upsweep (build sums) on range [0..P-1]
     for (uint stride = 1; stride < P; stride <<= 1)
     {
-        uint idx = (threadId + 1) * (stride << 1) - 1;
-        if (idx < P)
+        uint step = stride << 1;
+        for (uint idx = (threadId + 1) * step - 1; idx < P; idx += THREADS * step)
         {
             s_scan[idx] += s_scan[idx - stride];
         }
@@ -58,8 +58,8 @@ void ExclusiveScanBlock(uint Nblock, uint threadId)
     // Downsweep on range [0..P-1]
     for (uint stride = (P >> 1); stride >= 1; stride >>= 1)
     {
-        uint idx = (threadId + 1) * (stride << 1) - 1;
-        if (idx < P)
+        uint step = stride << 1;
+        for (uint idx = (threadId + 1) * step - 1; idx < P; idx += THREADS * step)
         {
             uint t = s_scan[idx - stride];
             s_scan[idx - stride] = s_scan[idx];
@@ -200,5 +200,102 @@ void BlockOffsetsCS(uint3 groupThreadId : SV_GroupThreadID,
         // s_data still holds original blockSums; s_scan holds their exclusive scan.
         uint total = s_scan[B - 1] + s_data[B - 1];
         totalOut[0] = total;
+    }
+}
+
+[numthreads(THREADS, 1, 1)]
+void TerrainRegionBlockScanCS(uint3 groupThreadId : SV_GroupThreadID,
+                              uint3 groupId : SV_GroupID)
+{
+    StructuredBuffer<uint> counts = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionPixelCountBuffer)];
+    RWStructuredBuffer<uint> offsets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionOffsetBuffer)];
+    RWStructuredBuffer<uint> blockSums = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionBlockSumsBuffer)];
+
+    uint N = UintRootConstant0;
+    uint blockId = groupId.x;
+    uint localTid = groupThreadId.x;
+    uint base = blockId * K;
+
+    for (uint i = localTid; i < K; i += THREADS)
+    {
+        uint globalIdx = base + i;
+        s_data[i] = (globalIdx < N) ? counts[globalIdx] : 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint Nblock = 0;
+    if (N > base)
+        Nblock = min(K, N - base);
+
+    ExclusiveScanBlock(Nblock, localTid);
+
+    for (uint i = localTid; i < Nblock; i += THREADS)
+    {
+        offsets[base + i] = s_scan[i];
+    }
+
+    uint localSum = 0;
+    for (uint i = localTid; i < Nblock; i += THREADS)
+    {
+        localSum += s_data[i];
+    }
+
+    if (localTid == 0)
+        s_blockSum = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    InterlockedAdd(s_blockSum, localSum);
+    GroupMemoryBarrierWithGroupSync();
+
+    if (localTid == 0)
+    {
+        uint numBlocks = (N + K - 1) / K;
+        if (blockId < numBlocks)
+        {
+            blockSums[blockId] = s_blockSum;
+        }
+    }
+}
+
+[numthreads(THREADS, 1, 1)]
+void TerrainRegionBlockOffsetsCS(uint3 groupThreadId : SV_GroupThreadID,
+                                 uint3 groupId : SV_GroupID)
+{
+    if (groupId.x != 0 || groupId.y != 0 || groupId.z != 0)
+        return;
+
+    StructuredBuffer<uint> counts = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionPixelCountBuffer)];
+    RWStructuredBuffer<uint> offsets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionOffsetBuffer)];
+    StructuredBuffer<uint> blockSums = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionBlockSumsBuffer)];
+    RWStructuredBuffer<uint> scannedBlockSums = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionScannedBlockSumsBuffer)];
+    RWStructuredBuffer<uint> totalOut = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionTotalPixelCountBuffer)];
+
+    uint N = UintRootConstant0;
+    uint B = UintRootConstant1;
+    uint localTid = groupThreadId.x;
+
+    for (uint i = localTid; i < B; i += THREADS)
+    {
+        s_data[i] = blockSums[i];
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    ExclusiveScanBlock(B, localTid);
+
+    for (uint i = localTid; i < B; i += THREADS)
+    {
+        scannedBlockSums[i] = s_scan[i];
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint elem = localTid; elem < N; elem += THREADS)
+    {
+        uint blockId = elem / K;
+        offsets[elem] += s_scan[blockId];
+    }
+
+    if (localTid == 0 && B > 0)
+    {
+        totalOut[0] = s_scan[B - 1] + s_data[B - 1];
     }
 }

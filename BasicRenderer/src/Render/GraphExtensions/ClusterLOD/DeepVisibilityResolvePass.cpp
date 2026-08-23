@@ -1,8 +1,11 @@
 #include "Render/GraphExtensions/ClusterLOD/DeepVisibilityResolvePass.h"
 
+#include <bit>
+
 #include "Managers/Singletons/PSOManager.h"
 #include "Managers/Singletons/SettingsManager.h"
 #include "Managers/ViewManager.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
@@ -47,9 +50,10 @@ void DeepVisibilityResolvePass::DeclareResourceUsages(ComputePassBuilder* builde
             Builtin::NormalMatrixBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::Environment::PrefilteredCubemapsGroup,
             Builtin::Environment::InfoBuffer,
@@ -61,10 +65,18 @@ void DeepVisibilityResolvePass::DeclareResourceUsages(ComputePassBuilder* builde
             Builtin::Light::DirectionalLightCascadeBuffer,
             Builtin::Light::ClusterBuffer,
             Builtin::Light::PagesBuffer,
+            Builtin::OpenPBR::FuzzLTC,
+            Builtin::OpenPBR::IdealMetalEnergyComplement,
+            Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
+            Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
+            Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
             Builtin::CLod::Offsets,
             Builtin::CLod::GroupChunks,
             Builtin::CLod::Groups,
             Builtin::CLod::MeshMetadata,
+            Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo,
@@ -82,6 +94,7 @@ void DeepVisibilityResolvePass::DeclareResourceUsages(ComputePassBuilder* builde
         builder->WithShaderResource(
             Builtin::Shadows::CLodClipmapInfo,
             Builtin::Shadows::CLodDirectionalPageViewInfo,
+            Builtin::Shadows::CLodPageMetadata,
             Builtin::Shadows::CLodPageTable,
             Builtin::Shadows::CLodPhysicalPages,
 		    Builtin::Shadows::CLodCompactMainCamera,
@@ -108,6 +121,7 @@ void DeepVisibilityResolvePass::DeclareResourceUsages(ComputePassBuilder* builde
 
 void DeepVisibilityResolvePass::Setup()
 {
+    RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
     if (m_getShadowsEnabled && m_getShadowsEnabled()) {
         RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
     }
@@ -176,6 +190,10 @@ PassReturn DeepVisibilityResolvePass::Execute(PassExecutionContext& executionCon
     misc[VISBUF_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = m_reyesTessTableTrianglesBuffer
         ? m_reyesTessTableTrianglesBuffer->GetSRVInfo(0).slot.index
         : 0xFFFFFFFFu;
+    misc[VISBUF_REYES_USE_NORMAL_MAPS] = CLodReyesUseNormalMaps() ? 1u : 0u;
+    misc[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(CLodReyesTerrainNormalBlend());
+    misc[VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS] = CLodReyesTerrainNormalMipBias();
+    misc[VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT] = std::bit_cast<uint32_t>(CLodReyesObjectNormalMapBlend());
     commandList.PushConstants(
         rhi::ShaderStage::Compute,
         0,

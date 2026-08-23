@@ -1,9 +1,11 @@
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapDeduplicatePredictedPagesPass.h"
 
+#include "BuiltinResources.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
+#include "Resources/PixelBuffer.h"
 
 #include "../shaders/PerPassRootConstants/clodVirtualShadowDeduplicatePredictedPagesRootConstants.h"
 
@@ -12,12 +14,22 @@ VirtualShadowMapDeduplicatePredictedPagesPass::VirtualShadowMapDeduplicatePredic
     std::shared_ptr<Buffer> predictiveRawPageCountBuffer,
     std::shared_ptr<Buffer> predictedScratchBitsetBuffer,
     std::shared_ptr<Buffer> predictedPagesBuffer,
-    std::shared_ptr<Buffer> predictedPageCountBuffer)
+    std::shared_ptr<Buffer> predictedPageCountBuffer,
+    std::shared_ptr<Buffer> statsBuffer,
+    std::shared_ptr<PixelBuffer> pageTableTexture,
+    std::shared_ptr<Buffer> pageMetadataBuffer,
+    std::shared_ptr<Buffer> dirtyFlagsBuffer,
+    uint32_t physicalPageCount)
     : m_predictiveRawPagesBuffer(std::move(predictiveRawPagesBuffer))
     , m_predictiveRawPageCountBuffer(std::move(predictiveRawPageCountBuffer))
     , m_predictedScratchBitsetBuffer(std::move(predictedScratchBitsetBuffer))
     , m_predictedPagesBuffer(std::move(predictedPagesBuffer))
     , m_predictedPageCountBuffer(std::move(predictedPageCountBuffer))
+    , m_statsBuffer(std::move(statsBuffer))
+    , m_pageTableTexture(std::move(pageTableTexture))
+    , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
+    , m_dirtyFlagsBuffer(std::move(dirtyFlagsBuffer))
+    , m_physicalPageCount(physicalPageCount)
 {
     m_clearStatePso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
@@ -39,10 +51,15 @@ void VirtualShadowMapDeduplicatePredictedPagesPass::DeclareResourceUsages(Comput
     builder->WithShaderResource(
             m_predictiveRawPagesBuffer,
             m_predictiveRawPageCountBuffer)
+        .WithConstantBuffer(Builtin::PerFrameBuffer)
         .WithUnorderedAccess(
             m_predictedScratchBitsetBuffer,
             m_predictedPagesBuffer,
-            m_predictedPageCountBuffer);
+            m_predictedPageCountBuffer,
+            m_statsBuffer,
+            m_pageTableTexture,
+            m_pageMetadataBuffer,
+            m_dirtyFlagsBuffer);
 }
 
 void VirtualShadowMapDeduplicatePredictedPagesPass::Setup() {}
@@ -64,6 +81,15 @@ PassReturn VirtualShadowMapDeduplicatePredictedPagesPass::Execute(PassExecutionC
     rootConstants[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_SCRATCH_BITSET_DESCRIPTOR_INDEX] = m_predictedScratchBitsetBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_OUTPUT_PAGES_DESCRIPTOR_INDEX] = m_predictedPagesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_OUTPUT_PAGE_COUNT_DESCRIPTOR_INDEX] = m_predictedPageCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PAGE_TABLE_DESCRIPTOR_INDEX] =
+        m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PAGE_METADATA_DESCRIPTOR_INDEX] =
+        m_pageMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] =
+        m_dirtyFlagsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PHYSICAL_PAGE_COUNT] =
+        m_physicalPageCount;
 
     commandList.BindPipeline(m_clearStatePso.GetAPIPipelineState().GetHandle());
     commandList.PushConstants(
@@ -75,7 +101,7 @@ PassReturn VirtualShadowMapDeduplicatePredictedPagesPass::Execute(PassExecutionC
         rootConstants);
 
     constexpr uint32_t kThreadsPerGroup = 64u;
-    commandList.Dispatch((CLodVirtualShadowPredictedPageBitsetWordCount() + kThreadsPerGroup - 1u) / kThreadsPerGroup, 1u, 1u);
+    commandList.Dispatch((CLodVirtualShadowFallbackDependencyHashCapacity + kThreadsPerGroup - 1u) / kThreadsPerGroup, 1u, 1u);
 
     rhi::GlobalBarrier globalBarrier{};
     globalBarrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
@@ -96,6 +122,7 @@ PassReturn VirtualShadowMapDeduplicatePredictedPagesPass::Execute(PassExecutionC
         NumMiscUintRootConstants,
         rootConstants);
     commandList.Dispatch((CLodVirtualShadowPredictiveRawPageCapacity + kThreadsPerGroup - 1u) / kThreadsPerGroup, 1u, 1u);
+    commandList.Barriers(barrierBatch);
 
     return {};
 }

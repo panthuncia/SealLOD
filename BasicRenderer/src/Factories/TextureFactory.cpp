@@ -21,6 +21,7 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
 #include "Managers/Singletons/DeviceManager.h"
+#include "Managers/MaterialTextureTransferService.h"
 #include "Utilities/Utilities.h"
 
 #define A_CPU
@@ -99,6 +100,15 @@ namespace {
                 }
 #endif
 
+                const bool blockCompressed = rhi::helpers::IsBlockCompressed(desc.format);
+
+                if (blockCompressed) {
+                    out.pData = imageData;
+                    out.rowPitch = static_cast<uint32_t>(storedRowPitch);
+                    out.slicePitch = static_cast<uint32_t>(storedSlicePitch);
+                    continue;
+                }
+
                 uint32_t channels = desc.channels;
 
                 // Pick a width/height that makes "raw tightly packed" match the stored pitches, if possible.
@@ -148,7 +158,7 @@ namespace {
         auto device = DeviceManager::GetInstance().GetDevice();
 
         TEXTURE_UPLOAD_SUBRESOURCES(
-            rg::runtime::UploadTarget::FromShared(dstTexture),
+            org::runtime::UploadTarget::FromShared(dstTexture),
             desc.format,
             baseW,
             baseH,
@@ -671,7 +681,8 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
     TextureInitialData initialData,
     std::string_view debugName,
     bool preserveAlphaCoverage,
-    bool forceSrgbMipEncoding)
+    bool forceSrgbMipEncoding,
+    uint32_t maxMipLevels)
     const {
     if (initialData.Empty()) {
         throw std::runtime_error("CreateAlwaysResidentPixelBuffer: initialData is empty. Use PixelBuffer::CreateShared for data-less textures.");
@@ -685,7 +696,6 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
 
     const uint32_t baseW = desc.imageDimensions[0].width;
     const uint32_t baseH = desc.imageDimensions[0].height;
-
     const bool doMipmapping = desc.generateMipMaps && !rhi::helpers::IsBlockCompressed(desc.format); // TODO: BC mip gen
     preserveAlphaCoverage = preserveAlphaCoverage
         && doMipmapping
@@ -699,7 +709,10 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
         // Build full imageDimensions for *all* subresources so UploadTextureData can compute pitches safely.
         const uint32_t faces = desc.isCubemap ? 6u : 1u;
         const uint32_t slices = faces * uint32_t(desc.arraySize);
-        const uint32_t mipLevels = CalcMipCount(baseW, baseH);
+        const uint32_t fullMipLevels = CalcMipCount(baseW, baseH);
+        const uint32_t mipLevels = maxMipLevels == 0u
+            ? fullMipLevels
+            : (std::min)(fullMipLevels, maxMipLevels);
 
         desc.imageDimensions.resize(size_t(slices) * mipLevels);
         for (uint32_t s = 0; s < slices; ++s) {
@@ -755,7 +768,7 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
     return pb;
 }
 
-void TextureFactory::SetReadbackService(rg::runtime::IReadbackService* readbackService)
+void TextureFactory::SetReadbackService(org::runtime::IReadbackService* readbackService)
 {
     std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass)->SetReadbackService(readbackService);
 }
@@ -764,6 +777,8 @@ bool TextureFactory::SubmitBC7CompressionJob(
     const std::shared_ptr<TextureProcessingJobHandle>& handle,
     std::string_view debugName) const
 {
+    constexpr uint32_t MaxBC7CompressionJobsInFlight = 4u;
+
     if (!handle) {
         return false;
     }
@@ -796,6 +811,21 @@ bool TextureFactory::SubmitBC7CompressionJob(
         return false;
     }
 
+    uint32_t inFlightJobs = m_bc7InFlightJobs->load(std::memory_order_acquire);
+    while (inFlightJobs < MaxBC7CompressionJobsInFlight &&
+        !m_bc7InFlightJobs->compare_exchange_weak(
+            inFlightJobs,
+            inFlightJobs + 1u,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+    }
+    if (inFlightJobs >= MaxBC7CompressionJobsInFlight) {
+        return false;
+    }
+
+    auto job = std::make_shared<BC7CompressionJob>();
+    job->inFlightCounter = m_bc7InFlightJobs;
+
     const bool preserveAlphaCoverage = ShouldPreserveAlphaCoverage(requestMeta, preparedSourceData->desc);
     const uint32_t preparedMipLevels = GetTextureMipLevelCount(preparedSourceData->desc);
 
@@ -810,10 +840,16 @@ bool TextureFactory::SubmitBC7CompressionJob(
         TextureInitialData::FromBytes(preparedSourceData->subresources),
         jobName.empty() ? std::string_view("Texture[BC7Working]") : std::string_view(jobName),
         preserveAlphaCoverage,
-        requestMeta.preferSRGB);
+        requestMeta.preferSRGB,
+        requestMeta.processing.maxMipLevels);
 
+    const uint32_t fullGeneratedMipLevels = CalcMipCount(
+        preparedSourceData->desc.imageDimensions[0].width,
+        preparedSourceData->desc.imageDimensions[0].height);
     const uint32_t generatedMipLevels = workingDesc.generateMipMaps
-        ? CalcMipCount(preparedSourceData->desc.imageDimensions[0].width, preparedSourceData->desc.imageDimensions[0].height)
+        ? (requestMeta.processing.maxMipLevels == 0u
+            ? fullGeneratedMipLevels
+            : (std::min)(fullGeneratedMipLevels, requestMeta.processing.maxMipLevels))
         : preparedMipLevels;
     if (workingTexture->GetMipLevels() != generatedMipLevels) {
         spdlog::error(
@@ -824,11 +860,14 @@ bool TextureFactory::SubmitBC7CompressionJob(
         return false;
     }
 
-    const uint32_t compressedMipLevels = preserveAlphaCoverage && requestMeta.processing.requestMipChain
+    const uint32_t requestedCompressedMipLevels = preserveAlphaCoverage && requestMeta.processing.requestMipChain
         ? CalcAlphaCoverageExportMipCount(
             preparedSourceData->desc.imageDimensions[0].width,
             preparedSourceData->desc.imageDimensions[0].height)
         : generatedMipLevels;
+    const uint32_t compressedMipLevels = requestMeta.processing.maxMipLevels == 0u
+        ? requestedCompressedMipLevels
+        : (std::min)(requestedCompressedMipLevels, requestMeta.processing.maxMipLevels);
 
     TextureSourceData compressionLayoutSource = *preparedSourceData;
     if (compressionLayoutSource.desc.imageDimensions.size() != compressedMipLevels) {
@@ -866,7 +905,6 @@ bool TextureFactory::SubmitBC7CompressionJob(
         true,
         jobName.empty() ? std::string_view("Texture[BC7Blocks]") : std::string_view(jobName + "[BC7Blocks]"));
 
-    auto job = std::make_shared<BC7CompressionJob>();
     job->debugName = jobName;
     job->handle = handle;
     job->workingTexture = std::move(workingTexture);
@@ -1151,6 +1189,7 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<PixelBuffe
 
 void TextureFactory::MipmappingPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
+    m_declaredResourcesChanged = false;
     if (m_pending.empty()) return;
 
     builder->WithShaderResource(m_pMipConstants);
@@ -1313,6 +1352,7 @@ void TextureFactory::BC7CompressionPass::EnqueueJob(const std::shared_ptr<BC7Com
         return;
     }
 
+    std::scoped_lock lock(m_pendingMutex);
     m_pending.push_back(job);
     m_declaredResourcesChanged = true;
 }
@@ -1345,12 +1385,19 @@ PipelineState& TextureFactory::BC7CompressionPass::GetOrCreatePipeline()
 
 void TextureFactory::BC7CompressionPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
+    std::scoped_lock lock(m_pendingMutex);
+    m_declaredResourcesChanged.store(false, std::memory_order_release);
     if (m_pending.empty()) {
         return;
     }
 
     for (const auto& job : m_pending) {
         if (!job || !job->workingTexture || !job->blockBuffer) {
+            continue;
+        }
+        const auto stage = job->stage.load(std::memory_order_acquire);
+        if (stage != BC7CompressionJob::Stage::WaitingForSourceUpload &&
+            stage != BC7CompressionJob::Stage::ReadyForCompression) {
             continue;
         }
 
@@ -1363,6 +1410,7 @@ void TextureFactory::BC7CompressionPass::DeclareResourceUsages(ComputePassBuilde
 
 PassReturn TextureFactory::BC7CompressionPass::Execute(PassExecutionContext& executionContext)
 {
+    std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) {
         return {};
     }
@@ -1378,8 +1426,33 @@ PassReturn TextureFactory::BC7CompressionPass::Execute(PassExecutionContext& exe
     commandList.BindLayout(psoManager.GetComputeRootSignature().GetHandle());
     commandList.BindPipeline(GetOrCreatePipeline().GetAPIPipelineState().GetHandle());
 
+    std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
+    waiting.reserve(m_pending.size());
     for (const auto& job : m_pending) {
         if (!job || !job->workingTexture || !job->blockBuffer) {
+            continue;
+        }
+
+        const auto stage = job->stage.load(std::memory_order_acquire);
+        if (stage == BC7CompressionJob::Stage::WaitingForSourceUpload) {
+            // Upload work can arrive after the upload pass captured its
+            // dynamic declarations. Keep the source declared as an SRV and
+            // wait one full frames-in-flight cycle before sampling it.
+            const uint32_t remaining = job->sourceUploadWaitExecutions.fetch_sub(1u, std::memory_order_acq_rel);
+            if (remaining > 1u) {
+                waiting.push_back(job);
+                continue;
+            }
+            job->stage.store(BC7CompressionJob::Stage::ReadyForCompression, std::memory_order_release);
+            job->stageFrameIndex.store(executionContext.frameIndex, std::memory_order_release);
+            waiting.push_back(job);
+            continue;
+        }
+        if (stage != BC7CompressionJob::Stage::ReadyForCompression) {
+            continue;
+        }
+        if (job->stageFrameIndex.load(std::memory_order_acquire) == executionContext.frameIndex) {
+            waiting.push_back(job);
             continue;
         }
 
@@ -1406,9 +1479,11 @@ PassReturn TextureFactory::BC7CompressionPass::Execute(PassExecutionContext& exe
             const uint32_t dispatchY = (blocksY + 7u) / 8u;
             commandList.Dispatch(dispatchX, dispatchY, 1);
         }
+        job->stageFrameIndex.store(executionContext.frameIndex, std::memory_order_release);
+        job->stage.store(BC7CompressionJob::Stage::CompressionRecorded, std::memory_order_release);
     }
 
-    m_pending.clear();
+    m_pending = std::move(waiting);
     m_declaredResourcesChanged = true;
     return {};
 }
@@ -1427,6 +1502,7 @@ void TextureFactory::BC7CompressionCopyPass::EnqueueJob(const std::shared_ptr<BC
         return;
     }
 
+    std::scoped_lock lock(m_pendingMutex);
     m_pending.push_back(job);
     m_declaredResourcesChanged = true;
 }
@@ -1438,12 +1514,17 @@ void TextureFactory::BC7CompressionCopyPass::Update(const UpdateExecutionContext
 
 void TextureFactory::BC7CompressionCopyPass::DeclareResourceUsages(RenderPassBuilder* builder)
 {
+    std::scoped_lock lock(m_pendingMutex);
+    m_declaredResourcesChanged.store(false, std::memory_order_release);
     if (m_pending.empty()) {
         return;
     }
 
     for (const auto& job : m_pending) {
         if (!job || !job->blockBuffer || !job->compressedTexture) {
+            continue;
+        }
+        if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CompressionRecorded) {
             continue;
         }
 
@@ -1454,8 +1535,22 @@ void TextureFactory::BC7CompressionCopyPass::DeclareResourceUsages(RenderPassBui
 
 void TextureFactory::BC7CompressionCopyPass::RecordImmediateCommands(ImmediateExecutionContext& context)
 {
+    std::scoped_lock lock(m_pendingMutex);
+    if (m_pending.empty()) {
+        return;
+    }
+    std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
+    waiting.reserve(m_pending.size());
     for (const auto& job : m_pending) {
         if (!job || !job->blockBuffer || !job->compressedTexture) {
+            continue;
+        }
+        if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CompressionRecorded) {
+            waiting.push_back(job);
+            continue;
+        }
+        if (job->stageFrameIndex.load(std::memory_order_acquire) == context.frameIndex) {
+            waiting.push_back(job);
             continue;
         }
 
@@ -1470,9 +1565,11 @@ void TextureFactory::BC7CompressionCopyPass::RecordImmediateCommands(ImmediateEx
                 0,
                 0);
         }
+        job->stageFrameIndex.store(context.frameIndex, std::memory_order_release);
+        job->stage.store(BC7CompressionJob::Stage::CopyRecorded, std::memory_order_release);
     }
 
-    m_pending.clear();
+    m_pending = std::move(waiting);
     m_declaredResourcesChanged = true;
 }
 
@@ -1484,7 +1581,7 @@ void TextureFactory::BC7CompressionReadbackPass::Setup()
 {
 }
 
-void TextureFactory::BC7CompressionReadbackPass::SetReadbackService(rg::runtime::IReadbackService* readbackService)
+void TextureFactory::BC7CompressionReadbackPass::SetReadbackService(org::runtime::IReadbackService* readbackService)
 {
     m_readbackService = readbackService;
 }
@@ -1495,6 +1592,7 @@ void TextureFactory::BC7CompressionReadbackPass::EnqueueJob(const std::shared_pt
         return;
     }
 
+    std::scoped_lock lock(m_pendingMutex);
     m_pending.push_back(job);
     m_declaredResourcesChanged = true;
 }
@@ -1506,6 +1604,8 @@ void TextureFactory::BC7CompressionReadbackPass::Update(const UpdateExecutionCon
 
 void TextureFactory::BC7CompressionReadbackPass::DeclareResourceUsages(CopyPassBuilder* builder)
 {
+    std::scoped_lock lock(m_pendingMutex);
+    m_declaredResourcesChanged.store(false, std::memory_order_release);
     if (m_pending.empty()) {
         return;
     }
@@ -1515,6 +1615,9 @@ void TextureFactory::BC7CompressionReadbackPass::DeclareResourceUsages(CopyPassB
         if (!job || !job->compressedTexture) {
             continue;
         }
+        if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CopyRecorded) {
+            continue;
+        }
 
         builder->WithCopySource(job->compressedTexture);
     }
@@ -1522,6 +1625,10 @@ void TextureFactory::BC7CompressionReadbackPass::DeclareResourceUsages(CopyPassB
 
 void TextureFactory::BC7CompressionReadbackPass::RecordImmediateCommands(ImmediateExecutionContext& context)
 {
+    std::scoped_lock lock(m_pendingMutex);
+    if (m_pending.empty()) {
+        return;
+    }
     if (!m_readbackService) {
         for (const auto& job : m_pending) {
             if (!job || !job->handle) {
@@ -1537,8 +1644,18 @@ void TextureFactory::BC7CompressionReadbackPass::RecordImmediateCommands(Immedia
         return;
     }
 
+    std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
+    waiting.reserve(m_pending.size());
     for (const auto& job : m_pending) {
         if (!job || !job->compressedTexture || !job->handle) {
+            continue;
+        }
+        if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CopyRecorded) {
+            waiting.push_back(job);
+            continue;
+        }
+        if (job->stageFrameIndex.load(std::memory_order_acquire) == context.frameIndex) {
+            waiting.push_back(job);
             continue;
         }
 
@@ -1615,25 +1732,36 @@ void TextureFactory::BC7CompressionReadbackPass::RecordImmediateCommands(Immedia
 
         const auto token = m_readbackService->EnqueueCapture(std::move(request));
         m_pendingCaptureIds.push_back(token.id);
+        job->stageFrameIndex.store(context.frameIndex, std::memory_order_release);
+        job->stage.store(BC7CompressionJob::Stage::ReadbackRecorded, std::memory_order_release);
         TextureProcessingManager::GetInstance().MarkGpuJobReadbackPending(job->handle);
     }
 
-    m_pending.clear();
+    m_pending = std::move(waiting);
     m_declaredResourcesChanged = true;
 }
 
 PassReturn TextureFactory::BC7CompressionReadbackPass::Execute(PassExecutionContext& context)
 {
+    std::scoped_lock lock(m_pendingMutex);
     if (!m_readbackService || m_pendingCaptureIds.empty()) {
         return {};
     }
 
+    // Frames can submit out of CPU order, so a pass-wide monotonically
+    // increasing external fence can be signaled out of order. Give each
+    // recorded batch its own timeline; the readback request owns it until the
+    // callback completes, preventing timeline-slot reuse while it is pending.
     auto signalFenceOwner = std::make_shared<rhi::TimelinePtr>();
     context.device.CreateTimeline(*signalFenceOwner);
     const rhi::Timeline signalFence = signalFenceOwner->Get();
     constexpr uint64_t fenceValue = 1;
     for (uint64_t captureId : m_pendingCaptureIds) {
-        m_readbackService->FinalizeCapture(rg::runtime::ReadbackCaptureToken{ captureId }, QueueKind::Copy, signalFenceOwner, fenceValue);
+        m_readbackService->FinalizeCapture(
+            org::runtime::ReadbackCaptureToken{ captureId },
+            QueueKind::Copy,
+            signalFenceOwner,
+            fenceValue);
     }
 
     m_pendingCaptureIds.clear();
@@ -1642,4 +1770,42 @@ PassReturn TextureFactory::BC7CompressionReadbackPass::Execute(PassExecutionCont
 
 void TextureFactory::BC7CompressionReadbackPass::Cleanup()
 {
+}
+
+std::shared_ptr<PixelBuffer> TextureFactory::CreateMaterialResidentPixelBuffer(
+	TextureDescription desc,
+	TextureInitialData initialData,
+	std::string_view debugName,
+	uint32_t maxMipLevels) const
+{
+	if (!m_materialTextureTransferService) {
+		throw std::runtime_error("material texture transfer service is not initialized");
+	}
+	if (initialData.Empty() || desc.imageDimensions.empty() || desc.channels == 0) {
+		throw std::runtime_error("CreateMaterialResidentPixelBuffer received incomplete texture data");
+	}
+
+	const uint32_t slices = (desc.isCubemap ? 6u : 1u) * (std::max)(1u, desc.arraySize);
+	const uint32_t sourceMipLevels = GetTextureMipLevelCount(desc);
+	if (desc.generateMipMaps && !rhi::helpers::IsBlockCompressed(desc.format) &&
+		slices == 1u && sourceMipLevels == 1u && initialData.subresources.size() == 1u) {
+		uint32_t mipLevels = CalcMipCount(desc.imageDimensions[0].width, desc.imageDimensions[0].height);
+		if (maxMipLevels != 0u) mipLevels = (std::min)(mipLevels, maxMipLevels);
+		initialData.subresources = BuildMipChain2D(
+			initialData.subresources.front(),
+			desc.imageDimensions[0].width,
+			desc.imageDimensions[0].height,
+			desc.channels,
+			mipLevels,
+			rhi::helpers::IsSRGB(desc.format));
+		ResizeDescriptionMipChain(desc, mipLevels);
+	}
+	desc.generateMipMaps = false;
+	desc.hasUAV = false;
+	desc.hasNonShaderVisibleUAV = false;
+	desc.initialLayout = rhi::ResourceLayout::Common;
+	auto image = PixelBuffer::CreateShared(desc);
+	if (!debugName.empty()) image->SetName(std::string(debugName));
+	m_materialTextureTransferService->EnqueueUpload(image, desc, std::move(initialData));
+	return image;
 }

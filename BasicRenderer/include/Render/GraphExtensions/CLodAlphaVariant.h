@@ -6,7 +6,8 @@
 #include "Render/RenderGraph/RenderGraph.h"
 
 class CLodExtension;
-class ResourceGroup;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 struct CLodVariantTraits;
 struct RenderPhase;
 

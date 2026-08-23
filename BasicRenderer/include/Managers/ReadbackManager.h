@@ -79,14 +79,14 @@ private:
 
     void SaveCubemapToDDS(
         rhi::Device& device,
-        rg::imm::ImmediateCommandList& commandList,
+        org::imm::ImmediateCommandList& commandList,
         std::shared_ptr<PixelBuffer> cubemap,
         const std::wstring& outputFile,
         uint64_t fenceValue);
 
     void SaveTextureToDDS(
         rhi::Device& device,
-        rg::imm::ImmediateCommandList& commandList,
+        org::imm::ImmediateCommandList& commandList,
         PixelBuffer* texture,
         const std::wstring& outputFile,
         uint64_t fenceValue);

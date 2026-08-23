@@ -34,7 +34,7 @@ void VirtualShadowMapBuildMarkTilesPass::Update(const UpdateExecutionContext& ex
 {
     (void)executionContext;
     const uint32_t zero = 0u;
-    BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_tileCountBuffer), 0);
+    BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_tileCountBuffer), 0);
 }
 
 PassReturn VirtualShadowMapBuildMarkTilesPass::Execute(PassExecutionContext& executionContext)

@@ -32,8 +32,8 @@ public:
         builder->WithShaderResource(
             Builtin::Color::HDRColorTarget,
             Builtin::PrimaryCamera::DepthTexture,
-            Builtin::GBuffer::Normals,
-            Builtin::GBuffer::MetallicRoughness,
+            Builtin::Surface::NormalRoughness,
+            Builtin::Surface::SpecularAo,
             Builtin::CameraBuffer,
             Builtin::Environment::CurrentPrefilteredCubemap);
         builder->WithUnorderedAccess(Builtin::PostProcessing::ScreenSpaceReflections);

@@ -3,13 +3,31 @@
 
 static const uint kCLodVirtualShadowClipmapValidFlag = 0x1u;
 static const uint kCLodVirtualShadowClipmapInvalidateFlag = 0x2u;
+static const uint kCLodVirtualShadowClipmapDynamicSkinnedFlag = 0x4u;
 static const uint kCLodVirtualShadowAllocatedMask = 0x80000000u;
 static const uint kCLodVirtualShadowDirtyMask = 0x40000000u;
 static const uint kCLodVirtualShadowContentValidMask = 0x20000000u;
 static const uint kCLodVirtualShadowVisitedMask = 0x10000000u;
 static const uint kCLodVirtualShadowRerenderedThisFrameMask = 0x08000000u;
-static const uint kCLodVirtualShadowPhysicalPageIndexMask = 0x07FFFFFFu;
+static const uint kCLodVirtualShadowAdmittedThisFrameMask = 0x04000000u;
+static const uint kCLodVirtualShadowUpgradePendingMask = 0x02000000u;
+static const uint kCLodVirtualShadowDynamicContentMask = 0x01000000u;
+static const uint kCLodVirtualShadowPhysicalPageIndexMask = 0x00FFFFFFu;
 static const uint kCLodVirtualShadowPhysicalPageResidentFlag = 0x1u;
+static const uint kCLodVirtualShadowPhysicalPageAllocationGenerationShift = 1u;
+static const uint kCLodVirtualShadowPhysicalPageAllocationGenerationMask = 0xFFFFFFFEu;
+static const uint kCLodVirtualShadowClearEpochPendingMask = 0x80000000u;
+
+uint CLodVirtualShadowPhysicalPageAllocationGeneration(uint metadataFlags)
+{
+    return metadataFlags >> kCLodVirtualShadowPhysicalPageAllocationGenerationShift;
+}
+
+uint CLodVirtualShadowPhysicalPageMetadataFlags(uint allocationGeneration, bool resident)
+{
+    return (allocationGeneration << kCLodVirtualShadowPhysicalPageAllocationGenerationShift) |
+        (resident ? kCLodVirtualShadowPhysicalPageResidentFlag : 0u);
+}
 static const uint kCLodVirtualShadowDefaultClipmapCount = 22u;
 static const uint kCLodVirtualShadowClipmapCount = 22u;
 static const uint CLodVirtualShadowDefaultClipmapCount = kCLodVirtualShadowDefaultClipmapCount;
@@ -39,9 +57,13 @@ static const uint kCLodVirtualShadowMovedInstanceBitWordCount =
 static const uint kInvalidShadowCameraIndex = 0xFFFFFFFFu;
 static const uint kCLodVirtualShadowMarkTileSize = 16u;
 static const uint kCLodVirtualShadowBlockPagesPerAxis = 4u;
+static const uint kCLodVirtualShadowReceiverSubpagesPerAxis = 4u;
+static const uint kCLodVirtualShadowMaxReceiverPageCount =
+    kCLodVirtualShadowMaxPageTableResolution *
+    kCLodVirtualShadowMaxPageTableResolution *
+    kCLodVirtualShadowClipmapCount;
 static const uint kCLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (kCLodVirtualShadowBlockPagesPerAxis * kCLodVirtualShadowBlockPagesPerAxis) / 2u;
-static const uint kCLodVirtualShadowBlockMaxTrackedPerCluster = 32u;
 static const uint kCLodVirtualShadowMaxBlocksPerAxis =
     (kCLodVirtualShadowMaxPageTableResolution + kCLodVirtualShadowBlockPagesPerAxis - 1u) / kCLodVirtualShadowBlockPagesPerAxis;
 static const uint kCLodVirtualShadowMaxBlocksPerClipmap =
@@ -68,6 +90,10 @@ struct CLodVirtualShadowClipmapInfo
     uint pageTableResolution;
     uint physicalAtlasPagesWide;
     uint physicalAtlasPagesHigh;
+    int unwrappedPageOffsetX;
+    int unwrappedPageOffsetY;
+    float depthNear;
+    float depthRange;
 };
 
 struct CLodVirtualShadowMainCameraInfo
@@ -98,8 +124,8 @@ struct CLodVirtualShadowMarkClipmapData
     uint physicalAtlasPagesWide;
     uint physicalAtlasPagesHigh;
     float directionalLodBias;
-    uint2 pad0;
-    float4 directionalPageViewRow;
+    int unwrappedPageOffsetX;
+    int unwrappedPageOffsetY;
     row_major matrix shadowViewProjection;
 };
 
@@ -152,6 +178,57 @@ struct CLodVirtualShadowStats
     float targetPressureLodBias;
     float smoothedPressureLodBias;
     uint framesSinceOverBudget;
+    uint configuredPageRenderBudget;
+    uint configuredUpgradePageRenderBudget;
+    uint normalEligiblePageCount;
+    uint normalAdmittedPageCount;
+    uint normalDeferredPageCount;
+    uint upgradeEligiblePageCount;
+    uint upgradeAdmittedPageCount;
+    uint upgradeDeferredPageCount;
+    uint invalidUpgradeDependencyCount;
+    uint admittedPageCount;
+    uint normalRenderedPageCount;
+    uint upgradeRenderedPageCount;
+    uint upgradeCandidateInputCount;
+    uint upgradeRawPageCount;
+    uint upgradeRawPageOverflowCount;
+    uint readyUpgradePageCount;
+    uint readyUpgradePageOverflowCount;
+    uint upgradeCandidateAppendOverflowCount;
+    uint cumulativeUpgradePageAdmittedCount;
+    uint cumulativeUpgradePageRenderedCount;
+    uint cumulativeUpgradeCandidateAppendOverflowCount;
+    uint cumulativeUpgradeQueueOverflowCount;
+    uint upgradeInvalidationInputCount;
+    uint upgradeInvalidationRejectedInputCount;
+    uint upgradeInvalidationAllocatedPageTouchCount;
+    uint cumulativeUpgradeInvalidationInputCount;
+    uint cumulativeUpgradeInvalidationAllocatedPageTouchCount;
+    uint pageTableOwnerMismatchCount;
+    uint contentValidOwnerMismatchCount;
+    uint newlyAllocatedPageCount;
+    uint physicalPageClearCount;
+    uint dynamicPageClearCount;
+    uint composedPageCount;
+    uint markResidentTagMismatchCount;
+    uint renderedWithoutMatchingClearCount;
+    uint syntheticEmptyValidPageCount;
+    uint blockExpandedRequestedRecordCount;
+    uint blockExpandedCommittedRecordCount;
+    uint blockExpandedDroppedRecordCount;
+    uint pageJobRequestedRecordCount;
+    uint pageJobCommittedRecordCount;
+    uint pageJobDroppedRecordCount;
+    uint pageJobDoubleSidedRecordCount;
+    uint pageJobRasterJobCount;
+    uint pageJobRasterTriangleCount;
+    uint pageJobRasterDepthRejectedTriangleCount;
+    uint pageJobRasterBackfaceRejectedTriangleCount;
+    uint pageJobRasterCoveredPixelCount;
+    uint pageJobRasterPageWriteCount;
+    uint pageJobRasterClusterBoundsOverlapCount;
+    uint pageJobRasterBboxRejectedTriangleCount;
     uint setupWrappedClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint setupStaleDirtyClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint markResidentCleanHits[kCLodVirtualShadowClipmapCount];
@@ -170,7 +247,6 @@ struct CLodVirtualShadowStats
     uint predictiveInvalidatedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint invalidatedCurrentBoundsPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint invalidatedPreviousBoundsPageTableEntries[kCLodVirtualShadowClipmapCount];
-    uint invalidatedSkinnedPageTableEntries[kCLodVirtualShadowClipmapCount];
 };
 
 struct CLodVirtualShadowBlockMeta
@@ -216,8 +292,63 @@ bool CLodVirtualShadowTryGetClipmapInfoForView(
 
 bool CLodVirtualShadowPageEntryCanRaster(uint pageEntry)
 {
-    return (pageEntry & (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask)) ==
-        (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask);
+    const uint requiredMask =
+        kCLodVirtualShadowAllocatedMask |
+        kCLodVirtualShadowDirtyMask |
+        kCLodVirtualShadowAdmittedThisFrameMask;
+    return (pageEntry & requiredMask) == requiredMask;
+}
+
+bool CLodVirtualShadowPageEntryIsDynamicActive(uint pageEntry)
+{
+    const uint requiredMask =
+        kCLodVirtualShadowAllocatedMask |
+        kCLodVirtualShadowVisitedMask;
+    return (pageEntry & requiredMask) == requiredMask;
+}
+
+bool CLodVirtualShadowPageEntryHasSampleableContent(uint pageEntry)
+{
+    // Lookups sample the transient composite atlas, not the persistent static
+    // atlas. A page therefore becomes sampleable only after this frame's mark
+    // pass visited it and the clear pass initialized its transient copy. Static
+    // ContentValid alone is not enough: an unvisited fallback page can retain
+    // arbitrary dynamic texels from an earlier frame or physical-page owner.
+    // Dynamic-only pages remain supported once their current-frame raster sets
+    // DynamicContent.
+    return CLodVirtualShadowPageEntryIsDynamicActive(pageEntry) &&
+        (pageEntry &
+            (kCLodVirtualShadowContentValidMask |
+             kCLodVirtualShadowDynamicContentMask)) != 0u;
+}
+
+// The page hierarchy carries both raster domains in one R32_UINT texture.
+// Keeping the domains as independent bits lets rigid/static and animated
+// casters share the hierarchy build and traversal machinery without making
+// every rigid caster visit every cached page each frame.
+static const uint kCLodVirtualShadowHierarchyStaticMask = 1u;
+static const uint kCLodVirtualShadowHierarchyDynamicMask = 2u;
+
+bool CLodVirtualShadowPageEntryCanRasterLayer(
+    uint pageEntry,
+    bool dynamicLayer)
+{
+    return dynamicLayer
+        ? CLodVirtualShadowPageEntryIsDynamicActive(pageEntry)
+        : CLodVirtualShadowPageEntryCanRaster(pageEntry);
+}
+
+uint CLodVirtualShadowPackAbsolutePageTag(
+    uint2 logicalPageCoords,
+    int unwrappedPageOffsetX,
+    int unwrappedPageOffsetY)
+{
+    const int2 absolutePageCoords =
+        int2(logicalPageCoords) -
+        int2(unwrappedPageOffsetX, unwrappedPageOffsetY);
+    return
+        (uint(absolutePageCoords.x) & 0xFFFFu) |
+        ((uint(absolutePageCoords.y) & 0xFFFFu) << 16u);
 }
 
 uint CLodVirtualShadowWrapPageCoord(uint coord, uint offset, uint pageTableResolution)
@@ -244,6 +375,102 @@ uint2 CLodVirtualShadowVirtualPageCoordsFromUv(float2 shadowUv, CLodVirtualShado
 uint2 CLodVirtualShadowVirtualPageCoordsFromUv(float2 shadowUv, CLodVirtualShadowMarkClipmapData clipmapData)
 {
     return CLodVirtualShadowVirtualPageCoordsFromUv(shadowUv, clipmapData.pageTableResolution);
+}
+
+bool CLodVirtualShadowClipmapUsesDynamicSkinnedCasters(CLodVirtualShadowClipmapInfo clipmapInfo)
+{
+    return (clipmapInfo.flags & kCLodVirtualShadowClipmapDynamicSkinnedFlag) != 0u;
+}
+
+uint2 CLodVirtualShadowReceiverSubpageCoordsFromUv(float2 shadowUv, uint pageTableResolution)
+{
+    const uint resolution = max(pageTableResolution, 1u) *
+        kCLodVirtualShadowReceiverSubpagesPerAxis;
+    return min((uint2)(saturate(shadowUv) * resolution), resolution - 1u);
+}
+
+uint2 CLodVirtualShadowReceiverSubpageCoordsFromUv(
+    float2 shadowUv,
+    uint pageTableResolution,
+    uint subpagesPerAxis)
+{
+    const uint resolution = max(pageTableResolution, 1u) * max(subpagesPerAxis, 1u);
+    return min((uint2)(saturate(shadowUv) * resolution), resolution - 1u);
+}
+
+uint2 CLodVirtualShadowReceiverMaskForPageRect(
+    uint2 globalSubpageMin,
+    uint2 globalSubpageMax,
+    uint2 pageCoord,
+    uint subpagesPerAxis)
+{
+    const uint2 pageOrigin = pageCoord * subpagesPerAxis;
+    if (any(globalSubpageMax < pageOrigin) ||
+        any(globalSubpageMin >= pageOrigin + subpagesPerAxis))
+    {
+        return uint2(0u, 0u);
+    }
+    const uint2 localMin = max(globalSubpageMin, pageOrigin) - pageOrigin;
+    const uint2 localMax = min(globalSubpageMax, pageOrigin + subpagesPerAxis - 1u) - pageOrigin;
+    const uint width = localMax.x - localMin.x + 1u;
+    const uint rowBits = ((1u << width) - 1u) << localMin.x;
+    uint2 result = uint2(0u, 0u);
+    [unroll]
+    for (uint y = 0u; y < 8u; ++y)
+    {
+        if (y < subpagesPerAxis && y >= localMin.y && y <= localMax.y)
+        {
+            const uint bitOffset = y * subpagesPerAxis;
+            if (bitOffset < 32u)
+            {
+                result.x |= rowBits << bitOffset;
+            }
+            else
+            {
+                result.y |= rowBits << (bitOffset - 32u);
+            }
+        }
+    }
+    return result;
+}
+
+uint CLodVirtualShadowReceiverPageLinearIndex(uint2 pageCoord, uint clipmapIndex)
+{
+    return clipmapIndex *
+            (kCLodVirtualShadowMaxPageTableResolution *
+                kCLodVirtualShadowMaxPageTableResolution) +
+        pageCoord.y * kCLodVirtualShadowMaxPageTableResolution +
+        pageCoord.x;
+}
+
+uint CLodVirtualShadowBlockMaskForPageRect(
+    uint2 logicalPageMin,
+    uint2 logicalPageMax,
+    uint2 blockOriginPage)
+{
+    uint activeMask = 0u;
+    [unroll]
+    for (uint localPageY = 0u;
+         localPageY < kCLodVirtualShadowBlockPagesPerAxis;
+         ++localPageY)
+    {
+        [unroll]
+        for (uint localPageX = 0u;
+             localPageX < kCLodVirtualShadowBlockPagesPerAxis;
+             ++localPageX)
+        {
+            const uint2 logicalPageCoord =
+                blockOriginPage + uint2(localPageX, localPageY);
+            if (all(logicalPageCoord >= logicalPageMin) &&
+                all(logicalPageCoord <= logicalPageMax))
+            {
+                activeMask |= 1u <<
+                    (localPageY * kCLodVirtualShadowBlockPagesPerAxis +
+                        localPageX);
+            }
+        }
+    }
+    return activeMask;
 }
 
 uint2 CLodVirtualShadowWrappedPageCoords(
@@ -369,6 +596,7 @@ bool CLodVirtualShadowAnyRenderablePageInPixelRect(
     uint2 minPixel,
     uint2 maxPixel,
     CLodVirtualShadowClipmapInfo clipmapInfo,
+    bool dynamicLayer,
     RWTexture2DArray<uint> pageTable)
 {
     if (!CLodVirtualShadowClipmapIsValid(clipmapInfo))
@@ -392,7 +620,7 @@ bool CLodVirtualShadowAnyRenderablePageInPixelRect(
         {
             const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(uint2(pageX, pageY), clipmapInfo);
             const uint pageEntry = pageTable[uint3(wrappedPageCoords, clipmapInfo.pageTableLayer)];
-            if (CLodVirtualShadowPageEntryCanRaster(pageEntry))
+            if (CLodVirtualShadowPageEntryCanRasterLayer(pageEntry, dynamicLayer))
             {
                 return true;
             }
@@ -406,6 +634,7 @@ bool CLodVirtualShadowAnyRenderablePageInPageRect(
     uint2 minPageCoords,
     uint2 maxPageCoords,
     CLodVirtualShadowClipmapInfo clipmapInfo,
+    bool dynamicLayer,
     RWTexture2DArray<uint> pageTable)
 {
     if (!CLodVirtualShadowClipmapIsValid(clipmapInfo))
@@ -426,7 +655,7 @@ bool CLodVirtualShadowAnyRenderablePageInPageRect(
         {
             const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(uint2(pageX, pageY), clipmapInfo);
             const uint pageEntry = pageTable[uint3(wrappedPageCoords, clipmapInfo.pageTableLayer)];
-            if (CLodVirtualShadowPageEntryCanRaster(pageEntry))
+            if (CLodVirtualShadowPageEntryCanRasterLayer(pageEntry, dynamicLayer))
             {
                 return true;
             }
@@ -455,6 +684,51 @@ uint2 CLodVirtualShadowPhysicalAtlasPixel(uint physicalPageIndex, uint2 virtualT
     return CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapData.physicalAtlasPagesWide);
 }
 
+float CLodVirtualShadowContinuousClipmapLevel(
+    float3 positionWS,
+    float3 cameraPositionWS,
+    float clip0TexelWorldSize,
+    float directionalLodBias,
+    uint activeClipmapCount)
+{
+    if (activeClipmapCount == 0u)
+    {
+        return 0.0f;
+    }
+
+    const float pageCount = (float)kCLodVirtualShadowFixedVirtualPageCountPerAxis;
+    const float scaleRatio = pageCount > 0.0f ? max((pageCount - 2.0f) / pageCount, 0.0f) : 1.0f;
+    const float clip0FrustumScale = 0.5f * max(clip0TexelWorldSize, 1.0e-5f) * (float)kCLodVirtualShadowFixedVirtualResolution;
+    const float baseScale = max(clip0FrustumScale * scaleRatio, 1.0e-5f);
+    const float distanceFromCamera = length(positionWS - cameraPositionWS);
+    // The configured bias is baked into clip0TexelWorldSize. Keeping the same
+    // full (fractional) term here cancels that physical scale for clip ownership
+    // while the selected clip's texel/page footprint changes continuously.
+    const float clipLevel =
+        log2(max(distanceFromCamera / baseScale, 1.0f)) +
+        directionalLodBias;
+    return clamp(
+        clipLevel,
+        0.0f,
+        (float)(activeClipmapCount - 1u));
+}
+
+float CLodVirtualShadowContinuousTexelWorldSize(
+    float3 positionWS,
+    float3 cameraPositionWS,
+    float clip0TexelWorldSize,
+    float directionalLodBias,
+    uint activeClipmapCount)
+{
+    return max(clip0TexelWorldSize, 1.0e-5f) * exp2(
+        CLodVirtualShadowContinuousClipmapLevel(
+            positionWS,
+            cameraPositionWS,
+            clip0TexelWorldSize,
+            directionalLodBias,
+            activeClipmapCount));
+}
+
 uint CLodVirtualShadowSelectClipmapIndex(
     float3 positionWS,
     float3 cameraPositionWS,
@@ -467,13 +741,14 @@ uint CLodVirtualShadowSelectClipmapIndex(
         return 0u;
     }
 
-    const float pageCount = (float)kCLodVirtualShadowFixedVirtualPageCountPerAxis;
-    const float scaleRatio = pageCount > 0.0f ? max((pageCount - 2.0f) / pageCount, 0.0f) : 1.0f;
-    const float clip0FrustumScale = 0.5f * max(clip0TexelWorldSize, 1.0e-5f) * (float)kCLodVirtualShadowFixedVirtualResolution;
-    const float baseScale = max(clip0FrustumScale * scaleRatio, 1.0e-5f);
-    const float distanceFromCamera = length(positionWS - cameraPositionWS);
-    const float clipLevel = ceil(log2(max(distanceFromCamera / baseScale, 1.0f))) + directionalLodBias;
-    return min((uint)max(clipLevel, 0.0f), activeClipmapCount - 1u);
+    const float clipLevel = ceil(
+        CLodVirtualShadowContinuousClipmapLevel(
+            positionWS,
+            cameraPositionWS,
+            clip0TexelWorldSize,
+            directionalLodBias,
+            activeClipmapCount));
+    return min((uint)clipLevel, activeClipmapCount - 1u);
 }
 
 #endif

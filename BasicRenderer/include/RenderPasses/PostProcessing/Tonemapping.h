@@ -26,7 +26,8 @@ A_STATIC void LpmSetupOut(AU1 i, inAU4 v)
 
 class TonemappingPass : public RenderPass {
 public:
-	TonemappingPass() {
+	explicit TonemappingPass(bool bloomEnabled = false)
+        : m_bloomEnabled(bloomEnabled) {
 		CreatePSO();
 		getTonemapType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("tonemapType");
         m_pLPMConstants = LazyDynamicStructuredBuffer<LPMConstants>::CreateShared(1, "AMD LPM constants", 1, true);
@@ -42,13 +43,20 @@ public:
 		return m_providedResources;
     }
 
-    void DeclareResourceUsages(RenderPassBuilder* builder) {
+    void DeclareResourceUsages(RenderPassBuilder* builder) override {
         builder->WithShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer, "FFX::LPMConstants")
             .WithRenderTarget(Builtin::Backbuffer);
+        if (m_bloomEnabled) {
+            builder->WithShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ 1, 2 }));
+        }
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
     }
 
 	void Setup() override {
+        if (m_bloomEnabled) {
+            m_pBloomTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(
+                Builtin::PostProcessing::BloomTexture);
+        }
 
         LPMConstants lpmConstants = {};
         
@@ -61,7 +69,7 @@ public:
         
         // Rest will be filled in by the luminanceHistogramAverage shader
 
-        BUFFER_UPLOAD(&lpmConstants, sizeof(LPMConstants), rg::runtime::UploadTarget::FromShared(m_pLPMConstants), 0);
+        BUFFER_UPLOAD(&lpmConstants, sizeof(LPMConstants), org::runtime::UploadTarget::FromShared(m_pLPMConstants), 0);
     }
 
 	PassReturn Execute(PassExecutionContext& executionContext) override {
@@ -95,6 +103,14 @@ public:
 		unsigned int misc[NumMiscUintRootConstants] = {};
 		misc[LPM_CONSTANTS_BUFFER_SRV_DESCRIPTOR_INDEX] = m_pLPMConstants->GetSRVInfo(0).slot.index;
 		misc[TONEMAP_TYPE] = getTonemapType();
+        misc[TONEMAP_BLOOM_ENABLED] = m_bloomEnabled ? 1u : 0u;
+        if (m_bloomEnabled) {
+            misc[TONEMAP_BLOOM_MIP1_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(1).slot.index;
+            misc[TONEMAP_BLOOM_MIP2_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(2).slot.index;
+            misc[TONEMAP_BLOOM_FILTER_RADIUS] = as_uint(0.001f);
+            misc[TONEMAP_BLOOM_ASPECT_RATIO] = as_uint(
+                context.outputResolution.x / static_cast<float>(context.outputResolution.y));
+        }
 
 		commandList.PushConstants(rhi::ShaderStage::Pixel, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, misc);
 
@@ -114,6 +130,8 @@ private:
     std::shared_ptr<LazyDynamicStructuredBuffer<LPMConstants>> m_pLPMConstants;
 
     std::function<unsigned int()> getTonemapType;
+    bool m_bloomEnabled = false;
+    PixelBuffer* m_pBloomTarget = nullptr;
 
     std::vector<ResourceIdentifier> m_providedResources = {
 		"FFX::LPMConstants"

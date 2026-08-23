@@ -32,7 +32,11 @@ ReyesSplitPass::ReyesSplitPass(
     uint32_t maxSplitQueueEntries,
     uint32_t splitPassIndex,
     uint32_t maxSplitPassCount,
-    uint32_t phaseIndex)
+    uint32_t phaseIndex,
+    std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer,
+    std::shared_ptr<Buffer> replaySplitQueueBuffer,
+    std::shared_ptr<Buffer> replaySplitQueueCounterBuffer,
+    std::shared_ptr<Buffer> replaySplitQueueOverflowBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_inputSplitQueueBuffer(std::move(inputSplitQueueBuffer))
     , m_inputSplitQueueCounterBuffer(std::move(inputSplitQueueCounterBuffer))
@@ -50,6 +54,10 @@ ReyesSplitPass::ReyesSplitPass(
     , m_shadowNonRasterableHierarchyTexture(std::move(shadowNonRasterableHierarchyTexture))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
+    , m_viewDepthSrvIndicesBuffer(std::move(viewDepthSrvIndicesBuffer))
+    , m_replaySplitQueueBuffer(std::move(replaySplitQueueBuffer))
+    , m_replaySplitQueueCounterBuffer(std::move(replaySplitQueueCounterBuffer))
+    , m_replaySplitQueueOverflowBuffer(std::move(replaySplitQueueOverflowBuffer))
     , m_maxSplitQueueEntries(maxSplitQueueEntries)
     , m_splitPassIndex(splitPassIndex)
     , m_maxSplitPassCount(maxSplitPassCount)
@@ -89,15 +97,15 @@ void ReyesSplitPass::DeclareResourceUsages(ComputePassBuilder* builder)
             m_tessTableVerticesBuffer,
             m_tessTableTrianglesBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CullingCameraBuffer,
-            Builtin::CameraBuffer,
-			Builtin::Shadows::CLodCompactShadowCameras)
+            Builtin::CameraBuffer)
 		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithIndirectArguments(m_indirectArgsBuffer)
         .WithUnorderedAccess(
@@ -108,6 +116,18 @@ void ReyesSplitPass::DeclareResourceUsages(ComputePassBuilder* builder)
             m_diceQueueCounterBuffer,
             m_diceQueueOverflowBuffer,
             m_telemetryBuffer);
+    if (m_viewDepthSrvIndicesBuffer) {
+        builder->WithShaderResource(m_viewDepthSrvIndicesBuffer);
+    }
+    if (m_replaySplitQueueBuffer) {
+        builder->WithUnorderedAccess(m_replaySplitQueueBuffer);
+    }
+    if (m_replaySplitQueueCounterBuffer) {
+        builder->WithUnorderedAccess(m_replaySplitQueueCounterBuffer);
+    }
+    if (m_replaySplitQueueOverflowBuffer) {
+        builder->WithUnorderedAccess(m_replaySplitQueueOverflowBuffer);
+    }
     if (m_shadowClipmapInfoBuffer) {
         builder->WithShaderResource(m_shadowClipmapInfoBuffer, Builtin::Shadows::CLodCompactShadowCameras);
     }
@@ -157,6 +177,25 @@ PassReturn ReyesSplitPass::Execute(PassExecutionContext& executionContext)
     uintRootConstants[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = m_shadowNonRasterableHierarchyTexture
         ? m_shadowNonRasterableHierarchyTexture->GetSRVInfo(SRVViewType::Texture2DArrayFull, 0).slot.index
         : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = m_viewDepthSrvIndicesBuffer
+        ? m_viewDepthSrvIndicesBuffer->GetSRVInfo(0).slot.index
+        : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_DESCRIPTOR_INDEX] = m_replaySplitQueueBuffer
+        ? m_replaySplitQueueBuffer->GetUAVShaderVisibleInfo(0).slot.index
+        : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_replaySplitQueueCounterBuffer
+        ? m_replaySplitQueueCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index
+        : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = m_replaySplitQueueOverflowBuffer
+        ? m_replaySplitQueueOverflowBuffer->GetUAVShaderVisibleInfo(0).slot.index
+        : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_SPLIT_ENABLE_PATCH_OCCLUSION] =
+        (m_viewDepthSrvIndicesBuffer && m_replaySplitQueueBuffer && m_replaySplitQueueCounterBuffer && m_replaySplitQueueOverflowBuffer)
+            ? 1u
+            : 0u;
+    uintRootConstants[CLOD_REYES_SPLIT_PHASE_INDEX] = m_phaseIndex;
+    uintRootConstants[CLOD_REYES_SPLIT_USE_AABB_OCCLUSION] =
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)() ? 1u : 0u;
     uintRootConstants[UintRootConstant18] = as_uint(std::max(
         SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesShadowCoarseTargetPagesPerTriangleSettingName)(),
         CLodReyesShadowCoarseTargetPagesPerTriangleMin));

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <string_view>
 
@@ -9,13 +11,18 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 
-class PixelBuffer;
-class Sampler;
-class BufferView;
-class Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class Sampler; }
+using org::Sampler;
+namespace org { class BufferView; }
+using org::BufferView;
+namespace org { class Buffer; }
+using org::Buffer;
 struct TextureProcessingJobHandle;
+class MaterialTextureTransferService;
 
-namespace rg::runtime {
+namespace org::runtime {
     class IReadbackService;
 }
 
@@ -44,19 +51,32 @@ public:
         TextureInitialData initialData,
         std::string_view debugName = {},
         bool preserveAlphaCoverage = false,
-        bool forceSrgbMipEncoding = false) const;
+        bool forceSrgbMipEncoding = false,
+        uint32_t maxMipLevels = 0u) const;
+
+	// Creates a final material residency image whose upload and immutable SRV
+	// transition are owned outside the render graph.
+	std::shared_ptr<PixelBuffer> CreateMaterialResidentPixelBuffer(
+		TextureDescription desc,
+		TextureInitialData initialData,
+		std::string_view debugName = {},
+		uint32_t maxMipLevels = 0u) const;
+	void SetMaterialTextureTransferService(MaterialTextureTransferService* service) {
+		m_materialTextureTransferService = service;
+	}
 
     std::shared_ptr<ComputePass> GetMipmappingPass() const { return m_mipmappingPass; }
     std::shared_ptr<ComputePass> GetBC7CompressionPass() const { return m_bc7CompressionPass; }
     std::shared_ptr<RenderPass> GetBC7CompressionCopyPass() const { return m_bc7CompressionCopyPass; }
     std::shared_ptr<CopyPass> GetBC7CompressionReadbackPass() const { return m_bc7CompressionReadbackPass; }
 
-    void SetReadbackService(rg::runtime::IReadbackService* readbackService);
+    void SetReadbackService(org::runtime::IReadbackService* readbackService);
     bool SubmitBC7CompressionJob(
         const std::shared_ptr<TextureProcessingJobHandle>& handle,
         std::string_view debugName = {}) const;
 
 private:
+	MaterialTextureTransferService* m_materialTextureTransferService = nullptr;
 
     struct BC7CompressionSubresource {
         rhi::CopyableFootprint footprint{};
@@ -65,12 +85,31 @@ private:
     };
 
     struct BC7CompressionJob {
+        enum class Stage : uint8_t {
+            WaitingForSourceUpload,
+            ReadyForCompression,
+            CompressionRecorded,
+            CopyRecorded,
+            ReadbackRecorded,
+        };
+
+        ~BC7CompressionJob()
+        {
+            if (inFlightCounter) {
+                inFlightCounter->fetch_sub(1u, std::memory_order_acq_rel);
+            }
+        }
+
         std::string debugName;
         std::shared_ptr<TextureProcessingJobHandle> handle;
         std::shared_ptr<PixelBuffer> workingTexture;
         std::shared_ptr<PixelBuffer> compressedTexture;
         std::shared_ptr<Buffer> blockBuffer;
         std::vector<BC7CompressionSubresource> subresources;
+        std::shared_ptr<std::atomic_uint32_t> inFlightCounter;
+        std::atomic<Stage> stage = Stage::WaitingForSourceUpload;
+        std::atomic<uint32_t> stageFrameIndex = UINT32_MAX;
+        std::atomic<uint32_t> sourceUploadWaitExecutions = 4u;
         uint64_t outputByteSize = 0;
         bool outputHasFullMipChain = true;
     };
@@ -197,7 +236,7 @@ private:
         void Cleanup() override;
 
         bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged;
+            return m_declaredResourcesChanged.load(std::memory_order_acquire);
         }
 
     private:
@@ -205,9 +244,10 @@ private:
         PipelineState CreatePipeline() const;
 
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
+        mutable std::mutex m_pendingMutex;
         PipelineState m_psoMode6;
         bool m_hasPsoMode6 = false;
-        bool m_declaredResourcesChanged = true;
+        std::atomic_bool m_declaredResourcesChanged = true;
     };
 
     class BC7CompressionCopyPass : public RenderPass, public IDynamicDeclaredResources, public IHasImmediateModeCommands {
@@ -225,19 +265,20 @@ private:
         void Cleanup() override;
 
         bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged;
+            return m_declaredResourcesChanged.load(std::memory_order_acquire);
         }
 
     private:
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
-        bool m_declaredResourcesChanged = true;
+        mutable std::mutex m_pendingMutex;
+        std::atomic_bool m_declaredResourcesChanged = true;
     };
 
     class BC7CompressionReadbackPass : public CopyPass, public IDynamicDeclaredResources, public IHasImmediateModeCommands {
     public:
         void Setup() override;
 
-        void SetReadbackService(rg::runtime::IReadbackService* readbackService);
+        void SetReadbackService(org::runtime::IReadbackService* readbackService);
         bool HasReadbackService() const { return m_readbackService != nullptr; }
         void EnqueueJob(const std::shared_ptr<BC7CompressionJob>& job);
 
@@ -252,14 +293,15 @@ private:
         void Cleanup() override;
 
         bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged;
+            return m_declaredResourcesChanged.load(std::memory_order_acquire);
         }
 
     private:
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         std::vector<uint64_t> m_pendingCaptureIds;
-        rg::runtime::IReadbackService* m_readbackService = nullptr;
-        bool m_declaredResourcesChanged = true;
+        mutable std::mutex m_pendingMutex;
+        org::runtime::IReadbackService* m_readbackService = nullptr;
+        std::atomic_bool m_declaredResourcesChanged = true;
     };
 
     TextureFactory() {
@@ -273,4 +315,5 @@ private:
 	std::shared_ptr<ComputePass> m_bc7CompressionPass;
 	std::shared_ptr<RenderPass> m_bc7CompressionCopyPass;
 	std::shared_ptr<CopyPass> m_bc7CompressionReadbackPass;
+    std::shared_ptr<std::atomic_uint32_t> m_bc7InFlightJobs = std::make_shared<std::atomic_uint32_t>(0u);
 };

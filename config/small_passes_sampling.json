@@ -1,0 +1,58 @@
+{
+  "name": "BasicRenderer small-pass optimization",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 30,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 80,
+    "maximum_samples": 160,
+    "confidence_level": 0.95,
+    "relative_half_width": 0.005
+  },
+  "output": {
+    "database": "out/small_passes_sampling.sqlite",
+    "last_run_summary": "out/small_passes_sampling.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "render_graph_gpu_time",
+      "output_name": "GPU time",
+      "unit": "ms",
+      "source": "render_graph_gpu_time",
+      "relative_half_width": 0.005
+    }
+  ],
+  "passes": [
+    {
+      "id": "material_histogram",
+      "name": "MaterialHistogramPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    },
+    {
+      "id": "build_pixel_list",
+      "name": "BuildPixelListPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    },
+    {
+      "id": "luminance_histogram",
+      "name": "luminanceHistogramPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    },
+    {
+      "id": "bloom_blend",
+      "name": "BloomUpsampleAndBlendPass",
+      "queue": "Direct",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    }
+  ]
+}

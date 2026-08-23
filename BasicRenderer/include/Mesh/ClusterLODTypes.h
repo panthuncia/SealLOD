@@ -6,8 +6,11 @@
 // CLod shader types header.
 
 #include <cstdint>
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
+#include <functional>
 #include <directxmath.h>
 #include <memory>
 #include <optional>
@@ -21,6 +24,8 @@
 #include "Mesh/ClusterLODShaderTypes.h"
 #include "Mesh/VertexFlags.h"
 #include "Import/MeshData.h"
+#include "Animation/DynamicWindMetadata.h"
+#include "Animation/SkeletonArtifact.h"
 
 // Forward declarations for GPU-side types only needed by MeshIngestBuilder::Build()
 class Material;
@@ -30,6 +35,27 @@ enum class MeshCpuDataPolicy {
 	Retain,
 	ReleaseAfterUpload,
 };
+
+struct VoxelCoverageHit
+{
+	uint32_t triangleIndex = 0;
+	DirectX::XMFLOAT3 position{};
+	DirectX::XMFLOAT3 normal{ 0.0f, 0.0f, 1.0f };
+	DirectX::XMFLOAT2 uv{};
+	DirectX::XMFLOAT3 trianglePositions[3]{};
+	DirectX::XMFLOAT2 triangleUvs[3]{};
+	float barycentrics[3]{};
+};
+
+struct VoxelCoverageMaterialSample
+{
+	bool accepted = true;
+	bool overrideNormal = false;
+	DirectX::XMFLOAT3 normal{ 0.0f, 0.0f, 1.0f };
+	float weight = 1.0f;
+};
+
+using VoxelCoverageMaterialSampler = std::function<VoxelCoverageMaterialSample(const VoxelCoverageHit&)>;
 
 // Traversal types
 
@@ -54,6 +80,19 @@ struct ClusterLODNode
 	ClusterLODNodeRange        range{};
 	ClusterLODTraversalMetric  traversalMetric{};
 };
+
+struct ClusterLODNodeSkinningInfo
+{
+	uint32_t boneListOffset = 0;
+	uint16_t boneCount = 0;
+	uint16_t flags = 0;
+};
+static_assert(sizeof(ClusterLODNodeSkinningInfo) == 8, "ClusterLODNodeSkinningInfo must be 8 bytes");
+
+static constexpr uint16_t CLOD_NODE_SKINNING_FLAG_OVERFLOW = 1u << 0;
+static constexpr uint16_t CLOD_NODE_SKINNING_FLAG_COARSE_FALLBACK = 1u << 1;
+static constexpr uint32_t CLOD_NODE_BONE_LIMIT_DEFAULT = 16u;
+static constexpr uint32_t CLOD_NODE_BONE_LIMIT_HARD_MAX = 64u;
 
 struct ClusterLODNodeRangeAlloc
 {
@@ -85,6 +124,35 @@ struct ClusterLODCacheSource
 	std::wstring containerFileName;
 };
 
+struct ClusterLODAssemblySkeletonData
+{
+	std::vector<std::string> jointNames;
+	std::vector<int32_t> parentIndices;
+	std::vector<DirectX::XMFLOAT4X4> inverseBindMatrices;
+	std::vector<DirectX::XMFLOAT4X4> restLocalMatrices;
+	std::vector<DirectX::XMFLOAT4X4> bindGlobalMatrices;
+	std::vector<uint32_t> windSimulationGroupIndices;
+	std::string windProfileIdentity;
+	DynamicWindMetadata dynamicWindMetadata;
+
+	bool Empty() const
+	{
+		return jointNames.empty();
+	}
+
+	void Clear()
+	{
+		jointNames.clear();
+		parentIndices.clear();
+		inverseBindMatrices.clear();
+		restLocalMatrices.clear();
+		bindGlobalMatrices.clear();
+		windSimulationGroupIndices.clear();
+		windProfileIdentity.clear();
+		dynamicWindMetadata = {};
+	}
+};
+
 // Voxel group data model
 
 struct VoxelCell
@@ -105,21 +173,51 @@ struct VoxelGroupPayload
 	DirectX::XMFLOAT3 aabbMin{};
 	DirectX::XMFLOAT3 aabbMax{};
 	float voxelWidth = 0.0f;
+	DirectX::XMFLOAT2 uvDensity = { 0.0f, 0.0f };
 	std::vector<VoxelCell> activeCells;
+};
+
+struct VoxelGroupPackedMetadata
+{
+	DirectX::XMFLOAT4 aabbMinAndVoxelWidth{}; // xyz=min, w=voxel width
+	DirectX::XMFLOAT4 aabbMaxAndError{};      // xyz=max, w=accepted voxel error
+	uint32_t firstCluster = 0;
+	uint32_t clusterCount = 0;
+	uint32_t firstCube = 0;
+	uint32_t cubeCount = 0;
+	uint32_t resolution = 0;
+	uint32_t flags = 0;
+	DirectX::XMFLOAT2 uvDensity = { 0.0f, 0.0f };
 };
 
 struct VoxelGroupMapping
 {
 	std::vector<int32_t> groupToPayloadIndex;
 	std::vector<VoxelGroupPayload> payloads;
-	std::vector<int32_t> groupToPackedDescriptorIndex;
-	std::vector<CLodVoxelGroupDescriptor> packedGroupDescriptors;
+	std::vector<int32_t> groupToPackedMetadataIndex;
+	std::vector<VoxelGroupPackedMetadata> packedGroupMetadata;
 	std::vector<CLodVoxelClusterRecord> packedClusterRecords;
 	std::vector<CLodVoxelCubeRecord> packedCubeRecords;
 	std::vector<CLodVoxelAttributeSample> packedAttributeSamples;
 };
 
 // Prebuilt / Cache payload types
+
+struct ClusterLODPartRecord
+{
+	uint32_t groupBase = 0;
+	uint32_t groupCount = 0;
+	uint32_t nodeBase = 0;
+	uint32_t nodeCount = 0;
+	uint32_t transformBase = 0;
+	uint32_t transformCount = 0;
+	uint32_t instanceBase = 0;
+	uint32_t instanceCount = 0;
+	uint32_t rootNode = 0;
+	uint32_t flags = 0;
+};
+
+static constexpr uint32_t CLOD_PART_RECORD_FLAG_ROOT = 1u << 0;
 
 struct ClusterLODPrebuiltData
 {
@@ -137,8 +235,18 @@ struct ClusterLODPrebuiltData
 	uint32_t voxelPageCount = 0;
 	ClusterLODCacheSource cacheSource;
 	std::vector<ClusterLODNode> nodes;
+	std::vector<ClusterLODNodeSkinningInfo> nodeSkinningInfos;
+	std::vector<uint32_t> nodeBoneIndices;
+	uint32_t nodeBoneLimit = CLOD_NODE_BONE_LIMIT_DEFAULT;
 	std::vector<ClusterLODNodeRangeAlloc> lodNodeRanges;
 	std::vector<uint32_t> lodLevelRoots;
+	std::vector<ClusterLODAssemblyTransform> assemblyTransforms;
+	std::vector<ClusterLODAssemblyInstance> assemblyInstances;
+	std::vector<ClusterLODAssemblyBoneRemap> assemblyBoneRemaps;
+	std::vector<uint32_t> assemblyBoneRemapIndices;
+	SkeletonArtifactReference assemblySkeletonArtifact;
+	std::vector<ClusterLODPartRecord> partRecords;
+	uint32_t rootPartIndex = 0;
 	uint32_t maxDepth = 0;
 	uint32_t maxTraversalDepth = 0;
 };
@@ -153,6 +261,7 @@ struct ClusterLODCacheBuildOwnedData
 {
 	std::vector<std::vector<std::vector<std::byte>>> groupPageBlobs;
 	std::vector<std::vector<std::byte>> meshPageBlobs;
+	VoxelGroupMapping voxelGroupMapping;
 
 	ClusterLODCacheBuildPayload AsPayload() const {
 		ClusterLODCacheBuildPayload payload{};
@@ -168,36 +277,38 @@ struct ClusterLODPrebuildArtifacts
 	ClusterLODCacheBuildOwnedData cacheBuildData;
 };
 
-// Builder settings
-
-enum class ClusterLODVoxelFallbackMode : uint8_t
+struct ClusterLODVoxelGridOverride
 {
-	Auto,
-	MeshOnly,
-	VoxelOnly,
+	DirectX::XMFLOAT3 aabbMin{};
+	DirectX::XMFLOAT3 aabbMax{};
+	float voxelWidth = 0.0f;
+	uint32_t resolution = 0u;
 };
 
-enum class ClusterLODVoxelPruningMode : uint8_t
+// Builder settings
+
+enum class ClusterLODCoveragePreservationMode : uint8_t
 {
 	None,
-	Spatial,
-	Coverage,
+	PrioritizeEdges,
+	Voxel,
 };
 
 struct ClusterLODBuilderSettings
 {
 	bool disableSloppyFallback = false;
+	float sloppyFallbackErrorFactor = 2.0f;
 	float lodErrorMergePrevious = 1.5f;
 	float lodErrorMergeAdditive = 0.0f;
 	uint32_t partitionSizeFloor = 8u;
+	uint32_t nodeBoneLimit = CLOD_NODE_BONE_LIMIT_DEFAULT;
 	bool preserveImportedNormals = true;
 	bool enableNormalAttributeSimplification = true;
 	float normalAttributeWeight = 1.0f;
 	float simplifyTangentWeight = 0.01f;
 	float simplifyTangentSignWeight = 0.5f;
 
-	bool enableVoxelFallback = true;
-	ClusterLODVoxelFallbackMode voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
+	ClusterLODCoveragePreservationMode coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;
 	uint32_t voxelGridBaseResolution = 32u;
 	uint32_t voxelMinResolution = 0u;
 	uint32_t voxelRaysPerCell = 64u;
@@ -206,8 +317,8 @@ struct ClusterLODBuilderSettings
 	float voxelFallbackGrowthFactor = 1.1f;
 	float voxelFallbackAcceptanceBias = 1.0f;
 	float voxelFallbackOpacityThreshold = 0.0f;
-	bool voxelFallbackCarryZeroCoverage = false;
-	ClusterLODVoxelPruningMode voxelFallbackPruningMode = ClusterLODVoxelPruningMode::None;
+	uint32_t voxelTailMaxLevels = 4u;
+	float voxelTailGrowthFactor = 1.5f;
 	bool doubleSidedVoxelSourceNormals = false;
 };
 
@@ -231,23 +342,20 @@ inline std::string GetClusterLODEnvironmentVariable(const char* name)
 
 inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(ClusterLODBuilderSettings settings)
 {
-	const std::string modeString = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_MODE");
+	const std::string modeString = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE");
 	if (!modeString.empty())
 	{
-		if (modeString == "mesh" || modeString == "mesh-only")
+		if (modeString == "none")
 		{
-			settings.enableVoxelFallback = false;
-			settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::MeshOnly;
+			settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::None;
 		}
-		else if (modeString == "auto")
+		else if (modeString == "prioritizeEdges" || modeString == "prioritize-edges")
 		{
-			settings.enableVoxelFallback = true;
-			settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
+			settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;
 		}
-		else if (modeString == "voxel" || modeString == "voxel-only")
+		else if (modeString == "voxel")
 		{
-			settings.enableVoxelFallback = true;
-			settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::VoxelOnly;
+			settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::Voxel;
 		}
 	}
 
@@ -298,24 +406,11 @@ inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(Clus
 	readFloat("BASICRENDERER_CLOD_VOXEL_GROWTH", settings.voxelFallbackGrowthFactor);
 	readFloat("BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS", settings.voxelFallbackAcceptanceBias);
 	readFloat("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD", settings.voxelFallbackOpacityThreshold);
-	readBool("BASICRENDERER_CLOD_VOXEL_CARRY_ZERO_COVERAGE", settings.voxelFallbackCarryZeroCoverage);
-
-	const std::string pruningModeString = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_PRUNING");
-	if (!pruningModeString.empty())
-	{
-		if (pruningModeString == "none" || pruningModeString == "off" || pruningModeString == "disabled")
-		{
-			settings.voxelFallbackPruningMode = ClusterLODVoxelPruningMode::None;
-		}
-		else if (pruningModeString == "coverage" || pruningModeString == "global" || pruningModeString == "pure-coverage")
-		{
-			settings.voxelFallbackPruningMode = ClusterLODVoxelPruningMode::Coverage;
-		}
-		else if (pruningModeString == "spatial")
-		{
-			settings.voxelFallbackPruningMode = ClusterLODVoxelPruningMode::Spatial;
-		}
-	}
+	readUint("BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS", settings.voxelTailMaxLevels);
+	readUint("BASICRENDERER_CLOD_NODE_BONE_LIMIT", settings.nodeBoneLimit);
+	readFloat("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH", settings.voxelTailGrowthFactor);
+	readBool("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", settings.disableSloppyFallback);
+	readFloat("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", settings.sloppyFallbackErrorFactor);
 
 	return settings;
 }
@@ -385,6 +480,24 @@ public:
 		if (byteCount != m_skinningVertexSize) {
 			throw std::runtime_error("MeshIngestBuilder skinning vertex byte size mismatch");
 		}
+		constexpr size_t kMaxDebugVertices = 4u;
+		constexpr size_t kMaxSkinInfluences = 8u;
+		if (m_skinningDebugPositions.size() / 3u < kMaxDebugVertices) {
+			const size_t jointsOffset = sizeof(DirectX::XMFLOAT3) + sizeof(DirectX::XMFLOAT3);
+			const size_t weightsOffset = jointsOffset + sizeof(uint32_t) * kMaxSkinInfluences;
+			if (byteCount >= weightsOffset + sizeof(float) * kMaxSkinInfluences) {
+				const auto oldJointCount = m_skinningDebugJoints.size();
+				const auto oldPositionCount = m_skinningDebugPositions.size();
+				m_skinningDebugJoints.resize(oldJointCount + kMaxSkinInfluences);
+				m_skinningDebugWeights.resize(oldJointCount + kMaxSkinInfluences);
+				m_skinningDebugPositions.resize(oldPositionCount + 3u);
+				m_skinningDebugNormals.resize(oldPositionCount + 3u);
+				std::memcpy(m_skinningDebugPositions.data() + oldPositionCount, data, sizeof(float) * 3u);
+				std::memcpy(m_skinningDebugNormals.data() + oldPositionCount, data + sizeof(DirectX::XMFLOAT3), sizeof(float) * 3u);
+				std::memcpy(m_skinningDebugJoints.data() + oldJointCount, data + jointsOffset, sizeof(uint32_t) * kMaxSkinInfluences);
+				std::memcpy(m_skinningDebugWeights.data() + oldJointCount, data + weightsOffset, sizeof(float) * kMaxSkinInfluences);
+			}
+		}
 		m_skinningVertices.insert(m_skinningVertices.end(), data, data + byteCount);
 	}
 
@@ -404,6 +517,30 @@ public:
 		return m_uvSets;
 	}
 
+	const std::vector<std::byte>& GetVertices() const {
+		return m_vertices;
+	}
+
+	const std::vector<std::byte>& GetSkinningVertices() const {
+		return m_skinningVertices;
+	}
+
+	const std::vector<uint32_t>& GetIndices() const {
+		return m_indices;
+	}
+
+	unsigned int GetVertexSize() const {
+		return m_vertexSize;
+	}
+
+	unsigned int GetSkinningVertexSize() const {
+		return m_skinningVertexSize;
+	}
+
+	unsigned int GetFlags() const {
+		return m_flags;
+	}
+
 	// GPU-side: creates a Mesh object with buffer views.
 	// Only implemented in the renderer (Mesh.cpp); not available in headless builds.
 	std::shared_ptr<Mesh> Build(
@@ -412,7 +549,21 @@ public:
 		MeshCpuDataPolicy cpuDataPolicy = MeshCpuDataPolicy::Retain);
 
 	// Headless: runs the full ClusterLOD build pipeline (CPU-only).
-	ClusterLODPrebuildArtifacts BuildClusterLODArtifacts() const;
+	ClusterLODPrebuildArtifacts BuildClusterLODArtifacts(
+		const VoxelCoverageMaterialSampler* coverageMaterialSampler = nullptr) const;
+	ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifacts(
+		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER) const;
+	ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifacts(
+		const ClusterLODVoxelGridOverride& grid,
+		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER) const;
+	VoxelGroupPayload BuildVoxelOnlyPayload(const ClusterLODVoxelGridOverride& grid) const;
+	VoxelGroupPayload BuildVoxelOnlyPayload(
+		const ClusterLODVoxelGridOverride& grid,
+		const VoxelCoverageMaterialSampler* coverageMaterialSampler) const;
+	static ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
+		const VoxelGroupPayload& payload,
+		const ClusterLODBuilderSettings& settings,
+		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
 
 	void SetClusterLODBuilderSettings(const ClusterLODBuilderSettings& settings) {
 		m_clusterLODBuilderSettings = settings;
@@ -428,6 +579,10 @@ private:
 	unsigned int m_flags = 0;
 	std::vector<std::byte> m_vertices;
 	std::vector<std::byte> m_skinningVertices;
+	std::vector<uint32_t> m_skinningDebugJoints;
+	std::vector<float> m_skinningDebugWeights;
+	std::vector<float> m_skinningDebugPositions;
+	std::vector<float> m_skinningDebugNormals;
 	std::vector<uint32_t> m_indices;
 	std::vector<MeshUvSetData> m_uvSets;
 	ClusterLODBuilderSettings m_clusterLODBuilderSettings{};

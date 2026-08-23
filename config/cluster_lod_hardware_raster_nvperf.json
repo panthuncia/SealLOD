@@ -1,0 +1,117 @@
+{
+  "name": "BasicRenderer CLOD hardware raster NVPerf metrics",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 30,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 3,
+    "maximum_samples": 5,
+    "confidence_level": 0.95,
+    "relative_half_width": 1.0
+  },
+  "output": {
+    "database": "out/cluster_lod_hardware_raster_nvperf.sqlite",
+    "last_run_summary": "out/cluster_lod_hardware_raster_nvperf.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "gpu__time_duration",
+      "output_name": "GPU duration",
+      "unit": "ns",
+      "type": "counter",
+      "rollup": "sum",
+      "submetric": "none"
+    },
+    {
+      "id": "active_warps",
+      "name": "smsp__warps_active",
+      "output_name": "Active warps/cycle",
+      "unit": "warps/cycle",
+      "type": "counter",
+      "rollup": "avg",
+      "submetric": "per_cycle_active",
+      "required": false
+    },
+    {
+      "id": "mesh_registers",
+      "name": "tpc__average_registers_per_thread_shader_vtg",
+      "output_name": "VTG registers/thread",
+      "unit": "registers",
+      "type": "ratio",
+      "rollup": "avg",
+      "submetric": "ratio",
+      "required": false
+    },
+    {
+      "id": "shared_bytes",
+      "name": "tpc__average_sharedmem_bytes_per_cta",
+      "output_name": "Shared memory/CTA",
+      "unit": "bytes",
+      "type": "ratio",
+      "rollup": "avg",
+      "submetric": "ratio",
+      "required": false
+    },
+    {
+      "id": "vtg_register_allocation",
+      "name": "tpc__sm_rf_registers_allocated_shader_vtg",
+      "output_name": "VTG register-file allocation",
+      "unit": "registers/cycle",
+      "type": "counter",
+      "rollup": "avg",
+      "submetric": "per_cycle_active",
+      "required": false
+    },
+    {
+      "id": "vtg_launch_stall",
+      "name": "tpc__warp_launch_cycles_stalled_shader_vtg",
+      "output_name": "VTG warp-launch stall",
+      "unit": "%",
+      "type": "counter",
+      "rollup": "sum",
+      "submetric": "pct_of_peak_sustained_elapsed",
+      "required": false
+    },
+    {
+      "id": "isbe_bytes",
+      "name": "tpc__l1tex_mem_shared_data_isbe_bytes_allocated",
+      "output_name": "ISBE shared allocation",
+      "unit": "bytes/cycle",
+      "type": "counter",
+      "rollup": "avg",
+      "submetric": "per_cycle_active",
+      "required": false
+    },
+    {
+      "id": "pixel_registers",
+      "name": "tpc__average_registers_per_thread_shader_ps",
+      "output_name": "Pixel registers/thread",
+      "unit": "registers",
+      "type": "ratio",
+      "rollup": "avg",
+      "submetric": "ratio",
+      "required": false
+    }
+  ],
+  "passes": [
+    {
+      "id": "rasterize_clusters_pass1",
+      "name": "CLodOpaque::RasterizeClustersPass1",
+      "queue": "Graphics",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time",
+        "active_warps",
+        "mesh_registers",
+        "shared_bytes",
+        "vtg_register_allocation",
+        "vtg_launch_stall",
+        "isbe_bytes",
+        "pixel_registers"
+      ]
+    }
+  ]
+}

@@ -2,10 +2,18 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <limits>
+#include <memory>
+#include <span>
 #include <vector>
 #include <directxmath.h>
 
 #include "Mesh/ClusterLODTypes.h"
+
+uint32_t ComputeVoxelClusterCullMetadata(
+	std::span<const CLodVoxelCubeRecord> cubeRecords,
+	uint32_t firstCube,
+	uint32_t cubeCount);
 
 struct VoxelSourceCandidatePayload
 {
@@ -13,9 +21,46 @@ struct VoxelSourceCandidatePayload
 	float expansionRadius = 0.0f;
 };
 
+struct VoxelSourcePayloadInstance
+{
+	const VoxelGroupPayload* payload = nullptr;
+	ClusterLODAssemblyTransform localToTarget{};
+	float expansionRadius = 0.0f;
+	int32_t refinedGroupOverride = std::numeric_limits<int32_t>::min();
+};
+
+struct VoxelSourceTrianglePart
+{
+	const std::vector<std::byte>* vertices = nullptr;
+	size_t vertexStrideBytes = 0;
+	const std::vector<std::byte>* skinningVertices = nullptr;
+	size_t skinningVertexStrideBytes = 0;
+	const std::vector<uint32_t>* triangleIndices = nullptr;
+};
+
+struct VoxelSourceTriangleInstance
+{
+	uint32_t partIndex = 0;
+	ClusterLODAssemblyTransform localToWorld{};
+	int32_t refinedGroup = -1;
+	std::span<const uint32_t> boneRemapIndices{};
+};
+
+struct VoxelSourceTriangleSample
+{
+	DirectX::XMFLOAT3 positions[3]{};
+	DirectX::XMFLOAT3 normals[3]{};
+	DirectX::XMFLOAT2 uvs[3]{};
+	uint64_t uvChartId = std::numeric_limits<uint64_t>::max();
+	uint32_t dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
+};
+
 class VoxelSourceTriangleBVH
 {
 public:
+	VoxelSourceTriangleBVH();
+	~VoxelSourceTriangleBVH();
+
 	void Build(
 		const std::vector<std::byte>* vertices,
 		size_t vertexStrideBytes,
@@ -23,13 +68,29 @@ public:
 		const std::vector<std::byte>* skinningVertices = nullptr,
 		size_t skinningVertexStrideBytes = 0,
 		const std::vector<int32_t>* triangleRefinedGroupIds = nullptr,
+		bool doubleSidedTriangles = false,
+		bool buildRefinedGroupScenes = true);
+	void BuildInstanced(
+		std::span<const VoxelSourceTrianglePart> parts,
+		std::span<const VoxelSourceTriangleInstance> instances,
 		bool doubleSidedTriangles = false);
+	void SetRefinedGroupDomainMap(std::vector<std::vector<int32_t>> refinedGroupDomainMap);
 
 	bool IsValid() const;
-	void QueryAABB(
-		const DirectX::XMFLOAT3& aabbMin,
-		const DirectX::XMFLOAT3& aabbMax,
-		std::vector<uint32_t>& outTriangleIndices) const;
+	bool IntersectNearest(
+		int32_t refinedGroupFilter,
+		const DirectX::XMFLOAT3& origin,
+		const DirectX::XMFLOAT3& direction,
+		float tMin,
+		float tMax,
+		uint32_t& outTriangleIndex,
+		float& outT,
+		float& outU,
+		float& outV) const;
+	bool GetTriangleSample(
+		uint32_t triangleIndex,
+		VoxelSourceTriangleSample& outSample) const;
+	DirectX::XMFLOAT2 UvDensity() const { return m_uvDensity; }
 
 	const std::vector<std::byte>* Vertices() const { return m_vertices; }
 	size_t VertexStrideBytes() const { return m_vertexStrideBytes; }
@@ -40,17 +101,8 @@ public:
 	bool DoubleSidedTriangles() const { return m_doubleSidedTriangles; }
 
 private:
-	struct Node
-	{
-		DirectX::XMFLOAT3 boundsMin{};
-		DirectX::XMFLOAT3 boundsMax{};
-		uint32_t firstTriangle = 0;
-		uint32_t triangleCount = 0;
-		uint32_t leftChild = UINT32_MAX;
-		uint32_t rightChild = UINT32_MAX;
-	};
-
-	uint32_t BuildNode(uint32_t firstTriangle, uint32_t triangleCount);
+	struct EmbreeScene;
+	DirectX::XMFLOAT2 ComputeUvDensity() const;
 
 	const std::vector<std::byte>* m_vertices = nullptr;
 	size_t m_vertexStrideBytes = 0;
@@ -59,8 +111,9 @@ private:
 	const std::vector<uint32_t>* m_triangleIndices = nullptr;
 	const std::vector<int32_t>* m_triangleRefinedGroupIds = nullptr;
 	bool m_doubleSidedTriangles = false;
-	std::vector<uint32_t> m_triangleOrder;
-	std::vector<Node> m_nodes;
+	DirectX::XMFLOAT2 m_uvDensity = { 0.0f, 0.0f };
+	std::vector<std::vector<int32_t>> m_refinedGroupDomainMap;
+	std::unique_ptr<EmbreeScene> m_embreeScene;
 };
 
 // Input: triangle-based source geometry to voxelize into a single group.
@@ -81,15 +134,18 @@ struct VoxelizeTrianglesInput
 	// coverage tracing. Candidate generation still uses triangleIndices and
 	// source/candidate voxel payloads.
 	const VoxelSourceTriangleBVH* coverageSourceTriangles = nullptr;
+	const VoxelCoverageMaterialSampler* coverageMaterialSampler = nullptr;
+	int32_t terminalCoverageRefinedGroupOverride = std::numeric_limits<int32_t>::min();
 
-	// Optional already-voxelized sources. These are re-sampled as volumes when
-	// building a coarser voxel parent.
+	// Optional already-voxelized sources. These only define candidate output
+	// cells; coverage is evaluated from triangle sources.
 	const std::vector<const VoxelGroupPayload*>* sourceVoxelPayloads = nullptr;
+	const std::vector<VoxelSourcePayloadInstance>* sourceVoxelPayloadInstances = nullptr;
 
 	// Optional already-voxelized sources used only to define candidate output
 	// cells. Coverage for these candidates is evaluated from triangle sources.
 	const std::vector<VoxelSourceCandidatePayload>* candidateVoxelPayloads = nullptr;
-	bool keepZeroCoverageSourceCells = false;
+	const std::vector<VoxelSourcePayloadInstance>* candidateVoxelPayloadInstances = nullptr;
 
 	// World-space AABB of the geometry to voxelize.
 	DirectX::XMFLOAT3 aabbMin{};
@@ -101,7 +157,11 @@ struct VoxelizeTrianglesInput
 
 	// Number of rays cast per active cell for opacity sampling.
 	uint32_t raysPerCell = 64;
-	ClusterLODVoxelPruningMode pruningMode = ClusterLODVoxelPruningMode::None;
+
+	// Output selection. Both default to true for compatibility with existing callers.
+	bool emitRenderPayload = true;
+	bool emitSourcePayload = true;
+
 };
 
 struct VoxelizeTrianglesResult
@@ -128,7 +188,6 @@ struct VoxelizeTrianglesResult
 		int32_t refinedGroup = -1;
 		uint32_t candidateKeys = 0;
 		uint32_t triangleOwnedCells = 0;
-		uint32_t voxelOwnedCells = 0;
 		uint32_t candidateOwnedCells = 0;
 		uint32_t candidateOnlyCells = 0;
 		uint32_t positiveCoverageCells = 0;
@@ -159,7 +218,7 @@ struct PackVoxelGroupInput
 
 struct PackedVoxelGroupBuildResult
 {
-	CLodVoxelGroupDescriptor descriptor{};
+	VoxelGroupPackedMetadata metadata{};
 	std::vector<CLodVoxelClusterRecord> clusterRecords;
 	std::vector<CLodVoxelCubeRecord> cubeRecords;
 	std::vector<CLodVoxelAttributeSample> attributeSamples;

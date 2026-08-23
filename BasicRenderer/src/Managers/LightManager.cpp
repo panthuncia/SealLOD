@@ -17,7 +17,7 @@
 #include "../../generated/BuiltinResources.h"
 
 LightManager::LightManager() {
-    auto& resourceManager = ResourceManager::GetInstance();
+    auto& resourceManager = ::ResourceManager::GetInstance();
 
 	m_activeLightIndices = SortedUnsignedIntBuffer::CreateShared(1, "activeLightIndices");
     m_lightBuffer = LazyDynamicStructuredBuffer<LightInfo>::CreateShared(10, "lightBuffer<LightInfo>");
@@ -25,14 +25,16 @@ LightManager::LightManager() {
     m_pointViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "pointViewInfo<uint>");
     m_directionalViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "direcitonalViewInfo<uint>");
 
-	rg::memory::SetResourceUsageHint(*m_activeLightIndices, "Lighting buffers");
-	rg::memory::SetResourceUsageHint(*m_lightBuffer, "Lighting buffers");
-	rg::memory::SetResourceUsageHint(*m_spotViewInfo, "Lighting buffers");
-	rg::memory::SetResourceUsageHint(*m_pointViewInfo, "Lighting buffers");
-	rg::memory::SetResourceUsageHint(*m_directionalViewInfo, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_activeLightIndices, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_lightBuffer, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_spotViewInfo, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_pointViewInfo, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_directionalViewInfo, "Lighting buffers");
 
 	getNumDirectionalLightCascades = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numDirectionalLightCascades");
 	getShadowResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("shadowResolution");
+	getMaxShadowDistance = SettingsManager::GetInstance().getSettingGetter<float>("maxShadowDistance");
+	getDirectionalShadowSceneExtent = SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowSceneExtent");
 	getDirectionalVirtualShadowSourceAngleDegrees = SettingsManager::GetInstance().getSettingGetter<float>(
 		CLodDirectionalVirtualShadowSourceAngleDegreesSettingName);
 
@@ -50,7 +52,7 @@ LightManager::LightManager() {
 	auto numClusters = lightClusterSize.x * lightClusterSize.y * lightClusterSize.z;
 	m_pClusterBuffer = CreateIndexedStructuredBuffer(numClusters, sizeof(Cluster), true, false);
 	m_pClusterBuffer->SetName("lightingClusterBuffer");
-	rg::memory::SetResourceUsageHint(*m_pClusterBuffer, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_pClusterBuffer, "Lighting buffers");
 
 	static const size_t avgPagesPerCluster = 10;
 	m_lightPagePoolSize = numClusters * avgPagesPerCluster;
@@ -63,7 +65,7 @@ LightManager::LightManager() {
 		rhi::HeapType::DeviceLocal);
 	m_pLightPagesBuffer->SetAllowAlias(true);
 	m_pLightPagesBuffer->SetName("lightPagesBuffer");
-	rg::memory::SetResourceUsageHint(*m_pLightPagesBuffer, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_pLightPagesBuffer, "Lighting buffers");
 
 	m_resources[Builtin::Light::ClusterBuffer] = m_pClusterBuffer;
 	m_resources[Builtin::Light::PagesBuffer] = m_pLightPagesBuffer;
@@ -154,10 +156,13 @@ void LightManager::RemoveLight(flecs::entity light) {
 	}
 
 	auto& viewInfo = light.get<Components::LightViewInfo>();
-	m_activeLightIndices->Remove(viewInfo.lightBufferIndex);
-	m_lightBuffer->Remove(viewInfo.lightBufferView.get());
+	if (viewInfo.lightBufferView) {
+		m_activeLightIndices->Remove(viewInfo.lightBufferIndex);
+		m_lightBuffer->Remove(viewInfo.lightBufferView.get());
+	}
 
 	RemoveLightViewInfo(light);
+	light.remove<Components::LightViewInfo>();
 }
 
 unsigned int LightManager::GetNumLights() {
@@ -250,19 +255,24 @@ LightManager::CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t ent
 		numCascades,
 		camera.zNear,
 		camera.zFar,
-		camera.zFar);
+		std::max(getMaxShadowDistance(), camera.zNear));
 
 	// Virtual shadow clip levels are nested around the primary camera.
-	const float clipVerticalExtent = std::max(
-		SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowVerticalExtent")(),
+	const float shadowDistanceLowerBound = std::max(
+		SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowDistanceLowerBound")(),
 		1.0f);
+	const float directionalLodBias =
+		CLodVirtualShadowBuildRuntimeResolutionConfig().directionalLodBias;
+	const float directionalResolutionScale = std::exp2(directionalLodBias);
 	auto cascades = setupDirectionalClipmaps(numCascades, info.dirWorldSpace,
 		DirectX::XMLoadFloat3(&posFloats), 
 		GetForwardFromMatrix(matrix),
 		GetUpFromMatrix(matrix),
 		camera.zNear, camera.fov, camera.aspect,
 		directionalClipFarPlanes,
-		clipVerticalExtent);
+		shadowDistanceLowerBound,
+		std::max(getDirectionalShadowSceneExtent(), 0.0f),
+		directionalResolutionScale);
 
 	// Collect the frustum planes from each cascade.
 	cascadePlanes = Components::FrustumPlanes();
@@ -442,11 +452,14 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 			numCascades,
 			camera.zNear,
 			camera.zFar,
-			camera.zFar);
-		const float clipVerticalExtent = std::max(
-			SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowVerticalExtent")(),
+			std::max(getMaxShadowDistance(), camera.zNear));
+		const float shadowDistanceLowerBound = std::max(
+			SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowDistanceLowerBound")(),
 			1.0f);
-		auto cascades = setupDirectionalClipmaps(numCascades, lightInfo.lightInfo.dirWorldSpace, DirectX::XMLoadFloat3(&posFloats), GetForwardFromMatrix(matrix), GetUpFromMatrix(matrix), camera.zNear, camera.fov, camera.aspect, directionalClipFarPlanes, clipVerticalExtent);
+		const float directionalLodBias =
+			CLodVirtualShadowBuildRuntimeResolutionConfig().directionalLodBias;
+		const float directionalResolutionScale = std::exp2(directionalLodBias);
+		auto cascades = setupDirectionalClipmaps(numCascades, lightInfo.lightInfo.dirWorldSpace, DirectX::XMLoadFloat3(&posFloats), GetForwardFromMatrix(matrix), GetUpFromMatrix(matrix), camera.zNear, camera.fov, camera.aspect, directionalClipFarPlanes, shadowDistanceLowerBound, std::max(getDirectionalShadowSceneExtent(), 0.0f), directionalResolutionScale);
 		PublishDirectionalShadowDebug(cascades);
 		viewInfo.virtualShadowUnwrappedPageOffsetX.resize(numCascades);
 		viewInfo.virtualShadowUnwrappedPageOffsetY.resize(numCascades);
@@ -504,22 +517,28 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 void LightManager::RemoveLightViewInfo(flecs::entity light) {
 
 	//m_pCommandBufferManager->UnregisterBuffers(light.id()); // Remove indirect command buffers
-	auto& lightInfo = light.get<Components::Light>();
-	auto& viewInfo = light.get<Components::LightViewInfo>();
-	switch (lightInfo.type) {
+	const auto* lightInfo = light.try_get<Components::Light>();
+	const auto* viewInfo = light.try_get<Components::LightViewInfo>();
+	if (!lightInfo || !viewInfo || !lightInfo->lightInfo.shadowCaster) {
+		return;
+	}
+
+	switch (lightInfo->type) {
 	case Components::LightType::Point: {
-		auto& views = viewInfo.viewIDs;
-		for (int i = 0; i < 6; i++) {
+		const auto& views = viewInfo->viewIDs;
+		for (size_t i = 0; i < views.size(); i++) {
 			m_pViewManager->DestroyView(views[i]);
 		}
 		break;
 	}
 	case Components::LightType::Spot: {
-		m_pViewManager->DestroyView(viewInfo.viewIDs[0]);
+		for (const auto viewID : viewInfo->viewIDs) {
+			m_pViewManager->DestroyView(viewID);
+		}
 		break;
 	}
 	case Components::LightType::Directional: {
-		auto& views = viewInfo.viewIDs;
+		const auto& views = viewInfo->viewIDs;
 		for (size_t i = 0; i < views.size(); i++) {
 			m_pViewManager->DestroyView(views[i]);
 		}

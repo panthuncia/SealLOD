@@ -14,8 +14,8 @@ public:
         CreateXeGTAOComputePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) {
-        builder->WithShaderResource(Builtin::GBuffer::Normals, Builtin::GTAO::WorkingDepths, Builtin::CameraBuffer)
+    void DeclareResourceUsages(ComputePassBuilder* builder) override {
+        builder->WithShaderResource(Builtin::Surface::NormalRoughness, Builtin::GTAO::WorkingDepths, Builtin::CameraBuffer)
             .WithUnorderedAccess(Builtin::GTAO::WorkingEdges, Builtin::GTAO::WorkingAOTerm1)
             .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -34,7 +34,7 @@ public:
         auto workingDepths = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingDepths);
         auto workingAOTerm = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingAOTerm1);
         auto workingEdges = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingEdges);
-        auto normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Normals);
+        auto normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::NormalRoughness);
 
 		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
 
@@ -90,7 +90,7 @@ private:
         samplerDesc.borderPreset = rhi::BorderPreset::TransparentBlack;
         samplerDesc.minLod = 0.0f;
         samplerDesc.maxLod = 0.0f;
-        m_samplerIndex = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(samplerDesc);
+        m_samplerIndex = org::runtime::CreateIndexedSamplerFromActiveDescriptorService(samplerDesc);
     }
 
     void CreateXeGTAOComputePSO() {

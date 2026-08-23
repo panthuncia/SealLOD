@@ -52,9 +52,7 @@ void CLodRtReflectionsRayGen()
     Texture2D<float> depthTexture =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PrimaryCamera::DepthTexture)];
     Texture2D<float4> normalsTexture =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
-    Texture2D<float4> metallicRoughnessTexture =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MetallicRoughness)];
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::NormalRoughness)];
     ConstantBuffer<PerFrameBuffer> perFrameBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<Camera> cameras =
@@ -66,8 +64,7 @@ void CLodRtReflectionsRayGen()
 
     const float depth = depthTexture[pixel];
     const float4 normalSample = normalsTexture[pixel];
-    const float4 metallicRoughness = metallicRoughnessTexture[pixel];
-    const float perceptualRoughness = metallicRoughness.y;
+    const float perceptualRoughness = normalSample.w;
     const float3 normalWS = normalize(normalSample.xyz);
     const bool reflectivePixel = depth > 0.0f
         && depth < 1.0f

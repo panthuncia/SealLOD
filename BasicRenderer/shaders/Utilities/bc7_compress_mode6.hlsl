@@ -163,6 +163,64 @@ void RefineEndpoints(float4 samples[16], uint indices[16], inout float4 endpoint
     endpoint1 = ClampByteRange((rhsB * sumA2 - rhsA * sumAB) / det);
 }
 
+void FitPrincipalAxisEndpoints(float4 samples[16], inout float4 endpoint0, inout float4 endpoint1)
+{
+    float4 mean = 0.0f.xxxx;
+    [unroll]
+    for (uint index = 0u; index < 16u; ++index)
+    {
+        mean += samples[index];
+    }
+    mean *= (1.0f / 16.0f);
+
+    // Component-wise range is a useful non-zero seed, but it is not itself a
+    // valid endpoint fit: mode 6 has one shared index for all RGBA channels.
+    float4 axis = endpoint1 - endpoint0;
+    float axisLengthSquared = dot(axis, axis);
+    if (axisLengthSquared < 1.0e-8f)
+    {
+        endpoint0 = mean;
+        endpoint1 = mean;
+        return;
+    }
+    axis *= rsqrt(axisLengthSquared);
+
+    // Power iteration over the 4D covariance matrix. Expressing C*v as a sum
+    // of delta*dot(delta,v) avoids materializing a matrix and maps well to the
+    // small fixed 4x4 block.
+    [unroll]
+    for (uint iteration = 0u; iteration < 8u; ++iteration)
+    {
+        float4 nextAxis = 0.0f.xxxx;
+        [unroll]
+        for (uint index = 0u; index < 16u; ++index)
+        {
+            const float4 delta = samples[index] - mean;
+            nextAxis += delta * dot(delta, axis);
+        }
+
+        const float nextLengthSquared = dot(nextAxis, nextAxis);
+        if (nextLengthSquared < 1.0e-8f)
+        {
+            break;
+        }
+        axis = nextAxis * rsqrt(nextLengthSquared);
+    }
+
+    float minProjection = 3.402823466e+38F;
+    float maxProjection = -3.402823466e+38F;
+    [unroll]
+    for (uint index = 0u; index < 16u; ++index)
+    {
+        const float projection = dot(samples[index] - mean, axis);
+        minProjection = min(minProjection, projection);
+        maxProjection = max(maxProjection, projection);
+    }
+
+    endpoint0 = ClampByteRange(mean + axis * minProjection);
+    endpoint1 = ClampByteRange(mean + axis * maxProjection);
+}
+
 BC7Mode6Block EncodeMode6(Texture2D<float4> srcTexture, uint2 blockBase, uint2 textureSize)
 {
     float4 samples[16];
@@ -183,6 +241,8 @@ BC7Mode6Block EncodeMode6(Texture2D<float4> srcTexture, uint2 blockBase, uint2 t
             endpoint1 = max(endpoint1, sampleBytes);
         }
     }
+
+    FitPrincipalAxisEndpoints(samples, endpoint0, endpoint1);
 
     uint indices[16];
 

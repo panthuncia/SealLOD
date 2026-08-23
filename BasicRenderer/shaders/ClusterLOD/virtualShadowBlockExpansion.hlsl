@@ -1,6 +1,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/clodStructs.hlsli"
 #include "include/clodPageAccess.hlsli"
@@ -19,9 +20,11 @@ struct RasterizeClustersCommand
     uint dispatchZ;
 };
 
-static const uint kVsmBlockTrackedCapacity = kCLodVirtualShadowBlockMaxTrackedPerCluster;
+static const uint kVsmBlockTrackedCapacity = kCLodVirtualShadowMaxBlocksPerClipmap;
 
 groupshared float2 gs_screenPos[SW_RASTER_MAX_VERTS];
+groupshared float2 gs_coverageMin;
+groupshared float2 gs_coverageMax;
 groupshared uint gs_useCluster;
 groupshared uint gs_minBlockX;
 groupshared uint gs_minBlockY;
@@ -32,46 +35,12 @@ groupshared uint gs_activeBlockCount;
 groupshared uint gs_outputBaseIndex;
 groupshared uint gs_committedCount;
 groupshared uint gs_emitPackedVirtualBlockOrigins[kVsmBlockTrackedCapacity];
-groupshared uint gs_emitPackedWrappedBlockOrigins[kVsmBlockTrackedCapacity];
-groupshared uint gs_emitActiveMasks[kVsmBlockTrackedCapacity];
 groupshared uint gs_emitPackedActiveRects[kVsmBlockTrackedCapacity];
-groupshared uint gs_emitPackedPhysicalPageIndices[kVsmBlockTrackedCapacity * 8u];
-
-uint VsmEmitPhysicalPageIndexArrayOffset(uint slot)
-{
-    return slot * 8u;
-}
 
 void VsmStoreTrackedBlockMeta(uint slot, CLodVirtualShadowBlockMeta blockMeta)
 {
     gs_emitPackedVirtualBlockOrigins[slot] = blockMeta.packedVirtualBlockOrigin;
-    gs_emitPackedWrappedBlockOrigins[slot] = blockMeta.packedWrappedBlockOrigin;
-    gs_emitActiveMasks[slot] = blockMeta.activePageMask;
     gs_emitPackedActiveRects[slot] = blockMeta.packedActiveRectAndFlags;
-
-    const uint baseIndex = VsmEmitPhysicalPageIndexArrayOffset(slot);
-    [unroll]
-    for (uint i = 0u; i < 8u; ++i)
-    {
-        gs_emitPackedPhysicalPageIndices[baseIndex + i] = blockMeta.packedPhysicalPageIndices[i];
-    }
-}
-
-CLodVirtualShadowBlockMeta VsmLoadTrackedBlockMeta(uint slot)
-{
-    CLodVirtualShadowBlockMeta blockMeta = (CLodVirtualShadowBlockMeta)0;
-    blockMeta.packedVirtualBlockOrigin = gs_emitPackedVirtualBlockOrigins[slot];
-    blockMeta.packedWrappedBlockOrigin = gs_emitPackedWrappedBlockOrigins[slot];
-    blockMeta.activePageMask = gs_emitActiveMasks[slot];
-    blockMeta.packedActiveRectAndFlags = gs_emitPackedActiveRects[slot];
-
-    const uint baseIndex = VsmEmitPhysicalPageIndexArrayOffset(slot);
-    [unroll]
-    for (uint i = 0u; i < 8u; ++i)
-    {
-        blockMeta.packedPhysicalPageIndices[i] = gs_emitPackedPhysicalPageIndices[baseIndex + i];
-    }
-    return blockMeta;
 }
 
 bool VsmComputeBlockCoverage(
@@ -99,73 +68,30 @@ bool VsmComputeBlockCoverage(
     return all(blockCount > uint2(0u, 0u));
 }
 
-bool VsmBuildBlockMeta(
-    uint2 blockOriginPageCoord,
-    CLodVirtualShadowClipmapInfo clipmapInfo,
-    RWTexture2DArray<uint> pageTable,
+bool VsmLoadActiveBlockMeta(
+    uint2 blockCoord,
+    uint shadowClipmapIndex,
+    StructuredBuffer<uint> activeBlockMetadata,
     out CLodVirtualShadowBlockMeta blockMeta)
 {
     blockMeta = (CLodVirtualShadowBlockMeta)0;
-
-    [unroll]
-    for (uint packedPairIndex = 0u; packedPairIndex < 8u; ++packedPairIndex)
-    {
-        blockMeta.packedPhysicalPageIndices[packedPairIndex] = 0xFFFFFFFFu;
-    }
-
-    uint activeMask = 0u;
-    uint2 minLocalPageCoord = uint2(3u, 3u);
-    uint2 maxLocalPageCoord = uint2(0u, 0u);
-
-    [unroll]
-    for (uint localPageY = 0u; localPageY < kCLodVirtualShadowBlockPagesPerAxis; ++localPageY)
-    {
-        [unroll]
-        for (uint localPageX = 0u; localPageX < kCLodVirtualShadowBlockPagesPerAxis; ++localPageX)
-        {
-            const uint2 localPageCoord = uint2(localPageX, localPageY);
-            const uint2 pageCoord = blockOriginPageCoord + localPageCoord;
-            if (pageCoord.x >= clipmapInfo.pageTableResolution || pageCoord.y >= clipmapInfo.pageTableResolution)
-            {
-                continue;
-            }
-
-            const uint2 wrappedPageCoord = CLodVirtualShadowWrappedPageCoords(pageCoord, clipmapInfo);
-            const uint pageEntry = pageTable[uint3(wrappedPageCoord, clipmapInfo.pageTableLayer)];
-            if (!CLodVirtualShadowPageEntryCanRaster(pageEntry))
-            {
-                continue;
-            }
-
-            const uint localPageIndex = CLodVirtualShadowBlockLocalPageIndex(localPageCoord);
-            const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
-            activeMask |= (1u << localPageIndex);
-            minLocalPageCoord = min(minLocalPageCoord, localPageCoord);
-            maxLocalPageCoord = max(maxLocalPageCoord, localPageCoord);
-
-            const uint packedPairIndex = localPageIndex >> 1u;
-            const uint halfShift = (localPageIndex & 1u) * 16u;
-            blockMeta.packedPhysicalPageIndices[packedPairIndex] =
-                (blockMeta.packedPhysicalPageIndices[packedPairIndex] & ~(0xFFFFu << halfShift)) |
-                ((physicalPageIndex & 0xFFFFu) << halfShift);
-        }
-    }
-
-    if (activeMask == 0u)
+    const uint blockLinearIndex =
+        CLodVirtualShadowBlockLinearIndex(blockCoord, shadowClipmapIndex);
+    const uint packedActiveRect = activeBlockMetadata[blockLinearIndex];
+    if (packedActiveRect == 0xFFFFFFFFu)
     {
         return false;
     }
-
-    blockMeta.packedVirtualBlockOrigin = CLodVirtualShadowPackBlockPageCoords(blockOriginPageCoord);
-    blockMeta.packedWrappedBlockOrigin = CLodVirtualShadowPackBlockPageCoords(
-        CLodVirtualShadowWrappedPageCoords(blockOriginPageCoord, clipmapInfo));
-    blockMeta.activePageMask = activeMask;
-    blockMeta.packedActiveRectAndFlags = CLodVirtualShadowPackBlockActiveRect(minLocalPageCoord, maxLocalPageCoord, false);
+    blockMeta.packedVirtualBlockOrigin =
+        CLodVirtualShadowPackBlockPageCoords(
+            CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord));
+    blockMeta.packedActiveRectAndFlags = packedActiveRect;
     return true;
 }
 
 void VsmLoadClusterScreenCoverage(
     uint4 packedCluster,
+    uint assemblyTransformIndex,
     uint GI,
     out bool outHasClipmapInfo,
     out CLodVirtualShadowClipmapInfo outClipmapInfo)
@@ -177,12 +103,19 @@ void VsmLoadClusterScreenCoverage(
     const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
     const uint shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
 
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    const PerMeshInstanceBuffer meshInst = meshInstBuf[instanceID];
-    StructuredBuffer<PerObjectBuffer> objBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    const PerObjectBuffer objData = objBuf[meshInst.perObjectBufferIndex];
+    const PerObjectBuffer objData =
+        LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
+#if defined(PSO_SKINNED)
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    // Keep virtual-shadow deformation on the same transient wind palette as visibility rasterization.
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+        ? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+        : 0xFFFFFFFFu;
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+#endif
 
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
         ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
@@ -215,6 +148,25 @@ void VsmLoadClusterScreenCoverage(
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     const CullingCameraInfo cam = cullingCameras[viewID];
     const row_major matrix modelViewProjection = mul(objData.model, cam.viewProjection);
+#if !defined(PSO_SKINNED)
+    if (GI == 0u)
+    {
+        const float4 clipCenter = mul(float4(desc.bounds.xyz, 1.0f), modelViewProjection);
+        const float inverseW = rcp(max(abs(clipCenter.w), 1.0e-8f));
+        const float2 ndcCenter = clipCenter.xy * inverseW;
+        const float2 ndcRadius = desc.bounds.w * float2(
+            length(float3(modelViewProjection[0][0], modelViewProjection[1][0], modelViewProjection[2][0])),
+            length(float3(modelViewProjection[0][1], modelViewProjection[1][1], modelViewProjection[2][1]))) * inverseW;
+        const float virtualResolution = (float)max(outClipmapInfo.virtualResolution, 1u);
+        const float2 screenCenter = float2(
+            (ndcCenter.x + 1.0f) * 0.5f * virtualResolution,
+            (1.0f - ndcCenter.y) * 0.5f * virtualResolution);
+        const float2 screenRadius = ndcRadius * (0.5f * virtualResolution);
+        gs_coverageMin = screenCenter - screenRadius;
+        gs_coverageMax = screenCenter + screenRadius;
+    }
+    return;
+#endif
     const uint positionBitstreamBase = pageSlabByteOffset + hdr.positionBitstreamOffset;
 
     for (uint v = GI; v < vertCount; v += SW_RASTER_THREADS)
@@ -230,7 +182,9 @@ void VsmLoadClusterScreenCoverage(
 #if defined(PSO_SKINNED)
         SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
         skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
-        localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
+        skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
+        localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
+            meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
 #endif
 
         const float4 clipPos = mul(float4(localPos, 1.0f), modelViewProjection);
@@ -258,24 +212,31 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
 
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + linearizedGroupID;
     ByteAddressBuffer sourceClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> sourceClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(sourceClusters, sortedClusterIndex);
+    const uint sourceClusterTransformIndex = sourceClusterTransformIndices[sortedClusterIndex];
+    RWStructuredBuffer<uint> clusterCoverage =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_CLUSTER_COVERAGE_DESCRIPTOR_INDEX];
 
     if (GI == 0u)
     {
         gs_useCluster = 0u;
         gs_activeBlockCount = 0u;
         gs_totalBlockCount = 0u;
+        clusterCoverage[sortedClusterIndex] = 0xFFFFFFFFu;
     }
 
     bool hasClipmapInfo = false;
     CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-    VsmLoadClusterScreenCoverage(packedCluster, GI, hasClipmapInfo, clipmapInfo);
+    VsmLoadClusterScreenCoverage(packedCluster, sourceClusterTransformIndex, GI, hasClipmapInfo, clipmapInfo);
     GroupMemoryBarrierWithGroupSync();
 
     if (GI == 0u && hasClipmapInfo)
     {
         float2 ssMin;
         float2 ssMax;
+#if defined(PSO_SKINNED)
         const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
         const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
         const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
@@ -285,6 +246,10 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
             hdr.descriptorOffset,
             CLodVisibleClusterLocalMeshletIndex(packedCluster));
         PJ_ComputeScreenBounds(gs_screenPos, CLodDescVertexCount(desc), ssMin, ssMax);
+#else
+        ssMin = gs_coverageMin;
+        ssMax = gs_coverageMax;
+#endif
 
         uint2 minBlockCoord;
         uint2 blockCount;
@@ -296,6 +261,11 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
             gs_blockCountY = blockCount.y;
             gs_totalBlockCount = blockCount.x * blockCount.y;
             gs_useCluster = 1u;
+            clusterCoverage[sortedClusterIndex] =
+                minBlockCoord.x |
+                (minBlockCoord.y << 8u) |
+                ((blockCount.x - 1u) << 16u) |
+                ((blockCount.y - 1u) << 24u);
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -305,13 +275,20 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
         return;
     }
 
-    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
+    const uint shadowClipmapIndex =
+        CLodVisibleClusterShadowClipmapIndex(packedCluster);
+    StructuredBuffer<uint> activeBlockMetadata =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX];
     [loop]
     for (uint blockLinearIndex = GI; blockLinearIndex < gs_totalBlockCount; blockLinearIndex += SW_RASTER_THREADS)
     {
         const uint2 blockCoord = uint2(blockLinearIndex % gs_blockCountX, blockLinearIndex / gs_blockCountX) + uint2(gs_minBlockX, gs_minBlockY);
         CLodVirtualShadowBlockMeta blockMeta;
-        if (VsmBuildBlockMeta(CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord), clipmapInfo, pageTable, blockMeta))
+        if (VsmLoadActiveBlockMeta(
+                blockCoord,
+                shadowClipmapIndex,
+                activeBlockMetadata,
+                blockMeta))
         {
             InterlockedAdd(gs_activeBlockCount, 1u);
         }
@@ -320,9 +297,17 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
 
     if (GI == 0u && gs_activeBlockCount != 0u)
     {
-        const uint emittedCount = gs_activeBlockCount > CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP ? 1u : gs_activeBlockCount;
+        // Never fall back to one unscoped cluster when block coverage exceeds
+        // the tracking cap. That cluster can rasterize every admitted page its
+        // triangles touch, defeating both page-local ownership and the work
+        // budget. Emit the bounded tracked subset; deferred pages remain dirty
+        // and will be covered by later frames.
+        const uint emittedCount = gs_activeBlockCount;
         RWStructuredBuffer<uint> expandedHistogram = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_HISTOGRAM_DESCRIPTOR_INDEX];
         InterlockedAdd(expandedHistogram[bucketID], emittedCount);
+        RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+            ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_STATS_DESCRIPTOR_INDEX];
+        InterlockedAdd(statsBuffer[0].blockExpandedRequestedRecordCount, emittedCount);
     }
 }
 
@@ -342,6 +327,9 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + linearizedGroupID;
     ByteAddressBuffer sourceClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(sourceClusters, sortedClusterIndex);
+    StructuredBuffer<uint> sourceClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint sourceClusterTransformIndex = sourceClusterTransformIndices[sortedClusterIndex];
 
     if (GI == 0u)
     {
@@ -352,34 +340,18 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
         gs_committedCount = 0u;
     }
 
-    bool hasClipmapInfo = false;
-    CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-    VsmLoadClusterScreenCoverage(packedCluster, GI, hasClipmapInfo, clipmapInfo);
-    GroupMemoryBarrierWithGroupSync();
-
-    if (GI == 0u && hasClipmapInfo)
+    if (GI == 0u)
     {
-        float2 ssMin;
-        float2 ssMax;
-        const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
-        const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
-        const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
-        const CLodMeshletDescriptor desc = LoadMeshletDescriptor(
-            pageSlabDescriptorIndex,
-            pageSlabByteOffset,
-            hdr.descriptorOffset,
-            CLodVisibleClusterLocalMeshletIndex(packedCluster));
-        PJ_ComputeScreenBounds(gs_screenPos, CLodDescVertexCount(desc), ssMin, ssMax);
-
-        uint2 minBlockCoord;
-        uint2 blockCount;
-        if (VsmComputeBlockCoverage(ssMin, ssMax, clipmapInfo, minBlockCoord, blockCount))
+        StructuredBuffer<uint> clusterCoverage =
+            ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_CLUSTER_COVERAGE_DESCRIPTOR_INDEX];
+        const uint packedCoverage = clusterCoverage[sortedClusterIndex];
+        if (packedCoverage != 0xFFFFFFFFu)
         {
-            gs_minBlockX = minBlockCoord.x;
-            gs_minBlockY = minBlockCoord.y;
-            gs_blockCountX = blockCount.x;
-            gs_blockCountY = blockCount.y;
-            gs_totalBlockCount = blockCount.x * blockCount.y;
+            gs_minBlockX = packedCoverage & 0xFFu;
+            gs_minBlockY = (packedCoverage >> 8u) & 0xFFu;
+            gs_blockCountX = ((packedCoverage >> 16u) & 0xFFu) + 1u;
+            gs_blockCountY = ((packedCoverage >> 24u) & 0xFFu) + 1u;
+            gs_totalBlockCount = gs_blockCountX * gs_blockCountY;
             gs_useCluster = 1u;
         }
     }
@@ -390,13 +362,20 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
         return;
     }
 
-    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
+    const uint shadowClipmapIndex =
+        CLodVisibleClusterShadowClipmapIndex(packedCluster);
+    StructuredBuffer<uint> activeBlockMetadata =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX];
     [loop]
     for (uint blockLinearIndex = GI; blockLinearIndex < gs_totalBlockCount; blockLinearIndex += SW_RASTER_THREADS)
     {
         const uint2 blockCoord = uint2(blockLinearIndex % gs_blockCountX, blockLinearIndex / gs_blockCountX) + uint2(gs_minBlockX, gs_minBlockY);
         CLodVirtualShadowBlockMeta blockMeta;
-        if (!VsmBuildBlockMeta(CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord), clipmapInfo, pageTable, blockMeta))
+        if (!VsmLoadActiveBlockMeta(
+                blockCoord,
+                shadowClipmapIndex,
+                activeBlockMetadata,
+                blockMeta))
         {
             continue;
         }
@@ -410,10 +389,9 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     }
     GroupMemoryBarrierWithGroupSync();
 
-    const bool overflowedBlockTracking = gs_activeBlockCount > CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP;
     if (GI == 0u)
     {
-        const uint requestedCount = overflowedBlockTracking ? 1u : min(gs_activeBlockCount, kVsmBlockTrackedCapacity);
+        const uint requestedCount = gs_activeBlockCount;
         if (requestedCount != 0u)
         {
             StructuredBuffer<uint> expandedOffsets = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_OFFSETS_DESCRIPTOR_INDEX];
@@ -427,6 +405,26 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
                 (gs_outputBaseIndex < recordCapacity)
                     ? min(requestedCount, recordCapacity - gs_outputBaseIndex)
                     : 0u;
+
+            RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+                ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_STATS_DESCRIPTOR_INDEX];
+            InterlockedAdd(
+                statsBuffer[0].blockExpandedCommittedRecordCount,
+                gs_committedCount);
+            const uint droppedCount = requestedCount - gs_committedCount;
+            if (droppedCount != 0u)
+            {
+                // The prefix offsets intentionally retain their original
+                // allocation, but raster must consume only records that were
+                // actually written. Otherwise it reads stale records beyond
+                // the capacity clamp.
+                RWStructuredBuffer<uint> expandedHistogram =
+                    ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_HISTOGRAM_DESCRIPTOR_INDEX];
+                InterlockedAdd(expandedHistogram[bucketID], 0u - droppedCount);
+                InterlockedAdd(
+                    statsBuffer[0].blockExpandedDroppedRecordCount,
+                    droppedCount);
+            }
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -437,22 +435,49 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     }
 
     RWByteAddressBuffer expandedClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> expandedClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
 
-    if (overflowedBlockTracking)
+    for (uint outputIndex = GI;
+         outputIndex < gs_committedCount;
+         outputIndex += SW_RASTER_THREADS)
     {
-        if (GI == 0u)
+        const uint2 virtualBlockOrigin =
+            CLodVirtualShadowUnpackBlockPageCoords(
+                gs_emitPackedVirtualBlockOrigins[outputIndex]);
+        const uint2 blockCoord =
+            CLodVirtualShadowBlockCoordFromPageCoord(
+                virtualBlockOrigin);
+        const uint2 minLocalPageCoord =
+            CLodVirtualShadowUnpackBlockActiveRectMin(
+                gs_emitPackedActiveRects[outputIndex]);
+        const uint2 maxLocalPageCoord =
+            CLodVirtualShadowUnpackBlockActiveRectMax(
+                gs_emitPackedActiveRects[outputIndex]);
+        uint blockPayload =
+            CLodPackVisibleClusterVsmPayloadForBlock(
+                CLodVisibleClusterShadowClipmapIndex(packedCluster),
+                blockCoord,
+                minLocalPageCoord,
+                maxLocalPageCoord,
+                false);
+        if (CLodVisibleClusterIsVoxel(packedCluster))
         {
-            CLodStoreVisibleClusterPackedWordsRW(expandedClusters, gs_outputBaseIndex, packedCluster);
+            blockPayload =
+                CLodVisibleClusterMarkVoxelPayload(blockPayload);
         }
-        return;
+        uint4 expandedCluster = packedCluster;
+        expandedCluster.w =
+            (packedCluster.w &
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_MASK) |
+            blockPayload;
+        CLodStoreVisibleClusterPackedWordsRW(
+            expandedClusters,
+            gs_outputBaseIndex + outputIndex,
+            expandedCluster);
+        expandedClusterTransformIndices[gs_outputBaseIndex + outputIndex] =
+            sourceClusterTransformIndex;
     }
-
-    if (GI >= gs_committedCount)
-    {
-        return;
-    }
-
-    CLodStoreVisibleClusterPackedWordsRW(expandedClusters, gs_outputBaseIndex + GI, packedCluster);
 }
 
 [shader("compute")]

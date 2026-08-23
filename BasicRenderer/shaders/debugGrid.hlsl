@@ -131,17 +131,16 @@ void DebugGridCSMain(uint3 dtid : SV_DispatchThreadID)
     float axisOp = saturate(asfloat(RC_AxisOpacity));
     float overallOp = saturate(asfloat(RC_OverallOpacity));
 
-    float4x4 invViewProj = inverse(mul(cam.view, cam.unjitteredProjection));
-    float4x4 invView = inverse(cam.view);
-
-    float3 camPos = invView[3].xyz;
+    float3 camPos = cam.viewInverse[3].xyz;
 
     float2 ndc;
     ndc.x = uv.x * 2.0 - 1.0;
     ndc.y = (1.0 - uv.y) * 2.0 - 1.0;
 
-    float4 farH = mul(float4(ndc, 1.0, 1.0), invViewProj);
-    float3 farP = farH.xyz / max(farH.w, 1e-6);
+    float4 viewH = mul(float4(ndc, 0.0, 1.0), cam.projectionInverse);
+    float3 viewP = viewH.xyz / max(viewH.w, 1e-6);
+    float4 worldH = mul(float4(viewP, 1.0), cam.viewInverse);
+    float3 farP = worldH.xyz / max(worldH.w, 1e-6);
 
     float3 rayDir = normalize(farP - camPos);
 
@@ -173,8 +172,10 @@ void DebugGridCSMain(uint3 dtid : SV_DispatchThreadID)
     // Camera-relative snapping to reduce far-from-origin precision issues
     float2 camXZ = camPos.xz;
 
-    float2 minorUV = hit.xz / minorCell - floor(camXZ / minorCell);
-    float2 majorUV = hit.xz / majorCell - floor(camXZ / majorCell);
+    float2 minorOrigin = floor(camXZ / minorCell) * minorCell;
+    float2 majorOrigin = floor(camXZ / majorCell) * majorCell;
+    float2 minorUV = (hit.xz - minorOrigin) / minorCell;
+    float2 majorUV = (hit.xz - majorOrigin) / majorCell;
 
     float minorMask = PristineGrid(minorUV, minorLW.xx);
     float majorMask = PristineGrid(majorUV, majorLW.xx);

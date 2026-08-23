@@ -228,7 +228,8 @@ ExtractionResult ExtractAll(const aiScene* pScene, const std::string& sourceFile
 		auto prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
 
 		// Populate MeshIngestBuilder
-		MeshIngestBuilder ingest(vertexSize, hasBones ? skinningVertexSize : 0, meshFlags, GetDefaultBuilderSettings());
+		MeshIngestBuilder ingest(vertexSize, hasBones ? skinningVertexSize : 0, meshFlags,
+			GetDefaultBuilderSettings(cacheIdentity.sourceIdentifier));
         ingest.SetUvSets(std::move(uvSets));
 		ingest.ReserveVertices(numVertices);
 		if (hasBones) {

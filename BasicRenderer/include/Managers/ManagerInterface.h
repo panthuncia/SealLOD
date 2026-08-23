@@ -9,6 +9,9 @@ class EnvironmentManager;
 class MaterialManager;
 class SkeletonManager;
 class TextureFactory;
+class TerrainManager;
+class ShaderVariantRequestService;
+namespace org::runtime { class IDescriptorService; class IUploadService; }
 
 class ManagerInterface {
 public:
@@ -22,7 +25,11 @@ public:
 		EnvironmentManager*  environmentManager,
 		MaterialManager* materialManager,
 		SkeletonManager* skeletonManager,
-		TextureFactory* textureFactory
+		TextureFactory* textureFactory,
+		TerrainManager* terrainManager = nullptr,
+		ShaderVariantRequestService* shaderVariantRequestService = nullptr,
+		org::runtime::IUploadService* uploadService = nullptr,
+		org::runtime::IDescriptorService* descriptorService = nullptr
 	) : m_pMeshManager(meshManager),
 		m_pObjectManager(objectManager),
 		m_pIndirectCommandBufferManager(indirectCommandBufferManager),
@@ -31,7 +38,11 @@ public:
 		m_pEnvironmentManager(environmentManager),
 		m_pMaterialManager(materialManager),
 		m_pSkeletonManager(skeletonManager),
-		m_pTextureFactory(textureFactory) {
+		m_pTextureFactory(textureFactory),
+		m_pTerrainManager(terrainManager),
+		m_pShaderVariantRequestService(shaderVariantRequestService),
+		m_pUploadService(uploadService),
+		m_pDescriptorService(descriptorService) {
 	}
 
 	void SetManagers(MeshManager* meshManager,
@@ -42,7 +53,11 @@ public:
 		EnvironmentManager* environmentManager,
 		MaterialManager* materialManager,
 		SkeletonManager* skeletonManager,
-		TextureFactory* textureFactory) {
+		TextureFactory* textureFactory,
+		TerrainManager* terrainManager = nullptr,
+		ShaderVariantRequestService* shaderVariantRequestService = nullptr,
+		org::runtime::IUploadService* uploadService = nullptr,
+		org::runtime::IDescriptorService* descriptorService = nullptr) {
 		m_pMeshManager = meshManager;
 		m_pObjectManager = objectManager;
 		m_pIndirectCommandBufferManager = indirectCommandBufferManager;
@@ -52,6 +67,10 @@ public:
 		m_pMaterialManager = materialManager;
 		m_pSkeletonManager = skeletonManager;
 		m_pTextureFactory = textureFactory;
+		m_pTerrainManager = terrainManager;
+		m_pShaderVariantRequestService = shaderVariantRequestService;
+		m_pUploadService = uploadService;
+		m_pDescriptorService = descriptorService;
 	}
 
 	MeshManager* GetMeshManager() const { return m_pMeshManager; }
@@ -63,6 +82,10 @@ public:
 	MaterialManager* GetMaterialManager() const { return m_pMaterialManager; }
 	SkeletonManager* GetSkeletonManager() const { return m_pSkeletonManager; }
 	TextureFactory* GetTextureFactory() const { return m_pTextureFactory; }
+	TerrainManager* GetTerrainManager() const { return m_pTerrainManager; }
+	ShaderVariantRequestService* GetShaderVariantRequestService() const { return m_pShaderVariantRequestService; }
+	org::runtime::IUploadService* GetUploadService() const { return m_pUploadService; }
+	org::runtime::IDescriptorService* GetDescriptorService() const { return m_pDescriptorService; }
 private:
 	MeshManager* m_pMeshManager = nullptr;
 	ObjectManager* m_pObjectManager = nullptr;
@@ -73,4 +96,8 @@ private:
 	MaterialManager* m_pMaterialManager = nullptr;
 	SkeletonManager* m_pSkeletonManager = nullptr;
 	TextureFactory* m_pTextureFactory = nullptr;
+	TerrainManager* m_pTerrainManager = nullptr;
+	ShaderVariantRequestService* m_pShaderVariantRequestService = nullptr;
+	org::runtime::IUploadService* m_pUploadService = nullptr;
+	org::runtime::IDescriptorService* m_pDescriptorService = nullptr;
 };

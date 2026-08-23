@@ -4,10 +4,67 @@
 #define ReyesPatchRasterCS ReyesPatchRasterOpaqueUnusedCS
 #include "ClusterLOD/reyesPatchRaster.hlsl"
 #undef ReyesPatchRasterCS
+#include "include/clodVirtualShadowDepth.hlsli"
+
+// The virtual-shadow Reyes graph does not guarantee that assembly-remap
+// buffers exist. Keep its historical non-assembly skinning contract explicit
+// instead of entering helpers whose descriptor dependencies are unconditional.
+float3 DecodeReyesVirtualShadowPosition(
+    uint meshletLocalVertex,
+    CLodPageHeader hdr,
+    CLodMeshletDescriptor desc,
+    uint pageByteOffset,
+    uint pagePoolSlabDescriptorIndex,
+    uint vertexFlags,
+    uint skinningInstanceSlot)
+{
+    float3 localPos = DecodeCompressedPosition(
+        meshletLocalVertex,
+        pageByteOffset + hdr.positionBitstreamOffset,
+        desc.positionBitOffset,
+        CLodDescBitsX(desc),
+        CLodDescBitsY(desc),
+        CLodDescBitsZ(desc),
+        hdr.compressedPositionQuantExp,
+        int3(desc.minQx, desc.minQy, desc.minQz),
+        pagePoolSlabDescriptorIndex);
+    if ((vertexFlags & VERTEX_SKINNED) != 0u)
+    {
+        SkinningInfluences skinning = DecodePackedJoints(
+            meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex);
+        skinning = DecodePackedWeights(
+            meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex, skinning);
+        localPos = ApplySkinningToPosition(skinningInstanceSlot, skinning, localPos);
+    }
+    return localPos;
+}
+
+float3 DecodeReyesVirtualShadowNormal(
+    uint meshletLocalVertex,
+    CLodPageHeader hdr,
+    CLodMeshletDescriptor desc,
+    uint pageByteOffset,
+    uint pagePoolSlabDescriptorIndex,
+    uint vertexFlags,
+    uint skinningInstanceSlot)
+{
+    float3 localNormal = DecodeCompressedNormal(
+        meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex);
+    if ((vertexFlags & VERTEX_SKINNED) != 0u)
+    {
+        SkinningInfluences skinning = DecodePackedJoints(
+            meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex);
+        skinning = DecodePackedWeights(
+            meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex, skinning);
+        localNormal = mul(localNormal, (float3x3)BuildSkinMatrix(skinningInstanceSlot, skinning));
+    }
+    return normalize(localNormal);
+}
 
 void ReyesTryWriteVirtualShadowTexel(
     RWTexture2DArray<uint> pageTable,
     RWTexture2D<uint> physicalPages,
+    bool dynamicLayer,
     ClodViewRasterInfo viewRasterInfo,
     CLodVirtualShadowClipmapInfo clipmapInfo,
     uint shadowVsmPayload,
@@ -45,8 +102,8 @@ void ReyesTryWriteVirtualShadowTexel(
     const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(virtualPageCoords, clipmapInfo);
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-    if ((pageEntry & (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask)) !=
-        (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask))
+    if (!CLodVirtualShadowPageEntryCanRasterLayer(
+            pageEntry, dynamicLayer))
     {
         return;
     }
@@ -54,18 +111,30 @@ void ReyesTryWriteVirtualShadowTexel(
     const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
     const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
-    InterlockedMin(physicalPages[atlasPixel], asuint(depth));
+    const float pageSpaceDepth = dynamicLayer
+        ? CLodVirtualShadowDepthToCachedPageSpace(
+            depth,
+            physicalPageIndex,
+            clipmapInfo.shadowCameraBufferIndex)
+        : depth;
+    InterlockedMin(
+        physicalPages[atlasPixel],
+        CLodVirtualShadowEncodeDepth(pageSpaceDepth, clipmapInfo));
 
     uint ignored = 0u;
     InterlockedOr(
         pageTable[pageCoords],
-        kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+        dynamicLayer
+            ? kCLodVirtualShadowDynamicContentMask
+            : kCLodVirtualShadowContentValidMask |
+                kCLodVirtualShadowRerenderedThisFrameMask,
         ignored);
 }
 
 void ReyesRasterizeProjectedVirtualShadowMicroTriangle(
     RWTexture2DArray<uint> pageTable,
     RWTexture2D<uint> physicalPages,
+    bool dynamicLayer,
     RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer,
     ClodViewRasterInfo viewRasterInfo,
     CLodVirtualShadowClipmapInfo clipmapInfo,
@@ -166,6 +235,7 @@ void ReyesRasterizeProjectedVirtualShadowMicroTriangle(
                 ReyesTryWriteVirtualShadowTexel(
                     pageTable,
                     physicalPages,
+                    dynamicLayer,
                     viewRasterInfo,
                     clipmapInfo,
                     shadowVsmPayload,
@@ -185,6 +255,7 @@ void ReyesRasterizeProjectedVirtualShadowMicroTriangle(
 void ReyesRasterizeVirtualShadowMicroTriangle(
     RWTexture2DArray<uint> pageTable,
     RWTexture2D<uint> physicalPages,
+    bool dynamicLayer,
     RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer,
     ClodViewRasterInfo viewRasterInfo,
     CLodVirtualShadowClipmapInfo clipmapInfo,
@@ -243,6 +314,7 @@ void ReyesRasterizeVirtualShadowMicroTriangle(
     ReyesRasterizeProjectedVirtualShadowMicroTriangle(
         pageTable,
         physicalPages,
+        dynamicLayer,
         telemetryBuffer,
         viewRasterInfo,
         clipmapInfo,
@@ -260,6 +332,7 @@ void ReyesRasterizeVirtualShadowMicroTriangle(
         ReyesRasterizeProjectedVirtualShadowMicroTriangle(
             pageTable,
             physicalPages,
+            dynamicLayer,
             telemetryBuffer,
             viewRasterInfo,
             clipmapInfo,
@@ -281,6 +354,7 @@ void ReyesRasterizeVirtualShadowMicroTriangle(
     ReyesRasterizeProjectedVirtualShadowMicroTriangle(
         pageTable,
         physicalPages,
+        dynamicLayer,
         telemetryBuffer,
         viewRasterInfo,
         clipmapInfo,
@@ -315,6 +389,7 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
     StructuredBuffer<PerObjectBuffer> perObjects = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 
     const uint rasterWorkCount = rasterWorkCounter[0];
     if (rasterWorkIndex >= rasterWorkCount)
@@ -364,9 +439,13 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
     const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
     const CLodMeshletDescriptor meshletDesc = LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, hdr.descriptorOffset, localMeshletIndex);
 
-    const PerMeshInstanceBuffer meshInstance = perMeshInstances[diceEntry.instanceID];
+    PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(diceEntry.instanceID);
+    if (!CLodVisibleClusterUsesDynamicShadowLayer(packedCluster))
+    {
+        meshInstance.skinningInstanceSlot = 0xFFFFFFFFu;
+    }
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
-    const PerObjectBuffer objectData = perObjects[meshInstance.perObjectBufferIndex];
+    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
     const CullingCameraInfo camera = cameras[diceEntry.viewID];
     const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
 
@@ -378,10 +457,12 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
     }
 
     const uint3 sourceTriangle = DecodeTriangle(slab, pageSlabByteOffset + hdr.triangleStreamOffset, meshletDesc.triangleByteOffset, sourceTriangleIndex);
-    const float3 sourcePosition0 = DecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-    const float3 sourcePosition1 = DecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-    const float3 sourcePosition2 = DecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-    const bool displacementEnabled = materialInfo.geometricDisplacementEnabled != 0u;
+    const float3 sourcePosition0 = DecodeReyesVirtualShadowPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+    const float3 sourcePosition1 = DecodeReyesVirtualShadowPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+    const float3 sourcePosition2 = DecodeReyesVirtualShadowPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+    const bool displacementEnabled =
+        ReyesGeometricDisplacementEnabled(materialInfo) &&
+        materialInfo.heightUvSetIndex < hdr.uvSetCount;
     float3 sourceNormal0 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal1 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal2 = float3(0.0f, 0.0f, 1.0f);
@@ -390,9 +471,9 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
     float2 sourceUv2 = float2(0.0f, 0.0f);
     if (displacementEnabled)
     {
-        sourceNormal0 = DecodeSkinnedNormal(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-        sourceNormal1 = DecodeSkinnedNormal(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-        sourceNormal2 = DecodeSkinnedNormal(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+        sourceNormal0 = DecodeReyesVirtualShadowNormal(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+        sourceNormal1 = DecodeReyesVirtualShadowNormal(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+        sourceNormal2 = DecodeReyesVirtualShadowNormal(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
         sourceUv0 = DecodeCompressedUV(sourceTriangle.x, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
         sourceUv1 = DecodeCompressedUV(sourceTriangle.y, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
         sourceUv2 = DecodeCompressedUV(sourceTriangle.z, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
@@ -416,8 +497,17 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
 
     row_major matrix modelViewProjection = mul(objectData.model, camera.viewProjection);
     float4 modelViewZ = mul(objectData.model, camera.viewZ);
+    const float patchDepth = max(
+        ( -dot(float4(sourcePosition0, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition1, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition2, 1.0f), modelViewZ)) / 3.0f,
+        max(camera.zNear, 1.0e-3f));
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
-    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
+    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
+        dynamicLayer
+            ? CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
+            : CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
 
     const uint rasterMicroTriangleEnd = min(rasterWorkEntry.microTriangleOffset + rasterWorkEntry.microTriangleCount, microTriangleCount);
     [loop]
@@ -437,6 +527,11 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
         ReyesEvaluateDisplacedPatchTriangle(
             materialInfo,
             displacementEnabled,
+            camera,
+            perFrame.heightFadeStartDistance,
+            perFrame.heightFadeEndDistance,
+            objectData.model,
+            patchDepth,
             sourcePosition0,
             sourcePosition1,
             sourcePosition2,
@@ -469,6 +564,7 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
         ReyesRasterizeVirtualShadowMicroTriangle(
             pageTable,
             physicalPages,
+            dynamicLayer,
             telemetryBuffer,
             viewRasterInfo,
             clipmapInfo,

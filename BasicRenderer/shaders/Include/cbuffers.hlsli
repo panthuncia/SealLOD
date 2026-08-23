@@ -38,6 +38,26 @@ cbuffer MiscUintRootConstants : register(b4) { // Used for pass-specific one-off
     uint UintRootConstant25;
     uint UintRootConstant26;
     uint UintRootConstant27;
+    uint UintRootConstant28;
+    uint UintRootConstant29;
+	uint UintRootConstant30;
+	uint UintRootConstant31;
+	uint UintRootConstant32;
+	uint UintRootConstant33;
+	uint UintRootConstant34;
+	uint UintRootConstant35;
+	uint UintRootConstant36;
+	uint UintRootConstant37;
+	uint UintRootConstant38;
+	uint UintRootConstant39;
+	uint UintRootConstant40;
+	uint UintRootConstant41;
+	uint UintRootConstant42;
+	uint UintRootConstant43;
+	uint UintRootConstant44;
+	uint UintRootConstant45;
+	uint UintRootConstant46;
+	uint UintRootConstant47;
 }
 
 cbuffer ResourceDescriptorIndices : register(b5) {
@@ -113,6 +133,7 @@ cbuffer IndirectCommandSignatureRootConstants : register(b6)
     uint IndirectCommandSignatureRootConstant1;
     uint IndirectCommandSignatureRootConstant2;
     uint IndirectCommandSignatureRootConstant3;
+    uint IndirectCommandSignatureRootConstant4;
 };
 
 uint GetRootPerObjectBufferIndex()
@@ -147,5 +168,6 @@ int GetRootLightViewIndex() { return (int)UintRootConstant23; }
 bool GetRootEnableShadows() { return UintRootConstant24 != 0u; }
 bool GetRootEnablePunctualLights() { return UintRootConstant25 != 0u; }
 bool GetRootEnableGTAO() { return UintRootConstant26 != 0u; }
+bool GetRootEnableSkybox() { return UintRootConstant27 != 0u; }
 
 #endif // __CBUFFERS_HLSL__

@@ -2,7 +2,6 @@
 
 #define A_GPU
 #define A_HLSL
-#define SPD_LINEAR_SAMPLER
 
 struct SpdGlobalAtomicBuffer
 {
@@ -29,7 +28,8 @@ struct spdConstants
     float2 invInputSize;
     
     unsigned int mipUavDescriptorIndices[12];
-    uint pad[4];
+    uint2 validSourceSize;
+    uint2 pad;
 };
 
 // UintRootConstant0 is the index of the global atomic buffer
@@ -40,9 +40,15 @@ struct spdConstants
 AF4 SpdLoadSourceImage(ASU2 p, AU1 slice)
 {
     StructuredBuffer<spdConstants> constants = ResourceDescriptorHeap[UintRootConstant2];
-    float2 invInputSize = constants[UintRootConstant3].invInputSize;
-    AF2 textureCoord = p * invInputSize + invInputSize;
-    
+    spdConstants downsampleConstants = constants[UintRootConstant3];
+    if (any(p >= downsampleConstants.validSourceSize))
+    {
+        // The linear-depth texture is padded to power-of-two dimensions for
+        // SPD. Padding must be the neutral value for max-depth reduction;
+        // otherwise its FLT_MAX clear value poisons every coarse HZB mip.
+        return AF4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
 #if defined (DOWNSAMPLE_ARRAY)
     Texture2DArray<float> imgSrc = ResourceDescriptorHeap[UintRootConstant1];
     float result = imgSrc.Load(int4((int)p.x, (int)p.y, (int)slice, 0));

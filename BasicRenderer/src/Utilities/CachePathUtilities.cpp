@@ -1,9 +1,13 @@
 #include "Utilities/CachePathUtilities.h"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <system_error>
 #include <unordered_set>
+#include <vector>
 
 #include <windows.h>
 
@@ -74,9 +78,94 @@ std::string ws2s(const std::wstring_view& wide)
 	return out;
 }
 
+namespace {
+std::optional<std::filesystem::path> GetExecutableDirectory()
+{
+	std::vector<wchar_t> modulePath(MAX_PATH);
+	while (true) {
+		const DWORD written = ::GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+		if (written == 0) {
+			break;
+		}
+		if (written < modulePath.size()) {
+			std::filesystem::path path(modulePath.data());
+			std::error_code ec;
+			path = std::filesystem::weakly_canonical(path, ec);
+			if (ec) {
+				path = std::filesystem::path(modulePath.data());
+			}
+			return path.parent_path();
+		}
+		modulePath.resize(modulePath.size() * 2u);
+	}
+	return std::nullopt;
+}
+
+std::filesystem::path RemapBuildOutputAssetPath(const std::filesystem::path& canonicalPath)
+{
+	std::vector<std::filesystem::path> parts;
+	for (const auto& part : canonicalPath) {
+		parts.push_back(part);
+	}
+
+	for (std::size_t outIndex = 0; outIndex < parts.size(); ++outIndex) {
+		if (parts[outIndex] != "out" || outIndex == 0u) {
+			continue;
+		}
+		for (std::size_t assetRootIndex = outIndex + 1u; assetRootIndex < parts.size(); ++assetRootIndex) {
+			if (parts[assetRootIndex] != "models" && parts[assetRootIndex] != "textures") {
+				continue;
+			}
+
+			std::filesystem::path sourceRoot;
+			for (std::size_t i = 0; i < outIndex; ++i) {
+				sourceRoot /= parts[i];
+			}
+			std::filesystem::path candidate = sourceRoot;
+			for (std::size_t i = assetRootIndex; i < parts.size(); ++i) {
+				candidate /= parts[i];
+			}
+
+			std::error_code ec;
+			if (std::filesystem::exists(candidate, ec)) {
+				return candidate;
+			}
+		}
+	}
+	return canonicalPath;
+}
+}
+
+std::filesystem::path GetCacheRootPath()
+{
+	// Cache root selection is process-wide configuration. Resolving the module
+	// path and querying the environment for every artifact was a substantial
+	// source of contention during parallel scene preparation.
+	static const std::filesystem::path cacheRoot = [] {
+		const DWORD envLength = ::GetEnvironmentVariableA("SARP_CACHE_ROOT", nullptr, 0);
+		if (envLength > 1) {
+			std::vector<char> envRoot(envLength);
+			if (::GetEnvironmentVariableA("SARP_CACHE_ROOT", envRoot.data(), envLength) != 0 && envRoot.front() != '\0') {
+				return std::filesystem::path(envRoot.data());
+			}
+		}
+
+		if (auto executableDirectory = GetExecutableDirectory()) {
+			return *executableDirectory / L"cache";
+		}
+
+		return std::filesystem::current_path() / L"cache";
+	}();
+	return cacheRoot;
+}
+
+std::wstring BuildCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
+	return (GetCacheRootPath() / directory / fileName).wstring();
+}
+
 std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
-	std::filesystem::path workingDir = std::filesystem::current_path();
-	std::filesystem::path cacheDir = workingDir / L"cache" / directory;
+	const std::filesystem::path cacheRoot = GetCacheRootPath();
+	std::filesystem::path cacheDir = cacheRoot / directory;
 
 	// Avoid repeated OS syscalls: only call create_directories once per unique
 	// directory path.  The set persists for the lifetime of the process.
@@ -91,14 +180,28 @@ std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& 
 		}
 	}
 
-	std::filesystem::path filePath = cacheDir / fileName;
-	return filePath.wstring();
+	return (cacheDir / fileName).wstring();
 }
 
 std::string NormalizeCacheSourcePath(const std::string& path) {
 	if (path.empty()) return path;
+
+	constexpr std::string_view sarpNifScheme = "sarp-nif://";
+	if (path.size() >= sarpNifScheme.size() &&
+		std::equal(sarpNifScheme.begin(), sarpNifScheme.end(), path.begin(), [](char a, char b) {
+			return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+		})) {
+		std::string normalized = "sarp-nif://";
+		normalized.reserve(path.size());
+		for (std::size_t i = sarpNifScheme.size(); i < path.size(); ++i) {
+			const char ch = path[i] == '\\' ? '/' : path[i];
+			normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+		}
+		return normalized;
+	}
+
 	std::error_code ec;
 	auto canonical = std::filesystem::weakly_canonical(std::filesystem::path(path), ec);
 	if (ec) return path; // if canonicalisation fails, use original
-	return canonical.generic_string(); // forward-slash, absolute
+	return RemapBuildOutputAssetPath(canonical).generic_string(); // forward-slash, absolute
 }

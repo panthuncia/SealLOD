@@ -7,8 +7,11 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
+#include "include/materialFlags.hlsli"
 #include "PerPassRootConstants/clodWorkGraphRootConstants.h"
 #include "include/clodStructs.hlsli"
 #include "include/clodPageAccess.hlsli"
@@ -67,6 +70,9 @@ void WG_PageJobBuild(
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, unsortedClusterIndex);
+    RWStructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[unsortedClusterIndex];
 
     const uint viewID = CLodVisibleClusterViewID(packedCluster);
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
@@ -97,23 +103,27 @@ void WG_PageJobBuild(
         hdr.descriptorOffset, localMeshletIndex);
     const uint vertCount = CLodDescVertexCount(desc);
 
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    PerMeshInstanceBuffer meshInst = meshInstBuf[instanceID];
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    // Wind palettes are draw-transient; the persistent mesh template retains its bind-pose source slot.
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+        ? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+        : 0xFFFFFFFFu;
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    StructuredBuffer<PerObjectBuffer> objBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    PerObjectBuffer objData = objBuf[meshInst.perObjectBufferIndex];
+    PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
 
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf =
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     ClodViewRasterInfo rasterInfo = viewRasterInfoBuf[viewID];
 
-    const float visWidth  = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
-    const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
-    const float scissorMinXf = float(rasterInfo.scissorMinX);
-    const float scissorMinYf = float(rasterInfo.scissorMinY);
+    const float visWidth  = float(max(clipmapInfo.virtualResolution, 1u));
+    const float visHeight = visWidth;
+    const float scissorMinXf = 0.0f;
+    const float scissorMinYf = 0.0f;
 
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
@@ -133,7 +143,9 @@ void WG_PageJobBuild(
         if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u) {
             SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
-            localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
+            skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
+            localPos = ApplyAssemblySkinningToPosition(
+                meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex, localPos);
         }
         float4 clipPos = mul(float4(localPos, 1.0f), modelViewProjection);
         float invW = 1.0f / clipPos.w;
@@ -257,6 +269,18 @@ void WG_PageJobExpand(
 
     RWTexture2DArray<uint> pageTableUAV =
         ResourceDescriptorHeap[CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX];
+    globallycoherent RWByteAddressBuffer visibleClusters =
+        ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster =
+        CLodLoadVisibleClusterPackedGloballyCoherent(
+            visibleClusters, clusterIndex);
+    const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
+    const PerMeshInstanceBuffer meshInst =
+        LoadMeshTemplateForDraw(instanceID);
+    StructuredBuffer<PerMeshBuffer> perMeshBuffer =
+        ResourceDescriptorHeap[
+            ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
 
     const uint pageRangeWidth = maxPageCoord.x - minPageCoord.x + 1u;
 
@@ -273,7 +297,8 @@ void WG_PageJobExpand(
         myWrappedCoords = CLodVirtualShadowWrappedPageCoords(uint2(myPageX, myPageY), clipmapInfo);
         const uint pageEntry = pageTableUAV[uint3(myWrappedCoords, clipmapInfo.pageTableLayer)];
 
-        if (CLodVirtualShadowPageEntryCanRaster(pageEntry)) {
+        if (CLodVirtualShadowPageEntryCanRasterLayer(
+                pageEntry, dynamicLayer)) {
             myPhysicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
             InterlockedAdd(gs_pjExpandDirtyCount, 1u, mySlot);
         }
@@ -338,6 +363,9 @@ void WG_PageJobRasterPage(
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, unsortedClusterIndex);
+    RWStructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[unsortedClusterIndex];
 
     const uint viewID = CLodVisibleClusterViewID(packedCluster);
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
@@ -352,14 +380,23 @@ void WG_PageJobRasterPage(
     const uint vertCount = CLodDescVertexCount(desc);
     const uint triCount = CLodDescTriangleCount(desc);
 
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    PerMeshInstanceBuffer meshInst = meshInstBuf[instanceID];
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+        ? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+        : 0xFFFFFFFFu;
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    StructuredBuffer<PerObjectBuffer> objBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    PerObjectBuffer objData = objBuf[meshInst.perObjectBufferIndex];
+    StructuredBuffer<MaterialInfo> materialDataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    const MaterialInfo materialInfo =
+        materialDataBuffer[perMeshBuffer[meshInst.perMeshBufferIndex].materialDataIndex];
+    const bool doubleSided =
+        (materialInfo.materialFlags & MATERIAL_DOUBLE_SIDED) != 0u;
+    PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
 
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
@@ -369,10 +406,13 @@ void WG_PageJobRasterPage(
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     ClodViewRasterInfo rasterInfo = viewRasterInfoBuf[viewID];
 
-    const float visWidth  = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
-    const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
-    const float scissorMinXf = float(rasterInfo.scissorMinX);
-    const float scissorMinYf = float(rasterInfo.scissorMinY);
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodClipmapInfo)];
+    const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapLayer];
+    const float visWidth  = float(max(clipmapInfo.virtualResolution, 1u));
+    const float visHeight = visWidth;
+    const float scissorMinXf = 0.0f;
+    const float scissorMinYf = 0.0f;
 
     const uint positionBitstreamBase = pageSlabByteOffset + hdr.positionBitstreamOffset;
     row_major matrix modelViewProjection = mul(objData.model, cam.viewProjection);
@@ -389,7 +429,9 @@ void WG_PageJobRasterPage(
         if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u) {
             SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
-            localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
+            skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
+            localPos = ApplyAssemblySkinningToPosition(
+                meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex, localPos);
         }
         float4 localPos4 = float4(localPos, 1.0f);
         float4 clipPos = mul(localPos4, modelViewProjection);
@@ -405,8 +447,12 @@ void WG_PageJobRasterPage(
     GroupMemoryBarrierWithGroupSync();
 
     // Rasterize all triangles clipped to this single page.
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
     RWTexture2D<uint> physicalPages =
-        ResourceDescriptorHeap[CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX];
+        ResourceDescriptorHeap[
+            dynamicLayer
+                ? CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX
+                : CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX];
     RWTexture2DArray<uint> pageTableUAV =
         ResourceDescriptorHeap[CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX];
 
@@ -432,7 +478,23 @@ void WG_PageJobRasterPage(
         float2 e01 = s1 - s0;
         float2 e02 = s2 - s0;
         float twiceArea = e01.x * e02.y - e01.y * e02.x;
-        if (twiceArea >= 0.0f) continue;
+        if (doubleSided)
+        {
+            if (abs(twiceArea) <= 1.0e-8f) continue;
+            if (twiceArea > 0.0f)
+            {
+                float2 tmpPos = s1;
+                s1 = s2;
+                s2 = tmpPos;
+                float tmpDepth = depth1;
+                depth1 = depth2;
+                depth2 = tmpDepth;
+                e01 = s1 - s0;
+                e02 = s2 - s0;
+                twiceArea = e01.x * e02.y - e01.y * e02.x;
+            }
+        }
+        else if (twiceArea >= 0.0f) continue;
 
         float invTwiceArea = -1.0f / twiceArea;
         float2 bbMinF = min(min(s0, s1), s2);
@@ -463,7 +525,17 @@ void WG_PageJobRasterPage(
                     float depth = b0 * depth0 + b1 * depth1 + b2 * depth2;
                     uint2 localPixel = uint2(px - pagePixelMinX, py - pagePixelMinY);
                     uint2 atlasPixel = uint2(atlasBaseX + localPixel.x, atlasBaseY + localPixel.y);
-                    InterlockedMin(physicalPages[atlasPixel], asuint(depth));
+                    const float pageSpaceDepth = dynamicLayer
+                        ? CLodVirtualShadowDepthToCachedPageSpace(
+                            depth,
+                            physicalPageIndex,
+                            clipmapInfo.shadowCameraBufferIndex)
+                        : depth;
+                    InterlockedMin(
+                        physicalPages[atlasPixel],
+                        CLodVirtualShadowEncodeDepth(
+                            pageSpaceDepth,
+                            clipmapInfo));
                     anyPixelWritten = true;
                 }
                 b0 += dx_b0;
@@ -474,14 +546,16 @@ void WG_PageJobRasterPage(
         }
     }
 
-    // Unconditionally mark this page as content-valid. The Expand node already
-    // confirmed the page was dirty+allocated, so this is always correct.
-    // No barrier needed: each thread writes the same idempotent OR.
+    // Only static writes establish persistent cache validity. No barrier is
+    // needed because every contributing thread writes the same idempotent OR.
     if (anyPixelWritten) {
         uint ignored = 0u;
         InterlockedOr(
             pageTableUAV[uint3(wrappedPageCoords, clipmapLayer)],
-            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+            dynamicLayer
+                ? kCLodVirtualShadowDynamicContentMask
+                : kCLodVirtualShadowContentValidMask |
+                    kCLodVirtualShadowRerenderedThisFrameMask,
             ignored);
     }
 }

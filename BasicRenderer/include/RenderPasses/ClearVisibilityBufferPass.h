@@ -1,37 +1,44 @@
 #pragma once
 
+#include <functional>
+
 #include "RenderPasses/Base/ComputePass.h"
 #include "Managers/Singletons/PSOManager.h"
+#include "Managers/Singletons/SettingsManager.h"
 #include "Render/RenderContext.h"
+#include "Render/OutputTypes.h"
+#include "Resources/PixelBuffer.h"
 
 class ClearVisibilityBufferPass : public RenderPass {
 public:
-	ClearVisibilityBufferPass() {}
+	ClearVisibilityBufferPass() {
+		m_getOutputType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType");
+	}
 
 	void DeclareResourceUsages(RenderPassBuilder* builder) override {
 		builder->WithUnorderedAccessClear(Builtin::PrimaryCamera::VisibilityTexture,
-			Builtin::GBuffer::Albedo,
-			Builtin::GBuffer::Coat,
-			Builtin::GBuffer::Emissive,
-			Builtin::GBuffer::Fuzz,
-			Builtin::GBuffer::MetallicRoughness,
-			Builtin::GBuffer::Normals,
-			Builtin::GBuffer::MotionVectors,
-			Builtin::Color::HDRColorTarget,
+			Builtin::Surface::BaseColorOpacity,
+			Builtin::Surface::NormalRoughness,
+			Builtin::Surface::SpecularAo,
+			Builtin::Surface::Emissive,
+			Builtin::Surface::Motion,
+			Builtin::Surface::Payload0,
+			Builtin::Surface::Payload1,
+			Builtin::Surface::Identity,
 			Builtin::DebugVisualization);
 		builder->WithDepthStencilClear(Builtin::PrimaryCamera::DepthTexture);
 	}
 
 	void Setup() override {
 		m_visibilityBuffer = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::VisibilityTexture);
-		m_albedo = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Albedo);
-		m_coat = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Coat);
-		m_metallicRoughness = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::MetallicRoughness);
-		m_emissive = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Emissive);
-		m_fuzz = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Fuzz);
-		m_normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Normals);
-		m_motionVectors = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::MotionVectors);
-		m_HDRColorTarget = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Color::HDRColorTarget);
+		m_baseColorOpacity = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::BaseColorOpacity);
+		m_normalRoughness = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::NormalRoughness);
+		m_specularAo = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::SpecularAo);
+		m_emissive = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Emissive);
+		m_motion = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Motion);
+		m_payload0 = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Payload0);
+		m_payload1 = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Payload1);
+		m_surfaceIdentity = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Identity);
 		m_depthTexture = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::DepthTexture);
 		m_debugVisualization = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::DebugVisualization);
 	}
@@ -55,6 +62,14 @@ public:
 		clearValue.v[0] = 0xFFFFFFFF;
 		clearValue.v[1] = 0xFFFFFFFF;
 
+		commandList.ClearUavUint(clearInfo, clearValue);
+
+		// Canonical surface producers overwrite this sentinel for every shaded
+		// pixel. Clearing it prevents missing producers from exposing stale or
+		// uninitialized record indices to deferred shading.
+		clearInfo.cpuVisible = m_surfaceIdentity->GetUAVNonShaderVisibleInfo(0).slot;
+		clearInfo.shaderVisible = m_surfaceIdentity->GetUAVShaderVisibleInfo(0).slot;
+		clearInfo.resource = m_surfaceIdentity->GetAPIResource();
 		commandList.ClearUavUint(clearInfo, clearValue);
 
 		// Everything else: 0
@@ -84,14 +99,13 @@ public:
 			}
 			};
 
-		clearResource(m_albedo);
-		clearResource(m_coat);
-		clearResource(m_metallicRoughness);
+		clearResource(m_baseColorOpacity);
+		clearResource(m_normalRoughness);
+		clearResource(m_specularAo);
 		clearResource(m_emissive);
-		clearResource(m_fuzz);
-		clearResource(m_normals);
-		clearResource(m_motionVectors);
-		clearResource(m_HDRColorTarget); // TODO: Only needed because of non-zero initialized memory issue- make a clear manager instead?
+		clearResource(m_motion);
+		clearResource(m_payload0);
+		clearResource(m_payload1);
 		clearDepth(m_depthTexture); // same
 
 		// Clear debug visualization texture to sentinel (0xFFFFFFFF)
@@ -114,14 +128,15 @@ public:
 
 private:
 	GloballyIndexedResource* m_visibilityBuffer;
-	GloballyIndexedResource* m_albedo;
-	GloballyIndexedResource* m_coat;
-	GloballyIndexedResource* m_metallicRoughness;
+	GloballyIndexedResource* m_baseColorOpacity;
+	GloballyIndexedResource* m_normalRoughness;
+	GloballyIndexedResource* m_specularAo;
 	GloballyIndexedResource* m_emissive;
-	GloballyIndexedResource* m_fuzz;
-	GloballyIndexedResource* m_normals;
-	GloballyIndexedResource* m_motionVectors;
-	GloballyIndexedResource* m_HDRColorTarget;
+	GloballyIndexedResource* m_motion;
+	GloballyIndexedResource* m_payload0;
+	GloballyIndexedResource* m_payload1;
+	GloballyIndexedResource* m_surfaceIdentity;
 	GloballyIndexedResource* m_depthTexture;
 	GloballyIndexedResource* m_debugVisualization;
+	std::function<unsigned int()> m_getOutputType;
 };

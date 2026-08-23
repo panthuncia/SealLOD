@@ -105,6 +105,17 @@ float3 toneMapACES_Hill(float3 color)
 	return color;
 }
 
+float3 SampleBloomForTonemap(float2 uv)
+{
+    Texture2D<float4> bloom = ResourceDescriptorHeap[TONEMAP_BLOOM_MIP1_SRV_DESCRIPTOR_INDEX];
+    Texture2D<float4> lowBloom = ResourceDescriptorHeap[TONEMAP_BLOOM_MIP2_SRV_DESCRIPTOR_INDEX];
+    // Every pyramid level has already been filtered during downsample and
+    // accumulation. One hardware-bilinear reconstruction per remaining level
+    // retains the broad bloom profile without another eight-tap output filter.
+    return bloom.SampleLevel(g_linearClamp, uv, 0).rgb +
+        lowBloom.SampleLevel(g_linearClamp, uv, 0).rgb;
+}
+
 // UintRootConstant0 is HDR source SRV
 float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
 {
@@ -112,6 +123,8 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
     float2 uv = input.uv;
     uv.y = 1.0f - uv.y; // Why is this necessary only here?
     float4 color = float4(hdrSource.SampleLevel(g_pointClamp, uv, 0).rgb, 1.0);
+    if (TONEMAP_BLOOM_ENABLED != 0u)
+        color.rgb = lerp(color.rgb, SampleBloomForTonemap(uv), 0.04f);
 	ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 	// Apply tone mapping based on the selected method
     switch (TONEMAP_TYPE)

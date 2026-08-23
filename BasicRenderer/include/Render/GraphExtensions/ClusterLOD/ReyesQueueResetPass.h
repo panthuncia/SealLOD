@@ -6,7 +6,8 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class ReyesQueueResetPass final : public ComputePass {
 public:
@@ -20,7 +21,11 @@ public:
         std::shared_ptr<Buffer> ownershipBitsetBuffer,
         std::shared_ptr<Buffer> telemetryBuffer,
         uint32_t phaseIndex,
-        bool clearDiceQueueCounter = true);
+        bool clearDiceQueueCounter = true,
+        std::shared_ptr<Buffer> replaySplitQueueCounter = nullptr,
+        std::shared_ptr<Buffer> replaySplitQueueOverflowCounter = nullptr,
+        std::shared_ptr<Buffer> replayDiceQueueCounter = nullptr,
+        std::shared_ptr<Buffer> replayDiceQueueOverflowCounter = nullptr);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -37,6 +42,10 @@ private:
     std::shared_ptr<Buffer> m_diceQueueOverflowCounter;
     std::shared_ptr<Buffer> m_ownershipBitsetBuffer;
     std::shared_ptr<Buffer> m_telemetryBuffer;
+    std::shared_ptr<Buffer> m_replaySplitQueueCounter;
+    std::shared_ptr<Buffer> m_replaySplitQueueOverflowCounter;
+    std::shared_ptr<Buffer> m_replayDiceQueueCounter;
+    std::shared_ptr<Buffer> m_replayDiceQueueOverflowCounter;
     uint32_t m_phaseIndex = 0u;
     bool m_clearDiceQueueCounter = true;
     uint32_t m_ownershipBitsetWordCount = 0u;

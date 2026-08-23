@@ -7,10 +7,11 @@
 #include "Resources/PixelBuffer.h"
 #include "Utilities/Utilities.h"
 
-PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass() {
+PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass(bool writeProjectedDepth)
+    : m_writeProjectedDepth(writeProjectedDepth) {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/gbuffer.hlsl",
+        L"shaders/canonicalSurface.hlsl",
         L"PerViewPrimaryDepthCopyCS",
         {},
         "PerViewPrimaryDepthCopyPSO");
@@ -18,12 +19,14 @@ PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass() {
 
 void PerViewLinearDepthCopyPass::DeclareResourceUsages(ComputePassBuilder* builder) {
     builder->WithShaderResource(Builtin::PrimaryCamera::VisibilityTexture)
-        .WithUnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap, Builtin::PrimaryCamera::ProjectedDepthTexture);
+        .WithUnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap,
+            Builtin::PrimaryCamera::ProjectedDepthTexture, Builtin::Surface::DeviceDepth);
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
 }
 
 void PerViewLinearDepthCopyPass::Setup() {
     m_pProjectedDepthTexture = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PrimaryCamera::ProjectedDepthTexture);
+    m_pCanonicalDeviceDepth = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Surface::DeviceDepth);
 }
 
 PassReturn PerViewLinearDepthCopyPass::Execute(PassExecutionContext& executionContext) {
@@ -49,14 +52,17 @@ PassReturn PerViewLinearDepthCopyPass::Execute(PassExecutionContext& executionCo
         rootConstants[UintRootConstant3] = view->gpu.visibilityBuffer->GetHeight();
 
         // Only write projected depth for the primary camera view
-        if (view->flags.primaryCamera && m_pProjectedDepthTexture) {
+        if (m_writeProjectedDepth && view->flags.primaryCamera && m_pProjectedDepthTexture) {
             rootConstants[UintRootConstant4] = m_pProjectedDepthTexture->GetUAVShaderVisibleInfo(0).slot.index;
+            rootConstants[UintRootConstant7] = m_pCanonicalDeviceDepth
+                ? m_pCanonicalDeviceDepth->GetUAVShaderVisibleInfo(0).slot.index : 0xFFFFFFFFu;
             // Extract M[2][2] and M[3][2] from the unjittered projection matrix (row-major)
             const auto& proj = view->cameraInfo.unjitteredProjection;
             rootConstants[UintRootConstant5] = as_uint(DirectX::XMVectorGetZ(proj.r[2])); // M[2][2]
             rootConstants[UintRootConstant6] = as_uint(DirectX::XMVectorGetZ(proj.r[3])); // M[3][2]
         } else {
             rootConstants[UintRootConstant4] = 0xFFFFFFFF; // sentinel: skip projected depth write
+            rootConstants[UintRootConstant7] = 0xFFFFFFFF;
         }
 
         commandList.PushConstants(

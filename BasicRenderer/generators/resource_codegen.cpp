@@ -29,10 +29,11 @@ static std::string recurse_structs(
         }
         else {
             // leaf: emit a static constexpr string_view member
+            const std::string value = child.is_string() ? child.get<std::string>() : full;
             out += indent
                 + "inline static constexpr std::string_view "
                 + key
-                + " = \"" + full + "\";\n";
+                + " = \"" + value + "\";\n";
         }
     }
     return out;

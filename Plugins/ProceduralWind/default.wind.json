@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "harmonicFrequenciesHz": [0.10, 0.37, 1.31],
+  "harmonicWeights": [1.0, 0.45, 0.20],
+  "groups": [
+    { "id": 0, "isTrunk": true,  "influence": 1.0,  "meanBendRadians": 0.035, "parallelAmplitudeRadians": 0.018, "perpendicularRatio": 0.20, "torsionRatio": 0.05, "frequencyScale": 0.5, "maximumAngleRadians": 0.12, "boundsScale": 1.15 },
+    { "id": 1, "isTrunk": false, "influence": 0.8,  "meanBendRadians": 0.020, "parallelAmplitudeRadians": 0.025, "perpendicularRatio": 0.35, "torsionRatio": 0.08, "frequencyScale": 1.0, "maximumAngleRadians": 0.16, "boundsScale": 1.20 },
+    { "id": 2, "isTrunk": false, "influence": 0.55, "meanBendRadians": 0.008, "parallelAmplitudeRadians": 0.035, "perpendicularRatio": 0.50, "torsionRatio": 0.12, "frequencyScale": 2.0, "maximumAngleRadians": 0.22, "boundsScale": 1.25 },
+    { "id": 3, "isTrunk": false, "influence": 0.35, "meanBendRadians": 0.003, "parallelAmplitudeRadians": 0.045, "perpendicularRatio": 0.65, "torsionRatio": 0.18, "frequencyScale": 4.0, "maximumAngleRadians": 0.28, "boundsScale": 1.30 }
+  ]
+}

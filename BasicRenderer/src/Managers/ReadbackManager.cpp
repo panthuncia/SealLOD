@@ -224,7 +224,7 @@ PassReturn ReadbackManager::ReadbackPass::Execute(PassExecutionContext& context)
 
 void ReadbackManager::SaveCubemapToDDS(
     rhi::Device& device,
-    rg::imm::ImmediateCommandList& commandList,
+    org::imm::ImmediateCommandList& commandList,
     std::shared_ptr<PixelBuffer> cubemap,
     const std::wstring& outputFile,
     uint64_t fenceValue)
@@ -297,7 +297,7 @@ void ReadbackManager::SaveCubemapToDDS(
 
 void ReadbackManager::SaveTextureToDDS(
     rhi::Device& device,
-    rg::imm::ImmediateCommandList& commandList,
+    org::imm::ImmediateCommandList& commandList,
     PixelBuffer* texture,
     const std::wstring& outputFile,
     uint64_t fenceValue)

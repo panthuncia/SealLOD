@@ -12,7 +12,10 @@
 #include <memory>
 #include <mutex>
 #include <functional>
+#include <optional>
+#include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <flecs.h>
 
 #include <rhi.h>
@@ -30,23 +33,33 @@
 #include "Managers/EnvironmentManager.h"
 #include "Managers/MaterialManager.h"
 #include "Managers/SkeletonManager.h"
+#include "Managers/TerrainManager.h"
 #include "Managers/ReadbackManager.h"
 #include "Factories/TextureFactory.h"
 #include "Scene/MovementState.h"
 #include "Telemetry/FrameTaskGraphTelemetry.h"
-#include "../generated/BuiltinResources.h"
+#include "Render/BuiltinResources.h"
+#include "Render/GraphExtensions/RenderGraphExtensionRegistration.h"
 #include "Utilities/Timer.h"
 #include "Render/RenderContext.h"
+#include "Render/RendererSettings.h"
 #include "Render/OpenPBRLookupResources.h"
 #include "Render/SceneRenderBridge.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodRayTracingSystem.h"
+#include "Render/ShaderVariantRequestService.h"
+#include "Render/Pipeline/PipelineRecipe.h"
+#include "Render/ProducerPassServices.h"
+#include "Render/ProducerPersistentState.h"
 
 class DynamicResource;
-class ExternalTextureResource;
+namespace org { class ExternalTextureResource; }
+using org::ExternalTextureResource;
+class CLodStreamingSystem;
+class VirtualShadowCasterRegistry;
 
 using namespace Microsoft::WRL;
 
-namespace rg::runtime {
+namespace org::runtime {
 class IUploadPolicyService;
 }
 
@@ -72,9 +85,68 @@ private:
 
 class Renderer {
 public:
-    Renderer() = default;
+    struct SamplingReadinessSnapshot {
+        bool sceneTaskInFlight = false;
+        bool hasCommittedSceneSnapshot = false;
+        uint64_t committedSceneSnapshotSequence = 0;
+        uint64_t pendingSceneSnapshotSequence = 0;
+        uint32_t pendingTextureReloads = 0;
+        uint32_t fullResolutionTextures = 0;
+        uint32_t materialTextures = 0;
+        uint32_t streamableMaterialTextures = 0;
+        uint32_t streamingEnabledMaterialTextures = 0;
+        uint32_t streamableFullResolutionTextures = 0;
+        uint64_t materialTextureResidentBytes = 0;
+        uint64_t streamableMaterialTextureResidentBytes = 0;
+        std::vector<uint32_t> materialTextureResidentTopMipHistogram;
+        std::vector<uint32_t> materialTextureRequestedTopMipHistogram;
+        std::vector<uint32_t> materialTextureFeedbackTopMipHistogram;
+        uint32_t materialTexturesWithoutFeedback = 0;
+        std::vector<uint64_t> materialTextureResidentBytesByTopMip;
+        uint32_t materialTextureResidentShapeMismatchCount = 0;
+        uint64_t materialTextureResidentShapeMismatchBytes = 0;
+        uint32_t materialTextureDistinctPreparedCount = 0;
+        uint64_t materialTextureDistinctPreparedBytes = 0;
+        uint32_t activeMaterialTextureResourceCount = 0;
+        uint64_t activeMaterialTextureResourceBytes = 0;
+        uint32_t externallyManagedActiveTextureResourceCount = 0;
+        uint64_t externallyManagedActiveTextureResourceBytes = 0;
+		uint32_t graphManagedParticipatingActiveTextureResourceCount = 0;
+		uint64_t graphManagedParticipatingActiveTextureResourceBytes = 0;
+        uint32_t alphaTestedMaterialTextureCount = 0;
+        uint32_t alphaTestedMaterialTextureMipCapViolationCount = 0;
+        std::vector<uint64_t> materialTexturePublishedResourceIDs;
+        std::vector<std::string> largestMaterialTextureRecords;
+        uint64_t deferredGpuReleaseCount = 0;
+        uint64_t deferredGpuReleaseResourceCount = 0;
+        uint64_t blockedGpuReleaseCount = 0;
+        uint64_t invalidGpuReleaseTimelineCount = 0;
+        uint64_t deviceErrorGpuReleaseTimelineCount = 0;
+        uint64_t incompleteGpuReleaseTimelineCount = 0;
+        std::vector<uint64_t> deferredGpuReleaseResourceIDs;
+        uint64_t deletionQueueObjectCount = 0;
+        uint64_t deletionQueueAllocationCount = 0;
+        uint64_t deletionQueueTrackedAllocationCount = 0;
+        uint32_t residentClodGroups = 0;
+        uint32_t residentClodAllocations = 0;
+        uint64_t residentClodAllocationBytes = 0;
+        uint64_t totalClodStreamedBytes = 0;
+        uint32_t queuedClodRequests = 0;
+        uint32_t inFlightClodGroups = 0;
+        uint32_t completedClodResults = 0;
+        uint32_t pendingDirectStorageLaunches = 0;
+        uint32_t pendingDirectStorageUploads = 0;
+        uint32_t ioTasks = 0;
+        uint32_t backgroundTasks = 0;
+        uint32_t shaderCompileTasks = 0;
+        uint64_t deferredRetireQueueDepth = 0;
+        uint64_t drawRecordsAllocated = 0;
+    };
 
-    void Initialize(HWND hwnd, UINT x_res, UINT y_res);
+    Renderer() = default;
+    ~Renderer();
+
+    void Initialize(HWND hwnd, UINT x_res, UINT y_res, br::pipeline::PipelineRecipe recipe);
     void OnResize(UINT newWidth, UINT newHeight);
     void Update(float elapsedSeconds);
 	void PostUpdate();
@@ -84,12 +156,36 @@ public:
     void SetCurrentScene(std::shared_ptr<Scene> newScene);
     InputManager& GetInputManager();
     void SetInputMode(InputMode mode);
+    void SetCameraSpeed(float speed);
     void SetEnvironment(std::string name);
     std::shared_ptr<Scene> AppendScene(std::shared_ptr<Scene> scene);
 	bool IsInitialized() const { return m_isInitialized; }
+    void SetExternalSceneMode(bool enabled);
+    void SetSceneRenderOverlapEnabled(bool enabled);
+    void IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snapshot);
+    ObjectManager::Stats GetObjectManagerStats() const;
+    SamplingReadinessSnapshot GetSamplingReadinessSnapshot() const;
+    void SetDeterministicSamplingMode(bool enabled);
+    bool GetDeterministicSamplingMode() const { return m_deterministicSamplingMode; }
+    ManagerInterface& GetManagerInterface() { return m_managerInterface; }
+    const ManagerInterface& GetManagerInterface() const { return m_managerInterface; }
+    uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
+    RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
+    const RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
+    bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
+    void SetProducerPersistentState(std::shared_ptr<ProducerPersistentState> state) {
+        if (m_isInitialized) throw std::logic_error("producer persistent state must be set before initialization");
+        m_producerPersistentState = state ? std::move(state) : std::make_shared<ProducerPersistentState>();
+    }
+    const br::pipeline::PipelineRecipe& GetPipelineRecipe() const { return m_pipelineRecipe; }
+    void SetPipelineReplacementDebugBreakHandler(std::function<void()> handler) {
+        m_pipelineReplacementDebugBreakHandler = std::move(handler);
+    }
 
 private:
 	bool m_isInitialized = false;
+    bool m_deterministicSamplingMode = false;
+    HWND m_hwnd = nullptr;
     rhi::Device m_device;
 
     rhi::SwapchainPtr m_swapChain;
@@ -125,10 +221,21 @@ private:
 
     std::unique_ptr<RenderGraph> currentRenderGraph = nullptr;
     bool m_renderGraphRuntimeInitialized = false;
+    br::pipeline::PipelineRecipe m_pipelineRecipe;
+    std::optional<br::pipeline::PipelineRecipe> m_pendingPipelineRecipe;
+    std::optional<br::pipeline::PipelineRecipe> m_pipelineRollbackRecipe;
+    mutable std::mutex m_pipelineRecipeMutex;
+    bool m_pipelineExtensionsDirty = true;
+    bool m_syncingPipelineTopologySettings = false;
+    std::function<void()> m_pipelineReplacementDebugBreakHandler;
     bool rebuildRenderGraph = true;
     bool m_shaderReloadRequested = false;
 
     RenderContext m_context;
+    ProducerPassServices m_producerServices;
+    // Persistent producer state survives graph rebuilds and full/producer
+    // recipe switches. It is released only with the renderer/device lifetime.
+    std::shared_ptr<ProducerPersistentState> m_producerPersistentState = std::make_shared<ProducerPersistentState>();
 
 	std::string m_environmentName;
 	std::unique_ptr<Environment> m_currentEnvironment = nullptr;
@@ -147,11 +254,13 @@ private:
     std::unique_ptr<IndirectCommandBufferManager> m_pIndirectCommandBufferManager = nullptr;
     std::unique_ptr<ViewManager> m_pViewManager = nullptr;
 	std::unique_ptr<EnvironmentManager> m_pEnvironmentManager = nullptr;
-	std::unique_ptr<MaterialManager> m_pMaterialManager = nullptr;
+    std::unique_ptr<MaterialManager> m_pMaterialManager = nullptr;
 	std::unique_ptr<SkeletonManager> m_pSkeletonManager = nullptr;
+    std::unique_ptr<TerrainManager> m_pTerrainManager = nullptr;
     std::unique_ptr<br::ReadbackManager> m_pReadbackManager = nullptr;
     std::unique_ptr<TextureFactory> m_pTextureFactory = nullptr;
     std::unique_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
+    ShaderVariantRequestService m_shaderVariantRequestService;
 
 	ManagerInterface m_managerInterface;
     DirectX::XMUINT3 m_lightClusterSize = { 12, 12, 24 };
@@ -165,6 +274,10 @@ private:
     void CreateGlobalResources();
     void CreateDefaultEnvironmentResources();
     void CreateRenderGraph();
+    void ApplyPendingPipelineReplacement();
+    br::pipeline::PipelineRecipe GetPipelineRecipeForMutation() const;
+    void RegisterPipelineExtensions();
+    void HandlePipelineReplacementFailure(const std::exception& error);
     void SetSettings();
     void SetEnvironmentInternal(std::wstring name);
 	void ToggleMeshShaders(bool useMeshShaders);
@@ -186,9 +299,10 @@ private:
     void RunAnimationUpdateStage(float elapsedSeconds);
     void RunTransformPropagationStage();
     void RunSceneBridgeSyncStage();
+    void RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapshot& snapshot);
+    void ClearExternalSnapshotMeshRegistrations();
     void ApplyPrimaryCameraInput(float elapsedSeconds);
     void ApplyPrimaryCameraInputToRenderBridge(float elapsedSeconds);
-    void SetSceneRenderOverlapEnabled(bool enabled);
     void InvalidateSceneOverlapState();
     void RunRenderResourceSyncStage();
     void FlushPendingSceneExplorerEdits();
@@ -201,6 +315,11 @@ private:
         const std::chrono::steady_clock::time_point& stageStart,
         const std::chrono::steady_clock::time_point& stageEnd);
     void PublishFrameTaskGraphCapture();
+    void MaybeRequestCLodVisibilityTelemetry();
+    void MaybeRequestCLodVirtualShadowTelemetry();
+    void MaybeRequestObjectReyesAtlasTelemetry();
+    void MaybeRequestTerrainRvtTelemetry();
+    void ApplyWindowResolutionPreset(WindowResolutionPreset preset);
 
     void StallPipeline();
 
@@ -218,7 +337,6 @@ private:
 	bool m_gtaoEnabled = true;
 	bool m_visibilityRendering = true;
 	bool m_occlusionCulling = true;
-	bool m_meshletCulling = true;
     bool m_bloom = false;
     bool m_jitter = true;
 	bool m_screenSpaceReflections = false;
@@ -242,12 +360,18 @@ private:
     std::function<bool()> getDrawBoundingSpheres;
 	std::function<bool()> getImageBasedLightingEnabled;
 
-	std::vector<SettingsManager::Subscription> m_settingsSubscriptions;
+    std::vector<SettingsManager::Subscription> m_settingsSubscriptions;
 
-	DeferredFunctions m_preFrameDeferredFunctions;
+    uint64_t m_lastTerrainRvtTelemetryRequestFrame = UINT64_MAX;
+    bool m_terrainRvtStatsReadbackPending = false;
+    bool m_terrainRvtCountersReadbackPending = false;
+    bool m_loggedTerrainRvtTelemetryEnabled = false;
+
+    DeferredFunctions m_preFrameDeferredFunctions;
     int32_t m_lastFrameTaskNodeIndex = -1;
     br::render::SceneRenderBridge m_sceneRenderBridge;
     bool m_sceneRenderOverlapEnabled = true;
+    bool m_externalSceneMode = false;
     bool m_swapChainReady = true;
     bool m_loggedSwapChainNotReady = false;
 
@@ -278,18 +402,43 @@ private:
 
     std::mutex m_pendingSceneExplorerEditsMutex;
     std::unordered_map<uint64_t, PendingSceneExplorerEdit> m_pendingSceneExplorerEdits;
+    struct ExternalMeshRegistration {
+        std::shared_ptr<Material> material;
+        MaterialCompileFlags regularEvalFlags = MaterialCompileNone;
+        MaterialCompileFlags reyesEvalFlags = MaterialCompileNone;
+        MaterialRasterFlags rasterFlags = MaterialRasterFlagsNone;
+        bool hasDistinctReyes = false;
+    };
+    std::unordered_map<uint64_t, ExternalMeshRegistration> m_externalMeshRegistrations;
+    std::unordered_set<uint64_t> m_externalRegisteredMeshes;
+    std::unordered_set<uint64_t> m_externalRegisteredMeshInstances;
 
-    std::shared_ptr<rg::runtime::IUploadPolicyService> m_uploadPolicyService = nullptr;
+    std::shared_ptr<org::runtime::IUploadPolicyService> m_uploadPolicyService = nullptr;
+    uint64_t m_lastCLodVisibilityTelemetryRequestFrame = UINT64_MAX;
+    bool m_clodTelemetryReadbackPending = false;
+    bool m_clodVisibleCounterReadbackPending = false;
+    bool m_clodReplayStateReadbackPending = false;
+    bool m_loggedCLodVisibilityTelemetryEnabled = false;
+    bool m_clodVisibilityTelemetryDebugEnabledByRenderer = false;
+    uint64_t m_lastCLodVirtualShadowTelemetryRequestFrame = UINT64_MAX;
+    bool m_clodVirtualShadowTelemetryReadbackPending = false;
+    bool m_clodVirtualShadowWorkTelemetryReadbackPending = false;
+    uint32_t m_virtualShadowCasterTelemetryReadbacksPending = 0u;
+    bool m_loggedCLodVirtualShadowTelemetryEnabled = false;
+    uint64_t m_lastObjectReyesAtlasTelemetryRequestFrame = UINT64_MAX;
+    bool m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;
+    bool m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;
+    bool m_loggedObjectReyesAtlasTelemetryEnabled = false;
 
     class CoreResourceProvider : public IResourceProvider {
 	public:
         std::shared_ptr<PixelBuffer> m_HDRColorTarget = nullptr;
 		std::shared_ptr<PixelBuffer> m_upscaledHDRColorTarget = nullptr;
-		std::shared_ptr<PixelBuffer> m_gbufferMotionVectors = nullptr;
+		std::shared_ptr<PixelBuffer> m_gbufferDilatedMotionVectors = nullptr;
 
 		std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override { // TODO: don't use ifs
-            if (key.ToString() == Builtin::GBuffer::MotionVectors)
-				return m_gbufferMotionVectors;
+			if (key.ToString() == Builtin::Surface::DilatedMotion)
+				return m_gbufferDilatedMotionVectors;
             if (key.ToString() == Builtin::Color::HDRColorTarget)
 				return m_HDRColorTarget;
             if (key.ToString() == Builtin::PostProcessing::UpscaledHDR)
@@ -305,7 +454,7 @@ private:
 
         std::vector<ResourceIdentifier> GetSupportedKeys() override {
 			return {
-                Builtin::GBuffer::MotionVectors,
+                Builtin::Surface::DilatedMotion,
                 Builtin::Color::HDRColorTarget,
 				Builtin::PostProcessing::UpscaledHDR,
 			};
@@ -318,7 +467,7 @@ private:
         void Cleanup() {
 			m_HDRColorTarget = nullptr;
 			m_upscaledHDRColorTarget = nullptr;
-			m_gbufferMotionVectors = nullptr;
+			m_gbufferDilatedMotionVectors = nullptr;
         }
     };
 	CoreResourceProvider m_coreResourceProvider;

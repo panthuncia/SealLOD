@@ -6,8 +6,13 @@
 #include "Render/RendererComponents.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
-class PixelBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class DynamicBuffer; }
+using org::DynamicBuffer;
+class VirtualShadowInvalidationQueue;
 
 class VirtualShadowMapInvalidatePagesPass final : public ComputePass {
 public:
@@ -20,7 +25,8 @@ public:
         std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
         std::shared_ptr<Buffer> pageMetadataBuffer,
         std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
-        std::shared_ptr<Buffer> statsBuffer);
+        std::shared_ptr<Buffer> statsBuffer,
+        std::shared_ptr<VirtualShadowInvalidationQueue> extensionInvalidations = nullptr);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -30,6 +36,7 @@ public:
 
 private:
     PipelineState m_pso;
+    PipelineState m_boundsPso;
     std::shared_ptr<Buffer> m_invalidationInputsBuffer;
     std::shared_ptr<Buffer> m_invalidationCountBuffer;
     std::shared_ptr<Buffer> m_invalidatedInstancesBitsetBuffer;
@@ -39,7 +46,10 @@ private:
     std::shared_ptr<Buffer> m_pageMetadataBuffer;
     std::shared_ptr<Buffer> m_directionalPageViewInfoBuffer;
     std::shared_ptr<Buffer> m_statsBuffer;
+    std::shared_ptr<DynamicBuffer> m_boundsInvalidationBuffer;
+    std::shared_ptr<VirtualShadowInvalidationQueue> m_extensionInvalidations;
     uint32_t m_pendingInputCount = 0u;
+    uint32_t m_pendingBoundsCount = 0u;
+    bool m_invalidateAllActiveClipmaps = false;
     flecs::query<const Components::ObjectDrawInfo> m_transformChangedQuery;
-    flecs::query<const Components::ObjectDrawInfo> m_skinnedObjectsQuery;
 };

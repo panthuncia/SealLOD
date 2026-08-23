@@ -177,7 +177,7 @@ TextureDescription CreateAVBOITEarlyDepthDescription()
 RenderGraph::ExternalInsertPoint MakeTransparentTailInsertPoint()
 {
     auto insertPoint = RenderGraph::ExternalInsertPoint::After("LightCullingPass");
-    insertPoint.after.push_back("CLodShadow::VirtualShadowDeduplicatePredictedPagesPass");
+    insertPoint.after.push_back("CLodShadow::VirtualShadowClearDirtyBitsPass");
     insertPoint.before.push_back("Screen-Space Reflections Pass");
     insertPoint.before.push_back("UpscalingPass");
     insertPoint.before.push_back("luminanceHistogramPass");
@@ -404,12 +404,12 @@ void CLodAlphaVariant::TagResourceUsages(CLodExtension& extension)
 {
     auto tagBufferUsage = [](const std::shared_ptr<Buffer>& buffer, std::string_view usage) {
         if (buffer) {
-            rg::memory::SetResourceUsageHint(*buffer, std::string(usage));
+            org::memory::SetResourceUsageHint(*buffer, std::string(usage));
         }
     };
     auto tagTextureUsage = [](const std::shared_ptr<PixelBuffer>& texture, std::string_view usage) {
         if (texture) {
-            rg::memory::SetResourceUsageHint(*texture, std::string(usage));
+            org::memory::SetResourceUsageHint(*texture, std::string(usage));
         }
     };
 
@@ -554,6 +554,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
                     MakeVariantPassName(traits, "ReyesPatchRasterPass1"),
                     std::make_shared<ReyesDeepVisibilityRasterizationPass>(
                         extension.m_visibleClustersBuffer,
+                        extension.m_visibleClusterTransformIndicesBuffer,
                         extension.m_reyesDiceQueueBuffer,
                         extension.m_reyesDiceQueueCounterBuffer,
                         extension.m_reyesRasterWorkBuffer,
@@ -583,6 +584,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
             std::make_shared<ClusterRasterizationPass>(
                 occupancyPassInputs,
                 extension.m_compactedVisibleClustersBuffer,
+                extension.m_compactedVisibleClusterTransformIndicesBuffer,
                 extension.m_rasterBucketsHistogramBuffer,
                 extension.m_rasterBucketsIndirectArgsBuffer,
                 extension.m_sortedToUnsortedMappingBuffer,
@@ -681,6 +683,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
         std::make_shared<ClusterRasterizationPass>(
             rasterizePassInputs,
             extension.m_compactedVisibleClustersBuffer,
+            extension.m_compactedVisibleClusterTransformIndicesBuffer,
             extension.m_rasterBucketsHistogramBuffer,
             extension.m_rasterBucketsIndirectArgsBuffer,
             extension.m_sortedToUnsortedMappingBuffer,
@@ -778,6 +781,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
             std::make_shared<ClusterRasterizationPass>(
                 shadePassInputs,
                 extension.m_compactedVisibleClustersBuffer,
+                extension.m_compactedVisibleClusterTransformIndicesBuffer,
                 extension.m_rasterBucketsHistogramBuffer,
                 extension.m_rasterBucketsIndirectArgsBuffer,
                 extension.m_sortedToUnsortedMappingBuffer,

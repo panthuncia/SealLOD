@@ -17,6 +17,7 @@ struct SkinningInfluences
 struct Vertex {
     float3 position;
     float3 normal;
+    float4 tangent;
     float2 texcoord;
     SkinningInfluences skinning;
     float3 color;
@@ -40,6 +41,12 @@ Vertex LoadVertex(uint byteOffset, ByteAddressBuffer buffer, uint flags) {
     vertex.skinning.joints1 = uint4(0, 0, 0, 0);
     vertex.skinning.weights0 = float4(0.0, 0.0, 0.0, 0.0);
     vertex.skinning.weights1 = float4(0.0, 0.0, 0.0, 0.0);
+
+    vertex.tangent = float4(1.0, 0.0, 0.0, 0.0);
+    if (flags & VERTEX_TANGENTS) {
+        vertex.tangent = LoadFloat4(byteOffset, buffer);
+        byteOffset += VERTEX_LAYOUT_TANGENT_SIZE;
+    }
 
     if (flags & VERTEX_TEXCOORDS) {
         vertex.texcoord = LoadFloat2(byteOffset, buffer);
@@ -71,6 +78,7 @@ Vertex LoadSkinningVertex(uint byteOffset, ByteAddressBuffer buffer, uint flags)
     byteOffset += 12;
 
     vertex.texcoord = float2(0.0, 0.0);
+    vertex.tangent = float4(1.0, 0.0, 0.0, 0.0);
     vertex.skinning.joints0 = uint4(0, 0, 0, 0);
     vertex.skinning.joints1 = uint4(0, 0, 0, 0);
     vertex.skinning.weights0 = float4(0.0, 0.0, 0.0, 0.0);

@@ -22,3 +22,18 @@
 [submodule "FidelityFX-SDK"]
 	path = FidelityFX-SDK
 	url = https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
+[submodule "PyNifly"]
+	path = PyNifly
+	url = git@github.com:panthuncia/PyNifly.git
+[submodule "xatlas"]
+	path = xatlas
+	url = https://github.com/jpcy/xatlas.git
+[submodule "geometry-central"]
+	path = geometry-central
+	url = https://github.com/nmwsharp/geometry-central.git
+[submodule "BasicTelemetry"]
+	path = BasicTelemetry
+	url = git@github.com:panthuncia/BasicTelemetry.git
+[submodule "ORGModuleServices"]
+	path = ORGModuleServices
+	url = git@github.com:panthuncia/ORGModuleServices.git

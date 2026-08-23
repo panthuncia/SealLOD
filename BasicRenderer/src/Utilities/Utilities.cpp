@@ -4,16 +4,22 @@
 #include <stdexcept>
 #include <algorithm>
 #include <codecvt>
+#include <cstdio>
+#include <cstdlib>
 #include <future>
 #include <functional>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <mutex>
+#include <unordered_set>
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <optional>
 #include <gsl/gsl>
 #include <rhi_helpers.h>
 #include <rhi_conversions_dx12.h>
+#include <tracy/Tracy.hpp>
 
 #include "Utilities/ProcessedTextureCache.h"
 
@@ -28,14 +34,16 @@
 #include "Mesh/VertexLayout.h"
 #include "Scene/Components.h"
 #include "Resources/PixelBuffer.h"
+#include "Resources/Texture.h"
 
 using namespace DirectX;
 
 void ThrowIfFailed(HRESULT hr) {
     if (FAILED(hr)) {
-        // Print the error code for debugging purposes
-        std::cerr << "HRESULT failed with error code: " << std::hex << hr << std::endl;
-        throw std::runtime_error("HRESULT failed");
+        char message[64]{};
+        std::snprintf(message, sizeof(message), "HRESULT failed: 0x%08lX", static_cast<unsigned long>(hr));
+        std::cerr << message << std::endl;
+        throw std::runtime_error(message);
     }
 }
 
@@ -104,7 +112,22 @@ std::shared_ptr<Mesh> MeshFromData(MeshData&& meshData, std::wstring name, std::
 		skinningVertices = std::move(skinningData);
 	}
 
-    return Mesh::CreateShared(std::move(rawData), vertexSize, std::move(skinningVertices), skinningVertexSize, meshData.indices, std::move(meshData.uvSets), meshData.material, vertexFlags, std::move(prebuiltClusterLOD));
+    auto mesh = Mesh::CreateShared(std::move(rawData), vertexSize, std::move(skinningVertices), skinningVertexSize, meshData.indices, std::move(meshData.uvSets), meshData.material, vertexFlags, std::move(prebuiltClusterLOD));
+    if (hasJoints && numVertices != 0) {
+        const size_t availableJointCount = meshData.joints.size() / numVertices;
+        const size_t availableWeightCount = meshData.weights.size() / numVertices;
+        const size_t sampleCount = std::min({ kMaxSkinInfluences, availableJointCount, availableWeightCount });
+        std::vector<uint32_t> sampleJoints;
+        std::vector<float> sampleWeights;
+        sampleJoints.reserve(sampleCount);
+        sampleWeights.reserve(sampleCount);
+        for (size_t influenceIndex = 0; influenceIndex < sampleCount; ++influenceIndex) {
+            sampleJoints.push_back(meshData.joints[influenceIndex]);
+            sampleWeights.push_back(meshData.weights[influenceIndex]);
+        }
+        mesh->SetSkinningDebugSample(std::move(sampleJoints), std::move(sampleWeights));
+    }
+    return mesh;
 }
 
 XMMATRIX RemoveScalingFromMatrix(const XMMATRIX& initialMatrix) {
@@ -328,10 +351,197 @@ namespace detail {
 
     constexpr bool kForceCpuTextureLoadPath = false;
 
+    bool IsTruthyEnvironmentFlag(const char* name) {
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
+            return false;
+        }
+
+        const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+        free(value);
+        return enabled;
+    }
+
+    bool IsDirectStorageGpuTextureUploadDisabled() {
+        static const bool disabled = IsTruthyEnvironmentFlag("BASICRENDERER_DISABLE_DIRECTSTORAGE_TEXTURE_UPLOAD");
+        return disabled;
+    }
+
     struct ReadFileBytesResult {
         std::vector<std::byte> data;
         bool usedDirectStorage = false;
+        bool usedMemoryMapping = false;
         std::string detail;
+    };
+
+    std::string FormatWin32Error(DWORD error)
+    {
+        LPSTR message = nullptr;
+        const DWORD length = FormatMessageA(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
+            error,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<LPSTR>(&message),
+            0,
+            nullptr);
+        std::string result = length != 0 && message != nullptr
+            ? std::string(message, length)
+            : "unknown Win32 error";
+        if (message) {
+            LocalFree(message);
+        }
+        while (!result.empty() && (result.back() == '\r' || result.back() == '\n' || result.back() == '.')) {
+            result.pop_back();
+        }
+        return result + " (GetLastError=" + std::to_string(error) + ")";
+    }
+
+    void WarnOnce(std::string key, std::string message)
+    {
+        static std::mutex mutex;
+        static std::unordered_set<std::string> seen;
+        std::scoped_lock lock(mutex);
+        if (seen.insert(std::move(key)).second) {
+            spdlog::warn("{}", message);
+        }
+    }
+
+    class MappedFileView {
+    public:
+        MappedFileView() = default;
+        ~MappedFileView()
+        {
+            Reset();
+        }
+
+        MappedFileView(const MappedFileView&) = delete;
+        MappedFileView& operator=(const MappedFileView&) = delete;
+
+        MappedFileView(MappedFileView&& other) noexcept
+        {
+            MoveFrom(std::move(other));
+        }
+
+        MappedFileView& operator=(MappedFileView&& other) noexcept
+        {
+            if (this != &other) {
+                Reset();
+                MoveFrom(std::move(other));
+            }
+            return *this;
+        }
+
+        static std::optional<MappedFileView> Open(const std::wstring& path, std::string* outError = nullptr)
+        {
+            ZoneScopedN("MappedFileView::Open");
+            if (outError) {
+                outError->clear();
+            }
+
+            HANDLE file = CreateFileW(
+                path.c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                nullptr);
+            if (file == INVALID_HANDLE_VALUE) {
+                if (outError) {
+                    *outError = "CreateFileW failed: " + FormatWin32Error(GetLastError());
+                }
+                return std::nullopt;
+            }
+
+            LARGE_INTEGER size{};
+            if (!GetFileSizeEx(file, &size) || size.QuadPart < 0) {
+                if (outError) {
+                    *outError = "GetFileSizeEx failed: " + FormatWin32Error(GetLastError());
+                }
+                CloseHandle(file);
+                return std::nullopt;
+            }
+            if (size.QuadPart == 0) {
+                if (outError) {
+                    *outError = "file is empty";
+                }
+                CloseHandle(file);
+                return std::nullopt;
+            }
+            if (static_cast<unsigned long long>(size.QuadPart) > static_cast<unsigned long long>((std::numeric_limits<size_t>::max)())) {
+                if (outError) {
+                    *outError = "file is too large to map into address space";
+                }
+                CloseHandle(file);
+                return std::nullopt;
+            }
+
+            HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+            if (mapping == nullptr) {
+                if (outError) {
+                    *outError = "CreateFileMappingW failed: " + FormatWin32Error(GetLastError());
+                }
+                CloseHandle(file);
+                return std::nullopt;
+            }
+
+            void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+            if (view == nullptr) {
+                if (outError) {
+                    *outError = "MapViewOfFile failed: " + FormatWin32Error(GetLastError());
+                }
+                CloseHandle(mapping);
+                CloseHandle(file);
+                return std::nullopt;
+            }
+
+            MappedFileView result;
+            result.m_file = file;
+            result.m_mapping = mapping;
+            result.m_view = view;
+            result.m_size = static_cast<size_t>(size.QuadPart);
+            return result;
+        }
+
+        const void* Data() const noexcept { return m_view; }
+        size_t Size() const noexcept { return m_size; }
+
+    private:
+        void Reset()
+        {
+            if (m_view) {
+                UnmapViewOfFile(m_view);
+                m_view = nullptr;
+            }
+            if (m_mapping) {
+                CloseHandle(m_mapping);
+                m_mapping = nullptr;
+            }
+            if (m_file != INVALID_HANDLE_VALUE) {
+                CloseHandle(m_file);
+                m_file = INVALID_HANDLE_VALUE;
+            }
+            m_size = 0;
+        }
+
+        void MoveFrom(MappedFileView&& other) noexcept
+        {
+            m_file = other.m_file;
+            m_mapping = other.m_mapping;
+            m_view = other.m_view;
+            m_size = other.m_size;
+            other.m_file = INVALID_HANDLE_VALUE;
+            other.m_mapping = nullptr;
+            other.m_view = nullptr;
+            other.m_size = 0;
+        }
+
+        HANDLE m_file = INVALID_HANDLE_VALUE;
+        HANDLE m_mapping = nullptr;
+        void* m_view = nullptr;
+        size_t m_size = 0;
     };
 
     bool IsDDSPath(const std::wstring& filePath) {
@@ -371,6 +581,73 @@ namespace detail {
         return true;
     }
 
+    std::optional<TextureDescription> TryBuildDeferredConditionedCacheDescription(
+        const std::wstring& filePath,
+        bool allowRTV,
+        bool allowUAV,
+        std::string* outFailureReason = nullptr)
+    {
+        if (outFailureReason) {
+            outFailureReason->clear();
+        }
+
+        br::processed_texture_cache::FileHeader header{};
+        if (!ReadProcessedTextureCacheHeader(filePath, header)) {
+            if (outFailureReason) {
+                *outFailureReason = "failed to read conditioned texture cache header";
+            }
+            return std::nullopt;
+        }
+
+        if (header.baseWidth == 0 || header.baseHeight == 0 || header.mipLevels == 0 ||
+            header.subresourceCount == 0 || header.totalArraySlices == 0 ||
+            header.subresourceCount != header.totalArraySlices * header.mipLevels) {
+            if (outFailureReason) {
+                *outFailureReason = "conditioned texture cache header has inconsistent dimensions";
+            }
+            return std::nullopt;
+        }
+
+        TextureDescription desc{};
+        desc.format = static_cast<rhi::Format>(header.format);
+        desc.channels = static_cast<unsigned short>(header.channels);
+        desc.isCubemap = br::processed_texture_cache::HasFlag(header, br::processed_texture_cache::FlagIsCubemap);
+        desc.isArray = br::processed_texture_cache::HasFlag(header, br::processed_texture_cache::FlagIsArray);
+        desc.arraySize = desc.isCubemap
+            ? (std::max)(1u, header.totalArraySlices / 6u)
+            : (std::max)(1u, header.arraySize);
+        desc.hasRTV = allowRTV;
+        desc.hasUAV = allowUAV;
+        desc.generateMipMaps = false;
+        desc.initialLayout = rhi::ResourceLayout::Common;
+        desc.imageDimensions.reserve(header.subresourceCount);
+
+        const DXGI_FORMAT dxgiFormat = rhi::ToDxgi(desc.format);
+        for (uint32_t arraySlice = 0; arraySlice < header.totalArraySlices; ++arraySlice) {
+            for (uint32_t mip = 0; mip < header.mipLevels; ++mip) {
+                const size_t mipWidth = (std::max)(size_t(1), static_cast<size_t>(header.baseWidth) >> mip);
+                const size_t mipHeight = (std::max)(size_t(1), static_cast<size_t>(header.baseHeight) >> mip);
+                size_t rowPitch = 0;
+                size_t slicePitch = 0;
+                if (FAILED(DirectX::ComputePitch(dxgiFormat, mipWidth, mipHeight, rowPitch, slicePitch))) {
+                    if (outFailureReason) {
+                        *outFailureReason = "failed to compute conditioned texture cache pitch";
+                    }
+                    return std::nullopt;
+                }
+
+                ImageDimensions dims{};
+                dims.width = static_cast<uint32_t>(mipWidth);
+                dims.height = static_cast<uint32_t>(mipHeight);
+                dims.rowPitch = rowPitch;
+                dims.slicePitch = slicePitch;
+                desc.imageDimensions.push_back(dims);
+            }
+        }
+
+        return desc;
+    }
+
     std::shared_ptr<TextureAsset> TryLoadProcessedTextureCacheToVRAM(
         const std::wstring& filePath,
         std::shared_ptr<Sampler> sampler,
@@ -380,6 +657,13 @@ namespace detail {
     {
         if (outFailureReason) {
             outFailureReason->clear();
+        }
+
+        if (IsDirectStorageGpuTextureUploadDisabled()) {
+            if (outFailureReason) {
+                *outFailureReason = "DirectStorage GPU texture upload disabled";
+            }
+            return {};
         }
 
         if (!DirectStorageManager::GetInstance().CanServiceQueue(br::DirectStorageQueueKind::Gpu)) {
@@ -406,6 +690,7 @@ namespace detail {
         desc.hasRTV = allowRTV;
         desc.hasUAV = allowUAV;
         desc.generateMipMaps = false;
+        desc.initialLayout = rhi::ResourceLayout::Common;
 
         if (header.baseWidth == 0 || header.baseHeight == 0 || header.mipLevels == 0 ||
             header.subresourceCount == 0 || header.totalArraySlices == 0 ||
@@ -500,9 +785,19 @@ namespace detail {
         bool allowRTV,
         bool allowUAV)
     {
+        if (IsDirectStorageGpuTextureUploadDisabled()) {
+            return {};
+        }
+
         if (!DirectStorageManager::GetInstance().CanServiceQueue(br::DirectStorageQueueKind::Gpu)) {
             return {};
         }
+
+        // Raw DDS files store mip rows tightly. DirectStorage texture destinations expect the
+        // request byte stream to match the D3D12 copyable footprint layout, including row padding.
+        // Route normal DDS files through DirectXTex decode + the standard upload path. The
+        // conditioned texture cache has its own footprint-compatible DirectStorage path.
+        return {};
 
         DirectX::ScratchImage image;
         DirectX::TexMetadata metadata{};
@@ -549,6 +844,7 @@ namespace detail {
         desc.hasRTV = allowRTV;
         desc.hasUAV = allowUAV;
         desc.generateMipMaps = false;
+        desc.initialLayout = rhi::ResourceLayout::Common;
 
         const uint32_t arraySlices = static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize));
         const uint32_t mipLevels = static_cast<uint32_t>((std::max)(size_t(1), metadata.mipLevels));
@@ -636,6 +932,23 @@ namespace detail {
             }
         }
 
+        std::string mapError;
+        {
+            ZoneScopedN("ReadFileBytes::MemoryMappedFallback");
+            if (auto mapped = MappedFileView::Open(path, &mapError)) {
+                result.data.resize(mapped->Size());
+                std::memcpy(result.data.data(), mapped->Data(), mapped->Size());
+                result.usedMemoryMapping = true;
+                result.detail = "file bytes copied from memory-mapped file view";
+                TracyPlot("SARP.Texture.MMap.Bytes", static_cast<int64_t>(mapped->Size()));
+                return result;
+            }
+        }
+
+        WarnOnce(
+            "mmap|" + ws2s(path) + "|" + mapError,
+            "LoadTextureFromFile: memory-mapped read failed for '" + ws2s(path) + "' because " + mapError + "; falling back to std::ifstream");
+
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) { throw std::runtime_error("Failed to open file: " + ws2s(path)); }
         const auto size = static_cast<size_t>(f.tellg());
@@ -709,7 +1022,7 @@ LoadTextureFromMemory(const void* bytes,
 
     DirectX::TexMetadata meta{};
     ImageFiletype kind{};
-    if (!detail::ProbeImageContainer(bytes, byteCount, kind, meta, flags)) {
+    if (!::detail::ProbeImageContainer(bytes, byteCount, kind, meta, flags)) {
         throw std::runtime_error("Unrecognized image container in memory buffer");
     }
 
@@ -793,10 +1106,11 @@ LoadTextureFromFile(const std::wstring& filePath,
     // For WIC paths, FORCE_* ensures consistent format choice even if the file has metadata
     localFlags.wic = preferSRGB ? DirectX::WIC_FLAGS_FORCE_SRGB : DirectX::WIC_FLAGS_FORCE_LINEAR;
 
-    if (detail::IsProcessedTextureCachePath(filePath)) {
+    if (::detail::IsProcessedTextureCachePath(filePath)) {
         std::string processedCacheFailureReason;
-        if (!detail::kForceCpuTextureLoadPath) {
-            if (auto conditionedTexture = detail::TryLoadProcessedTextureCacheToVRAM(filePath, sampler, allowRTV, allowUAV, &processedCacheFailureReason)) {
+        if (!::detail::kForceCpuTextureLoadPath) {
+            ZoneScopedN("TryLoadProcessedTextureCacheToVRAM");
+            if (auto conditionedTexture = ::detail::TryLoadProcessedTextureCacheToVRAM(filePath, sampler, allowRTV, allowUAV, &processedCacheFailureReason)) {
                 conditionedTexture->Meta().preferSRGB = preferSRGB;
                 return conditionedTexture;
             }
@@ -805,6 +1119,7 @@ LoadTextureFromFile(const std::wstring& filePath,
         std::filesystem::path ddsFallbackPath = std::filesystem::path(filePath).replace_extension(L".dds");
         std::error_code ec;
         if (std::filesystem::exists(ddsFallbackPath, ec) && !ec) {
+            ZoneScopedN("LoadTextureFromFile fallback to sibling DDS");
             spdlog::info(
                 "LoadTextureFromFile: conditioned cache '{}' fell back to sibling DDS '{}' because {}",
                 ws2s(filePath),
@@ -821,23 +1136,104 @@ LoadTextureFromFile(const std::wstring& filePath,
         }
     }
 
-    if (!detail::kForceCpuTextureLoadPath && detail::IsDDSPath(filePath)) {
-        if (auto directStorageTexture = detail::TryLoadDDSDirectToVRAM(filePath, sampler, preferSRGB, localFlags, false, allowRTV, allowUAV)) {
+    if (!::detail::kForceCpuTextureLoadPath && ::detail::IsDDSPath(filePath)) {
+        ZoneScopedN("TryLoadDDSDirectToVRAM");
+        if (auto directStorageTexture = ::detail::TryLoadDDSDirectToVRAM(filePath, sampler, preferSRGB, localFlags, false, allowRTV, allowUAV)) {
             directStorageTexture->Meta().filePath = utf8;
             directStorageTexture->Meta().preferSRGB = preferSRGB;
             return directStorageTexture;
         }
     }
 
-    const auto fileBytes = detail::ReadFileBytes(filePath);
-    auto texture = LoadTextureFromMemory(fileBytes.data.data(), fileBytes.data.size(), sampler, localFlags, preferSRGB, allowRTV, allowUAV);
+    ZoneScopedN("LoadTextureFromFile fallback to CPU decode");
+    std::shared_ptr<TextureAsset> texture;
+    std::string mapError;
+    if (auto mapped = ::detail::MappedFileView::Open(filePath, &mapError)) {
+        ZoneScopedN("LoadTextureFromFile fallback mmap decode");
+        TracyPlot("SARP.Texture.MMap.DecodeBytes", static_cast<int64_t>(mapped->Size()));
+        texture = LoadTextureFromMemory(mapped->Data(), mapped->Size(), sampler, localFlags, preferSRGB, allowRTV, allowUAV);
+        if (texture) {
+            texture->RecordLoadPath(TextureLoadPathTelemetry::MemoryMappedFileRead, "texture decoded directly from memory-mapped file view");
+        }
+    } else {
+        ::detail::WarnOnce(
+            "mmap-decode|" + utf8 + "|" + mapError,
+            "LoadTextureFromFile: memory-mapped decode failed for '" + utf8 + "' because " + mapError + "; falling back to copied file bytes");
+        const auto fileBytes = ::detail::ReadFileBytes(filePath);
+        texture = LoadTextureFromMemory(fileBytes.data.data(), fileBytes.data.size(), sampler, localFlags, preferSRGB, allowRTV, allowUAV);
+        if (texture) {
+            texture->RecordLoadPath(
+                fileBytes.usedDirectStorage ? TextureLoadPathTelemetry::DirectStorageSystemMemoryRead :
+                fileBytes.usedMemoryMapping ? TextureLoadPathTelemetry::MemoryMappedFileRead :
+                TextureLoadPathTelemetry::CpuFileRead,
+                fileBytes.detail);
+        }
+    }
     if (texture) {
         texture->Meta().filePath = utf8;
         texture->Meta().preferSRGB = preferSRGB;
-        texture->RecordLoadPath(
-            fileBytes.usedDirectStorage ? TextureLoadPathTelemetry::DirectStorageSystemMemoryRead : TextureLoadPathTelemetry::CpuFileRead,
-            fileBytes.detail);
     }
+    return texture;
+}
+
+std::shared_ptr<TextureAsset>
+LoadTextureFromFileDeferred(
+    const std::wstring& filePath,
+    std::shared_ptr<Sampler> sampler,
+    bool preferSRGB,
+    const TextureFileMeta* metaOverride,
+    bool allowRTV,
+    bool allowUAV)
+{
+    ZoneScopedN("LoadTextureFromFileDeferred");
+    const std::string utf8 = ws2s(filePath);
+    ZoneText(utf8.data(), utf8.size());
+
+    TextureFileMeta meta = metaOverride ? *metaOverride : TextureFileMeta{};
+    if (meta.filePath.empty()) {
+        meta.filePath = utf8;
+    }
+    meta.preferSRGB = preferSRGB;
+
+    TextureDescription desc{};
+    std::string deferredShapeDetail = "texture load deferred; source path retained for async upload";
+    if (meta.isProcessingCacheArtifact || ::detail::IsProcessedTextureCachePath(filePath)) {
+        std::string cacheShapeError;
+        if (auto cacheDesc = ::detail::TryBuildDeferredConditionedCacheDescription(filePath, allowRTV, allowUAV, &cacheShapeError)) {
+            desc = std::move(*cacheDesc);
+            meta.isProcessingCacheArtifact = true;
+            deferredShapeDetail = "texture load deferred; conditioned cache shape populated from cache header";
+            TracyPlot("SARP.Texture.DeferredConditionedCacheShape", static_cast<int64_t>(1));
+        }
+        else if (!cacheShapeError.empty()) {
+            spdlog::debug(
+                "LoadTextureFromFileDeferred: using placeholder shape for '{}' because {}",
+                utf8,
+                cacheShapeError);
+        }
+    }
+
+    if (desc.imageDimensions.empty()) {
+        desc.channels = 4;
+        desc.format = preferSRGB
+            ? rhi::Format::R8G8B8A8_UNorm_sRGB
+            : rhi::Format::R8G8B8A8_UNorm;
+        desc.hasRTV = allowRTV;
+        desc.hasUAV = allowUAV;
+        desc.generateMipMaps = false;
+
+        ImageDimensions dims{};
+        dims.width = 1;
+        dims.height = 1;
+        dims.rowPitch = 4;
+        dims.slicePitch = 4;
+        desc.imageDimensions.push_back(dims);
+    }
+
+    auto texture = TextureAsset::CreateShared(desc, utf8, std::move(sampler), std::move(meta));
+    texture->RecordLoadPath(TextureLoadPathTelemetry::DeferredFileReference, deferredShapeDetail);
+    texture->RecordUploadPath(TextureUploadPathTelemetry::DeferredPlaceholder, "deferred texture will use a semantic placeholder until async upload completes");
+    TracyPlot("SARP.Texture.DeferredQueued", static_cast<int64_t>(1));
     return texture;
 }
 
@@ -877,7 +1273,7 @@ std::shared_ptr<TextureAsset> LoadCubemapFromFile(const char* topPath, const cha
 }
 
 std::shared_ptr<TextureAsset> LoadCubemapFromFile(std::wstring ddsFilePath, bool allowRTV, bool allowUAV) {
-    if (auto directStorageTexture = detail::TryLoadDDSDirectToVRAM(ddsFilePath, Sampler::GetDefaultSampler(), false, {}, true, allowRTV, allowUAV)) {
+    if (auto directStorageTexture = ::detail::TryLoadDDSDirectToVRAM(ddsFilePath, Sampler::GetDefaultSampler(), false, {}, true, allowRTV, allowUAV)) {
         return directStorageTexture;
     }
 
@@ -1175,7 +1571,9 @@ std::vector<Cascade> setupDirectionalClipmaps(
     float fovY,
     float aspectRatio,
     const std::vector<float>& clipFarPlanes,
-    float clipVerticalExtent)
+    float shadowDistanceLowerBound,
+    float clipSceneExtent,
+    float resolutionScale)
 {
     using namespace DirectX;
     std::vector<Cascade> clipmaps;
@@ -1197,11 +1595,26 @@ std::vector<Cascade> setupDirectionalClipmaps(
     const float tanHalfFov = tanf(fovY * 0.5f);
     const float clipZeroHalfHeight = clipZeroFar * tanHalfFov;
     const float clipZeroHalfWidth = clipZeroHalfHeight * aspectRatio;
-    const float clipZeroScale = std::max(
+    const float cameraDerivedClipZeroScale = std::max(
         std::sqrt(clipZeroHalfWidth * clipZeroHalfWidth + clipZeroHalfHeight * clipZeroHalfHeight),
         1.0f);
+    // A positive scene extent is the maximum camera-to-edge distance that the
+    // coarsest clip must cover.  Work backwards through the power-of-two ladder
+    // so the final clip fits that extent exactly, just as the terrain RVT fits
+    // its clip ladder to the terrain domain.  This prevents a very large camera
+    // far plane from making every VSM page unnecessarily coarse.
+    const float clipLadderScale = std::pow(2.0f, static_cast<float>(std::max(numClipmaps - 1, 0)));
+    const float unscaledClipZeroScale = clipSceneExtent > 0.0f
+        ? std::max(clipSceneExtent / clipLadderScale, 1.0e-4f)
+        : cameraDerivedClipZeroScale;
+    // Scale the complete physical clip ladder continuously while keeping the
+    // virtual page table fixed. The GPU retains the same LOD bias for clip
+    // ownership, so fractional values alter world texel/page footprint without
+    // snapping ownership to an adjacent integer clip level.
+    const float clipZeroScale = unscaledClipZeroScale *
+        std::max(resolutionScale, 1.0e-4f);
     const float ndcPageSize = 2.0f / static_cast<float>(CLodVirtualShadowFixedVirtualPageCountPerAxis);
-    const float clampedClipVerticalExtent = std::max(clipVerticalExtent, 1.0f);
+    const float clampedShadowDistanceLowerBound = std::max(shadowDistanceLowerBound, 1.0f);
     const float clipHeightOffsetScale = 5.0f;
     const float clipNearScale = 0.01f;
     const float clipFarScale = 10.0f;
@@ -1209,14 +1622,15 @@ std::vector<Cascade> setupDirectionalClipmaps(
     for (int i = 0; i < numClipmaps; ++i)
     {
         const float clipScale = clipZeroScale * std::pow(2.0f, static_cast<float>(i));
-        // The user-configured vertical extent acts as a minimum clip depth, but
-        // coarse clipmaps still need their light-space depth and origin offset to
-        // grow with XY coverage or they stop containing the scene.
+        // Preserve per-level depth precision, but never contract below the
+        // content-configured caster distance. Content can raise this bound for
+        // unusually tall or distant casters without forcing every inner clip
+        // to inherit the coarsest clip's potentially enormous depth range.
         const float nearDistance = std::max(
-            std::max(clipNearScale * clipScale, clampedClipVerticalExtent * 0.001f),
+            std::max(clipNearScale * clipScale, clampedShadowDistanceLowerBound * 0.001f),
             0.01f);
         const float farDistance = std::max(
-            std::max(clipFarScale * clipScale, clampedClipVerticalExtent),
+            std::max(clipFarScale * clipScale, clampedShadowDistanceLowerBound),
             nearDistance + 1.0f);
         const XMMATRIX lightOrtho = XMMatrixOrthographicOffCenterRH(
             -clipScale,
@@ -1244,7 +1658,17 @@ std::vector<Cascade> setupDirectionalClipmaps(
 
         const float lightDistance = std::max(clipHeightOffsetScale * clipScale, farDistance * 0.5f);
         const XMVECTOR lightPos = alignedTargetWorld - normalizedLightDir * lightDistance;
-        const XMMATRIX lightView = XMMatrixLookToRH(lightPos, normalizedLightDir, lightUp);
+        // Build every clip directly in the same light-space basis. Rebuilding
+        // the view from a clip-specific world-space eye performs an
+        // inverse-transform/LookTo round trip whose float cancellation leaves
+        // slightly different X/Y translations at each level. Those residuals
+        // move a projected point relative to the nested texel grids.
+        XMMATRIX lightView = defaultLightView;
+        lightView.r[3] = XMVectorSet(
+            -XMVectorGetX(alignedTargetLightView),
+            -XMVectorGetY(alignedTargetLightView),
+            -XMVectorGetZ(alignedTargetLightView) - lightDistance,
+            1.0f);
         Cascade clipmap;
         clipmap.size = clipScale * 2.0f;
         XMStoreFloat4(&clipmap.worldCenter, lightPos);
@@ -1986,7 +2410,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 
 	std::shared_ptr<PixelBuffer> depthBuffer = PixelBuffer::CreateShared(desc);
 	depthBuffer->SetName("Depth Buffer");
-	rg::memory::SetResourceUsageHint(*depthBuffer, "Depth resources");
+	org::memory::SetResourceUsageHint(*depthBuffer, "Depth resources");
 
     TextureDescription downsampledDesc;
     // Pad yres and xres to power of two
@@ -1999,6 +2423,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 	downsampledDesc.hasDSV = false;
 	downsampledDesc.hasSRV = true;
 	downsampledDesc.hasUAV = true;
+	downsampledDesc.hasNonShaderVisibleUAV = true;
 	downsampledDesc.isCubemap = isCubemap;
 	downsampledDesc.channels = 1;
 	downsampledDesc.srvFormat = rhi::Format::R32_Float;
@@ -2011,7 +2436,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 
     std::shared_ptr<PixelBuffer> linearDepthBuffer = PixelBuffer::CreateShared(downsampledDesc);
     linearDepthBuffer->SetName("linear Depth Buffer");
-	rg::memory::SetResourceUsageHint(*linearDepthBuffer, "Depth resources");
+	org::memory::SetResourceUsageHint(*linearDepthBuffer, "Depth resources");
 
 	// Projected (non-linear) depth for upscalers — R32_Float with UAV+SRV, same resolution as depth buffer
 	TextureDescription projectedDesc;
@@ -2033,7 +2458,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 
 	std::shared_ptr<PixelBuffer> projectedDepthBuffer = PixelBuffer::CreateShared(projectedDesc);
 	projectedDepthBuffer->SetName("Projected Depth Buffer");
-	rg::memory::SetResourceUsageHint(*projectedDepthBuffer, "Depth resources");
+	org::memory::SetResourceUsageHint(*projectedDepthBuffer, "Depth resources");
 
 	Components::DepthMap depthMap;
 	depthMap.depthMap = depthBuffer;

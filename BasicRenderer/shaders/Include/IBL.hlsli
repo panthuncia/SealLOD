@@ -145,7 +145,12 @@ float OpenPBRFuzzDirectionalReflectance(float fuzzRoughness, float cosTheta)
 
 float OpenPBRFuzzIncomingReflected(float fuzzWeight, float fuzzRoughness, float NdotV)
 {
-    return saturate(saturate(fuzzWeight) * OpenPBRFuzzDirectionalReflectance(fuzzRoughness, NdotV));
+    const float presence = saturate(fuzzWeight);
+    if (presence <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return saturate(presence * OpenPBRFuzzDirectionalReflectance(fuzzRoughness, NdotV));
 }
 
 float OpenPBRFuzzBaseLayerScaleIncoming(float fuzzWeight, float fuzzRoughness, float NdotV)
@@ -159,6 +164,10 @@ OpenPBRFuzzLayerState MakeOpenPBRFuzzLayerState(float3 normal, float3 viewDir, f
     state.roughness = saturate(fuzzRoughness);
     state.tint = saturate(fuzzColor);
     state.presence = saturate(fuzzWeight);
+    if (state.presence <= 0.0f)
+    {
+        return state;
+    }
     state.basis.normal = normalize(normal);
     OpenPBRBuildViewAlignedBasis(state.basis.normal, normalize(viewDir), state.basis.tangent, state.basis.bitangent);
     state.viewDirLocal = OpenPBRWorldToLocal(state.basis, normalize(viewDir));
@@ -183,11 +192,19 @@ float OpenPBRFuzzBaseLayerScaleIncoming(OpenPBRFuzzLayerState state)
 
 float OpenPBRFuzzBaseLayerScaleOutgoing(OpenPBRFuzzLayerState state, float3 lightDirection)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 1.0f;
+    }
     return 1.0f - OpenPBRFuzzProportionReflected(state, OpenPBRWorldToLocal(state.basis, normalize(lightDirection)));
 }
 
 float OpenPBRFuzzBaseLayerScaleComplete(OpenPBRFuzzLayerState state, float3 lightDirection)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 1.0f;
+    }
     return OpenPBRFuzzBaseLayerScaleIncoming(state) * OpenPBRFuzzBaseLayerScaleOutgoing(state, lightDirection);
 }
 
@@ -227,6 +244,10 @@ float OpenPBRFuzzEvaluateLTC(float3 wiLocal, float3 ltcCoefficients)
 
 float3 OpenPBRFuzzSheenBRDF(OpenPBRFuzzLayerState state, float3 lightDirection)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 0.0f.xxx;
+    }
     const float3 lightDirLocal = OpenPBRWorldToLocal(state.basis, normalize(lightDirection));
     if (state.viewDirLocal.z <= 0.0f || lightDirLocal.z <= 0.0f)
     {
@@ -241,6 +262,10 @@ float3 OpenPBRFuzzSheenBRDF(OpenPBRFuzzLayerState state, float3 lightDirection)
 
 float3 OpenPBRFuzzSheenIBL(float3 fuzzColor, float fuzzWeight, float fuzzRoughness, float NdotV, float3 reflectedRadiance)
 {
+    if (fuzzWeight <= 0.0f)
+    {
+        return 0.0f.xxx;
+    }
     const float viewReflected = OpenPBRFuzzIncomingReflected(fuzzWeight, fuzzRoughness, NdotV);
     return viewReflected * saturate(fuzzColor) * reflectedRadiance;
 }
@@ -506,15 +531,21 @@ OpenPBRBaseLayerState MakeOpenPBRBaseLayerState(
     OpenPBRBaseLayerState state = (OpenPBRBaseLayerState)0;
     state.weightedBaseColor = saturate(weightedBaseColor);
     state.diffuseColor = diffuseColor;
+#if !defined(CLOD_FORWARD_DIFFUSE_ROUGHNESS) || CLOD_FORWARD_DIFFUSE_ROUGHNESS
     state.baseDiffuseRoughness = saturate(baseDiffuseRoughness);
+#else
+    state.baseDiffuseRoughness = 0.0f;
+#endif
     state.specularAlpha = saturate(specularAlpha);
     state.weightedSpecularIor = max(weightedSpecularIor, 1.0f);
     state.dielectricSpecularF0 = saturate(dielectricSpecularF0);
     state.dielectricSpecularWeight = saturate(dielectricSpecularWeight);
+#if !defined(CLOD_FORWARD_METAL) || CLOD_FORWARD_METAL
     state.metalAverageFresnel = saturate(metalAverageFresnel);
     state.metalSpecularF0 = saturate(metalSpecularF0);
     state.metalSpecularWeight = saturate(metalSpecularWeight);
     state.metalMultipleScatterScale = state.metalSpecularWeight * state.metalAverageFresnel * state.metalAverageFresnel;
+#endif
     return state;
 }
 
@@ -529,22 +560,35 @@ OpenPBRBaseLayerEvaluation EvaluateOpenPBRBaseLayerDirect(OpenPBRBaseLayerState 
     const float VdotL = dot(viewDir, lightDir);
 
     const float diffuseEnergyComp = OpenPBRDiffuseSpecularEnergyCompensation(NdotV, NdotL, state.specularAlpha, state.weightedSpecularIor);
+#if !defined(CLOD_FORWARD_DIFFUSE_ROUGHNESS) || CLOD_FORWARD_DIFFUSE_ROUGHNESS
     evaluation.diffuse = OpenPBRDiffuseEON(state.diffuseColor, state.baseDiffuseRoughness, NdotV, NdotL, VdotL) * diffuseEnergyComp;
+#else
+    // The zero-roughness limit of the FON diffuse model is Lambert. Avoid the
+    // polynomial and multi-scatter construction for materials compiled with
+    // an identically zero diffuse roughness.
+    evaluation.diffuse = state.diffuseColor * (Fd_Lambert() * diffuseEnergyComp);
+#endif
+#if !defined(CLOD_FORWARD_METAL) || CLOD_FORWARD_METAL
     const float metalViewComplement = OpenPBRLookUpIdealMetalEnergyComplement(state.specularAlpha, NdotV);
     const float metalLightComplement = OpenPBRLookUpIdealMetalEnergyComplement(state.specularAlpha, NdotL);
     const float metalAverageComplement = OpenPBRLookUpIdealMetalAverageEnergyComplement(state.specularAlpha);
     const float metalTabulatedFactors =
         metalViewComplement * metalLightComplement / OpenPBRClampAverageEnergyComplementAboveZero(metalAverageComplement);
     const float metalMmsBrdfScale = min(metalTabulatedFactors, rcp(max(NdotL, 1.0e-4f))) * Fd_Lambert();
+#endif
 
     const float3 dielectricSpecular =
         state.dielectricSpecularWeight *
         specularLobe(state.specularAlpha, state.dielectricSpecularF0, halfwayDir, NdotV, NdotL, NdotH, LdotH) *
         mx_ggx_energy_compensation(NdotV, state.specularAlpha, state.dielectricSpecularF0);
+#if !defined(CLOD_FORWARD_METAL) || CLOD_FORWARD_METAL
     const float3 metalSpecular =
         state.metalSpecularWeight *
         (specularLobe(state.specularAlpha, state.metalSpecularF0, halfwayDir, NdotV, NdotL, NdotH, LdotH) +
             state.metalMultipleScatterScale * metalMmsBrdfScale);
+#else
+    const float3 metalSpecular = 0.0f.xxx;
+#endif
 
     evaluation.specular = dielectricSpecular + metalSpecular;
     return evaluation;
@@ -554,14 +598,22 @@ OpenPBRBaseLayerEvaluation EvaluateOpenPBRBaseLayerIBL(OpenPBRBaseLayerState sta
 {
     OpenPBRBaseLayerEvaluation evaluation = (OpenPBRBaseLayerEvaluation)0;
     const float diffuseEnergyComp = OpenPBRDiffuseSpecularIBLEnergyCompensation(NdotV, state.specularAlpha, state.weightedSpecularIor);
+#if !defined(CLOD_FORWARD_DIFFUSE_ROUGHNESS) || CLOD_FORWARD_DIFFUSE_ROUGHNESS
     const float diffuseDirectionalAlbedo = OpenPBRDirectionalAlbedoFONApprox(NdotV, state.baseDiffuseRoughness);
+#else
+    const float diffuseDirectionalAlbedo = 1.0f;
+#endif
     const float3 dielectricE = mx_ggx_dir_albedo_analytic(NdotV, state.specularAlpha, state.dielectricSpecularF0, 1.0f.xxx);
+    evaluation.diffuse = state.diffuseColor * diffuseIrradiance * diffuseDirectionalAlbedo * diffuseEnergyComp;
+#if !defined(CLOD_FORWARD_METAL) || CLOD_FORWARD_METAL
     const float3 metalE = mx_ggx_dir_albedo_analytic(NdotV, state.specularAlpha, state.metalSpecularF0, 1.0f.xxx);
     const float metalMultipleScatter = OpenPBRLookUpIdealMetalEnergyComplement(state.specularAlpha, NdotV);
 
-    evaluation.diffuse = state.diffuseColor * diffuseIrradiance * diffuseDirectionalAlbedo * diffuseEnergyComp;
-    evaluation.specular =
-        (state.dielectricSpecularWeight * dielectricE + state.metalSpecularWeight * metalE + state.metalMultipleScatterScale * metalMultipleScatter) * specularRadiance;
+    const float3 metalSpecular = state.metalSpecularWeight * metalE + state.metalMultipleScatterScale * metalMultipleScatter;
+#else
+    const float3 metalSpecular = 0.0f.xxx;
+#endif
+    evaluation.specular = (state.dielectricSpecularWeight * dielectricE + metalSpecular) * specularRadiance;
     return evaluation;
 }
 
@@ -609,6 +661,11 @@ OpenPBRCoatLayerState MakeOpenPBRCoatLayerState(
     state.presence = saturate(coatWeight);
     state.ior = max(coatIor, 1.0f);
     state.roughness = saturate(coatRoughness);
+    if (state.presence <= 0.0f)
+    {
+        state.extraBaseLayerScale = 1.0f.xxx;
+        return state;
+    }
     state.extraBaseLayerScale = OpenPBRComputeCoatExtraBaseLayerScale(baseState, state.presence, state.ior, coatDarkening);
     return state;
 }
@@ -644,17 +701,32 @@ float OpenPBRComputeDielectricEnergyReflected(float ior, float alpha, float cosT
 
 float OpenPBRCoatReflectedProportion(OpenPBRCoatLayerState state, float NdotX)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 0.0f;
+    }
+
     return saturate(state.presence * OpenPBRComputeDielectricEnergyReflected(state.ior, state.roughness, NdotX));
 }
 
 float3 OpenPBRCoatBaseLayerScaleIncoming(OpenPBRCoatLayerState state, float NdotV)
 {
+    if (state.presence <= 0.0f)
+    {
+        return state.extraBaseLayerScale;
+    }
+
     const float reflectedProportion = OpenPBRCoatReflectedProportion(state, NdotV);
     return OpenPBRCoatPassageColorMultiplier(state, NdotV) * (1.0f - reflectedProportion).xxx * state.extraBaseLayerScale;
 }
 
 float3 OpenPBRCoatBaseLayerScaleOutgoing(OpenPBRCoatLayerState state, float NdotL)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 1.0f.xxx;
+    }
+
     const float reflectedProportion = OpenPBRCoatReflectedProportion(state, NdotL);
     return OpenPBRCoatPassageColorMultiplier(state, NdotL) * (1.0f - reflectedProportion).xxx;
 }
@@ -694,30 +766,50 @@ void evaluateIBL(inout float3 color, inout float3 debugDiffuse, inout float3 deb
         metalAverageFresnel,
         metalSpecularF0,
         metalSpecularWeight);
+#if !defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT
     const OpenPBRCoatLayerState coatState = MakeOpenPBRCoatLayerState(baseState, coatColor, coatWeight, coatIor, coatRoughness, coatDarkening);
+#endif
     
     StructuredBuffer<EnvironmentInfo> environments = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Environment::InfoBuffer)];
     float3 specularRadiance = 0.0f.xxx;
     float3 fuzzRadiance = 0.0f.xxx;
 #if defined (PSO_SPECULAR_IBL)
     specularRadiance = prefilteredRadiance(r, perceptualRoughness, environments[environmentIndex].prefilteredCubemapDescriptorIndex);
-    fuzzRadiance = prefilteredRadiance(r, fuzzRoughness, environments[environmentIndex].prefilteredCubemapDescriptorIndex);
+    // A zero-presence fuzz layer contributes no radiance, so avoid the extra
+    // prefiltered-environment lookup for the common non-fuzz material path.
+#if !defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ
+    if (fuzzWeight > 0.0f)
+    {
+        fuzzRadiance = prefilteredRadiance(r, fuzzRoughness, environments[environmentIndex].prefilteredCubemapDescriptorIndex);
+    }
+#endif
 #endif
     float3 diffuseIrradiance = max(irradianceSH(normalize(normal + bentNormal), environmentIndex, environmentBufferDescriptorIndex), 0.0) * Fd_Lambert();
     OpenPBRBaseLayerEvaluation baseEvaluation = EvaluateOpenPBRBaseLayerIBL(baseState, NdotV, diffuseIrradiance, specularRadiance);
     float3 Fd = baseEvaluation.diffuse * diffuseAO;
     float3 Fr = baseEvaluation.specular;
+#if !defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ
     const float fuzzIncomingScale = OpenPBRFuzzBaseLayerScaleIncoming(fuzzWeight, fuzzRoughness, NdotV);
-    const float3 coatViewAttenuation = OpenPBRCoatBaseLayerScaleIncoming(coatState, NdotV);
     float3 fuzzFr = OpenPBRFuzzSheenIBL(fuzzColor, fuzzWeight, fuzzRoughness, NdotV, fuzzRadiance);
+#else
+    const float fuzzIncomingScale = 1.0f;
+    float3 fuzzFr = 0.0f.xxx;
+#endif
+#if !defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT
+    const float3 coatViewAttenuation = OpenPBRCoatBaseLayerScaleIncoming(coatState, NdotV);
+#else
+    const float3 coatViewAttenuation = 1.0f.xxx;
+#endif
 
     float3 coatFr = 0.0f.xxx;
 #if defined (PSO_SPECULAR_IBL)
+#if !defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT
     if (coatState.presence > 0.0f)
     {
         const float coatReflected = OpenPBRCoatReflectedProportion(coatState, NdotV);
         coatFr = coatReflected.xxx * prefilteredRadiance(r, coatPerceptualRoughness, environments[environmentIndex].prefilteredCubemapDescriptorIndex);
     }
+#endif
 #endif
 
     const float3 baseAttenuation = fuzzIncomingScale.xxx * coatViewAttenuation;

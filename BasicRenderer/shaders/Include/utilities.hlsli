@@ -11,6 +11,14 @@
 #include "include/outputTypes.hlsli"
 #include "include/waveIntrinsicsHelpers.hlsli"
 
+#if defined(PSO_OPENPBR_COAT_COLOR_TEXTURE) || defined(PSO_OPENPBR_COAT_WEIGHT_TEXTURE) || defined(PSO_OPENPBR_COAT_ROUGHNESS_TEXTURE)
+#define PSO_OPENPBR_COAT_TEXTURES 1
+#endif
+
+#if defined(PSO_OPENPBR_FUZZ_COLOR_TEXTURE) || defined(PSO_OPENPBR_FUZZ_WEIGHT_TEXTURE) || defined(PSO_OPENPBR_FUZZ_ROUGHNESS_TEXTURE)
+#define PSO_OPENPBR_FUZZ_TEXTURES 1
+#endif
+
 struct OpenPBRSurfaceSample
 {
     uint openPBRMaterialDataIndex;
@@ -52,6 +60,27 @@ TextureStreamingGPUInfo LoadTextureStreamingInfo(uint streamingTextureID)
 }
 
 static const uint kTextureStreamingFlagEnabled = 1u << 1;
+
+float3 DecodeMaterialNormalSample(float4 textureNormal, uint3 channels, uint materialFlags)
+{
+    float3 tangentSpaceNormal;
+    if (channels.z >= 4u)
+    {
+        float2 xy = float2(
+            DynamicSwizzle(textureNormal, channels.x),
+            DynamicSwizzle(textureNormal, channels.y)) * 2.0f - 1.0f;
+        tangentSpaceNormal = float3(xy, sqrt(saturate(1.0f - dot(xy, xy))));
+    }
+    else
+    {
+        tangentSpaceNormal = DynamicSwizzle(textureNormal, channels) * 2.0f - 1.0f;
+    }
+
+    tangentSpaceNormal = normalize(tangentSpaceNormal);
+    if ((materialFlags & MATERIAL_NEGATE_NORMALS) != 0u) tangentSpaceNormal = -tangentSpaceNormal;
+    if ((materialFlags & MATERIAL_INVERT_NORMAL_GREEN) != 0u) tangentSpaceNormal.g = -tangentSpaceNormal.g;
+    return tangentSpaceNormal;
+}
 
 bool TextureStreamingHasFullMip0Dimensions(TextureStreamingGPUInfo streamingInfo)
 {
@@ -103,6 +132,48 @@ uint ReduceWaveGroupRequestedTopMipMin(uint4 groupMask, uint requestedTopMip)
     return minRequestedTopMip;
 }
 
+void RecordTextureStreamingFeedbackRequestedTopMip(
+    TextureStreamingGPUInfo streamingInfo,
+    uint streamingTextureID,
+    uint requestedTopMip)
+{
+    if (streamingTextureID == 0u) {
+        return;
+    }
+
+    if ((streamingInfo.flags & kTextureStreamingFlagEnabled) == 0u || streamingInfo.totalMipCount <= 1u) {
+        return;
+    }
+
+    RWStructuredBuffer<uint> textureStreamingFeedbackBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
+
+    if (WaveActiveAllEqual(streamingTextureID))
+    {
+        const uint waveRequestedTopMip = WaveActiveMin(requestedTopMip);
+        if (WaveIsFirstLane())
+        {
+            uint previousRequestedTopMip;
+            InterlockedMin(
+                textureStreamingFeedbackBuffer[streamingTextureID],
+                waveRequestedTopMip,
+                previousRequestedTopMip);
+        }
+        return;
+    }
+
+    const uint4 groupMask = WaveMatch(streamingTextureID);
+    const uint leaderLane = WaveFirstLaneFromMask(groupMask);
+    if (WaveGetLaneIndex() != leaderLane) {
+        return;
+    }
+
+    const uint groupRequestedTopMip = ReduceWaveGroupRequestedTopMipMin(groupMask, requestedTopMip);
+
+    uint previousRequestedTopMip;
+    InterlockedMin(textureStreamingFeedbackBuffer[streamingTextureID], groupRequestedTopMip, previousRequestedTopMip);
+}
+
 void RecordTextureStreamingFeedback(
     TextureStreamingGPUInfo streamingInfo,
     uint streamingTextureID,
@@ -117,20 +188,8 @@ void RecordTextureStreamingFeedback(
         return;
     }
 
-    RWStructuredBuffer<uint> textureStreamingFeedbackBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
-
     const uint requestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, texelDdx, texelDdy);
-    const uint4 groupMask = WaveMatch(streamingTextureID);
-    const uint leaderLane = WaveFirstLaneFromMask(groupMask);
-    if (WaveGetLaneIndex() != leaderLane) {
-        return;
-    }
-
-    const uint groupRequestedTopMip = ReduceWaveGroupRequestedTopMipMin(groupMask, requestedTopMip);
-
-    uint previousRequestedTopMip;
-    InterlockedMin(textureStreamingFeedbackBuffer[streamingTextureID], groupRequestedTopMip, previousRequestedTopMip);
+    RecordTextureStreamingFeedbackRequestedTopMip(streamingInfo, streamingTextureID, requestedTopMip);
 }
 
 OpenPBRSurfaceSample ResolveCanonicalOpenPBRSurface(
@@ -401,12 +460,6 @@ float Sample2DGrad(Texture2D<float> tex, SamplerState samp, float2 uv, float2 dU
     return tex.SampleGrad(samp, uv, dUVdx, dUVdy);
 }
 
-uint ComputeTextureMipCountFromDimensions(uint width, uint height)
-{
-    const uint maxDimension = max(width, height);
-    return maxDimension > 0u ? (1u + firstbithigh(maxDimension)) : 1u;
-}
-
 float ComputeMaterialSelectedMipLod(float2 texelDdx, float2 texelDdy)
 {
     const float maxFootprintSq = max(dot(texelDdx, texelDdx), dot(texelDdy, texelDdy));
@@ -419,39 +472,91 @@ bool ShouldTrackMaterialSelectedMipDebug()
     return perFrameBuffer.outputType == OUTPUT_MATERIAL_SELECTED_MIP;
 }
 
+struct MaterialTextureFeedback
+{
+    uint selectedMaterialMipLevel;
+    uint selectedMaterialMipMaxLevel;
+};
+
+void InitializeMaterialTextureFeedback(out MaterialTextureFeedback feedback)
+{
+    feedback.selectedMaterialMipLevel = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
+    feedback.selectedMaterialMipMaxLevel = 0u;
+}
+
+void ApplyMaterialTextureFeedback(inout MaterialInputs materialInputs, MaterialTextureFeedback feedback)
+{
+    materialInputs.selectedMaterialMipLevel = feedback.selectedMaterialMipLevel;
+    materialInputs.selectedMaterialMipMaxLevel = feedback.selectedMaterialMipMaxLevel;
+}
+
 void InitializeMaterialSelectedMipDebug(inout MaterialInputs materialInputs)
 {
     materialInputs.selectedMaterialMipLevel = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
     materialInputs.selectedMaterialMipMaxLevel = 0u;
+    materialInputs.parallaxApplied = 0u;
+    materialInputs.terrainRvtDebugFlags = 0u;
+    materialInputs.terrainRvtRequestedMip = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
+    materialInputs.terrainRvtResidentMip = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
+    materialInputs.terrainRvtPageTableIndex = 0xffffffffu;
+    materialInputs.terrainRvtPhysicalPageIndex = 0xffffffffu;
+    materialInputs.terrainRvtAtlasPoolIndex = 0xffffffffu;
+    materialInputs.terrainRvtOwnerPageTableIndex = 0xffffffffu;
+    materialInputs.terrainRvtFallbackReason = 0u;
+    materialInputs.terrainRvtPageCoord = 0xffffffffu.xx;
+    materialInputs.terrainRvtPageUv = 0.0f.xx;
+    materialInputs.terrainRvtAtlasUv = 0.0f.xxx;
+    materialInputs.terrainRvtPhysicalTileUv = 0.0f.xx;
+    materialInputs.terrainRvtSampleAlbedo = 0.0f.xxx;
+    materialInputs.terrainRvtSampleAlbedoPoint = 0.0f.xxx;
+    materialInputs.terrainRvtSampleNormal = 0.0f.xxx;
+    materialInputs.terrainRvtSampleMaterial = 0.0f.xxx;
+    materialInputs.terrainRvtHeightScale = 0.0f;
+    materialInputs.geometricHeightDebug = 0.0f;
+    materialInputs.glintEnabled = 0u;
+    materialInputs.glintParameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
 }
 
-void AccumulateMaterialSelectedMipDebug(inout MaterialInputs materialInputs, uint selectedMipLevel, uint selectedMipMaxLevel)
+void ApplyMaterialGlintInfo(in MaterialInfo materialInfo, inout MaterialInputs materialInputs)
 {
-    if (materialInputs.selectedMaterialMipLevel == MATERIAL_DEBUG_INVALID_MIP_LEVEL ||
-        selectedMipLevel < materialInputs.selectedMaterialMipLevel)
+    materialInputs.glintEnabled = materialInfo.glintEnabled;
+    materialInputs.glintParameters = materialInfo.glintParameters;
+}
+
+void ApplyMaterialGlintInfo(in MaterialEvalInfo materialInfo, inout MaterialInputs materialInputs)
+{
+    materialInputs.glintEnabled = materialInfo.glintEnabled;
+    materialInputs.glintParameters = materialInfo.glintParameters;
+}
+
+void AccumulateMaterialSelectedMipDebug(inout MaterialTextureFeedback feedback, uint selectedMipLevel, uint selectedMipMaxLevel)
+{
+    if (feedback.selectedMaterialMipLevel == MATERIAL_DEBUG_INVALID_MIP_LEVEL ||
+        selectedMipLevel > feedback.selectedMaterialMipLevel)
     {
-        materialInputs.selectedMaterialMipLevel = selectedMipLevel;
-        materialInputs.selectedMaterialMipMaxLevel = selectedMipMaxLevel;
+        feedback.selectedMaterialMipLevel = selectedMipLevel;
+        feedback.selectedMaterialMipMaxLevel = selectedMipMaxLevel;
         return;
     }
 
-    if (selectedMipLevel == materialInputs.selectedMaterialMipLevel)
+    if (selectedMipLevel == feedback.selectedMaterialMipLevel)
     {
-        materialInputs.selectedMaterialMipMaxLevel = max(materialInputs.selectedMaterialMipMaxLevel, selectedMipMaxLevel);
+        feedback.selectedMaterialMipMaxLevel = max(feedback.selectedMaterialMipMaxLevel, selectedMipMaxLevel);
     }
 }
 
 void RecordMaterialSelectedMipDebug(
-    inout MaterialInputs materialInputs,
+    inout MaterialTextureFeedback feedback,
     TextureStreamingGPUInfo streamingInfo,
     bool hasStreamingInfo,
     uint width,
     uint height,
+	uint resourceMipCount,
     float2 dUVdx,
     float2 dUVdy)
 {
     uint residentTopMip = 0u;
-    uint totalMipCount = ComputeTextureMipCountFromDimensions(width, height);
+	uint totalMipCount = max(resourceMipCount, 1u);
     float2 texelScale = float2((float)width, (float)height);
     if (hasStreamingInfo)
     {
@@ -466,7 +571,76 @@ void RecordMaterialSelectedMipDebug(
     const uint selectedMipLevel = min(
         totalMipCount - 1u,
         selectedMipBase + (uint)ComputeMaterialSelectedMipLod(dUVdx * texelScale, dUVdy * texelScale));
-    AccumulateMaterialSelectedMipDebug(materialInputs, selectedMipLevel, totalMipCount - 1u);
+    AccumulateMaterialSelectedMipDebug(feedback, selectedMipLevel, totalMipCount - 1u);
+}
+
+float4 SampleResidentMaterialTexture2DGrad(
+    Texture2D<float4> tex,
+    SamplerState samp,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy,
+    inout MaterialTextureFeedback feedback)
+{
+    if (ShouldTrackMaterialSelectedMipDebug())
+    {
+        uint width;
+        uint height;
+		uint mipCount;
+		tex.GetDimensions(0u, width, height, mipCount);
+		RecordMaterialSelectedMipDebug(feedback, (TextureStreamingGPUInfo)0, false, width, height, mipCount, dUVdx, dUVdy);
+    }
+
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+}
+
+float4 SampleStreamingMaterialTexture2DGrad(
+    Texture2D<float4> tex,
+    SamplerState samp,
+    uint streamingTextureID,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy,
+    inout MaterialTextureFeedback feedback)
+{
+    uint width;
+    uint height;
+	uint mipCount;
+	tex.GetDimensions(0u, width, height, mipCount);
+
+    const bool hasStreamingInfo = streamingTextureID != 0u;
+    TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
+    if (hasStreamingInfo) {
+        streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
+    }
+
+    if (hasStreamingInfo) {
+        const float2 texelScale = ResolveTextureStreamingTexelScale(streamingInfo, width, height);
+        RecordTextureStreamingFeedback(streamingInfo, streamingTextureID, dUVdx * texelScale, dUVdy * texelScale);
+    }
+
+    if (ShouldTrackMaterialSelectedMipDebug())
+    {
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, dUVdx, dUVdy);
+    }
+
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+}
+
+float4 SampleMaterialTexture2DGrad(
+    Texture2D<float4> tex,
+    SamplerState samp,
+    uint streamingTextureID,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy,
+    inout MaterialTextureFeedback feedback)
+{
+#if defined(PSO_TEXTURE_STREAMING)
+    return SampleStreamingMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
+#else
+    return SampleResidentMaterialTexture2DGrad(tex, samp, uv, dUVdx, dUVdy, feedback);
+#endif
 }
 
 float4 SampleMaterialTexture2DGrad(
@@ -478,9 +652,64 @@ float4 SampleMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialInputs materialInputs)
 {
+    MaterialTextureFeedback feedback;
+    feedback.selectedMaterialMipLevel = materialInputs.selectedMaterialMipLevel;
+    feedback.selectedMaterialMipMaxLevel = materialInputs.selectedMaterialMipMaxLevel;
+    float4 result = SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
+    ApplyMaterialTextureFeedback(materialInputs, feedback);
+    return result;
+}
+
+float4 SampleMaterialTexture2DGrad(Texture2D<float4> tex, SamplerState samp, uint streamingTextureID, float2 uv, float2 dUVdx, float2 dUVdy)
+{
+    MaterialTextureFeedback unusedFeedback;
+    InitializeMaterialTextureFeedback(unusedFeedback);
+    return SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, unusedFeedback);
+}
+
+float4 SampleMaterialTexture2DGradNoFeedback(
+    Texture2D<float4> tex,
+    SamplerState samp,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+}
+
+float SampleResidentMaterialTexture2DGrad(
+    Texture2D<float> tex,
+    SamplerState samp,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy,
+    inout MaterialTextureFeedback feedback)
+{
+    if (ShouldTrackMaterialSelectedMipDebug())
+    {
+        uint width;
+        uint height;
+		uint mipCount;
+		tex.GetDimensions(0u, width, height, mipCount);
+		RecordMaterialSelectedMipDebug(feedback, (TextureStreamingGPUInfo)0, false, width, height, mipCount, dUVdx, dUVdy);
+    }
+
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+}
+
+float SampleStreamingMaterialTexture2DGrad(
+    Texture2D<float> tex,
+    SamplerState samp,
+    uint streamingTextureID,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy,
+    inout MaterialTextureFeedback feedback)
+{
     uint width;
     uint height;
-    tex.GetDimensions(width, height);
+	uint mipCount;
+	tex.GetDimensions(0u, width, height, mipCount);
 
     const bool hasStreamingInfo = streamingTextureID != 0u;
     TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
@@ -495,17 +724,26 @@ float4 SampleMaterialTexture2DGrad(
 
     if (ShouldTrackMaterialSelectedMipDebug())
     {
-        RecordMaterialSelectedMipDebug(materialInputs, streamingInfo, hasStreamingInfo, width, height, dUVdx, dUVdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, dUVdx, dUVdy);
     }
 
     return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
 }
 
-float4 SampleMaterialTexture2DGrad(Texture2D<float4> tex, SamplerState samp, uint streamingTextureID, float2 uv, float2 dUVdx, float2 dUVdy)
+float SampleMaterialTexture2DGrad(
+    Texture2D<float> tex,
+    SamplerState samp,
+    uint streamingTextureID,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy,
+    inout MaterialTextureFeedback feedback)
 {
-    MaterialInputs unusedMaterialInputs = (MaterialInputs)0;
-    InitializeMaterialSelectedMipDebug(unusedMaterialInputs);
-    return SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, unusedMaterialInputs);
+#if defined(PSO_TEXTURE_STREAMING)
+    return SampleStreamingMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
+#else
+    return SampleResidentMaterialTexture2DGrad(tex, samp, uv, dUVdx, dUVdy, feedback);
+#endif
 }
 
 float SampleMaterialTexture2DGrad(
@@ -517,34 +755,344 @@ float SampleMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialInputs materialInputs)
 {
-    uint width;
-    uint height;
-    tex.GetDimensions(width, height);
-
-    const bool hasStreamingInfo = streamingTextureID != 0u;
-    TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
-    if (hasStreamingInfo) {
-        streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
-    }
-
-    if (hasStreamingInfo) {
-        const float2 texelScale = ResolveTextureStreamingTexelScale(streamingInfo, width, height);
-        RecordTextureStreamingFeedback(streamingInfo, streamingTextureID, dUVdx * texelScale, dUVdy * texelScale);
-    }
-
-    if (ShouldTrackMaterialSelectedMipDebug())
-    {
-        RecordMaterialSelectedMipDebug(materialInputs, streamingInfo, hasStreamingInfo, width, height, dUVdx, dUVdy);
-    }
-
-    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+    MaterialTextureFeedback feedback;
+    feedback.selectedMaterialMipLevel = materialInputs.selectedMaterialMipLevel;
+    feedback.selectedMaterialMipMaxLevel = materialInputs.selectedMaterialMipMaxLevel;
+    float result = SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
+    ApplyMaterialTextureFeedback(materialInputs, feedback);
+    return result;
 }
 
 float SampleMaterialTexture2DGrad(Texture2D<float> tex, SamplerState samp, uint streamingTextureID, float2 uv, float2 dUVdx, float2 dUVdy)
 {
-    MaterialInputs unusedMaterialInputs = (MaterialInputs)0;
-    InitializeMaterialSelectedMipDebug(unusedMaterialInputs);
-    return SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, unusedMaterialInputs);
+    MaterialTextureFeedback unusedFeedback;
+    InitializeMaterialTextureFeedback(unusedFeedback);
+    return SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, unusedFeedback);
+}
+
+float SampleMaterialTexture2DGradNoFeedback(
+    Texture2D<float> tex,
+    SamplerState samp,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+}
+
+float ObjectReyesSampleAtlasHeightSmooth(Texture2D<float4> tex, SamplerState samp, float2 uv)
+{
+    uint width;
+    uint height;
+	uint mipCount;
+	tex.GetDimensions(0u, width, height, mipCount);
+    const float2 texel = float2(1.0f, 1.0f) / max(float2((float)width, (float)height), float2(1.0f, 1.0f));
+    uv = saturate(uv);
+
+    float sum = 0.0f;
+    sum += tex.SampleLevel(samp, uv, 0.0f).r * 4.0f;
+    sum += tex.SampleLevel(samp, saturate(uv + float2(texel.x, 0.0f)), 0.0f).r * 2.0f;
+    sum += tex.SampleLevel(samp, saturate(uv - float2(texel.x, 0.0f)), 0.0f).r * 2.0f;
+    sum += tex.SampleLevel(samp, saturate(uv + float2(0.0f, texel.y)), 0.0f).r * 2.0f;
+    sum += tex.SampleLevel(samp, saturate(uv - float2(0.0f, texel.y)), 0.0f).r * 2.0f;
+    sum += tex.SampleLevel(samp, saturate(uv + texel), 0.0f).r;
+    sum += tex.SampleLevel(samp, saturate(uv - texel), 0.0f).r;
+    sum += tex.SampleLevel(samp, saturate(uv + float2(texel.x, -texel.y)), 0.0f).r;
+    sum += tex.SampleLevel(samp, saturate(uv + float2(-texel.x, texel.y)), 0.0f).r;
+    return sum * (1.0f / 16.0f);
+}
+
+float ObjectSurfaceHash21(float2 p)
+{
+    p = frac(p * float2(123.34f, 456.21f));
+    p += dot(p, p + 45.32f);
+    return frac(p.x * p.y);
+}
+
+float2 ObjectSurfaceWrapUv(float2 uv)
+{
+    return frac(uv);
+}
+
+float2 ObjectSurfaceHash22(float2 p)
+{
+    const float n = ObjectSurfaceHash21(p);
+    return frac(float2(n, ObjectSurfaceHash21(p + n + 17.17f))) - 0.5f.xx;
+}
+
+struct ObjectSurfaceStochasticContext
+{
+    float2 uv;
+    float2 dUVdx;
+    float2 dUVdy;
+    float2 offsets0;
+    float2 offsets1;
+    float2 offsets2;
+    float3 weights;
+};
+
+ObjectSurfaceStochasticContext ObjectSurfaceBuildStochasticContext(float2 uv, float2 dUVdx, float2 dUVdy)
+{
+    ObjectSurfaceStochasticContext ctx;
+    ctx.uv = uv;
+    ctx.dUVdx = dUVdx;
+    ctx.dUVdy = dUVdy;
+    const float2 cell = floor(uv);
+    ctx.offsets0 = ObjectSurfaceHash22(cell + float2(0.0f, 0.0f));
+    ctx.offsets1 = ObjectSurfaceHash22(cell + float2(1.0f, 0.0f));
+    ctx.offsets2 = ObjectSurfaceHash22(cell + float2(0.0f, 1.0f));
+    const float2 f = frac(uv);
+    ctx.weights = saturate(float3(1.0f - f.x - f.y, f.x, f.y));
+    ctx.weights *= rcp(max(dot(ctx.weights, 1.0f.xxx), 1.0e-5f));
+    return ctx;
+}
+
+float4 ObjectSurfaceSampleStochastic4(Texture2D<float4> tex, SamplerState samp, uint streamingTextureID, ObjectSurfaceStochasticContext ctx, inout MaterialTextureFeedback feedback)
+{
+    float4 result = SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets0), ctx.dUVdx, ctx.dUVdy, feedback) * ctx.weights.x;
+    result += SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets1), ctx.dUVdx, ctx.dUVdy, feedback) * ctx.weights.y;
+    result += SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets2), ctx.dUVdx, ctx.dUVdy, feedback) * ctx.weights.z;
+    return result;
+}
+
+float4 ObjectSurfaceSampleStochastic4NoFeedback(Texture2D<float4> tex, SamplerState samp, ObjectSurfaceStochasticContext ctx)
+{
+    float4 result = SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets0), ctx.dUVdx, ctx.dUVdy) * ctx.weights.x;
+    result += SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets1), ctx.dUVdx, ctx.dUVdy) * ctx.weights.y;
+    result += SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets2), ctx.dUVdx, ctx.dUVdy) * ctx.weights.z;
+    return result;
+}
+
+float ObjectSurfaceSampleStochastic1(Texture2D<float> tex, SamplerState samp, uint streamingTextureID, ObjectSurfaceStochasticContext ctx, inout MaterialTextureFeedback feedback)
+{
+    float result = SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets0), ctx.dUVdx, ctx.dUVdy, feedback) * ctx.weights.x;
+    result += SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets1), ctx.dUVdx, ctx.dUVdy, feedback) * ctx.weights.y;
+    result += SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets2), ctx.dUVdx, ctx.dUVdy, feedback) * ctx.weights.z;
+    return result;
+}
+
+float ObjectSurfaceSampleStochastic1NoFeedback(Texture2D<float> tex, SamplerState samp, ObjectSurfaceStochasticContext ctx)
+{
+    float result = SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets0), ctx.dUVdx, ctx.dUVdy) * ctx.weights.x;
+    result += SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets1), ctx.dUVdx, ctx.dUVdy) * ctx.weights.y;
+    result += SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets2), ctx.dUVdx, ctx.dUVdy) * ctx.weights.z;
+    return result;
+}
+
+float3 ObjectSurfaceTriplanarWeights(float3 normalOS)
+{
+    float3 w = pow(abs(normalize(normalOS)), 4.0f.xxx);
+    return w * rcp(max(w.x + w.y + w.z, 1.0e-5f));
+}
+
+void ObjectSurfaceProjection(
+    uint projection,
+    float3 positionOS,
+    float3 dpdxOS,
+    float3 dpdyOS,
+    float density,
+    out float2 uv,
+    out float2 dUVdx,
+    out float2 dUVdy)
+{
+    if (projection == 0u)
+    {
+        uv = positionOS.yz * density;
+        dUVdx = dpdxOS.yz * density;
+        dUVdy = dpdyOS.yz * density;
+    }
+    else if (projection == 1u)
+    {
+        uv = positionOS.zx * density;
+        dUVdx = dpdxOS.zx * density;
+        dUVdy = dpdyOS.zx * density;
+    }
+    else
+    {
+        uv = positionOS.xy * density;
+        dUVdx = dpdxOS.xy * density;
+        dUVdy = dpdyOS.xy * density;
+    }
+}
+
+uint ComputeObjectSurfaceTriplanarRequestedTopMip(
+    TextureStreamingGPUInfo streamingInfo,
+    float2 texelScale,
+    float2 xDdx,
+    float2 xDdy,
+    float2 yDdx,
+    float2 yDdy,
+    float2 zDdx,
+    float2 zDdy)
+{
+    const uint xRequestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, xDdx * texelScale, xDdy * texelScale);
+    const uint yRequestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, yDdx * texelScale, yDdy * texelScale);
+    const uint zRequestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, zDdx * texelScale, zDdy * texelScale);
+    return min(xRequestedTopMip, min(yRequestedTopMip, zRequestedTopMip));
+}
+
+void RecordObjectSurfaceTriplanarTextureAccess(
+    Texture2D<float4> tex,
+    uint streamingTextureID,
+    float2 xDdx,
+    float2 xDdy,
+    float2 yDdx,
+    float2 yDdy,
+    float2 zDdx,
+    float2 zDdy,
+    inout MaterialTextureFeedback feedback)
+{
+    const bool hasStreamingInfo = streamingTextureID != 0u;
+    const bool trackMipDebug = ShouldTrackMaterialSelectedMipDebug();
+    if (!hasStreamingInfo && !trackMipDebug)
+    {
+        return;
+    }
+
+    uint width;
+    uint height;
+    uint mipCount;
+    tex.GetDimensions(0u, width, height, mipCount);
+
+    TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
+    if (hasStreamingInfo)
+    {
+        streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
+        if ((streamingInfo.flags & kTextureStreamingFlagEnabled) != 0u && streamingInfo.totalMipCount > 1u)
+        {
+            const float2 texelScale = ResolveTextureStreamingTexelScale(streamingInfo, width, height);
+            const uint requestedTopMip = ComputeObjectSurfaceTriplanarRequestedTopMip(
+                streamingInfo,
+                texelScale,
+                xDdx,
+                xDdy,
+                yDdx,
+                yDdy,
+                zDdx,
+                zDdy);
+            RecordTextureStreamingFeedbackRequestedTopMip(streamingInfo, streamingTextureID, requestedTopMip);
+        }
+    }
+
+    if (trackMipDebug)
+    {
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, xDdx, xDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, yDdx, yDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, zDdx, zDdy);
+    }
+}
+
+void RecordObjectSurfaceTriplanarTextureAccess(
+    Texture2D<float> tex,
+    uint streamingTextureID,
+    float2 xDdx,
+    float2 xDdy,
+    float2 yDdx,
+    float2 yDdy,
+    float2 zDdx,
+    float2 zDdy,
+    inout MaterialTextureFeedback feedback)
+{
+    const bool hasStreamingInfo = streamingTextureID != 0u;
+    const bool trackMipDebug = ShouldTrackMaterialSelectedMipDebug();
+    if (!hasStreamingInfo && !trackMipDebug)
+    {
+        return;
+    }
+
+    uint width;
+    uint height;
+	uint mipCount;
+	tex.GetDimensions(0u, width, height, mipCount);
+
+    TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
+    if (hasStreamingInfo)
+    {
+        streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
+        if ((streamingInfo.flags & kTextureStreamingFlagEnabled) != 0u && streamingInfo.totalMipCount > 1u)
+        {
+            const float2 texelScale = ResolveTextureStreamingTexelScale(streamingInfo, width, height);
+            const uint requestedTopMip = ComputeObjectSurfaceTriplanarRequestedTopMip(
+                streamingInfo,
+                texelScale,
+                xDdx,
+                xDdy,
+                yDdx,
+                yDdy,
+                zDdx,
+                zDdy);
+            RecordTextureStreamingFeedbackRequestedTopMip(streamingInfo, streamingTextureID, requestedTopMip);
+        }
+    }
+
+    if (trackMipDebug)
+    {
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, xDdx, xDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, yDdx, yDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, zDdx, zDdy);
+    }
+}
+
+float4 ObjectSurfaceSampleTriplanar4(
+    Texture2D<float4> tex,
+    SamplerState samp,
+    uint streamingTextureID,
+    float3 positionOS,
+    float3 normalOS,
+    float3 dpdxOS,
+    float3 dpdyOS,
+    float density,
+    inout MaterialTextureFeedback feedback)
+{
+    const float3 weights = ObjectSurfaceTriplanarWeights(normalOS);
+    float2 xUv;
+    float2 xDdx;
+    float2 xDdy;
+    float2 yUv;
+    float2 yDdx;
+    float2 yDdy;
+    float2 zUv;
+    float2 zDdx;
+    float2 zDdy;
+    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
+    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
+    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+    float4 result = ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
+    result += ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
+    result += ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
+    return result;
+}
+
+float ObjectSurfaceSampleTriplanarHeight(
+    Texture2D<float> tex,
+    SamplerState samp,
+    uint streamingTextureID,
+    float3 positionOS,
+    float3 normalOS,
+    float3 dpdxOS,
+    float3 dpdyOS,
+    float density,
+    inout MaterialTextureFeedback feedback)
+{
+    const float3 weights = ObjectSurfaceTriplanarWeights(normalOS);
+    float2 xUv;
+    float2 xDdx;
+    float2 xDdy;
+    float2 yUv;
+    float2 yDdx;
+    float2 yDdy;
+    float2 zUv;
+    float2 zDdx;
+    float2 zDdy;
+    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
+    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
+    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+    float result = ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
+    result += ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
+    result += ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
+    return result;
 }
 
 #define MATERIAL_MAX_UNIQUE_UV_SETS 8u
@@ -729,18 +1277,10 @@ void ApplyOpenPBRTextureSampling(
     inout OpenPBRSurfaceSample surface,
     inout MaterialInputs materialInputs)
 {
-    const uint cacheIndices[OPENPBR_TEXTURE_SLOT_COUNT] = {
-        uvBindings.openPBRCacheIndexBySlot[0],
-        uvBindings.openPBRCacheIndexBySlot[1],
-        uvBindings.openPBRCacheIndexBySlot[2],
-        uvBindings.openPBRCacheIndexBySlot[3],
-        uvBindings.openPBRCacheIndexBySlot[4],
-        uvBindings.openPBRCacheIndexBySlot[5]
-    };
-
+#if defined(PSO_OPENPBR_COAT_TEXTURES)
     const MaterialUvSample coatColorUv = ResolveOpenPBRTextureUv(
         uvCache,
-        cacheIndices[0],
+        uvBindings.openPBRCacheIndexBySlot[0],
         openPBRMaterialInfo.coatColorUvSetIndex,
         hasParallaxResolvedUv,
         parallaxUvSetIndex,
@@ -749,7 +1289,7 @@ void ApplyOpenPBRTextureSampling(
         parallaxDUdy);
     const MaterialUvSample coatWeightUv = ResolveOpenPBRTextureUv(
         uvCache,
-        cacheIndices[1],
+        uvBindings.openPBRCacheIndexBySlot[1],
         openPBRMaterialInfo.coatWeightUvSetIndex,
         hasParallaxResolvedUv,
         parallaxUvSetIndex,
@@ -758,41 +1298,13 @@ void ApplyOpenPBRTextureSampling(
         parallaxDUdy);
     const MaterialUvSample coatRoughnessUv = ResolveOpenPBRTextureUv(
         uvCache,
-        cacheIndices[2],
+        uvBindings.openPBRCacheIndexBySlot[2],
         openPBRMaterialInfo.coatRoughnessUvSetIndex,
         hasParallaxResolvedUv,
         parallaxUvSetIndex,
         parallaxUv,
         parallaxDUdx,
         parallaxDUdy);
-    const MaterialUvSample fuzzColorUv = ResolveOpenPBRTextureUv(
-        uvCache,
-        cacheIndices[3],
-        openPBRMaterialInfo.fuzzColorUvSetIndex,
-        hasParallaxResolvedUv,
-        parallaxUvSetIndex,
-        parallaxUv,
-        parallaxDUdx,
-        parallaxDUdy);
-    const MaterialUvSample fuzzWeightUv = ResolveOpenPBRTextureUv(
-        uvCache,
-        cacheIndices[4],
-        openPBRMaterialInfo.fuzzWeightUvSetIndex,
-        hasParallaxResolvedUv,
-        parallaxUvSetIndex,
-        parallaxUv,
-        parallaxDUdx,
-        parallaxDUdy);
-    const MaterialUvSample fuzzRoughnessUv = ResolveOpenPBRTextureUv(
-        uvCache,
-        cacheIndices[5],
-        openPBRMaterialInfo.fuzzRoughnessUvSetIndex,
-        hasParallaxResolvedUv,
-        parallaxUvSetIndex,
-        parallaxUv,
-        parallaxDUdx,
-        parallaxDUdy);
-
     surface.coatColor *= SampleOpenPBRColorTexture(
         openPBRMaterialInfo.coatColorTextureIndex,
         openPBRMaterialInfo.coatColorSamplerIndex,
@@ -814,7 +1326,39 @@ void ApplyOpenPBRTextureSampling(
         openPBRMaterialInfo.coatRoughnessChannel,
         coatRoughnessUv,
         materialInputs);
+    surface.coatColor = saturate(surface.coatColor);
+    surface.coatWeight = saturate(surface.coatWeight);
+    surface.coatRoughness = saturate(surface.coatRoughness);
+#endif
 
+#if defined(PSO_OPENPBR_FUZZ_TEXTURES)
+    const MaterialUvSample fuzzColorUv = ResolveOpenPBRTextureUv(
+        uvCache,
+        uvBindings.openPBRCacheIndexBySlot[3],
+        openPBRMaterialInfo.fuzzColorUvSetIndex,
+        hasParallaxResolvedUv,
+        parallaxUvSetIndex,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy);
+    const MaterialUvSample fuzzWeightUv = ResolveOpenPBRTextureUv(
+        uvCache,
+        uvBindings.openPBRCacheIndexBySlot[4],
+        openPBRMaterialInfo.fuzzWeightUvSetIndex,
+        hasParallaxResolvedUv,
+        parallaxUvSetIndex,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy);
+    const MaterialUvSample fuzzRoughnessUv = ResolveOpenPBRTextureUv(
+        uvCache,
+        uvBindings.openPBRCacheIndexBySlot[5],
+        openPBRMaterialInfo.fuzzRoughnessUvSetIndex,
+        hasParallaxResolvedUv,
+        parallaxUvSetIndex,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy);
     surface.fuzzColor *= SampleOpenPBRColorTexture(
         openPBRMaterialInfo.fuzzColorTextureIndex,
         openPBRMaterialInfo.fuzzColorSamplerIndex,
@@ -836,13 +1380,10 @@ void ApplyOpenPBRTextureSampling(
         openPBRMaterialInfo.fuzzRoughnessChannel,
         fuzzRoughnessUv,
         materialInputs);
-
-    surface.coatColor = saturate(surface.coatColor);
-    surface.coatWeight = saturate(surface.coatWeight);
-    surface.coatRoughness = saturate(surface.coatRoughness);
     surface.fuzzColor = saturate(surface.fuzzColor);
     surface.fuzzWeight = saturate(surface.fuzzWeight);
     surface.fuzzRoughness = saturate(surface.fuzzRoughness);
+#endif
 }
 
 void ApplyOpenPBRTextureSamplingSpecialized(
@@ -998,7 +1539,8 @@ bool MaterialSlotEnabled(MaterialInfo materialInfo, uint materialFlags, Material
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return (materialFlags & MATERIAL_EMISSIVE_TEXTURE) != 0u;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return (materialFlags & MATERIAL_PARALLAX) != 0u;
+        return (materialFlags & (MATERIAL_PARALLAX | MATERIAL_GEOMETRIC_DISPLACEMENT)) != 0u &&
+            (((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u) || ((materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u));
     default:
         return false;
     }
@@ -1028,7 +1570,9 @@ uint MaterialSlotUvSetIndex(MaterialInfo materialInfo, MaterialTextureSlot slot)
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return materialInfo.emissiveUvSetIndex;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return materialInfo.heightUvSetIndex;
+        return (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u
+            ? materialInfo.baseColorUvSetIndex
+            : materialInfo.heightUvSetIndex;
     default:
         return 0u;
     }
@@ -1053,7 +1597,9 @@ uint MaterialSlotUvSetIndex(MaterialEvalInfo materialInfo, MaterialTextureSlot s
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return materialInfo.emissiveUvSetIndex;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return materialInfo.heightUvSetIndex;
+        return (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u
+            ? materialInfo.baseColorUvSetIndex
+            : materialInfo.heightUvSetIndex;
     default:
         return 0u;
     }
@@ -1078,7 +1624,9 @@ uint MaterialSlotStreamingTextureID(MaterialInfo materialInfo, MaterialTextureSl
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return materialInfo.emissiveStreamingTextureID;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return materialInfo.heightStreamingTextureID;
+        return (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u
+            ? materialInfo.baseColorStreamingTextureID
+            : materialInfo.heightStreamingTextureID;
     default:
         return 0u;
     }
@@ -1103,7 +1651,9 @@ uint MaterialSlotStreamingTextureID(MaterialEvalInfo materialInfo, MaterialTextu
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return materialInfo.emissiveStreamingTextureID;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return materialInfo.heightStreamingTextureID;
+        return (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u
+            ? materialInfo.baseColorStreamingTextureID
+            : materialInfo.heightStreamingTextureID;
     default:
         return 0u;
     }
@@ -1173,48 +1723,79 @@ MaterialUvBindings BuildMaterialUvBindings(MaterialInfo materialInfo, uint mater
         bindings.cacheIndexBySlot[slot] = cacheIndex;
     }
 
+#if defined(PSO_OPENPBR_COAT_TEXTURES) || defined(PSO_OPENPBR_FUZZ_TEXTURES)
     const OpenPBRMaterialInfo openPBRMaterialInfo = LoadOpenPBRMaterialInfo(materialInfo);
-    const uint uvSetIndices[OPENPBR_TEXTURE_SLOT_COUNT] = {
+#endif
+
+#if defined(PSO_OPENPBR_COAT_TEXTURES)
+    const uint coatUvSetIndices[3] = {
         openPBRMaterialInfo.coatColorUvSetIndex,
         openPBRMaterialInfo.coatWeightUvSetIndex,
-        openPBRMaterialInfo.coatRoughnessUvSetIndex,
+        openPBRMaterialInfo.coatRoughnessUvSetIndex
+    };
+    const uint coatTextureIndices[3] = {
+        openPBRMaterialInfo.coatColorTextureIndex,
+        openPBRMaterialInfo.coatWeightTextureIndex,
+        openPBRMaterialInfo.coatRoughnessTextureIndex
+    };
+    const uint coatSamplerIndices[3] = {
+        openPBRMaterialInfo.coatColorSamplerIndex,
+        openPBRMaterialInfo.coatWeightSamplerIndex,
+        openPBRMaterialInfo.coatRoughnessSamplerIndex
+    };
+
+    [unroll]
+    for (uint coatSlot = 0u; coatSlot < 3u; ++coatSlot)
+    {
+        if (!HasOpenPBRTexture(coatTextureIndices[coatSlot], coatSamplerIndices[coatSlot]))
+        {
+            continue;
+        }
+
+        uint cacheIndex = FindMaterialUvCacheIndex(cache, coatUvSetIndices[coatSlot]);
+        if (cacheIndex == MATERIAL_INVALID_UV_CACHE_INDEX)
+        {
+            cacheIndex = uv0CacheIndex;
+        }
+
+        bindings.openPBRCacheIndexBySlot[coatSlot] = cacheIndex;
+    }
+#endif
+
+#if defined(PSO_OPENPBR_FUZZ_TEXTURES)
+    const uint fuzzUvSetIndices[3] = {
         openPBRMaterialInfo.fuzzColorUvSetIndex,
         openPBRMaterialInfo.fuzzWeightUvSetIndex,
         openPBRMaterialInfo.fuzzRoughnessUvSetIndex
     };
-    const uint textureIndices[OPENPBR_TEXTURE_SLOT_COUNT] = {
-        openPBRMaterialInfo.coatColorTextureIndex,
-        openPBRMaterialInfo.coatWeightTextureIndex,
-        openPBRMaterialInfo.coatRoughnessTextureIndex,
+    const uint fuzzTextureIndices[3] = {
         openPBRMaterialInfo.fuzzColorTextureIndex,
         openPBRMaterialInfo.fuzzWeightTextureIndex,
         openPBRMaterialInfo.fuzzRoughnessTextureIndex
     };
-    const uint samplerIndices[OPENPBR_TEXTURE_SLOT_COUNT] = {
-        openPBRMaterialInfo.coatColorSamplerIndex,
-        openPBRMaterialInfo.coatWeightSamplerIndex,
-        openPBRMaterialInfo.coatRoughnessSamplerIndex,
+    const uint fuzzSamplerIndices[3] = {
         openPBRMaterialInfo.fuzzColorSamplerIndex,
         openPBRMaterialInfo.fuzzWeightSamplerIndex,
         openPBRMaterialInfo.fuzzRoughnessSamplerIndex
     };
 
     [unroll]
-    for (uint slot = 0u; slot < OPENPBR_TEXTURE_SLOT_COUNT; ++slot)
+    for (uint fuzzSlot = 0u; fuzzSlot < 3u; ++fuzzSlot)
     {
-        if (!HasOpenPBRTexture(textureIndices[slot], samplerIndices[slot]))
+        if (!HasOpenPBRTexture(fuzzTextureIndices[fuzzSlot], fuzzSamplerIndices[fuzzSlot]))
         {
             continue;
         }
 
-        uint cacheIndex = FindMaterialUvCacheIndex(cache, uvSetIndices[slot]);
+        uint cacheIndex = FindMaterialUvCacheIndex(cache, fuzzUvSetIndices[fuzzSlot]);
         if (cacheIndex == MATERIAL_INVALID_UV_CACHE_INDEX)
         {
             cacheIndex = uv0CacheIndex;
         }
 
-        bindings.openPBRCacheIndexBySlot[slot] = cacheIndex;
+        bindings.openPBRCacheIndexBySlot[fuzzSlot + 3u] = cacheIndex;
     }
+#endif
 
     if ((materialFlags & MATERIAL_NORMAL_MAP) != 0u)
     {
@@ -1227,7 +1808,7 @@ MaterialUvBindings BuildMaterialUvBindings(MaterialInfo materialInfo, uint mater
         bindings.hasTbnSource = bindings.tbnCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
 
-    if ((materialFlags & MATERIAL_PARALLAX) != 0u)
+    if ((materialFlags & (MATERIAL_PARALLAX | MATERIAL_GEOMETRIC_DISPLACEMENT)) != 0u)
     {
         bindings.heightCacheIndex = bindings.cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_HEIGHT];
         bindings.hasHeightSource = bindings.heightCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
@@ -1286,10 +1867,153 @@ float3x3 BuildMaterialTBN(
     return cotangent_frame_from_derivs(normalWSBase.xyz, dpdx, dpdy, tbnUv.dUVdx, tbnUv.dUVdy);
 }
 
+float3x3 BuildMaterialTBNFromVertexTangent(
+    in MaterialUvCache cache,
+    in MaterialUvBindings bindings,
+    in float3 normalWSBase,
+    in float3 dpdx,
+    in float3 dpdy,
+    in float4 tangentWS)
+{
+    if (abs(tangentWS.w) > 0.5f && dot(tangentWS.xyz, tangentWS.xyz) > 1.0e-8f)
+    {
+        const float3 N = normalize(normalWSBase);
+        const float3 T = normalize(tangentWS.xyz - N * dot(N, tangentWS.xyz));
+        const float3 B = normalize(cross(T, N)) * (tangentWS.w < 0.0f ? -1.0f : 1.0f);
+        return float3x3(T, B, N);
+    }
+
+    return BuildMaterialTBN(cache, bindings, normalWSBase, dpdx, dpdy);
+}
+
 void AppendOpenPBRForwardUvSamples(
     inout MaterialUvCache cache,
     in VisBufferPSInput input,
     in OpenPBRMaterialInfo openPBRMaterialInfo);
+
+float SampleMaterialGeometricHeightDebug(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in MaterialInfo materialInfo,
+    in uint materialFlags,
+    bool hasParallaxResolvedUv,
+    float2 parallaxUv,
+    float2 parallaxDUdx,
+    float2 parallaxDUdy,
+    inout MaterialInputs materialInputs)
+{
+    if (materialInfo.objectSurfaceSamplingMode == 2u && (materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)
+    {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
+        MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        return saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, heightUv.uv));
+    }
+
+    if (!uvBindings.hasHeightSource)
+    {
+        return 0.0f;
+    }
+
+    MaterialUvSample heightUv = ResolveMaterialUvSample(
+        uvCache,
+        uvBindings,
+        MATERIAL_TEXTURE_SLOT_HEIGHT,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy);
+    if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+    {
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+        return saturate(SampleMaterialTexture2DGrad(
+            heightTexture,
+            heightSampler,
+            materialInfo.baseColorStreamingTextureID,
+            heightUv.uv,
+            heightUv.dUVdx,
+            heightUv.dUVdy,
+            materialInputs).a);
+    }
+
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    return saturate(DynamicSwizzle(SampleMaterialTexture2DGrad(
+        heightTexture,
+        heightSampler,
+        materialInfo.heightStreamingTextureID,
+        heightUv.uv,
+        heightUv.dUVdx,
+        heightUv.dUVdy,
+        materialInputs), materialInfo.heightChannel));
+}
+
+float SampleMaterialGeometricHeightDebug(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in MaterialEvalInfo materialInfo,
+    in uint materialFlags,
+    bool hasParallaxResolvedUv,
+    float2 parallaxUv,
+    float2 parallaxDUdx,
+    float2 parallaxDUdy,
+    inout MaterialInputs materialInputs)
+{
+    if (materialInfo.objectSurfaceSamplingMode == 2u && (materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)
+    {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
+        MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        return saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, heightUv.uv));
+    }
+
+    if (!uvBindings.hasHeightSource)
+    {
+        return 0.0f;
+    }
+
+    MaterialUvSample heightUv = ResolveMaterialUvSample(
+        uvCache,
+        uvBindings,
+        MATERIAL_TEXTURE_SLOT_HEIGHT,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy);
+    if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+    {
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+        return saturate(SampleMaterialTexture2DGrad(
+            heightTexture,
+            heightSampler,
+            materialInfo.baseColorStreamingTextureID,
+            heightUv.uv,
+            heightUv.dUVdx,
+            heightUv.dUVdy,
+            materialInputs).a);
+    }
+
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    return saturate(DynamicSwizzle(SampleMaterialTexture2DGrad(
+        heightTexture,
+        heightSampler,
+        materialInfo.heightStreamingTextureID,
+        heightUv.uv,
+        heightUv.dUVdx,
+        heightUv.dUVdy,
+        materialInputs), materialInfo.heightChannel));
+}
 
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
 void BuildForwardTransparentMaterialUvData(
@@ -1302,6 +2026,10 @@ void BuildForwardTransparentMaterialUvData(
     cache = (MaterialUvCache)0;
     InitializeMaterialUvBindings(bindings);
 
+#if CLOD_FORWARD_UV_SET_COUNT == 0
+    return;
+#else
+
     uint cacheIndexByUvSet[MATERIAL_MAX_UNIQUE_UV_SETS];
 
     [unroll]
@@ -1310,18 +2038,26 @@ void BuildForwardTransparentMaterialUvData(
         cacheIndexByUvSet[uvSetIndex] = MATERIAL_INVALID_UV_CACHE_INDEX;
     }
 
+#if CLOD_FORWARD_UV_SET_COUNT > 0
     const float4 uvSet01 = input.uvSet01;
-    const float4 uvSet23 = input.uvSet23;
-    const float4 uvSet45 = input.uvSet45;
-    const float4 uvSet67 = input.uvSet67;
     const float4 uvSet01Dx = ddx(uvSet01);
     const float4 uvSet01Dy = ddy(uvSet01);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
+    const float4 uvSet23 = input.uvSet23;
     const float4 uvSet23Dx = ddx(uvSet23);
     const float4 uvSet23Dy = ddy(uvSet23);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
+    const float4 uvSet45 = input.uvSet45;
     const float4 uvSet45Dx = ddx(uvSet45);
     const float4 uvSet45Dy = ddy(uvSet45);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
+    const float4 uvSet67 = input.uvSet67;
     const float4 uvSet67Dx = ddx(uvSet67);
     const float4 uvSet67Dy = ddy(uvSet67);
+#endif
 
     [unroll]
     for (uint slot = 0u; slot < MATERIAL_TEXTURE_SLOT_COUNT; ++slot)
@@ -1333,7 +2069,7 @@ void BuildForwardTransparentMaterialUvData(
         }
 
         const uint uvSetIndex = MaterialSlotUvSetIndex(materialInfo, textureSlot);
-        if (uvSetIndex >= MATERIAL_MAX_UNIQUE_UV_SETS || cacheIndexByUvSet[uvSetIndex] != MATERIAL_INVALID_UV_CACHE_INDEX)
+        if (uvSetIndex >= CLOD_FORWARD_UV_SET_COUNT || cacheIndexByUvSet[uvSetIndex] != MATERIAL_INVALID_UV_CACHE_INDEX)
         {
             continue;
         }
@@ -1344,6 +2080,7 @@ void BuildForwardTransparentMaterialUvData(
 
         switch (uvSetIndex)
         {
+#if CLOD_FORWARD_UV_SET_COUNT > 0
         case 0u:
             sample.uv = uvSet01.xy;
             sample.dUVdx = uvSet01Dx.xy;
@@ -1354,6 +2091,8 @@ void BuildForwardTransparentMaterialUvData(
             sample.dUVdx = uvSet01Dx.zw;
             sample.dUVdy = uvSet01Dy.zw;
             break;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
         case 2u:
             sample.uv = uvSet23.xy;
             sample.dUVdx = uvSet23Dx.xy;
@@ -1364,6 +2103,8 @@ void BuildForwardTransparentMaterialUvData(
             sample.dUVdx = uvSet23Dx.zw;
             sample.dUVdy = uvSet23Dy.zw;
             break;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
         case 4u:
             sample.uv = uvSet45.xy;
             sample.dUVdx = uvSet45Dx.xy;
@@ -1374,15 +2115,20 @@ void BuildForwardTransparentMaterialUvData(
             sample.dUVdx = uvSet45Dx.zw;
             sample.dUVdy = uvSet45Dy.zw;
             break;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
         case 6u:
             sample.uv = uvSet67.xy;
             sample.dUVdx = uvSet67Dx.xy;
             sample.dUVdy = uvSet67Dy.xy;
             break;
-        default:
+        case 7u:
             sample.uv = uvSet67.zw;
             sample.dUVdx = uvSet67Dx.zw;
             sample.dUVdy = uvSet67Dy.zw;
+            break;
+#endif
+        default:
             break;
         }
 
@@ -1391,7 +2137,9 @@ void BuildForwardTransparentMaterialUvData(
         cache.count = cacheIndex + 1u;
     }
 
+#if defined(PSO_OPENPBR_COAT_TEXTURES) || defined(PSO_OPENPBR_FUZZ_TEXTURES)
     AppendOpenPBRForwardUvSamples(cache, input, LoadOpenPBRMaterialInfo(materialInfo));
+#endif
 
     [unroll]
     for (uint cacheIndex = 0u; cacheIndex < MATERIAL_MAX_UNIQUE_UV_SETS; ++cacheIndex)
@@ -1409,32 +2157,6 @@ void BuildForwardTransparentMaterialUvData(
     }
 
     const uint uv0CacheIndex = cacheIndexByUvSet[0u];
-
-    const OpenPBRMaterialInfo openPBRMaterialInfo = LoadOpenPBRMaterialInfo(materialInfo);
-    const uint openPBRUvSetIndices[OPENPBR_TEXTURE_SLOT_COUNT] = {
-        openPBRMaterialInfo.coatColorUvSetIndex,
-        openPBRMaterialInfo.coatWeightUvSetIndex,
-        openPBRMaterialInfo.coatRoughnessUvSetIndex,
-        openPBRMaterialInfo.fuzzColorUvSetIndex,
-        openPBRMaterialInfo.fuzzWeightUvSetIndex,
-        openPBRMaterialInfo.fuzzRoughnessUvSetIndex
-    };
-    const uint openPBRTextureIndices[OPENPBR_TEXTURE_SLOT_COUNT] = {
-        openPBRMaterialInfo.coatColorTextureIndex,
-        openPBRMaterialInfo.coatWeightTextureIndex,
-        openPBRMaterialInfo.coatRoughnessTextureIndex,
-        openPBRMaterialInfo.fuzzColorTextureIndex,
-        openPBRMaterialInfo.fuzzWeightTextureIndex,
-        openPBRMaterialInfo.fuzzRoughnessTextureIndex
-    };
-    const uint openPBRSamplerIndices[OPENPBR_TEXTURE_SLOT_COUNT] = {
-        openPBRMaterialInfo.coatColorSamplerIndex,
-        openPBRMaterialInfo.coatWeightSamplerIndex,
-        openPBRMaterialInfo.coatRoughnessSamplerIndex,
-        openPBRMaterialInfo.fuzzColorSamplerIndex,
-        openPBRMaterialInfo.fuzzWeightSamplerIndex,
-        openPBRMaterialInfo.fuzzRoughnessSamplerIndex
-    };
 
     [unroll]
     for (uint slot = 0u; slot < MATERIAL_TEXTURE_SLOT_COUNT; ++slot)
@@ -1459,16 +2181,37 @@ void BuildForwardTransparentMaterialUvData(
         bindings.cacheIndexBySlot[slot] = cacheIndex;
     }
 
+#if defined(PSO_OPENPBR_COAT_TEXTURES) || defined(PSO_OPENPBR_FUZZ_TEXTURES)
+    const OpenPBRMaterialInfo openPBRMaterialInfo = LoadOpenPBRMaterialInfo(materialInfo);
+#endif
+
+#if defined(PSO_OPENPBR_COAT_TEXTURES)
+    const uint openPBRCoatUvSetIndices[3] = {
+        openPBRMaterialInfo.coatColorUvSetIndex,
+        openPBRMaterialInfo.coatWeightUvSetIndex,
+        openPBRMaterialInfo.coatRoughnessUvSetIndex
+    };
+    const uint openPBRCoatTextureIndices[3] = {
+        openPBRMaterialInfo.coatColorTextureIndex,
+        openPBRMaterialInfo.coatWeightTextureIndex,
+        openPBRMaterialInfo.coatRoughnessTextureIndex
+    };
+    const uint openPBRCoatSamplerIndices[3] = {
+        openPBRMaterialInfo.coatColorSamplerIndex,
+        openPBRMaterialInfo.coatWeightSamplerIndex,
+        openPBRMaterialInfo.coatRoughnessSamplerIndex
+    };
+
     [unroll]
-    for (uint slot = 0u; slot < OPENPBR_TEXTURE_SLOT_COUNT; ++slot)
+    for (uint coatSlot = 0u; coatSlot < 3u; ++coatSlot)
     {
-        if (!HasOpenPBRTexture(openPBRTextureIndices[slot], openPBRSamplerIndices[slot]))
+        if (!HasOpenPBRTexture(openPBRCoatTextureIndices[coatSlot], openPBRCoatSamplerIndices[coatSlot]))
         {
             continue;
         }
 
         uint cacheIndex = MATERIAL_INVALID_UV_CACHE_INDEX;
-        const uint uvSetIndex = openPBRUvSetIndices[slot];
+        const uint uvSetIndex = openPBRCoatUvSetIndices[coatSlot];
         if (uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS)
         {
             cacheIndex = cacheIndexByUvSet[uvSetIndex];
@@ -1478,8 +2221,49 @@ void BuildForwardTransparentMaterialUvData(
             cacheIndex = uv0CacheIndex;
         }
 
-        bindings.openPBRCacheIndexBySlot[slot] = cacheIndex;
+        bindings.openPBRCacheIndexBySlot[coatSlot] = cacheIndex;
     }
+#endif
+
+#if defined(PSO_OPENPBR_FUZZ_TEXTURES)
+    const uint openPBRFuzzUvSetIndices[3] = {
+        openPBRMaterialInfo.fuzzColorUvSetIndex,
+        openPBRMaterialInfo.fuzzWeightUvSetIndex,
+        openPBRMaterialInfo.fuzzRoughnessUvSetIndex
+    };
+    const uint openPBRFuzzTextureIndices[3] = {
+        openPBRMaterialInfo.fuzzColorTextureIndex,
+        openPBRMaterialInfo.fuzzWeightTextureIndex,
+        openPBRMaterialInfo.fuzzRoughnessTextureIndex
+    };
+    const uint openPBRFuzzSamplerIndices[3] = {
+        openPBRMaterialInfo.fuzzColorSamplerIndex,
+        openPBRMaterialInfo.fuzzWeightSamplerIndex,
+        openPBRMaterialInfo.fuzzRoughnessSamplerIndex
+    };
+
+    [unroll]
+    for (uint fuzzSlot = 0u; fuzzSlot < 3u; ++fuzzSlot)
+    {
+        if (!HasOpenPBRTexture(openPBRFuzzTextureIndices[fuzzSlot], openPBRFuzzSamplerIndices[fuzzSlot]))
+        {
+            continue;
+        }
+
+        uint cacheIndex = MATERIAL_INVALID_UV_CACHE_INDEX;
+        const uint uvSetIndex = openPBRFuzzUvSetIndices[fuzzSlot];
+        if (uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS)
+        {
+            cacheIndex = cacheIndexByUvSet[uvSetIndex];
+        }
+        if (cacheIndex == MATERIAL_INVALID_UV_CACHE_INDEX)
+        {
+            cacheIndex = uv0CacheIndex;
+        }
+
+        bindings.openPBRCacheIndexBySlot[fuzzSlot + 3u] = cacheIndex;
+    }
+#endif
 
     if ((materialFlags & MATERIAL_NORMAL_MAP) != 0u)
     {
@@ -1492,33 +2276,42 @@ void BuildForwardTransparentMaterialUvData(
         bindings.hasTbnSource = bindings.tbnCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
 
-    if ((materialFlags & MATERIAL_PARALLAX) != 0u)
+    if ((materialFlags & (MATERIAL_PARALLAX | MATERIAL_GEOMETRIC_DISPLACEMENT)) != 0u)
     {
         bindings.heightCacheIndex = bindings.cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_HEIGHT];
         bindings.hasHeightSource = bindings.heightCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
+#endif
 }
 
 float2 GetForwardTransparentUvSet(in VisBufferPSInput input, uint uvSetIndex)
 {
     switch (uvSetIndex)
     {
+#if CLOD_FORWARD_UV_SET_COUNT > 0
     case 0u:
         return input.uvSet01.xy;
     case 1u:
         return input.uvSet01.zw;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
     case 2u:
         return input.uvSet23.xy;
     case 3u:
         return input.uvSet23.zw;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
     case 4u:
         return input.uvSet45.xy;
     case 5u:
         return input.uvSet45.zw;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
     case 6u:
         return input.uvSet67.xy;
     case 7u:
         return input.uvSet67.zw;
+#endif
     default:
         return float2(0.0f, 0.0f);
     }
@@ -1547,42 +2340,32 @@ void AppendOpenPBRForwardUvSamples(
     in VisBufferPSInput input,
     in OpenPBRMaterialInfo openPBRMaterialInfo)
 {
-    const uint uvSetIndices[6] = {
+#if defined(PSO_OPENPBR_COAT_TEXTURES)
+    const uint coatUvSetIndices[3] = {
         openPBRMaterialInfo.coatColorUvSetIndex,
         openPBRMaterialInfo.coatWeightUvSetIndex,
-        openPBRMaterialInfo.coatRoughnessUvSetIndex,
-        openPBRMaterialInfo.fuzzColorUvSetIndex,
-        openPBRMaterialInfo.fuzzWeightUvSetIndex,
-        openPBRMaterialInfo.fuzzRoughnessUvSetIndex
+        openPBRMaterialInfo.coatRoughnessUvSetIndex
     };
-
-    const uint textureIndices[6] = {
+    const uint coatTextureIndices[3] = {
         openPBRMaterialInfo.coatColorTextureIndex,
         openPBRMaterialInfo.coatWeightTextureIndex,
-        openPBRMaterialInfo.coatRoughnessTextureIndex,
-        openPBRMaterialInfo.fuzzColorTextureIndex,
-        openPBRMaterialInfo.fuzzWeightTextureIndex,
-        openPBRMaterialInfo.fuzzRoughnessTextureIndex
+        openPBRMaterialInfo.coatRoughnessTextureIndex
     };
-
-    const uint samplerIndices[6] = {
+    const uint coatSamplerIndices[3] = {
         openPBRMaterialInfo.coatColorSamplerIndex,
         openPBRMaterialInfo.coatWeightSamplerIndex,
-        openPBRMaterialInfo.coatRoughnessSamplerIndex,
-        openPBRMaterialInfo.fuzzColorSamplerIndex,
-        openPBRMaterialInfo.fuzzWeightSamplerIndex,
-        openPBRMaterialInfo.fuzzRoughnessSamplerIndex
+        openPBRMaterialInfo.coatRoughnessSamplerIndex
     };
 
     [unroll]
-    for (uint i = 0u; i < 6u; ++i)
+    for (uint coatSlot = 0u; coatSlot < 3u; ++coatSlot)
     {
-        if (!HasOpenPBRTexture(textureIndices[i], samplerIndices[i]))
+        if (!HasOpenPBRTexture(coatTextureIndices[coatSlot], coatSamplerIndices[coatSlot]))
         {
             continue;
         }
 
-        const uint uvSetIndex = uvSetIndices[i];
+        const uint uvSetIndex = coatUvSetIndices[coatSlot];
         if (FindMaterialUvCacheIndex(cache, uvSetIndex) != MATERIAL_INVALID_UV_CACHE_INDEX)
         {
             continue;
@@ -1590,6 +2373,42 @@ void AppendOpenPBRForwardUvSamples(
 
         AppendForwardMaterialUvSample(cache, uvSetIndex, input);
     }
+#endif
+
+#if defined(PSO_OPENPBR_FUZZ_TEXTURES)
+    const uint fuzzUvSetIndices[3] = {
+        openPBRMaterialInfo.fuzzColorUvSetIndex,
+        openPBRMaterialInfo.fuzzWeightUvSetIndex,
+        openPBRMaterialInfo.fuzzRoughnessUvSetIndex
+    };
+    const uint fuzzTextureIndices[3] = {
+        openPBRMaterialInfo.fuzzColorTextureIndex,
+        openPBRMaterialInfo.fuzzWeightTextureIndex,
+        openPBRMaterialInfo.fuzzRoughnessTextureIndex
+    };
+    const uint fuzzSamplerIndices[3] = {
+        openPBRMaterialInfo.fuzzColorSamplerIndex,
+        openPBRMaterialInfo.fuzzWeightSamplerIndex,
+        openPBRMaterialInfo.fuzzRoughnessSamplerIndex
+    };
+
+    [unroll]
+    for (uint fuzzSlot = 0u; fuzzSlot < 3u; ++fuzzSlot)
+    {
+        if (!HasOpenPBRTexture(fuzzTextureIndices[fuzzSlot], fuzzSamplerIndices[fuzzSlot]))
+        {
+            continue;
+        }
+
+        const uint uvSetIndex = fuzzUvSetIndices[fuzzSlot];
+        if (FindMaterialUvCacheIndex(cache, uvSetIndex) != MATERIAL_INVALID_UV_CACHE_INDEX)
+        {
+            continue;
+        }
+
+        AppendForwardMaterialUvSample(cache, uvSetIndex, input);
+    }
+#endif
 }
 
 MaterialUvCache BuildMaterialUvCacheFromForwardInput(
@@ -1617,11 +2436,295 @@ MaterialUvCache BuildMaterialUvCacheFromForwardInput(
         AppendForwardMaterialUvSample(cache, uvSetIndex, input);
     }
 
+#if defined(PSO_OPENPBR_COAT_TEXTURES) || defined(PSO_OPENPBR_FUZZ_TEXTURES)
     AppendOpenPBRForwardUvSamples(cache, input, LoadOpenPBRMaterialInfo(materialInfo));
+#endif
 
     return cache;
 }
 #endif
+
+float3 ObjectSurfaceProjectionNormalOS(uint projection, float3 normalTS, float3 normalOS)
+{
+    if (projection == 0u)
+    {
+        const float axisSign = normalOS.x < 0.0f ? -1.0f : 1.0f;
+        return normalize(float3(axisSign * normalTS.z, normalTS.x, normalTS.y));
+    }
+    if (projection == 1u)
+    {
+        const float axisSign = normalOS.y < 0.0f ? -1.0f : 1.0f;
+        return normalize(float3(normalTS.y, axisSign * normalTS.z, normalTS.x));
+    }
+    const float axisSign = normalOS.z < 0.0f ? -1.0f : 1.0f;
+    return normalize(float3(normalTS.x, normalTS.y, axisSign * normalTS.z));
+}
+
+float3 ObjectSurfaceSampleTriplanarNormalWS(
+    Texture2D<float4> tex,
+    SamplerState samp,
+    uint streamingTextureID,
+    uint3 channels,
+    uint materialFlags,
+    float3 positionOS,
+    float3 normalOS,
+    float3 dpdxOS,
+    float3 dpdyOS,
+    float density,
+    float3x3 normalMatrix,
+    inout MaterialTextureFeedback feedback)
+{
+    const float3 weights = ObjectSurfaceTriplanarWeights(normalOS);
+    float2 xUv;
+    float2 xDdx;
+    float2 xDdy;
+    float2 yUv;
+    float2 yDdx;
+    float2 yDdy;
+    float2 zUv;
+    float2 zDdx;
+    float2 zDdy;
+    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
+    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
+    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+    float3 blendedNormalOS = ObjectSurfaceProjectionNormalOS(
+        0u,
+        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)), channels, materialFlags),
+        normalOS) * weights.x;
+    blendedNormalOS += ObjectSurfaceProjectionNormalOS(
+        1u,
+        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)), channels, materialFlags),
+        normalOS) * weights.y;
+    blendedNormalOS += ObjectSurfaceProjectionNormalOS(
+        2u,
+        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)), channels, materialFlags),
+        normalOS) * weights.z;
+    blendedNormalOS = normalize(blendedNormalOS);
+    return normalize(mul(blendedNormalOS, normalMatrix));
+}
+
+void SampleObjectTriplanarStochasticMaterial(
+    in float3 normalWSBase,
+    in float3 normalOS,
+    in float3 positionOS,
+    in float3 vertexColorMultiplier,
+    in float3 dpdxOS,
+    in float3 dpdyOS,
+    in float3x3 normalMatrix,
+    in MaterialInfo materialInfo,
+    in uint materialFlags,
+    out MaterialInputs ret)
+{
+    InitializeMaterialSelectedMipDebug(ret);
+    MaterialTextureFeedback textureFeedback;
+    InitializeMaterialTextureFeedback(textureFeedback);
+
+    const float density = max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f);
+    float4 baseColor = materialInfo.baseColorFactor;
+
+#if defined(PSO_BASE_COLOR_TEXTURE)
+    Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+    SamplerState baseColorSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+    baseColor *= ObjectSurfaceSampleTriplanar4(baseColorTexture, baseColorSamplerState, materialInfo.baseColorStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback);
+#endif
+
+#if defined(PSO_OPACITY_TEXTURE)
+    Texture2D<float4> opacityTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.opacityTextureIndex)];
+    SamplerState opacitySamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.opacitySamplerIndex)];
+    baseColor.a *= ObjectSurfaceSampleTriplanar4(opacityTexture, opacitySamplerState, materialInfo.opacityStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback).a;
+#endif
+
+    float metallic = materialInfo.metallicFactor;
+#if defined(PSO_METALLIC_TEXTURE)
+    Texture2D<float4> metallicTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.metallicTextureIndex)];
+    SamplerState metallicSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.metallicSamplerIndex)];
+    metallic = DynamicSwizzle(
+        ObjectSurfaceSampleTriplanar4(metallicTexture, metallicSamplerState, materialInfo.metallicStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback),
+        materialInfo.metallicChannel) * materialInfo.metallicFactor;
+#endif
+
+    float roughness = materialInfo.roughnessFactor;
+#if defined(PSO_ROUGHNESS_TEXTURE)
+    Texture2D<float4> roughnessTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.roughnessTextureIndex)];
+    SamplerState roughnessSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.roughnessSamplerIndex)];
+    roughness = DynamicSwizzle(
+        ObjectSurfaceSampleTriplanar4(roughnessTexture, roughnessSamplerState, materialInfo.roughnessStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback),
+        materialInfo.roughnessChannel) * materialInfo.roughnessFactor;
+#endif
+
+    float3 normalWS = normalWSBase;
+#if defined(PSO_NORMAL_MAP)
+    if ((materialFlags & MATERIAL_NORMAL_MAP) != 0u && (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
+    {
+        Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
+        SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
+        normalWS = ObjectSurfaceSampleTriplanarNormalWS(
+            normalTexture,
+            normalSamplerState,
+            materialInfo.normalStreamingTextureID,
+            materialInfo.normalChannels,
+            materialFlags,
+            positionOS,
+            normalOS,
+            dpdxOS,
+            dpdyOS,
+            density,
+            normalMatrix,
+            textureFeedback);
+    }
+#endif
+
+    float ao = 1.0f;
+#if defined(PSO_AO_TEXTURE)
+    Texture2D<float4> aoTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.aoMapIndex)];
+    SamplerState aoSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.aoSamplerIndex)];
+    ao = DynamicSwizzle(
+        ObjectSurfaceSampleTriplanar4(aoTexture, aoSamplerState, materialInfo.aoStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback),
+        materialInfo.aoChannel);
+#endif
+
+    float3 emissive = materialInfo.emissiveFactor.rgb;
+#if defined(PSO_EMISSIVE_TEXTURE)
+    Texture2D<float4> emissiveTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.emissiveTextureIndex)];
+    SamplerState emissiveSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.emissiveSamplerIndex)];
+    const float4 emissiveSample = ObjectSurfaceSampleTriplanar4(emissiveTexture, emissiveSamplerState, materialInfo.emissiveStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback);
+    emissive = float3(
+        DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.x),
+        DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.y),
+        DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.z)) * materialInfo.emissiveFactor.rgb;
+#endif
+
+    const OpenPBRMaterialInfo openPBRMaterialInfo = LoadOpenPBRMaterialInfo(materialInfo);
+    OpenPBRSurfaceSample openPBRSurface = ResolveCanonicalOpenPBRSurface(
+        materialInfo,
+        openPBRMaterialInfo,
+        baseColor.rgb * vertexColorMultiplier,
+        metallic,
+        roughness,
+        baseColor.a,
+        emissive);
+    PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    if ((materialFlags & MATERIAL_PARALLAX) != 0u && (materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)
+    {
+        Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        ret.geometricHeightDebug = saturate(ObjectSurfaceSampleTriplanarHeight(heightTexture, heightSampler, materialInfo.heightStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback));
+    }
+    ApplyMaterialTextureFeedback(ret, textureFeedback);
+    ApplyMaterialGlintInfo(materialInfo, ret);
+}
+
+void SampleObjectTriplanarStochasticMaterial(
+    in float3 normalWSBase,
+    in float3 normalOS,
+    in float3 positionOS,
+    in float3 vertexColorMultiplier,
+    in float3 dpdxOS,
+    in float3 dpdyOS,
+    in float3x3 normalMatrix,
+    in MaterialEvalInfo materialInfo,
+    in uint materialFlags,
+    out MaterialInputs ret)
+{
+    InitializeMaterialSelectedMipDebug(ret);
+    MaterialTextureFeedback textureFeedback;
+    InitializeMaterialTextureFeedback(textureFeedback);
+
+    const float density = max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f);
+    float4 baseColor = materialInfo.baseColorFactor;
+
+#if defined(PSO_BASE_COLOR_TEXTURE)
+    Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+    SamplerState baseColorSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+    baseColor *= ObjectSurfaceSampleTriplanar4(baseColorTexture, baseColorSamplerState, materialInfo.baseColorStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback);
+#endif
+
+#if defined(PSO_OPACITY_TEXTURE)
+    Texture2D<float4> opacityTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.opacityTextureIndex)];
+    SamplerState opacitySamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.opacitySamplerIndex)];
+    baseColor.a *= ObjectSurfaceSampleTriplanar4(opacityTexture, opacitySamplerState, materialInfo.opacityStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback).a;
+#endif
+
+    float metallic = materialInfo.metallicFactor;
+#if defined(PSO_METALLIC_TEXTURE)
+    Texture2D<float4> metallicTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.metallicTextureIndex)];
+    SamplerState metallicSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.metallicSamplerIndex)];
+    metallic = DynamicSwizzle(
+        ObjectSurfaceSampleTriplanar4(metallicTexture, metallicSamplerState, materialInfo.metallicStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback),
+        materialInfo.metallicChannel) * materialInfo.metallicFactor;
+#endif
+
+    float roughness = materialInfo.roughnessFactor;
+#if defined(PSO_ROUGHNESS_TEXTURE)
+    Texture2D<float4> roughnessTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.roughnessTextureIndex)];
+    SamplerState roughnessSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.roughnessSamplerIndex)];
+    roughness = DynamicSwizzle(
+        ObjectSurfaceSampleTriplanar4(roughnessTexture, roughnessSamplerState, materialInfo.roughnessStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback),
+        materialInfo.roughnessChannel) * materialInfo.roughnessFactor;
+#endif
+
+    float3 normalWS = normalWSBase;
+#if defined(PSO_NORMAL_MAP)
+    if ((materialFlags & MATERIAL_NORMAL_MAP) != 0u && (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
+    {
+        Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
+        SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
+        normalWS = ObjectSurfaceSampleTriplanarNormalWS(
+            normalTexture,
+            normalSamplerState,
+            materialInfo.normalStreamingTextureID,
+            materialInfo.normalChannels,
+            materialFlags,
+            positionOS,
+            normalOS,
+            dpdxOS,
+            dpdyOS,
+            density,
+            normalMatrix,
+            textureFeedback);
+    }
+#endif
+
+    float ao = 1.0f;
+#if defined(PSO_AO_TEXTURE)
+    Texture2D<float4> aoTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.aoMapIndex)];
+    SamplerState aoSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.aoSamplerIndex)];
+    ao = DynamicSwizzle(
+        ObjectSurfaceSampleTriplanar4(aoTexture, aoSamplerState, materialInfo.aoStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback),
+        materialInfo.aoChannel);
+#endif
+
+    float3 emissive = materialInfo.emissiveFactor.rgb;
+#if defined(PSO_EMISSIVE_TEXTURE)
+    Texture2D<float4> emissiveTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.emissiveTextureIndex)];
+    SamplerState emissiveSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.emissiveSamplerIndex)];
+    const float4 emissiveSample = ObjectSurfaceSampleTriplanar4(emissiveTexture, emissiveSamplerState, materialInfo.emissiveStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback);
+    emissive = float3(
+        DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.x),
+        DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.y),
+        DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.z)) * materialInfo.emissiveFactor.rgb;
+#endif
+
+    const OpenPBRMaterialInfo openPBRMaterialInfo = LoadOpenPBRMaterialInfo(materialInfo);
+    OpenPBRSurfaceSample openPBRSurface = ResolveCanonicalOpenPBRSurface(
+        materialInfo,
+        openPBRMaterialInfo,
+        baseColor.rgb * vertexColorMultiplier,
+        metallic,
+        roughness,
+        baseColor.a,
+        emissive);
+    PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    if ((materialFlags & MATERIAL_PARALLAX) != 0u && (materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)
+    {
+        Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        ret.geometricHeightDebug = saturate(ObjectSurfaceSampleTriplanarHeight(heightTexture, heightSampler, materialInfo.heightStreamingTextureID, positionOS, normalOS, dpdxOS, dpdyOS, density, textureFeedback));
+    }
+    ApplyMaterialTextureFeedback(ret, textureFeedback);
+    ApplyMaterialGlintInfo(materialInfo, ret);
+}
 
 void SampleMaterialFromUvCache(
     in MaterialUvCache uvCache,
@@ -1646,7 +2749,7 @@ void SampleMaterialFromUvCache(
     MaterialUvSample emissiveUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_EMISSIVE);
 
     float3x3 TBN = (float3x3)0.0f;
-    if (uvBindings.hasTbnSource)
+    if (uvBindings.hasTbnSource && (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
     {
         MaterialUvSample tbnUv = uvCache.samples[uvBindings.tbnCacheIndex];
         TBN = cotangent_frame_from_derivs(normalWSBase.xyz, dpdx, dpdy, tbnUv.dUVdx, tbnUv.dUVdy);
@@ -1667,23 +2770,47 @@ void SampleMaterialFromUvCache(
 
         float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS.xyz);
 
-        Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-        SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
+        {
+            float3 uvh;
+            if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+            {
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    3u,
+                    TBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
+            else
+            {
+                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    TBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
 
-        float3 uvh = getContactRefinementParallaxCoordsAndHeight(
-            parallaxTexture,
-            parallaxSamplerState,
-            TBN,
-            heightUv.uv,
-            viewDir,
-            materialInfo.heightMapScale,
-            heightUv.dUVdx,
-            heightUv.dUVdy);
-
-        parallaxUv = uvh.xy;
-        parallaxDUdx = heightUv.dUVdx;
-        parallaxDUdy = heightUv.dUVdy;
-        hasParallaxResolvedUv = true;
+            parallaxUv = uvh.xy;
+            parallaxDUdx = heightUv.dUVdx;
+            parallaxDUdy = heightUv.dUVdy;
+            hasParallaxResolvedUv = true;
+            ret.parallaxApplied = 1u;
+        }
     }
 #endif
 
@@ -1763,7 +2890,7 @@ void SampleMaterialFromUvCache(
     float3 normalWS = normalWSBase;
 
 #if defined(PSO_NORMAL_MAP)
-    if (uvBindings.hasTbnSource)
+    if (uvBindings.hasTbnSource && (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
     {
         Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
         SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
@@ -1777,11 +2904,8 @@ void SampleMaterialFromUvCache(
             normalDUdy = parallaxDUdy;
         }
 
-        float3 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalSampleUv, normalDUdx, normalDUdy, ret).rgb;
-        float3 tangentSpaceNormal = normalize(textureNormal * 2.0 - 1.0);
-
-        if (materialFlags & MATERIAL_NEGATE_NORMALS) tangentSpaceNormal = -tangentSpaceNormal;
-        if (materialFlags & MATERIAL_INVERT_NORMAL_GREEN) tangentSpaceNormal.g = -tangentSpaceNormal.g;
+        float4 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalSampleUv, normalDUdx, normalDUdy, ret);
+        float3 tangentSpaceNormal = DecodeMaterialNormalSample(textureNormal, materialInfo.normalChannels, materialFlags);
 
         normalWS = normalize(mul(tangentSpaceNormal, TBN));
     }
@@ -1833,6 +2957,7 @@ void SampleMaterialFromUvCache(
         roughness,
         baseColor.a,
         emissive);
+#if defined(PSO_OPENPBR_COAT_TEXTURES) || defined(PSO_OPENPBR_FUZZ_TEXTURES)
     ApplyOpenPBRTextureSamplingSpecialized(
         uvCache,
         uvBindings,
@@ -1844,7 +2969,19 @@ void SampleMaterialFromUvCache(
         openPBRMaterialInfo,
         openPBRSurface,
         ret);
+#endif
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
+        uvCache,
+        uvBindings,
+        materialInfo,
+        materialFlags,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy,
+        ret);
+    ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
 void SampleMaterialEvalFromUvCache(
@@ -1860,6 +2997,8 @@ void SampleMaterialEvalFromUvCache(
     out MaterialInputs ret)
 {
     InitializeMaterialSelectedMipDebug(ret);
+    MaterialTextureFeedback textureFeedback;
+    InitializeMaterialTextureFeedback(textureFeedback);
 
     float2 parallaxUv = float2(0.0f, 0.0f);
     float2 parallaxDUdx = float2(0.0f, 0.0f);
@@ -1877,23 +3016,47 @@ void SampleMaterialEvalFromUvCache(
 
         float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS.xyz);
 
-        Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-        SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
+        {
+            float3 uvh;
+            if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+            {
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    3u,
+                    parallaxTBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
+            else
+            {
+                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    parallaxTBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
 
-        float3 uvh = getContactRefinementParallaxCoordsAndHeight(
-            parallaxTexture,
-            parallaxSamplerState,
-            parallaxTBN,
-            heightUv.uv,
-            viewDir,
-            materialInfo.heightMapScale,
-            heightUv.dUVdx,
-            heightUv.dUVdy);
-
-        parallaxUv = uvh.xy;
-        parallaxDUdx = heightUv.dUVdx;
-        parallaxDUdy = heightUv.dUVdy;
-        hasParallaxResolvedUv = true;
+            parallaxUv = uvh.xy;
+            parallaxDUdx = heightUv.dUVdx;
+            parallaxDUdy = heightUv.dUVdy;
+            hasParallaxResolvedUv = true;
+            ret.parallaxApplied = 1u;
+        }
     }
 #endif
 
@@ -1914,7 +3077,7 @@ void SampleMaterialEvalFromUvCache(
 #else
     const MaterialUvSample baseColorUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_BASE_COLOR);
 #endif
-    float4 sampledColor = SampleMaterialTexture2DGrad(baseColorTexture, baseColorSamplerState, materialInfo.baseColorStreamingTextureID, baseColorUv.uv, baseColorUv.dUVdx, baseColorUv.dUVdy, ret);
+    float4 sampledColor = SampleMaterialTexture2DGrad(baseColorTexture, baseColorSamplerState, materialInfo.baseColorStreamingTextureID, baseColorUv.uv, baseColorUv.dUVdx, baseColorUv.dUVdy, textureFeedback);
     baseColor *= sampledColor;
 #endif
 
@@ -1933,7 +3096,7 @@ void SampleMaterialEvalFromUvCache(
 #else
     const MaterialUvSample opacityUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_OPACITY);
 #endif
-    float4 opacitySample = SampleMaterialTexture2DGrad(opacityTexture, opacitySamplerState, materialInfo.opacityStreamingTextureID, opacityUv.uv, opacityUv.dUVdx, opacityUv.dUVdy, ret);
+    float4 opacitySample = SampleMaterialTexture2DGrad(opacityTexture, opacitySamplerState, materialInfo.opacityStreamingTextureID, opacityUv.uv, opacityUv.dUVdx, opacityUv.dUVdy, textureFeedback);
     baseColor.a *= opacitySample.a;
 #endif
 
@@ -1955,7 +3118,7 @@ void SampleMaterialEvalFromUvCache(
 #else
     const MaterialUvSample metallicUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_METALLIC);
 #endif
-    float4 metallicSample = SampleMaterialTexture2DGrad(metallicTexture, metallicSamplerState, materialInfo.metallicStreamingTextureID, metallicUv.uv, metallicUv.dUVdx, metallicUv.dUVdy, ret);
+    float4 metallicSample = SampleMaterialTexture2DGrad(metallicTexture, metallicSamplerState, materialInfo.metallicStreamingTextureID, metallicUv.uv, metallicUv.dUVdx, metallicUv.dUVdy, textureFeedback);
     metallic = DynamicSwizzle(metallicSample, materialInfo.metallicChannel) * materialInfo.metallicFactor;
 #endif
 
@@ -1974,14 +3137,14 @@ void SampleMaterialEvalFromUvCache(
 #else
     const MaterialUvSample roughnessUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_ROUGHNESS);
 #endif
-    float4 roughnessSample = SampleMaterialTexture2DGrad(roughnessTexture, roughnessSamplerState, materialInfo.roughnessStreamingTextureID, roughnessUv.uv, roughnessUv.dUVdx, roughnessUv.dUVdy, ret);
+    float4 roughnessSample = SampleMaterialTexture2DGrad(roughnessTexture, roughnessSamplerState, materialInfo.roughnessStreamingTextureID, roughnessUv.uv, roughnessUv.dUVdx, roughnessUv.dUVdy, textureFeedback);
     roughness = DynamicSwizzle(roughnessSample, materialInfo.roughnessChannel) * materialInfo.roughnessFactor;
 #endif
 
     float3 normalWS = normalWSBase;
 
 #if defined(PSO_NORMAL_MAP)
-    if (uvBindings.hasTbnSource)
+    if (uvBindings.hasTbnSource && (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
     {
         const float3x3 normalTBN = BuildMaterialTBN(uvCache, uvBindings, normalWSBase, dpdx, dpdy);
         Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
@@ -1998,11 +3161,8 @@ void SampleMaterialEvalFromUvCache(
 #else
         const MaterialUvSample normalUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
 #endif
-        float3 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalUv.uv, normalUv.dUVdx, normalUv.dUVdy, ret).rgb;
-        float3 tangentSpaceNormal = normalize(textureNormal * 2.0 - 1.0);
-
-        if (materialFlags & MATERIAL_NEGATE_NORMALS) tangentSpaceNormal = -tangentSpaceNormal;
-        if (materialFlags & MATERIAL_INVERT_NORMAL_GREEN) tangentSpaceNormal.g = -tangentSpaceNormal.g;
+        float4 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalUv.uv, normalUv.dUVdx, normalUv.dUVdy, textureFeedback);
+        float3 tangentSpaceNormal = DecodeMaterialNormalSample(textureNormal, materialInfo.normalChannels, materialFlags);
 
         normalWS = normalize(mul(tangentSpaceNormal, normalTBN));
     }
@@ -2024,7 +3184,7 @@ void SampleMaterialEvalFromUvCache(
 #else
     const MaterialUvSample aoUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_AO);
 #endif
-    float4 aoSample = SampleMaterialTexture2DGrad(aoTexture, aoSamplerState, materialInfo.aoStreamingTextureID, aoUv.uv, aoUv.dUVdx, aoUv.dUVdy, ret);
+    float4 aoSample = SampleMaterialTexture2DGrad(aoTexture, aoSamplerState, materialInfo.aoStreamingTextureID, aoUv.uv, aoUv.dUVdx, aoUv.dUVdy, textureFeedback);
     ao = DynamicSwizzle(aoSample, materialInfo.aoChannel);
 #endif
 
@@ -2044,7 +3204,7 @@ void SampleMaterialEvalFromUvCache(
 #else
     const MaterialUvSample emissiveUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_EMISSIVE);
 #endif
-    float4 emissiveSample = SampleMaterialTexture2DGrad(emissiveTexture, emissiveSamplerState, materialInfo.emissiveStreamingTextureID, emissiveUv.uv, emissiveUv.dUVdx, emissiveUv.dUVdy, ret);
+    float4 emissiveSample = SampleMaterialTexture2DGrad(emissiveTexture, emissiveSamplerState, materialInfo.emissiveStreamingTextureID, emissiveUv.uv, emissiveUv.dUVdx, emissiveUv.dUVdy, textureFeedback);
     emissive = float3(
         DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.x),
         DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.y),
@@ -2060,6 +3220,7 @@ void SampleMaterialEvalFromUvCache(
         roughness,
         baseColor.a,
         emissive);
+#if defined(PSO_OPENPBR_COAT_TEXTURES) || defined(PSO_OPENPBR_FUZZ_TEXTURES)
     ApplyOpenPBRTextureSampling(
         uvCache,
         uvBindings,
@@ -2071,7 +3232,50 @@ void SampleMaterialEvalFromUvCache(
         openPBRMaterialInfo,
         openPBRSurface,
         ret);
+#endif
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ApplyMaterialTextureFeedback(ret, textureFeedback);
+    ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
+        uvCache,
+        uvBindings,
+        materialInfo,
+        materialFlags,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy,
+        ret);
+    ApplyMaterialGlintInfo(materialInfo, ret);
+}
+
+void SampleMaterialFromUvCacheWithVertexTangent(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in float3 normalWSBase,
+    in float4 tangentWS,
+    in float3 posWS,
+    in float3 vertexColorMultiplier,
+    in MaterialInfo materialInfo,
+    in uint materialFlags,
+    in float3 dpdx,
+    in float3 dpdy,
+    out MaterialInputs ret)
+{
+    SampleMaterialFromUvCache(uvCache, uvBindings, normalWSBase, posWS, vertexColorMultiplier, materialInfo, materialFlags, dpdx, dpdy, ret);
+
+#if defined(PSO_NORMAL_MAP)
+    if (uvBindings.hasTbnSource && abs(tangentWS.w) > 0.5f && (materialFlags & MATERIAL_NORMAL_MAP) != 0u &&
+        (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
+    {
+        const float3x3 normalTBN = BuildMaterialTBNFromVertexTangent(uvCache, uvBindings, normalWSBase, dpdx, dpdy, tangentWS);
+        Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
+        SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
+        const MaterialUvSample normalUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
+        float4 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalUv.uv, normalUv.dUVdx, normalUv.dUVdy);
+        float3 tangentSpaceNormal = DecodeMaterialNormalSample(textureNormal, materialInfo.normalChannels, materialFlags);
+        ret.normalWS = normalize(mul(tangentSpaceNormal, normalTBN));
+    }
+#endif
 }
 
 void SampleMaterialFromUvCacheRuntime(
@@ -2109,23 +3313,47 @@ void SampleMaterialFromUvCacheRuntime(
 
         float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS);
 
-        Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-        SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
+        {
+            float3 uvh;
+            if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+            {
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    3u,
+                    TBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
+            else
+            {
+                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    TBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
 
-        float3 uvh = getContactRefinementParallaxCoordsAndHeight(
-            parallaxTexture,
-            parallaxSamplerState,
-            TBN,
-            heightUv.uv,
-            viewDir,
-            materialInfo.heightMapScale,
-            heightUv.dUVdx,
-            heightUv.dUVdy);
-
-        parallaxUv = uvh.xy;
-        parallaxDUdx = heightUv.dUVdx;
-        parallaxDUdy = heightUv.dUVdy;
-        hasParallaxResolvedUv = true;
+            parallaxUv = uvh.xy;
+            parallaxDUdx = heightUv.dUVdx;
+            parallaxDUdy = heightUv.dUVdy;
+            hasParallaxResolvedUv = true;
+            ret.parallaxApplied = 1u;
+        }
     }
 
     float4 baseColor = materialInfo.baseColorFactor;
@@ -2209,7 +3437,8 @@ void SampleMaterialFromUvCacheRuntime(
     }
 
     float3 normalWS = normalWSBase;
-    if ((materialFlags & MATERIAL_NORMAL_MAP) != 0u && uvBindings.hasTbnSource)
+    if ((materialFlags & MATERIAL_NORMAL_MAP) != 0u && uvBindings.hasTbnSource &&
+        (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
     {
         const MaterialUvSample normalUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
         Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
@@ -2224,11 +3453,8 @@ void SampleMaterialFromUvCacheRuntime(
             normalDUdy = parallaxDUdy;
         }
 
-        float3 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalSampleUv, normalDUdx, normalDUdy, ret).rgb;
-        float3 tangentSpaceNormal = normalize(textureNormal * 2.0 - 1.0);
-
-        if ((materialFlags & MATERIAL_NEGATE_NORMALS) != 0u) tangentSpaceNormal = -tangentSpaceNormal;
-        if ((materialFlags & MATERIAL_INVERT_NORMAL_GREEN) != 0u) tangentSpaceNormal.g = -tangentSpaceNormal.g;
+        float4 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalSampleUv, normalDUdx, normalDUdy, ret);
+        float3 tangentSpaceNormal = DecodeMaterialNormalSample(textureNormal, materialInfo.normalChannels, materialFlags);
 
         normalWS = normalize(mul(tangentSpaceNormal, TBN));
     }
@@ -2283,6 +3509,7 @@ void SampleMaterialFromUvCacheRuntime(
         roughness,
         baseColor.a,
         emissive);
+#if defined(PSO_OPENPBR_COAT_TEXTURES) || defined(PSO_OPENPBR_FUZZ_TEXTURES)
     ApplyOpenPBRTextureSampling(
         uvCache,
         uvBindings,
@@ -2294,7 +3521,19 @@ void SampleMaterialFromUvCacheRuntime(
         openPBRMaterialInfo,
         openPBRSurface,
         ret);
+#endif
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
+        uvCache,
+        uvBindings,
+        materialInfo,
+        materialFlags,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy,
+        ret);
+    ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
 void SampleMaterialCorePrecompiled(
@@ -2326,14 +3565,15 @@ void SampleMaterialCorePrecompiled(
     Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
     SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
 
-    // IMPORTANT: inside getContactRefinementParallaxCoordsAndHeight, use SampleGrad too.
-    float3 uvh = getContactRefinementParallaxCoordsAndHeight(
+    // IMPORTANT: inside getParallaxOcclusionMappingCoordsAndHeight, use SampleGrad too.
+    float3 uvh = getParallaxOcclusionMappingCoordsAndHeight(
         parallaxTexture,
         parallaxSamplerState,
         TBN,
         localUV,
         viewDir,
-        materialInfo.heightMapScale,
+        materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
+        16u,
         localDUdx,
         localDUdy
     );
@@ -2383,16 +3623,16 @@ void SampleMaterialCorePrecompiled(
     float3 normalWS = normalWSBase;
 
 #if defined(PSO_NORMAL_MAP)
-    Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
-    SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
+    if ((materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
+    {
+        Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
+        SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
 
-    float3 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, localUV, localDUdx, localDUdy).rgb;
-    float3 tangentSpaceNormal = normalize(textureNormal * 2.0 - 1.0);
+        float4 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, localUV, localDUdx, localDUdy);
+        float3 tangentSpaceNormal = DecodeMaterialNormalSample(textureNormal, materialInfo.normalChannels, materialFlags);
 
-    if (materialFlags & MATERIAL_NEGATE_NORMALS)       tangentSpaceNormal = -tangentSpaceNormal;
-    if (materialFlags & MATERIAL_INVERT_NORMAL_GREEN)  tangentSpaceNormal.g = -tangentSpaceNormal.g;
-
-    normalWS = normalize(mul(tangentSpaceNormal, TBN));
+        normalWS = normalize(mul(tangentSpaceNormal, TBN));
+    }
 #endif
 
     // AO
@@ -2419,16 +3659,29 @@ void SampleMaterialCorePrecompiled(
         roughness,
         baseColor.a,
         emissive);
+#if defined(PSO_OPENPBR_COAT_TEXTURES) || defined(PSO_OPENPBR_FUZZ_TEXTURES)
+    MaterialUvCache openPBRUvCache = BuildSingleUvCache(localUV, localDUdx, localDUdy);
+    MaterialUvBindings openPBRUvBindings;
+    InitializeMaterialUvBindings(openPBRUvBindings);
+    [unroll]
+    for (uint openPBRSlot = 0u; openPBRSlot < OPENPBR_TEXTURE_SLOT_COUNT; ++openPBRSlot)
+    {
+        openPBRUvBindings.openPBRCacheIndexBySlot[openPBRSlot] = 0u;
+    }
     ApplyOpenPBRTextureSampling(
-        BuildSingleUvCache(localUV, localDUdx, localDUdy),
+        openPBRUvCache,
+        openPBRUvBindings,
         false,
         0u,
         float2(0.0f, 0.0f),
         float2(0.0f, 0.0f),
         float2(0.0f, 0.0f),
         LoadOpenPBRMaterialInfo(materialInfo),
-        openPBRSurface);
+        openPBRSurface,
+        ret);
+#endif
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ApplyMaterialGlintInfo(materialInfo, ret);
 #endif
 }
 
@@ -2484,7 +3737,7 @@ void GetMaterialInfoForFragment(in const PSInput input, out MaterialInputs ret)
     uint materialFlags = materialInfo.materialFlags;
     MaterialUvCache uvCache = BuildSingleUvCache(input.texcoord, ddx(input.texcoord), ddy(input.texcoord));
     MaterialUvBindings uvBindings = BuildMaterialUvBindings(materialInfo, materialFlags, uvCache);
-    SampleMaterialFromUvCache(uvCache, uvBindings, input.normalWorldSpace, input.positionWorldSpace.xyz, input.color, materialInfo, materialFlags, ddx(input.positionWorldSpace.xyz), ddy(input.positionWorldSpace.xyz), ret);
+    SampleMaterialFromUvCacheWithVertexTangent(uvCache, uvBindings, input.normalWorldSpace, input.tangentWorldSpace, input.positionWorldSpace.xyz, input.color, materialInfo, materialFlags, ddx(input.positionWorldSpace.xyz), ddy(input.positionWorldSpace.xyz), ret);
 }
 
 void GetMaterialInfoForFragmentPrecompiled(in const PSInput input, out MaterialInputs ret)
@@ -2497,10 +3750,11 @@ void GetMaterialInfoForFragmentPrecompiled(in const PSInput input, out MaterialI
     uint materialFlags = materialInfo.materialFlags;
     MaterialUvCache uvCache = BuildSingleUvCache(input.texcoord, ddx(input.texcoord), ddy(input.texcoord));
     MaterialUvBindings uvBindings = BuildMaterialUvBindings(materialInfo, materialFlags, uvCache);
-    SampleMaterialFromUvCache(
+    SampleMaterialFromUvCacheWithVertexTangent(
         uvCache,
         uvBindings,
         input.normalWorldSpace,
+        input.tangentWorldSpace,
         input.positionWorldSpace.xyz,
         input.color,
         materialInfo,
@@ -2508,6 +3762,34 @@ void GetMaterialInfoForFragmentPrecompiled(in const PSInput input, out MaterialI
         ddx(input.positionWorldSpace.xyz),
         ddy(input.positionWorldSpace.xyz),
         ret);
+}
+
+void SampleMaterialFromUvCacheRuntimeWithVertexTangent(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in float3 normalWSBase,
+    in float4 tangentWS,
+    in float3 posWS,
+    in float3 vertexColorMultiplier,
+    in MaterialInfo materialInfo,
+    in uint materialFlags,
+    in float3 dpdx,
+    in float3 dpdy,
+    out MaterialInputs ret)
+{
+    SampleMaterialFromUvCacheRuntime(uvCache, uvBindings, normalWSBase, posWS, vertexColorMultiplier, materialInfo, materialFlags, dpdx, dpdy, ret);
+
+    if (uvBindings.hasTbnSource && abs(tangentWS.w) > 0.5f && (materialFlags & MATERIAL_NORMAL_MAP) != 0u &&
+        (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
+    {
+        const float3x3 normalTBN = BuildMaterialTBNFromVertexTangent(uvCache, uvBindings, normalWSBase, dpdx, dpdy, tangentWS);
+        Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
+        SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
+        const MaterialUvSample normalUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
+        float4 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalUv.uv, normalUv.dUVdx, normalUv.dUVdy);
+        float3 tangentSpaceNormal = DecodeMaterialNormalSample(textureNormal, materialInfo.normalChannels, materialFlags);
+        ret.normalWS = normalize(mul(tangentSpaceNormal, normalTBN));
+    }
 }
 
 void SampleMaterialCS(
@@ -2636,76 +3918,84 @@ void PopulateFragmentInfoFromOpenPBR(
     ret.F0 = saturate(dielectricSpecularWeight * dielectricF0 + metalSpecularWeight * metalF0);
 }
 
-void GetFragmentInfoScreenSpace(in uint2 pixelCoordinates, in float3 viewWS, in float3 fragPosViewSpace, in float3 fragPosWorldSpace, in bool enableGTAO, out FragmentInfo ret) {
+void GetFragmentInfoCanonicalSurface(in uint2 pixelCoordinates, in float3 viewWS, in float3 fragPosViewSpace, in float3 fragPosWorldSpace, in bool enableGTAO, out FragmentInfo ret) {
     ret.pixelCoords = pixelCoordinates;
     ret.fragPosViewSpace = fragPosViewSpace;
     ret.fragPosWorldSpace = fragPosWorldSpace;
     ret.selectedMaterialMipLevel = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
     ret.selectedMaterialMipMaxLevel = 0u;
-    
-    // Gather textures
-    Texture2D<float4> normalsTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
-    
-    // Load values
-    float4 normalSample = normalsTexture[pixelCoordinates];
-    ret.normalWS = normalSample.xyz;
-    //ret.normalWS = SignedOctDecode(encodedNormal.yzw);
-    
-    Texture2D<float4> albedoTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Albedo)];
-    float4 baseColorSample = albedoTexture[pixelCoordinates];
-    Texture2D<float4> coatTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Coat)];
-    float4 coatSample = coatTexture[pixelCoordinates];
-    Texture2D<float4> emissiveTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Emissive)];
-    float4 emissive = emissiveTexture[pixelCoordinates];
-    Texture2D<float4> fuzzTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Fuzz)];
-    float4 fuzzSample = fuzzTexture[pixelCoordinates];
-    
+    ret.parallaxApplied = 0u;
+    ret.glintEnabled = 0u;
+    ret.glintParameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
+
+    Texture2D<float4> baseColorOpacityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::BaseColorOpacity)];
+    Texture2D<float4> normalRoughnessTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::NormalRoughness)];
+    Texture2D<float4> specularAoTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::SpecularAo)];
+    Texture2D<float4> emissiveTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Emissive)];
+    Texture2D<float4> payload0Texture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Payload0)];
+    Texture2D<float4> payload1Texture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Payload1)];
+    Texture2D<uint2> identityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Identity)];
+    StructuredBuffer<SARPSurfaceRecordV1> records = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Records)];
+
+    const float4 baseColorOpacity = baseColorOpacityTexture[pixelCoordinates];
+    const float4 normalRoughness = normalRoughnessTexture[pixelCoordinates];
+    const float4 specularAo = specularAoTexture[pixelCoordinates];
+    const float4 emissive = emissiveTexture[pixelCoordinates];
+    const float4 coat = payload0Texture[pixelCoordinates];
+    const float4 fuzz = payload1Texture[pixelCoordinates];
+    const uint2 identity = identityTexture[pixelCoordinates];
+    uint surfaceRecordCount;
+    uint surfaceRecordStride;
+    records.GetDimensions(surfaceRecordCount, surfaceRecordStride);
+    SARPSurfaceRecordV1 record = (SARPSurfaceRecordV1)0;
+    if (identity.x < surfaceRecordCount) {
+        record = records[identity.x];
+    }
+
+    ret.normalWS = normalize(normalRoughness.xyz);
+    ret.perceptualRoughnessUnclamped = normalRoughness.w;
+    ret.perceptualRoughness = clamp(normalRoughness.w, MIN_PERCEPTUAL_ROUGHNESS, 1.0f);
+    ret.roughness = PerceptualRoughnessToRoughness(ret.perceptualRoughness);
+    ret.roughnessUnclamped = PerceptualRoughnessToRoughness(ret.perceptualRoughnessUnclamped);
+    ret.viewWS = viewWS;
+    ret.NdotV = dot(ret.normalWS, ret.viewWS);
+    ret.normalWS = normalize(ret.normalWS + max(0.0f, -ret.NdotV + MIN_N_DOT_V) * ret.viewWS);
+    ret.NdotV = max(MIN_N_DOT_V, dot(ret.normalWS, ret.viewWS));
+    ret.reflectedWS = reflect(-ret.viewWS, ret.normalWS);
+    ret.alpha = baseColorOpacity.a;
+
     if (enableGTAO)
     {
         Texture2D<uint> aoTexture = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::GTAO::OutputAOTerm)];
-        ret.diffuseAmbientOcclusion = min(baseColorSample.w, float(aoTexture[pixelCoordinates].x) / 255.0);
+        ret.diffuseAmbientOcclusion = min(specularAo.a, float(aoTexture[pixelCoordinates].x) / 255.0f);
     }
     else
     {
-        ret.diffuseAmbientOcclusion = baseColorSample.w; // AO stored in alpha channel
+        ret.diffuseAmbientOcclusion = specularAo.a;
     }
-    
-    Texture2D<float4> metallicRoughnessTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MetallicRoughness)];
-    float4 metallicRoughness = metallicRoughnessTexture[pixelCoordinates];
-    
-    float perceptualRoughness = metallicRoughness.y;
-    ret.perceptualRoughnessUnclamped = perceptualRoughness;
-    // Clamp the roughness to a minimum value to avoid divisions by 0 during lighting
-    ret.perceptualRoughness = clamp(perceptualRoughness, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
-    // Remaps the roughness to a perceptually linear roughness (roughness^2)
-    ret.roughness = PerceptualRoughnessToRoughness(ret.perceptualRoughness);
-    ret.roughnessUnclamped = PerceptualRoughnessToRoughness(ret.perceptualRoughnessUnclamped);
-    
-    ret.viewWS = viewWS;
-    //ret.NdotV = dot(ret.normalWS, viewWS);
-    ret.NdotV = dot(ret.normalWS, ret.viewWS);
-    ret.normalWS = normalize(ret.normalWS + max(0, -ret.NdotV + MIN_N_DOT_V) * ret.viewWS);
-    ret.NdotV = max(MIN_N_DOT_V, ret.NdotV);
-    ret.reflectedWS = reflect(-ret.viewWS, ret.normalWS);
-    
-    //ret.DFG = prefilteredDFG(ret.perceptualRoughness, ret.NdotV);
-
-    ret.alpha = 1.0; // Opaque objects
 
     OpenPBRSurfaceSample surface = (OpenPBRSurfaceSample)0;
-    surface.openPBRMaterialDataIndex = (uint)(normalSample.w + 0.5f);
-    surface.baseColor = baseColorSample.xyz;
-    surface.baseMetalness = metallicRoughness.x;
-    surface.specularRoughness = metallicRoughness.y;
-    surface.coatColor = coatSample.xyz;
-    surface.coatWeight = coatSample.w;
-    surface.coatRoughness = metallicRoughness.z;
-    surface.fuzzColor = fuzzSample.xyz;
-    surface.fuzzWeight = metallicRoughness.w;
-    surface.fuzzRoughness = fuzzSample.w;
-    surface.opacity = 1.0f;
-    surface.emissive = emissive.xyz;
+    surface.openPBRMaterialDataIndex = record.materialTableIndex;
+    surface.baseColor = baseColorOpacity.rgb;
+    surface.baseMetalness = 0.0f;
+    surface.specularRoughness = normalRoughness.w;
+    surface.coatColor = coat.rgb;
+    surface.coatWeight = coat.a;
+    surface.coatRoughness = 0.0f;
+    surface.fuzzColor = fuzz.rgb;
+    surface.fuzzWeight = 0.0f;
+    surface.fuzzRoughness = fuzz.a;
+    surface.opacity = baseColorOpacity.a;
+    surface.emissive = emissive.rgb;
     PopulateFragmentInfoFromOpenPBR(surface, ret);
+
+    // These values are fully resolved by the producer contract. Keep the rich
+    // OpenPBR coat/fuzz terms above, but do not reconstruct base response from
+    // a metallic parameter in the lighting consumer.
+    ret.diffuseColor = baseColorOpacity.rgb;
+    ret.F0 = specularAo.rgb;
+    ret.dielectricF0 = max(specularAo.r, max(specularAo.g, specularAo.b));
+    ret.materialFlags = record.flags;
 }
 
 void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialInfo, in float3 viewWS, in float2 pixelCoords, in bool enableGTAO, in bool transparent, in bool isFrontFace, in uint materialFlags)
@@ -2713,6 +4003,10 @@ void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialIn
     ret.materialFlags = materialFlags;
     ret.selectedMaterialMipLevel = materialInfo.selectedMaterialMipLevel;
     ret.selectedMaterialMipMaxLevel = materialInfo.selectedMaterialMipMaxLevel;
+    ret.parallaxApplied = materialInfo.parallaxApplied;
+    ret.glintEnabled = materialInfo.glintEnabled;
+    ret.glintParameters = materialInfo.glintParameters;
+    ret.geometricHeightDebug = materialInfo.geometricHeightDebug;
     float perceptualRoughness = materialInfo.roughness;
     ret.perceptualRoughnessUnclamped = perceptualRoughness;
     // Clamp the roughness to a minimum value to avoid divisions by 0 during lighting

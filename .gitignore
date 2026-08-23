@@ -18,8 +18,10 @@ models/
 textures/
 /ThirdParty/
 cmake-build-*
-docs/
-PyNifly/
 Streamline/
 vk_streamline/
 vk_lod_clusters/
+cache/
+reports/
+#docs/
+logs/

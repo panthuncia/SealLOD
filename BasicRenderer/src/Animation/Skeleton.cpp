@@ -9,6 +9,22 @@
 
 #include "Scene/Components.h"
 
+namespace {
+    bool MatrixNearlyEqual(DirectX::XMMATRIX lhs, DirectX::XMMATRIX rhs, float tolerance = 1.0e-5f)
+    {
+        for (uint32_t row = 0; row < 4; ++row) {
+            const auto diff = DirectX::XMVectorAbs(DirectX::XMVectorSubtract(lhs.r[row], rhs.r[row]));
+            if (DirectX::XMVectorGetX(diff) > tolerance ||
+                DirectX::XMVectorGetY(diff) > tolerance ||
+                DirectX::XMVectorGetZ(diff) > tolerance ||
+                DirectX::XMVectorGetW(diff) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
 Skeleton::Matrix Skeleton::ComposeTRS_(const Components::Position& p,
     const Components::Rotation& r,
     const Components::Scale& s)
@@ -51,6 +67,69 @@ Skeleton::Skeleton(const std::vector<flecs::entity>& nodes,
     // but runtime skinning must use instances.
 }
 
+Skeleton::Skeleton(std::vector<std::string> boneNames,
+    std::vector<int32_t> parentIndices,
+    std::vector<Matrix> inverseBindMatrices,
+    std::vector<Components::Transform> restLocalTransforms,
+    std::vector<Matrix> rootParentGlobals,
+    std::vector<uint32_t> windSimulationGroupIndices,
+    std::string windProfileIdentity,
+    DynamicWindMetadata dynamicWindMetadata,
+    std::vector<uint32_t> evaluationOrder,
+    std::vector<SkeletonWindBoneInvariant> windBoneInvariants,
+    std::vector<Matrix> bindGlobalMatrices,
+    std::vector<SkeletonLodVariant> lodVariants)
+{
+    m_isBaseSkeleton = true;
+    m_boneNames = std::move(boneNames);
+    m_parentIndices = std::move(parentIndices);
+    if (m_parentIndices.size() != m_boneNames.size()) {
+        spdlog::warn("Skeleton: parent index count ({}) != bone name count ({}); treating all bones as roots",
+            m_parentIndices.size(),
+            m_boneNames.size());
+        m_parentIndices.assign(m_boneNames.size(), -1);
+    }
+    m_restLocalTransforms = std::move(restLocalTransforms);
+    if (!m_restLocalTransforms.empty() && m_restLocalTransforms.size() != m_boneNames.size()) {
+        spdlog::warn("Skeleton: rest local transform count ({}) != bone name count ({}); using identity rest transforms",
+            m_restLocalTransforms.size(),
+            m_boneNames.size());
+        m_restLocalTransforms.clear();
+    }
+    if (m_restLocalTransforms.empty()) {
+        m_restLocalTransforms.resize(m_boneNames.size());
+    }
+    m_rootParentGlobals = std::move(rootParentGlobals);
+    if (m_rootParentGlobals.size() != m_boneNames.size()) {
+        m_rootParentGlobals.assign(m_boneNames.size(), DirectX::XMMatrixIdentity());
+    }
+    m_inverseBindMatrices = std::move(inverseBindMatrices);
+    if (m_inverseBindMatrices.size() != m_boneNames.size()) {
+        spdlog::warn("Skeleton: inverse bind count ({}) != bone name count ({}); using identity inverse binds",
+            m_inverseBindMatrices.size(),
+            m_boneNames.size());
+        m_inverseBindMatrices.assign(m_boneNames.size(), DirectX::XMMatrixIdentity());
+    }
+    m_windSimulationGroupIndices = std::move(windSimulationGroupIndices);
+    if (!m_windSimulationGroupIndices.empty() && m_windSimulationGroupIndices.size() != m_boneNames.size()) {
+        spdlog::warn("Skeleton: wind simulation group count ({}) != bone name count ({}); disabling wind metadata",
+            m_windSimulationGroupIndices.size(), m_boneNames.size());
+        m_windSimulationGroupIndices.clear();
+    }
+    m_windProfileIdentity = std::move(windProfileIdentity);
+    m_dynamicWindMetadata = std::move(dynamicWindMetadata);
+    m_windBoneInvariants = std::move(windBoneInvariants);
+	m_lodVariants = std::move(lodVariants);
+    m_bindGlobalMatrices = std::move(bindGlobalMatrices);
+    if (!m_bindGlobalMatrices.empty() && m_bindGlobalMatrices.size() != m_boneNames.size()) {
+        spdlog::warn("Skeleton: bind global count ({}) != bone name count ({}); discarding cached bind globals",
+            m_bindGlobalMatrices.size(), m_boneNames.size());
+        m_bindGlobalMatrices.clear();
+    }
+    if (evaluationOrder.size() == m_boneNames.size()) m_evalOrder = std::move(evaluationOrder);
+    else BuildEvalOrder_();
+}
+
 Skeleton::Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton)
 {
     if (!baseSkeleton) {
@@ -68,6 +147,7 @@ Skeleton::Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton)
     m_isBaseSkeleton = false;
 
     EnsureInstanceBuffersSized_();
+    UpdateTransforms(0.0f, true);
     // Start at rest pose
     m_poseDirty = true;
 }
@@ -84,6 +164,14 @@ Skeleton::Skeleton(const Skeleton& other)
         m_restLocalTransforms = other.m_restLocalTransforms;
         m_evalOrder = other.m_evalOrder;
         m_inverseBindMatrices = other.m_inverseBindMatrices;
+		m_rootParentGlobals = other.m_rootParentGlobals;
+		m_bindGlobalMatrices = other.m_bindGlobalMatrices;
+		m_windSimulationGroupIndices = other.m_windSimulationGroupIndices;
+		m_windProfileIdentity = other.m_windProfileIdentity;
+		m_dynamicWindMetadata = other.m_dynamicWindMetadata;
+		m_windBoneInvariants = other.m_windBoneInvariants;
+		m_lodVariants = other.m_lodVariants;
+        m_skinningGPUFlags = other.m_skinningGPUFlags;
 
         animations = other.animations;
         animationsByName = other.animationsByName;
@@ -98,6 +186,8 @@ Skeleton::Skeleton(const Skeleton& other)
     m_animationSpeed = other.m_animationSpeed;
     m_activeAnimationIndex = other.m_activeAnimationIndex;
     m_currentAnimationConservativeBoundsScale = other.m_currentAnimationConservativeBoundsScale;
+    m_externalPose = other.m_externalPose;
+    m_skinningGPUFlags = other.m_skinningGPUFlags;
 
     EnsureInstanceBuffersSized_();
 
@@ -132,6 +222,45 @@ std::shared_ptr<Skeleton> Skeleton::GetBaseSkeletonShared() const
         return nullptr;
     }
     return m_baseSkeleton;
+}
+
+std::span<const uint32_t> Skeleton::GetWindSimulationGroupIndices() const
+{
+    if (m_isBaseSkeleton) return m_windSimulationGroupIndices;
+    return m_baseSkeleton ? std::span<const uint32_t>(m_baseSkeleton->m_windSimulationGroupIndices) : std::span<const uint32_t>{};
+}
+
+std::string_view Skeleton::GetWindProfileIdentity() const
+{
+    if (m_isBaseSkeleton) return m_windProfileIdentity;
+    return m_baseSkeleton ? std::string_view(m_baseSkeleton->m_windProfileIdentity) : std::string_view{};
+}
+
+const DynamicWindMetadata& Skeleton::GetDynamicWindMetadata() const
+{
+    if (m_isBaseSkeleton) return m_dynamicWindMetadata;
+    static const DynamicWindMetadata empty;
+    return m_baseSkeleton ? m_baseSkeleton->m_dynamicWindMetadata : empty;
+}
+
+std::span<const SkeletonWindBoneInvariant> Skeleton::GetWindBoneInvariants() const
+{
+    auto base = GetBaseSkeletonShared();
+    return base ? std::span<const SkeletonWindBoneInvariant>(base->m_windBoneInvariants) : std::span<const SkeletonWindBoneInvariant>{};
+}
+
+std::span<const SkeletonLodVariant> Skeleton::GetSkeletonLodVariants() const
+{
+	auto base = GetBaseSkeletonShared();
+	return base ? std::span<const SkeletonLodVariant>(base->m_lodVariants) : std::span<const SkeletonLodVariant>{};
+}
+
+uint32_t Skeleton::GetSkinningGPUFlags() const noexcept
+{
+    if (m_isBaseSkeleton) {
+        return m_skinningGPUFlags;
+    }
+    return m_baseSkeleton ? m_baseSkeleton->m_skinningGPUFlags : m_skinningGPUFlags;
 }
 
 // TODO: Inheritance from external parents currently disabled- is it correct to apply these if the renderable entity is already being scaled based on the same parent?
@@ -424,6 +553,20 @@ std::span<const int32_t> Skeleton::GetParentIndices() const
     return {};
 }
 
+std::span<const Skeleton::Matrix> Skeleton::GetRootParentGlobals() const
+{
+    if (m_isBaseSkeleton) return m_rootParentGlobals;
+    if (m_baseSkeleton) return m_baseSkeleton->m_rootParentGlobals;
+    return {};
+}
+
+std::span<const Skeleton::Matrix> Skeleton::GetBindGlobalMatrices() const
+{
+    if (m_isBaseSkeleton) return m_bindGlobalMatrices;
+    if (m_baseSkeleton) return m_baseSkeleton->m_bindGlobalMatrices;
+    return {};
+}
+
 void Skeleton::SetAnimation(size_t index)
 {
     if (m_isBaseSkeleton) {
@@ -506,17 +649,19 @@ size_t Skeleton::GetActiveAnimationIndex() const noexcept
 
 float Skeleton::GetCurrentAnimationConservativeBoundsScale() const noexcept
 {
-    if (m_isBaseSkeleton) {
-        return 1.0f;
-    }
-
-    return m_currentAnimationConservativeBoundsScale;
+    if (HasWindSimulationGroups()) return 1.0f;
+    return m_isBaseSkeleton ? 1.0f : m_currentAnimationConservativeBoundsScale;
 }
 
 void Skeleton::UpdateTransforms(float elapsedSeconds, bool force)
 {
     if (m_isBaseSkeleton) {
         spdlog::warn("Skeleton::UpdateTransforms called on base skeleton - ignored");
+        return;
+    }
+
+    if (m_externalPose && !force) {
+        m_poseDirty = true;
         return;
     }
 
@@ -572,6 +717,54 @@ void Skeleton::UpdateTransforms(float elapsedSeconds, bool force)
         }
     }
 
+    m_poseDirty = true;
+}
+
+void Skeleton::SetExternalPose(std::span<const Matrix> boneMatrices, float conservativeBoundsScale)
+{
+    if (m_isBaseSkeleton) {
+        spdlog::warn("Skeleton::SetExternalPose called on base skeleton - ignored");
+        return;
+    }
+
+    EnsureInstanceBuffersSized_();
+    const auto copyCount = (std::min)(m_boneMatrices.size(), boneMatrices.size());
+    bool changed = !m_externalPose ||
+        std::abs(m_currentAnimationConservativeBoundsScale - conservativeBoundsScale) > 1.0e-5f ||
+        boneMatrices.size() != m_boneMatrices.size();
+
+    if (!changed) {
+        for (size_t i = 0; i < copyCount; ++i) {
+            if (!MatrixNearlyEqual(m_boneMatrices[i], boneMatrices[i])) {
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    if (!changed && copyCount < m_boneMatrices.size()) {
+        const auto identity = DirectX::XMMatrixIdentity();
+        for (size_t i = copyCount; i < m_boneMatrices.size(); ++i) {
+            if (!MatrixNearlyEqual(m_boneMatrices[i], identity)) {
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    m_externalPose = true;
+    if (!changed) {
+        return;
+    }
+
+    for (size_t i = 0; i < copyCount; ++i) {
+        m_boneMatrices[i] = boneMatrices[i];
+    }
+    for (size_t i = copyCount; i < m_boneMatrices.size(); ++i) {
+        m_boneMatrices[i] = DirectX::XMMatrixIdentity();
+    }
+
+    m_currentAnimationConservativeBoundsScale = conservativeBoundsScale;
     m_poseDirty = true;
 }
 

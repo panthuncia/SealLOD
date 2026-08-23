@@ -14,7 +14,8 @@
 #include "ShaderBuffers.h"
 
 class MeshInstance;
-class DynamicGloballyIndexedResource;
+namespace org { class DynamicGloballyIndexedResource; }
+using org::DynamicGloballyIndexedResource;
 class TextureAsset;
 class Mesh;
 
@@ -95,6 +96,10 @@ namespace Components {
         CameraInfo info;
     };
 
+    struct ExternalCameraMatrices {
+        CameraInfo info;
+    };
+
     struct PrimaryCamera {};
 
     struct ProjectionMatrix {
@@ -110,11 +115,6 @@ namespace Components {
             : frustumPlanes(std::move(frustumPlanes)) {
         }
         std::vector<std::array<ClippingPlane, 6>> frustumPlanes;
-    };
-
-    struct IndirectCommandBuffers {
-        std::shared_ptr<DynamicGloballyIndexedResource> meshletCullingIndirectCommandBuffer;
-        std::shared_ptr<DynamicGloballyIndexedResource> meshletCullingResetIndirectCommandBuffer;
     };
 
     struct SceneNode {};
@@ -155,6 +155,12 @@ namespace Components {
         uint64_t generation = 0;
     };
 
+    struct RenderBridgeDirtyState {
+        bool renderables = true;
+        bool cameras = true;
+        bool lights = true;
+    };
+
     struct Name {
         Name() = default;
         Name(std::string name) : name(std::move(name)) {}
@@ -174,6 +180,14 @@ namespace Components {
             : meshInstances(std::move(instances)) {
         }
         std::vector<std::shared_ptr<MeshInstance>> meshInstances;
+        uint64_t generation = 0;
+
+        void BumpGeneration() { ++generation; }
+    };
+
+    struct InstanceTransforms {
+        std::vector<Matrix> transforms;
+        std::vector<uint32_t> meshInstanceTransformIndices;
         uint64_t generation = 0;
 
         void BumpGeneration() { ++generation; }

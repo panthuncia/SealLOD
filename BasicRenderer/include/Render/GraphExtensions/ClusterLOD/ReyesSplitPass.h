@@ -7,8 +7,10 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
-class PixelBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class ReyesSplitPass final : public ComputePass {
 public:
@@ -33,7 +35,11 @@ public:
         uint32_t maxSplitQueueEntries,
         uint32_t splitPassIndex,
         uint32_t maxSplitPassCount,
-        uint32_t phaseIndex);
+        uint32_t phaseIndex,
+        std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer = nullptr,
+        std::shared_ptr<Buffer> replaySplitQueueBuffer = nullptr,
+        std::shared_ptr<Buffer> replaySplitQueueCounterBuffer = nullptr,
+        std::shared_ptr<Buffer> replaySplitQueueOverflowBuffer = nullptr);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -59,6 +65,10 @@ private:
     std::shared_ptr<PixelBuffer> m_shadowDirtyHierarchyTexture;
     std::shared_ptr<PixelBuffer> m_shadowNonRasterableHierarchyTexture;
     std::shared_ptr<Buffer> m_telemetryBuffer;
+    std::shared_ptr<Buffer> m_viewDepthSrvIndicesBuffer;
+    std::shared_ptr<Buffer> m_replaySplitQueueBuffer;
+    std::shared_ptr<Buffer> m_replaySplitQueueCounterBuffer;
+    std::shared_ptr<Buffer> m_replaySplitQueueOverflowBuffer;
     uint32_t m_maxSplitQueueEntries = 0u;
     uint32_t m_splitPassIndex = 0u;
     uint32_t m_maxSplitPassCount = 0u;

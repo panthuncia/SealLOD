@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
 #include <DirectXMath.h>
 #include <vector>
 #include <memory>
@@ -18,6 +19,12 @@ enum class MaterialModel : uint32_t {
     OpenPBR = 1,
 };
 
+enum class ObjectSurfaceSamplingMode : uint32_t {
+    None = 0,
+    TriplanarStochastic = 1,
+    AtlasBakedHeight = 2,
+};
+
 struct TextureAndConstant {
 	TextureAndConstant() = default;
     TextureAndConstant(std::shared_ptr<TextureAsset> tex, float f) : texture(tex), factor(f) {
@@ -29,6 +36,7 @@ struct TextureAndConstant {
 	std::vector<uint32_t> channels; // For swizzling texture channels, e.g. R, G, B, A
 	uint32_t uvSetIndex = 0;
 	std::string uvSetName;
+	std::string sourcePath;
 };
 
 struct OpenPBRTextureBindings {
@@ -92,6 +100,15 @@ struct OpenPBRMaterialParameters {
 
 struct MaterialDescription {
     MaterialModel materialModel = MaterialModel::LegacyPreviewSurface;
+    std::uint64_t sourceMaterialIdentity = 0;
+    std::uint32_t semanticFamily = 0;
+    std::uint32_t surfaceFlags = 0;
+    std::uint32_t diagnosticReason = 0;
+    DirectX::XMFLOAT3 resolvedSpecularF0 = { 0.04f, 0.04f, 0.04f };
+    DirectX::XMFLOAT3 legacySpecularColor = { 1.0f, 1.0f, 1.0f };
+    float legacySpecularStrength = 1.0f;
+    float sourceGlossiness = 0.5f;
+    std::uint32_t glossToRoughnessConvention = 0;
     std::string name;
     DirectX::XMFLOAT4   diffuseColor = { 1,1,1,1 };
     DirectX::XMFLOAT4   emissiveColor = { 0,0,0,1 };
@@ -103,6 +120,19 @@ struct MaterialDescription {
 	bool invertNormalGreen = false; // For OpenGL compatibility
 	bool forceDoubleSided = false;
     bool enableGeometricDisplacement = false;
+	bool geometricDisplacementOptIn = false;
+	bool brniflyVertexAlpha = false;
+	bool brniflyZBufferWrite = true;
+	bool brniflyDecal = false;
+	bool brniflyDynamicDecal = false;
+	bool brniflyModelSpaceNormals = false;
+	bool heightMapFromBaseColorAlpha = false;
+	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+	bool objectSurfaceUseTriplanarProjection = false;
+	bool objectSurfaceUseTripleTapStochastic = false;
+	float objectSurfaceTexelDensity = 1.0f;
+	std::string staticTextureOverrideSourceName;
+	bool forceVoxelMaterial = false;
 	BlendState blendState = BlendState::BLEND_STATE_UNKNOWN; // By default, infer from other properties
     TextureAndConstant  baseColor = {};
     TextureAndConstant  metallic = { nullptr, 0.0f };
@@ -114,6 +144,8 @@ struct MaterialDescription {
     TextureAndConstant	normal = {};
     OpenPBRMaterialParameters openPBR = {};
     OpenPBRTextureBindings openPBRTextures = {};
+    bool glintEnabled = false;
+    DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
 };
 
 inline OpenPBRMaterialParameters TranslateLegacyMaterialDescriptionToOpenPBR(const MaterialDescription& desc) {
@@ -127,6 +159,18 @@ inline OpenPBRMaterialParameters TranslateLegacyMaterialDescriptionToOpenPBR(con
     };
     result.baseMetalness = std::clamp(desc.metallic.factor.Get(), 0.0f, 1.0f);
     result.specularRoughness = std::clamp(desc.roughness.factor.Get(), 0.0f, 1.0f);
+    const float f0Peak = std::clamp(std::max({ desc.resolvedSpecularF0.x,
+        desc.resolvedSpecularF0.y, desc.resolvedSpecularF0.z }), 0.0f, 0.9999f);
+    if (f0Peak > 0.0f) {
+        const float sqrtF0 = std::sqrt(f0Peak);
+        result.specularIor = (1.0f + sqrtF0) / std::max(1.0f - sqrtF0, 1.0e-4f);
+        result.specularColor = {
+            std::clamp(desc.resolvedSpecularF0.x / f0Peak, 0.0f, 1.0f),
+            std::clamp(desc.resolvedSpecularF0.y / f0Peak, 0.0f, 1.0f),
+            std::clamp(desc.resolvedSpecularF0.z / f0Peak, 0.0f, 1.0f) };
+    } else {
+        result.specularWeight = 0.0f;
+    }
 
     const float emissiveScale = desc.emissive.factor.Get();
     const DirectX::XMFLOAT3 emissive = {

@@ -1,8 +1,12 @@
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/vertexFlags.hlsli"
 #include "include/visibleClusterPacking.hlsli"
+#include "include/clodPageAccess.hlsli"
+#include "include/clodReyesTransition.hlsli"
 #include "include/clodStructs.hlsli"
+#include "include/materialFlags.hlsli"
 #include "PerPassRootConstants/clodReyesRootConstants.h"
 
 static const uint REYES_CLASSIFY_GROUP_SIZE = 64u;
@@ -72,19 +76,58 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
 
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstances = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
     StructuredBuffer<PerMeshBuffer> perMeshes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
 
-    const PerMeshInstanceBuffer meshInstance = perMeshInstances[instanceID];
+    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    const CLodMeshMetadata metadata = clodMeshMetadataBuffer[offsets.clodMeshMetadataIndex];
     const uint materialIndex = perMesh.materialDataIndex;
     const MaterialInfo materialInfo = materialDataBuffer[materialIndex];
 
-    const bool displacementEnabled = materialInfo.geometricDisplacementEnabled != 0u;
+    const bool displacementEnabled =
+        materialInfo.geometricDisplacementEnabled != 0u &&
+        (((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u) ||
+         (((materialInfo.materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u) &&
+          ((materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)));
     const float displacementSpan = max(0.0f, materialInfo.geometricDisplacementMax - materialInfo.geometricDisplacementMin);
     const bool skinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
     const bool hasMeaningfulDisplacement = displacementEnabled && displacementSpan > 1e-5f;
+    bool fullyBeyondReyesCutoff = false;
+    if (hasMeaningfulDisplacement)
+    {
+        const uint localMeshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
+        const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+        const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+        const CLodPageHeader pageHeader = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+        const CLodMeshletDescriptor meshletDesc =
+            LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, pageHeader.descriptorOffset, localMeshletIndex);
+        const BoundingSphere meshletBounds = CLodComputeMeshletBounds(
+            meshletDesc,
+            pageHeader,
+            pageSlabDescriptorIndex,
+            pageSlabByteOffset,
+            perMesh.vertexFlags,
+            meshInstance.skinningInstanceSlot,
+            metadata,
+            CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
+        const PerObjectBuffer objectData = LoadInstanceTransformForDraw(instanceID);
+        const float uniformScale = CLodMaxAxisScale_RowVector(objectData.model);
+        const float3 centerWorld = mul(float4(meshletBounds.sphere.xyz, 1.0f), objectData.model).xyz;
+        const float radiusWorld = meshletBounds.sphere.w * uniformScale;
+        StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+        ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+        fullyBeyondReyesCutoff = CLodReyesSphereFullyBeyondCutoff(
+            perFrame.heightFadeStartDistance,
+            perFrame.heightFadeEndDistance,
+            cameras[CLodVisibleClusterViewID(packedCluster)],
+            centerWorld,
+            radiusWorld);
+    }
+    const bool hasEffectiveReyesDisplacement = hasMeaningfulDisplacement && !fullyBeyondReyesCutoff;
     const uint classifyMode = CLOD_REYES_CLASSIFY_MODE;
     uint routeKind = CLOD_REYES_ROUTE_VISIBILITY;
     bool emitOwnedCluster = false;
@@ -93,18 +136,18 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (classifyMode == REYES_CLASSIFY_MODE_DEFAULT)
     {
         routeKind = CLOD_REYES_ROUTE_VISIBILITY;
-        emitOwnedCluster = hasMeaningfulDisplacement;
+        emitOwnedCluster = hasEffectiveReyesDisplacement;
         emitFullCluster = !emitOwnedCluster;
     }
     else if (classifyMode == REYES_CLASSIFY_MODE_SHADOW_FINE_DISPLACED_ONLY)
     {
         routeKind = CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM;
-        emitOwnedCluster = hasMeaningfulDisplacement;
+        emitOwnedCluster = hasEffectiveReyesDisplacement;
     }
     else if (classifyMode == REYES_CLASSIFY_MODE_SHADOW_COARSE_LARGE_ONLY)
     {
         routeKind = CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM;
-        emitOwnedCluster = !hasMeaningfulDisplacement;
+        emitOwnedCluster = !hasEffectiveReyesDisplacement;
     }
 
     const uint commonFlags =

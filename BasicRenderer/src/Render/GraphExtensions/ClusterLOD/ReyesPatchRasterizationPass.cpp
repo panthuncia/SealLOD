@@ -3,8 +3,10 @@
 #include "Managers/ViewManager.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
+#include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
+#include "Render/TerrainRvtTelemetry.h"
 #include "BuiltinResources.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "ShaderBuffers.h"
@@ -13,6 +15,7 @@
 
 ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
     std::shared_ptr<Buffer> visibleClustersBuffer,
+    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> diceQueueBuffer,
     std::shared_ptr<Buffer> diceQueueCounterBuffer,
     std::shared_ptr<Buffer> rasterWorkBuffer,
@@ -28,6 +31,7 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
     uint32_t phaseIndex,
     uint32_t patchVisibilityIndexBase)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
+    , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_diceQueueBuffer(std::move(diceQueueBuffer))
     , m_diceQueueCounterBuffer(std::move(diceQueueCounterBuffer))
     , m_rasterWorkBuffer(std::move(rasterWorkBuffer))
@@ -46,7 +50,7 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/reyesPatchRaster.hlsl",
         L"ReyesPatchRasterCS",
-        {},
+        IsTerrainRvtTelemetryDebugEnabled() ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } } : std::vector<DxcDefine>{},
         "CLod.ReyesPatchRaster.PSO");
 
     rhi::IndirectArg dispatchArgs[] = {
@@ -64,6 +68,7 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
 {
     builder->WithShaderResource(
             m_visibleClustersBuffer,
+            m_visibleClusterTransformIndicesBuffer,
             m_diceQueueBuffer,
             m_diceQueueCounterBuffer,
             m_rasterWorkBuffer,
@@ -74,18 +79,49 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
             m_viewRasterInfoBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::CullingCameraBuffer,
-			Builtin::PerMaterialDataBuffer,
+            Builtin::PerMaterialDataBuffer,
+            Builtin::CLod::Offsets,
+            Builtin::CLod::MeshMetadata,
+            Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices,
+            "Builtin::PerMaterialEvalDataBuffer",
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
+            Builtin::Terrain::Sets,
+            Builtin::Terrain::Layers,
+            Builtin::Terrain::StochasticLayers,
+            Builtin::Terrain::LayerRefs,
+            Builtin::Terrain::Regions,
+            Builtin::Terrain::WeightBlocks,
+            Builtin::Terrain::TextureGroup,
+            Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
+            Builtin::Terrain::RvtPageTable,
+            Builtin::Terrain::RvtPageKeys,
+            Builtin::Terrain::RvtPhysicalPageOwner,
+            Builtin::Terrain::RvtPhysicalPageAtlas,
+            Builtin::Terrain::RvtHeightResidentCache,
+            Builtin::Terrain::RvtHeightAtlas,
+            Builtin::Terrain::RvtAlbedoAtlas,
+            Builtin::Terrain::RvtNormalAtlas,
+            Builtin::Terrain::RvtMaterialAtlas,
 			Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
-		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
+        .WithUnorderedAccess(
+            Builtin::Material::TextureStreamingFeedbackBuffer,
+            Builtin::Terrain::RvtRequestMasks,
+            Builtin::Terrain::RvtRequestList,
+            Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtStats)
         .WithIndirectArguments(m_indirectArgsBuffer)
-        .WithUnorderedAccess(m_telemetryBuffer);
+        .WithUnorderedAccess(m_telemetryBuffer)
+        .WithConstantBuffer(Builtin::PerFrameBuffer);
 
     for (const auto& visibilityBuffer : m_visibilityBuffers) {
         builder->WithUnorderedAccess(visibilityBuffer);
@@ -122,6 +158,10 @@ bool ReyesPatchRasterizationPass::DeclaredResourcesChanged() const
 
 PassReturn ReyesPatchRasterizationPass::Execute(PassExecutionContext& executionContext)
 {
+    if (SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)()) {
+        return {};
+    }
+
     auto* renderContext = executionContext.hostData->Get<RenderContext>();
     auto& context = *renderContext;
     auto& commandList = executionContext.commandList;
@@ -133,6 +173,8 @@ PassReturn ReyesPatchRasterizationPass::Execute(PassExecutionContext& executionC
 
     uint32_t uintRootConstants[NumMiscUintRootConstants] = {};
     uintRootConstants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetSRVInfo(0).slot.index;
+    uintRootConstants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
+        m_visibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_diceQueueCounterBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_WORK_BUFFER_DESCRIPTOR_INDEX] = m_rasterWorkBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_DESCRIPTOR_INDEX] = m_diceQueueBuffer->GetSRVInfo(0).slot.index;

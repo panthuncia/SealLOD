@@ -18,7 +18,11 @@ ReyesQueueResetPass::ReyesQueueResetPass(
     std::shared_ptr<Buffer> ownershipBitsetBuffer,
     std::shared_ptr<Buffer> telemetryBuffer,
     uint32_t phaseIndex,
-    bool clearDiceQueueCounter)
+    bool clearDiceQueueCounter,
+    std::shared_ptr<Buffer> replaySplitQueueCounter,
+    std::shared_ptr<Buffer> replaySplitQueueOverflowCounter,
+    std::shared_ptr<Buffer> replayDiceQueueCounter,
+    std::shared_ptr<Buffer> replayDiceQueueOverflowCounter)
     : m_fullClusterCounter(std::move(fullClusterCounter))
     , m_ownedClusterCounter(std::move(ownedClusterCounter))
     , m_splitQueueCounters(std::move(splitQueueCounters))
@@ -27,6 +31,10 @@ ReyesQueueResetPass::ReyesQueueResetPass(
     , m_diceQueueOverflowCounter(std::move(diceQueueOverflowCounter))
     , m_ownershipBitsetBuffer(std::move(ownershipBitsetBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
+    , m_replaySplitQueueCounter(std::move(replaySplitQueueCounter))
+    , m_replaySplitQueueOverflowCounter(std::move(replaySplitQueueOverflowCounter))
+    , m_replayDiceQueueCounter(std::move(replayDiceQueueCounter))
+    , m_replayDiceQueueOverflowCounter(std::move(replayDiceQueueOverflowCounter))
     , m_phaseIndex(phaseIndex) {
     m_clearDiceQueueCounter = clearDiceQueueCounter;
     m_clearCountersPso = PSOManager::GetInstance().MakeComputePipeline(
@@ -50,6 +58,18 @@ ReyesQueueResetPass::ReyesQueueResetPass(
 void ReyesQueueResetPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
     builder->WithUnorderedAccess(m_fullClusterCounter, m_ownedClusterCounter, m_diceQueueCounter, m_diceQueueOverflowCounter, m_telemetryBuffer);
+    if (m_replaySplitQueueCounter) {
+        builder->WithUnorderedAccess(m_replaySplitQueueCounter);
+    }
+    if (m_replaySplitQueueOverflowCounter) {
+        builder->WithUnorderedAccess(m_replaySplitQueueOverflowCounter);
+    }
+    if (m_replayDiceQueueCounter) {
+        builder->WithUnorderedAccess(m_replayDiceQueueCounter);
+    }
+    if (m_replayDiceQueueOverflowCounter) {
+        builder->WithUnorderedAccess(m_replayDiceQueueOverflowCounter);
+    }
     if (m_ownershipBitsetBuffer) {
         builder->WithUnorderedAccess(m_ownershipBitsetBuffer);
     }
@@ -84,6 +104,18 @@ PassReturn ReyesQueueResetPass::Execute(PassExecutionContext& executionContext)
     uintRootConstants[CLOD_REYES_RESET_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_diceQueueCounter->GetUAVShaderVisibleInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_RESET_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = m_diceQueueOverflowCounter->GetUAVShaderVisibleInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_RESET_CLEAR_DICE_QUEUE_COUNTER] = m_clearDiceQueueCounter ? 1u : 0u;
+    uintRootConstants[CLOD_REYES_RESET_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_replaySplitQueueCounter
+        ? m_replaySplitQueueCounter->GetUAVShaderVisibleInfo(0).slot.index
+        : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_RESET_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = m_replaySplitQueueOverflowCounter
+        ? m_replaySplitQueueOverflowCounter->GetUAVShaderVisibleInfo(0).slot.index
+        : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_RESET_REPLAY_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_replayDiceQueueCounter
+        ? m_replayDiceQueueCounter->GetUAVShaderVisibleInfo(0).slot.index
+        : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_RESET_REPLAY_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = m_replayDiceQueueOverflowCounter
+        ? m_replayDiceQueueOverflowCounter->GetUAVShaderVisibleInfo(0).slot.index
+        : 0xFFFFFFFFu;
 
     commandList.BindPipeline(m_clearCountersPso.GetAPIPipelineState().GetHandle());
     BindResourceDescriptorIndices(commandList, m_clearCountersPso.GetResourceDescriptorSlots());
@@ -126,7 +158,16 @@ void ReyesQueueResetPass::Update(const UpdateExecutionContext& executionContext)
     CLodReyesTelemetry telemetry{};
     telemetry.phaseIndex = m_phaseIndex;
     telemetry.configuredMaxSplitPassCount = CLodReyesMaxSplitPassCount;
-    BUFFER_UPLOAD(&telemetry, sizeof(CLodReyesTelemetry), rg::runtime::UploadTarget::FromShared(m_telemetryBuffer), 0);
+    telemetry.objectReyesAtlasDebugMinMaterialSlot = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinHeightDescriptor = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinSamplerDescriptor = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinHeightValueU16 = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinPatchHeightValueU16 = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinPatchUvXU16 = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinPatchUvYU16 = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinPageUvSetCount = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinHeightUvSetIndex = 0xFFFFFFFFu;
+    BUFFER_UPLOAD(&telemetry, sizeof(CLodReyesTelemetry), org::runtime::UploadTarget::FromShared(m_telemetryBuffer), 0);
 }
 
 void ReyesQueueResetPass::Cleanup() {}

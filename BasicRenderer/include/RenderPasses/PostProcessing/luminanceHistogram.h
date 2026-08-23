@@ -12,7 +12,7 @@ public:
         CreateComputePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) {
+    void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithShaderResource(Builtin::Color::HDRColorTarget)
             .WithUnorderedAccess(Builtin::PostProcessing::LuminanceHistogram);
     }
@@ -21,17 +21,18 @@ public:
 		// Removed redundant Register calls now covered by declared-resource auto descriptor registration
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
+	PassReturn Execute(PassExecutionContext& executionContext) override {
         auto* renderContext = executionContext.hostData->Get<RenderContext>();
         auto& context = *renderContext;
         auto& psoManager = PSOManager::GetInstance();
         auto& commandList = executionContext.commandList;
 
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
+		commandList.SetDescriptorHeaps(executionContext.GetResourceDescriptorHeap().GetHandle(),
+			executionContext.GetSamplerDescriptorHeap().GetHandle());
 
         // Set the compute pipeline state
-		commandList.BindLayout(psoManager.GetComputeRootSignature().GetHandle());
-		commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
+		commandList.BindLayout(psoManager.GetComputeRootSignature(executionContext.backendInstance).GetHandle());
+		commandList.BindPipeline(psoManager.ResolvePipeline(m_pso, executionContext.backendInstance).GetHandle());
 
         uint32_t passConstants[NumMiscUintRootConstants] = {};
         passConstants[MIN_LOG_LUMINANCE] = as_uint(0.001f); // Minimum log luminance value
@@ -43,8 +44,10 @@ public:
 
         // Dispatch
         // In luminance histogram each thread group handles a 16x16 block
-        unsigned int x = (context.renderResolution.x + 16 - 1) / 16;
-        unsigned int y = (context.renderResolution.y + 16 - 1) / 16;
+        const unsigned int sampledWidth = (context.renderResolution.x + 3) / 4;
+        const unsigned int sampledHeight = (context.renderResolution.y + 3) / 4;
+        unsigned int x = (sampledWidth + 16 - 1) / 16;
+        unsigned int y = (sampledHeight + 16 - 1) / 16;
         commandList.Dispatch(x, y, 1);
 
         return {};

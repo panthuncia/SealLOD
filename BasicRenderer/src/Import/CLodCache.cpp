@@ -1,26 +1,36 @@
 #include "Import/CLodCache.h"
+#include "Mesh/DefaultCLodSettings.h"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <span>
 #include <sstream>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 #include <cwctype>
+#include <string_view>
 
 #include <boost/container_hash/hash.hpp>
-#include <pxr/base/vt/array.h>
-#include <pxr/base/vt/value.h>
-#include <pxr/usd/sdf/path.h>
-#include <pxr/usd/sdf/types.h>
-#include <pxr/usd/usd/attribute.h>
-#include <pxr/usd/usd/payloads.h>
-#include <pxr/usd/usd/prim.h>
-#include <pxr/usd/usd/stage.h>
-
+#include <BasicTelemetry/Telemetry.h>
 #include <spdlog/spdlog.h>
+#include <tracy/Tracy.hpp>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 #if BASICRENDERER_HAS_DIRECTSTORAGE
 #include "Managers/Singletons/DirectStorageManager.h"
@@ -31,10 +41,224 @@
 
 namespace CLodCache {
 
-	namespace {
-		static constexpr const char* kRootPrimPath = "/CLodCache";
-		static constexpr const char* kGroupsPrimPath = "/CLodCache/Groups";
+	struct MappedContainerLease::Impl {
+#ifdef _WIN32
+		~Impl() {
+			if (data != nullptr) {
+				UnmapViewOfFile(data);
+			}
+			if (mappingHandle != nullptr) {
+				CloseHandle(mappingHandle);
+			}
+			if (fileHandle != INVALID_HANDLE_VALUE) {
+				CloseHandle(fileHandle);
+			}
+		}
 
+		HANDLE fileHandle = INVALID_HANDLE_VALUE;
+		HANDLE mappingHandle = nullptr;
+#endif
+		const std::byte* data = nullptr;
+		uint64_t fileSize = 0u;
+		uint32_t pageCount = 0u;
+	};
+
+	MappedContainerLease::MappedContainerLease(
+		std::shared_ptr<const Impl> impl)
+		: m_impl(std::move(impl)) {
+	}
+
+	MappedContainerLease::~MappedContainerLease() = default;
+
+	uint32_t MappedContainerLease::GetPageCount() const {
+		return m_impl != nullptr ? m_impl->pageCount : 0u;
+	}
+
+	bool MappedContainerLease::GetBlob(
+		uint64_t offset,
+		uint32_t size,
+		std::span<const std::byte>& outBlob) const {
+		outBlob = {};
+		if (m_impl == nullptr || m_impl->data == nullptr) {
+			return false;
+		}
+		const uint64_t end = offset + static_cast<uint64_t>(size);
+		if (end < offset || end > m_impl->fileSize) {
+			return false;
+		}
+		outBlob = std::span<const std::byte>(
+			m_impl->data + offset, size);
+		return true;
+	}
+
+	bool MappedContainerLease::WarmBlob(
+		uint64_t offset,
+		uint32_t size) const {
+		return WarmBlobs(
+			std::span<const uint64_t>(&offset, 1u),
+			std::span<const uint32_t>(&size, 1u));
+	}
+
+	bool MappedContainerLease::WarmBlobs(
+		std::span<const uint64_t> offsets,
+		std::span<const uint32_t> sizes) const {
+		if (m_impl == nullptr ||
+			m_impl->data == nullptr ||
+			offsets.size() != sizes.size()) {
+			return false;
+		}
+		if (offsets.empty()) {
+			return true;
+		}
+#ifdef _WIN32
+		thread_local std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+		ranges.clear();
+		ranges.reserve(offsets.size());
+		for (size_t i = 0u; i < offsets.size(); ++i) {
+			const uint64_t end =
+				offsets[i] + static_cast<uint64_t>(sizes[i]);
+			if (end < offsets[i] || end > m_impl->fileSize) {
+				return false;
+			}
+			WIN32_MEMORY_RANGE_ENTRY range{};
+			range.VirtualAddress = const_cast<std::byte*>(
+				m_impl->data + offsets[i]);
+			range.NumberOfBytes = sizes[i];
+			ranges.push_back(range);
+		}
+		return PrefetchVirtualMemory(
+			GetCurrentProcess(),
+			static_cast<ULONG_PTR>(ranges.size()),
+			ranges.data(),
+			0u) != FALSE;
+#else
+		return false;
+#endif
+	}
+
+	bool AcquireMappedContainer(
+		const std::wstring& containerPath,
+		uint32_t expectedPageCount,
+		std::shared_ptr<const MappedContainerLease>& outLease) {
+		ZoneScopedN("CLodCache::AcquireMappedContainer");
+		BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer");
+		ZoneValue(static_cast<int64_t>(expectedPageCount));
+		outLease.reset();
+#ifndef _WIN32
+		(void)containerPath;
+		(void)expectedPageCount;
+		return false;
+#else
+		static std::mutex cacheMutex;
+		static std::unordered_map<
+			std::wstring,
+			std::weak_ptr<const MappedContainerLease>> cache;
+		static std::unordered_map<std::wstring, std::shared_ptr<std::mutex>> pathMutexes;
+		std::unique_lock<std::mutex> lock(cacheMutex, std::defer_lock);
+		std::shared_ptr<std::mutex> pathMutex;
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::WaitCacheMutex");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::WaitCacheMutex");
+			lock.lock();
+			auto& entry = pathMutexes[containerPath];
+			if (!entry) {
+				entry = std::make_shared<std::mutex>();
+			}
+			pathMutex = entry;
+		}
+		if (auto it = cache.find(containerPath); it != cache.end()) {
+			ZoneScopedN("CLodCache::AcquireMappedContainer::CacheHit");
+			if (auto existing = it->second.lock(); existing && existing->GetPageCount() == expectedPageCount) {
+				outLease = std::move(existing);
+				return true;
+			}
+			cache.erase(it);
+		}
+		lock.unlock();
+
+		// Only one worker may populate a particular container. Different container
+		// paths still open and map concurrently.
+		std::unique_lock<std::mutex> pathLock(*pathMutex, std::defer_lock);
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::WaitPathMutex");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::WaitPathMutex");
+			pathLock.lock();
+		}
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::RecheckCache");
+			std::lock_guard cacheLock(cacheMutex);
+			if (auto it = cache.find(containerPath); it != cache.end()) {
+				if (auto existing = it->second.lock(); existing && existing->GetPageCount() == expectedPageCount) {
+					outLease = std::move(existing);
+					return true;
+				}
+				cache.erase(it);
+			}
+		}
+
+		auto impl = std::make_shared<MappedContainerLease::Impl>();
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::OpenFile");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::OpenFile");
+			impl->fileHandle = CreateFileW(
+				containerPath.c_str(),
+				GENERIC_READ,
+				FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+				nullptr,
+				OPEN_EXISTING,
+				FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+				nullptr);
+		}
+		if (impl->fileHandle == INVALID_HANDLE_VALUE) {
+			return false;
+		}
+		LARGE_INTEGER fileSize{};
+		if (!GetFileSizeEx(impl->fileHandle, &fileSize) ||
+			fileSize.QuadPart < 16) {
+			return false;
+		}
+		impl->fileSize = static_cast<uint64_t>(fileSize.QuadPart);
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::CreateFileMapping");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::CreateFileMapping");
+			impl->mappingHandle = CreateFileMappingW(
+				impl->fileHandle, nullptr, PAGE_READONLY, 0, 0, nullptr);
+		}
+		if (impl->mappingHandle == nullptr) {
+			return false;
+		}
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::MapView");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::MapView");
+			impl->data = static_cast<const std::byte*>(
+				MapViewOfFile(impl->mappingHandle, FILE_MAP_READ, 0, 0, 0));
+		}
+		if (impl->data == nullptr) {
+			return false;
+		}
+		// The companion metadata was schema-validated when the mesh cache was
+		// loaded and owns the page locators/count. Avoid faulting the first page of
+		// every one of thousands of containers merely to re-read those fields.
+		// GetBlob still validates every locator against the mapped file size.
+		impl->pageCount = expectedPageCount;
+		auto lease = std::shared_ptr<const MappedContainerLease>(
+			new MappedContainerLease(std::move(impl)));
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::PublishCache");
+			lock.lock();
+			if (auto existing = cache[containerPath].lock();
+				existing && existing->GetPageCount() == expectedPageCount) {
+				outLease = std::move(existing);
+				return true;
+			}
+			cache[containerPath] = lease;
+		}
+		outLease = std::move(lease);
+		return true;
+#endif
+	}
+
+	namespace {
 		std::wstring SanitizeFolderName(const std::wstring& input)
 		{
 			if (input.empty()) {
@@ -83,6 +307,11 @@ namespace CLodCache {
 		std::wstring GetCacheFilePathBySource(const std::wstring& fileName, const std::string& sourceIdentifier)
 		{
 			return GetCacheFilePath(fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
+		}
+
+		std::wstring BuildCacheFilePathBySource(const std::wstring& fileName, const std::string& sourceIdentifier)
+		{
+			return BuildCacheFilePath(fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
 		}
 
 		template<typename T>
@@ -198,8 +427,20 @@ namespace CLodCache {
 			WritePod(out, cacheSource.buildConfigHash);
 			WriteString(out, ws2s(cacheSource.containerFileName));
 			WriteVectorPod(out, prebuiltData.nodes);
+			WriteVectorPod(out, prebuiltData.nodeSkinningInfos);
+			WriteVectorPod(out, prebuiltData.nodeBoneIndices);
+			WritePod(out, prebuiltData.nodeBoneLimit);
 			WriteVectorPod(out, prebuiltData.lodNodeRanges);
 			WriteVectorPod(out, prebuiltData.lodLevelRoots);
+			WriteVectorPod(out, prebuiltData.assemblyTransforms);
+			WriteVectorPod(out, prebuiltData.assemblyInstances);
+			WriteVectorPod(out, prebuiltData.assemblyBoneRemaps);
+			WriteVectorPod(out, prebuiltData.assemblyBoneRemapIndices);
+			WritePod(out, prebuiltData.assemblySkeletonArtifact.id.digest);
+			WritePod(out, prebuiltData.assemblySkeletonArtifact.schemaVersion);
+			WritePod(out, prebuiltData.assemblySkeletonArtifact.jointCount);
+			WriteVectorPod(out, prebuiltData.partRecords);
+			WritePod(out, prebuiltData.rootPartIndex);
 			WritePod(out, prebuiltData.maxDepth);
 			WritePod(out, prebuiltData.maxTraversalDepth);
 
@@ -241,8 +482,20 @@ namespace CLodCache {
 			if (!ReadString(blob, offset, containerFileName)) return false;
 			out.prebuiltData.cacheSource.containerFileName = s2ws(containerFileName);
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.nodes)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.nodeSkinningInfos)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.nodeBoneIndices)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.nodeBoneLimit)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.lodNodeRanges)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.lodLevelRoots)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyTransforms)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyInstances)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyBoneRemaps)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyBoneRemapIndices)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeletonArtifact.id.digest)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeletonArtifact.schemaVersion)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeletonArtifact.jointCount)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.partRecords)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.rootPartIndex)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxDepth)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxTraversalDepth)) return false;
 
@@ -250,6 +503,8 @@ namespace CLodCache {
 		}
 
 		static constexpr uint32_t kContainerMagic = 0x444F4C43u; // CLOD
+		static constexpr uint32_t kMetadataMagic = 0x4D4C4F43u; // COLM
+		static constexpr uint32_t kMetadataVersion = 1u;
 
 		struct ContainerHeader {
 			uint32_t magic = kContainerMagic;
@@ -257,6 +512,123 @@ namespace CLodCache {
 			uint32_t reserved = 0;
 			uint32_t pageCount = 0;
 		};
+
+#ifdef _WIN32
+		class MappedContainerFile
+		{
+		public:
+			~MappedContainerFile()
+			{
+				Close();
+			}
+
+			bool Open(const std::wstring& path)
+			{
+				if (valid && filePath == path) {
+					return true;
+				}
+
+				Close();
+				filePath = path;
+				if (filePath.empty()) {
+					return false;
+				}
+
+				fileHandle = CreateFileW(
+					filePath.c_str(),
+					GENERIC_READ,
+					FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+					nullptr,
+					OPEN_EXISTING,
+					FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+					nullptr);
+				if (fileHandle == INVALID_HANDLE_VALUE) {
+					return false;
+				}
+
+				LARGE_INTEGER fileSizeLarge{};
+				if (!GetFileSizeEx(fileHandle, &fileSizeLarge) || fileSizeLarge.QuadPart < static_cast<LONGLONG>(sizeof(ContainerHeader))) {
+					Close();
+					return false;
+				}
+				fileSize = static_cast<uint64_t>(fileSizeLarge.QuadPart);
+
+				mappingHandle = CreateFileMappingW(fileHandle, nullptr, PAGE_READONLY, 0, 0, nullptr);
+				if (mappingHandle == nullptr) {
+					Close();
+					return false;
+				}
+
+				const void* mappedView = MapViewOfFile(mappingHandle, FILE_MAP_READ, 0, 0, 0);
+				if (mappedView == nullptr) {
+					Close();
+					return false;
+				}
+				data = static_cast<const std::byte*>(mappedView);
+
+				ContainerHeader header{};
+				std::memcpy(&header, data, sizeof(header));
+				if (header.magic != kContainerMagic || header.version != 4u) {
+					Close();
+					return false;
+				}
+
+				pageCount = header.pageCount;
+				valid = true;
+				return true;
+			}
+
+			void Close()
+			{
+				if (data != nullptr) {
+					UnmapViewOfFile(data);
+					data = nullptr;
+				}
+				if (mappingHandle != nullptr) {
+					CloseHandle(mappingHandle);
+					mappingHandle = nullptr;
+				}
+				if (fileHandle != INVALID_HANDLE_VALUE) {
+					CloseHandle(fileHandle);
+					fileHandle = INVALID_HANDLE_VALUE;
+				}
+				fileSize = 0;
+				pageCount = 0;
+				valid = false;
+			}
+
+			bool ReadBlob(const ClusterLODGroupDiskLocator& locator, std::vector<std::byte>& outBlob) const
+			{
+				if (!valid || data == nullptr) {
+					return false;
+				}
+				const uint64_t blobEnd = locator.blobOffset + static_cast<uint64_t>(locator.blobSizeBytes);
+				if (blobEnd < locator.blobOffset || blobEnd > fileSize) {
+					return false;
+				}
+
+				outBlob.resize(locator.blobSizeBytes);
+				if (locator.blobSizeBytes != 0u) {
+					std::memcpy(outBlob.data(), data + locator.blobOffset, locator.blobSizeBytes);
+				}
+				return true;
+			}
+
+			uint32_t PageCount() const
+			{
+				return pageCount;
+			}
+
+		private:
+			std::wstring filePath;
+			HANDLE fileHandle = INVALID_HANDLE_VALUE;
+			HANDLE mappingHandle = nullptr;
+			const std::byte* data = nullptr;
+			uint64_t fileSize = 0;
+			uint32_t pageCount = 0;
+			bool valid = false;
+		};
+#endif
 
 		bool ReadPageBlobDirect(std::ifstream& file,
 			const ClusterLODGroupDiskLocator& locator,
@@ -277,16 +649,17 @@ namespace CLodCache {
 			return file.good();
 		}
 
-		std::wstring BuildGroupContainerFileName(const CacheKey& key, uint64_t buildConfigHash)
+		std::wstring BuildCacheArtifactFileName(const CacheKey& key, uint64_t buildConfigHash, std::string_view extension)
 		{
 			size_t hashSeed = 0;
 			boost::hash_combine(hashSeed, key.sourceIdentifier);
 			boost::hash_combine(hashSeed, key.primPath);
 			boost::hash_combine(hashSeed, key.subsetName);
 			boost::hash_combine(hashSeed, buildConfigHash);
+			boost::hash_combine(hashSeed, kSchemaVersion);
 
 			std::stringstream ss;
-			ss << "clod_" << std::hex << hashSeed << ".clodbin";
+			ss << "clod_" << std::hex << hashSeed << extension;
 			return s2ws(ss.str());
 		}
 
@@ -299,6 +672,111 @@ namespace CLodCache {
 			}
 			outSizeBytes = static_cast<uint32_t>(sizeBytes64);
 			return true;
+		}
+
+		bool WriteMetadataBlob(const std::wstring& cachePath, const std::vector<std::byte>& blob)
+		{
+			static std::atomic<uint64_t> tempCounter{ 0 };
+			static std::array<std::mutex, 64> replacementLocks;
+
+			const std::filesystem::path finalPath(cachePath);
+			std::wstringstream tempName;
+			tempName << L".clodmeta."
+					 << std::hash<std::thread::id>{}(std::this_thread::get_id())
+					 << L"." << tempCounter.fetch_add(1, std::memory_order_relaxed)
+					 << L".tmp";
+			const auto tempPath = (finalPath.parent_path() / tempName.str()).wstring();
+			auto cleanupTemp = [&tempPath]()
+			{
+				std::error_code cleanupEc;
+				std::filesystem::remove(tempPath, cleanupEc);
+			};
+			{
+				std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
+				if (!file.is_open()) {
+					spdlog::warn("Failed to open temporary CLod metadata file: {}", ws2s(tempPath));
+					return false;
+				}
+
+				if (blob.size() > static_cast<std::size_t>((std::numeric_limits<std::streamsize>::max)())) {
+					cleanupTemp();
+					return false;
+				}
+				const uint32_t magic = kMetadataMagic;
+				const uint32_t version = kMetadataVersion;
+				const uint64_t blobSize = static_cast<uint64_t>(blob.size());
+				file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+				file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+				file.write(reinterpret_cast<const char*>(&blobSize), sizeof(blobSize));
+				if (!blob.empty()) {
+					file.write(reinterpret_cast<const char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+				}
+				if (!file.good()) {
+					cleanupTemp();
+					return false;
+				}
+			}
+
+			std::error_code ec;
+			const auto lockIndex = std::hash<std::wstring>{}(cachePath) % replacementLocks.size();
+			{
+				std::scoped_lock lock(replacementLocks[lockIndex]);
+				for (int attempt = 0; attempt < 16; ++attempt) {
+					std::filesystem::remove(cachePath, ec);
+					ec.clear();
+					std::filesystem::rename(tempPath, cachePath, ec);
+					if (!ec) {
+						return true;
+					}
+					std::error_code existsEc;
+					if (std::filesystem::exists(cachePath, existsEc)) {
+						spdlog::debug("CLod metadata already exists after replace race: {}", ws2s(cachePath));
+						cleanupTemp();
+						return true;
+					}
+
+					if (attempt < 15) {
+						std::this_thread::sleep_for(std::chrono::milliseconds(2));
+					}
+				}
+				if (ec) {
+					spdlog::warn("Failed to replace CLod metadata '{}' with '{}': {}",
+						ws2s(cachePath), ws2s(tempPath), ec.message());
+					cleanupTemp();
+					return false;
+				}
+			}
+			return true;
+		}
+
+		bool ReadMetadataBlob(const std::wstring& cachePath, std::vector<std::byte>& blob)
+		{
+			std::ifstream file(cachePath, std::ios::binary);
+			if (!file.is_open()) {
+				return false;
+			}
+
+			uint32_t magic = 0;
+			uint32_t version = 0;
+			uint64_t blobSize = 0;
+			file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+			file.read(reinterpret_cast<char*>(&version), sizeof(version));
+			file.read(reinterpret_cast<char*>(&blobSize), sizeof(blobSize));
+			if (!file.good() || magic != kMetadataMagic || version != kMetadataVersion) {
+				return false;
+			}
+			if (blobSize > static_cast<uint64_t>((std::numeric_limits<std::size_t>::max)())) {
+				return false;
+			}
+			if (blobSize > static_cast<uint64_t>((std::numeric_limits<std::streamsize>::max)())) {
+				return false;
+			}
+
+			blob.resize(static_cast<std::size_t>(blobSize));
+			if (!blob.empty()) {
+				file.read(reinterpret_cast<char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+			}
+			return file.good();
 		}
 
 		template<typename T>
@@ -317,10 +795,12 @@ namespace CLodCache {
 			const ClusterLODCacheBuildPayload& payload,
 			std::vector<ClusterLODGroupDiskLocator>& outPageLocators)
 		{
+			ZoneScopedN("CLodCache::SaveContainerPayload");
 			(void)prebuiltData;
 			const std::vector<std::vector<std::byte>> emptyPageBlobs;
 			const auto& pageBlobs = payload.meshPageBlobs != nullptr ? *payload.meshPageBlobs : emptyPageBlobs;
 			const uint32_t pageCount = static_cast<uint32_t>(pageBlobs.size());
+			TracyPlot("CLOD.Cache.SaveContainer.Pages", static_cast<int64_t>(pageCount));
 			outPageLocators.assign(pageCount, {});
 
 			std::ofstream file(containerPath, std::ios::binary | std::ios::trunc);
@@ -363,6 +843,7 @@ namespace CLodCache {
 				locator.blobSizeBytes = static_cast<uint32_t>(blobSize64);
 				locator.reserved = 0;
 			}
+			TracyPlot("CLOD.Cache.SaveContainer.Bytes", static_cast<int64_t>(file.tellp()));
 
 			if (pageCount > 0) {
 				file.seekp(directoryOffset, std::ios::beg);
@@ -388,207 +869,116 @@ namespace CLodCache {
 			return file.good();
 		}
 
-		std::vector<std::byte> ToBytes(const pxr::VtArray<unsigned char>& data)
+		std::mutex& MetadataMemoryCacheMutex()
 		{
-			std::vector<std::byte> bytes(data.size());
-			for (size_t i = 0; i < data.size(); ++i) {
-				bytes[i] = static_cast<std::byte>(data[i]);
-			}
-			return bytes;
+			static std::mutex mutex;
+			return mutex;
 		}
 
-		pxr::VtArray<unsigned char> ToVtUChar(const std::vector<std::byte>& bytes)
+		std::unordered_map<std::wstring, std::shared_ptr<const CacheData>>& MetadataMemoryCache()
 		{
-			pxr::VtArray<unsigned char> out;
-			out.resize(bytes.size());
-			for (size_t i = 0; i < bytes.size(); ++i) {
-				out[i] = static_cast<unsigned char>(bytes[i]);
-			}
-			return out;
+			static std::unordered_map<std::wstring, std::shared_ptr<const CacheData>> cache;
+			return cache;
 		}
 
-		std::wstring BuildGroupPayloadFileName(const CacheKey& key, uint64_t buildConfigHash, uint32_t groupIndex)
+		std::optional<CacheData> TryLoadMetadataFromMemoryCache(const std::wstring& cachePath)
 		{
-			size_t hashSeed = 0;
-			boost::hash_combine(hashSeed, key.sourceIdentifier);
-			boost::hash_combine(hashSeed, key.primPath);
-			boost::hash_combine(hashSeed, key.subsetName);
-			boost::hash_combine(hashSeed, buildConfigHash);
-			boost::hash_combine(hashSeed, groupIndex);
-
-			std::stringstream ss;
-			ss << "clod_" << std::hex << hashSeed << "_g" << std::dec << groupIndex << ".usdc";
-			return s2ws(ss.str());
+			std::lock_guard lock(MetadataMemoryCacheMutex());
+			const auto it = MetadataMemoryCache().find(cachePath);
+			if (it == MetadataMemoryCache().end() || !it->second) {
+				return std::nullopt;
+			}
+			return *it->second;
 		}
 
-		std::string GroupPrimPathString(uint32_t groupIndex)
+		void StoreMetadataInMemoryCache(const std::wstring& cachePath, CacheData data)
 		{
-			return std::string(kGroupsPrimPath) + "/g_" + std::to_string(groupIndex);
+			auto cached = std::make_shared<CacheData>(std::move(data));
+			std::lock_guard lock(MetadataMemoryCacheMutex());
+			MetadataMemoryCache().insert_or_assign(cachePath, std::move(cached));
 		}
 
-		bool SaveGroupPayloadLayer(
-			const CacheKey& key,
-			uint64_t buildConfigHash,
-			uint32_t groupIndex,
-			const std::vector<std::byte>& vertexChunk,
-			const std::vector<std::byte>& skinningChunk,
-			const std::vector<uint32_t>& meshletVertexChunk,
-			const std::vector<uint32_t>& compressedPositionWordChunk,
-			const std::vector<uint32_t>& compressedNormalWordChunk,
-			const std::vector<uint32_t>& compressedMeshletVertexWordChunk,
-			const std::vector<meshopt_Meshlet>& meshletChunk,
-			const std::vector<uint8_t>& meshletTriangleChunk,
-			const std::vector<BoundingSphere>& meshletBoundsChunk)
-		{
-			const std::wstring groupFileName = BuildGroupPayloadFileName(key, buildConfigHash, groupIndex);
-			const std::wstring groupCachePath = GetCacheFilePathBySource(groupFileName, key.sourceIdentifier);
-
-			auto groupStage = pxr::UsdStage::CreateNew(ws2s(groupCachePath), pxr::UsdStage::LoadNone);
-			if (!groupStage) {
-				return false;
-			}
-
-			auto groupRoot = groupStage->DefinePrim(pxr::SdfPath("/GroupPayload"), pxr::TfToken("Scope"));
-			if (!groupRoot) {
-				return false;
-			}
-
-			groupRoot.CreateAttribute(pxr::TfToken("groupIndex"), pxr::SdfValueTypeNames->UInt, true)
-				.Set(groupIndex);
-			groupRoot.CreateAttribute(pxr::TfToken("groupVertexChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(vertexChunk));
-			groupRoot.CreateAttribute(pxr::TfToken("groupSkinningVertexChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(skinningChunk));
-
-			pxr::VtArray<uint32_t> meshletVertices;
-			meshletVertices.assign(meshletVertexChunk.begin(), meshletVertexChunk.end());
-			groupRoot.CreateAttribute(pxr::TfToken("groupMeshletVertexChunk"), pxr::SdfValueTypeNames->UIntArray, true)
-				.Set(meshletVertices);
-
-			pxr::VtArray<uint32_t> compressedPositionWords;
-			compressedPositionWords.assign(compressedPositionWordChunk.begin(), compressedPositionWordChunk.end());
-			groupRoot.CreateAttribute(pxr::TfToken("groupCompressedPositionWordChunk"), pxr::SdfValueTypeNames->UIntArray, true)
-				.Set(compressedPositionWords);
-
-			pxr::VtArray<uint32_t> compressedNormalWords;
-			compressedNormalWords.assign(compressedNormalWordChunk.begin(), compressedNormalWordChunk.end());
-			groupRoot.CreateAttribute(pxr::TfToken("groupCompressedNormalWordChunk"), pxr::SdfValueTypeNames->UIntArray, true)
-				.Set(compressedNormalWords);
-
-			pxr::VtArray<uint32_t> compressedMeshletVertexWords;
-			compressedMeshletVertexWords.assign(compressedMeshletVertexWordChunk.begin(), compressedMeshletVertexWordChunk.end());
-			groupRoot.CreateAttribute(pxr::TfToken("groupCompressedMeshletVertexWordChunk"), pxr::SdfValueTypeNames->UIntArray, true)
-				.Set(compressedMeshletVertexWords);
-
-			std::vector<std::byte> meshletChunkBytes(meshletChunk.size() * sizeof(meshopt_Meshlet));
-			if (!meshletChunkBytes.empty()) {
-				std::memcpy(meshletChunkBytes.data(), meshletChunk.data(), meshletChunkBytes.size());
-			}
-
-			std::vector<std::byte> meshletTriangleChunkBytes(meshletTriangleChunk.size() * sizeof(uint8_t));
-			if (!meshletTriangleChunkBytes.empty()) {
-				std::memcpy(meshletTriangleChunkBytes.data(), meshletTriangleChunk.data(), meshletTriangleChunkBytes.size());
-			}
-
-			std::vector<std::byte> meshletBoundsChunkBytes(meshletBoundsChunk.size() * sizeof(BoundingSphere));
-			if (!meshletBoundsChunkBytes.empty()) {
-				std::memcpy(meshletBoundsChunkBytes.data(), meshletBoundsChunk.data(), meshletBoundsChunkBytes.size());
-			}
-
-			groupRoot.CreateAttribute(pxr::TfToken("groupMeshletChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(meshletChunkBytes));
-
-			groupRoot.CreateAttribute(pxr::TfToken("groupMeshletTriangleChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(meshletTriangleChunkBytes));
-
-			groupRoot.CreateAttribute(pxr::TfToken("groupMeshletBoundsChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(meshletBoundsChunkBytes));
-
-			return groupStage->GetRootLayer()->Save();
-		}
 	}
 
 	namespace {
 		bool SaveImpl(const CacheKey& key, uint64_t buildConfigHash, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload, ClusterLODPrebuiltData* outSavedPrebuiltData)
 		{
-			const std::wstring fileName = BuildCacheFileName(key, buildConfigHash);
-			const std::wstring cachePath = GetCacheFilePathBySource(fileName, key.sourceIdentifier);
-			const std::wstring containerFileName = BuildGroupContainerFileName(key, buildConfigHash);
-			const std::wstring containerPath = GetCacheFilePathBySource(containerFileName, key.sourceIdentifier);
+			ZoneScopedN("CLodCache::SaveImpl");
+			const CacheLookup lookup = BuildCacheLookup(key, buildConfigHash);
+			if (std::filesystem::exists(lookup.metadataPath)) {
+				spdlog::warn(
+					"Skipping CLod cache save because metadata file already exists but did not load cleanly: {}",
+					ws2s(lookup.metadataPath));
+				return false;
+			}
 
-			spdlog::info("CLodCache::SaveImpl  metadata='{}' container='{}'",
-				ws2s(cachePath), ws2s(containerPath));
+			spdlog::debug("CLodCache::SaveImpl  metadata='{}' container='{}'",
+				ws2s(lookup.metadataPath), ws2s(lookup.containerPath));
 
 			std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
-			if (!SaveContainerPayload(containerPath, prebuiltData, payload, pageDiskLocators)) {
-				spdlog::warn("Failed to write CLod container payload: {}", ws2s(containerPath));
+			if (!SaveContainerPayload(lookup.containerPath, prebuiltData, payload, pageDiskLocators)) {
+				spdlog::warn("Failed to write CLod container payload: {}", ws2s(lookup.containerPath));
 				return false;
 			}
-
-			auto stage = pxr::UsdStage::CreateNew(ws2s(cachePath), pxr::UsdStage::LoadNone);
-			if (!stage) {
-				spdlog::warn("Failed to create CLod cache stage: {}", ws2s(cachePath));
-				return false;
-			}
-
-			auto prim = stage->DefinePrim(pxr::SdfPath(kRootPrimPath), pxr::TfToken("Scope"));
-			if (!prim) {
-				return false;
-			}
-
-			auto groupsPrim = stage->DefinePrim(pxr::SdfPath(kGroupsPrimPath), pxr::TfToken("Scope"));
-			if (!groupsPrim) {
-				return false;
-			}
-
-			prim.CreateAttribute(pxr::TfToken("clodSchemaVersion"), pxr::SdfValueTypeNames->Int, true)
-				.Set(static_cast<int>(kSchemaVersion));
-			prim.CreateAttribute(pxr::TfToken("clodBuildConfigHash"), pxr::SdfValueTypeNames->Int64, true)
-				.Set(static_cast<int64_t>(buildConfigHash));
 
 			ClusterLODCacheSource cacheSource = prebuiltData.cacheSource;
 			cacheSource.sourceIdentifier = key.sourceIdentifier;
 			cacheSource.primPath = key.primPath;
 			cacheSource.subsetName = key.subsetName;
 			cacheSource.buildConfigHash = buildConfigHash;
-			cacheSource.containerFileName = containerFileName;
+			cacheSource.containerFileName = lookup.containerFileName;
 
-			auto blob = SerializeMetadata(buildConfigHash, prebuiltData, pageDiskLocators, cacheSource);
-			auto vtBlob = ToVtUChar(blob);
-			prim.CreateAttribute(pxr::TfToken("clodBlob"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(vtBlob);
-
-			const size_t groupCount = prebuiltData.groups.size();
-			for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groupCount); ++groupIndex) {
-				const pxr::SdfPath groupPrimPath(GroupPrimPathString(groupIndex));
-				auto groupPrim = stage->DefinePrim(groupPrimPath, pxr::TfToken("Scope"));
-				if (!groupPrim) {
+			std::vector<std::byte> blob;
+			{
+				ZoneScopedN("CLodCache::SaveImpl::SerializeMetadata");
+				blob = SerializeMetadata(buildConfigHash, prebuiltData, pageDiskLocators, cacheSource);
+			}
+			TracyPlot("CLOD.Cache.MetadataBytes", static_cast<int64_t>(blob.size()));
+			{
+				ZoneScopedN("CLodCache::SaveImpl::WriteMetadata");
+				if (!WriteMetadataBlob(lookup.metadataPath, blob)) {
+					spdlog::warn("Failed to write CLod cache metadata: {}", ws2s(lookup.metadataPath));
 					return false;
 				}
-				groupPrim.CreateAttribute(pxr::TfToken("groupIndex"), pxr::SdfValueTypeNames->UInt, true)
-					.Set(groupIndex);
 			}
 
-			if (!stage->GetRootLayer()->Save()) {
-				return false;
-			}
+			CacheData savedData{};
+			savedData.schemaVersion = kSchemaVersion;
+			savedData.buildConfigHash = buildConfigHash;
+			savedData.prebuiltData = prebuiltData;
+			savedData.prebuiltData.pageDiskLocators = pageDiskLocators;
+			savedData.prebuiltData.cacheSource = cacheSource;
 
 			if (outSavedPrebuiltData != nullptr) {
-				*outSavedPrebuiltData = prebuiltData;
-				outSavedPrebuiltData->pageDiskLocators = std::move(pageDiskLocators);
-				outSavedPrebuiltData->cacheSource = std::move(cacheSource);
+				*outSavedPrebuiltData = savedData.prebuiltData;
 			}
+
+			StoreMetadataInMemoryCache(lookup.metadataPath, std::move(savedData));
 
 			return true;
 		}
 	}
 
-	uint64_t ComputeBuildConfigHash()
+	uint64_t ComputeBuildConfigHash(std::string_view assetIdentifier)
 	{
 		size_t seed = 0;
 		auto hashEnvironmentString = [&seed](const char* name)
 		{
 			boost::hash_combine(seed, GetClusterLODEnvironmentVariable(name));
+		};
+		auto hashEffectiveNodeBoneLimit = [&seed]()
+		{
+			const std::string text = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_NODE_BONE_LIMIT");
+			char* end = nullptr;
+			const unsigned long parsed = text.empty() ? 0ul : std::strtoul(text.c_str(), &end, 10);
+			const bool hasValidOverride = !text.empty() && end != text.c_str();
+			boost::hash_combine(seed, hasValidOverride);
+			if (hasValidOverride)
+			{
+				const uint32_t effective = std::clamp(
+					static_cast<uint32_t>(parsed), 1u, CLOD_NODE_BONE_LIMIT_HARD_MAX);
+				boost::hash_combine(seed, effective);
+			}
 		};
 
 		boost::hash_combine(seed, static_cast<uint32_t>(kSchemaVersion));
@@ -598,14 +988,23 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(4));  // traversal node fanout
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // compressed group position bitstream enabled
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // compressed group normal stream enabled
-		boost::hash_combine(seed, static_cast<uint32_t>(7));  // page-header-authoritative native float3 position stream
+		boost::hash_combine(seed, static_cast<uint32_t>(8));  // page-header-authoritative native float3 position stream + tangent-frame stream
+		boost::hash_combine(seed, static_cast<uint32_t>(1));  // meshoptimizer tangent generation replaces MikkTSpace
+		boost::hash_combine(seed, static_cast<uint32_t>(1));  // coverage preservation mode + exterior-edge priority flags
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // compressed meshlet vertex index bitstream enabled
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // mesh quantization heuristic version
-		boost::hash_combine(seed, static_cast<uint32_t>(1));  // UV quantization heuristic version
-		boost::hash_combine(seed, static_cast<uint32_t>(7));  // USD compliance layout + inherited primvar card isolation
-		boost::hash_combine(seed, static_cast<uint32_t>(27));  // voxel page descriptors use local segment addressing and SGGX voxel attributes
-		boost::hash_combine(seed, static_cast<uint32_t>(3));  // traversal nodes/groups carry max hierarchical parent error; segments split by refined domain
-		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MODE");
+		boost::hash_combine(seed, static_cast<uint32_t>(2));  // UV quantization heuristic version; atlas height UVs use absolute quantization
+		boost::hash_combine(seed, static_cast<uint32_t>(12));  // USD compliance layout + inherited primvar card isolation + mixed Reyes boundary output cleanup + atlas-baked Object Reyes UV stream
+		boost::hash_combine(seed, static_cast<uint32_t>(32));  // assembly voxel traversal boundaries derive from parent representation errors
+		boost::hash_combine(seed, static_cast<uint32_t>(9));  // voxel propagation derives traversal boundaries from active parent payload errors
+		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
+		boost::hash_combine(seed, static_cast<uint32_t>(9));  // page-less root instance portals force traversal instead of duplicating root pages + part voxel tail groups
+		boost::hash_combine(seed, static_cast<uint32_t>(4));  // voxel coverage/SGGX estimator version
+		// Asset-local settings must only invalidate caches built for the matching
+		// asset. Including the whole settings document here invalidates unrelated
+		// assets (notably every terrain world) whenever one model is tuned.
+		boost::hash_combine(seed, GetCLodAssetSettingsHash(assetIdentifier));
+		hashEnvironmentString("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GRID");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MIN_RES");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_RAYS");
@@ -614,69 +1013,66 @@ namespace CLodCache {
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GROWTH");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD");
-		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_CARRY_ZERO_COVERAGE");
-		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_PRUNING");
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS");
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH");
+		hashEffectiveNodeBoneLimit();
+		hashEnvironmentString("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK");
+		hashEnvironmentString("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR");
 		return static_cast<uint64_t>(seed);
 	}
 
 	std::wstring BuildCacheFileName(const CacheKey& key, uint64_t buildConfigHash)
 	{
-		size_t hashSeed = 0;
-		boost::hash_combine(hashSeed, key.sourceIdentifier);
-		boost::hash_combine(hashSeed, key.primPath);
-		boost::hash_combine(hashSeed, key.subsetName);
-		boost::hash_combine(hashSeed, buildConfigHash);
+		return BuildCacheArtifactFileName(key, buildConfigHash, ".clodmeta");
+	}
 
-		std::stringstream ss;
-		ss << "clod_" << std::hex << hashSeed << ".usdc";
-		return s2ws(ss.str());
+	CacheLookup BuildCacheLookup(const CacheKey& key, uint64_t buildConfigHash)
+	{
+		CacheLookup lookup{};
+		lookup.key = key;
+		lookup.buildConfigHash = buildConfigHash;
+		lookup.metadataFileName = BuildCacheArtifactFileName(key, buildConfigHash, ".clodmeta");
+		lookup.metadataPath = GetCacheFilePathBySource(lookup.metadataFileName, key.sourceIdentifier);
+		lookup.containerFileName = BuildCacheArtifactFileName(key, buildConfigHash, ".clodbin");
+		lookup.containerPath = GetCacheFilePathBySource(lookup.containerFileName, key.sourceIdentifier);
+		return lookup;
+	}
+
+	std::wstring GetCacheFilePathForSource(const std::wstring& fileName, const std::string& sourceIdentifier)
+	{
+		return GetCacheFilePathBySource(fileName, sourceIdentifier);
 	}
 
 	std::optional<CacheData> TryLoad(const CacheKey& key, uint64_t expectedBuildConfigHash)
 	{
-		const std::wstring fileName = BuildCacheFileName(key, expectedBuildConfigHash);
-		const std::wstring cachePath = GetCacheFilePathBySource(fileName, key.sourceIdentifier);
-		if (!std::filesystem::exists(cachePath)) {
-			return std::nullopt;
+		ZoneScopedN("CLodCache::TryLoad");
+		const CacheLookup lookup = BuildCacheLookup(key, expectedBuildConfigHash);
+		if (auto memoryCached = TryLoadMetadataFromMemoryCache(lookup.metadataPath)) {
+			if (memoryCached->buildConfigHash == expectedBuildConfigHash &&
+				memoryCached->schemaVersion == kSchemaVersion) {
+				return memoryCached;
+			}
 		}
-
-		auto stage = pxr::UsdStage::Open(ws2s(cachePath), pxr::UsdStage::LoadNone);
-		if (!stage) {
-			spdlog::warn("CLod cache exists but failed to open: {}", ws2s(cachePath));
-			return std::nullopt;
-		}
-
-		pxr::UsdPrim root = stage->GetPrimAtPath(pxr::SdfPath(kRootPrimPath));
-		if (!root) {
+		if (!std::filesystem::exists(lookup.metadataPath)) {
 			return std::nullopt;
 		}
 
 		CacheData out;
-		int authoredSchema = 0;
-		if (!root.GetAttribute(pxr::TfToken("clodSchemaVersion")).Get(&authoredSchema)) {
-			return std::nullopt;
+		std::vector<std::byte> bytes;
+		{
+			ZoneScopedN("CLodCache::TryLoad::ReadMetadata");
+			if (!ReadMetadataBlob(lookup.metadataPath, bytes)) {
+				spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(lookup.metadataPath));
+				return std::nullopt;
+			}
 		}
-		if (authoredSchema != static_cast<int>(kSchemaVersion)) {
-			return std::nullopt;
-		}
-
-		int64_t authoredBuildHash = 0;
-		if (!root.GetAttribute(pxr::TfToken("clodBuildConfigHash")).Get(&authoredBuildHash)) {
-			return std::nullopt;
-		}
-		if (static_cast<uint64_t>(authoredBuildHash) != expectedBuildConfigHash) {
-			return std::nullopt;
-		}
-
-		pxr::VtArray<unsigned char> blobData;
-		if (!root.GetAttribute(pxr::TfToken("clodBlob")).Get(&blobData)) {
-			return std::nullopt;
-		}
-
-		auto bytes = ToBytes(blobData);
-		if (!DeserializeMetadata(bytes, out)) {
-			spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(cachePath));
-			return std::nullopt;
+		TracyPlot("CLOD.Cache.LoadMetadataBytes", static_cast<int64_t>(bytes.size()));
+		{
+			ZoneScopedN("CLodCache::TryLoad::DeserializeMetadata");
+			if (!DeserializeMetadata(bytes, out)) {
+				spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(lookup.metadataPath));
+				return std::nullopt;
+			}
 		}
 
 		if (out.buildConfigHash != expectedBuildConfigHash || out.schemaVersion != kSchemaVersion) {
@@ -696,18 +1092,19 @@ namespace CLodCache {
 			out.prebuiltData.cacheSource.buildConfigHash = expectedBuildConfigHash;
 		}
 		if (out.prebuiltData.cacheSource.containerFileName.empty()) {
-			out.prebuiltData.cacheSource.containerFileName = BuildGroupContainerFileName(key, expectedBuildConfigHash);
+			out.prebuiltData.cacheSource.containerFileName = lookup.containerFileName;
 		}
 
 		const uint32_t pageCount = out.prebuiltData.voxelPageBase + out.prebuiltData.voxelPageCount;
 		const bool hasContainerLocators = pageCount > 0u && (out.prebuiltData.pageDiskLocators.size() == pageCount);
 		if (hasContainerLocators) {
+			StoreMetadataInMemoryCache(lookup.metadataPath, out);
 			return out;
 		}
 
 		spdlog::warn(
 			"CLod cache '{}' is missing disk locator metadata for {} mesh pages; treating as cache miss.",
-			ws2s(cachePath),
+			ws2s(lookup.metadataPath),
 			pageCount);
 		return std::nullopt;
 	}
@@ -744,10 +1141,6 @@ namespace CLodCache {
 			return false;
 		}
 		const ClusterLODGroup& group = prebuilt.groups[groupLocalIndex];
-		const uint64_t groupPageEnd = static_cast<uint64_t>(group.pageMapBase) + static_cast<uint64_t>(group.pageCount);
-		if (groupPageEnd > prebuilt.pageDiskLocators.size()) {
-			return false;
-		}
 		if (groupLocalIndex < prebuilt.groupChunks.size()) {
 			outPayload.groupChunkMetadata = prebuilt.groupChunks[groupLocalIndex];
 		}
@@ -760,12 +1153,20 @@ namespace CLodCache {
 			}
 		}
 		if (!meshPageIndices.empty()) {
+			if (meshPageIndices.size() != group.pageCount ||
+				std::any_of(meshPageIndices.begin(), meshPageIndices.end(), [&](uint32_t pageIndex) { return pageIndex >= prebuilt.pageDiskLocators.size(); })) {
+				return false;
+			}
 			return LoadMeshPagesSelective(
 				file,
 				std::span<const ClusterLODGroupDiskLocator>(prebuilt.pageDiskLocators.data(), prebuilt.pageDiskLocators.size()),
 				std::span<const uint32_t>(meshPageIndices.data(), meshPageIndices.size()),
 				{},
 				outPayload);
+		}
+		const uint64_t groupPageEnd = static_cast<uint64_t>(group.pageMapBase) + static_cast<uint64_t>(group.pageCount);
+		if (groupPageEnd > prebuilt.pageDiskLocators.size()) {
+			return false;
 		}
 		return LoadMeshPagesSelective(
 			file,
@@ -782,7 +1183,10 @@ namespace CLodCache {
 			return {};
 		}
 
-		return GetCacheFilePathBySource(cacheSource.containerFileName, cacheSource.sourceIdentifier);
+		// The serialized filename is the authoritative locator. Rebuilding the
+		// metadata and container identities here duplicated hashing/formatting and
+		// entered the write-side directory creation lock for every mesh.
+		return BuildCacheFilePathBySource(cacheSource.containerFileName, cacheSource.sourceIdentifier);
 	}
 
 	bool LoadMeshPagesSelective(std::ifstream& file,
@@ -830,6 +1234,84 @@ namespace CLodCache {
 			}
 		}
 		return true;
+	}
+
+	bool LoadMeshPagesSelectiveMapped(
+		const std::wstring& containerPath,
+		std::span<const ClusterLODGroupDiskLocator> pageLocators,
+		uint32_t firstPage,
+		uint32_t pageCount,
+		const std::vector<bool>& pageNeedsFetch,
+		LoadedGroupPayload& outPayload)
+	{
+#ifndef _WIN32
+		(void)containerPath;
+		(void)pageLocators;
+		(void)firstPage;
+		(void)pageCount;
+		(void)pageNeedsFetch;
+		(void)outPayload;
+		return false;
+#else
+		thread_local MappedContainerFile mappedContainer;
+		if (!mappedContainer.Open(containerPath) || mappedContainer.PageCount() != pageLocators.size()) {
+			return false;
+		}
+
+		outPayload.pageBlobs.assign(pageCount, {});
+		const uint64_t endPage = static_cast<uint64_t>(firstPage) + static_cast<uint64_t>(pageCount);
+		if (endPage > pageLocators.size()) {
+			return false;
+		}
+		for (uint32_t pageOffset = 0; pageOffset < pageCount; ++pageOffset) {
+			if (!pageNeedsFetch.empty() &&
+				pageOffset < static_cast<uint32_t>(pageNeedsFetch.size()) &&
+				!pageNeedsFetch[pageOffset]) {
+				continue;
+			}
+			if (!mappedContainer.ReadBlob(pageLocators[firstPage + pageOffset], outPayload.pageBlobs[pageOffset])) {
+				return false;
+			}
+		}
+		return true;
+#endif
+	}
+
+	bool LoadMeshPagesSelectiveMapped(
+		const std::wstring& containerPath,
+		std::span<const ClusterLODGroupDiskLocator> pageLocators,
+		std::span<const uint32_t> meshPageIndices,
+		const std::vector<bool>& pageNeedsFetch,
+		LoadedGroupPayload& outPayload)
+	{
+#ifndef _WIN32
+		(void)containerPath;
+		(void)pageLocators;
+		(void)meshPageIndices;
+		(void)pageNeedsFetch;
+		(void)outPayload;
+		return false;
+#else
+		thread_local MappedContainerFile mappedContainer;
+		if (!mappedContainer.Open(containerPath) || mappedContainer.PageCount() != pageLocators.size()) {
+			return false;
+		}
+
+		outPayload.pageBlobs.assign(meshPageIndices.size(), {});
+		for (uint32_t pageOffset = 0; pageOffset < static_cast<uint32_t>(meshPageIndices.size()); ++pageOffset) {
+			if (!pageNeedsFetch.empty() &&
+				pageOffset < static_cast<uint32_t>(pageNeedsFetch.size()) &&
+				!pageNeedsFetch[pageOffset]) {
+				continue;
+			}
+			const uint32_t meshPageIndex = meshPageIndices[pageOffset];
+			if (meshPageIndex >= pageLocators.size() ||
+				!mappedContainer.ReadBlob(pageLocators[meshPageIndex], outPayload.pageBlobs[pageOffset])) {
+				return false;
+			}
+		}
+		return true;
+#endif
 	}
 
 	bool GetMeshPagePayloadLayout(std::span<const ClusterLODGroupDiskLocator> pageLocators,
@@ -1003,7 +1485,7 @@ namespace CLodCache {
 			return false;
 		}
 
-		const std::wstring containerPath = GetCacheFilePathBySource(cacheSource.containerFileName, cacheSource.sourceIdentifier);
+		const std::wstring containerPath = ResolveContainerPath(cacheSource);
 		outFile.open(containerPath, std::ios::binary);
 		if (!outFile.is_open()) {
 			return false;

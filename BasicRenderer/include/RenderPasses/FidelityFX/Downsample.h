@@ -40,7 +40,7 @@ public:
     ~DownsamplePass() {
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) {
+    void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
             .WithUnorderedAccess(Subresources(Builtin::PrimaryCamera::LinearDepthMap, FromMip{ 1 }));
     }
@@ -136,7 +136,8 @@ private:
         float invInputSize[2];
         
         unsigned int mipUavDescriptorIndices[12];
-        uint pad[4];
+        uint validSourceSize[2];
+        uint pad[2];
     };
 
     struct PerMapInfo {
@@ -255,6 +256,8 @@ private:
         spdConstants constants = {};
 		constants.srcSize[0] = linearDepthMap->GetInternalWidth();
 		constants.srcSize[1] = linearDepthMap->GetInternalHeight();
+        constants.validSourceSize[0] = linearDepthMap->GetWidth();
+        constants.validSourceSize[1] = linearDepthMap->GetHeight();
         constants.invInputSize[0] = 1.0f / static_cast<float>(paddedWidth);
         constants.invInputSize[1] = 1.0f / static_cast<float>(paddedHeight);
         constants.mips = numWorkGroupsAndMips[1];

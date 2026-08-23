@@ -5,16 +5,22 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
-class PixelBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class VirtualShadowMapClearPagesPass final : public ComputePass {
 public:
     VirtualShadowMapClearPagesPass(
-        std::shared_ptr<PixelBuffer> physicalPagesTexture,
+        std::shared_ptr<PixelBuffer> staticPagesTexture,
+        std::shared_ptr<PixelBuffer> dynamicPagesTexture,
         std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
         std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer);
+        std::shared_ptr<Buffer> pageMetadataBuffer,
+        std::shared_ptr<Buffer> clipmapInfoBuffer,
+        std::shared_ptr<Buffer> pageViewInfoBuffer,
+        std::shared_ptr<Buffer> statsBuffer);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -23,8 +29,12 @@ public:
 
 private:
     PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_physicalPagesTexture;
+    std::shared_ptr<PixelBuffer> m_staticPagesTexture;
+    std::shared_ptr<PixelBuffer> m_dynamicPagesTexture;
     std::shared_ptr<Buffer> m_dirtyPageFlagsBuffer;
     std::shared_ptr<PixelBuffer> m_pageTableTexture;
     std::shared_ptr<Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<Buffer> m_pageViewInfoBuffer;
+    std::shared_ptr<Buffer> m_statsBuffer;
 };

@@ -12,36 +12,70 @@ struct PSInput {
     float3 color : TEXCOORD6; // For models with vertex colors
     float3 normalModelSpace : TEXCOORD7; // For debug view
     uint meshletIndex : TEXCOORD8; // For meshlet debug view
+    float4 tangentWorldSpace : TEXCOORD9;
 };
 
 struct VisBufferPSInput
 {
     float4 position : SV_POSITION; // Screen-space position, required for rasterization
+#if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    float4 virtualShadowClipDistances : SV_ClipDistance0;
+#endif
     float linearDepth : TEXCOORD0;
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+#ifndef CLOD_FORWARD_UV_SET_COUNT
+#define CLOD_FORWARD_UV_SET_COUNT 8
+#endif
     float3 positionWorldSpace : TEXCOORD1;
     float3 normalWorldSpace : TEXCOORD2;
+#if !defined(CLOD_FORWARD_VERTEX_COLOR) || CLOD_FORWARD_VERTEX_COLOR
     float3 color : TEXCOORD3;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 0
     float4 uvSet01 : TEXCOORD4;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
     float4 uvSet23 : TEXCOORD5;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
     float4 uvSet45 : TEXCOORD6;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
     float4 uvSet67 : TEXCOORD7;
+#endif
     nointerpolation uint materialDataIndex : TEXCOORD8;
 #if defined (PSO_ALPHA_TEST)
     float2 texcoord : TEXCOORD9;
 #endif
-    nointerpolation uint visibleClusterIndex : TEXCOORD10;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     nointerpolation uint viewID : TEXCOORD11;
-    nointerpolation uint shadowClipmapIndex : TEXCOORD12;
+#endif
 #else
 #if defined (PSO_ALPHA_TEST)
     float2 texcoord : TEXCOORD1;
-    nointerpolation uint materialDataIndex : TEXCOORD2; // convenience for alpha test
-#endif
+    nointerpolation uint materialDataIndex : TEXCOORD2;
     nointerpolation uint visibleClusterIndex : TEXCOORD3;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     nointerpolation uint viewID : TEXCOORD4;
+#endif
+#if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
     nointerpolation uint shadowClipmapIndex : TEXCOORD5;
 #endif
+#else
+    nointerpolation uint visibleClusterIndex : TEXCOORD1;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
+    nointerpolation uint viewID : TEXCOORD2;
+#endif
+#if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    nointerpolation uint shadowClipmapIndex : TEXCOORD3;
+#endif
+#endif
+#endif
+};
+
+struct VisibilityPerPrimitive
+{
+    uint triangleIndex : SV_PrimitiveID;
 };
 
 struct ClodViewRasterInfo
@@ -173,7 +207,7 @@ struct Camera {
     
     bool isOrtho;
     float2 UVScaleToNextPowerOf2;
-    uint pad[1];
+    uint lodResY;
 };
 
 struct CullingCameraInfo
@@ -184,7 +218,9 @@ struct CullingCameraInfo
     float zNear;
     float errorOverDistanceThreshold; // Threshold for (error * scale) / distance metric
     uint isOrtho;
-    float3 pad;
+    float viewportWidth;
+    float viewportHeight;
+    float reyesDiceRatePixels;
     float4 viewRightWorld;
     float4 viewUpWorld;
     float4 viewForwardWorld;
@@ -219,7 +255,214 @@ struct PerFrameBuffer {
     float shadowVirtualSmrtMaxRayAngleFromLightDegrees;
     float shadowVirtualSmrtRayLengthScaleDirectional;
     float shadowVirtualSmrtMaxTraceDistanceWorld;
-    float _padSmrt;
+    uint shadowVirtualReceiverTraceEnabled;
+    uint shadowVirtualReceiverTraceSampleCount;
+    float shadowVirtualReceiverTraceMaxDistanceWorld;
+    float shadowVirtualReceiverTraceUncertaintyScale;
+    float shadowVirtualReceiverTraceDepthSafetyScale;
+    uint shadowVirtualReceiverTracePad0;
+    uint shadowVirtualReceiverTracePad1;
+    uint terrainStochasticSamplingEnabled;
+    uint terrainStochasticDiffuseEnabled;
+    uint terrainStochasticNormalEnabled;
+    uint terrainStochasticDerivativeNormalsEnabled;
+    float terrainStochasticBlendCurve;
+    uint terrainGaussianStochasticEnabled;
+    uint terrainStochasticRegisterPad;
+    uint terrainStochasticPad0;
+    uint terrainStochasticPad1;
+    uint terrainStochasticPad2;
+    uint parallaxOcclusionMappingEnabled;
+    uint terrainParallaxOcclusionMappingEnabled;
+    float terrainParallaxHeightScale;
+    uint terrainParallaxMaxSteps;
+    float heightFadeStartDistance;
+    float heightFadeEndDistance;
+    uint terrainRvtEnabled;
+    uint terrainRvtForceDirectFallback;
+    uint terrainRvtDebugView;
+    uint terrainRvtTelemetryEnabled;
+    float terrainReyesDisplacementScale;
+    float objectReyesDisplacementScale;
+    float objectParallaxHeightScale;
+};
+
+static const uint TERRAIN_RVT_CONTENT_HEIGHT = 1u << 0;
+static const uint TERRAIN_RVT_CONTENT_MATERIAL = 1u << 1;
+static const uint TERRAIN_RVT_PAGE_VALID = 1u << 31;
+static const uint TERRAIN_RVT_PAGE_VISITED = 1u << 30;
+static const uint TERRAIN_RVT_PAGE_CONTENT_SHIFT = 28u;
+static const uint TERRAIN_RVT_PAGE_CONTENT_MASK = 0x3u << TERRAIN_RVT_PAGE_CONTENT_SHIFT;
+static const uint TERRAIN_RVT_PAGE_PHYSICAL_MASK = 0x00FFFFFFu;
+static const uint TERRAIN_RVT_INFO_INITIALIZED = 1u << 0;
+static const uint TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT = 1u << 0;
+
+struct TerrainRvtInfo
+{
+    uint pageSize;
+    uint borderTexels;
+    uint physicalTileTexelSide;
+    uint physicalAtlasPagesWide;
+    uint physicalAtlasPagesHigh;
+    uint maxPhysicalPages;
+    uint maxVirtualPageTableEntries;
+    uint maxRequests;
+    uint maxGenerationEntries;
+    uint mipCount;
+    uint pageTableResolution;
+    uint flags;
+    float basePageWorldSize;
+    uint physicalAtlasPoolCount;
+    uint maxTerrainSets;
+    uint maxClipLevels;
+    uint maxGeneratedPagesPerFrame;
+    float mipOffset;
+};
+
+struct TerrainRvtClipInfo
+{
+    uint terrainSetIndex;
+    uint clipLevel;
+    uint tableBaseSlot;
+    uint tableResolution;
+    uint2 originPage;
+    uint2 terrainPageCount;
+    float pageWorldSize;
+    float invPageWorldSize;
+    uint valid;
+    uint terrainClipCount;
+    int2 clearDelta;
+};
+
+struct TerrainRvtPageTag
+{
+    uint terrainSetIndex;
+    uint clipLevel;
+    uint pageX;
+    uint pageY;
+};
+
+struct TerrainRvtPageRequest
+{
+    uint pageTableIndex;
+    uint terrainSetIndex;
+    uint clipLevel;
+    uint contentMask;
+    uint pageX;
+    uint pageY;
+    uint pad0;
+    uint pad1;
+};
+
+struct TerrainRvtGenerationRequest
+{
+    uint pageTableIndex;
+    uint physicalPageIndex;
+    uint contentMask;
+    uint terrainSetIndex;
+    uint clipLevel;
+    uint pageX;
+    uint pageY;
+    uint pad0;
+};
+
+struct TerrainRvtPhysicalPageAtlasInfo
+{
+    float2 atlasBaseUv;
+    float2 pageUvScale;
+    float poolIndex;
+    float3 pad0;
+};
+
+struct TerrainRvtHeightResidentCacheEntry
+{
+    uint status;
+    uint requestedTerrainSetIndex;
+    uint requestedClipLevel;
+    uint requestedPageX;
+    uint requestedPageY;
+    uint residentClipLevel;
+    uint residentPageTableIndex;
+    uint physicalPageIndex;
+    uint residentPageX;
+    uint residentPageY;
+    uint pad0;
+    uint pad1;
+};
+
+struct TerrainRvtStats
+{
+    uint heightRequests;
+    uint materialRequests;
+    uint requestOverflows;
+    uint generatedPages;
+    uint allocationFailures;
+    uint heightFallbacks;
+    uint materialFallbacks;
+    uint residentHits;
+    uint heightSampleAttempts;
+    uint materialSampleAttempts;
+    uint heightSampleHits;
+    uint materialSampleHits;
+    uint heightPageTableMisses;
+    uint materialPageTableMisses;
+    uint heightComputePageFailures;
+    uint materialComputePageFailures;
+    uint heightDisabledFallbacks;
+    uint materialDisabledFallbacks;
+    uint heightForcedFallbacks;
+    uint materialForcedFallbacks;
+    uint markComputePageFailures;
+    uint markWorldRectCalls;
+    uint markWorldRectPages;
+    uint resolveResidentPages;
+    uint generationHeightPages;
+    uint generationMaterialPages;
+    uint generationCombinedPages;
+    uint generationTexels;
+    uint materialSampleRequestedPageXor;
+    uint materialSampleResidentPageXor;
+    uint materialSamplePhysicalPageXor;
+    uint materialSampleRequestedPageMin;
+    uint materialSampleRequestedPageMax;
+    uint materialSampleResidentPageMin;
+    uint materialSampleResidentPageMax;
+    uint materialSamplePhysicalPageMin;
+    uint materialSamplePhysicalPageMax;
+    uint materialSampleCoarserResidentHits;
+    uint materialSampleAtlasPoolMask;
+    uint heightOwnerMismatches;
+    uint materialOwnerMismatches;
+    uint requestPageTableXor;
+    uint requestPageTableMin;
+    uint requestPageTableMax;
+    uint generationPageTableMin;
+    uint generationPageTableMax;
+    uint materialSampleAttemptedPageXor;
+    uint materialSampleAttemptedPageMin;
+    uint materialSampleAttemptedPageMax;
+    uint materialSamplePageMissRequestedPageXor;
+    uint materialSamplePageMissRequestedPageMin;
+    uint materialSamplePageMissRequestedPageMax;
+    uint heightSampleAttemptedPageXor;
+    uint heightSampleAttemptedPageMin;
+    uint heightSampleAttemptedPageMax;
+    uint heightSamplePageMissRequestedPageXor;
+    uint heightSamplePageMissRequestedPageMin;
+    uint heightSamplePageMissRequestedPageMax;
+    uint heightFastSampleAttempts;
+    uint heightFastSampleHits;
+    uint heightFastPageMissRequests;
+    uint heightFullSampleAttempts;
+    uint heightFullSampleHits;
+    uint generationPageTableXor;
+    uint generationPhysicalPageXor;
+    uint physicalPageOwnerCollisions;
+    uint heightRequestMipHistogram[16];
+    uint materialRequestMipHistogram[16];
+    uint heightSampleMipHistogram[16];
+    uint materialSampleMipHistogram[16];
+    uint generationMipHistogram[16];
 };
 
 struct BoundingSphere {
@@ -283,7 +526,7 @@ struct MaterialInfo {
     float geometricDisplacementMin;
     float geometricDisplacementMax;
     uint geometricDisplacementEnabled;
-    uint perMaterialPad0;
+    uint terrainSetIndex;
     
     float4 baseColorFactor;
     float4 emissiveFactor;
@@ -320,6 +563,16 @@ struct MaterialInfo {
     uint aoStreamingTextureID;
     uint heightStreamingTextureID;
     uint opacityStreamingTextureID;
+    float2 reyesUvDensity;
+    float objectSurfaceTexelDensity;
+    uint objectSurfaceSamplingMode;
+    uint2 sourceMaterialId;
+    uint semanticFamily;
+    uint surfaceFlags;
+    float4 glintParameters;
+    uint glintEnabled;
+    uint diagnosticReason;
+    uint2 padGlint;
 };
 
 struct MaterialEvalInfo {
@@ -357,6 +610,9 @@ struct MaterialEvalInfo {
     float4 emissiveFactor;
     uint4 baseColorChannels;
 
+    uint3 normalChannels;
+    uint terrainSetIndex;
+
     uint aoChannel;
     uint heightChannel;
     uint metallicChannel;
@@ -383,6 +639,101 @@ struct MaterialEvalInfo {
     uint aoStreamingTextureID;
     uint heightStreamingTextureID;
     uint opacityStreamingTextureID;
+    float2 reyesUvDensity;
+    float objectSurfaceTexelDensity;
+    uint objectSurfaceSamplingMode;
+    uint2 sourceMaterialId;
+    uint semanticFamily;
+    uint surfaceFlags;
+    float4 glintParameters;
+    uint glintEnabled;
+    uint diagnosticReason;
+    uint2 padGlint;
+};
+
+struct TerrainLayerInfo {
+    uint diffuseTextureIndex;
+    uint diffuseSamplerIndex;
+    uint normalTextureIndex;
+    uint normalSamplerIndex;
+    uint heightTextureIndex;
+    uint heightSamplerIndex;
+    uint rmaosTextureIndex;
+    uint rmaosSamplerIndex;
+    uint diffuseStreamingTextureID;
+    uint normalStreamingTextureID;
+    uint heightStreamingTextureID;
+    uint rmaosStreamingTextureID;
+    uint3 normalChannels;
+    uint flags;
+    float4 fallbackColor;
+    float uvScale;
+    uint stochasticLayerIndex;
+    float heightScale;
+    float roughnessScale;
+    float specularLevel;
+    float4 glintParameters;
+    float4 farOverlayParams;
+};
+
+struct TerrainStochasticLayerInfo {
+    uint diffuseGaussianTextureIndex;
+    uint diffuseInverseLutTextureIndex;
+    uint diffuseInverseLutSamplerIndex;
+    uint diffuseFlags;
+    uint normalGaussianTextureIndex;
+    uint normalInverseLutTextureIndex;
+    uint normalInverseLutSamplerIndex;
+    uint normalFlags;
+    float stochasticScale;
+    float diffuseLutHeight;
+    float normalLutHeight;
+    float heightLutHeight;
+    float4 diffuseColorSpaceOrigin;
+    float4 diffuseColorSpaceVector0;
+    float4 diffuseColorSpaceVector1;
+    float4 diffuseColorSpaceVector2;
+    uint heightGaussianTextureIndex;
+    uint heightInverseLutTextureIndex;
+    uint heightInverseLutSamplerIndex;
+    uint heightFlags;
+};
+
+struct TerrainLayerRefInfo {
+    uint layerIndex;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+struct TerrainRegionInfo {
+    int regionX;
+    int regionY;
+    uint layerRefStart;
+    uint layerRefCount;
+    uint weightBlockStart;
+    uint weightSampleSide;
+    uint weightSamplesPerLayer;
+    uint pad1;
+};
+
+struct TerrainSetInfo {
+    int minRegionX;
+    int minRegionY;
+    uint regionCountX;
+    uint regionCountY;
+    uint regionBase;
+    uint regionCount;
+    uint layerBase;
+    uint layerCount;
+    uint layerRefBase;
+    uint layerRefCount;
+    uint weightBlockBase;
+    uint weightBlockCount;
+    float regionSizeWorld;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 struct OpenPBRMaterialInfo {
@@ -500,11 +851,14 @@ struct PerObjectBuffer {
     row_major matrix modelInverse;
     uint normalMatrixBufferIndex;
     uint objectFlags;
-    uint pad[2];
+    uint stableSceneIdLo;
+    uint stableSceneIdHi;
 };
 
 struct PerMeshBuffer {
     uint materialDataIndex;
+    uint materialEvalCompileFlagsID;
+    uint materialReyesEvalCompileFlagsID;
     uint rasterBucketIndex;
     uint vertexFlags;
     uint vertexByteSize;
@@ -528,6 +882,34 @@ struct PerMeshInstanceBuffer {
     uint skinningInstanceSlot;
     float skinnedBoundsScale;
     BoundingSphere boundingSphere;
+};
+
+struct PerInstanceTransformBuffer {
+    row_major matrix model;
+    row_major matrix prevModel;
+    row_major matrix modelInverse;
+    uint normalMatrixBufferIndex;
+    uint objectFlags;
+    uint stableSceneIdLo;
+    uint stableSceneIdHi;
+};
+
+struct InstanceDrawRecordBuffer {
+    uint meshTemplateIndex;
+    uint instanceTransformIndex;
+    uint clodOffsetIndex;
+    uint skinnedAssemblyPlacementIndex;
+    uint skinningTypeSlot;
+};
+
+struct SkinnedAssemblyPlacementBuffer {
+    uint instanceTransformIndex;
+    uint skinningTypeSlot;
+    uint stableSceneId;
+    uint generation;
+    float4 localBoundingSphere;
+    float boundsScale;
+    uint3 pad;
 };
 
 #define LIGHTS_PER_PAGE 12
@@ -622,6 +1004,10 @@ struct FragmentInfo {
     uint materialFlags;
     uint selectedMaterialMipLevel;
     uint selectedMaterialMipMaxLevel;
+    uint parallaxApplied;
+    uint glintEnabled;
+    float geometricHeightDebug;
+    float4 glintParameters;
 };
 
 struct EnvironmentInfo {
@@ -666,15 +1052,69 @@ struct MaterialInputs
     uint openPBRMaterialDataIndex;
     uint selectedMaterialMipLevel;
     uint selectedMaterialMipMaxLevel;
+    uint parallaxApplied;
+    uint terrainRvtDebugFlags;
+    uint terrainRvtRequestedMip;
+    uint terrainRvtResidentMip;
+    uint terrainRvtPageTableIndex;
+    uint terrainRvtPhysicalPageIndex;
+    uint terrainRvtAtlasPoolIndex;
+    uint terrainRvtOwnerPageTableIndex;
+    uint terrainRvtFallbackReason;
+    uint2 terrainRvtPageCoord;
+    float2 terrainRvtPageUv;
+    float3 terrainRvtAtlasUv;
+    float2 terrainRvtPhysicalTileUv;
+    float3 terrainRvtSampleAlbedo;
+    float3 terrainRvtSampleAlbedoPoint;
+    float3 terrainRvtSampleNormal;
+    float3 terrainRvtSampleMaterial;
+    float terrainRvtHeightScale;
+    float2 terrainRvtLocal;
+    uint terrainRvtTerrainClipCount;
+    float geometricHeightDebug;
+    uint glintEnabled;
+    float4 glintParameters;
+    uint2 sourceObjectId;
+    uint2 sourceMaterialId;
+    uint materialTableIndex;
+    uint semanticFamily;
+    uint surfaceFlags;
+    uint diagnosticReason;
+};
+
+struct SARPSurfaceRecordV1
+{
+    uint2 sourceObjectId;
+    uint2 sourceMaterialId;
+    uint materialTableIndex;
+    uint semanticFamilyAndPayload;
+    uint flags;
+    uint diagnosticReason;
 };
 
 struct SkinningInstanceGPUInfo
 {
+    // Offset into Builtin::SkeletonResources::BoneTransforms, which stores
+    // row-vector inverseBind * animatedGlobal skin matrices.
     uint transformOffsetMatrices;
+    // Kept for CPU/debug compatibility; forward skinning no longer reads this in shaders.
     uint invBindOffsetMatrices;
     uint inverseSkinOffsetMatrices;
     uint boneCount;
+    uint flags;
+    uint pad0;
+    uint previousTransformOffsetMatrices;
+    uint stableSceneId;
+	uint boneRemapDescriptor;
+	uint boneRemapOffset;
+	uint sourceBoneCount;
+	uint skeletonLodVariant;
 };
+
+// Legacy/cache compatibility bit. Palette orientation is now canonical and does
+// not vary per instance.
+static const uint SkinningInstanceFlag_RowVectorSkinMatrix = 1u << 0;
 
 // TODO: packing?
 /*
@@ -853,6 +1293,40 @@ struct CLodReyesTelemetry
     uint rasterMicroTriangleOverflowCount;
     uint rasterNearPlaneClippedQuadCount;
     uint rasterTinyTriangleFallbackCount;
+    uint splitOcclusionTestCount;
+    uint splitOcclusionDeferCount;
+    uint splitOcclusionDropCount;
+    uint diceOcclusionTestCount;
+    uint diceOcclusionDeferCount;
+    uint diceOcclusionDropCount;
+    uint replaySplitQueueOverflowCount;
+    uint replayDiceQueueOverflowCount;
+    uint replaySplitMergeCount;
+    uint replayDiceMergeCount;
+    uint objectReyesAtlasDebugMaterialCount;
+    uint objectReyesAtlasDebugDisplacementEnabledCount;
+    uint objectReyesAtlasDebugZeroHeightDescriptorCount;
+    uint objectReyesAtlasDebugSampleCount;
+    uint objectReyesAtlasDebugMinMaterialSlot;
+    uint objectReyesAtlasDebugMaxMaterialSlot;
+    uint objectReyesAtlasDebugMinHeightDescriptor;
+    uint objectReyesAtlasDebugMaxHeightDescriptor;
+    uint objectReyesAtlasDebugMinSamplerDescriptor;
+    uint objectReyesAtlasDebugMaxSamplerDescriptor;
+    uint objectReyesAtlasDebugMinHeightValueU16;
+    uint objectReyesAtlasDebugMaxHeightValueU16;
+    uint objectReyesAtlasDebugPatchSampleCount;
+    uint objectReyesAtlasDebugMinPatchHeightValueU16;
+    uint objectReyesAtlasDebugMaxPatchHeightValueU16;
+    uint objectReyesAtlasDebugMinPatchUvXU16;
+    uint objectReyesAtlasDebugMaxPatchUvXU16;
+    uint objectReyesAtlasDebugMinPatchUvYU16;
+    uint objectReyesAtlasDebugMaxPatchUvYU16;
+    uint objectReyesAtlasDebugInvalidHeightUvSetCount;
+    uint objectReyesAtlasDebugMinPageUvSetCount;
+    uint objectReyesAtlasDebugMaxPageUvSetCount;
+    uint objectReyesAtlasDebugMinHeightUvSetIndex;
+    uint objectReyesAtlasDebugMaxHeightUvSetIndex;
 };
 
 #endif // __STRUCTS_HLSL__

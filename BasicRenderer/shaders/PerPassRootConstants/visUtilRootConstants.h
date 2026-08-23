@@ -9,5 +9,15 @@
 #define VISBUF_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX UintRootConstant10
 #define VISBUF_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX UintRootConstant11
 #define VISBUF_VOXEL_MATERIAL_BIN_INDEX UintRootConstant12
+#define VISBUF_REYES_USE_NORMAL_MAPS UintRootConstant13
+#define VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT UintRootConstant14
+#define VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS UintRootConstant15
+#define VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT UintRootConstant16
+#define VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX UintRootConstant17
+
+// External visibility producers can reserve high cluster-id ranges in the
+// existing vis-key payload. SARP grass owns this range and resolves those
+// pixels in its own GBuffer pass.
+#define VISBUF_SARP_GRASS_INDEX_BASE 0x02000000u
 
 #endif // VIS_UTIL_ROOT_CONSTANTS_H

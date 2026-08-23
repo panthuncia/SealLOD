@@ -46,6 +46,11 @@ struct MeshletSetup
     PerMeshBuffer meshBuffer;
     PerMeshInstanceBuffer meshInstanceBuffer;
     PerObjectBuffer objectBuffer;
+    // The opaque rigid CLod path only needs these members. Keeping that path out
+    // of the full PerObjectBuffer avoids carrying three matrices through every
+    // mesh-shader lane.
+    row_major float4x4 clodRasterModel;
+    uint clodRasterObjectFlags;
     uint vertCount;
     uint triCount;
     uint vertOffset; // Non-CLod: meshlet.VertOffset; CLod: unused (0)
@@ -65,6 +70,8 @@ struct MeshletSetup
     uint triangleByteOffset;    // byte offset within page triangle stream
     uint boneListOffset;        // uint offset within page bone-index stream
     uint boneCount;
+    uint assemblyTransformIndex;
+    CLodMeshMetadata clodMetadata;
     uint pageAttributeMask;
     uint uvSetCount;
     uint uvDescriptorBase;
@@ -130,6 +137,8 @@ bool InitializeMeshletInternal(
     setup.triangleByteOffset = 0;
     setup.boneListOffset = 0;
     setup.boneCount = 0;
+    setup.assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    setup.clodMetadata = (CLodMeshMetadata)0;
     setup.pageAttributeMask = 0;
     setup.uvSetCount = 0;
     setup.uvDescriptorBase = 0;

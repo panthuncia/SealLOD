@@ -17,11 +17,11 @@
 #include "Render/MemoryIntrospectionAPI.h"
 
 EnvironmentManager::EnvironmentManager() {
-	auto& resourceManager = ResourceManager::GetInstance();
+	auto& resourceManager = ::ResourceManager::GetInstance();
 	m_skyboxResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("skyboxResolution")();
 	m_reflectionCubemapResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("reflectionCubemapResolution")();
 	m_environmentInfoBuffer = LazyDynamicStructuredBuffer<EnvironmentInfo>::CreateShared(1, "environmentsBuffer", 0, true);
-	rg::memory::SetResourceUsageHint(*m_environmentInfoBuffer, "Environment Info");
+	org::memory::SetResourceUsageHint(*m_environmentInfoBuffer, "Environment Info");
 
 	m_workingEnvironmentCubemapGroup = std::make_shared<ResourceGroup>("EnvironmentCubemapGroup");
 	m_workingHDRIGroup = std::make_shared<ResourceGroup>("WorkingHDRIGroup");
@@ -60,6 +60,7 @@ std::unique_ptr<Environment> EnvironmentManager::CreateEnvironment(std::wstring 
 	prefilteredDesc.hasUAV = true;
 
 	auto prefilteredEnvironmentCubemap = PixelBuffer::CreateShared(prefilteredDesc);
+	org::memory::SetResourceUsageHint(*prefilteredEnvironmentCubemap, "Environment lighting");
 	auto sampler = Sampler::GetDefaultSampler();
 	auto prefilteredEnvironment = TextureAsset::CreateShared(prefilteredDesc, prefilteredEnvironmentCubemap, sampler, TextureFileMeta());
 	prefilteredEnvironment->SetName("Environment prefiltered cubemap");
@@ -86,6 +87,7 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 		auto factory = TextureFactory::CreateUnique();
 		skybox->EnsureUploaded(*factory);
 		skybox->SetName("Skybox cubemap");
+		org::memory::SetResourceUsageHint(*skybox->ImagePtr(), "Environment lighting");
 		res = skybox->GetWidth();
 		e->SetReflectionCubemapResolution(res);
 		e->SetEnvironmentCubemap(skybox);
@@ -111,6 +113,7 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 		skyboxDesc.hasUAV = true;
 
 		auto envCubemap = PixelBuffer::CreateShared(skyboxDesc);
+		org::memory::SetResourceUsageHint(*envCubemap, "Environment lighting");
 		auto sampler = Sampler::GetDefaultSampler();
 		skybox = TextureAsset::CreateShared(skyboxDesc, envCubemap, sampler, TextureFileMeta());
 		skybox->SetName("Environment cubemap");
@@ -157,6 +160,7 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 	prefilteredDesc.hasUAV = true;
 
 	auto prefilteredEnvironmentCubemap = PixelBuffer::CreateShared(prefilteredDesc);
+	org::memory::SetResourceUsageHint(*prefilteredEnvironmentCubemap, "Environment lighting");
 	auto sampler = Sampler::GetDefaultSampler();
 	auto prefilteredEnvironment = TextureAsset::CreateShared(prefilteredDesc, prefilteredEnvironmentCubemap, sampler, TextureFileMeta());
 	prefilteredEnvironment->SetName("Environment prefiltered cubemap");

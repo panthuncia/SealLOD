@@ -28,8 +28,6 @@
 #include "Resources/Resolvers/ECSResourceResolver.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "ShaderBuffers.h"
-#include <rhi_interop.h>
-#include <rhi_interop_dx12.h>
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodCreateCommandRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodPureComputeCullingRootConstants.h"
@@ -37,19 +35,20 @@
 
 namespace {
 
-uint64_t GetNativeBufferDeviceAddress(rhi::Resource resource) noexcept
-{
-    if (ID3D12Resource* nativeResource = rhi::dx12::get_resource(resource)) {
-        return nativeResource->GetGPUVirtualAddress();
-    }
-
-    rhi::VulkanResourceInfo vulkanInfo{};
-    if (rhi::QueryNativeResource(resource, rhi::RHI_IID_VK_RESOURCE, &vulkanInfo, sizeof(vulkanInfo))) {
-        return vulkanInfo.deviceAddress;
-    }
-
-    return 0u;
-}
+static_assert(
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS !=
+        CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX &&
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS !=
+        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX !=
+        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX,
+    "Object-cull-only constants must not overwrite shared CLod traversal state");
 
 constexpr uint32_t kPureComputeObjectCullThreadsPerGroup = 64u;
 constexpr uint32_t kPureComputeTraverseThreadsPerGroup = 64u;
@@ -137,12 +136,16 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::string stablePassIdentifier,
     HierarchicalCullingPassInputs inputs,
     std::shared_ptr<Buffer> visibleClustersBuffer,
+    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> visibleClustersCounterBuffer,
     std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
     std::shared_ptr<Buffer> voxelRasterWorkBuffer,
     std::shared_ptr<Buffer> voxelRasterWorkCounterBuffer,
+    std::shared_ptr<Buffer> skinnedVoxelRasterWorkBuffer,
+    std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
     uint32_t voxelRasterWorkCapacity,
     std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
+    std::shared_ptr<Buffer> pageJobVisibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
     std::shared_ptr<Buffer> histogramIndirectCommand,
     std::shared_ptr<Buffer> workGraphTelemetryBuffer,
@@ -157,16 +160,25 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<Buffer> swWriteBaseCounterBuffer,
     std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidatesBuffer,
     std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
+    std::shared_ptr<Buffer> shadowInvalidationCountBuffer,
     std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture)
+    std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
+    std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer,
+    std::shared_ptr<Buffer> shadowReceiverSubpageMaskBuffer,
+    std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture,
+    std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
+    , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_visibleClustersCounterBuffer(std::move(visibleClustersCounterBuffer))
     , m_swVisibleClustersCounterBuffer(std::move(swVisibleClustersCounterBuffer))
     , m_voxelRasterWorkBuffer(std::move(voxelRasterWorkBuffer))
     , m_voxelRasterWorkCounterBuffer(std::move(voxelRasterWorkCounterBuffer))
+    , m_skinnedVoxelRasterWorkBuffer(std::move(skinnedVoxelRasterWorkBuffer))
+    , m_skinnedVoxelRasterWorkCounterBuffer(std::move(skinnedVoxelRasterWorkCounterBuffer))
     , m_voxelRasterWorkCapacity(voxelRasterWorkCapacity)
     , m_pageJobVisibleClustersBuffer(std::move(pageJobVisibleClustersBuffer))
+    , m_pageJobVisibleClusterTransformIndicesBuffer(std::move(pageJobVisibleClusterTransformIndicesBuffer))
     , m_pageJobVisibleClustersCounterBuffer(std::move(pageJobVisibleClustersCounterBuffer))
     , m_histogramIndirectCommand(std::move(histogramIndirectCommand))
     , m_workGraphTelemetryBuffer(std::move(workGraphTelemetryBuffer))
@@ -180,15 +192,23 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_shadowDirtyHierarchyTexture(std::move(shadowDirtyHierarchyTexture))
     , m_shadowPredictiveInvalidationCandidatesBuffer(std::move(shadowPredictiveInvalidationCandidatesBuffer))
     , m_shadowPredictiveInvalidationCandidateCountBuffer(std::move(shadowPredictiveInvalidationCandidateCountBuffer))
+    , m_shadowInvalidationCountBuffer(std::move(shadowInvalidationCountBuffer))
     , m_shadowInvalidatedInstancesBitsetBuffer(std::move(shadowInvalidatedInstancesBitsetBuffer))
     , m_shadowPageTableTexture(std::move(shadowPageTableTexture))
     , m_shadowPhysicalPagesTexture(std::move(shadowPhysicalPagesTexture))
+    , m_shadowActiveBlockMetadataBuffer(std::move(shadowActiveBlockMetadataBuffer))
+    , m_shadowReceiverSubpageMaskBuffer(std::move(shadowReceiverSubpageMaskBuffer))
+    , m_shadowDynamicPhysicalPagesTexture(
+        std::move(shadowDynamicPhysicalPagesTexture))
+    , m_shadowDynamicActiveBlockMetadataBuffer(
+        std::move(shadowDynamicActiveBlockMetadataBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
 {
     m_isFirstPass = inputs.isFirstPass;
     m_maxVisibleClusters = inputs.maxVisibleClusters;
     m_workGraphMode = inputs.workGraphMode;
     m_rasterOutputKind = inputs.rasterOutputKind;
+    const std::string passIdentifierForLog = stablePassIdentifier;
     m_workGraphComputePageJobDescriptorResourceId =
         std::string(CLodWorkGraphComputePageJobDescriptorBufferId) + "." + std::move(stablePassIdentifier);
     m_voxelRasterQueueDescriptorResourceId =
@@ -197,7 +217,28 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     m_clodOnlyWorkloads = inputs.clodOnlyWorkloads;
     m_useShadowCascadeViews = inputs.useShadowCascadeViews;
 
-    if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClustersCounterBuffer) {
+    if (m_isFirstPass && UsesVirtualShadowOutput(m_rasterOutputKind) &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(
+            CLodDynamicWindBoundsCacheEnabledSettingName)()) {
+        constexpr uint64_t entryStride = 48u;
+        const uint64_t budgetMiB = std::min<uint32_t>(
+            SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+                CLodDynamicWindBoundsCacheMiBSettingName)(),
+            256u);
+        const uint64_t budgetBytes = budgetMiB * 1024u * 1024u;
+        m_dynamicWindBoundsCacheEntryCount = static_cast<uint32_t>(budgetBytes / entryStride);
+        if (m_dynamicWindBoundsCacheEntryCount != 0u) {
+            m_dynamicWindBoundsCacheBuffer = CreateAliasedUnmaterializedRawBuffer(
+                static_cast<uint64_t>(m_dynamicWindBoundsCacheEntryCount) * entryStride,
+                true,
+                false,
+                true);
+            m_dynamicWindBoundsCacheBuffer->SetName("CLod DynamicWind Meshlet Bounds Cache");
+            org::memory::SetResourceUsageHint(*m_dynamicWindBoundsCacheBuffer, "DynamicWind VSM bounds cache");
+        }
+    }
+
+    if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClusterTransformIndicesBuffer && m_pageJobVisibleClustersCounterBuffer) {
         m_workGraphComputePageJobDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
             1u,
             sizeof(CLodWorkGraphComputePageJobDescriptors),
@@ -206,44 +247,69 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
             false,
             false);
         m_workGraphComputePageJobDescriptorsBuffer->SetName("CLod Pure Compute Page Job Descriptors");
-        rg::memory::SetResourceUsageHint(*m_workGraphComputePageJobDescriptorsBuffer, "Cluster LOD pure compute");
+        org::memory::SetResourceUsageHint(*m_workGraphComputePageJobDescriptorsBuffer, "Cluster LOD pure compute");
     }
 
-    m_voxelRasterQueueDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        1u,
-        sizeof(CLodVoxelRasterQueueDescriptors),
-        false,
-        false,
-        false,
-        false);
-    m_voxelRasterQueueDescriptorsBuffer->SetName("CLod Pure Compute Voxel Raster Queue Descriptors");
-    rg::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD pure compute");
+    if (m_voxelRasterWorkCapacity != 0u) {
+        m_voxelRasterQueueDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+            1u,
+            sizeof(CLodVoxelRasterQueueDescriptors),
+            false,
+            false,
+            false,
+            false);
+        m_voxelRasterQueueDescriptorsBuffer->SetName("CLod Pure Compute Voxel Raster Queue Descriptors");
+        org::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD voxel rasterization");
+    }
 
     const uint32_t frontierCapacity = std::max(1u, m_maxVisibleClusters);
-    m_pureComputeCurrentNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
+    const uint64_t nodeFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodPureComputeNodeFrontierStrideBytes;
+    const uint64_t clusterFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodPureComputeClusterFrontierStrideBytes;
+    spdlog::info(
+        "CLod pure compute frontier allocation '{}': capacity={} nodeFrontier={} MiB each clusterFrontier={} MiB",
+        passIdentifierForLog,
+        frontierCapacity,
+        static_cast<double>(nodeFrontierBytes) / (1024.0 * 1024.0),
+        static_cast<double>(clusterFrontierBytes) / (1024.0 * 1024.0));
+    m_pureComputeCurrentNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeCurrentNodeFrontierBuffer->SetName("CLod Pure Compute Current Node Frontier");
-    rg::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
-    m_pureComputeNextNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
+    org::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
+    m_pureComputeNextNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeNextNodeFrontierBuffer->SetName("CLod Pure Compute Next Node Frontier");
-    rg::memory::SetResourceUsageHint(*m_pureComputeNextNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
-    m_pureComputeClusterFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodMeshletReplayStrideBytes, true, false, false, true);
+    org::memory::SetResourceUsageHint(*m_pureComputeNextNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
+    m_pureComputeCurrentLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
+    m_pureComputeCurrentLeafFrontierBuffer->SetName("CLod Pure Compute Current Leaf Frontier");
+    org::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
+    m_pureComputeNextLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
+    m_pureComputeNextLeafFrontierBuffer->SetName("CLod Pure Compute Next Leaf Frontier");
+    org::memory::SetResourceUsageHint(*m_pureComputeNextLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
+    m_pureComputeClusterFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeClusterFrontierStrideBytes, true, false, false, true);
     m_pureComputeClusterFrontierBuffer->SetName("CLod Pure Compute Cluster Frontier");
-    rg::memory::SetResourceUsageHint(*m_pureComputeClusterFrontierBuffer, "Cluster LOD pure compute frontiers");
+    org::memory::SetResourceUsageHint(*m_pureComputeClusterFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeCurrentNodeCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeCurrentNodeCounterBuffer->SetName("CLod Pure Compute Current Node Counter");
-    rg::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeCounterBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeNextNodeCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeNextNodeCounterBuffer->SetName("CLod Pure Compute Next Node Counter");
-    rg::memory::SetResourceUsageHint(*m_pureComputeNextNodeCounterBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeNextNodeCounterBuffer, "Cluster LOD pure compute");
+    m_pureComputeCurrentLeafCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
+    m_pureComputeCurrentLeafCounterBuffer->SetName("CLod Pure Compute Current Leaf Counter");
+    org::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafCounterBuffer, "Cluster LOD pure compute");
+    m_pureComputeNextLeafCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
+    m_pureComputeNextLeafCounterBuffer->SetName("CLod Pure Compute Next Leaf Counter");
+    org::memory::SetResourceUsageHint(*m_pureComputeNextLeafCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeClusterCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeClusterCounterBuffer->SetName("CLod Pure Compute Cluster Counter");
-    rg::memory::SetResourceUsageHint(*m_pureComputeClusterCounterBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeClusterCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeNodeDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
     m_pureComputeNodeDispatchArgsBuffer->SetName("CLod Pure Compute Node Dispatch Args");
-    rg::memory::SetResourceUsageHint(*m_pureComputeNodeDispatchArgsBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeNodeDispatchArgsBuffer, "Cluster LOD pure compute");
+    m_pureComputeLeafDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
+    m_pureComputeLeafDispatchArgsBuffer->SetName("CLod Pure Compute Leaf Dispatch Args");
+    org::memory::SetResourceUsageHint(*m_pureComputeLeafDispatchArgsBuffer, "Cluster LOD pure compute");
     m_pureComputeClusterDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
     m_pureComputeClusterDispatchArgsBuffer->SetName("CLod Pure Compute Cluster Dispatch Args");
-    rg::memory::SetResourceUsageHint(*m_pureComputeClusterDispatchArgsBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeClusterDispatchArgsBuffer, "Cluster LOD pure compute");
 
     const bool enableSharedSWClassificationPath =
         UsesSWClassification(m_workGraphMode) || m_workGraphComputePageJobDescriptorsBuffer != nullptr;
@@ -261,13 +327,17 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         { L"CLOD_WG_ENABLE_SW_CLASSIFICATION", enableSharedSWClassificationPath ? L"1" : L"0" },
         { L"CLOD_WG_ENABLE_SW_NODE_OUTPUT", L"0" },
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", UsesVirtualShadowOutput(m_rasterOutputKind) ? L"1" : L"0" },
+        { L"CLOD_VSM_TWO_LAYER_COMPUTE_CULL_VERSION", UsesVirtualShadowOutput(m_rasterOutputKind) ? L"2" : L"0" },
         { L"CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER", enableComputePageJobDescriptorBuffer ? L"1" : L"0" },
+        { L"CLOD_WG_ENABLE_VOXEL_OUTPUT", m_voxelRasterWorkCapacity != 0u ? L"1" : L"0" },
         { L"CLOD_COMPUTE_INCLUDE_ONLY", L"1" },
         { L"CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID", voxelQueueDescriptorResourceIdDefine.c_str() },
     };
     if (enableComputePageJobDescriptorBuffer) {
         pureComputeDefines.push_back({ L"CLOD_WG_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER_ID", pageJobDescriptorResourceIdDefine.c_str() });
     }
+    std::vector<DxcDefine> pureComputeLeafDefines = pureComputeDefines;
+    pureComputeLeafDefines.push_back({ L"CLOD_PC_LEAF_ONLY", L"1" });
 
     auto& psoManager = PSOManager::GetInstance();
     const auto computeLayout = psoManager.GetComputeRootSignature().GetHandle();
@@ -289,6 +359,18 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         L"BuildPureComputeDispatchArgsCS",
         pureComputeDefines,
         "CLod.PureCompute.BuildDispatchArgs");
+    m_pureComputeBuildDualDispatchArgsPipelineState = psoManager.MakeComputePipeline(
+        computeLayout,
+        L"shaders/ClusterLOD/computeCulling.hlsl",
+        L"BuildPureComputeDualDispatchArgsCS",
+        pureComputeDefines,
+        "CLod.PureCompute.BuildDualDispatchArgs");
+    m_pureComputeClearTraversalCountersPipelineState = psoManager.MakeComputePipeline(
+        computeLayout,
+        L"shaders/ClusterLOD/computeCulling.hlsl",
+        L"ClearPureComputeTraversalCountersCS",
+        pureComputeDefines,
+        "CLod.PureCompute.ClearTraversalCounters");
     m_pureComputeBuildReplayDispatchArgsPipelineState = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/computeCulling.hlsl",
@@ -319,6 +401,12 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         L"PureComputeTraverseFrontierCS",
         pureComputeDefines,
         "CLod.PureCompute.Traverse");
+    m_pureComputeLeafPipelineState = psoManager.MakeComputePipeline(
+        computeLayout,
+        L"shaders/ClusterLOD/computeCulling.hlsl",
+        L"PureComputeTraverseFrontierCS",
+        pureComputeLeafDefines,
+        "CLod.PureCompute.Leaf");
     m_pureComputeClusterPipelineState = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/computeCulling.hlsl",
@@ -331,6 +419,26 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         L"PureComputeDenseClusterWorkCS",
         pureComputeDefines,
         "CLod.PureCompute.DenseClusterCull");
+
+    const ResourceIdentifier voxelDescriptorId{ m_voxelRasterQueueDescriptorResourceId };
+    auto validateVoxelVariant = [&](const char* pipelineName, const PipelineState& pipeline, bool expectsVoxelDescriptor) {
+        const auto& resources = pipeline.GetResourceDescriptorSlots();
+        const bool requestsVoxelDescriptor = std::ranges::find(
+            resources.mandatoryResourceDescriptorSlots,
+            voxelDescriptorId) != resources.mandatoryResourceDescriptorSlots.end();
+        if (requestsVoxelDescriptor != expectsVoxelDescriptor) {
+            throw std::runtime_error(
+                std::string("CLod pure-compute shader voxel-output variant '") + pipelineName +
+                "' has an inconsistent resource interface (expected=" +
+                (expectsVoxelDescriptor ? "true" : "false") + ", reflected=" +
+                (requestsVoxelDescriptor ? "true" : "false") + ")");
+        }
+    };
+    validateVoxelVariant("object-cull", m_pureComputeObjectCullPipelineState, false);
+    validateVoxelVariant("traverse", m_pureComputeTraversePipelineState, m_voxelRasterWorkCapacity != 0u);
+    validateVoxelVariant("leaf", m_pureComputeLeafPipelineState, m_voxelRasterWorkCapacity != 0u);
+    validateVoxelVariant("cluster", m_pureComputeClusterPipelineState, false);
+    validateVoxelVariant("dense-cluster", m_pureComputeDenseClusterPipelineState, false);
 
     rhi::IndirectArg dispatchArg[] = {
         {.kind = rhi::IndirectArgKind::Dispatch }
@@ -370,21 +478,24 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
 
     builder->WithUnorderedAccess(
             m_visibleClustersBuffer,
+            m_visibleClusterTransformIndicesBuffer,
             m_visibleClustersCounterBuffer,
-            m_voxelRasterWorkBuffer,
-            m_voxelRasterWorkCounterBuffer,
             m_histogramIndirectCommand,
             m_workGraphTelemetryBuffer,
             m_occlusionReplayBuffer,
             m_occlusionReplayStateBuffer,
-            m_occlusionNodeGpuInputsBuffer,
             m_pureComputeCurrentNodeFrontierBuffer,
             m_pureComputeNextNodeFrontierBuffer,
+            m_pureComputeCurrentLeafFrontierBuffer,
+            m_pureComputeNextLeafFrontierBuffer,
             m_pureComputeClusterFrontierBuffer,
             m_pureComputeCurrentNodeCounterBuffer,
             m_pureComputeNextNodeCounterBuffer,
+            m_pureComputeCurrentLeafCounterBuffer,
+            m_pureComputeNextLeafCounterBuffer,
             m_pureComputeClusterCounterBuffer,
             m_pureComputeNodeDispatchArgsBuffer,
+            m_pureComputeLeafDispatchArgsBuffer,
             m_pureComputeClusterDispatchArgsBuffer,
             Builtin::CLod::StreamingLoadRequestKeys,
             Builtin::CLod::StreamingLoadRequests,
@@ -397,6 +508,12 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             Builtin::CLod::Groups,
             Builtin::CLod::Segments,
             Builtin::CLod::Nodes,
+			Builtin::CLod::NodeSkinningInfos,
+			Builtin::CLod::NodeBoneIndices,
+            Builtin::CLod::AssemblyInstances,
+            Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::CLod::StreamingNonResidentBits,
             Builtin::CLod::MeshMetadata,
             CLodLevelInfosBufferId,
@@ -404,32 +521,47 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             Builtin::CLod::StreamingRuntimeState,
             Builtin::CullingCameraBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::SkinnedAssemblyPlacements,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::CameraBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMaterialDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo,
-            m_viewRasterInfoBuffer,
-            m_voxelRasterQueueDescriptorResourceId.c_str())
+            m_viewRasterInfoBuffer)
         .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithShaderResource(ECSResourceResolver(drawSetIndicesQuery))
         .WithInternalTransition(m_visibleClustersCounterBuffer, computeReadState)
         .WithInternalTransition(m_occlusionReplayStateBuffer, computeReadState)
         .WithInternalTransition(m_pureComputeCurrentNodeFrontierBuffer, computeReadState)
-        .WithInternalTransition(m_pureComputeCurrentNodeCounterBuffer, computeReadState);
+        .WithInternalTransition(m_pureComputeCurrentNodeCounterBuffer, computeReadState)
+        .WithInternalTransition(m_pureComputeCurrentLeafFrontierBuffer, computeReadState)
+        .WithInternalTransition(m_pureComputeCurrentLeafCounterBuffer, computeReadState);
+
+    if (m_voxelRasterWorkCapacity != 0u) {
+        builder->WithUnorderedAccess(
+                m_voxelRasterWorkBuffer,
+                m_voxelRasterWorkCounterBuffer,
+                m_skinnedVoxelRasterWorkBuffer,
+                m_skinnedVoxelRasterWorkCounterBuffer)
+            .WithShaderResource(m_voxelRasterQueueDescriptorResourceId.c_str());
+    }
 
     const uint32_t traversalLevelCount = std::min(m_activeTraversalDepth, kPureComputeMaxTraversalLevels);
     if (!m_isFirstPass || traversalLevelCount > 0u) {
         builder->WithInternalTransition(m_pureComputeNodeDispatchArgsBuffer, indirectState)
+            .WithInternalTransition(m_pureComputeLeafDispatchArgsBuffer, indirectState)
             .WithInternalTransition(m_pureComputeClusterDispatchArgsBuffer, indirectState);
     }
     if (traversalLevelCount > 0u) {
         builder->WithInternalTransition(m_pureComputeNextNodeFrontierBuffer, computeReadState)
-            .WithInternalTransition(m_pureComputeNextNodeCounterBuffer, computeReadState);
+            .WithInternalTransition(m_pureComputeNextNodeCounterBuffer, computeReadState)
+            .WithInternalTransition(m_pureComputeNextLeafFrontierBuffer, computeReadState)
+            .WithInternalTransition(m_pureComputeNextLeafCounterBuffer, computeReadState);
     }
 
     if (UsesSWClassification(m_workGraphMode) && m_swVisibleClustersCounterBuffer) {
@@ -440,23 +572,37 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         builder->WithShaderResource(m_workGraphComputePageJobDescriptorResourceId.c_str());
     }
 
-    if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClustersCounterBuffer) {
-        builder->WithUnorderedAccess(m_pageJobVisibleClustersBuffer, m_pageJobVisibleClustersCounterBuffer);
+    if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClusterTransformIndicesBuffer && m_pageJobVisibleClustersCounterBuffer) {
+        builder->WithUnorderedAccess(
+            m_pageJobVisibleClustersBuffer,
+            m_pageJobVisibleClusterTransformIndicesBuffer,
+            m_pageJobVisibleClustersCounterBuffer);
     }
 
     if (m_slabResourceGroup) {
         builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
 
+    if (m_dynamicWindBoundsCacheBuffer) {
+        builder->WithUnorderedAccess(m_dynamicWindBoundsCacheBuffer);
+        // This read both enforces SimulateInstancesPhase2 -> shadow traversal
+        // ordering and limits caching to placements accepted by DynamicWind.
+        builder->WithShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
+    }
+
     if (UsesVirtualShadowOutput(m_rasterOutputKind)) {
         builder->WithShaderResource(
             Builtin::Shadows::CLodClipmapInfo,
+            Builtin::Shadows::CLodDirectionalPageViewInfo,
             Builtin::Shadows::CLodCompactShadowCameras);
         if (m_shadowDirtyHierarchyTexture) {
             builder->WithShaderResource(m_shadowDirtyHierarchyTexture);
         }
         if (m_shadowInvalidatedInstancesBitsetBuffer) {
             builder->WithShaderResource(m_shadowInvalidatedInstancesBitsetBuffer);
+        }
+        if (m_shadowInvalidationCountBuffer) {
+            builder->WithShaderResource(m_shadowInvalidationCountBuffer);
         }
         if (m_shadowPredictiveInvalidationCandidatesBuffer) {
             builder->WithUnorderedAccess(m_shadowPredictiveInvalidationCandidatesBuffer);
@@ -470,13 +616,24 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         if (m_shadowPhysicalPagesTexture) {
             builder->WithUnorderedAccess(m_shadowPhysicalPagesTexture);
         }
+        if (m_shadowDynamicPhysicalPagesTexture) {
+            builder->WithUnorderedAccess(m_shadowDynamicPhysicalPagesTexture);
+        }
+        if (m_shadowActiveBlockMetadataBuffer) {
+            builder->WithShaderResource(m_shadowActiveBlockMetadataBuffer);
+        }
+        if (m_shadowReceiverSubpageMaskBuffer) {
+            builder->WithShaderResource(m_shadowReceiverSubpageMaskBuffer);
+        }
+        if (m_shadowDynamicActiveBlockMetadataBuffer) {
+            builder->WithShaderResource(
+                m_shadowDynamicActiveBlockMetadataBuffer);
+        }
     }
 
     if (UsesPerViewDepthMapOcclusion(m_rasterOutputKind)) {
         builder->WithUnorderedAccess(m_viewDepthSrvIndicesBuffer)
-            .WithShaderResource(m_isFirstPass
-                ? Builtin::LastFrameLinearDepthMaps
-                : Builtin::PrimaryCamera::LinearDepthMap);
+            .WithShaderResource(Builtin::PrimaryCamera::LinearDepthMap);
     }
 
     if (m_phase1VisibleClustersCounterBuffer && !m_isFirstPass) {
@@ -491,6 +648,10 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
 
 void HierarchicalDispatchCullingPass::Setup()
 {
+	// Pure-compute traversal uses the same bindless node-bounds sidecars as the
+	// work graph. Keep explicit registrations in addition to graph declarations.
+	RegisterSRV(Builtin::CLod::NodeSkinningInfos);
+	RegisterSRV(Builtin::CLod::NodeBoneIndices);
 }
 
 PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& executionContext)
@@ -501,6 +662,35 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
 
     commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
     commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
+
+    if (m_isFirstPass && IsCLodWorkGraphTelemetryEnabled()) {
+        BindResourceDescriptorIndices(commandList, m_clearPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_clearPipelineState.GetAPIPipelineState().GetHandle());
+
+        uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] =
+            m_workGraphTelemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodWorkGraphCounterCount;
+        commandList.PushConstants(
+            rhi::ShaderStage::Compute,
+            0,
+            MiscUintRootSignatureIndex,
+            0,
+            NumMiscUintRootConstants,
+            clearRootConstants);
+        commandList.Dispatch((CLodWorkGraphCounterCount + 63u) / 64u, 1u, 1u);
+
+        rhi::BufferBarrier telemetryBarrier{};
+        telemetryBarrier.buffer = m_workGraphTelemetryBuffer->GetAPIResource().GetHandle();
+        telemetryBarrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
+        telemetryBarrier.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
+        telemetryBarrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
+        telemetryBarrier.afterSync = rhi::ResourceSyncState::ComputeShading;
+        rhi::BarrierBatch telemetryBarrierBatch{};
+        telemetryBarrierBatch.buffers = { &telemetryBarrier };
+        commandList.Barriers(telemetryBarrierBatch);
+    }
 
     if (m_pageJobVisibleClustersCounterBuffer) {
         BindResourceDescriptorIndices(commandList, m_clearPipelineState.GetResourceDescriptorSlots());
@@ -532,12 +722,23 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         commandList.Barriers(clearBarrierBatch);
     }
 
+    const char* expansionSettingName = m_isFirstPass
+        ? CLodPureComputePhase2ExpansionFactorSettingName
+        : CLodPureComputeReplayExpansionFactorSettingName;
     const uint32_t phase2ExpansionFactor = CLodNormalizePureComputePhase2ExpansionFactor(
-        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodPureComputePhase2ExpansionFactorSettingName)());
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(expansionSettingName)());
     const uint32_t phase2RecordsPerGroup = 64u / phase2ExpansionFactor;
 
     uint32_t sharedRootConstants[NumMiscUintRootConstants] = {};
+    if (m_dynamicWindBoundsCacheBuffer) {
+        ++m_dynamicWindBoundsCacheGeneration;
+        if (m_dynamicWindBoundsCacheGeneration == 0u ||
+            m_dynamicWindBoundsCacheGeneration >= 0x7FFFFFFFu) {
+            m_dynamicWindBoundsCacheGeneration = 1u;
+        }
+    }
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    sharedRootConstants[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_visibleClusterTransformIndicesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     sharedRootConstants[CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT] =
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodForceTraversalDepthRootSettingName)();
@@ -555,6 +756,25 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             ? m_viewDepthSrvIndicesBuffer->GetSRVInfo(0).slot.index
             : 0u;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_CAPACITY] = static_cast<uint32_t>(m_maxVisibleClusters);
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX] =
+        m_dynamicWindBoundsCacheBuffer
+            ? m_dynamicWindBoundsCacheBuffer->GetUAVShaderVisibleInfo(0).slot.index
+            : 0u;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] = m_dynamicWindBoundsCacheEntryCount;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] = m_dynamicWindBoundsCacheGeneration;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] =
+        m_dynamicWindBoundsCacheBuffer
+            ? m_resourceRegistryView
+                ->RequestPtr<GloballyIndexedResource>("Builtin::DynamicWind::VisibleSkeletonMembership")
+                ->GetSRVInfo(0).slot.index
+            : 0u;
+    if (m_dynamicWindBoundsCacheBuffer && m_dynamicWindBoundsCacheGeneration == 1u) {
+        spdlog::info(
+            "CLod DynamicWind bounds cache bindings: entries={} cacheDescriptor={} membershipDescriptor={}",
+            m_dynamicWindBoundsCacheEntryCount,
+            sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX],
+            sharedRootConstants[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX]);
+    }
     sharedRootConstants[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] =
         m_shadowDirtyHierarchyTexture
             ? m_shadowDirtyHierarchyTexture->GetSRVInfo(SRVViewType::Texture2DArrayFull, 0).slot.index
@@ -602,6 +822,31 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         m_shadowPhysicalPagesTexture
             ? m_shadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index
             : 0u;
+    sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
+        m_shadowActiveBlockMetadataBuffer
+            ? m_shadowActiveBlockMetadataBuffer->GetSRVInfo(0).slot.index
+            : 0u;
+    sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX] =
+        m_shadowReceiverSubpageMaskBuffer
+            ? m_shadowReceiverSubpageMaskBuffer->GetSRVInfo(0).slot.index
+            : 0u;
+    const uint32_t receiverSubpageMode = m_shadowReceiverSubpageMaskBuffer
+        ? SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+            CLodDirectionalVirtualShadowReceiverSubpageModeSettingName)()
+        : CLodVirtualShadowReceiverSubpageModeOff;
+    sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_MODE] = receiverSubpageMode;
+    sharedRootConstants[
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX] =
+        m_shadowDynamicPhysicalPagesTexture
+            ? m_shadowDynamicPhysicalPagesTexture
+                ->GetUAVShaderVisibleInfo(0).slot.index
+            : 0u;
+    sharedRootConstants[
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
+        m_shadowDynamicActiveBlockMetadataBuffer
+            ? m_shadowDynamicActiveBlockMetadataBuffer
+                ->GetSRVInfo(0).slot.index
+            : 0u;
     sharedRootConstants[CLOD_WG_HW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX] =
         (m_phase1VisibleClustersCounterBuffer ? m_phase1VisibleClustersCounterBuffer : m_visibleClustersCounterBuffer)
             ->GetSRVInfo(0)
@@ -634,7 +879,19 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName)()) {
         workGraphFlags |= CLOD_WG_FLAG_VSM_PREDICTIVE_LOD_INVALIDATION;
     }
-    constexpr uint32_t swRasterThreshold = 16u;
+    if (UsesVirtualShadowOutput(m_rasterOutputKind) &&
+        receiverSubpageMode != CLodVirtualShadowReceiverSubpageModeOff) {
+        workGraphFlags |= CLOD_WG_FLAG_VSM_RECEIVER_SUBPAGE_MASK;
+    }
+    if (!SettingsManager::GetInstance().getSettingGetter<bool>(CLodFrustumCullingSettingName)()) {
+        workGraphFlags |= CLOD_WG_FLAG_DISABLE_FRUSTUM_CULLING;
+    }
+    const uint32_t swRasterThreshold = std::min(
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+            UsesVirtualShadowOutput(m_rasterOutputKind)
+                ? CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName
+                : CLodSoftwareRasterDiameterThresholdSettingName)(),
+        0xFFFFu);
     workGraphFlags |= (swRasterThreshold << CLOD_WG_SW_RASTER_THRESHOLD_SHIFT);
     if (!m_isFirstPass) {
         workGraphFlags |= CLOD_WG_FLAG_PHASE2;
@@ -659,7 +916,10 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         commandList.Dispatch(1u, 1u, 1u);
     };
 
-    clearCounter(m_voxelRasterWorkCounterBuffer);
+    if (m_voxelRasterWorkCapacity != 0u) {
+        clearCounter(m_voxelRasterWorkCounterBuffer);
+        clearCounter(m_skinnedVoxelRasterWorkCounterBuffer);
+    }
 
     auto bufferBarrier = [&](std::initializer_list<std::shared_ptr<Buffer>> buffers,
                              rhi::ResourceAccessType beforeAccess,
@@ -734,9 +994,12 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             rhi::ResourceSyncState::ComputeShading);
     };
 
-    uavBarrier({ m_voxelRasterWorkCounterBuffer });
+    if (m_voxelRasterWorkCapacity != 0u) {
+        uavBarrier({ m_voxelRasterWorkCounterBuffer, m_skinnedVoxelRasterWorkCounterBuffer });
+    }
 
     bool nodeDispatchArgsNeedReuseBarrier = false;
+    bool leafDispatchArgsNeedReuseBarrier = false;
     bool clusterDispatchArgsNeedReuseBarrier = false;
 
     auto buildDispatchArgs = [&](const std::shared_ptr<Buffer>& counterBuffer, const std::shared_ptr<Buffer>& argsBuffer, uint32_t threadsPerGroup) {
@@ -757,6 +1020,51 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             0,
             NumMiscUintRootConstants,
             dispatchRootConstants);
+        commandList.Dispatch(1u, 1u, 1u);
+    };
+
+    auto buildDualDispatchArgs = [&](const std::shared_ptr<Buffer>& firstCounterBuffer,
+                                     const std::shared_ptr<Buffer>& firstArgsBuffer,
+                                     const std::shared_ptr<Buffer>& secondCounterBuffer,
+                                     const std::shared_ptr<Buffer>& secondArgsBuffer,
+                                     uint32_t threadsPerGroup) {
+        BindResourceDescriptorIndices(commandList, m_pureComputeBuildDualDispatchArgsPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_pureComputeBuildDualDispatchArgsPipelineState.GetAPIPipelineState().GetHandle());
+        uint32_t dispatchRootConstants[NumMiscUintRootConstants] = {};
+        std::copy(std::begin(sharedRootConstants), std::end(sharedRootConstants), std::begin(dispatchRootConstants));
+        dispatchRootConstants[CLOD_PC_DISPATCH_COUNTER_DESCRIPTOR_INDEX] = firstCounterBuffer->GetSRVInfo(0).slot.index;
+        dispatchRootConstants[CLOD_PC_DISPATCH_ARGS_DESCRIPTOR_INDEX] = firstArgsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        dispatchRootConstants[CLOD_PC_DISPATCH_THREADS_PER_GROUP] = threadsPerGroup;
+        dispatchRootConstants[CLOD_PC_DISPATCH_COUNT_LIMIT] = static_cast<uint32_t>(m_maxVisibleClusters);
+        dispatchRootConstants[CLOD_PC_SECOND_DISPATCH_COUNTER_DESCRIPTOR_INDEX] = secondCounterBuffer->GetSRVInfo(0).slot.index;
+        dispatchRootConstants[CLOD_PC_SECOND_DISPATCH_ARGS_DESCRIPTOR_INDEX] = secondArgsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        commandList.PushConstants(
+            rhi::ShaderStage::Compute,
+            0,
+            MiscUintRootSignatureIndex,
+            0,
+            NumMiscUintRootConstants,
+            dispatchRootConstants);
+        commandList.Dispatch(1u, 1u, 1u);
+    };
+
+    auto clearTraversalCounters = [&](const std::shared_ptr<Buffer>& nodeCounter,
+                                      const std::shared_ptr<Buffer>& leafCounter,
+                                      const std::shared_ptr<Buffer>& clusterCounter) {
+        BindResourceDescriptorIndices(commandList, m_pureComputeClearTraversalCountersPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_pureComputeClearTraversalCountersPipelineState.GetAPIPipelineState().GetHandle());
+        uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
+        std::copy(std::begin(sharedRootConstants), std::end(sharedRootConstants), std::begin(clearRootConstants));
+        clearRootConstants[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = nodeCounter->GetUAVShaderVisibleInfo(0).slot.index;
+        clearRootConstants[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX] = leafCounter->GetUAVShaderVisibleInfo(0).slot.index;
+        clearRootConstants[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = clusterCounter->GetUAVShaderVisibleInfo(0).slot.index;
+        commandList.PushConstants(
+            rhi::ShaderStage::Compute,
+            0,
+            MiscUintRootSignatureIndex,
+            0,
+            NumMiscUintRootConstants,
+            clearRootConstants);
         commandList.Dispatch(1u, 1u, 1u);
     };
 
@@ -878,8 +1186,16 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
 
     clearCounter(m_pureComputeCurrentNodeCounterBuffer);
     clearCounter(m_pureComputeNextNodeCounterBuffer);
+    clearCounter(m_pureComputeCurrentLeafCounterBuffer);
+    clearCounter(m_pureComputeNextLeafCounterBuffer);
     clearCounter(m_pureComputeClusterCounterBuffer);
-    uavBarrier({ m_pureComputeCurrentNodeCounterBuffer, m_pureComputeNextNodeCounterBuffer, m_pureComputeClusterCounterBuffer });
+    uavBarrier({
+        m_pureComputeCurrentNodeCounterBuffer,
+        m_pureComputeNextNodeCounterBuffer,
+        m_pureComputeCurrentLeafCounterBuffer,
+        m_pureComputeNextLeafCounterBuffer,
+        m_pureComputeClusterCounterBuffer,
+    });
 
     if (m_isFirstPass) {
         std::vector<ObjectCullRecord> cullRecords;
@@ -887,20 +1203,34 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         context.viewManager->ForEachFiltered(filter, [&](uint64_t view) {
             auto viewInfo = context.viewManager->Get(view);
             auto cameraBufferIndex = viewInfo->gpu.cameraBufferIndex;
-            auto workloads = context.indirectCommandBufferManager->GetViewIndirectBuffersForRenderPhase(
-                view,
-                m_renderPhase,
-                m_clodOnlyWorkloads);
-            for (auto& wl : workloads) {
-                auto count = wl.workload.count;
-                if (count == 0) {
-                    continue;
-                }
+			auto workloads = context.indirectCommandBufferManager->GetViewIndirectBuffersForRenderPhase(
+				view,
+				m_renderPhase,
+				m_clodOnlyWorkloads);
+			for (auto& wl : workloads) {
+				const auto activeDrawSetIndices = wl.workload.activeDrawSetIndices;
+				if (!activeDrawSetIndices) {
+					spdlog::warn(
+						"HierarchicalDispatchCullingPass: skipping stale workload without active draw set indices flags={} phase={} clodOnly={} count={}",
+						static_cast<std::uint64_t>(wl.key.compileFlags),
+						wl.key.renderPhase.hash,
+						wl.key.clodOnly,
+						wl.workload.count);
+					continue;
+				}
+				const auto count = wl.workload.activeDrawCount;
+				if (count == 0) {
+					continue;
+				}
 
-                ObjectCullRecord record{};
+				ObjectCullRecord record{};
                 record.viewDataIndex = cameraBufferIndex;
-                record.activeDrawSetIndicesSRVIndex = context.objectManager->GetActiveDrawSetIndices(wl.key)->GetSRVInfo(0).slot.index;
+                record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
+                record.drawRecordVisibilityGenerationSRVIndex = context.objectManager->GetDrawRecordVisibilityGenerationBuffer()->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;
+                record.shadowCasterClass = UsesVirtualShadowOutput(m_rasterOutputKind)
+                    ? (wl.key.skinnedShadowCaster ? 2u : 1u)
+                    : 0u;
                 record.dispatchGridX = static_cast<uint>((count + kPureComputeObjectCullThreadsPerGroup - 1u) / kPureComputeObjectCullThreadsPerGroup);
                 record.dispatchGridY = 1;
                 record.dispatchGridZ = 1;
@@ -918,6 +1248,12 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_COUNT] = record.activeDrawCount;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] = record.viewDataIndex;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] = record.activeDrawSetIndicesSRVIndex;
+            objectCullRootConstants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] = record.drawRecordVisibilityGenerationSRVIndex;
+            objectCullRootConstants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] = record.shadowCasterClass;
+            objectCullRootConstants[CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX] =
+                m_shadowInvalidationCountBuffer
+                    ? m_shadowInvalidationCountBuffer->GetSRVInfo(0).slot.index
+                    : 0u;
             commandList.PushConstants(
                 rhi::ShaderStage::Compute,
                 0,
@@ -1007,6 +1343,8 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     uavToComputeReadBarrier({
         m_pureComputeCurrentNodeFrontierBuffer,
         m_pureComputeCurrentNodeCounterBuffer,
+        m_pureComputeCurrentLeafFrontierBuffer,
+        m_pureComputeCurrentLeafCounterBuffer,
     });
     uavBarrier({
         m_visibleClustersCounterBuffer,
@@ -1018,52 +1356,93 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     auto currentNodeCounter = m_pureComputeCurrentNodeCounterBuffer;
     auto nextNodeFrontier = m_pureComputeNextNodeFrontierBuffer;
     auto nextNodeCounter = m_pureComputeNextNodeCounterBuffer;
+    auto currentLeafFrontier = m_pureComputeCurrentLeafFrontierBuffer;
+    auto currentLeafCounter = m_pureComputeCurrentLeafCounterBuffer;
+    auto nextLeafFrontier = m_pureComputeNextLeafFrontierBuffer;
+    auto nextLeafCounter = m_pureComputeNextLeafCounterBuffer;
 
     const uint32_t traversalLevelCount = std::min(m_activeTraversalDepth, kPureComputeMaxTraversalLevels);
     for (uint32_t level = 0; level < traversalLevelCount; ++level) {
         if (level > 0u) {
-            computeReadToUavBarrier({ nextNodeFrontier, nextNodeCounter });
+            computeReadToUavBarrier({
+                nextNodeFrontier,
+                nextNodeCounter,
+                nextLeafFrontier,
+                nextLeafCounter,
+            });
         }
-        clearCounter(nextNodeCounter);
-        clearCounter(m_pureComputeClusterCounterBuffer);
-        uavBarrier({ nextNodeCounter, m_pureComputeClusterCounterBuffer });
+        clearTraversalCounters(nextNodeCounter, nextLeafCounter, m_pureComputeClusterCounterBuffer);
+        uavBarrier({ nextNodeCounter, nextLeafCounter, m_pureComputeClusterCounterBuffer });
 
         if (nodeDispatchArgsNeedReuseBarrier) {
             indirectArgsToUavBarrier({ m_pureComputeNodeDispatchArgsBuffer });
             nodeDispatchArgsNeedReuseBarrier = false;
         }
-        buildDispatchArgs(currentNodeCounter, m_pureComputeNodeDispatchArgsBuffer, kPureComputeTraverseThreadsPerGroup);
-        uavToIndirectArgsBarrier({ m_pureComputeNodeDispatchArgsBuffer });
+        if (leafDispatchArgsNeedReuseBarrier) {
+            indirectArgsToUavBarrier({ m_pureComputeLeafDispatchArgsBuffer });
+            leafDispatchArgsNeedReuseBarrier = false;
+        }
+        buildDualDispatchArgs(
+            currentNodeCounter,
+            m_pureComputeNodeDispatchArgsBuffer,
+            currentLeafCounter,
+            m_pureComputeLeafDispatchArgsBuffer,
+            kPureComputeTraverseThreadsPerGroup);
+        uavToIndirectArgsBarrier({
+            m_pureComputeNodeDispatchArgsBuffer,
+            m_pureComputeLeafDispatchArgsBuffer,
+        });
 
         BindResourceDescriptorIndices(commandList, m_pureComputeTraversePipelineState.GetResourceDescriptorSlots());
         commandList.BindPipeline(m_pureComputeTraversePipelineState.GetAPIPipelineState().GetHandle());
-        uint32_t traverseRootConstants[NumMiscUintRootConstants] = {};
-        std::copy(std::begin(sharedRootConstants), std::end(sharedRootConstants), std::begin(traverseRootConstants));
-        traverseRootConstants[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX] = currentNodeFrontier->GetSRVInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX] = currentNodeCounter->GetSRVInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] = nextNodeFrontier->GetUAVShaderVisibleInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = nextNodeCounter->GetUAVShaderVisibleInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX] = m_pureComputeClusterFrontierBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = m_pureComputeClusterCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        commandList.PushConstants(
-            rhi::ShaderStage::Compute,
-            0,
-            MiscUintRootSignatureIndex,
-            0,
-            NumMiscUintRootConstants,
-            traverseRootConstants);
-        commandList.ExecuteIndirect(
-            m_pureComputeDispatchCommandSignature->GetHandle(),
-            m_pureComputeNodeDispatchArgsBuffer->GetAPIResource().GetHandle(),
-            0,
-            {},
-            0,
-            1);
+        auto dispatchNodeFrontier = [&](const std::shared_ptr<Buffer>& inputFrontier,
+                                       const std::shared_ptr<Buffer>& inputCounter,
+                                       const std::shared_ptr<Buffer>& dispatchArgs) {
+            uint32_t traverseRootConstants[NumMiscUintRootConstants] = {};
+            std::copy(std::begin(sharedRootConstants), std::end(sharedRootConstants), std::begin(traverseRootConstants));
+            traverseRootConstants[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX] = inputFrontier->GetSRVInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX] = inputCounter->GetSRVInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] = nextNodeFrontier->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = nextNodeCounter->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX] = m_pureComputeClusterFrontierBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = m_pureComputeClusterCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_LEAF_OUTPUT_DESCRIPTOR_INDEX] = nextLeafFrontier->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX] = nextLeafCounter->GetUAVShaderVisibleInfo(0).slot.index;
+            commandList.PushConstants(
+                rhi::ShaderStage::Compute,
+                0,
+                MiscUintRootSignatureIndex,
+                0,
+                NumMiscUintRootConstants,
+                traverseRootConstants);
+            commandList.ExecuteIndirect(
+                m_pureComputeDispatchCommandSignature->GetHandle(),
+                dispatchArgs->GetAPIResource().GetHandle(),
+                0,
+                {},
+                0,
+                1);
+        };
+        dispatchNodeFrontier(currentNodeFrontier, currentNodeCounter, m_pureComputeNodeDispatchArgsBuffer);
+        uavBarrier({
+            nextNodeFrontier,
+            nextNodeCounter,
+            nextLeafFrontier,
+            nextLeafCounter,
+            m_pureComputeClusterFrontierBuffer,
+            m_pureComputeClusterCounterBuffer,
+        });
+        BindResourceDescriptorIndices(commandList, m_pureComputeLeafPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_pureComputeLeafPipelineState.GetAPIPipelineState().GetHandle());
+        dispatchNodeFrontier(currentLeafFrontier, currentLeafCounter, m_pureComputeLeafDispatchArgsBuffer);
         nodeDispatchArgsNeedReuseBarrier = true;
+        leafDispatchArgsNeedReuseBarrier = true;
 
         uavToComputeReadBarrier({
             nextNodeFrontier,
             nextNodeCounter,
+            nextLeafFrontier,
+            nextLeafCounter,
             m_pureComputeClusterFrontierBuffer,
             m_pureComputeClusterCounterBuffer,
         });
@@ -1087,6 +1466,8 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
 
         std::swap(currentNodeFrontier, nextNodeFrontier);
         std::swap(currentNodeCounter, nextNodeCounter);
+        std::swap(currentLeafFrontier, nextLeafFrontier);
+        std::swap(currentLeafCounter, nextLeafCounter);
     }
 
     uavToComputeReadBarrier({ m_visibleClustersCounterBuffer, m_occlusionReplayStateBuffer });
@@ -1099,8 +1480,11 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     createRootConstants[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetSRVInfo(0).slot.index;
     createRootConstants[CLOD_CREATE_RASTER_BUCKET_HISTOGRAM_COMMAND_DESCRIPTOR_INDEX] = m_histogramIndirectCommand->GetUAVShaderVisibleInfo(0).slot.index;
     createRootConstants[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = m_occlusionReplayStateBuffer->GetSRVInfo(0).slot.index;
-    createRootConstants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = m_occlusionNodeGpuInputsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    // Pure-compute replay seeds descriptor-backed frontiers directly; it does
+    // not consume D3D12 work-graph node-input records.
+    createRootConstants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     createRootConstants[CLOD_CREATE_NUM_RASTER_BUCKETS] = context.materialManager->GetRasterBucketCount();
+    createRootConstants[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = static_cast<uint32_t>(m_maxVisibleClusters);
     commandList.PushConstants(
         rhi::ShaderStage::Compute,
         0,
@@ -1152,12 +1536,12 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
     uint32_t zero = 0u;
     {
         ZoneScopedN("HierarchicalDispatchCullingPass::UploadCounterResets");
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_visibleClustersCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_visibleClustersCounterBuffer), 0);
         if (m_swVisibleClustersCounterBuffer) {
-            BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_swVisibleClustersCounterBuffer), 0);
+            BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_swVisibleClustersCounterBuffer), 0);
         }
         if (m_pageJobVisibleClustersCounterBuffer) {
-            BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pageJobVisibleClustersCounterBuffer), 0);
+            BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pageJobVisibleClustersCounterBuffer), 0);
         }
     }
 
@@ -1167,19 +1551,26 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
         m_sizedPureComputeFrontierCapacity = frontierCapacity;
         m_pureComputeCurrentNodeFrontierBuffer->ResizeStructured(frontierCapacity);
         m_pureComputeNextNodeFrontierBuffer->ResizeStructured(frontierCapacity);
+        m_pureComputeCurrentLeafFrontierBuffer->ResizeStructured(frontierCapacity);
+        m_pureComputeNextLeafFrontierBuffer->ResizeStructured(frontierCapacity);
         m_pureComputeClusterFrontierBuffer->ResizeStructured(frontierCapacity);
         m_pureComputeCurrentNodeCounterBuffer->ResizeStructured(1u);
         m_pureComputeNextNodeCounterBuffer->ResizeStructured(1u);
+        m_pureComputeCurrentLeafCounterBuffer->ResizeStructured(1u);
+        m_pureComputeNextLeafCounterBuffer->ResizeStructured(1u);
         m_pureComputeClusterCounterBuffer->ResizeStructured(1u);
         m_pureComputeNodeDispatchArgsBuffer->ResizeStructured(1u);
+        m_pureComputeLeafDispatchArgsBuffer->ResizeStructured(1u);
         m_pureComputeClusterDispatchArgsBuffer->ResizeStructured(1u);
     }
 
     {
         ZoneScopedN("HierarchicalDispatchCullingPass::UploadPureComputeCounterResets");
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeCurrentNodeCounterBuffer), 0);
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeNextNodeCounterBuffer), 0);
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeClusterCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeCurrentNodeCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeNextNodeCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeCurrentLeafCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeNextLeafCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeClusterCounterBuffer), 0);
     }
 
     bool rebuildViewTables = false;
@@ -1245,7 +1636,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             BUFFER_UPLOAD(
                 m_cachedViewRasterInfo.data(),
                 static_cast<uint32_t>(m_cachedViewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
-                rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+                org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
                 0);
         }
     }
@@ -1257,29 +1648,35 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             pageJobDescriptors.visibleClustersUAVDescriptorIndex = m_pageJobVisibleClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
             pageJobDescriptors.visibleClustersCounterUAVDescriptorIndex =
                 m_pageJobVisibleClustersCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            pageJobDescriptors.visibleClusterTransformIndicesUAVDescriptorIndex =
+                m_pageJobVisibleClusterTransformIndicesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
             if (!m_hasCachedPageJobDescriptors || !BytesEqual(pageJobDescriptors, m_cachedPageJobDescriptors)) {
                 m_cachedPageJobDescriptors = pageJobDescriptors;
                 m_hasCachedPageJobDescriptors = true;
                 BUFFER_UPLOAD(
                     &pageJobDescriptors,
                     sizeof(CLodWorkGraphComputePageJobDescriptors),
-                    rg::runtime::UploadTarget::FromShared(m_workGraphComputePageJobDescriptorsBuffer),
+                    org::runtime::UploadTarget::FromShared(m_workGraphComputePageJobDescriptorsBuffer),
                     0);
             }
         }
 
-        CLodVoxelRasterQueueDescriptors voxelQueueDescriptors{};
-        voxelQueueDescriptors.workRecordsUAVDescriptorIndex = m_voxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        voxelQueueDescriptors.workRecordCounterUAVDescriptorIndex = m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        voxelQueueDescriptors.workRecordCapacity = m_voxelRasterWorkCapacity;
-        if (!m_hasCachedVoxelQueueDescriptors || !BytesEqual(voxelQueueDescriptors, m_cachedVoxelQueueDescriptors)) {
-            m_cachedVoxelQueueDescriptors = voxelQueueDescriptors;
-            m_hasCachedVoxelQueueDescriptors = true;
-            BUFFER_UPLOAD(
-                &voxelQueueDescriptors,
-                sizeof(CLodVoxelRasterQueueDescriptors),
-                rg::runtime::UploadTarget::FromShared(m_voxelRasterQueueDescriptorsBuffer),
-                0);
+        if (m_voxelRasterWorkCapacity != 0u) {
+            CLodVoxelRasterQueueDescriptors voxelQueueDescriptors{};
+            voxelQueueDescriptors.rigidWorkRecordsUAVDescriptorIndex = m_voxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            voxelQueueDescriptors.rigidWorkRecordCounterUAVDescriptorIndex = m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            voxelQueueDescriptors.skinnedWorkRecordsUAVDescriptorIndex = m_skinnedVoxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            voxelQueueDescriptors.skinnedWorkRecordCounterUAVDescriptorIndex = m_skinnedVoxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            voxelQueueDescriptors.workRecordCapacity = m_voxelRasterWorkCapacity;
+            if (!m_hasCachedVoxelQueueDescriptors || !BytesEqual(voxelQueueDescriptors, m_cachedVoxelQueueDescriptors)) {
+                m_cachedVoxelQueueDescriptors = voxelQueueDescriptors;
+                m_hasCachedVoxelQueueDescriptors = true;
+                BUFFER_UPLOAD(
+                    &voxelQueueDescriptors,
+                    sizeof(CLodVoxelRasterQueueDescriptors),
+                    org::runtime::UploadTarget::FromShared(m_voxelRasterQueueDescriptorsBuffer),
+                    0);
+            }
         }
     }
 
@@ -1304,9 +1701,10 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
                     return;
                 }
 
-                const auto linearDepthMap = useHistoryDepth
-                    ? (view->gpu.lastFrameLinearDepthValid ? view->gpu.lastFrameLinearDepthMap : nullptr)
-                    : view->gpu.linearDepthMap;
+                const auto linearDepthMap =
+                    !useHistoryDepth || view->gpu.lastFrameLinearDepthValid
+                    ? view->gpu.linearDepthMap
+                    : nullptr;
                 if (!linearDepthMap) {
                     return;
                 }
@@ -1331,7 +1729,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             BUFFER_UPLOAD(
                 m_cachedViewDepthSrvIndices.data(),
                 static_cast<uint32_t>(m_cachedViewDepthSrvIndices.size() * sizeof(CLodViewDepthSRVIndex)),
-                rg::runtime::UploadTarget::FromShared(m_viewDepthSrvIndicesBuffer),
+                org::runtime::UploadTarget::FromShared(m_viewDepthSrvIndicesBuffer),
                 0);
         }
     }
@@ -1354,60 +1752,8 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
         BUFFER_UPLOAD(
             &replayState,
             sizeof(CLodReplayBufferState),
-            rg::runtime::UploadTarget::FromShared(m_occlusionReplayStateBuffer),
+            org::runtime::UploadTarget::FromShared(m_occlusionReplayStateBuffer),
             0);
-    }
-
-    {
-        ZoneScopedN("HierarchicalDispatchCullingPass::UpdateReplayNodeInputs");
-        CLodNodeGpuInput nodeGpuInputs[3] = {};
-        CLodMultiNodeGpuInput multiNodeGpuInput{};
-        multiNodeGpuInput.numNodeInputs = 2;
-        multiNodeGpuInput.pad0 = 0;
-        multiNodeGpuInput.nodeInputStride = sizeof(CLodNodeGpuInput);
-
-        if (!m_occlusionNodeGpuInputsBuffer->IsMaterialized()) {
-            m_occlusionNodeGpuInputsBuffer->Materialize();
-        }
-        if (!m_occlusionReplayBuffer->IsMaterialized()) {
-            m_occlusionReplayBuffer->Materialize();
-        }
-
-        if (const uint64_t nodeInputBufferAddress = GetNativeBufferDeviceAddress(m_occlusionNodeGpuInputsBuffer->GetAPIResource())) {
-            multiNodeGpuInput.nodeInputsAddress = nodeInputBufferAddress + sizeof(CLodNodeGpuInput);
-        }
-
-        if (const uint64_t replayAddress = GetNativeBufferDeviceAddress(m_occlusionReplayBuffer->GetAPIResource())) {
-            nodeGpuInputs[1].entrypointIndex = 1;
-            nodeGpuInputs[1].numRecords = 0;
-            nodeGpuInputs[1].recordsAddress = replayAddress;
-            nodeGpuInputs[1].recordStride = CLodNodeReplayStrideBytes;
-
-            nodeGpuInputs[2].entrypointIndex = 2;
-            nodeGpuInputs[2].numRecords = 0;
-            nodeGpuInputs[2].recordsAddress = replayAddress + CLodReplayMeshletRegionOffset;
-            nodeGpuInputs[2].recordStride = CLodMeshletReplayStrideBytes;
-        }
-
-        static_assert(sizeof(CLodMultiNodeGpuInput) == sizeof(CLodNodeGpuInput));
-        std::memcpy(&nodeGpuInputs[0], &multiNodeGpuInput, sizeof(CLodMultiNodeGpuInput));
-
-        if (!m_hasCachedNodeGpuInputs
-            || !std::equal(
-                std::begin(nodeGpuInputs),
-                std::end(nodeGpuInputs),
-                m_cachedNodeGpuInputs.begin(),
-                [](const CLodNodeGpuInput& left, const CLodNodeGpuInput& right) {
-                    return BytesEqual(left, right);
-                })) {
-            std::copy(std::begin(nodeGpuInputs), std::end(nodeGpuInputs), m_cachedNodeGpuInputs.begin());
-            m_hasCachedNodeGpuInputs = true;
-            BUFFER_UPLOAD(
-                nodeGpuInputs,
-                sizeof(nodeGpuInputs),
-                rg::runtime::UploadTarget::FromShared(m_occlusionNodeGpuInputsBuffer),
-                0);
-        }
     }
 
     if (IsCLodWorkGraphTelemetryEnabled()) {
@@ -1416,7 +1762,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
         BUFFER_UPLOAD(
             m_zeroTelemetryScratch.data(),
             static_cast<uint32_t>(m_zeroTelemetryScratch.size() * sizeof(uint32_t)),
-            rg::runtime::UploadTarget::FromShared(m_workGraphTelemetryBuffer),
+            org::runtime::UploadTarget::FromShared(m_workGraphTelemetryBuffer),
             0);
     }
 }
@@ -1445,7 +1791,10 @@ std::shared_ptr<Resource> HierarchicalDispatchCullingPass::ProvideResource(Resou
 
 std::vector<ResourceIdentifier> HierarchicalDispatchCullingPass::GetSupportedKeys()
 {
-    std::vector<ResourceIdentifier> resources{ ResourceIdentifier{ m_voxelRasterQueueDescriptorResourceId } };
+    std::vector<ResourceIdentifier> resources;
+    if (m_voxelRasterQueueDescriptorsBuffer) {
+        resources.emplace_back(m_voxelRasterQueueDescriptorResourceId);
+    }
     if (m_workGraphComputePageJobDescriptorsBuffer) {
         resources.emplace_back(m_workGraphComputePageJobDescriptorResourceId);
     }

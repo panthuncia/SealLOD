@@ -1,6 +1,13 @@
 # CLodCacheTool – Offline ClusterLOD cache builder (CLI)
 # Shares the geometry-extraction & CLod-build sources with BasicRenderer
 # but has NO GPU/D3D12 dependencies.
+#
+# TBB dependency note: the prebuilt OpenUSD packages can define TBB::tbb for
+# their bundled TBB runtime, while vcpkg Embree uses oneTBB (whose current
+# Windows import library is named tbb12).  Until OpenUSD and Embree are built
+# against one shared TBB package, do not assume TBB::tbb satisfies both or
+# hard-code a vcpkg triplet.  The explicit Embree-side library lookup below is
+# intentionally derived from vcpkg's active installed root and triplet.
 
 cmake_minimum_required(VERSION 3.16)
 
@@ -20,20 +27,23 @@ set(CLOD_SHARED_SOURCES
     "${BR_SRC}/Import/GlTFGeometryExtractor.cpp"
     "${BR_SRC}/Import/AssimpGeometryExtractor.cpp"
     "${BR_SRC}/Import/USDGeometryExtractor.cpp"
+    "${BR_SRC}/Import/USDMaterialCache.cpp"
     "${BR_SRC}/Import/BRNiflyClient.cpp"
 
     # CLod build & cache infrastructure
     "${BR_SRC}/Import/CLodCache.cpp"
     "${BR_SRC}/Import/CLodCacheLoader.cpp"
+    "${BR_SRC}/Import/SkeletonArtifactValidation.cpp"
     "${BR_SRC}/Import/DefaultCLodSettings.cpp"
     "${BR_SRC}/Mesh/MeshIngestBuilder.cpp"
     "${BR_SRC}/Mesh/ClusterLOD.cpp"
     "${BR_SRC}/Mesh/ClusterLODUtilities.cpp"
     "${BR_SRC}/Mesh/VoxelGroupBuilder.cpp"
+    "${BR_SRC}/Render/GraphExtensions/ClusterLOD/ReyesTessellationTable.cpp"
+    "${BR_SRC}/Render/GraphExtensions/ClusterLOD/ReyesTessellationGeneratedReferenceSource.cpp"
 
     # Utilities
     "${BR_SRC}/Utilities/CachePathUtilities.cpp"
-    "${BR_SRC}/Utilities/mikktspace.cpp"
 
     # Singletons needed by the pipeline
     "${BR_SRC}/Managers/Singletons/TaskSchedulerManager.cpp"
@@ -59,6 +69,7 @@ set_target_properties(CLodCacheTool PROPERTIES
 target_include_directories(CLodCacheTool PRIVATE
     "${BR_INCLUDE}"
     "${BR_SHADERS}"          # ClusterLODUtilities.cpp includes "../shaders/Common/defines.h"
+    "${BR_ROOT}/generated"
 )
 
 # The shaders include is for the relative-path include in ClusterLODUtilities.
@@ -67,6 +78,30 @@ target_include_directories(CLodCacheTool PRIVATE
 # so that  ../shaders/Common/defines.h  resolves correctly.
 target_include_directories(CLodCacheTool PRIVATE "${BR_ROOT}")
 
+if(TARGET BasicRHI::BasicRHI)
+    target_include_directories(CLodCacheTool PRIVATE
+        $<TARGET_PROPERTY:BasicRHI::BasicRHI,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_compile_definitions(CLodCacheTool PRIVATE
+        $<TARGET_PROPERTY:BasicRHI::BasicRHI,INTERFACE_COMPILE_DEFINITIONS>
+    )
+else()
+    get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+    target_include_directories(CLodCacheTool PRIVATE "${REPO_ROOT}/BasicRHI")
+endif()
+
+if(TARGET OpenRenderGraph::OpenRenderGraph)
+    target_include_directories(CLodCacheTool PRIVATE
+        $<TARGET_PROPERTY:OpenRenderGraph::OpenRenderGraph,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_compile_definitions(CLodCacheTool PRIVATE
+        $<TARGET_PROPERTY:OpenRenderGraph::OpenRenderGraph,INTERFACE_COMPILE_DEFINITIONS>
+    )
+else()
+    get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+    target_include_directories(CLodCacheTool PRIVATE "${REPO_ROOT}/OpenRenderGraph/include")
+endif()
+
 # Find packages (same vcpkg packages BasicRenderer uses) 
 find_package(spdlog       REQUIRED CONFIG)
 find_package(assimp       REQUIRED CONFIG)
@@ -74,6 +109,9 @@ find_package(nlohmann_json REQUIRED CONFIG)
 find_package(Boost        REQUIRED CONFIG COMPONENTS container_hash)
 find_package(DirectX-Headers CONFIG REQUIRED)
 find_package(Tracy REQUIRED CONFIG)
+find_package(embree CONFIG REQUIRED)
+find_package(flecs CONFIG REQUIRED)
+find_package(lz4 CONFIG REQUIRED)
 
 # OpenUSD – prefix path already set by the top-level CMakeLists.txt
 find_package(pxr REQUIRED CONFIG)
@@ -81,17 +119,44 @@ if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
 
-# meshoptimizer is added via ThirdParty/meshoptimizer
+set(_clod_cache_tool_vcpkg_installed_dir "${VCPKG_INSTALLED_DIR}")
+if(NOT _clod_cache_tool_vcpkg_installed_dir)
+    set(_clod_cache_tool_vcpkg_installed_dir "${_VCPKG_INSTALLED_DIR}")
+endif()
+find_library(
+    CLOD_CACHE_TOOL_TBB12_LIBRARY
+    NAMES tbb12
+    PATHS "${_clod_cache_tool_vcpkg_installed_dir}/${VCPKG_TARGET_TRIPLET}/lib"
+    NO_DEFAULT_PATH
+)
+if(NOT CLOD_CACHE_TOOL_TBB12_LIBRARY)
+    message(FATAL_ERROR
+        "CLodCacheTool requires the vcpkg oneTBB library used by Embree; "
+        "it was not found for triplet '${VCPKG_TARGET_TRIPLET}' under "
+        "'${_clod_cache_tool_vcpkg_installed_dir}'"
+    )
+endif()
+if(COMMAND basicrenderer_use_release_library_for_debug)
+    basicrenderer_use_release_library_for_debug(fmt::fmt)
+    basicrenderer_use_release_library_for_debug(Tracy::TracyClient)
+endif()
+
+# meshoptimizer is added via ThirdParty/meshoptimizer1.2
 
 # Link libraries
 target_link_libraries(CLodCacheTool PRIVATE
-    spdlog::spdlog_header_only
+	BasicTelemetry::Core
+	spdlog::spdlog_header_only
     assimp::assimp
     nlohmann_json::nlohmann_json
     meshoptimizer
     Boost::container_hash
-    TBB::tbb
     Tracy::TracyClient
+    embree
+    flecs::flecs_static
+    bcrypt.lib
+    lz4::lz4
+    "${CLOD_CACHE_TOOL_TBB12_LIBRARY}"
 
     # OpenUSD libs needed by CLodCache / CLodCacheLoader / USDGeometryExtractor
     usd

@@ -1,7 +1,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
 #include "include/visUtilCommon.hlsli"
-#include "gbuffer.hlsl"
+#include "canonicalSurface.hlsl"
 
 // Root constants (via ExecuteIndirect / command signature):
 //   IndirectCommandSignatureRootConstant0 = materialId
@@ -32,5 +32,9 @@ void EvaluateMaterialGroupCS(
     pixel.x = ref.pixelXY & 0xFFFFu;
     pixel.y = ref.pixelXY >> 16;
 
-    EvaluateGBufferOptimized(pixel);
+#if defined(VISUTIL_USE_CACHED_VIS_KEY)
+    EvaluateCanonicalSurfaceOptimized(pixel, (uint64_t(ref.visibilityKey.y) << 32) | ref.visibilityKey.x);
+#else
+    EvaluateCanonicalSurfaceOptimized(pixel);
+#endif
 }

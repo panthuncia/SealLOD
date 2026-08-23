@@ -12,7 +12,8 @@
 #include "RenderPasses/Base/ComputePass.h"
 #include "../../../../shaders/PerPassRootConstants/clodVirtualShadowBuildArgsRootConstants.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class VirtualShadowBuildRasterArgsPass : public ComputePass {
 public:

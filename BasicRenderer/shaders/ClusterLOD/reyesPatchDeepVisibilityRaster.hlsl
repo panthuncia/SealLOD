@@ -504,6 +504,7 @@ void ReyesPatchDeepVisibilityRasterCS(uint3 dispatchThreadId : SV_DispatchThread
     StructuredBuffer<PerObjectBuffer> perObjects = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 
     const uint rasterWorkCount = rasterWorkCounter[0];
     if (rasterWorkIndex >= rasterWorkCount)
@@ -547,9 +548,9 @@ void ReyesPatchDeepVisibilityRasterCS(uint3 dispatchThreadId : SV_DispatchThread
     const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
     const CLodMeshletDescriptor meshletDesc = LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, hdr.descriptorOffset, localMeshletIndex);
 
-    const PerMeshInstanceBuffer meshInstance = perMeshInstances[diceEntry.instanceID];
+    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(diceEntry.instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
-    const PerObjectBuffer objectData = perObjects[meshInstance.perObjectBufferIndex];
+    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
     const CullingCameraInfo camera = cameras[diceEntry.viewID];
     const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
 
@@ -564,7 +565,9 @@ void ReyesPatchDeepVisibilityRasterCS(uint3 dispatchThreadId : SV_DispatchThread
     const float3 sourcePosition0 = DecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
     const float3 sourcePosition1 = DecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
     const float3 sourcePosition2 = DecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-    const bool displacementEnabled = materialInfo.geometricDisplacementEnabled != 0u;
+    const bool displacementEnabled =
+        ReyesGeometricDisplacementEnabled(materialInfo) &&
+        materialInfo.heightUvSetIndex < hdr.uvSetCount;
     float3 sourceNormal0 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal1 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal2 = float3(0.0f, 0.0f, 1.0f);
@@ -599,6 +602,11 @@ void ReyesPatchDeepVisibilityRasterCS(uint3 dispatchThreadId : SV_DispatchThread
 
     row_major matrix modelViewProjection = mul(objectData.model, camera.viewProjection);
     float4 modelViewZ = mul(objectData.model, camera.viewZ);
+    const float patchDepth = max(
+        ( -dot(float4(sourcePosition0, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition1, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition2, 1.0f), modelViewZ)) / 3.0f,
+        max(camera.zNear, 1.0e-3f));
 
     const uint patchVisibilityIndex = CLOD_REYES_PATCH_RASTER_PATCH_INDEX_BASE + diceIndex;
     const uint rasterMicroTriangleEnd = min(rasterWorkEntry.microTriangleOffset + rasterWorkEntry.microTriangleCount, microTriangleCount);
@@ -619,6 +627,11 @@ void ReyesPatchDeepVisibilityRasterCS(uint3 dispatchThreadId : SV_DispatchThread
         ReyesEvaluateDisplacedPatchTriangle(
             materialInfo,
             displacementEnabled,
+            camera,
+            perFrame.heightFadeStartDistance,
+            perFrame.heightFadeEndDistance,
+            objectData.model,
+            patchDepth,
             sourcePosition0,
             sourcePosition1,
             sourcePosition2,

@@ -16,13 +16,15 @@ unsigned int Environment::GetEnvironmentIndex() const {
 
 void Environment::SetEnvironmentCubemap(std::shared_ptr<TextureAsset> texture) {
 	m_environmentCubemap = texture;
-	m_environmentInfo.cubeMapDescriptorIndex = texture->Image().GetSRVInfo(0).slot.index;
+	auto image = texture->ImagePtr();
+	m_environmentInfo.cubeMapDescriptorIndex = image->GetSRVInfo(0).slot.index;
 	m_currentManager->UpdateEnvironmentView(*this);
 }
 
 void Environment::SetEnvironmentPrefilteredCubemap(std::shared_ptr<TextureAsset> texture) {
 	m_environmentPrefilteredCubemap = texture;
-	m_environmentInfo.prefilteredCubemapDescriptorIndex = texture->Image().GetSRVInfo(0).slot.index;
+	auto image = texture->ImagePtr();
+	m_environmentInfo.prefilteredCubemapDescriptorIndex = image->GetSRVInfo(0).slot.index;
 	m_currentManager->UpdateEnvironmentView(*this);
 }
 

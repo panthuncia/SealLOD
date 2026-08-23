@@ -15,8 +15,10 @@ struct CLodStreamingReadbackCopyInputs {
     std::shared_ptr<Buffer> usedGroupsBufferSource;  // GPU used-groups buffer (N × uint32)
     std::shared_ptr<Buffer> sourceGroupMismatchCounterSource;
     std::shared_ptr<Buffer> sourceGroupMismatchDetailsSource;
+    std::shared_ptr<Buffer> virtualShadowDependencyCountSource;
+    std::shared_ptr<Buffer> virtualShadowDependenciesSource;
 
-    RG_DEFINE_PASS_INPUTS(CLodStreamingReadbackCopyInputs, &CLodStreamingReadbackCopyInputs::counterSource, &CLodStreamingReadbackCopyInputs::requestsSource, &CLodStreamingReadbackCopyInputs::usedGroupsCounterSource, &CLodStreamingReadbackCopyInputs::usedGroupsBufferSource, &CLodStreamingReadbackCopyInputs::sourceGroupMismatchCounterSource, &CLodStreamingReadbackCopyInputs::sourceGroupMismatchDetailsSource);
+    RG_DEFINE_PASS_INPUTS(CLodStreamingReadbackCopyInputs, &CLodStreamingReadbackCopyInputs::counterSource, &CLodStreamingReadbackCopyInputs::requestsSource, &CLodStreamingReadbackCopyInputs::usedGroupsCounterSource, &CLodStreamingReadbackCopyInputs::usedGroupsBufferSource, &CLodStreamingReadbackCopyInputs::sourceGroupMismatchCounterSource, &CLodStreamingReadbackCopyInputs::sourceGroupMismatchDetailsSource, &CLodStreamingReadbackCopyInputs::virtualShadowDependencyCountSource, &CLodStreamingReadbackCopyInputs::virtualShadowDependenciesSource);
 };
 
 // CopyPass that copies the GPU streaming load counter + load request buffer

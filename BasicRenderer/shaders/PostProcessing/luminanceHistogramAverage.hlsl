@@ -46,8 +46,9 @@ static const uint GROUP_SIZE = 256;
 static const uint THREADS_X = 256;
 static const uint THREADS_Y = 1;
 
-groupshared uint histogramShared[GROUP_SIZE];
+groupshared uint waveWeightedSums[8];
 
+[WaveSize(32)]
 [numthreads(THREADS_X, THREADS_Y, 1)]
 void CSMain(
     uint3 dispatchThreadID : SV_DispatchThreadID, // not used here
@@ -59,29 +60,24 @@ void CSMain(
 
     RWStructuredBuffer<uint> histogram = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PostProcessing::LuminanceHistogram)];
     uint countForThisBin = histogram[localIndex];
-    histogramShared[localIndex] = countForThisBin * localIndex;
-
-    // synchronize before zeroing
-    GroupMemoryBarrierWithGroupSync();
-
-    // Clear the bin for next frame
     histogram[localIndex] = 0;
 
-    // Parallel reduce (prefix-sum style) in shared memory
-    for (uint cutoff = GROUP_SIZE >> 1; cutoff > 0; cutoff >>= 1)
-    {
-        if (localIndex < cutoff)
-        {
-            histogramShared[localIndex] += histogramShared[localIndex + cutoff];
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
+    // Reduce within each 32-lane wave, then combine the eight wave totals with
+    // one final wave reduction. This replaces eight group-wide synchronization
+    // points in the original shared-memory tree with one.
+    const uint weightedWaveSum = WaveActiveSum(countForThisBin * localIndex);
+    if (WaveIsFirstLane())
+        waveWeightedSums[localIndex >> 5u] = weightedWaveSum;
+    GroupMemoryBarrierWithGroupSync();
+
+    const uint waveTotal = localIndex < 8u ? waveWeightedSums[localIndex] : 0u;
+    const uint weightedHistogramSum = WaveActiveSum(waveTotal);
 
     // Only one thread needs to compute and store the final exposure
     if (localIndex == 0)
     {
         // weighted log-average, normalized to [0..1], then offset by -1
-        float weightedLogAverage = (histogramShared[0] / max(NUM_PIXELS - countForThisBin, 1.0)) - 1.0;
+        float weightedLogAverage = (weightedHistogramSum / max(NUM_PIXELS - countForThisBin, 1.0)) - 1.0;
 
         // map back to luminance domain
         float weightedAvgLum = exp2((weightedLogAverage / 254.0) * LOG_LUMINANCE_RANGE + MIN_LOG_LUMINANCE);

@@ -5,6 +5,38 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Debug BasicRenderer Demo (Codex Debug)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/build/codex-debug/BasicRenderer/BasicRenderer.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/out/build/codex-debug/BasicRenderer",
+            "stopAtEntry": false,
+            "console": "integratedTerminal",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${workspaceFolder}/out/build/codex-debug/BasicRenderer;${env:PATH}"
+                }
+            ]
+        },
+        {
+            "name": "Debug BasicRenderer Demo",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/build/clang-relwithdebinfo/BasicRenderer/BasicRenderer.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/out/build/clang-relwithdebinfo/BasicRenderer",
+            "stopAtEntry": false,
+            "console": "integratedTerminal",
+            "environment": [
+                {
+                    "name": "PATH",
+                    "value": "${workspaceFolder}/out/build/clang-relwithdebinfo/BasicRenderer;${env:PATH}"
+                }
+            ]
+        },
+        {
             "name": "CMake: CMake Script",
             "type": "cmake",
             "request": "launch",

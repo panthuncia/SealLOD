@@ -17,7 +17,7 @@ public:
 	~LightCullingPass() {
 	}
 
-	void DeclareResourceUsages(ComputePassBuilder* builder) {
+	void DeclareResourceUsages(ComputePassBuilder* builder) override {
 		builder->WithShaderResource(Builtin::CameraBuffer, Builtin::Light::ActiveLightIndices, Builtin::Light::InfoBuffer)
 			.WithUnorderedAccess(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer, Builtin::Light::PagesCounter);
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -59,7 +59,7 @@ public:
 	virtual void Update(const UpdateExecutionContext& context) override {
 		// Reset UAV counter
 		uint32_t zero = 0;
-		BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromHandle(m_lightPagesCounterHandle), 0);
+		BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromHandle(m_lightPagesCounterHandle), 0);
 	}
 
 private:

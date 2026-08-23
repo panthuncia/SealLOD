@@ -25,6 +25,7 @@ constexpr uint32_t kDeepVisibilityAverageFragmentsPerPixel = 5u;
 ClusterRasterizationPass::ClusterRasterizationPass(
     ClusterRasterizationPassInputs inputs,
     std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
+    std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
     std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
     std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
@@ -49,8 +50,10 @@ ClusterRasterizationPass::ClusterRasterizationPass(
     std::shared_ptr<PixelBuffer> AVBOITEarlyDepthTexture,
     std::shared_ptr<Buffer> telemetryBuffer,
     std::shared_ptr<Buffer> sourceGroupMismatchCounterBuffer,
-    std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer)
+    std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer,
+    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture)
     : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
+    , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
     , m_rasterBucketsIndirectArgsBuffer(std::move(rasterBucketsIndirectArgsBuffer))
     , m_sortedToUnsortedMappingBuffer(std::move(sortedToUnsortedMappingBuffer))
@@ -71,6 +74,7 @@ ClusterRasterizationPass::ClusterRasterizationPass(
     , m_visibleClustersResolveBuffer(std::move(visibleClustersResolveBuffer))
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
+    , m_virtualShadowDynamicPagesTexture(std::move(virtualShadowDynamicPagesTexture))
     , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_sourceGroupMismatchCounterBuffer(std::move(sourceGroupMismatchCounterBuffer))
@@ -88,7 +92,7 @@ ClusterRasterizationPass::ClusterRasterizationPass(
 
     m_viewRasterInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodViewRasterInfo), false, false, false, false);
     m_viewRasterInfoBuffer->SetName("CLodViewRasterInfoBuffer");
-    rg::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD rasterization");
+    org::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD rasterization");
 
     rhi::IndirectArg args[] = {
         {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
@@ -109,9 +113,10 @@ void ClusterRasterizationPass::DeclareResourceUsages(RenderPassBuilder* builder)
             Builtin::NormalMatrixBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
@@ -121,9 +126,13 @@ void ClusterRasterizationPass::DeclareResourceUsages(RenderPassBuilder* builder)
             Builtin::CLod::GroupChunks,
             Builtin::CLod::Groups,
 			Builtin::CLod::GroupPageMap,
-			Builtin::CLod::Segments,
+            Builtin::CLod::Segments,
             Builtin::CLod::MeshMetadata,
+            Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices,
             m_compactedVisibleClustersBuffer,
+            m_compactedVisibleClusterTransformIndicesBuffer,
             m_rasterBucketsHistogramBuffer,
             m_viewRasterInfoBuffer,
             m_sortedToUnsortedMappingBuffer)
@@ -211,6 +220,7 @@ void ClusterRasterizationPass::DeclareResourceUsages(RenderPassBuilder* builder)
             builder->WithShaderResource(
                 Builtin::Shadows::CLodClipmapInfo,
                 Builtin::Shadows::CLodDirectionalPageViewInfo,
+                Builtin::Shadows::CLodPageMetadata,
                 Builtin::Shadows::CLodPageTable,
                 Builtin::Shadows::CLodPhysicalPages,
                 Builtin::Shadows::CLodCompactMainCamera,
@@ -221,8 +231,14 @@ void ClusterRasterizationPass::DeclareResourceUsages(RenderPassBuilder* builder)
         }
     }
     else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-        builder->WithShaderResource(m_virtualShadowClipmapInfoBuffer)
-            .WithUnorderedAccess(m_virtualShadowPageTableTexture, m_virtualShadowPhysicalPagesTexture);
+        builder->WithShaderResource(
+                m_virtualShadowClipmapInfoBuffer,
+                Builtin::Shadows::CLodDirectionalPageViewInfo)
+            .WithUnorderedAccess(
+                m_virtualShadowPageTableTexture,
+                m_virtualShadowPhysicalPagesTexture,
+                m_virtualShadowDynamicPagesTexture,
+                Builtin::Shadows::CLodStats);
     }
 
     // Declare page pool slabs for bindless access (auto-invalidates when new slabs are added).
@@ -254,6 +270,14 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
     uint32_t maxViewWidth = 1;
     uint32_t maxViewHeight = 1;
     uint64_t totalViewPixels = 0;
+    const bool lowResolutionAVBOITRaster =
+        m_outputKind == CLodRasterOutputKind::AVBOITOccupancy ||
+        m_outputKind == CLodRasterOutputKind::AVBOIT;
+    const auto rasterDimension = [&](uint32_t dimension) {
+        return lowResolutionAVBOITRaster
+            ? (dimension + CLodAVBOITDefaultDownsampleFactor - 1u) / CLodAVBOITDefaultDownsampleFactor
+            : dimension;
+    };
 
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         maxViewWidth = virtualShadowConfig.virtualResolution;
@@ -293,8 +317,8 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
                 static_cast<uint64_t>(headPointers->GetHeight());
         }
         else {
-            maxViewWidth = std::max(maxViewWidth, viewInfo->gpu.visibilityBuffer->GetWidth());
-            maxViewHeight = std::max(maxViewHeight, viewInfo->gpu.visibilityBuffer->GetHeight());
+            maxViewWidth = std::max(maxViewWidth, rasterDimension(viewInfo->gpu.visibilityBuffer->GetWidth()));
+            maxViewHeight = std::max(maxViewHeight, rasterDimension(viewInfo->gpu.visibilityBuffer->GetHeight()));
         }
     });
 
@@ -347,8 +371,8 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
         }
         else {
             info.opaqueVisibilitySRVDescriptorIndex = viewInfo->gpu.visibilityBuffer->GetSRVInfo(0).slot.index;
-            info.scissorMaxX = viewInfo->gpu.visibilityBuffer->GetWidth();
-            info.scissorMaxY = viewInfo->gpu.visibilityBuffer->GetHeight();
+            info.scissorMaxX = rasterDimension(viewInfo->gpu.visibilityBuffer->GetWidth());
+            info.scissorMaxY = rasterDimension(viewInfo->gpu.visibilityBuffer->GetHeight());
             visibilityBuffers.push_back(viewInfo->gpu.visibilityBuffer);
         }
 
@@ -385,7 +409,7 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
         BUFFER_UPLOAD(
             m_viewRasterInfos.data(),
             static_cast<uint32_t>(m_viewRasterInfos.size() * sizeof(CLodViewRasterInfo)),
-            rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+            org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
             0);
         m_declaredResourcesChanged = true;
     }
@@ -402,6 +426,11 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
     auto* renderContext = executionContext.hostData->Get<RenderContext>();
     auto& context = *renderContext;
     auto& commandList = executionContext.commandList;
+
+    if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)()) {
+        return {};
+    }
 
     rhi::PassBeginInfo p{};
     p.width = m_passWidth;
@@ -455,11 +484,17 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
     }
     misc[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = m_rasterBucketsHistogramBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_compactedVisibleClustersBuffer->GetSRVInfo(0).slot.index;
+    misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
+    misc[CLOD_RASTER_SINGLE_VIEW_VISIBILITY_UAV_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_COUNTER_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_DETAILS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
+    if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer && m_visibilityBuffers.size() == 1u) {
+        misc[CLOD_RASTER_SINGLE_VIEW_VISIBILITY_UAV_DESCRIPTOR_INDEX] =
+            m_visibilityBuffers.front()->GetUAVShaderVisibleInfo(0).slot.index;
+    }
     if (m_telemetryBuffer && IsCLodWorkGraphTelemetryEnabled()) {
         misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = m_telemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     }
@@ -474,6 +509,8 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = m_virtualShadowPageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_virtualShadowClipmapInfoBuffer->GetSRVInfo(0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = m_virtualShadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
+            m_virtualShadowDynamicPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = virtualShadowConfig.virtualResolution;
@@ -516,20 +553,26 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
     auto stride = sizeof(RasterizeClustersCommand);
     for (uint32_t i = 0; i < numBuckets; ++i) {
         auto flags = context.materialManager->GetRasterFlagsForBucket(i);
-        const auto& pso = (m_outputKind == CLodRasterOutputKind::VisibilityBuffer)
-            ? psoManager.GetClusterLODRasterPSO(flags, m_wireframe)
+        const PipelineState* pso = (m_outputKind == CLodRasterOutputKind::VisibilityBuffer)
+            ? psoManager.TryGetClusterLODRasterPSO(
+                flags,
+                m_wireframe,
+                m_visibilityBuffers.size() == 1u)
             : (m_outputKind == CLodRasterOutputKind::VirtualShadow)
-                ? psoManager.GetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
+                ? psoManager.TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
                 : (m_outputKind == CLodRasterOutputKind::AVBOITOccupancy)
-                    ? psoManager.GetClusterLODAVBOITOccupancyPSO(flags, m_wireframe)
+                    ? psoManager.TryGetClusterLODAVBOITOccupancyPSO(flags, m_wireframe)
                 : (m_outputKind == CLodRasterOutputKind::AVBOIT)
-                    ? psoManager.GetClusterLODAVBOITRasterPSO(flags, m_wireframe)
+                    ? psoManager.TryGetClusterLODAVBOITRasterPSO(flags, m_wireframe)
                 : (m_outputKind == CLodRasterOutputKind::AVBOITShading)
-                    ? psoManager.GetClusterLODAVBOITShadePSO(flags, m_wireframe)
-                : psoManager.GetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
+                    ? psoManager.TryGetClusterLODAVBOITShadePSO(flags, m_wireframe, context.globalPSOFlags)
+                : psoManager.TryGetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
+        if (!pso) {
+            continue;
+        }
 
-        BindResourceDescriptorIndices(commandList, pso.GetResourceDescriptorSlots());
-        commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
+        BindResourceDescriptorIndices(commandList, pso->GetResourceDescriptorSlots());
+        commandList.BindPipeline(pso->GetAPIPipelineState().GetHandle());
 
         const uint64_t argOffset = static_cast<uint64_t>(i) * stride;
         commandList.ExecuteIndirect(

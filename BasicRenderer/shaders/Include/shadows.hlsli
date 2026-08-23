@@ -3,6 +3,7 @@
 
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
 #include "include/structs.hlsli"
 #include "include/utilities.hlsli"
 
@@ -12,6 +13,11 @@ static const uint kCLodVirtualShadowDebugFlagSampledDepthMissing = 0x4u;
 static const uint kCLodVirtualShadowDebugFlagSampledPageUnwritten = 0x8u;
 static const uint kCLodVirtualShadowDebugFlagSampledTexelCleared = 0x10u;
 static const uint kCLodVirtualShadowDebugFlagSampledRerenderedThisFrame = 0x20u;
+static const uint kCLodVirtualShadowDebugFlagCachedPageTagMismatch = 0x40u;
+static const uint kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch = 0x80u;
+static const uint kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion = 0x100u;
+static const uint kCLodVirtualShadowDebugFlagFiniteDepthLit = 0x200u;
+static const uint kCLodVirtualShadowDebugFlagFiniteDepthShadowed = 0x400u;
 static const float kCLodVirtualShadowPi = 3.14159265359f;
 static const float kCLodVirtualShadowTwoPi = 6.28318530718f;
 static const float kCLodVirtualShadowDegreesToRadians = kCLodVirtualShadowPi / 180.0f;
@@ -25,6 +31,17 @@ struct CLodVirtualShadowDebugInfo
     uint sampledPageEntry;
     uint sampledPhysicalPageIndex;
     uint flags;
+    float2 cachedBasisCorrectionTexels;
+    uint2 sampledPageLocalTexel;
+    float depthDeltaTexels;
+    uint comparisonClipmapIndex;
+    float comparisonDepthDeltaTexels;
+    uint comparisonFlags;
+    float2 comparisonGridOffsetTexels;
+    float continuousClipLevel;
+    float visualFootprintWorld;
+    float actualTexelWorldSize;
+    float cameraFootprintWorld;
 };
 
 struct CLodVirtualShadowLookupResult
@@ -36,6 +53,8 @@ struct CLodVirtualShadowLookupResult
     float sampledLinearDepth;
     uint sampledClipmapIndex;
     uint sampledPhysicalPageIndex;
+    float continuousClipLevel;
+    float visualFootprintWorld;
     CLodVirtualShadowClipmapInfo clipmapInfo;
 };
 
@@ -48,6 +67,17 @@ CLodVirtualShadowDebugInfo CLodVirtualShadowInitDebugInfo(uint preferredClipmapI
     debugInfo.sampledPageEntry = 0u;
     debugInfo.sampledPhysicalPageIndex = 0xFFFFFFFFu;
     debugInfo.flags = 0u;
+    debugInfo.cachedBasisCorrectionTexels = 0.0f.xx;
+    debugInfo.sampledPageLocalTexel = uint2(0u, 0u);
+    debugInfo.depthDeltaTexels = 0.0f;
+    debugInfo.comparisonClipmapIndex = 0xFFFFFFFFu;
+    debugInfo.comparisonDepthDeltaTexels = 0.0f;
+    debugInfo.comparisonFlags = 0u;
+    debugInfo.comparisonGridOffsetTexels = 0.0f.xx;
+    debugInfo.continuousClipLevel = 0.0f;
+    debugInfo.visualFootprintWorld = 0.0f;
+    debugInfo.actualTexelWorldSize = 0.0f;
+    debugInfo.cameraFootprintWorld = 0.0f;
     return debugInfo;
 }
 
@@ -61,6 +91,8 @@ CLodVirtualShadowLookupResult CLodVirtualShadowInitLookupResult()
     result.sampledLinearDepth = 0.0f;
     result.sampledClipmapIndex = 0xFFFFFFFFu;
     result.sampledPhysicalPageIndex = 0xFFFFFFFFu;
+    result.continuousClipLevel = 0.0f;
+    result.visualFootprintWorld = 0.0f;
     result.clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
     return result;
 }
@@ -154,6 +186,18 @@ float3 CLodVirtualShadowDebugClipmapColor(uint clipmapIndex)
 
 float3 CLodVirtualShadowDebugPageStateColor(CLodVirtualShadowDebugInfo debugInfo)
 {
+    if ((debugInfo.flags &
+            kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch) != 0u)
+    {
+        return float3(1.0f, 0.0f, 0.6f);
+    }
+
+    if ((debugInfo.flags &
+            kCLodVirtualShadowDebugFlagCachedPageTagMismatch) != 0u)
+    {
+        return float3(1.0f, 0.25f, 0.0f);
+    }
+
     if ((debugInfo.flags & kCLodVirtualShadowDebugFlagSampledDepthMissing) != 0u)
     {
         return float3(1.0f, 0.0f, 1.0f);
@@ -162,6 +206,16 @@ float3 CLodVirtualShadowDebugPageStateColor(CLodVirtualShadowDebugInfo debugInfo
     if ((debugInfo.flags & kCLodVirtualShadowDebugFlagSampledPageUnwritten) != 0u)
     {
         return float3(0.0f, 0.85f, 0.95f);
+    }
+
+    // Blue identifies a page whose validity came from the raster pipeline
+    // completing an exact admitted job without any depth writes. This is
+    // expected only for page-job raster and distinguishes intentional empty
+    // pages from normally rendered green pages.
+    if ((debugInfo.flags &
+            kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion) != 0u)
+    {
+        return float3(0.05f, 0.30f, 1.0f);
     }
 
     if ((debugInfo.flags & kCLodVirtualShadowDebugFlagSampledTexelCleared) != 0u)
@@ -184,7 +238,21 @@ float3 CLodVirtualShadowDebugPageStateColor(CLodVirtualShadowDebugInfo debugInfo
         return float3(0.65f, 0.0f, 0.0f);
     }
 
-    return float3(0.10f, 0.85f, 0.20f);
+    // A valid page and a useful shadow sample are not the same state. Keep
+    // green for samples that actually occlude this receiver, and use violet
+    // when a finite depth value was accepted but compares as fully lit. This
+    // makes cached-depth-origin or incomplete-coverage failures visible
+    // instead of reporting both cases as healthy green pages.
+    if ((debugInfo.flags & kCLodVirtualShadowDebugFlagFiniteDepthShadowed) != 0u)
+    {
+        return float3(0.10f, 0.85f, 0.20f);
+    }
+    if ((debugInfo.flags & kCLodVirtualShadowDebugFlagFiniteDepthLit) != 0u)
+    {
+        return float3(0.62f, 0.18f, 0.90f);
+    }
+
+    return float3(0.35f, 0.35f, 0.35f);
 }
 
 float3 CLodVirtualShadowDebugRerenderedThisFrameColor(CLodVirtualShadowDebugInfo debugInfo)
@@ -222,34 +290,134 @@ float3 CLodVirtualShadowDebugRerenderedThisFrameColor(CLodVirtualShadowDebugInfo
     return float3(0.08f, 0.08f, 0.08f);
 }
 
-float2 CLodVirtualShadowDirectionalNormalOffsetUv(
-    float3 fragPosWorldSpace,
-    float3 normal,
-    float3 lightToFrag,
-    CLodVirtualShadowClipmapInfo clipmapInfo,
-    CLodVirtualShadowCompactShadowCameraInfo lightCamera)
+float3 CLodVirtualShadowDebugCachedBasisColor(
+    CLodVirtualShadowDebugInfo debugInfo)
 {
-    const float3 surfaceNormal = -normalize(normal);
-    const float3 normalizedLightToFrag = normalize(lightToFrag);
-    const float normalDotLight = saturate(dot(surfaceNormal, normalizedLightToFrag));
-    const float angleScale = 1.0f - normalDotLight;
+    if (debugInfo.sampledClipmapIndex == 0xFFFFFFFFu)
+    {
+        return float3(1.0f, 0.0f, 1.0f);
+    }
 
-    const float normalOffsetWorld = clipmapInfo.texelWorldSize * (15.0f + 0.1f * angleScale);
-    const float3 offsetWorldPosition = fragPosWorldSpace - surfaceNormal * normalOffsetWorld;
+    // Neutral gray is no correction. R/G encode signed X/Y displacement,
+    // while blue exposes the total magnitude. A one-texel displacement reaches
+    // the end of the signed color range.
+    const float2 signedCorrection =
+        clamp(debugInfo.cachedBasisCorrectionTexels, -1.0f.xx, 1.0f.xx);
+    return float3(
+        signedCorrection * 0.5f + 0.5f,
+        saturate(length(debugInfo.cachedBasisCorrectionTexels)));
+}
 
-    const float4 offsetLightSpace = mul(float4(offsetWorldPosition, 1.0f), lightCamera.viewProjection);
-    const float safeOffsetW = max(abs(offsetLightSpace.w), 1.0e-6f);
-    float2 offsetUv = offsetLightSpace.xy / safeOffsetW;
-    offsetUv = offsetUv * 0.5f + 0.5f;
-    offsetUv.y = 1.0f - offsetUv.y;
+float3 CLodVirtualShadowDebugPageLocalTexelColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    if (debugInfo.sampledClipmapIndex == 0xFFFFFFFFu)
+    {
+        return float3(1.0f, 0.0f, 1.0f);
+    }
 
-    const float4 baseLightSpace = mul(float4(fragPosWorldSpace, 1.0f), lightCamera.viewProjection);
-    const float safeBaseW = max(abs(baseLightSpace.w), 1.0e-6f);
-    float2 baseUv = baseLightSpace.xy / safeBaseW;
-    baseUv = baseUv * 0.5f + 0.5f;
-    baseUv.y = 1.0f - baseUv.y;
+    const float pageSize =
+        max((float)kCLodVirtualShadowPhysicalPageSize, 1.0f);
+    const float2 pageUv =
+        ((float2)debugInfo.sampledPageLocalTexel + 0.5f) / pageSize;
+    const uint2 edgeDistance = min(
+        debugInfo.sampledPageLocalTexel,
+        (kCLodVirtualShadowPhysicalPageSize - 1u) -
+            debugInfo.sampledPageLocalTexel);
+    const float edge = any(edgeDistance < 2u) ? 1.0f : 0.0f;
+    return float3(pageUv, edge);
+}
 
-    return offsetUv - baseUv;
+float3 CLodVirtualShadowDebugDepthMarginColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    if (debugInfo.sampledClipmapIndex == 0xFFFFFFFFu ||
+        (debugInfo.flags &
+            (kCLodVirtualShadowDebugFlagFiniteDepthLit |
+             kCLodVirtualShadowDebugFlagFiniteDepthShadowed)) == 0u)
+    {
+        return float3(1.0f, 0.0f, 1.0f);
+    }
+
+    const float normalizedMargin =
+        clamp(debugInfo.depthDeltaTexels * 0.25f, -1.0f, 1.0f);
+    const float3 nearSurface = float3(0.85f, 0.85f, 0.85f);
+    return normalizedMargin >= 0.0f
+        ? lerp(nearSurface, float3(1.0f, 0.05f, 0.0f), normalizedMargin)
+        : lerp(nearSurface, float3(0.0f, 0.25f, 1.0f), -normalizedMargin);
+}
+
+float3 CLodVirtualShadowDebugClipComparisonColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    // Yellow means the adjacent coarser level could not provide a finite
+    // comparison sample. Magenta is an actual lit/shadowed disagreement.
+    if ((debugInfo.comparisonFlags & 0x1u) == 0u)
+    {
+        return float3(1.0f, 0.75f, 0.0f);
+    }
+    if ((debugInfo.comparisonFlags & 0x2u) != 0u)
+    {
+        const float severity = saturate(
+            abs(debugInfo.depthDeltaTexels -
+                debugInfo.comparisonDepthDeltaTexels) * 0.25f);
+        return lerp(
+            float3(0.65f, 0.0f, 0.65f),
+            float3(1.0f, 0.0f, 1.0f),
+            severity);
+    }
+    if ((debugInfo.comparisonFlags & 0x4u) != 0u)
+    {
+        return float3(0.05f, 0.8f, 0.15f);
+    }
+    return float3(0.05f, 0.12f, 0.45f);
+}
+
+float3 CLodVirtualShadowDebugClipGridOffsetColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    if (debugInfo.comparisonClipmapIndex == 0xFFFFFFFFu)
+    {
+        return float3(1.0f, 0.75f, 0.0f);
+    }
+
+    // Signed adjacent-level texel-center displacement expressed in texels of
+    // the sampled (finer) level. This makes the expected half-fine-texel phase
+    // of a boundary-aligned 2x grid immediately visible.
+    const float2 signedOffset =
+        clamp(debugInfo.comparisonGridOffsetTexels, -1.0f.xx, 1.0f.xx);
+    return float3(
+        signedOffset * 0.5f + 0.5f,
+        saturate(length(debugInfo.comparisonGridOffsetTexels)));
+}
+
+float3 CLodVirtualShadowDebugTraceFootprintColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    const float actualToVisual =
+        debugInfo.actualTexelWorldSize /
+        max(debugInfo.visualFootprintWorld, 1.0e-6f);
+    const float cameraToVisual =
+        debugInfo.cameraFootprintWorld /
+        max(debugInfo.visualFootprintWorld, 1.0e-6f);
+    return float3(
+        frac(debugInfo.continuousClipLevel),
+        saturate((actualToVisual - 1.0f) * 0.5f),
+        saturate(cameraToVisual));
+}
+
+float CLodVirtualShadowCameraWorldUnitsPerPixel(
+    float3 positionWorldSpace,
+    Camera camera,
+    uint screenHeight)
+{
+    const float4 positionView =
+        mul(float4(positionWorldSpace, 1.0f), camera.view);
+    const float viewDepth =
+        max(-positionView.z, max(camera.zNear, 1.0e-3f));
+    return 2.0f * viewDepth *
+        abs(camera.projectionInverse[1][1]) /
+        max((float)screenHeight, 1.0f);
 }
 
 float CLodVirtualShadowReceiverPlaneDepthBias(
@@ -286,12 +454,288 @@ void CLodVirtualShadowProjectWorldToUvDepth(
     linearLightDepth = -samplePosLightView.z;
 }
 
+float2 CLodVirtualShadowQuantizedTexelCenterLightBasis(
+    float2 uv,
+    CLodVirtualShadowClipmapInfo clipmapInfo,
+    CLodVirtualShadowCompactShadowCameraInfo lightCamera)
+{
+    const float resolution =
+        max((float)clipmapInfo.virtualResolution, 1.0f);
+    const float2 centerUv =
+        (floor(uv * resolution) + 0.5f) / resolution;
+    const float2 centerNdc =
+        float2(centerUv.x * 2.0f - 1.0f,
+            1.0f - centerUv.y * 2.0f);
+    const float2 viewPosition = centerNdc /
+        float2(
+            lightCamera.projection[0][0],
+            lightCamera.projection[1][1]);
+    return viewPosition - lightCamera.view[3].xy;
+}
+
+uint2 CLodVirtualShadowCachedPageAtlasPixel(
+    float2 currentUv,
+    uint physicalPageIndex,
+    CLodVirtualShadowClipmapInfo clipmapInfo,
+    CLodVirtualShadowCompactShadowCameraInfo currentLightCamera,
+    float4 cachedPageViewRow,
+    out float2 basisCorrectionTexels,
+    out uint2 pageLocalTexel)
+{
+    // Page selection is performed in the current toroidal clipmap, but a
+    // persistent page's texels were rasterized in its cached view basis.
+    // Translate the current UV into that cached basis before taking the
+    // page-local texel coordinate. Work in signed virtual texels so an exact
+    // whole-page camera scroll (or a small correction across a page edge)
+    // wraps to the same physical-page texel.
+    const float2 viewTranslationDelta =
+        cachedPageViewRow.xy - currentLightCamera.view[3].xy;
+    const float4 projectedTranslationDelta =
+        mul(float4(viewTranslationDelta, 0.0f, 0.0f),
+            currentLightCamera.projection);
+    const float2 cachedUv = currentUv +
+        float2(
+            projectedTranslationDelta.x * 0.5f,
+            -projectedTranslationDelta.y * 0.5f);
+    basisCorrectionTexels =
+        (cachedUv - currentUv) * (float)clipmapInfo.virtualResolution;
+
+    const int pageSize = (int)kCLodVirtualShadowPhysicalPageSize;
+    const int2 cachedVirtualTexel =
+        (int2)floor(cachedUv * (float)clipmapInfo.virtualResolution);
+    const int2 localTexel =
+        ((cachedVirtualTexel % pageSize) + pageSize) % pageSize;
+    pageLocalTexel = (uint2)localTexel;
+    return CLodVirtualShadowPhysicalAtlasPixel(
+        physicalPageIndex,
+        pageLocalTexel,
+        clipmapInfo);
+}
+
+#if defined(CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE)
+bool CLodVirtualShadowIsValidCameraDepth(float depth)
+{
+    return depth > 0.0f &&
+        asuint(depth) != 0x7F7FFFFFu &&
+        asuint(depth) != 0xFFFFFFFFu;
+}
+
+struct CLodVirtualShadowReceiverOffsetResult
+{
+    float distance;
+    uint escaped;
+    uint valid;
+};
+
+bool CLodVirtualShadowReceiverTraceEscapedAt(
+    float3 sampleWorldSpace,
+    Camera mainCamera,
+    Texture2D<float> cameraLinearDepth,
+    uint2 screenSize,
+    float cameraDepthSafety,
+    out bool sampleValid)
+{
+    sampleValid = false;
+    const float4 sampleClip = mul(
+        float4(sampleWorldSpace, 1.0f),
+        mainCamera.viewProjection);
+    if (sampleClip.w <= 1.0e-6f)
+    {
+        return false;
+    }
+
+    float2 sampleUv = sampleClip.xy / sampleClip.w;
+    sampleUv = sampleUv * 0.5f + 0.5f;
+    sampleUv.y = 1.0f - sampleUv.y;
+    if (any(sampleUv < 0.0f) || any(sampleUv >= 1.0f))
+    {
+        return false;
+    }
+
+    const uint2 samplePixel = min(
+        uint2(sampleUv * float2(screenSize)),
+        screenSize - 1u);
+    const float sceneDepth = cameraLinearDepth.Load(int3(samplePixel, 0));
+    if (!CLodVirtualShadowIsValidCameraDepth(sceneDepth))
+    {
+        return false;
+    }
+
+    const float4 sampleView = mul(
+        float4(sampleWorldSpace, 1.0f),
+        mainCamera.view);
+    const float rayViewDepth = -sampleView.z;
+    sampleValid = true;
+    return rayViewDepth + cameraDepthSafety < sceneDepth;
+}
+
+CLodVirtualShadowReceiverOffsetResult CLodVirtualShadowAdaptiveReceiverOffset(
+    float2 pixelCoords,
+    float3 receiverWorldSpace,
+    float3 traceDirection,
+    Camera mainCamera,
+    Texture2D<float> cameraLinearDepth,
+    uint2 screenSize,
+    uint requestedSampleCount,
+    float maxTraceDistanceWorld,
+    float uncertaintyScale,
+    float depthSafetyScale)
+{
+    CLodVirtualShadowReceiverOffsetResult result;
+    result.distance = 0.0f;
+    result.escaped = 0u;
+    result.valid = 0u;
+    if (screenSize.x == 0u || screenSize.y == 0u ||
+        pixelCoords.x < 0.0f || pixelCoords.y < 0.0f ||
+        pixelCoords.x >= (float)screenSize.x ||
+        pixelCoords.y >= (float)screenSize.y)
+    {
+        return result;
+    }
+
+    const float4 receiverView = mul(float4(receiverWorldSpace, 1.0f), mainCamera.view);
+    const float receiverViewDepth = -receiverView.z;
+    if (receiverViewDepth <= 0.0f)
+    {
+        return result;
+    }
+
+    const uint2 receiverPixel = min(uint2(pixelCoords), screenSize - 1u);
+    const float cameraReceiverDepth = cameraLinearDepth.Load(int3(receiverPixel, 0));
+    if (!CLodVirtualShadowIsValidCameraDepth(cameraReceiverDepth))
+    {
+        return result;
+    }
+
+    // Reject shading layers which are not represented by the primary camera
+    // depth (for example a transparent layer behind the opaque receiver).
+    const float worldUnitsPerPixel =
+        CLodVirtualShadowCameraWorldUnitsPerPixel(
+            receiverWorldSpace,
+            mainCamera,
+            screenSize.y);
+    const float receiverAgreementTolerance = max(
+        worldUnitsPerPixel * 2.0f,
+        receiverViewDepth * 1.0e-5f);
+    if (abs(cameraReceiverDepth - receiverViewDepth) > receiverAgreementTolerance)
+    {
+        return result;
+    }
+
+    const float cameraRepresentationUncertainty = max(
+        worldUnitsPerPixel * max(uncertaintyScale, 0.0f),
+        1.0e-4f);
+    const float traceLimit = max(maxTraceDistanceWorld, 0.0f);
+    if (traceLimit <= 1.0e-5f)
+    {
+        return result;
+    }
+
+    const uint receiverTraceSampleCount =
+        clamp(requestedSampleCount, 1u, 32u);
+    // Uncertainty describes the camera-depth representation band; depth safety
+    // is the additional clearance requested by the user. They are independent
+    // pixel-space contributions, so add them instead of taking a max that made
+    // the uncertainty control inert whenever depth safety was larger.
+    const float cameraDepthSafety = max(
+        worldUnitsPerPixel *
+            (max(uncertaintyScale, 0.0f) +
+             max(depthSafetyScale, 0.0f)),
+        1.0e-4f);
+    const float firstTraceDistance = min(
+        traceLimit,
+        max(cameraRepresentationUncertainty * 0.25f, 1.0e-4f));
+    const float traceLogRatio = log(max(
+        traceLimit / max(firstTraceDistance, 1.0e-6f),
+        1.0f));
+    float lastFailedDistance = 0.0f;
+    const float3 normalizedTraceDirection = normalize(traceDirection);
+    bool traceRemainedValid = true;
+
+    [loop]
+    for (uint sampleIndex = 0u;
+         sampleIndex < receiverTraceSampleCount;
+         ++sampleIndex)
+    {
+        // Geometric spacing covers very different world scales while retaining
+        // samples close enough to the receiver to find a tight ray origin.
+        const float sampleAlpha = receiverTraceSampleCount > 1u
+            ? (float)sampleIndex /
+                (float)(receiverTraceSampleCount - 1u)
+            : 1.0f;
+        const float sampleDistance =
+            firstTraceDistance * exp(sampleAlpha * traceLogRatio);
+        const float3 sampleWorldSpace =
+            receiverWorldSpace + normalizedTraceDirection * sampleDistance;
+        bool sampleValid;
+        const bool cameraEscaped = CLodVirtualShadowReceiverTraceEscapedAt(
+            sampleWorldSpace,
+            mainCamera,
+            cameraLinearDepth,
+            screenSize,
+            cameraDepthSafety,
+            sampleValid);
+        if (!sampleValid)
+        {
+            traceRemainedValid = false;
+            break;
+        }
+
+        if (!cameraEscaped)
+        {
+            lastFailedDistance = sampleDistance;
+            continue;
+        }
+
+        float lowerDistance = lastFailedDistance;
+        float upperDistance = sampleDistance;
+        [unroll]
+        for (uint refinementIndex = 0u; refinementIndex < 3u; ++refinementIndex)
+        {
+            const float candidateDistance =
+                0.5f * (lowerDistance + upperDistance);
+            const float3 candidateWorldSpace =
+                receiverWorldSpace +
+                normalizedTraceDirection * candidateDistance;
+            bool candidateValid;
+            const bool candidateCameraEscaped =
+                CLodVirtualShadowReceiverTraceEscapedAt(
+                    candidateWorldSpace,
+                    mainCamera,
+                    cameraLinearDepth,
+                    screenSize,
+                    cameraDepthSafety,
+                    candidateValid);
+            if (candidateValid && candidateCameraEscaped)
+            {
+                upperDistance = candidateDistance;
+            }
+            else
+            {
+                lowerDistance = candidateDistance;
+            }
+        }
+
+        result.distance = upperDistance;
+        result.escaped = 1u;
+        result.valid = 1u;
+        return result;
+    }
+
+    // Failure remains explicit. A valid sample is not proof that the ray left
+    // the receiver, and using the last sample as an offset can skip real nearby
+    // blockers without fixing the underlying representation error.
+    result.valid = traceRemainedValid ? 1u : 0u;
+    return result;
+}
+#endif
+
 CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProjected(
     float3 samplePosWorldSpace,
-    float3 normal,
     uint preferredClipmapIndex,
     float2 preferredUv,
     float preferredLinearLightDepth,
+    float visualFootprintWorld,
     float2 ditherWorld,
     uint activeClipmapCount,
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos,
@@ -304,6 +748,8 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
     CLodVirtualShadowLookupResult result = CLodVirtualShadowInitLookupResult();
     debugInfo = CLodVirtualShadowInitDebugInfo(preferredClipmapIndex);
     (void)preferredLinearLightDepth;
+    result.visualFootprintWorld = visualFootprintWorld;
+    debugInfo.visualFootprintWorld = visualFootprintWorld;
 
     [loop]
     for (uint attempt = 0u; attempt < 3u; ++attempt)
@@ -345,56 +791,103 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
 
         if ((pageEntry & kCLodVirtualShadowAllocatedMask) == 0u)
             continue;
-        if ((pageEntry & kCLodVirtualShadowContentValidMask) == 0u)
+        if (!CLodVirtualShadowPageEntryHasSampleableContent(pageEntry))
         {
             if (attempt == 0u)
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledPageUnwritten;
             continue;
         }
-
         const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+        StructuredBuffer<uint4> pageMetadata =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(
+                Builtin::Shadows::CLodPageMetadata)];
+        const uint4 physicalMeta = pageMetadata[physicalPageIndex];
+        const uint expectedVirtualAddress =
+            wrappedPageCoords.y * clipmapInfo.pageTableResolution +
+            wrappedPageCoords.x;
+        if ((physicalMeta.z &
+                kCLodVirtualShadowPhysicalPageResidentFlag) == 0u ||
+            physicalMeta.x != expectedVirtualAddress ||
+            physicalMeta.w != clipmapInfo.pageTableLayer)
+        {
+            if (attempt == 0u)
+                debugInfo.flags |=
+                    kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch;
+            continue;
+        }
+        if ((physicalMeta.y &
+                kCLodVirtualShadowClearEpochPendingMask) != 0u)
+        {
+            debugInfo.flags |=
+                kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion;
+        }
         debugInfo.sampledClipmapIndex = candidateIndex;
         debugInfo.sampledPageEntry = pageEntry;
         debugInfo.sampledPhysicalPageIndex = physicalPageIndex;
+        debugInfo.actualTexelWorldSize = clipmapInfo.texelWorldSize;
         if ((pageEntry & kCLodVirtualShadowRerenderedThisFrameMask) != 0u)
             debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledRerenderedThisFrame;
 
         row_major matrix cachedPageView = lightCamera.view;
-        const uint pageViewInfoIndex =
-            clipmapInfo.pageTableLayer * (clipmapInfo.pageTableResolution * clipmapInfo.pageTableResolution) +
-            wrappedPageCoords.y * clipmapInfo.pageTableResolution +
-            wrappedPageCoords.x;
-        const float4 cachedPageViewRow = directionalPageViewInfo[pageViewInfoIndex];
-        cachedPageView[3][0] = cachedPageViewRow.x;
-        cachedPageView[3][1] = cachedPageViewRow.y;
+        const float4 cachedPageViewRow =
+            directionalPageViewInfo[physicalPageIndex];
+        const uint expectedPageTag = CLodVirtualShadowPackAbsolutePageTag(
+            virtualPageCoords,
+            clipmapInfo.unwrappedPageOffsetX,
+            clipmapInfo.unwrappedPageOffsetY);
+        if (asuint(cachedPageViewRow.w) != expectedPageTag)
+        {
+            if (attempt == 0u)
+                debugInfo.flags |=
+                    kCLodVirtualShadowDebugFlagCachedPageTagMismatch;
+            continue;
+        }
+        // Cached X/Y is consumed below to locate the persistent page, but the
+        // transient composite depth was rebased to the current view when this
+        // page was initialized.
         cachedPageView[3][2] = cachedPageViewRow.z;
-        cachedPageView[3][3] = cachedPageViewRow.w;
-        const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
+        cachedPageView[3][3] = 1.0f;
+        const float4 samplePosCurrentLightView =
+            mul(float4(samplePosWorldSpace, 1.0f), lightCamera.view);
         const float linearLightDepth =
-            -samplePosCachedPageLightView.z +
-            CLodVirtualShadowReceiverPlaneDepthBias(normal, lightCamera, ditherWorld);
+            -samplePosCurrentLightView.z;
         if (linearLightDepth <= 0.0f)
             continue;
 
-        const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(uv.xy, clipmapInfo);
-        const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
+        float2 basisCorrectionTexels;
+        uint2 pageLocalTexel;
+        const uint2 atlasPixel = CLodVirtualShadowCachedPageAtlasPixel(
+            uv.xy,
+            physicalPageIndex,
+            clipmapInfo,
+            lightCamera,
+            cachedPageViewRow,
+            basisCorrectionTexels,
+            pageLocalTexel);
+        debugInfo.cachedBasisCorrectionTexels = basisCorrectionTexels;
+        debugInfo.sampledPageLocalTexel = pageLocalTexel;
         const uint storedDepthBits = physicalPages.Load(int3(atlasPixel, 0));
 
         result.clipmapInfo = clipmapInfo;
+        debugInfo.actualTexelWorldSize = clipmapInfo.texelWorldSize;
         result.valid = 1u;
         result.sampledLinearDepth = linearLightDepth;
         result.sampledClipmapIndex = candidateIndex;
         result.sampledPhysicalPageIndex = physicalPageIndex;
-        if (storedDepthBits == 0x7F7FFFFFu)
+        if (storedDepthBits == kCLodVirtualShadowClearedDepth)
         {
-            if (attempt == 0u)
-                debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledTexelCleared;
+            // This is the texel actually selected by lookup, even when the
+            // preferred clipmap fell back to a coarser one. Restricting this
+            // diagnostic to attempt zero made clear coarse-page texels appear
+            // healthy green.
+            debugInfo.flags |=
+                kCLodVirtualShadowDebugFlagSampledTexelCleared;
             result.depthAvailable = 0u;
             result.occlusion = 0.0f;
-            result.closestDepth = asfloat(storedDepthBits);
+            result.closestDepth = clipmapInfo.depthNear + clipmapInfo.depthRange;
             return result;
         }
-        if (storedDepthBits == 0xFFFFFFFFu)
+        if (storedDepthBits == kCLodVirtualShadowMissingDepth)
         {
             if (attempt == 0u)
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledDepthMissing;
@@ -402,11 +895,21 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
             continue;
         }
 
-        const float closestDepth = asfloat(storedDepthBits);
+        const float closestDepth = CLodVirtualShadowDecodeDepth(
+            storedDepthBits,
+            clipmapInfo);
         const float depthDelta = linearLightDepth - closestDepth;
         result.depthAvailable = 1u;
         result.closestDepth = closestDepth;
-        result.occlusion = smoothstep(0.0f, clipmapInfo.texelWorldSize * 0.5f, depthDelta);
+        result.occlusion = smoothstep(
+            0.0f,
+            max(visualFootprintWorld, 1.0e-6f) * 0.5f,
+            depthDelta);
+        debugInfo.depthDeltaTexels =
+            depthDelta / max(clipmapInfo.texelWorldSize, 1.0e-6f);
+        debugInfo.flags |= result.occlusion > 0.01f
+            ? kCLodVirtualShadowDebugFlagFiniteDepthShadowed
+            : kCLodVirtualShadowDebugFlagFiniteDepthLit;
         return result;
     }
 
@@ -491,7 +994,6 @@ float calculateDirectionalVSMShadowDetailed(float3 fragPosWorldSpace, float3 fra
 CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
     float3 samplePosWorldSpace,
     float3 normal,
-    float3 lightToFrag,
     uint activeClipmapCount,
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos,
     StructuredBuffer<CLodVirtualShadowMainCameraInfo> compactMainCameraBuffer,
@@ -499,7 +1001,6 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
     StructuredBuffer<float4> directionalPageViewInfo,
     Texture2DArray<uint> pageTable,
     Texture2D<uint> physicalPages,
-    uint applyReceiverBias,
     float2 ditherWorld,
     out CLodVirtualShadowDebugInfo debugInfo)
 {
@@ -519,7 +1020,25 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         activeClipmapCount);
     debugInfo = CLodVirtualShadowInitDebugInfo(preferredClipmapIndex);
 
+    const float continuousClipLevel =
+        CLodVirtualShadowContinuousClipmapLevel(
+            samplePosWorldSpace,
+            mainCamera.positionWorldSpace.xyz,
+            clipmapInfos[0].texelWorldSize,
+            clipmapInfos[0].directionalLodBias,
+            activeClipmapCount);
+    const float visualFootprintWorld =
+        CLodVirtualShadowContinuousTexelWorldSize(
+            samplePosWorldSpace,
+            mainCamera.positionWorldSpace.xyz,
+            clipmapInfos[0].texelWorldSize,
+            clipmapInfos[0].directionalLodBias,
+            activeClipmapCount);
+    result.continuousClipLevel = continuousClipLevel;
+    result.visualFootprintWorld = visualFootprintWorld;
     result.clipmapInfo = clipmapInfos[preferredClipmapIndex];
+    debugInfo.continuousClipLevel = continuousClipLevel;
+    debugInfo.visualFootprintWorld = visualFootprintWorld;
 
     // Try preferred level + up to 2 coarser fallback levels
     [loop]
@@ -539,19 +1058,6 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         float3 uv = samplePosLightSpace.xyz / safeW;
         uv.xy = uv.xy * 0.5f + 0.5f;
         uv.y = 1.0f - uv.y;
-
-        if (attempt == 0u && applyReceiverBias != 0u)
-        {
-            const float2 biasedUv = uv.xy + CLodVirtualShadowDirectionalNormalOffsetUv(
-                samplePosWorldSpace,
-                normal,
-                lightToFrag,
-                clipmapInfo,
-                lightCamera);
-            if (biasedUv.x < 0.0f || biasedUv.x > 1.0f || biasedUv.y < 0.0f || biasedUv.y > 1.0f)
-                continue;
-            uv.xy = biasedUv;
-        }
 
         if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f || uv.z < 0.0f || uv.z > 1.0f)
             continue;
@@ -577,70 +1083,126 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
 
         if ((pageEntry & kCLodVirtualShadowAllocatedMask) == 0u)
             continue;
-        if ((pageEntry & kCLodVirtualShadowContentValidMask) == 0u)
+        if (!CLodVirtualShadowPageEntryHasSampleableContent(pageEntry))
         {
             if (attempt == 0u)
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledPageUnwritten;
             continue;
         }
-
         const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+        StructuredBuffer<uint4> pageMetadata =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(
+                Builtin::Shadows::CLodPageMetadata)];
+        const uint4 physicalMeta = pageMetadata[physicalPageIndex];
+        const uint expectedVirtualAddress =
+            wrappedPageCoords.y * clipmapInfo.pageTableResolution +
+            wrappedPageCoords.x;
+        if ((physicalMeta.z &
+                kCLodVirtualShadowPhysicalPageResidentFlag) == 0u ||
+            physicalMeta.x != expectedVirtualAddress ||
+            physicalMeta.w != clipmapInfo.pageTableLayer)
+        {
+            if (attempt == 0u)
+                debugInfo.flags |=
+                    kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch;
+            continue;
+        }
+        if ((physicalMeta.y &
+                kCLodVirtualShadowClearEpochPendingMask) != 0u)
+        {
+            debugInfo.flags |=
+                kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion;
+        }
         debugInfo.sampledClipmapIndex = candidateIndex;
         debugInfo.sampledPageEntry = pageEntry;
         debugInfo.sampledPhysicalPageIndex = physicalPageIndex;
+        debugInfo.actualTexelWorldSize = clipmapInfo.texelWorldSize;
         if ((pageEntry & kCLodVirtualShadowRerenderedThisFrameMask) != 0u)
             debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledRerenderedThisFrame;
 
         row_major matrix cachedPageView = lightCamera.view;
-        const uint pageViewInfoIndex =
-            clipmapInfo.pageTableLayer * (clipmapInfo.pageTableResolution * clipmapInfo.pageTableResolution) +
-            wrappedPageCoords.y * clipmapInfo.pageTableResolution +
-            wrappedPageCoords.x;
-        const float4 cachedPageViewRow = directionalPageViewInfo[pageViewInfoIndex];
-        cachedPageView[3][0] = cachedPageViewRow.x;
-        cachedPageView[3][1] = cachedPageViewRow.y;
+        const float4 cachedPageViewRow =
+            directionalPageViewInfo[physicalPageIndex];
+        const uint expectedPageTag = CLodVirtualShadowPackAbsolutePageTag(
+            virtualPageCoords,
+            clipmapInfo.unwrappedPageOffsetX,
+            clipmapInfo.unwrappedPageOffsetY);
+        if (asuint(cachedPageViewRow.w) != expectedPageTag)
+        {
+            if (attempt == 0u)
+                debugInfo.flags |=
+                    kCLodVirtualShadowDebugFlagCachedPageTagMismatch;
+            continue;
+        }
+        // Cached X/Y is consumed below to locate the persistent page, but the
+        // transient composite depth was rebased to the current view when this
+        // page was initialized.
         cachedPageView[3][2] = cachedPageViewRow.z;
-        cachedPageView[3][3] = cachedPageViewRow.w;
-        const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
+        cachedPageView[3][3] = 1.0f;
+        const float4 samplePosCurrentLightView =
+            mul(float4(samplePosWorldSpace, 1.0f), lightCamera.view);
         const float linearLightDepth =
-            -samplePosCachedPageLightView.z +
+            -samplePosCurrentLightView.z +
             CLodVirtualShadowReceiverPlaneDepthBias(normal, lightCamera, ditherWorld);
         if (linearLightDepth <= 0.0f)
             continue;
 
-        const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(uv.xy, clipmapInfo);
-        const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
+        float2 basisCorrectionTexels;
+        uint2 pageLocalTexel;
+        const uint2 atlasPixel = CLodVirtualShadowCachedPageAtlasPixel(
+            uv.xy,
+            physicalPageIndex,
+            clipmapInfo,
+            lightCamera,
+            cachedPageViewRow,
+            basisCorrectionTexels,
+            pageLocalTexel);
+        debugInfo.cachedBasisCorrectionTexels = basisCorrectionTexels;
+        debugInfo.sampledPageLocalTexel = pageLocalTexel;
 
         const uint storedDepthBits = physicalPages.Load(int3(atlasPixel, 0));
-        if (storedDepthBits == 0x7F7FFFFFu)
+        if (storedDepthBits == kCLodVirtualShadowClearedDepth)
         {
-            if (attempt == 0u)
-                debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledTexelCleared;
+            // Report the state of the page that was actually sampled. Coarse
+            // fallback samples are just as authoritative as attempt zero.
+            debugInfo.flags |=
+                kCLodVirtualShadowDebugFlagSampledTexelCleared;
             result.clipmapInfo = clipmapInfo;
             result.valid = 1u;
             result.depthAvailable = 0u;
             result.occlusion = 0.0f;
-            result.closestDepth = asfloat(storedDepthBits);
+            result.closestDepth = clipmapInfo.depthNear + clipmapInfo.depthRange;
             result.sampledClipmapIndex = candidateIndex;
             result.sampledPhysicalPageIndex = physicalPageIndex;
             return result;
         }
-        if (storedDepthBits == 0xFFFFFFFFu)
+        if (storedDepthBits == kCLodVirtualShadowMissingDepth)
         {
             if (attempt == 0u)
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledDepthMissing;
             continue;
         }
 
-        const float closestDepth = asfloat(storedDepthBits);
+        const float closestDepth = CLodVirtualShadowDecodeDepth(
+            storedDepthBits,
+            clipmapInfo);
         result.clipmapInfo = clipmapInfo;
+        debugInfo.actualTexelWorldSize = clipmapInfo.texelWorldSize;
         result.valid = 1u;
         result.depthAvailable = 1u;
         result.closestDepth = closestDepth;
         result.sampledClipmapIndex = candidateIndex;
         result.sampledPhysicalPageIndex = physicalPageIndex;
         const float depthDelta = linearLightDepth - closestDepth;
-        result.occlusion = smoothstep(0.0f, clipmapInfo.texelWorldSize * 0.5f, depthDelta);
+        result.occlusion = smoothstep(
+            0.0f,
+            visualFootprintWorld * 0.5f,
+            depthDelta);
+        debugInfo.depthDeltaTexels =
+            depthDelta / max(clipmapInfo.texelWorldSize, 1.0e-6f);
+        debugInfo.flags |= result.occlusion > 0.01f
+            ? kCLodVirtualShadowDebugFlagFiniteDepthShadowed
+            : kCLodVirtualShadowDebugFlagFiniteDepthLit;
         return result;
     }
 
@@ -650,7 +1212,6 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
 float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWorldSpace, float3 fragPosViewSpace, float3 normal, LightInfo light, uint numDirectionalClipmaps, float4 cascadeSplits, StructuredBuffer<unsigned int> cascadeCameraIndexBuffer, StructuredBuffer<Camera> cameraBuffer, out CLodVirtualShadowDebugInfo debugInfo) {
     (void)fragPosViewSpace;
     (void)cascadeCameraIndexBuffer;
-    (void)cameraBuffer;
     (void)cascadeSplits;
 
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
@@ -666,7 +1227,6 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
     const CLodVirtualShadowLookupResult receiverLookup = CLodVirtualShadowLookupDirectionalOcclusion(
         fragPosWorldSpace,
         normal,
-        lightToFrag,
         activeClipmapCount,
         clipmapInfos,
         compactMainCameraBuffer,
@@ -674,10 +1234,103 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         directionalPageViewInfo,
         pageTable,
         physicalPages,
-        1u,
         float2(0.0f, 0.0f),
         debugInfo);
     const float hardShadow = receiverLookup.occlusion;
+    const Camera mainCamera =
+        cameraBuffer[perFrameBuffer.mainCameraIndex];
+    const float cameraFootprintWorld =
+        CLodVirtualShadowCameraWorldUnitsPerPixel(
+            fragPosWorldSpace,
+            mainCamera,
+            perFrameBuffer.screenResY);
+    const float visualFootprintWorld =
+        max(receiverLookup.visualFootprintWorld, 1.0e-5f);
+    debugInfo.cameraFootprintWorld = cameraFootprintWorld;
+
+    if ((perFrameBuffer.outputType == OUTPUT_VSM_CLIP_COMPARISON ||
+         perFrameBuffer.outputType == OUTPUT_VSM_CLIP_GRID_OFFSET) &&
+        receiverLookup.valid != 0u &&
+        receiverLookup.depthAvailable != 0u &&
+        debugInfo.sampledClipmapIndex != 0xFFFFFFFFu)
+    {
+        const uint comparisonClipmapIndex =
+            debugInfo.sampledClipmapIndex + 1u;
+        debugInfo.comparisonClipmapIndex = comparisonClipmapIndex;
+        if (comparisonClipmapIndex < activeClipmapCount)
+        {
+            const CLodVirtualShadowCompactShadowCameraInfo
+                comparisonLightCamera =
+                    compactShadowCameraBuffer[comparisonClipmapIndex];
+            float2 comparisonUv;
+            float comparisonLinearDepth;
+            CLodVirtualShadowProjectWorldToUvDepth(
+                fragPosWorldSpace,
+                comparisonLightCamera,
+                comparisonUv,
+                comparisonLinearDepth);
+            const uint baseClipmapIndex =
+                debugInfo.sampledClipmapIndex;
+            const CLodVirtualShadowCompactShadowCameraInfo baseLightCamera =
+                compactShadowCameraBuffer[baseClipmapIndex];
+            float2 baseUv;
+            float baseLinearDepth;
+            CLodVirtualShadowProjectWorldToUvDepth(
+                fragPosWorldSpace,
+                baseLightCamera,
+                baseUv,
+                baseLinearDepth);
+            (void)baseLinearDepth;
+            const float2 baseTexelCenterLightBasis =
+                CLodVirtualShadowQuantizedTexelCenterLightBasis(
+                    baseUv,
+                    clipmapInfos[baseClipmapIndex],
+                    baseLightCamera);
+            const float2 comparisonTexelCenterLightBasis =
+                CLodVirtualShadowQuantizedTexelCenterLightBasis(
+                    comparisonUv,
+                    clipmapInfos[comparisonClipmapIndex],
+                    comparisonLightCamera);
+            debugInfo.comparisonGridOffsetTexels =
+                (comparisonTexelCenterLightBasis -
+                    baseTexelCenterLightBasis) /
+                max(
+                    clipmapInfos[baseClipmapIndex].texelWorldSize,
+                    1.0e-6f);
+
+            CLodVirtualShadowDebugInfo comparisonDebugInfo;
+            const CLodVirtualShadowLookupResult comparisonLookup =
+                CLodVirtualShadowLookupDirectionalOcclusionProjected(
+                    fragPosWorldSpace,
+                    comparisonClipmapIndex,
+                    comparisonUv,
+                    comparisonLinearDepth,
+                    receiverLookup.visualFootprintWorld,
+                    float2(0.0f, 0.0f),
+                    comparisonClipmapIndex + 1u,
+                    clipmapInfos,
+                    compactShadowCameraBuffer,
+                    directionalPageViewInfo,
+                    pageTable,
+                    physicalPages,
+                    comparisonDebugInfo);
+            if (comparisonLookup.valid != 0u &&
+                comparisonLookup.depthAvailable != 0u)
+            {
+                const bool baseShadowed =
+                    receiverLookup.occlusion > 0.01f;
+                const bool comparisonShadowed =
+                    comparisonLookup.occlusion > 0.01f;
+                debugInfo.comparisonFlags =
+                    0x1u |
+                    (baseShadowed != comparisonShadowed ? 0x2u : 0u) |
+                    (baseShadowed ? 0x4u : 0u) |
+                    (comparisonShadowed ? 0x8u : 0u);
+                debugInfo.comparisonDepthDeltaTexels =
+                    comparisonDebugInfo.depthDeltaTexels;
+            }
+        }
+    }
 
     const uint packedCounts = perFrameBuffer.shadowVirtualSmrtDirectionalCountsPacked;
     const uint rayCount = CLodVirtualShadowSmrtRayCountDirectional(packedCounts);
@@ -709,21 +1362,23 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         return hardShadow;
     }
 
-    const float tNear = max(receiverLookup.clipmapInfo.texelWorldSize * 4.0f, 1.0e-4f);
-    const float tFar = maxTraceDistance;
-    const float logRatio = log(max(tFar / tNear, 1.0f));
+    const uint receiverClipmapIndex =
+        debugInfo.sampledClipmapIndex != 0xFFFFFFFFu ?
+        debugInfo.sampledClipmapIndex :
+        debugInfo.preferredClipmapIndex;
+    const CLodVirtualShadowCompactShadowCameraInfo receiverLightCamera =
+        compactShadowCameraBuffer[receiverClipmapIndex];
+#if defined(CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE)
+    Texture2D<float> cameraLinearDepth =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(
+            Builtin::PrimaryCamera::LinearDepthMap)];
+#endif
 
     const float3 baseFragToLight = normalize(lightToFrag);
     float3 tangent;
     float3 bitangent;
     CLodVirtualShadowBuildOrthonormalBasis(baseFragToLight, tangent, bitangent);
 
-    const uint receiverClipmapIndex =
-        debugInfo.sampledClipmapIndex != 0xFFFFFFFFu ?
-        debugInfo.sampledClipmapIndex :
-        debugInfo.preferredClipmapIndex;
-    const CLodVirtualShadowClipmapInfo receiverClipmapInfo = clipmapInfos[receiverClipmapIndex];
-    const CLodVirtualShadowCompactShadowCameraInfo receiverLightCamera = compactShadowCameraBuffer[receiverClipmapIndex];
     float2 rayStartUv;
     float rayStartLinearDepth;
     CLodVirtualShadowProjectWorldToUvDepth(fragPosWorldSpace, receiverLightCamera, rayStartUv, rayStartLinearDepth);
@@ -731,16 +1386,16 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
     const float2 blueNoiseBase = blueNoiseTex.Load(int3(pixelCoordsInt % blueNoiseSize, 0)).xy;
     const float2 rotation = frac(blueNoiseBase + CLodVirtualShadowSmrtRotation(pixelCoordsInt, perFrameBuffer.frameIndex));
     const float lightDiskTan = tan(coneAngleRadians);
-    const float invSamplesPerRay = 1.0f / max((float)samplesPerRay, 1.0f);
-    const float texelDitherScale = 0.5f;
-
+    const float invSampleIntervals =
+        1.0f / (float)max(samplesPerRay > 1u ? samplesPerRay - 1u : 1u, 1u);
     float visibleRayCount = 0.0f;
     float validRayCount = 0.0f;
-    bool allRaysBlockedSoFar = true;
     [loop]
     for (uint rayIndex = 0u; rayIndex < rayCount; ++rayIndex)
     {
-        const int2 rayBnOffset = int2(CLodVirtualShadowR2Sequence(rayIndex + receiverClipmapIndex * 17u + 1u) * float2(blueNoiseSize));
+        const int2 rayBnOffset = int2(
+            CLodVirtualShadowR2Sequence(rayIndex + 1u) *
+            float2(blueNoiseSize));
         const float2 rayBn = blueNoiseTex.Load(int3((pixelCoordsInt + rayBnOffset) % blueNoiseSize, 0)).xy;
         float2 xi = CLodVirtualShadowHammersley2D(rayIndex, rayCount);
         xi = frac(xi + rotation + rayBn);
@@ -749,43 +1404,116 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         const float2 diskSample = diskRadius * float2(cos(diskAngle), sin(diskAngle));
 
         const float rayJitter = frac(rotation.x + (float)rayIndex * 0.618033988749895f);
-        const int2 ditherBnOffset = int2(CLodVirtualShadowR2Sequence(rayCount + rayIndex + receiverClipmapIndex * 29u + 3u) * float2(blueNoiseSize));
-        const float2 rayDitherBn = blueNoiseTex.Load(int3((pixelCoordsInt + ditherBnOffset) % blueNoiseSize, 0)).xy;
-        const float2 rayDitherWorld = texelDitherScale * (rayDitherBn - 0.5f) * receiverClipmapInfo.texelWorldSize;
-        const float3 rayEndWorldSpace = fragPosWorldSpace + baseFragToLight * tFar +
-            tangent * (diskSample.x * lightDiskTan * tFar) +
-            bitangent * (diskSample.y * lightDiskTan * tFar);
+        const float3 rayDirection = normalize(
+            baseFragToLight +
+            tangent * (diskSample.x * lightDiskTan) +
+            bitangent * (diskSample.y * lightDiskTan));
+        float rayNear = max(cameraFootprintWorld * 0.25f, 1.0e-4f);
+#if defined(CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE)
+        if (perFrameBuffer.shadowVirtualReceiverTraceEnabled != 0u)
+        {
+            const CLodVirtualShadowReceiverOffsetResult receiverOffset =
+                CLodVirtualShadowAdaptiveReceiverOffset(
+                    pixelCoords,
+                    fragPosWorldSpace,
+                    rayDirection,
+                    mainCamera,
+                    cameraLinearDepth,
+                    uint2(
+                        perFrameBuffer.screenResX,
+                        perFrameBuffer.screenResY),
+                    perFrameBuffer.shadowVirtualReceiverTraceSampleCount,
+                    perFrameBuffer.shadowVirtualReceiverTraceMaxDistanceWorld,
+                    perFrameBuffer.shadowVirtualReceiverTraceUncertaintyScale,
+                    perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale);
+            if (receiverOffset.escaped != 0u)
+            {
+                // Bound physical ray-origin displacement in screen-space
+                // terms. A grazing screen trace may require an arbitrarily
+                // long world-space distance to exceed the depth margin; using
+                // that full distance skips real blockers and causes peter-pan.
+                const float maximumReceiverOffset =
+                    cameraFootprintWorld * max(
+                        perFrameBuffer.shadowVirtualReceiverTraceUncertaintyScale +
+                            perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale,
+                        0.25f);
+                rayNear = max(
+                    min(receiverOffset.distance, maximumReceiverOffset),
+                    1.0e-4f);
+            }
+            else if (receiverOffset.valid != 0u)
+            {
+                // Failure to exceed a camera-depth safety margin is not proof
+                // of occlusion: the pixel-sized margin grows in world units
+                // with distance. Only a direction below the receiver's
+                // shading horizon is definitively self-occluded. Otherwise
+                // retain the small baseline origin and let VSM evidence decide.
+                if (dot(normalize(normal), rayDirection) <= 0.0f)
+                {
+                    validRayCount += 1.0f;
+                    continue;
+                }
+            }
+            else
+            {
+                // Off-screen or unavailable camera depth is unknown. Keep the
+                // baseline origin rather than converting missing evidence into
+                // either shadow or a large receiver offset.
+            }
+        }
+#endif
+        // Receiver suppression does not consume the configured blocker-search
+        // span. Every ray starts at its own proven-safe point and receives the
+        // full SMRT trace distance beyond it.
+        const float rayFar = rayNear + maxTraceDistance;
+        const float rayLogRatio = log(max(rayFar / rayNear, 1.0f));
+        const float3 rayEndWorldSpace =
+            fragPosWorldSpace + rayDirection * rayFar;
         float2 rayEndUv;
         float rayEndLinearDepth;
         CLodVirtualShadowProjectWorldToUvDepth(rayEndWorldSpace, receiverLightCamera, rayEndUv, rayEndLinearDepth);
 
         bool rayHit = false;
         bool rayHadValidSample = false;
-        bool depthHistoryValid = false;
-        float depthHistory = 0.0f;
-        float depthSlope = 0.0f;
-        float depthHistoryDistance = 0.0f;
-        float prevSampledLinearDepth = 0.0f;
-        uint prevSampledClipmapIndex = 0xFFFFFFFFu;
-        uint prevSampledPhysicalPageIndex = 0xFFFFFFFFu;
-        bool mustResetHistory = false;
+        bool rayHadUnknownSample = false;
+        bool rayObservedFreeSpace = false;
+        bool rayEndpointBehindSurface = false;
+        bool previousFiniteDepthValid = false;
+        float previousDepthDelta = 0.0f;
+        float previousDepthTolerance = 0.0f;
+        float previousSampleDistance = 0.0f;
         [loop]
         for (uint sampleIndex = 0u; sampleIndex < samplesPerRay; ++sampleIndex)
         {
-            const float t = ((float)sampleIndex + 0.5f + (rayJitter - 0.5f)) * invSamplesPerRay;
-            const float sampleDistance = tNear * exp(saturate(t) * logRatio);
-            const float rayAlpha = saturate(sampleDistance / tFar);
+            // Trace from the lightward endpoint back toward the receiver. A
+            // receiver in hard shadow starts behind the blocker, so marching
+            // receiver-to-light and treating that state as a hit preserves the
+            // hard-shadow silhouette instead of testing whether an angled ray
+            // actually crosses the blocker. Keep both endpoints exact; jitter
+            // only interior strata.
+            float sampleLogAlpha = samplesPerRay > 1u
+                ? 1.0f - (float)sampleIndex * invSampleIntervals
+                : 1.0f;
+            if (sampleIndex > 0u && sampleIndex + 1u < samplesPerRay)
+            {
+                sampleLogAlpha = saturate(
+                    sampleLogAlpha +
+                    (rayJitter - 0.5f) * invSampleIntervals * 0.5f);
+            }
+            const float sampleDistance =
+                rayNear * exp(sampleLogAlpha * rayLogRatio);
+            const float rayAlpha = saturate(sampleDistance / rayFar);
             const float3 samplePosWorldSpace = lerp(fragPosWorldSpace, rayEndWorldSpace, rayAlpha);
             const float2 sampleUv = lerp(rayStartUv, rayEndUv, rayAlpha);
             const float sampleLinearDepth = lerp(rayStartLinearDepth, rayEndLinearDepth, rayAlpha);
             CLodVirtualShadowDebugInfo unusedDebugInfo;
             const CLodVirtualShadowLookupResult raySample = CLodVirtualShadowLookupDirectionalOcclusionProjected(
                 samplePosWorldSpace,
-                normal,
                 receiverClipmapIndex,
                 sampleUv,
                 sampleLinearDepth,
-                rayDitherWorld,
+                visualFootprintWorld,
+                float2(0.0f, 0.0f),
                 activeClipmapCount,
                 clipmapInfos,
                 compactShadowCameraBuffer,
@@ -794,113 +1522,89 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
                 physicalPages,
                 unusedDebugInfo);
 
-            if (raySample.valid == 0u || raySample.depthAvailable == 0u)
+            if (raySample.valid == 0u)
             {
-                mustResetHistory = true;
+                // An unallocated or otherwise invalid page is unknown, so it
+                // cannot bridge a depth crossing between two known regions.
+                rayHadUnknownSample = true;
+                previousFiniteDepthValid = false;
                 continue;
             }
 
+            // A valid cleared texel is positive evidence that this portion of
+            // the ray is free. It makes the ray eligible for the visibility
+            // estimator even though there is no finite surface to compare.
             rayHadValidSample = true;
-
-            const bool pageChanged =
-                mustResetHistory ||
-                raySample.sampledClipmapIndex != prevSampledClipmapIndex ||
-                raySample.sampledPhysicalPageIndex != prevSampledPhysicalPageIndex;
-
-            prevSampledClipmapIndex = raySample.sampledClipmapIndex;
-            prevSampledPhysicalPageIndex = raySample.sampledPhysicalPageIndex;
-            mustResetHistory = false;
-
-            if (pageChanged)
+            if (raySample.depthAvailable == 0u)
             {
-                depthHistoryValid = false;
-                depthSlope = 0.0f;
+                rayObservedFreeSpace = true;
+                previousFiniteDepthValid = false;
+                continue;
             }
 
             const float closestDepth = raySample.closestDepth;
             const float refDepth = raySample.sampledLinearDepth;
+            const float depthDelta = refDepth - closestDepth;
+            // Use the continuous receiver footprint rather than the actual
+            // fallback clip texel. The latter doubles at clip boundaries and
+            // may jump several levels on fallback. Depth tolerance must also
+            // remain independent of trace length; coupling it to tFar caused
+            // longer traces to widen the dead zone and miss nearby blockers.
+            const float depthTolerance = max(
+                visualFootprintWorld * 0.15f,
+                abs(refDepth) * 1.0e-4f);
 
-            if (!depthHistoryValid)
+            if (sampleIndex == 0u && depthDelta > depthTolerance)
             {
-                // First valid sample in this page-local frame: simple depth test.
-                depthHistory = closestDepth;
-                depthHistoryDistance = sampleDistance;
-                depthHistoryValid = true;
-                prevSampledLinearDepth = refDepth;
+                rayEndpointBehindSurface = true;
+            }
 
-                const float depthTolerance = max(
-                    raySample.clipmapInfo.texelWorldSize * 0.15f,
-                    abs(refDepth) * 1.0e-4f);
-                if (refDepth > closestDepth + depthTolerance)
+            if (depthDelta < -depthTolerance)
+            {
+                rayObservedFreeSpace = true;
+            }
+
+            if (previousFiniteDepthValid &&
+                previousDepthDelta < -previousDepthTolerance &&
+                depthDelta > depthTolerance)
+            {
+                // Moving light-to-receiver, a real intersection changes the
+                // signed separation from in front of a surface to behind it.
+                // Reject large discontinuous jumps: those are normally the
+                // ray entering a blocker silhouette after it has already
+                // passed the blocker's depth, which is a miss rather than a
+                // surface crossing.
+                const float stepDistance = max(
+                    previousSampleDistance - sampleDistance,
+                    1.0e-4f);
+                const float maximumContinuousDeltaChange =
+                    stepDistance * 4.0f;
+                if (abs(depthDelta - previousDepthDelta) <=
+                    maximumContinuousDeltaChange)
                 {
                     rayHit = true;
                     break;
                 }
-
-                continue;
             }
 
-            const float stepDist = max(sampleDistance - depthHistoryDistance, 1.0e-4f);
-
-            // Is the shadow map showing a surface far behind the ray?
-            // This happens when the texel shows the ground past the occluder.
-            const float behindTolerance = max(
-                abs(refDepth - prevSampledLinearDepth) * 1.05f,
-                raySample.clipmapInfo.texelWorldSize * 0.1f);
-            const bool bBehind = (closestDepth - refDepth) > behindTolerance;
-
-            float depthForComparison;
-            if (bBehind)
-            {
-                // Shadow map doesn't show the tracked surface: extrapolate
-                depthForComparison = depthHistory + depthSlope * stepDist;
-            }
-            else
-            {
-                // Shadow map shows a surface near the ray: use it directly
-                depthForComparison = closestDepth;
-                if (abs(closestDepth - depthHistory) > 1.0e-6f)
-                {
-                    depthSlope = clamp(
-                        (closestDepth - depthHistory) / stepDist,
-                        -4.0f, 4.0f);
-                }
-                depthHistory = closestDepth;
-                depthHistoryDistance = sampleDistance;
-            }
-
-            // For receiver-to-light march: hit when ray is behind
-            // the tracked/extrapolated surface
-            const float hitTolerance = max(
-                raySample.clipmapInfo.texelWorldSize * 0.15f,
-                abs(refDepth) * 1.0e-4f);
-            if (refDepth - depthForComparison > hitTolerance)
-            {
-                rayHit = true;
-                break;
-            }
-
-            prevSampledLinearDepth = refDepth;
+            previousFiniteDepthValid = true;
+            previousDepthDelta = depthDelta;
+            previousDepthTolerance = depthTolerance;
+            previousSampleDistance = sampleDistance;
         }
 
-        if (rayHadValidSample)
+        // Retain conservative occlusion only when the exact lightward endpoint
+        // is definitively behind a finite surface. Samples which merely remain
+        // inside the tolerance band are unresolved, not proof of a blocker.
+        if (!rayHit && rayEndpointBehindSurface && !rayObservedFreeSpace)
+        {
+            rayHit = true;
+        }
+
+        if (rayHadValidSample && (rayHit || !rayHadUnknownSample))
         {
             validRayCount += 1.0f;
             visibleRayCount += rayHit ? 0.0f : 1.0f;
-            if (!rayHit)
-                allRaysBlockedSoFar = false;
-        }
-
-        // Wave early-out: all lanes fully lit after center ray
-        if (rayIndex == 0u && rayHadValidSample && WaveActiveAllTrue(!rayHit))
-        {
-            break;
-        }
-        // Wave early-out: all lanes in full umbra
-        if (rayIndex >= 3u && (rayIndex & 3u) == 3u &&
-            WaveActiveAllTrue(allRaysBlockedSoFar && validRayCount > 0.0f))
-        {
-            break;
         }
     }
 

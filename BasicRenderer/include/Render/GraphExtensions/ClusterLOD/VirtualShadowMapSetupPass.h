@@ -5,8 +5,11 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
-class PixelBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+class VirtualShadowCasterRegistry;
 
 class VirtualShadowMapSetupPass final : public ComputePass {
 public:
@@ -21,9 +24,8 @@ public:
         std::shared_ptr<Buffer> compactShadowCameraBuffer,
         std::shared_ptr<Buffer> statsBuffer,
         std::shared_ptr<Buffer> runtimeStateBuffer,
-        std::shared_ptr<Buffer> predictiveCandidateCountBuffer,
-        std::shared_ptr<Buffer> predictiveRawPageCountBuffer,
-        std::shared_ptr<Buffer> predictedPageCountBuffer,
+        std::shared_ptr<Buffer> fallbackCandidateCountBuffer,
+        std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters,
         bool forceResetResources);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
@@ -44,13 +46,13 @@ private:
     std::shared_ptr<Buffer> m_compactShadowCameraBuffer;
     std::shared_ptr<Buffer> m_statsBuffer;
     std::shared_ptr<Buffer> m_runtimeStateBuffer;
-    std::shared_ptr<Buffer> m_predictiveCandidateCountBuffer;
-    std::shared_ptr<Buffer> m_predictiveRawPageCountBuffer;
-    std::shared_ptr<Buffer> m_predictedPageCountBuffer;
+    std::shared_ptr<Buffer> m_fallbackCandidateCountBuffer;
+    std::shared_ptr<VirtualShadowCasterRegistry> m_virtualShadowCasters;
     bool m_forceResetResources = false;
     bool m_resetResources = false;
     bool m_resetReasonForced = false;
     bool m_resetReasonNoPreviousState = false;
     bool m_resetReasonStructureMismatch = false;
     bool m_resetReasonLightDirectionChanged = false;
+    bool m_feedbackRecoveryRefresh = false;
 };

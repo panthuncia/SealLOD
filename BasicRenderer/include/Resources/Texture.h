@@ -8,13 +8,16 @@
 #include <variant>
 
 #include "Import/Filetypes.h"
+#include "Materials/MaterialTextureStreaming.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Factories/TextureFactory.h"
 #include "Managers/Singletons/DirectStorageManager.h"
 #include "Resources/Sampler.h"
+#include "Resources/TextureResidency.h"
 
 struct RenderContext;
 struct TextureProcessingJobHandle;
+enum class TextureProcessingJobState : uint8_t;
 
 enum class TextureSemantic : uint8_t {
     Unknown = 0,
@@ -41,7 +44,9 @@ enum class TextureLoadPathTelemetry : uint8_t {
     DirectStorageGpuDirect,
     DirectStorageSystemMemoryRead,
     CpuFileRead,
+    MemoryMappedFileRead,
     InMemoryContainer,
+    DeferredFileReference,
 };
 
 enum class TextureUploadPathTelemetry : uint8_t {
@@ -52,6 +57,7 @@ enum class TextureUploadPathTelemetry : uint8_t {
     AsyncProcessingReadyUpload,
     ProcessingCacheUpload,
     ProcessingFailedFallback,
+    DeferredPlaceholder,
 };
 
 struct TextureProcessingSettings {
@@ -60,9 +66,12 @@ struct TextureProcessingSettings {
     bool requestMipChain = false;
     bool requestBlockCompression = false;
     bool allowAsyncPlaceholder = false;
+    bool allowCpuBootstrapBeforeAsyncProcessing = false;
     bool preferSRGB = false;
     bool preservePackedChannels = false;
     NormalMapConvention normalConvention = NormalMapConvention::DirectX;
+	// Zero retains the complete chain. A value N retains mip indices [0, N).
+	uint32_t maxMipLevels = 0;
     std::string sourceIdentity;
 };
 
@@ -79,6 +88,7 @@ inline TextureProcessingSettings MakeMaterialTextureProcessingSettings(
     settings.requestMipChain = true;
     settings.requestBlockCompression = semantic != TextureSemantic::Height;
     settings.allowAsyncPlaceholder = true;
+    settings.allowCpuBootstrapBeforeAsyncProcessing = true;
     settings.preferSRGB = preferSRGB;
     settings.preservePackedChannels = preservePackedChannels;
     settings.normalConvention = normalConvention;
@@ -95,6 +105,19 @@ struct TextureSourceData {
     bool hasFullMipChain = false;
     bool isBlockCompressed = false;
 };
+
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromConditionedCacheFilePath(
+    const std::string& path,
+	const std::string& reason = {});
+void ReleaseSharedProcessingPlaceholderTextures();
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromDDSFilePath(
+    const std::string& path,
+    bool preferSRGB,
+    const std::string& reason = {});
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromFilePath(
+    const std::string& path,
+    bool preferSRGB,
+    const std::string& reason = {});
 
 //enum class ImageFiletype {
 //	UNKNOWN,
@@ -142,9 +165,40 @@ struct TextureStreamingState {
     TextureMipResidencyWindow residency = {};
     uint32_t requestedTopMip = 0;
     uint32_t pendingTopMip = 0;
+    uint32_t lastFeedbackTopMip = UINT32_MAX;
     uint64_t lastSeenFrame = 0;
     uint64_t stateRevision = 0;
     uint64_t bindingRevision = 0;
+};
+
+struct TexturePendingDebugInfo {
+    std::string label;
+    std::string debugName;
+    std::string sourceIdentity;
+    std::string filePath;
+    std::string initialData;
+    bool hasUsableImage = false;
+    bool hasFinalImage = false;
+    bool hasPlaceholder = false;
+    bool needsStreamingReload = false;
+    bool hasProcessingHandle = false;
+    bool hasReloadHandle = false;
+    bool hasDirectStorageHandle = false;
+    bool isProcessingCacheArtifact = false;
+    uint32_t streamingTextureID = 0;
+    uint32_t requestedTopMip = 0;
+    uint32_t pendingTopMip = 0;
+    uint32_t residentTopMip = 0;
+    uint32_t directStorageTargetTopMip = 0;
+    uint32_t residentMipCount = 0;
+    uint32_t totalMipCount = 0;
+    uint64_t stateRevision = 0;
+    uint64_t bindingRevision = 0;
+    const char* processingState = "None";
+    const char* reloadState = "None";
+    const char* directStorageState = "None";
+    const char* loadPath = "unknown";
+    const char* uploadPath = "unknown";
 };
 
 enum class TextureReloadJobState : uint8_t {
@@ -175,8 +229,9 @@ enum class TextureDirectStorageReloadJobState : uint8_t {
 
 struct TextureDirectStorageReloadJobHandle {
     std::atomic<TextureDirectStorageReloadJobState> state = TextureDirectStorageReloadJobState::Queued;
+    std::atomic_bool cancelRequested = false;
     std::mutex mutex;
-    uint32_t targetTopMip = 0;
+    std::atomic<uint32_t> targetTopMip = 0;
     std::shared_ptr<PixelBuffer> uploadedImage;
     DirectStorageAsyncRequestHandle requestHandle;
     std::string error;
@@ -212,7 +267,7 @@ public:
             std::move(meta)
 		));
     }
-    
+
 	// Resolve to a vector of bytes
     const BytesList& ResolveToBytes() const
     {
@@ -237,69 +292,125 @@ public:
             }, m_initialStorage);
     }
 
-    PixelBuffer& Image() const { return *m_image; }
-    std::shared_ptr<PixelBuffer> ImagePtr() const { return m_image; }
+    struct PublishedBindingSnapshot {
+        std::shared_ptr<PixelBuffer> image;
+        uint64_t bindingRevision = 0;
+    };
+    PublishedBindingSnapshot GetPublishedBindingSnapshot() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return {m_publishedImage, m_publishedBindingRevision};
+    }
+    std::shared_ptr<PixelBuffer> ImagePtr() const {
+        return GetPublishedBindingSnapshot().image;
+    }
+    std::shared_ptr<PixelBuffer> PreparedImagePtr() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_image;
+    }
+    bool PublishPreparedImage(
+        uint64_t bindingRevision,
+        const std::shared_ptr<PixelBuffer>& image,
+        std::shared_ptr<PixelBuffer>* replacedPublishedImage = nullptr);
+    bool RejectPreparedImage(uint64_t bindingRevision, const std::shared_ptr<PixelBuffer>& image);
 
     Sampler& SamplerState() const { return *m_sampler; }
-    UINT SamplerDescriptorIndex() const { return m_sampler->GetDescriptorIndex(); }
+	void SetSampler(std::shared_ptr<Sampler> sampler) {
+		std::scoped_lock lock(m_uploadAdvanceMutex);
+		m_sampler = sampler ? std::move(sampler) : Sampler::GetDefaultSampler();
+	}
+    UINT SamplerDescriptorIndex() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_sampler->GetDescriptorIndex(); }
 
     const TextureFileMeta& Meta() const { return m_meta; }
     TextureFileMeta& Meta() { return m_meta; }
+    const TextureDescription& Description() const { return m_desc; }
+    rhi::Format Format() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_desc.format; }
 
     const TextureProcessingSettings& ProcessingSettings() const { return m_meta.processing; }
     void SetProcessingSettings(TextureProcessingSettings settings);
 
-    const TextureStreamingState& GetStreamingState() const { return m_streamingState; }
-    uint32_t GetStreamingTextureID() const { return m_streamingState.streamingTextureID; }
-    bool IsMipStreamingEligible() const { return m_streamingState.eligible; }
-    bool IsMipStreamingEnabled() const { return m_streamingState.enabled; }
-    bool IsUsingFallbackImage() const { return m_hasUploadedPlaceholder && !m_hasUploadedFinalImage; }
-    bool HasUsableImage() const { return m_image && m_image->HasValidBackingResource(); }
-    uint64_t GetBindingRevision() const { return m_streamingState.bindingRevision; }
-    uint64_t GetStreamingStateRevision() const { return m_streamingState.stateRevision; }
+    TextureStreamingState GetStreamingState() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_streamingState;
+    }
+    uint32_t GetStreamingTextureID() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.streamingTextureID; }
+    bool IsMipStreamingEligible() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.eligible; }
+    bool IsMipStreamingEnabled() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.enabled; }
+    bool IsUsingFallbackImage() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_hasUploadedPlaceholder && !m_hasUploadedFinalImage; }
+    bool HasUsableImage() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_image && m_image->HasValidBackingResource(); }
+    bool IsResidentFinalImage() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_image && m_image->HasValidBackingResource() && m_hasUploadedFinalImage && !m_hasUploadedPlaceholder;
+    }
+    uint64_t GetBindingRevision() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.bindingRevision; }
+    uint64_t GetStreamingStateRevision() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.stateRevision; }
     bool HasPendingUploadWork() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
         const bool needsStreamingReload =
             m_hasUploadedFinalImage &&
-            m_streamingState.enabled &&
             HasStreamingSourceData() &&
-            m_streamingState.pendingTopMip != m_streamingState.residency.residentTopMip;
-        return !HasUsableImage() ||
-            needsStreamingReload ||
-            m_hasUploadedPlaceholder ||
+            ((m_streamingState.enabled &&
+              m_streamingState.pendingTopMip != m_streamingState.residency.residentTopMip) ||
+             (!m_streamingState.enabled && m_streamingState.residency.residentTopMip != 0u));
+        const bool hasAsyncHandle =
             m_processingHandle != nullptr ||
             m_reloadHandle != nullptr ||
             m_directStorageReloadHandle != nullptr;
+        const bool hasOnlyPlaceholder =
+            m_hasUploadedPlaceholder &&
+            !m_hasUploadedFinalImage;
+        return !HasUsableImage() ||
+            needsStreamingReload ||
+            hasAsyncHandle ||
+            hasOnlyPlaceholder;
     }
-    uint32_t GetFullMip0Width() const { return m_sourceFullWidth != 0u ? m_sourceFullWidth : GetWidth(); }
-    uint32_t GetFullMip0Height() const { return m_sourceFullHeight != 0u ? m_sourceFullHeight : GetHeight(); }
-    void ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex = 0);
+    TexturePendingDebugInfo GetPendingDebugInfo() const;
+    const std::string& DebugName() const { return m_name; }
+    uint32_t GetFullMip0Width() const
+    {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_sourceFullWidth != 0u ? m_sourceFullWidth : m_desc.imageDimensions[0].width;
+    }
+    uint32_t GetFullMip0Height() const
+    {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_sourceFullHeight != 0u ? m_sourceFullHeight : m_desc.imageDimensions[0].height;
+    }
+    bool ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex = 0, bool forceResidencyChange = false);
     void EnableMipStreaming(bool enabled);
+    void SetMipStreamingSuppressed(bool suppressed);
 
     void AdoptUploadedImage(std::shared_ptr<PixelBuffer> image);
     void RecordLoadPath(TextureLoadPathTelemetry path, std::string detail = {});
     void RecordUploadPath(TextureUploadPathTelemetry path, std::string detail = {});
 
-    std::shared_ptr<TextureSourceData> BuildSourceData();
-    std::shared_ptr<TextureSourceData> BuildProcessingSourceData();
+    std::shared_ptr<TextureSourceData> BuildSourceData(const char* reason = nullptr);
+    std::shared_ptr<TextureSourceData> BuildProcessingSourceData(const char* reason = nullptr);
 
     void SetName(const std::string& name)
     {
+		std::scoped_lock lock(m_uploadAdvanceMutex);
         m_name = name;
-        if (HasUsableImage()) {
+        if (HasUsableImage() && !m_hasUploadedPlaceholder) {
             m_image->SetName(name);
         }
     }
 
     DirectStorageAsyncRequestHandle QueueInitialDirectStorageUploadIfNeeded();
     void EnsureUploaded(const TextureFactory& factory);
+    TextureUploadAdvanceResult EnsureUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode);
+    TextureUploadAdvanceResult RequestAllOrNothingUpload(const TextureFactory& factory, TextureUploadAdvanceMode mode);
+    bool DropResidentImageForStreaming();
 
     unsigned int GetWidth() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
         return m_desc.imageDimensions[0].width;
     }
     unsigned int GetHeight() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
         return m_desc.imageDimensions[0].height;
     }
     void SetGenerateMipmaps(bool generate) {
+		std::scoped_lock lock(m_uploadAdvanceMutex);
 	    m_desc.generateMipMaps = generate;
     }
 
@@ -309,37 +420,44 @@ private:
         StorageVariant initialStorage,
         std::shared_ptr<Sampler> defaultSampler,
         TextureFileMeta meta)
-        : m_desc(std::move(desc))
-        , m_initialStorage(std::move(initialStorage))
+        : m_initialStorage(std::move(initialStorage))
+        , m_desc(std::move(desc))
         , m_sampler(defaultSampler ? std::move(defaultSampler) : Sampler::GetDefaultSampler())
         , m_meta(std::move(meta)) {
         m_streamingState.streamingTextureID = NextStreamingTextureID();
         if (std::holds_alternative<std::shared_ptr<PixelBuffer>>(m_initialStorage)) { // Already initialized
             m_image = std::get<std::shared_ptr<PixelBuffer>>(m_initialStorage);
+			m_publishedImage = m_image;
 			m_hasUploadedFinalImage = true;
         }
-		if (std::holds_alternative<std::string>(m_initialStorage)) { // Store path for potential re-use
+        if (std::holds_alternative<std::string>(m_initialStorage)) { // Store path for potential re-use
             m_initialDataString = std::get<std::string>(m_initialStorage);
+            PrimeConditionedCacheResidentUploadMetadata();
 		}
         if (std::holds_alternative<BytesList>(m_initialStorage)) {
             m_originalSourceDesc = m_desc;
             m_originalSourceBytes = std::get<BytesList>(m_initialStorage);
         }
         RefreshStreamingStateFromDescription();
-        if (m_streamingState.eligible) {
+        if (m_streamingState.eligible && !m_suppressMipStreaming && IsMaterialTextureStreamingEnabledSetting()) {
             m_streamingState.enabled = true;
 			ApplyStreamingBootstrapTopMip();
             InvalidateResidentImageForStreamingRequest();
         }
     }
 	TextureDescription m_desc;
+	mutable std::recursive_mutex m_uploadAdvanceMutex;
     std::shared_ptr<PixelBuffer> m_image;
+    std::shared_ptr<PixelBuffer> m_publishedImage;
+    uint64_t m_publishedBindingRevision = 0;
     std::shared_ptr<Sampler> m_sampler;
     TextureFileMeta m_meta;
 	std::shared_ptr<TextureProcessingJobHandle> m_processingHandle;
     std::shared_ptr<TextureReloadJobHandle> m_reloadHandle;
     std::shared_ptr<TextureDirectStorageReloadJobHandle> m_directStorageReloadHandle;
     TextureStreamingState m_streamingState;
+	uint64_t m_streamingRequestChangedFrame = 0;
+    bool m_suppressMipStreaming = false;
 	uint32_t m_sourceTotalMipCount = 0;
     uint32_t m_sourceFullWidth = 0;
     uint32_t m_sourceFullHeight = 0;
@@ -349,10 +467,20 @@ private:
     std::string m_name;
 	bool m_hasUploadedPlaceholder = false;
 	bool m_hasUploadedFinalImage = false;
+	bool m_processingFallbackRequested = false;
     TextureLoadPathTelemetry m_lastReportedLoadPath = TextureLoadPathTelemetry::Unknown;
     TextureUploadPathTelemetry m_lastReportedUploadPath = TextureUploadPathTelemetry::Unknown;
 
     void RefreshStreamingStateFromDescription();
+	void SetPreparedImageLocked(std::shared_ptr<PixelBuffer> image) {
+		m_image = std::move(image);
+		// Material texture publication is owned by TextureStreamingManager even when
+		// mip streaming is disabled or the texture is ineligible.  Otherwise an
+		// upload can change the descriptor without producing an owner-dirty event.
+		if (!m_meta.processing.isParticipatingMaterialTexture) {
+			m_publishedImage = m_image;
+		}
+	}
 	void UpdateSourceShapeFromDescription(const TextureDescription& desc, uint32_t totalMipCountHint = 0u);
     void ApplySourceShapeHint(uint32_t fullWidth, uint32_t fullHeight, uint32_t totalMipCount);
 	void ApplyStreamingBootstrapTopMip();
@@ -365,4 +493,5 @@ private:
     void NoteTextureSeen(uint64_t frameIndex);
     void BumpStreamingStateRevision();
     void BumpBindingRevision();
+    void PrimeConditionedCacheResidentUploadMetadata() const;
 };

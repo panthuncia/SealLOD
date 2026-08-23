@@ -4,10 +4,8 @@
 #include "include/gammaCorrection.hlsli"
 #include "PerPassRootConstants/bloomSampleRootConstants.h"
 
-// UintRootConstant0 is HDR source SRV
-// UintRootConstant1 is mip level of bloom source SRV
-// UintRootConstant2 is src res x
-// UintRootConstant3 is src res y
+// UintRootConstant0 is the source SRV descriptor index.
+// UintRootConstant1/2 are the source dimensions.
 
 // UintRootConstant3/4 carry texel size as float bit patterns
 float4 downsample(FULLSCREEN_VS_OUTPUT input) : SV_Target
@@ -15,31 +13,17 @@ float4 downsample(FULLSCREEN_VS_OUTPUT input) : SV_Target
     float x = SRC_TEXEL_SIZE_X;
     float y = SRC_TEXEL_SIZE_Y;
     
-    Texture2D<float4> source = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PostProcessing::UpscaledHDR)];
+    Texture2D<float4> source = ResourceDescriptorHeap[SOURCE_TEXTURE_DESCRIPTOR_INDEX];
     float2 texCoord = input.uv;
     texCoord.y = 1.0f - texCoord.y;
     
-    float3 a = source.SampleLevel(g_linearClamp, float2(texCoord.x - 2 * x, texCoord.y + 2 * y), 0).rgb;
-    float3 b = source.SampleLevel(g_linearClamp, float2(texCoord.x, texCoord.y + 2 * y), 0).rgb;
-    float3 c = source.SampleLevel(g_linearClamp, float2(texCoord.x + 2 * x, texCoord.y + 2 * y), 0).rgb;
-    
-    float3 d = source.SampleLevel(g_linearClamp, float2(texCoord.x - 2 * x, texCoord.y), 0).rgb;
-    float3 e = source.SampleLevel(g_linearClamp, float2(texCoord.x, texCoord.y), 0).rgb;
-    float3 f = source.SampleLevel(g_linearClamp, float2(texCoord.x + 2 * x, texCoord.y), 0).rgb;
-    
-    float3 g = source.SampleLevel(g_linearClamp, float2(texCoord.x - 2 * x, texCoord.y - 2 * y), 0).rgb;
-    float3 h = source.SampleLevel(g_linearClamp, float2(texCoord.x, texCoord.y - 2 * y), 0).rgb;
-    float3 i = source.SampleLevel(g_linearClamp, float2(texCoord.x + 2 * x, texCoord.y - 2 * y), 0).rgb;
-    
-    float3 j = source.SampleLevel(g_linearClamp, float2(texCoord.x - x, texCoord.y + y), 0).rgb;
-    float3 k = source.SampleLevel(g_linearClamp, float2(texCoord.x + x, texCoord.y + y), 0).rgb;
-    float3 l = source.SampleLevel(g_linearClamp, float2(texCoord.x - x, texCoord.y - y), 0).rgb;
-    float3 m = source.SampleLevel(g_linearClamp, float2(texCoord.x + x, texCoord.y - y), 0).rgb;
-    
-    float3 downsample = e * 0.125;
-    downsample += (a + c + g + i) * 0.03125;
-    downsample += (b + d + f + h) * 0.0625;
-    downsample += (j + k + l + m) * 0.125;
+    // Four bilinear taps cover the 4x4 source footprint used by this 2:1
+    // downsample. The sampler performs the four sub-texel reads per tap.
+    float3 downsample = source.SampleLevel(g_linearClamp, texCoord + float2(-x, -y), 0).rgb;
+    downsample += source.SampleLevel(g_linearClamp, texCoord + float2(x, -y), 0).rgb;
+    downsample += source.SampleLevel(g_linearClamp, texCoord + float2(-x, y), 0).rgb;
+    downsample += source.SampleLevel(g_linearClamp, texCoord + float2(x, y), 0).rgb;
+    downsample *= 0.25f;
     
     downsample = max(downsample, 0.00001f);
     

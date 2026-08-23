@@ -1,6 +1,24 @@
 #pragma once
 
 #include "Mesh/ClusterLODTypes.h"
+#include "Mesh/VoxelGroupBuilder.h"
+
+#include <span>
+#include <cstdint>
+#include <string>
+
+// Associates page-packing telemetry emitted by builders on the current thread
+// with the logical asset being preprocessed. Telemetry is disabled unless
+// BASICRENDERER_CLOD_PAGE_PACKING_TELEMETRY names an output CSV file.
+void SetClusterLODPagePackingTelemetryContext(
+	std::string sourceIdentifier,
+	std::uint64_t referenceCount = 0);
+void ClearClusterLODPagePackingTelemetryContext();
+
+bool ValidateClusterLODPageRepresentations(
+	const ClusterLODPrebuiltData& prebuiltData,
+	const std::vector<std::vector<std::byte>>* meshPageBlobs,
+	std::string* outError = nullptr);
 
 ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const std::vector<std::byte>& vertices,
@@ -10,4 +28,63 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const std::vector<uint32_t>& indices,
 	const std::vector<MeshUvSetData>& uvSets,
 	unsigned int flags,
-	const ClusterLODBuilderSettings& settings);
+	const ClusterLODBuilderSettings& settings,
+	const VoxelCoverageMaterialSampler* coverageMaterialSampler = nullptr);
+
+ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
+	const std::vector<std::byte>& vertices,
+	unsigned int vertexSize,
+	const std::vector<uint32_t>& indices,
+	const ClusterLODBuilderSettings& settings,
+	const std::optional<ClusterLODVoxelGridOverride>& gridOverride,
+	uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
+
+ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
+	const std::vector<std::byte>& vertices,
+	unsigned int vertexSize,
+	const std::vector<uint32_t>& indices,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
+
+ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
+	const VoxelGroupPayload& payload,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
+
+struct ClusterLODAssemblyPart
+{
+	const ClusterLODPrebuildArtifacts* artifacts = nullptr;
+	const std::vector<std::byte>* coverageVertices = nullptr;
+	const std::vector<uint32_t>* coverageIndices = nullptr;
+	unsigned int coverageVertexSize = 0;
+	const std::vector<std::byte>* coverageSkinningVertices = nullptr;
+	unsigned int coverageSkinningVertexSize = 0;
+	bool doubleSidedCoverageTriangles = false;
+};
+
+struct ClusterLODAssemblyInstanceSpec
+{
+	uint32_t partIndex = 0;
+	uint32_t rootNode = 0;
+	ClusterLODAssemblyTransform transform{};
+	uint32_t flags = 0;
+	uint32_t boneRemapBase = CLOD_ASSEMBLY_BONE_REMAP_SENTINEL;
+	uint32_t boneRemapCount = 0;
+	std::vector<uint32_t> boneRemapIndices;
+};
+
+ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
+	std::span<const ClusterLODAssemblyPart> parts,
+	std::span<const ClusterLODAssemblyInstanceSpec> instances,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t preferredNodeWidth = 8u,
+	bool synthesizeVoxelParents = true);
+
+// Builds the preferred voxel-parent assembly when possible, while preserving
+// triangle-only parts through direct instance-root traversal when none of the
+// child hierarchies provides a usable voxel source.
+ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifactsPreservingTriangleOnly(
+	std::span<const ClusterLODAssemblyPart> parts,
+	std::span<const ClusterLODAssemblyInstanceSpec> instances,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t preferredNodeWidth = 8u);

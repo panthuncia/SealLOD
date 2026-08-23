@@ -2,6 +2,8 @@
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/visibleClusterPacking.hlsli"
 #include "include/structs.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
+#include "include/virtualShadowCaster.hlsli"
 #include "include/utilities.hlsli"
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
@@ -20,8 +22,15 @@ void CLodRasterPixelTelemetryAdd(uint counterIndex, uint value)
         return;
     }
 
-    RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
-    InterlockedAdd(telemetryCounters[counterIndex], value);
+    // Pixel-frequency global atomics can dominate the very raster pass that
+    // this instrumentation is intended to diagnose.  Aggregate each
+    // divergent call over its active wave lanes and issue one atomic.
+    const uint waveValue = WaveActiveSum(value);
+    if (WaveIsFirstLane())
+    {
+        RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
+        InterlockedAdd(telemetryCounters[counterIndex], waveValue);
+    }
 }
 
 ClodViewRasterInfo WaveLoadClodViewRasterInfo(StructuredBuffer<ClodViewRasterInfo> buffer, uint viewID)
@@ -80,6 +89,10 @@ CLodVirtualShadowClipmapInfo WaveLoadVirtualShadowClipmapInfo(
     result.pageTableResolution = WaveReadLaneAt(result.pageTableResolution, leaderLane);
     result.physicalAtlasPagesWide = WaveReadLaneAt(result.physicalAtlasPagesWide, leaderLane);
     result.physicalAtlasPagesHigh = WaveReadLaneAt(result.physicalAtlasPagesHigh, leaderLane);
+    result.unwrappedPageOffsetX = WaveReadLaneAt(result.unwrappedPageOffsetX, leaderLane);
+    result.unwrappedPageOffsetY = WaveReadLaneAt(result.unwrappedPageOffsetY, leaderLane);
+    result.depthNear = WaveReadLaneAt(result.depthNear, leaderLane);
+    result.depthRange = WaveReadLaneAt(result.depthRange, leaderLane);
     return result;
 }
 
@@ -145,28 +158,19 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
         }
     }
 
-    const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(virtualPageCoords, clipmapInfo);
-
-    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
-    const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
-    const uint pageEntry = pageTable[pageCoords];
-    if ((pageEntry & (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask)) !=
-        (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask))
+    const bool dynamicLayer =
+        CLodVisibleClusterUsesDynamicShadowLayerFromPayload(shadowVsmPayload);
+    if (!VirtualShadowCasterWriteDepth(
+            shadowUv,
+            input.linearDepth,
+            clipmapInfo,
+            dynamicLayer,
+            CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX,
+            CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX,
+            CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX))
     {
         CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED, 1u);
         return;
     }
-
-    const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
-    const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
-    const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
-
-    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
-    InterlockedMin(physicalPages[atlasPixel], asuint(input.linearDepth));
-    uint ignored = 0u;
-    InterlockedOr(
-        pageTable[pageCoords],
-        kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-        ignored);
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_WRITES, 1u);
 }
