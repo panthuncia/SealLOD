@@ -1018,7 +1018,7 @@ CLodStreamingSystem::CLodStreamingSystem() {
         tagBufferUsage(slot.virtualShadowDependenciesStaging, "Cluster LOD virtual shadow dependency readback");
     }
 
-    StartStreamingWorker();
+    StartStreamingService();
 }
 
 CLodStreamingSystem::~CLodStreamingSystem() {
@@ -1027,7 +1027,7 @@ CLodStreamingSystem::~CLodStreamingSystem() {
 }
 
 void CLodStreamingSystem::ShutdownGraphResources() {
-    StopStreamingWorker();
+    StopStreamingService();
 
     if (MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr) {
         ClearStreamingUploadFunction(meshManager);
@@ -1043,12 +1043,12 @@ void CLodStreamingSystem::ShutdownGraphResources() {
 }
 
 void CLodStreamingSystem::QuiesceGraphResourceAccess() {
-    StopStreamingWorker();
+    StopStreamingService();
     InvalidateVirtualShadowUpgradeUploadMappings();
 }
 
 void CLodStreamingSystem::Shutdown() {
-    const bool wasAlreadyQuitting = m_streamingWorkerQuit.load(std::memory_order_acquire);
+    const bool wasAlreadyQuitting = m_streamingServiceStop.load(std::memory_order_acquire);
     if (!wasAlreadyQuitting && m_getMeshManager) {
         if (MeshManager* meshManager = m_getMeshManager()) {
             const auto [pendingLaunches, pendingUploads] = meshManager->GetPendingCLodDirectStorageCounts();
@@ -1060,7 +1060,7 @@ void CLodStreamingSystem::Shutdown() {
             }
         }
     }
-    StopStreamingWorker();
+    StopStreamingService();
     WriteStreamingRequestTraceReport();
 
     // Destruction transfers streaming ownership back to MeshManager/PagePool.
@@ -1071,7 +1071,7 @@ void CLodStreamingSystem::Shutdown() {
 
 void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     (void)reg;
-    StopStreamingWorker();
+    StopStreamingService();
     ClearVirtualShadowUpgradeState();
 
     // The registry and the alias placements are graph-local, but CLod residency
@@ -1133,7 +1133,7 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
 }
 
 void CLodStreamingSystem::ResetStreamingStateForShutdown() {
-    StopStreamingWorker();
+    StopStreamingService();
     ClearVirtualShadowUpgradeState();
 
     auto releaseBufferBacking = [](const std::shared_ptr<Buffer>& buffer) {
@@ -1358,11 +1358,11 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     m_lastStreamingDomainEventGeneration = 0;
     m_streamingDomainFullResetPending = true;
 
-    // Discard any stale decoded readback data from the worker thread.
+    // Discard any stale decoded readback data from the scheduler drain.
     m_decodedReadbackBatch.clear();
     m_decodedUsedGroupsBatch.clear();
 
-    // Clear in-flight flags so the worker thread doesn't process stale readback data.
+    // Clear in-flight flags so the scheduler drain doesn't process stale readback data.
     {
         for (auto& slot : m_readbackStagingSlots) {
         slot.state.store(ReadbackStagingSlot::State::Free, std::memory_order_relaxed);
@@ -1378,7 +1378,7 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
 }
 
 void CLodStreamingSystem::Initialize(RenderGraph& rg) {
-    StopStreamingWorker();
+    StopStreamingService();
     MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr;
     if (meshManager != nullptr) {
         ClearStreamingUploadFunction(meshManager);
@@ -1400,22 +1400,31 @@ void CLodStreamingSystem::Initialize(RenderGraph& rg) {
 
     m_streamingServiceEpoch.fetch_add(1u, std::memory_order_release);
     ++m_uploadBatchGeneration;
-    StartStreamingWorker();
+    StartStreamingService();
 }
 
-void CLodStreamingSystem::StartStreamingWorker() {
-    if (m_streamingWorkerThread.joinable()) return;
-    m_streamingWorkerQuit.store(false, std::memory_order_release);
-    m_streamingWorkerThread = std::thread(&CLodStreamingSystem::StreamingWorkerMain, this);
-}
-
-void CLodStreamingSystem::StopStreamingWorker() {
-    m_streamingWorkerQuit.store(true, std::memory_order_release);
-    m_streamingServiceEpoch.fetch_add(1u, std::memory_order_release);
-    m_streamingServiceEpoch.notify_all();
-    if (m_streamingWorkerThread.joinable()) {
-        m_streamingWorkerThread.join();
+void CLodStreamingSystem::StartStreamingService() {
+    if (m_streamingTaskScope.Valid()) return;
+    m_streamingServiceStop.store(false, std::memory_order_release);
+    m_streamingLastProcessedFence = 0;
+    m_streamingObservedServiceEpoch = 0;
+    m_streamingDrainScheduled.store(false, std::memory_order_release);
+    auto& scheduler = br::TaskSchedulerManager::GetInstance();
+    if (!scheduler.IsInitialized()) {
+        spdlog::error("CLod streaming cannot start before the unified task scheduler");
+        m_streamingServiceStop.store(true, std::memory_order_release);
+        return;
     }
+    m_streamingTaskScope = scheduler.CreateScope("CLodStreaming");
+    ScheduleStreamingDrain();
+}
+
+void CLodStreamingSystem::StopStreamingService() {
+    m_streamingServiceStop.store(true, std::memory_order_release);
+    m_streamingServiceEpoch.fetch_add(1u, std::memory_order_release);
+    if (m_streamingTaskScope.Valid()) m_streamingTaskScope.CancelAndWait();
+    m_streamingTaskScope = {};
+    m_streamingDrainScheduled.store(false, std::memory_order_release);
 }
 
 void CLodStreamingSystem::ClearStreamingUploadFunction(MeshManager* meshManager) {
@@ -1489,7 +1498,7 @@ void CLodStreamingSystem::InstallStreamingUploadFunction(MeshManager* meshManage
 void CLodStreamingSystem::RequestStreamingFrameWork() {
     ZoneScopedN("CLodStreamingSystem::RequestStreamingFrameWork");
     m_streamingServiceEpoch.fetch_add(1u, std::memory_order_release);
-    m_streamingServiceEpoch.notify_one();
+    ScheduleStreamingDrain();
 }
 
 void CLodStreamingSystem::PublishStreamingFrameWorkForFrame() {
@@ -1553,6 +1562,15 @@ void CLodStreamingSystem::PublishActiveGroupSnapshot() {
 
 void CLodStreamingSystem::RunStreamingServiceWork() {
     ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork");
+    const auto serviceBegin = std::chrono::steady_clock::now();
+    uint64_t domainUs = 0, readbackUs = 0, requestsUs = 0;
+    uint64_t shadowUs = 0, residencyUploadUs = 0, finalizeUs = 0;
+    const auto measure = [](uint64_t& elapsed, auto&& operation) {
+        const auto begin = std::chrono::steady_clock::now();
+        operation();
+        elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - begin).count());
+    };
     if (NvPerfCaptureSuppressesCLodService()) {
         return;
     }
@@ -1582,33 +1600,46 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
 
     {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::ProcessStreamingDomainEvents");
-        ProcessStreamingDomainEvents();
+        measure(domainUs, [this] { ProcessStreamingDomainEvents(); });
     }
     if (meshManager != nullptr) {
         {
             ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::PollCompletedReadbackSlots");
-            PollCompletedReadbackSlots();
+            measure(readbackUs, [this] { PollCompletedReadbackSlots(); });
         }
         {
             ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::ProcessStreamingRequestsBudgeted");
-            ProcessStreamingRequestsBudgeted();
+            measure(requestsUs, [this] { ProcessStreamingRequestsBudgeted(); });
         }
     }
     {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::PublishVirtualShadowUpgradeUpload");
-        PublishVirtualShadowUpgradeUpload();
+        measure(shadowUs, [this] { PublishVirtualShadowUpgradeUpload(); });
     }
     {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::QueuePendingNonResidentBitsUpload");
-        QueuePendingNonResidentBitsUpload();
+        measure(residencyUploadUs, [this] { QueuePendingNonResidentBitsUpload(); });
     }
-    SealStreamingUploadBatch();
-    PublishActiveGroupSnapshot();
+    measure(finalizeUs, [this] {
+        SealStreamingUploadBatch();
+        PublishActiveGroupSnapshot();
+    });
 
     {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::PublishTelemetry");
         TracyPlot("CLodStreaming.Service.PendingDecodedGroups", static_cast<int64_t>(m_readbackBatchScratch.size()));
         TracyPlot("CLodStreaming.Service.PendingCpuRequests", static_cast<int64_t>(m_pendingStreamingRequestCount));
+    }
+
+    const auto totalUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - serviceBegin).count());
+    const uint64_t nowMs = ClodDiagNowMs();
+    if (totalUs > 4000u && nowMs - m_streamingLastLongSliceDiagnosticMs >= 5000u) {
+        m_streamingLastLongSliceDiagnosticMs = nowMs;
+        spdlog::warn(
+            "CLod scheduler slice {}us: domain={} readback={} requests={} shadow={} residency_upload={} finalize={} pending_cpu={}",
+            totalUs, domainUs, readbackUs, requestsUs, shadowUs, residencyUploadUs, finalizeUs,
+            m_pendingStreamingRequestCount);
     }
 
 }
@@ -3063,7 +3094,7 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
 
     m_pageLruInitialized = true;
 
-    // Route PagePool uploads through the worker-owned CLod upload stream.
+    // Route PagePool uploads through the serial-drain-owned CLod upload stream.
     InstallStreamingUploadFunction(meshManager);
     spdlog::info(
         "CLodPageLRU initialized with {} general pages across {} size classes",
@@ -7853,7 +7884,7 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
 
     ++m_streamingDiagnosticTick;
 
-    // Drain decoded (groupIndex, priority) pairs produced by the background worker thread.
+    // Drain decoded (groupIndex, priority) pairs produced by the scheduler drain.
     m_readbackBatchScratch.clear();
     m_usedGroupsBatchScratch.clear();
     {
@@ -7932,23 +7963,38 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
         static_cast<uint32_t>(m_usedGroupsBatchScratch.size()));
 }
 
-void CLodStreamingSystem::StreamingWorkerMain() {
-    uint64_t lastProcessed = 0;
-    uint64_t observedServiceEpoch = 0;
+void CLodStreamingSystem::ScheduleStreamingDrain() {
+    if (m_streamingServiceStop.load(std::memory_order_acquire) || !m_streamingTaskScope.Valid()) return;
+    bool expected = false;
+    if (!m_streamingDrainScheduled.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) return;
+    if (!br::TaskSchedulerManager::GetInstance().Submit(
+            m_streamingTaskScope,
+            br::TaskLane::Streaming,
+            br::TaskDomain::General,
+            "CLodStreamingDrain",
+            [this](const br::TaskContext& context) { StreamingDrainTask(context); })) {
+        m_streamingDrainScheduled.store(false, std::memory_order_release);
+        spdlog::error("CLod streaming drain submission was rejected");
+    }
+}
 
-    while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-        // Epoch pulses may coalesce: a service tick always consumes the latest
-        // worker-owned state, so no individual frame notification is lossless data.
-        uint64_t requestedEpoch = m_streamingServiceEpoch.load(std::memory_order_acquire);
-        if (requestedEpoch == observedServiceEpoch &&
-            m_streamingReadbackFenceCounter.load(std::memory_order_acquire) <= lastProcessed &&
-            !m_streamingWorkerQuit.load(std::memory_order_acquire)) {
-            m_streamingServiceEpoch.wait(requestedEpoch, std::memory_order_acquire);
-            requestedEpoch = m_streamingServiceEpoch.load(std::memory_order_acquire);
+void CLodStreamingSystem::StreamingDrainTask(const br::TaskContext& context) {
+        const auto finishDrain = [this]() {
+            m_streamingDrainScheduled.store(false, std::memory_order_release);
+            if (!m_streamingServiceStop.load(std::memory_order_acquire) &&
+                m_streamingServiceEpoch.load(std::memory_order_acquire) != m_streamingObservedServiceEpoch) {
+                ScheduleStreamingDrain();
+            }
+        };
+        if (context.StopRequested() || m_streamingServiceStop.load(std::memory_order_acquire)) {
+            finishDrain();
+            return;
         }
-        if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
-        const bool serviceRequested = requestedEpoch != observedServiceEpoch;
-        observedServiceEpoch = requestedEpoch;
+        uint64_t requestedEpoch = m_streamingServiceEpoch.load(std::memory_order_acquire);
+        const bool serviceRequested = requestedEpoch != m_streamingObservedServiceEpoch;
+        m_streamingObservedServiceEpoch = requestedEpoch;
+        uint64_t& lastProcessed = m_streamingLastProcessedFence;
 
         const uint64_t discardedThrough =
             m_streamingReadbackDiscardedFenceCounter.load(std::memory_order_acquire);
@@ -7961,40 +8007,12 @@ void CLodStreamingSystem::StreamingWorkerMain() {
         bool readbackReady = false;
         uint64_t decodeTarget = lastProcessed;
         if (hasFenceWork) {
-            ZoneScopedN("CLodStreamingWorker::WaitReadbackFence");
+            ZoneScopedN("CLodStreamingDrain::PollReadbackFence");
             uint64_t completed = m_streamingReadbackFenceHandle.GetCompletedValue();
             if (completed > lastProcessed) {
                 decodeTarget = std::min(completed, submittedTarget);
                 readbackReady = true;
             }
-            // Decode already-completed readbacks instead of waiting for the newest submitted fence.
-            // If nothing is complete yet, block on the next unprocessed value. An unsignaled
-            // readback fence is a GPU/submission failure and should remain visible as a hard stall.
-            if (!readbackReady) {
-                const uint64_t waitTarget = lastProcessed + 1u;
-                const auto result = m_streamingReadbackFenceHandle.HostWait(waitTarget, UINT32_MAX);
-                if (result == rhi::Result::Ok) {
-                    completed = m_streamingReadbackFenceHandle.GetCompletedValue();
-                    decodeTarget = std::min(completed, submittedTarget);
-                    readbackReady = decodeTarget > lastProcessed;
-                    if (!readbackReady) {
-                        spdlog::error(
-                            "CLod StreamingWorker readback fence wait returned before completion: submittedTarget={} waitTarget={} completed={}",
-                            submittedTarget,
-                            waitTarget,
-                            completed);
-                    }
-                }
-                else {
-                    spdlog::error(
-                        "CLod StreamingWorker readback fence wait failed: submittedTarget={} waitTarget={} result={} completed={}",
-                        submittedTarget,
-                        waitTarget,
-                        rhi::ResultName(result),
-                        m_streamingReadbackFenceHandle.GetCompletedValue());
-                }
-            }
-            if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
         }
 
         if (readbackReady) {
@@ -8278,14 +8296,14 @@ void CLodStreamingSystem::StreamingWorkerMain() {
         }
 
         const uint64_t latestEpoch = m_streamingServiceEpoch.load(std::memory_order_acquire);
-        if (serviceRequested || latestEpoch != observedServiceEpoch) {
-            observedServiceEpoch = latestEpoch;
+        if (serviceRequested || latestEpoch != m_streamingObservedServiceEpoch) {
+            m_streamingObservedServiceEpoch = latestEpoch;
             ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork");
             m_streamingServiceRunning.store(true, std::memory_order_release);
             RunStreamingServiceWork();
             m_streamingServiceRunning.store(false, std::memory_order_release);
         }
-    }
+        finishDrain();
 }
 
 void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
@@ -8298,7 +8316,9 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         }
         m_streamingCpuUploadBudgetRequests = std::max(m_streamingCpuUploadBudgetRequests, 1u);
     }
-    const uint32_t budget = m_streamingCpuUploadBudgetRequests;
+    // Preserve the configured admission ceiling while consuming a CPU backlog
+    // in small continuations that do not monopolize a OneTBB worker.
+    const uint32_t budget = std::min<uint32_t>(m_streamingCpuUploadBudgetRequests, 32u);
     {
         ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ConfigureEvictionBudget");
         m_pagePopEvictionsThisUpdate = 0u;

@@ -4893,6 +4893,9 @@ void Renderer::Cleanup() {
     if (m_pReadbackManager) {
         m_pReadbackManager->Cleanup();
     }
+    if (currentRenderGraph) {
+        currentRenderGraph->ShutdownTaskWorkers();
+    }
     SetAsyncBufferBackingResizeScheduler({});
     TaskSchedulerManager::GetInstance().Cleanup();
     ::ResourceManager::GetInstance().Cleanup();

@@ -10,12 +10,12 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "Managers/MeshManager.h"
+#include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -248,7 +248,8 @@ private:
     void EvictPrefetchedChildLayoutsForOwner(uint32_t ownerGroupIndex);
     void ClearPrefetchedChildLayouts();
     void PollCompletedReadbackSlots();
-    void StreamingWorkerMain();
+    void StreamingDrainTask(const br::TaskContext& context);
+    void ScheduleStreamingDrain();
     void ProcessStreamingRequestsBudgeted();
     void RequestStreamingFrameWork();
     void PublishStreamingFrameWorkForFrame();
@@ -261,8 +262,8 @@ private:
     void SealStreamingUploadBatch();
     void ObserveUploadBatchTickets();
     void PublishActiveGroupSnapshot();
-    void StartStreamingWorker();
-    void StopStreamingWorker();
+    void StartStreamingService();
+    void StopStreamingService();
 
     // Page-level LRU helpers
     void InitializePageLru(MeshManager* meshManager);
@@ -693,9 +694,14 @@ private:
     bool m_virtualShadowFeedbackLossPending = false;
     uint64_t m_virtualShadowFeedbackRecoveryRequests = 0u;
 
-    // Background streaming worker thread
-    std::thread m_streamingWorkerThread;
-    std::atomic<bool> m_streamingWorkerQuit{false};
+    // Serial scheduler-owned streaming coordinator. GPU completion is polled
+    // by frame/service kicks; this task never waits on a fence.
+    br::TaskScope m_streamingTaskScope;
+    std::atomic<bool> m_streamingDrainScheduled{false};
+    std::atomic<bool> m_streamingServiceStop{false};
+    uint64_t m_streamingLastProcessedFence = 0;
+    uint64_t m_streamingObservedServiceEpoch = 0;
+    uint64_t m_streamingLastLongSliceDiagnosticMs = 0;
     struct DecodedStreamingRequest {
         uint32_t groupIndex = UINT32_MAX;
         uint32_t priority = 0u;
