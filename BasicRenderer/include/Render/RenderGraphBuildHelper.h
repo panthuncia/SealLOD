@@ -33,6 +33,10 @@
 #include "RenderPasses/FidelityFX/LinearDepthHistoryCopyPass.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Render/MemoryIntrospectionAPI.h"
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+#include "Validation/SARPInteropValidation.h"
+#include "Managers/Singletons/DeviceManager.h"
+#endif
 
 inline void TagPassTechnique(RenderGraph* graph, std::string_view passName, std::string_view techniquePath) {
     graph->SetPassTechnique(std::string(passName), std::string(techniquePath));
@@ -1063,7 +1067,11 @@ void BuildBloomPipeline(RenderGraph* graph) {
 	// Downsample numBloomMips mips of the HDR color target
     for (unsigned int i = 0; i < numBloomMips; i++) {
         const std::string passName = "BloomDownsamplePass" + std::to_string(i);
-        graph->BuildRenderPass<BloomSamplePass>(passName, BloomSamplePassInputs{ i, false });
+		auto& builder = graph->BuildRenderPass<BloomSamplePass>(passName, BloomSamplePassInputs{ i, false });
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+		br::validation::SARPInteropValidation::ApplyPassPolicy(
+			passName, builder, DeviceManager::GetInstance().GetPeerBackend());
+#endif
         graph->SetPassTechnique(passName, "Post Process::Bloom");
     }
 

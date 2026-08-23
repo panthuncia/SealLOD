@@ -591,12 +591,52 @@ bool BuildProcessedTextureCacheLayouts(
 		return false;
 	}
 
-	auto* nativeDevice = rhi::dx12::get_device(DeviceManager::GetInstance().GetDevice());
+	// The conditioned cache format intentionally uses D3D12 copyable
+	// footprints. In Vulkan-primary multi-RHI mode the canonical D3D12 device is
+	// the peer, not GetDevice(), so resolve it explicitly by API.
+	auto* nativeDevice = rhi::dx12::get_device(
+		DeviceManager::GetInstance().GetDevice(rhi::Backend::D3D12));
 	if (nativeDevice == nullptr) {
-		if (outError) {
-			*outError = "failed to get native D3D12 device for conditioned texture cache layout";
+		// The on-disk cache uses D3D12's documented copyable-footprint
+		// alignment, but parsing it must not require a live D3D12 device when
+		// Vulkan is the sole backend. Reconstruct the deterministic 2D footprint
+		// layout (512-byte subresource offsets, 256-byte row pitches).
+		const auto format = static_cast<rhi::Format>(header.format);
+		const auto block = rhi::GetBlockInfo(format);
+		if (block.bytesPerBlock == 0) {
+			if (outError) *outError = "conditioned texture cache format has no portable block layout";
+			return false;
 		}
-		return false;
+		auto alignUp = [](UINT64 value, UINT64 alignment) {
+			return (value + alignment - 1u) & ~(alignment - 1u);
+		};
+		layouts.resize(header.subresourceCount);
+		numRows.resize(header.subresourceCount);
+		totalBytes = 0;
+		for (uint32_t subresource = 0; subresource < header.subresourceCount; ++subresource) {
+			const uint32_t mip = subresource % header.mipLevels;
+			const uint32_t width = (std::max)(1u, header.baseWidth >> mip);
+			const uint32_t height = (std::max)(1u, header.baseHeight >> mip);
+			const uint32_t blocksWide = (std::max)(1u, (width + block.blockWidth - 1u) / block.blockWidth);
+			const uint32_t rows = (std::max)(1u, (height + block.blockHeight - 1u) / block.blockHeight);
+			const UINT64 rowBytes = static_cast<UINT64>(blocksWide) * block.bytesPerBlock;
+			const UINT rowPitch = static_cast<UINT>(alignUp(rowBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT));
+			const UINT64 offset = alignUp(totalBytes, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+			auto& layout = layouts[subresource];
+			layout.Offset = offset;
+			layout.Footprint.Format = rhi::ToDxgi(format);
+			layout.Footprint.Width = width;
+			layout.Footprint.Height = height;
+			layout.Footprint.Depth = 1;
+			layout.Footprint.RowPitch = rowPitch;
+			numRows[subresource] = rows;
+			totalBytes = offset + static_cast<UINT64>(rowPitch) * (rows - 1u) + rowBytes;
+		}
+		if (totalBytes == 0 || totalBytes > header.dataSizeBytes) {
+			if (outError) *outError = "portable conditioned texture cache footprints exceed payload";
+			return false;
+		}
+		return true;
 	}
 
 	D3D12_RESOURCE_DESC resourceDesc{};

@@ -44,6 +44,17 @@ namespace {
         return disabled;
     }
 
+    bool IsUpscalingDisabledByEnvironment() {
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, "BASICRENDERER_DISABLE_UPSCALING") != 0 || value == nullptr) {
+            return false;
+        }
+        const bool disabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+        free(value);
+        return disabled;
+    }
+
     bool IsStreamlineEnabledSetting() {
         if (IsStreamlineDisabledByEnvironment()) {
             return false;
@@ -122,6 +133,21 @@ void UpscalingManager::SyncSettingsFromSettingsManager()
 {
     m_upscalingMode = ReadUpscalingModeSetting(m_upscalingMode);
     m_upscaleQualityMode = ReadUpscalingQualityModeSetting(m_upscaleQualityMode);
+    // Vulkan temporal upscaling is not yet stable (including the single-device
+    // path, where Streamline can fail while setting constants and corrupt its
+    // teardown state). Keep it disabled until that integration is validated;
+    // this also prevents motion-vector/history defects from masking interop.
+    const auto& deviceManager = DeviceManager::GetInstance();
+    const bool forceDisabled = IsUpscalingDisabledByEnvironment()
+        || deviceManager.GetBackend() == rhi::Backend::Vulkan;
+    if (forceDisabled && m_upscalingMode != UpscalingMode::None) {
+        static bool logged = false;
+        if (!logged) {
+            spdlog::info("UpscalingManager: forcing upscaling off for Vulkan stability");
+            logged = true;
+        }
+        m_upscalingMode = UpscalingMode::None;
+    }
 }
 
 bool CheckDLSSSupport(rhi::Device dev, rhi::Backend backend) {

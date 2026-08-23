@@ -7,6 +7,7 @@
 
 #include <DirectXTex.h>
 #include <rhi_conversions_dx12.h>
+#include <rhi_interop.h>
 
 #include <BasicTelemetry/Tracy.h>
 #include <spdlog/spdlog.h>
@@ -58,12 +59,30 @@ void MaterialTextureTransferService::SaveReadbackToDds(InFlightBatch::ReadbackCo
 	for (uint32_t mip = 0; mip < completion.mipLevels; ++mip) {
 		const auto& footprint = completion.footprints[mip];
 		const auto* destination = image.GetImage(mip, 0, 0);
+		if (!destination || destination->rowPitch == 0) {
+			completion.buffer->GetAPIResource().Unmap(0, 0);
+			spdlog::error("Material texture external readback has an invalid destination image at mip {}.", mip);
+			return;
+		}
+		const auto blockInfo = rhi::GetBlockInfo(completion.format);
+		const size_t rows = blockInfo.isCompressed
+			? (std::max)(size_t{1}, (destination->height + blockInfo.blockHeight - 1u) / blockInfo.blockHeight)
+			: destination->height;
+		const uint64_t sourceEnd = footprint.offset + static_cast<uint64_t>(footprint.rowPitch) * rows;
+		if (footprint.rowPitch < destination->rowPitch || sourceEnd > completion.bufferSize) {
+			completion.buffer->GetAPIResource().Unmap(0, 0);
+			spdlog::error(
+				"Material texture external readback footprint is invalid at mip {}: offset={} rowPitch={} rows={} "
+				"destinationRowPitch={} bufferSize={}.",
+				mip, footprint.offset, footprint.rowPitch, rows, destination->rowPitch, completion.bufferSize);
+			return;
+		}
 		const auto* source = static_cast<const uint8_t*>(mapped) + footprint.offset;
-		for (size_t row = 0; row < destination->height; ++row) {
+		for (size_t row = 0; row < rows; ++row) {
 			std::memcpy(
 				destination->pixels + row * destination->rowPitch,
 				source + row * footprint.rowPitch,
-				(std::min)(destination->rowPitch, static_cast<size_t>(footprint.rowPitch)));
+				destination->rowPitch);
 		}
 	}
 	completion.buffer->GetAPIResource().Unmap(0, 0);
@@ -238,13 +257,19 @@ void MaterialTextureTransferService::Pump()
 				if (request.description.imageDimensions.empty() || request.initialData.Empty()) {
 					throw std::runtime_error("material texture upload has no subresource data");
 				}
+				rhi::VulkanDeviceInfo vulkanDeviceInfo{};
+				const bool vulkanImageStartsUndefined = rhi::QueryNativeDevice(
+					m_device,
+					rhi::RHI_IID_VK_DEVICE,
+					&vulkanDeviceInfo,
+					sizeof(vulkanDeviceInfo));
 				auto toCopy = MakeWholeTextureBarrier(
 					*request.image,
-					rhi::ResourceAccessType::Common,
+					vulkanImageStartsUndefined ? rhi::ResourceAccessType::None : rhi::ResourceAccessType::Common,
 					rhi::ResourceAccessType::CopyDest,
-					rhi::ResourceLayout::Common,
+					vulkanImageStartsUndefined ? rhi::ResourceLayout::Undefined : rhi::ResourceLayout::Common,
 					rhi::ResourceLayout::CopyDest,
-					rhi::ResourceSyncState::All,
+					vulkanImageStartsUndefined ? rhi::ResourceSyncState::None : rhi::ResourceSyncState::All,
 					rhi::ResourceSyncState::Copy);
 				rhi::BarrierBatch barriers{};
 				barriers.textures = {&toCopy, 1};
@@ -340,6 +365,7 @@ void MaterialTextureTransferService::Pump()
 			.height = request.image->GetHeight(),
 			.mipLevels = mipLevels,
 			.format = request.image->GetFormat(),
+			.bufferSize = footprintInfo.totalBytes,
 			.outputFile = std::move(request.outputFile),
 			.callback = std::move(request.callback)});
 	}

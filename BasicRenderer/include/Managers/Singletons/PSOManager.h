@@ -233,6 +233,7 @@ public:
         const wchar_t* entryPoint,
         std::vector<DxcDefine> defines = {},
         const char* debugName = nullptr);
+	const rhi::Pipeline& ResolvePipeline(const PipelineState& pipeline, BackendInstanceId backendInstance);
 
     PipelineState RegisterExternalPipeline(
         PipelineState state,
@@ -243,18 +244,26 @@ public:
 
     const rhi::PipelineLayout& GetRootSignature();
     const rhi::PipelineLayout& GetComputeRootSignature();
+	const rhi::PipelineLayout& GetRootSignature(BackendInstanceId backendInstance);
+	const rhi::PipelineLayout& GetComputeRootSignature(BackendInstanceId backendInstance);
     bool RebuildAllPipelines(std::string& error);
     std::vector<LivePipelineInfo> ListPipelines() const;
     std::optional<LiveJobInfo> GetLiveJob(uint64_t jobId) const;
     uint64_t RequestRecompile(const std::string& pipelineId, RecompileOptions options = {});
     uint64_t RequestActivation(const std::string& pipelineId, uint64_t generation);
-    void PublishPendingLivePipelines(uint64_t retirementFenceValue);
-    void CollectRetiredLivePipelines(uint64_t completedFenceValue);
+	struct PipelineRetirementPoint {
+		rhi::Timeline timeline;
+		uint64_t value = 0;
+	};
+    void PublishPendingLivePipelines(std::vector<PipelineRetirementPoint> retirementPoints);
+    void CollectRetiredLivePipelines();
+	void DrainRetiredLivePipelinesAfterDeviceIdle();
     uint64_t GetPipelineEpoch() const;
     PipelineGenerationSnapshot GetPipelineGenerationSnapshot() const;
     std::vector<DxcDefine> GetShaderDefines(UINT psoFlags, MaterialCompileFlags materialFlags);
 	std::vector<DxcDefine> GetRasterShaderDefines(MaterialRasterFlags materialRasterFlags);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle);
+	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle, BackendInstanceId backendInstance);
 	void PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags materialCompileFlags);
 	ShaderLibraryBundle CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines = {});
 
@@ -263,7 +272,8 @@ public:
         const std::wstring& entryPoint,
         const std::wstring& target,
         std::vector<DxcDefine> defines,
-        Microsoft::WRL::ComPtr<ID3DBlob>& outBlob);
+        Microsoft::WRL::ComPtr<ID3DBlob>& outBlob,
+        bool emitSpirv = false);
 
 private:
     struct OwnedDefine {
@@ -307,7 +317,7 @@ private:
     };
 
     struct RetiredPayload {
-        uint64_t fenceValue = 0;
+		std::vector<PipelineRetirementPoint> completionPoints;
         std::shared_ptr<PipelineStatePayload> payload;
     };
 
@@ -327,8 +337,10 @@ private:
     };
 
     PSOManager() = default;
-    rhi::PipelineLayoutPtr m_rootSignature;
-    rhi::PipelineLayoutPtr m_computeRootSignature;
+	rhi::PipelineLayoutPtr m_rootSignature;
+	rhi::PipelineLayoutPtr m_peerRootSignature;
+	rhi::PipelineLayoutPtr m_computeRootSignature;
+	rhi::PipelineLayoutPtr m_peerComputeRootSignature;
     rhi::PipelineLayoutPtr m_debugRootSignature;
     rhi::PipelineLayoutPtr m_environmentConversionRootSignature;
 
@@ -414,6 +426,8 @@ private:
 
     PipelineState CreateDeferredPSO(UINT psoFlags);
     PipelineState BuildComputePipeline(const ComputeRecipe& recipe, const RecompileOptions* options = nullptr);
+	void BuildComputePipelineForBackend(const ComputeRecipe& recipe, const PipelineState& pipeline,
+		BackendInstanceId backendInstance);
     PipelineState RegisterComputePipeline(PipelineState state, ComputeRecipe recipe);
     PipelineState RegisterPipeline(
         PipelineState state,
@@ -493,13 +507,16 @@ private:
         const std::optional<ShaderInfo>& slot,
         const std::vector<DxcDefine>& defines,
 		const DxcBuffer& buffer,
+        bool emitSpirv,
         Microsoft::WRL::ComPtr<ID3DBlob>& outBlob);
     void CompileShader(const std::wstring& filename, 
         const std::wstring& entryPoint, 
         const std::wstring& target, 
         const DxcBuffer& ppBuffer,
-        std::vector<DxcDefine> defines, 
+        std::vector<DxcDefine> defines,
+        bool emitSpirv,
         Microsoft::WRL::ComPtr<ID3DBlob>& shaderBlob);
+	ShaderBundle CompileShadersForBackend(const ShaderInfoBundle& info, rhi::Backend backend);
 
     void createRootSignature();
     rhi::BlendState GetBlendDesc(MaterialCompileFlags materialCompileFlags);
@@ -536,7 +553,8 @@ private:
         const std::optional<ShaderInfo>& slot,
         const std::vector<DxcDefine>& defines,
         Microsoft::WRL::ComPtr<BlobT>& outBlob,
-        DxcBuffer& outBuf)
+        DxcBuffer& outBuf,
+        bool emitSpirv)
     {
         if (!slot)
             return;
@@ -546,7 +564,8 @@ private:
             slot->entryPoint,
             slot->target,
             defines,
-            outBlob
+            outBlob,
+            emitSpirv
         );
 
         outBuf.Ptr = outBlob->GetBufferPointer();

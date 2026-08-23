@@ -7,6 +7,8 @@
 
 #include <spdlog/spdlog.h>
 #include <rhi_debug.h>
+#include <rhi_interop_dx12.h>
+#include <rhi_interop_vulkan.h>
 
 #include "Managers/Singletons/SettingsManager.h"
 #include "Telemetry/NvPerfIntegration.h"
@@ -58,6 +60,10 @@ bool IsTruthyEnvironmentValue(const char* name) {
 
 bool IsNvPerfCaptureRequestedByEnvironment() {
     return IsTruthyEnvironmentValue("BASICRENDERER_NVPERF_CAPTURE");
+}
+
+bool IsMultiRHIRequested() {
+    return IsTruthyEnvironmentValue("BASICRENDERER_MULTI_RHI");
 }
 
 bool IsNvPerfD3D12DebugLayerAllowedByEnvironment() {
@@ -132,7 +138,14 @@ void DeviceManager::Initialize() {
         enableStreamline = false;
     }
 
-    bool enableDebug = IsDiagnosticsBuild();
+    bool enableDebug = IsDiagnosticsBuild() || IsTruthyEnvironmentValue("BASICRENDERER_VULKAN_VALIDATION");
+    // Allow an explicit false value to override diagnostics-build defaults.
+    // This is useful for isolating validation-layer/driver interactions while
+    // retaining validation by default for RelWithDebInfo development builds.
+    const std::string validationSetting = GetEnvironmentString("BASICRENDERER_VULKAN_VALIDATION");
+    if (!validationSetting.empty() && !IsTruthyEnvironmentValue("BASICRENDERER_VULKAN_VALIDATION")) {
+        enableDebug = false;
+    }
     const bool nvPerfCaptureRequested =
         IsNvPerfCaptureRequestedByEnvironment() ||
         telemetry::nvperf::CaptureConfigured();
@@ -169,6 +182,15 @@ void DeviceManager::Initialize() {
         enableTexelAddressing = true;
     }
 
+	const bool multiRHI = IsMultiRHIRequested();
+	if (multiRHI && enableStreamline) {
+		// Streamline wraps the D3D12 device and queues. External-memory handles
+		// must be created from the native device, so keep the experimental
+		// multi-device path free of proxy ownership ambiguity.
+		spdlog::info("DeviceManager::Initialize disabling Streamline in multi-RHI mode");
+		enableStreamline = false;
+	}
+
     spdlog::info(
         "DeviceManager::Initialize enableStreamline={} enableDebug={} enableReShape={} reshapeSync={} reshapeTexel={} framesInFlight={}",
         enableStreamline,
@@ -184,6 +206,7 @@ void DeviceManager::Initialize() {
         .backend = backend,
         .framesInFlight = numFramesInFlight,
         .enableDebug = enableDebug,
+        .enableExternalInterop = multiRHI,
         .instrumentation = {
             .enableRuntimeInstrumentation = enableRuntimeInstrumentation,
             .enableSynchronousRecording = enableSynchronousRecording,
@@ -206,6 +229,35 @@ void DeviceManager::Initialize() {
     m_graphicsQueue = m_device->GetQueue(rhi::QueueKind::Graphics);
     m_computeQueue = m_device->GetQueue(rhi::QueueKind::Compute);
     m_copyQueue = m_device->GetQueue(rhi::QueueKind::Copy);
+
+    if (multiRHI) {
+        const uint64_t adapterLuid = backend == rhi::Backend::D3D12
+            ? rhi::dx12::get_adapter_luid(m_device.Get())
+            : rhi::vulkan::get_adapter_luid(m_device.Get());
+        if (adapterLuid == 0) {
+            spdlog::error("DeviceManager::Initialize multi-RHI adapter does not expose a valid Windows LUID");
+            Cleanup();
+            return;
+        }
+        m_peerBackend = backend == rhi::Backend::D3D12 ? rhi::Backend::Vulkan : rhi::Backend::D3D12;
+        rhi::DeviceCreateInfo peerInfo = createInfo;
+        peerInfo.backend = m_peerBackend;
+        peerInfo.enableExternalInterop = true;
+        peerInfo.adapterLuid = adapterLuid;
+        peerInfo.requireAdapterLuid = true;
+        peerInfo.instrumentation = {};
+        const rhi::Result peerResult = m_peerBackend == rhi::Backend::Vulkan
+            ? rhi::CreateVulkanDevice(peerInfo, m_peerDevice, false)
+            : rhi::CreateD3D12Device(peerInfo, m_peerDevice, false);
+        if (!rhi::IsOk(peerResult) || !m_peerDevice) {
+            spdlog::error("DeviceManager::Initialize failed to create multi-RHI peer backend {} result={}",
+                static_cast<uint32_t>(m_peerBackend), static_cast<uint32_t>(peerResult));
+            Cleanup();
+            return;
+        }
+        spdlog::info("DeviceManager multi-RHI enabled primary={} peer={} adapterLuid=0x{:016X}",
+            static_cast<uint32_t>(m_backend), static_cast<uint32_t>(m_peerBackend), adapterLuid);
+    }
 
     telemetry::nvperf::LogStartupProbe(m_backend, m_device.Get(), m_graphicsQueue);
 
@@ -255,6 +307,7 @@ void DeviceManager::Cleanup() {
     m_computeQueue.Reset();
     m_copyQueue.Reset();
     m_backend = rhi::Backend::Null;
+    m_peerBackend = rhi::Backend::Null;
     m_meshShadersSupported = false;
     m_rayTracingFeatures = {};
     m_rayTracingSupported = false;
@@ -262,6 +315,9 @@ void DeviceManager::Cleanup() {
 
     if (m_device) {
         m_device.Reset();
+    }
+    if (m_peerDevice) {
+        m_peerDevice.Reset();
     }
 }
 

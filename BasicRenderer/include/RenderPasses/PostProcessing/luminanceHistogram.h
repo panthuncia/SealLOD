@@ -21,17 +21,18 @@ public:
 		// Removed redundant Register calls now covered by declared-resource auto descriptor registration
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
+	PassReturn Execute(PassExecutionContext& executionContext) override {
         auto* renderContext = executionContext.hostData->Get<RenderContext>();
         auto& context = *renderContext;
         auto& psoManager = PSOManager::GetInstance();
         auto& commandList = executionContext.commandList;
 
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
+		commandList.SetDescriptorHeaps(executionContext.GetResourceDescriptorHeap().GetHandle(),
+			executionContext.GetSamplerDescriptorHeap().GetHandle());
 
         // Set the compute pipeline state
-		commandList.BindLayout(psoManager.GetComputeRootSignature().GetHandle());
-		commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
+		commandList.BindLayout(psoManager.GetComputeRootSignature(executionContext.backendInstance).GetHandle());
+		commandList.BindPipeline(psoManager.ResolvePipeline(m_pso, executionContext.backendInstance).GetHandle());
 
         uint32_t passConstants[NumMiscUintRootConstants] = {};
         passConstants[MIN_LOG_LUMINANCE] = as_uint(0.001f); // Minimum log luminance value

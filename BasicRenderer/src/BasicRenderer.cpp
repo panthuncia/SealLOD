@@ -934,9 +934,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     //tracy::SetThreadName("Main");
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::filesystem::create_directories("logs");
-    std::filesystem::remove("logs/log.txt");
-    auto file_logger = spdlog::basic_logger_mt("file_logger", "logs/log.txt", true);
+    std::filesystem::path logPath = "logs/log.txt";
+    char* configuredLogPath = nullptr;
+    size_t configuredLogPathLength = 0;
+    if (_dupenv_s(&configuredLogPath, &configuredLogPathLength, "BASICRENDERER_LOG_PATH") == 0 &&
+        configuredLogPath != nullptr && configuredLogPath[0] != '\0') {
+        logPath = configuredLogPath;
+    }
+    std::free(configuredLogPath);
+    if (const auto parentPath = logPath.parent_path(); !parentPath.empty()) {
+        std::filesystem::create_directories(parentPath);
+    }
+    std::filesystem::remove(logPath);
+    auto file_logger = spdlog::basic_logger_mt("file_logger", logPath.string(), true);
     spdlog::set_default_logger(file_logger);
     file_logger->flush_on(spdlog::level::info);
 

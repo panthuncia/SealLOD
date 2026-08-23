@@ -12,7 +12,6 @@
 #include <cstring>
 #include <fstream>
 #include <filesystem>
-#include <iomanip>
 #include <sstream>
 #include <array>
 #include <stacktrace>
@@ -23,7 +22,6 @@
 #include <utility>
 
 #include <rhi_debug.h>
-#include <rhi_interop_dx12.h>
 #include <tracy/Tracy.hpp>
 #include <spdlog/spdlog.h>
 #include "Utilities/Utilities.h"
@@ -46,6 +44,7 @@
 #include "RenderPasses/DebugSpheresPass.h"
 #include "RenderPasses/DebugSkeletonPass.h"
 #include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/CopyPass.h"
 #include "RenderPasses/FidelityFX/Downsample.h"
 #include "RenderPasses/PostProcessing/Tonemapping.h"
 #include "RenderPasses/PostProcessing/Upscaling.h"
@@ -68,6 +67,9 @@
 #include "Scene/MovementState.h"
 #include "ThirdParty/XeGTAO.h"
 #include "Managers/EnvironmentManager.h"
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+#include "Validation/SARPInteropValidation.h"
+#endif
 #include "Render/TonemapTypes.h"
 #include "../generated/BuiltinResources.h"
 #include "Resources/ResourceIdentifier.h"
@@ -475,6 +477,13 @@ flecs::entity FindSceneEntityByStableSceneID(flecs::entity node, uint64_t stable
 
 } // namespace
 
+Renderer::~Renderer() {
+    // Resources unregister from this process-global service during member
+    // destruction. Clear the slot before the service member itself is
+    // destroyed so exception unwinding cannot call through a dangling pointer.
+    org::runtime::SetActiveUploadPolicyService(nullptr);
+}
+
 void Renderer::Initialize(
     HWND hwnd,
     UINT x_res,
@@ -524,7 +533,9 @@ void Renderer::Initialize(
     settingsManager.registerSetting<bool>("reshapeSynchronousRecording", false);
     settingsManager.registerSetting<bool>("reshapeTexelAddressing", true);
     settingsManager.registerSetting<uint64_t>("reshapeGlobalFeatureMask", 0ull);
-    settingsManager.registerSetting<bool>("renderGraphBatchTraceEnabled", false);
+    settingsManager.registerSetting<bool>(
+        "renderGraphBatchTraceEnabled",
+        ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_BATCH_TRACE"));
     settingsManager.registerSetting<bool>("renderGraphLightweightCompileSummaryEnabled", false);
     LoadPipeline(hwnd, x_res, y_res);
     DirectStorageManager::GetInstance().Initialize();
@@ -688,7 +699,10 @@ void Renderer::Initialize(
     Resource::SetEntityHooks(std::move(resourceEntityHooks));
 
     if (!currentRenderGraph) {
-		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice());
+		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
+		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
+			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
+		}
     }
 
     if (auto* uploadService = currentRenderGraph->GetUploadService()) {
@@ -714,11 +728,17 @@ void Renderer::Initialize(
         TaskSchedulerManager::GetInstance().RunBackgroundTask(taskName, std::move(task));
     });
     currentRenderGraph->SetTaskService(std::make_shared<br::TbbTaskService>());
+    spdlog::info("Renderer initialization: initializing PSO manager");
     PSOManager::GetInstance().initialize();
+    spdlog::info("Renderer initialization: initializing deletion manager");
     DeletionManager::GetInstance().Initialize();
+	spdlog::info("Renderer initialization: initializing command signatures");
 	CommandSignatureManager::GetInstance().Initialize();
+    spdlog::info("Renderer initialization: command signatures initialized");
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after PSO and command signatures");
+    spdlog::info("Renderer initialization: initializing menu");
     Menu::GetInstance().Initialize(hwnd, m_swapChain.Get());
+    spdlog::info("Renderer initialization: menu initialized");
     if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
         readbackService->Initialize(m_readbackFence.Get(), m_copyReadbackFence.Get());
     }
@@ -729,6 +749,7 @@ void Renderer::Initialize(
         statisticsService->Initialize();
     }
 
+    spdlog::info("Renderer initialization: initializing upscaling managers");
     UpscalingManager::GetInstance().InitFFX(); // Needs device and must precede Setup for FSR queries.
     UpscalingManager::GetInstance().Setup();
     FFXManager::GetInstance().InitFFX();
@@ -2058,7 +2079,9 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<uint32_t>("autoAliasPoolRetireIdleFrames", 120u);
 	settingsManager.registerSetting<float>("autoAliasPoolGrowthHeadroom", 1.5f);
     settingsManager.registerSetting<uint8_t>("transitionPlacementMode", static_cast<uint8_t>(org::runtime::TransitionPlacementMode::CanonicalThenOptimize));
-    settingsManager.registerSetting<bool>("heavyDebug", false);
+    settingsManager.registerSetting<bool>(
+        "heavyDebug",
+        ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_HEAVY_DEBUG"));
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(CLodVirtualShadowTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(ObjectReyesAtlasTelemetryDebugSettingName, false);
@@ -2529,6 +2552,22 @@ void Renderer::ToggleMeshShaders(bool useMeshShaders) {
 
 void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
     UINT dxgiFactoryFlags = 0;
+	RECT clientRect{};
+	if (hwnd && GetClientRect(hwnd, &clientRect)) {
+		const UINT clientWidth = static_cast<UINT>((std::max)(clientRect.right - clientRect.left, 0L));
+		const UINT clientHeight = static_cast<UINT>((std::max)(clientRect.bottom - clientRect.top, 0L));
+		if (clientWidth != 0 && clientHeight != 0 && (clientWidth != x_res || clientHeight != y_res)) {
+			spdlog::info(
+				"Renderer: using actual client extent {}x{} for initial swapchain instead of requested {}x{}",
+				clientWidth,
+				clientHeight,
+				x_res,
+				y_res);
+			x_res = clientWidth;
+			y_res = clientHeight;
+			SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ x_res, y_res });
+		}
+	}
 
     DeviceManager::GetInstance().Initialize();
 
@@ -2558,7 +2597,7 @@ void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
     m_backbufferResources.resize(m_numFramesInFlight);
     for (UINT n = 0; n < m_numFramesInFlight; n++) {
         m_backbufferResources[n] = std::make_shared<ExternalTextureResource>(
-            renderTargets[n], x_res, y_res);
+            renderTargets[n], x_res, y_res, rhi::Format::R8G8B8A8_UNorm);
         m_backbufferResources[n]->SetName("Backbuffer " + std::to_string(n));
     }
     m_dynamicBackbuffer = std::make_shared<DynamicResource>(m_backbufferResources[0]);
@@ -2830,10 +2869,12 @@ void Renderer::Update(float elapsedSeconds) {
     ZoneScopedN("Renderer::Update");
     BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
 
-    PSOManager::GetInstance().PublishPendingLivePipelines(m_currentFrameFenceValue);
-    if (m_frameFence) {
-        PSOManager::GetInstance().CollectRetiredLivePipelines(m_frameFence->GetCompletedValue());
-    }
+	std::vector<PSOManager::PipelineRetirementPoint> pipelineRetirementPoints;
+	for (const auto& point : DescriptorHeapManager::GetInstance().GetQueueFenceSnapshot()) {
+		pipelineRetirementPoints.push_back({ point.timeline, point.value });
+	}
+	PSOManager::GetInstance().PublishPendingLivePipelines(std::move(pipelineRetirementPoints));
+	PSOManager::GetInstance().CollectRetiredLivePipelines();
 
     BeginFrameTaskGraphCapture();
 
@@ -4493,7 +4534,23 @@ void Renderer::Render() {
 
     const bool renderGraphBatchTraceEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
 
-    const uint8_t renderedFrameIndex = m_frameIndex;
+    // Vulkan does not guarantee round-robin swapchain acquisition.  Re-read the
+    // acquired image at the last responsible point and bind the graph's dynamic
+    // backbuffer to that exact image.  Using the CPU frame slot here can record
+    // transitions for a presentable image that was not acquired.
+    const uint8_t renderedFrameIndex = m_swapChain
+        ? static_cast<uint8_t>(m_swapChain->CurrentImageIndex())
+        : m_frameIndex;
+    if (renderedFrameIndex != m_frameIndex) {
+        spdlog::warn(
+            "Renderer: acquired swapchain image changed before render (frame slot={} acquired={}); resynchronizing",
+            static_cast<unsigned>(m_frameIndex),
+            static_cast<unsigned>(renderedFrameIndex));
+        m_frameIndex = renderedFrameIndex;
+    }
+    if (m_dynamicBackbuffer && renderedFrameIndex < m_backbufferResources.size()) {
+        m_dynamicBackbuffer->SetResource(m_backbufferResources[renderedFrameIndex]);
+    }
 
     auto& world = RendererECSManager::GetInstance().GetWorld();
 	const Components::DrawStats& drawStats = world.get<Components::DrawStats>();
@@ -4687,6 +4744,7 @@ void Renderer::Render() {
     });
 
     // Present the frame
+    rhi::Result presentResult = rhi::Result::Ok;
     runCapturedStage("Present", [&]() {
         ZoneScopedN("Renderer::Render::Present");
         if (renderGraphBatchTraceEnabled) {
@@ -4698,11 +4756,32 @@ void Renderer::Render() {
                 .queue = presentDependency->queue,
                 .wait = presentDependency->wait,
             };
-            m_swapChain->Present(!m_allowTearing, presentSync);
+            presentResult = m_swapChain->Present(!m_allowTearing, presentSync);
         } else {
-            m_swapChain->Present(!m_allowTearing);
+            presentResult = m_swapChain->Present(!m_allowTearing);
         }
     });
+	if (presentResult == rhi::Result::ModeChanged) {
+		RECT clientRect{};
+		if (m_hwnd && GetClientRect(m_hwnd, &clientRect)) {
+			const UINT clientWidth = static_cast<UINT>((std::max)(clientRect.right - clientRect.left, 0L));
+			const UINT clientHeight = static_cast<UINT>((std::max)(clientRect.bottom - clientRect.top, 0L));
+			if (clientWidth != 0 && clientHeight != 0) {
+				spdlog::info(
+					"Renderer: presentation reported mode change; rebuilding swapchain for client extent {}x{}",
+					clientWidth,
+					clientHeight);
+				OnResize(clientWidth, clientHeight);
+				return;
+			}
+		}
+		spdlog::warn("Renderer: presentation reported mode change but no non-zero client extent is available");
+		return;
+	}
+	if (presentResult != rhi::Result::Ok) {
+		spdlog::error("Renderer: swapchain presentation failed with {}", rhi::ResultName(presentResult));
+		return;
+	}
 
     runCapturedStage("SignalFence", [&]() {
         ZoneScopedN("Renderer::Render::SignalFence");
@@ -4765,20 +4844,25 @@ void Renderer::StallPipeline() {
     for (uint8_t i = 0; i < m_numFramesInFlight; ++i) {
         WaitForFrame(i);
     }
-    auto device = DeviceManager::GetInstance().GetDevice();
-    spdlog::info("Renderer::StallPipeline waiting for device idle");
-    device.WaitIdle();
-    spdlog::info("Renderer::StallPipeline device idle complete");
+    auto& devices = DeviceManager::GetInstance();
+    spdlog::info("Renderer::StallPipeline waiting for all initialized devices idle");
+    devices.GetDevice().WaitIdle();
+    if (devices.IsMultiRHIEnabled()) {
+        devices.GetPeerDevice().WaitIdle();
+    }
+    spdlog::info("Renderer::StallPipeline all initialized devices idle complete");
 }
 
 void Renderer::Cleanup() {
     spdlog::info("In cleanup");
-    if (currentRenderGraph) {
-        currentRenderGraph->ShutdownExtensions();
-    }
     // Wait for all GPU frames to complete
 	spdlog::info("Stalling pipeline for cleanup");
 	StallPipeline();
+	// Extensions own graph resources and bridge objects.  Do not let them
+	// release those objects until work on both API devices has completed.
+    if (currentRenderGraph) {
+        currentRenderGraph->ShutdownExtensions();
+    }
 	if (currentScene) {
 		currentScene->Deactivate();
 	}
@@ -5136,6 +5220,10 @@ void Renderer::RegisterPipelineExtensions() {
     // every extension has been gathered, so this does not require their target
     // passes to have been materialized yet.
     for (const auto& [id, factory] : m_pipelineRecipe.Extensions()) {
+		if (id == "SARPGrass" && ReadTruthyEnvironmentFlag("BASICRENDERER_DISABLE_SARP_GRASS_EXTENSION")) {
+			spdlog::info("Render-graph isolation: SARPGrass extension disabled");
+			continue;
+		}
         auto extension = factory();
         if (!extension) {
             throw std::runtime_error("Pipeline extension factory returned null: " + id);
@@ -5173,6 +5261,7 @@ void Renderer::CreateRenderGraph() {
     // snapshots contain non-owning timeline handles, so consume all pending
     // releases and clear the snapshot while those timelines are still alive.
     DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+	PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
 
     // TODO: Find a better way to handle resources like this
     // TODO: this access pattern is stupid
@@ -5188,7 +5277,10 @@ void Renderer::CreateRenderGraph() {
 
         if (!currentRenderGraph)
         {
-		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice());
+		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
+		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
+			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
+		}
         if (auto* uploadService = currentRenderGraph->GetUploadService()) {
             uploadService->Initialize();
             org::runtime::SetActiveUploadService(uploadService);
@@ -5238,6 +5330,7 @@ void Renderer::CreateRenderGraph() {
     // native objects survive for numFramesInFlight + 1 frames and can retain
     // stale graph backing through the rebuilt graph's first frames.
     DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+	PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
 
     // Everything released above is GPU-idle, so it is safe (and important) to
     // release its native objects before materializing the candidate graph.
@@ -5407,7 +5500,11 @@ void Renderer::CreateRenderGraph() {
                 histogram->SetName("Luminance Histogram Buffer");
                 org::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
                 newGraph->RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogram);
-                newGraph->BuildComputePass<LuminanceHistogramPass>("luminanceHistogramPass");
+				auto& histogramBuilder = newGraph->BuildComputePass<LuminanceHistogramPass>("luminanceHistogramPass");
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+				br::validation::SARPInteropValidation::ApplyPassPolicy(
+					"luminanceHistogramPass", histogramBuilder, DeviceManager::GetInstance().GetPeerBackend());
+#endif
                 newGraph->SetPassTechnique("luminanceHistogramPass", "Post Process::Exposure");
                 newGraph->BuildComputePass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
                 newGraph->SetPassTechnique("LuminanceAveragePass", "Post Process::Exposure");
@@ -5423,7 +5520,7 @@ void Renderer::CreateRenderGraph() {
                 newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
                 break;
             case Bloom:
-                BuildBloomPipeline(newGraph.get());
+				BuildBloomPipeline(newGraph.get());
                 break;
             case Tonemapping:
                 newGraph->BuildRenderPass<TonemappingPass>(
@@ -5464,10 +5561,10 @@ void Renderer::CreateRenderGraph() {
 
     {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph::BuildTechniques");
-    for (const auto& entry : m_pipelineRecipe.Techniques()) {
-        entry.technique->Build(buildContext);
-        probeGraphBuildPhase(("CreateRenderGraph after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
-    }
+	for (const auto& entry : m_pipelineRecipe.Techniques()) {
+		entry.technique->Build(buildContext);
+		probeGraphBuildPhase(("CreateRenderGraph after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
+	}
     }
 
     probeGraphBuildPhase("CreateRenderGraph before CompileStructural");
@@ -5498,12 +5595,16 @@ void Renderer::CreateRenderGraph() {
 
     {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph::CompileStructural");
+	spdlog::info("Renderer::CreateRenderGraph entering CompileStructural");
     newGraph->CompileStructural();
+	spdlog::info("Renderer::CreateRenderGraph leaving CompileStructural");
     }
     probeGraphBuildPhase("CreateRenderGraph after CompileStructural");
     {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph::Setup");
+	spdlog::info("Renderer::CreateRenderGraph entering Setup");
     newGraph->Setup();
+	spdlog::info("Renderer::CreateRenderGraph leaving Setup");
     }
     probeGraphBuildPhase("CreateRenderGraph after Setup");
 

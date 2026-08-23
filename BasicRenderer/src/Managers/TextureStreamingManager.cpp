@@ -283,16 +283,13 @@ void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessed
 	}
 	{
 		ZoneScopedN("TextureStreamingWorker::WaitReadbackFence");
-		while (m_readbackFence.GetCompletedValue() < submitted) {
-			// A graph can be abandoned after assigning a timeline value but before
-			// submitting its signal.  Use a bounded wait so Shutdown can always join
-			// the worker instead of hanging forever on an unsignalled value.
-			const auto result = m_readbackFence.HostWait(submitted, 50u);
-			if (m_workerQuit.load(std::memory_order_acquire)) {
+		if (m_readbackFence.GetCompletedValue() < submitted) {
+			// A delayed feedback copy must not monopolize the streaming worker.
+			// Poll once, then service queued reload/processing completions and retry
+			// the feedback fence on the next worker iteration.
+			const auto result = m_readbackFence.HostWait(submitted, 5u);
+			if (m_workerQuit.load(std::memory_order_acquire) || result == rhi::Result::WaitTimeout) {
 				return;
-			}
-			if (result == rhi::Result::WaitTimeout) {
-				continue;
 			}
 			if (result != rhi::Result::Ok) {
 				return;
@@ -413,6 +410,7 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 	if (command.options.alphaTested) {
 		++m_alphaTestedBindingCountsByStreamingTextureID[streamingTextureID];
 	}
+
 	if (!command.options.allowIdleCoarsening) {
 		++m_idleCoarseningDisabledBindingCountsByStreamingTextureID[streamingTextureID];
 	}

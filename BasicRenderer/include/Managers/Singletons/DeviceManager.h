@@ -31,6 +31,17 @@ public:
         return m_backend;
     }
 
+    bool IsMultiRHIEnabled() const { return static_cast<bool>(m_peerDevice); }
+    rhi::Backend GetPeerBackend() const { return m_peerBackend; }
+    rhi::Device GetPeerDevice() const { return m_peerDevice.Get(); }
+    rhi::Device GetDevice(rhi::Backend backend) const {
+        if (backend == m_backend) return m_device.Get();
+        if (backend == m_peerBackend) return m_peerDevice.Get();
+        return {};
+    }
+    rhi::Queue GetPeerQueue(rhi::QueueKind kind) {
+        return m_peerDevice ? m_peerDevice->GetQueue(kind) : rhi::Queue{};
+    }
     bool GetMeshShadersSupported() const {
         return m_meshShadersSupported;
     }
@@ -57,6 +68,8 @@ private:
     rhi::Queue m_computeQueue;
     rhi::Queue m_copyQueue;
     rhi::Backend m_backend = rhi::Backend::Null;
+    rhi::DevicePtr m_peerDevice;
+    rhi::Backend m_peerBackend = rhi::Backend::Null;
     bool m_meshShadersSupported = false;
     RayTracingFeatureInfo m_rayTracingFeatures{};
     bool m_rayTracingSupported = false;

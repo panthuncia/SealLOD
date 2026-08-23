@@ -1000,6 +1000,14 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         m_imguiBackend = rhi::Backend::D3D12;
     } else if (DeviceManager::GetInstance().GetBackend() == rhi::Backend::Vulkan) {
 #if BASICRENDERER_HAS_IMGUI_VULKAN
+		// The Vulkan ImGui backend currently faults in its loader/initialization
+		// path on some drivers. Keep UI optional so Vulkan rendering and interop
+		// can start independently; the renderer already treats a null UI backend
+		// as a supported headless state.
+		if (std::getenv("BASICRENDERER_ENABLE_VULKAN_IMGUI") == nullptr) {
+			spdlog::warn("Menu::Initialize: Vulkan ImGui backend disabled; set BASICRENDERER_ENABLE_VULKAN_IMGUI=1 to opt in");
+		}
+		else {
         ImGui_ImplVulkan_InitInfo initInfo{};
         initInfo.ApiVersion = rhi::vulkan::get_device_api_version(device);
         initInfo.Instance = rhi::vulkan::get_instance(device);
@@ -1088,6 +1096,7 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         }
 
         m_imguiBackend = rhi::Backend::Vulkan;
+		}
 #else
         (void)swapChain;
         spdlog::warn("Menu::Initialize: Vulkan renderer backend was selected, but imgui_impl_vulkan.h is not available in this build environment.");
@@ -1819,6 +1828,13 @@ static bool PassUsesResourceAdapter(const void* passAndRes, uint64_t resourceId,
 
 inline void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
     m_sceneOverlapStatus = context.sceneOverlapStatus;
+	// A platform window/context may exist while the renderer backend is
+	// deliberately disabled (currently the default for Vulkan). ImGui 1.92's
+	// font atlas update requires a live renderer backend, so do not start a UI
+	// frame in the null-backend mode.
+	if (m_imguiBackend == rhi::Backend::Null) {
+		return;
+	}
 
     if (m_imguiBackend == rhi::Backend::D3D12) {
         ImGui_ImplDX12_NewFrame();

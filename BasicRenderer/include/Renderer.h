@@ -144,6 +144,7 @@ public:
     };
 
     Renderer() = default;
+    ~Renderer();
 
     void Initialize(HWND hwnd, UINT x_res, UINT y_res, br::pipeline::PipelineRecipe recipe);
     void OnResize(UINT newWidth, UINT newHeight);

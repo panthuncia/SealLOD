@@ -90,10 +90,9 @@ namespace {
 }
 
 namespace {
-
-shadercache::BinaryFormat GetActiveShaderBinaryFormat()
+shadercache::BinaryFormat GetShaderBinaryFormat(rhi::Backend backend)
 {
-    return DeviceManager::GetInstance().GetBackend() == rhi::Backend::Vulkan
+    return backend == rhi::Backend::Vulkan
         ? shadercache::BinaryFormat::Spirv
         : shadercache::BinaryFormat::Dxil;
 }
@@ -463,11 +462,12 @@ std::optional<ShaderLibraryBundle> TryLoadShaderLibraryFromCache(
     return bundle;
 }
 
-shadercache::CacheData BuildBundleCacheData(const ShaderInfoBundle& info, const ShaderBundle& bundle, uint64_t buildConfigHash)
+shadercache::CacheData BuildBundleCacheData(const ShaderInfoBundle& info, const ShaderBundle& bundle,
+    uint64_t buildConfigHash, shadercache::BinaryFormat binaryFormat)
 {
     shadercache::CacheData cacheData;
     cacheData.buildConfigHash = buildConfigHash;
-    cacheData.binaryFormat = GetActiveShaderBinaryFormat();
+    cacheData.binaryFormat = binaryFormat;
     cacheData.artifactKind = shadercache::ArtifactKind::Bundle;
     cacheData.resourceDescriptorSlots = bundle.resourceDescriptorSlots;
     cacheData.resourceIDsHash = bundle.resourceIDsHash;
@@ -480,11 +480,12 @@ shadercache::CacheData BuildBundleCacheData(const ShaderInfoBundle& info, const 
     return cacheData;
 }
 
-shadercache::CacheData BuildLibraryCacheData(const ShaderLibraryInfo& info, const ShaderLibraryBundle& bundle, uint64_t buildConfigHash)
+shadercache::CacheData BuildLibraryCacheData(const ShaderLibraryInfo& info, const ShaderLibraryBundle& bundle,
+    uint64_t buildConfigHash, shadercache::BinaryFormat binaryFormat)
 {
     shadercache::CacheData cacheData;
     cacheData.buildConfigHash = buildConfigHash;
-    cacheData.binaryFormat = GetActiveShaderBinaryFormat();
+    cacheData.binaryFormat = binaryFormat;
     cacheData.artifactKind = shadercache::ArtifactKind::Library;
     cacheData.resourceDescriptorSlots = bundle.resourceDescriptorSlots;
     cacheData.resourceIDsHash = bundle.resourceIDsHash;
@@ -566,7 +567,9 @@ void PSOManager::Cleanup() {
     debugPSO.Reset();
     environmentConversionPSO.Reset();
     m_rootSignature.Reset();
+	m_peerRootSignature.Reset();
     m_computeRootSignature.Reset();
+	m_peerComputeRootSignature.Reset();
     m_debugRootSignature.Reset();
     m_environmentConversionRootSignature.Reset();
     pUtils.Reset();
@@ -2231,7 +2234,50 @@ PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe, cons
     }
     payload->sourceHash = sourceHash;
     payload->label = options && !options->label.empty() ? options->label : "initial";
+
     return out;
+}
+
+void PSOManager::BuildComputePipelineForBackend(const ComputeRecipe& recipe, const PipelineState& pipeline,
+	BackendInstanceId backendInstance) {
+	if (backendInstance == BackendInstanceId::Primary || pipeline.HasBackendPipeline(backendInstance)) return;
+	std::vector<DxcDefine> defines;
+	defines.reserve(recipe.defines.size());
+	for (const OwnedDefine& define : recipe.defines) defines.push_back({ define.name.c_str(), define.value.c_str() });
+	ShaderInfoBundle sib;
+	sib.computeShader = { recipe.shaderPath, recipe.entryPoint, L"cs_6_6" };
+	sib.defines = defines;
+	auto compiled = CompileShaders(sib, backendInstance);
+	rhi::SubobjLayout layout{ GetComputeRootSignature(backendInstance).GetHandle() };
+	rhi::SubobjShader shader{ rhi::ShaderStage::Compute, rhi::DXIL(compiled.computeShader.Get()), ws2s(recipe.entryPoint) };
+	const rhi::PipelineStreamItem items[] = { rhi::Make(layout), rhi::Make(shader) };
+	rhi::PipelinePtr pso;
+	auto device = backendInstance == BackendInstanceId::Primary
+		? DeviceManager::GetInstance().GetDevice() : DeviceManager::GetInstance().GetPeerDevice();
+	const auto result = device.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pso);
+	if (Failed(result)) throw std::runtime_error("Failed to create backend-local compute PSO");
+	if (!recipe.debugName.empty()) {
+		const std::string name = recipe.debugName + ".backend" + std::to_string(static_cast<uint8_t>(backendInstance));
+		pso->SetName(name.c_str());
+	}
+	pipeline.AttachBackendPipeline(backendInstance, std::move(pso), compiled.resourceIDsHash,
+		compiled.resourceDescriptorSlots);
+	spdlog::info("PSOManager materialized compute pipeline '{}' for backend instance {}",
+		recipe.debugName, static_cast<uint8_t>(backendInstance));
+}
+
+const rhi::Pipeline& PSOManager::ResolvePipeline(const PipelineState& pipeline, BackendInstanceId backendInstance) {
+	if (backendInstance == BackendInstanceId::Primary) return pipeline.GetAPIPipelineState();
+	if (!pipeline.HasBackendPipeline(backendInstance)) {
+		std::scoped_lock lock(m_livePipelineMutex);
+		for (auto& [id, entry] : m_livePipelines) {
+			if (entry.state.GetSlot() == pipeline.GetSlot() && !entry.computeRecipe.shaderPath.empty()) {
+				BuildComputePipelineForBackend(entry.computeRecipe, pipeline, backendInstance);
+				break;
+			}
+		}
+	}
+	return pipeline.GetAPIPipelineState(backendInstance);
 }
 
 PipelineState PSOManager::RegisterComputePipeline(PipelineState state, ComputeRecipe recipe)
@@ -2574,7 +2620,8 @@ void PSOManager::GetPreprocessedBlob(
     const std::wstring& entryPoint,
     const std::wstring& target,
     std::vector<DxcDefine> defines,
-    Microsoft::WRL::ComPtr<ID3DBlob>& outBlob) {
+    Microsoft::WRL::ComPtr<ID3DBlob>& outBlob,
+    bool emitSpirv) {
 
     auto exePath = std::filesystem::path(GetExePath());
     auto fullPath = exePath / filename;
@@ -2588,7 +2635,7 @@ void PSOManager::GetPreprocessedBlob(
     opts.entryPoint = entryPoint;
     opts.target = target;
     opts.defines = std::move(defines);
-    opts.emitSpirv = IsSpirvFormat(GetActiveShaderBinaryFormat());
+    opts.emitSpirv = emitSpirv;
 #if WRITE_DEBUG_FILES
     opts.enableDebugInfo = true;
 #endif
@@ -2655,6 +2702,7 @@ void PSOManager::CompileShaderForSlot(
     const std::optional<ShaderInfo>& slot,
     const std::vector<DxcDefine>& defines,
     const DxcBuffer& buffer,
+    bool emitSpirv,
     Microsoft::WRL::ComPtr<ID3DBlob>& outBlob)
 {
     if (!slot)
@@ -2668,11 +2716,14 @@ void PSOManager::CompileShaderForSlot(
         slot->target,
         buffer,
         defines,
+        emitSpirv,
         outBlob
     );
 }
 
 ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines) {
+	const shadercache::BinaryFormat binaryFormat = GetShaderBinaryFormat(DeviceManager::GetInstance().GetBackend());
+	const bool emitSpirv = IsSpirvFormat(binaryFormat);
     Microsoft::WRL::ComPtr<ID3DBlob> outBlob;
     DxcBuffer dxcPreprocessBuff;
 
@@ -2682,7 +2733,8 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
         L"",
         libraryInfo.target,
         defines,
-        outBlob
+		outBlob,
+		emitSpirv
 	);
 
     dxcPreprocessBuff.Ptr = outBlob->GetBufferPointer();
@@ -2691,7 +2743,6 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
 
     std::string debug_shader_string((const char*)dxcPreprocessBuff.Ptr, dxcPreprocessBuff.Size);
 
-    const shadercache::BinaryFormat binaryFormat = GetActiveShaderBinaryFormat();
     const uint64_t buildConfigHash = ComputeShaderCacheBuildConfigHash(binaryFormat);
     const shadercache::CacheKey cacheKey{
         .binaryFormat = binaryFormat,
@@ -2744,7 +2795,7 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
     finalBuf.Size = libPP.finalSource.size();
 
     // compile as a library target (lib_6_8) without entry point
-    CompileShader(libraryInfo.filename, /*entryPoint*/ L"", libraryInfo.target, finalBuf, defines, outBlob);
+    CompileShader(libraryInfo.filename, /*entryPoint*/ L"", libraryInfo.target, finalBuf, defines, emitSpirv, outBlob);
 
 	std::vector<ResourceIdentifier> mandatoryResourceDescriptors;
     for (const auto& idStr : libPP.mandatoryIDs) {
@@ -2760,13 +2811,21 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
     bundle.resourceDescriptorSlots = {mandatoryResourceDescriptors, optionalResourceDescriptors};
 	bundle.resourceIDsHash = libPP.resourceIDsHash;
 
-    const shadercache::CacheData cacheData = BuildLibraryCacheData(libraryInfo, bundle, buildConfigHash);
+    const shadercache::CacheData cacheData = BuildLibraryCacheData(libraryInfo, bundle, buildConfigHash, binaryFormat);
     shadercache::Save(cacheKey, cacheData);
 	return bundle;
 
 }
 
 ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
+	return CompileShadersForBackend(info, DeviceManager::GetInstance().GetBackend());
+}
+
+ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, rhi::Backend backend) {
+	if (backend == rhi::Backend::Null)
+		throw std::runtime_error("Shader compilation requested for an unavailable backend");
+	const shadercache::BinaryFormat binaryFormat = GetShaderBinaryFormat(backend);
+	const bool emitSpirv = IsSpirvFormat(binaryFormat);
     if (info.vertexShader && info.meshShader) 
 		throw std::runtime_error("Cannot compile both vertex and mesh shaders in the same bundle");
 	if (info.computeShader && (info.meshShader || info.amplificationShader || info.vertexShader || info.pixelShader))
@@ -2783,13 +2842,12 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
 	Microsoft::WRL::ComPtr<ID3DBlob> preprocessedComputeShader;
 	DxcBuffer computeBuffer = {};
 
-    PreprocessShaderSlot(info.amplificationShader, info.defines, preprocessedAmplificationShader, amplificationBuffer);
-    PreprocessShaderSlot(info.meshShader, info.defines, preprocessedMeshShader, meshBuffer);
-    PreprocessShaderSlot(info.pixelShader, info.defines, preprocessedPixelShader, pixelBuffer);
-    PreprocessShaderSlot(info.vertexShader, info.defines, preprocessedVertexShader, vertexBuffer);
-    PreprocessShaderSlot(info.computeShader, info.defines, preprocessedComputeShader, computeBuffer);
+    PreprocessShaderSlot(info.amplificationShader, info.defines, preprocessedAmplificationShader, amplificationBuffer, emitSpirv);
+    PreprocessShaderSlot(info.meshShader, info.defines, preprocessedMeshShader, meshBuffer, emitSpirv);
+    PreprocessShaderSlot(info.pixelShader, info.defines, preprocessedPixelShader, pixelBuffer, emitSpirv);
+    PreprocessShaderSlot(info.vertexShader, info.defines, preprocessedVertexShader, vertexBuffer, emitSpirv);
+    PreprocessShaderSlot(info.computeShader, info.defines, preprocessedComputeShader, computeBuffer, emitSpirv);
 
-    const shadercache::BinaryFormat binaryFormat = GetActiveShaderBinaryFormat();
     const uint64_t buildConfigHash = ComputeShaderCacheBuildConfigHash(binaryFormat);
     const shadercache::CacheKey cacheKey{
         .binaryFormat = binaryFormat,
@@ -2819,13 +2877,6 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
     for (;;) {
         if (!g_bypassShaderArtifactCacheReads) {
             if (std::optional<ShaderBundle> cachedBundle = TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
-            if (logMaterialEvalCache) {
-                spdlog::info(
-                    "VisUtil material eval shader artifact cache hit identity=0x{:X} build=0x{:X} file='{}'",
-                    cacheKey.identityHash,
-                    buildConfigHash,
-                    ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
-            }
             return *cachedBundle;
             }
         }
@@ -2835,11 +2886,7 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
     }
     ShaderCompileFlightScope flightScope(flightKey);
     if (logMaterialEvalCache) {
-        spdlog::info(
-            "VisUtil material eval shader artifact cache miss; compiling identity=0x{:X} build=0x{:X} file='{}'",
-            cacheKey.identityHash,
-            buildConfigHash,
-            ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
+        spdlog::debug("VisUtil material eval shader artifact cache miss; compiling identity=0x{:X}", cacheKey.identityHash);
     }
 
     auto prepareSlot = [&](const std::optional<ShaderInfo>& slot, const DxcBuffer& buffer)
@@ -2947,11 +2994,11 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
         computeBuffer.Size = newCompute.size();
 	}
 
-	CompileShaderForSlot(info.amplificationShader, info.defines, amplificationBuffer, bundle.amplificationShader);
-	CompileShaderForSlot(info.meshShader, info.defines, meshBuffer, bundle.meshShader);
-	CompileShaderForSlot(info.pixelShader, info.defines, pixelBuffer, bundle.pixelShader);
-	CompileShaderForSlot(info.vertexShader, info.defines, vertexBuffer, bundle.vertexShader);
-    CompileShaderForSlot(info.computeShader, info.defines, computeBuffer, bundle.computeShader);
+	CompileShaderForSlot(info.amplificationShader, info.defines, amplificationBuffer, emitSpirv, bundle.amplificationShader);
+	CompileShaderForSlot(info.meshShader, info.defines, meshBuffer, emitSpirv, bundle.meshShader);
+	CompileShaderForSlot(info.pixelShader, info.defines, pixelBuffer, emitSpirv, bundle.pixelShader);
+	CompileShaderForSlot(info.vertexShader, info.defines, vertexBuffer, emitSpirv, bundle.vertexShader);
+    CompileShaderForSlot(info.computeShader, info.defines, computeBuffer, emitSpirv, bundle.computeShader);
 
     std::vector<std::string> combinedIds = {};
 	combinedIds.insert(combinedIds.end(), usedMandatoryResourceIDsVec.begin(), usedMandatoryResourceIDsVec.end());
@@ -2959,10 +3006,20 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
 
 	bundle.resourceIDsHash = hash_list(combinedIds);
 
-    const shadercache::CacheData cacheData = BuildBundleCacheData(info, bundle, buildConfigHash);
+    const shadercache::CacheData cacheData = BuildBundleCacheData(info, bundle, buildConfigHash, binaryFormat);
     shadercache::Save(cacheKey, cacheData);
 
 	return bundle;
+}
+
+ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info, BackendInstanceId backendInstance) {
+	const auto& devices = DeviceManager::GetInstance();
+	const rhi::Backend backend = backendInstance == BackendInstanceId::Primary
+		? devices.GetBackend() : devices.GetPeerBackend();
+	if (backend == rhi::Backend::Null) {
+		throw std::runtime_error("Shader compilation requested for an unavailable backend instance");
+	}
+	return CompileShadersForBackend(info, backend);
 }
 
 // for string delimiter
@@ -2986,6 +3043,7 @@ void PSOManager::CompileShader(
     const std::wstring& target, 
 	const DxcBuffer& ppBuffer,
     std::vector<DxcDefine> defines,
+    bool emitSpirv,
     Microsoft::WRL::ComPtr<ID3DBlob>& outBlob)
 {
     auto exePath = std::filesystem::path(GetExePath());
@@ -2996,7 +3054,7 @@ void PSOManager::CompileShader(
     opts.entryPoint = entryPoint;
     opts.target = target;
     opts.defines = std::move(defines);
-    opts.emitSpirv = IsSpirvFormat(GetActiveShaderBinaryFormat());
+    opts.emitSpirv = emitSpirv;
 #if WRITE_DEBUG_FILES
     opts.enableDebugInfo = true;
 #endif
@@ -3381,6 +3439,30 @@ void PSOManager::createRootSignature() {
             std::to_string(static_cast<uint32_t>(result)) +
             ")");
     }
+
+	if (auto peerDevice = DeviceManager::GetInstance().GetPeerDevice()) {
+		result = peerDevice.CreatePipelineLayout(
+			rhi::PipelineLayoutDesc{
+				.ranges = {},
+				.pushConstants = rhi::Span<rhi::PushConstantRangeDesc>(pcs, std::size(pcs)),
+				.staticSamplers = rhi::Span<rhi::StaticSamplerDesc>(staticSamplers, std::size(staticSamplers)),
+				.flags = rhi::PipelineLayoutFlags::PF_AllowInputAssembler },
+			m_peerRootSignature);
+		if (Failed(result) || !m_peerRootSignature || !m_peerRootSignature->IsValid()) {
+			throw std::runtime_error("Failed to create peer graphics pipeline layout");
+		}
+		result = peerDevice.CreatePipelineLayout(
+			rhi::PipelineLayoutDesc{
+				.ranges = {},
+				.pushConstants = rhi::Span<rhi::PushConstantRangeDesc>(pcs, std::size(pcs)),
+				.staticSamplers = rhi::Span<rhi::StaticSamplerDesc>(staticSamplers, std::size(staticSamplers)),
+				.flags = rhi::PipelineLayoutFlags::PF_None },
+			m_peerComputeRootSignature);
+		if (Failed(result) || !m_peerComputeRootSignature || !m_peerComputeRootSignature->IsValid()) {
+			throw std::runtime_error("Failed to create peer compute pipeline layout");
+		}
+		spdlog::info("PSOManager created graphics and compute layouts for the peer backend");
+	}
 }
 
 const rhi::PipelineLayout& PSOManager::GetRootSignature() {
@@ -3395,6 +3477,22 @@ const rhi::PipelineLayout& PSOManager::GetComputeRootSignature() {
 		throw std::runtime_error("Compute root signature / pipeline layout is not initialized");
 	}
 	return m_computeRootSignature.Get();
+}
+
+const rhi::PipelineLayout& PSOManager::GetRootSignature(BackendInstanceId backendInstance) {
+	if (backendInstance == BackendInstanceId::Primary) return GetRootSignature();
+	if (!m_peerRootSignature || !m_peerRootSignature->IsValid()) {
+		throw std::runtime_error("Peer graphics pipeline layout is not initialized");
+	}
+	return m_peerRootSignature.Get();
+}
+
+const rhi::PipelineLayout& PSOManager::GetComputeRootSignature(BackendInstanceId backendInstance) {
+	if (backendInstance == BackendInstanceId::Primary) return GetComputeRootSignature();
+	if (!m_peerComputeRootSignature || !m_peerComputeRootSignature->IsValid()) {
+		throw std::runtime_error("Peer compute pipeline layout is not initialized");
+	}
+	return m_peerComputeRootSignature.Get();
 }
 
 bool PSOManager::RebuildAllPipelines(std::string& error) {
@@ -3689,7 +3787,7 @@ bool PipelineResourcesMatch(const PipelineResources& left, const PipelineResourc
 }
 }
 
-void PSOManager::PublishPendingLivePipelines(uint64_t retirementFenceValue)
+void PSOManager::PublishPendingLivePipelines(std::vector<PipelineRetirementPoint> retirementPoints)
 {
     std::scoped_lock lock(m_livePipelineMutex);
     while (!m_pendingLivePublications.empty()) {
@@ -3713,7 +3811,7 @@ void PSOManager::PublishPendingLivePipelines(uint64_t retirementFenceValue)
 
         auto retired = entry.state.ReplacePayload(publication.payload);
         if (retired) {
-            m_retiredLivePayloads.push_back({ retirementFenceValue, std::move(retired) });
+			m_retiredLivePayloads.push_back({ retirementPoints, std::move(retired) });
         }
         entry.generations.push_back(publication.payload);
         entry.generationDefineOverrides[publication.payload->generation] =
@@ -3761,7 +3859,7 @@ void PSOManager::PublishPendingLivePipelines(uint64_t retirementFenceValue)
         }
         auto retired = entryIt->second.state.ReplacePayload(*generationIt);
         if (retired && retired != *generationIt) {
-            m_retiredLivePayloads.push_back({ retirementFenceValue, std::move(retired) });
+			m_retiredLivePayloads.push_back({ retirementPoints, std::move(retired) });
         }
         job.state = LiveJobState::Published;
         m_pipelineEpoch.fetch_add(1, std::memory_order_acq_rel);
@@ -3772,12 +3870,21 @@ void PSOManager::PublishPendingLivePipelines(uint64_t retirementFenceValue)
     }
 }
 
-void PSOManager::CollectRetiredLivePipelines(uint64_t completedFenceValue)
+void PSOManager::CollectRetiredLivePipelines()
 {
     std::scoped_lock lock(m_livePipelineMutex);
-    std::erase_if(m_retiredLivePayloads, [completedFenceValue](const RetiredPayload& retired) {
-        return retired.fenceValue <= completedFenceValue;
+	std::erase_if(m_retiredLivePayloads, [](RetiredPayload& retired) {
+		return std::ranges::all_of(retired.completionPoints, [](PipelineRetirementPoint& point) {
+			return point.timeline.IsValid() && point.value != UINT64_MAX &&
+				point.timeline.GetCompletedValue() >= point.value;
+		});
     });
+}
+
+void PSOManager::DrainRetiredLivePipelinesAfterDeviceIdle()
+{
+	std::scoped_lock lock(m_livePipelineMutex);
+	m_retiredLivePayloads.clear();
 }
 
 uint64_t PSOManager::GetPipelineEpoch() const

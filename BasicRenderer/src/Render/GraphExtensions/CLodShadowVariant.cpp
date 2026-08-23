@@ -829,6 +829,7 @@ void CLodShadowVariant::AppendStructuralTail(
     }
 
     const std::string shadowExpandPredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowFinalizeFallbackPagesPass");
+    spdlog::info("CLod shadow structural tail: construct {} begin", shadowExpandPredictedPagesPassName);
     auto shadowExpandPredictedPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
         shadowExpandPredictedPagesPassName,
         std::make_shared<VirtualShadowMapExpandPredictedPagesPass>(
@@ -843,11 +844,13 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowConfiguredMaxPhysicalPageCount));
+    spdlog::info("CLod shadow structural tail: construct {} complete", shadowExpandPredictedPagesPassName);
     shadowExpandPredictedPagesPassDesc.At(
         RenderGraph::ExternalInsertPoint::After(shadowClearDirtyBitsAfterPassName));
     outPasses.push_back(std::move(shadowExpandPredictedPagesPassDesc));
 
     const std::string shadowDeduplicatePredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowDeduplicateFallbackPagesPass");
+    spdlog::info("CLod shadow structural tail: construct {} begin", shadowDeduplicatePredictedPagesPassName);
     auto shadowDeduplicatePredictedPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
         shadowDeduplicatePredictedPagesPassName,
         std::make_shared<VirtualShadowMapDeduplicatePredictedPagesPass>(
@@ -861,6 +864,7 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowDirtyPageFlagsBuffer,
             extension.m_shadowConfiguredMaxPhysicalPageCount));
+    spdlog::info("CLod shadow structural tail: construct {} complete", shadowDeduplicatePredictedPagesPassName);
     shadowDeduplicatePredictedPagesPassDesc.At(
         RenderGraph::ExternalInsertPoint::After(shadowExpandPredictedPagesPassName));
     outPasses.push_back(std::move(shadowDeduplicatePredictedPagesPassDesc));
