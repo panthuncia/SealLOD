@@ -506,6 +506,22 @@ void TaskSchedulerManager::ParallelForImpl(std::string_view, std::size_t count, 
     else m_runtimeState->frameArena->execute(parallel);
 }
 
+void TaskSchedulerManager::ParallelForLimitedImpl(std::string_view, std::size_t count,
+    std::size_t maximumConcurrency, std::function<void(std::size_t)>&& body) {
+    if (count == 0) return;
+    const auto concurrency = (std::max)(std::size_t{ 1 },
+        (std::min)({ maximumConcurrency, count, static_cast<std::size_t>((std::max)(1u, m_workerCount + 1u)) }));
+    if (!m_runtimeState || concurrency == 1) {
+        for (std::size_t i = 0; i < count; ++i) body(i);
+        return;
+    }
+    oneapi::tbb::task_arena arena(static_cast<int>(concurrency), 1,
+        oneapi::tbb::task_arena::priority::high);
+    arena.execute([&] {
+        oneapi::tbb::parallel_for(std::size_t{ 0 }, count, [&](std::size_t i) { body(i); });
+    });
+}
+
 std::uint32_t TaskSchedulerManager::BlockingThreadCount() const noexcept {
     return m_runtimeState ? static_cast<std::uint32_t>(m_runtimeState->blockingThreads.size()) : 0;
 }

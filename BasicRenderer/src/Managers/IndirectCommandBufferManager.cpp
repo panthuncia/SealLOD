@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <limits>
 
+#include <BasicTelemetry/Tracy.h>
+
 #include "Managers/Singletons/ResourceManager.h"
 #include "Resources/ResourceGroup.h"
 #include "Resources/GloballyIndexedResource.h"
@@ -139,8 +141,11 @@ void IndirectCommandBufferManager::RequestWorkloadCounts(std::span<const Workloa
 }
 
 void IndirectCommandBufferManager::CommitGpuVisibleSnapshot(ObjectManager& objectManager) {
+    BT_ZONE_SCOPE("IndirectCommandBufferManager::CommitGpuVisibleSnapshot");
+    BT_ZONE_VALUE(static_cast<std::uint64_t>(m_viewIDToBuffers.size()) * m_workloadToRequestedCount.size());
     for (auto& [viewID, perView] : m_viewIDToBuffers) {
         for (auto& [workloadKey, requestedCount] : m_workloadToRequestedCount) {
+            BT_ZONE_SCOPE("IndirectCommandBufferManager::CommitGpuVisibleSnapshot::Workload");
             EnsureWorkloadRegistered(workloadKey);
             auto activeDrawSet = objectManager.TryGetActiveDrawSetIndices(workloadKey);
             const auto logicalActiveCount = activeDrawSet
@@ -177,6 +182,7 @@ void IndirectCommandBufferManager::CommitGpuVisibleSnapshot(ObjectManager& objec
                 if (!it->second.buffer ||
                     !it->second.buffer->GetResource() ||
                     capacity > RoundUp(it->second.count)) {
+                    BT_ZONE_SCOPE("IndirectCommandBufferManager::CommitGpuVisibleSnapshot::ReplaceResource");
                     it->second.buffer->SetResource(CreateIndirectCommandBufferResource(workloadKey, viewID, capacity));
                 }
                 it->second.count = safeCount;
@@ -185,11 +191,14 @@ void IndirectCommandBufferManager::CommitGpuVisibleSnapshot(ObjectManager& objec
                 continue;
             }
 
-            auto dyn = CreateIndirectWorkloadResource(workloadKey, viewID, capacity);
-            perView.buffersByWorkload.emplace(
-                workloadKey,
-                IndirectWorkload{ dyn, safeCount, safeCount, activeDrawSet });
-            m_indirectCommandsResourceGroup->AddResource(dyn);
+            {
+                BT_ZONE_SCOPE("IndirectCommandBufferManager::CommitGpuVisibleSnapshot::CreateWorkload");
+                auto dyn = CreateIndirectWorkloadResource(workloadKey, viewID, capacity);
+                perView.buffersByWorkload.emplace(
+                    workloadKey,
+                    IndirectWorkload{ dyn, safeCount, safeCount, activeDrawSet });
+                m_indirectCommandsResourceGroup->AddResource(dyn);
+            }
         }
     }
 }

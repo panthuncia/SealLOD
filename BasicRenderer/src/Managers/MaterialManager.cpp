@@ -16,7 +16,7 @@
 #include <string>
 #include <unordered_set>
 
-#include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Tracy.h>
 
 namespace {
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
@@ -1220,8 +1220,10 @@ bool MaterialManager::RequestExternalMaterialTextureReadback(
 }
 
 void MaterialManager::CommitGpuVisibleSnapshot() {
+	BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot");
 	const unsigned int compileFlagsSlotsUsed = m_compileFlagsRegistry.GetSlotsUsed();
 	if (m_materialPixelCountBuffer && compileFlagsSlotsUsed > m_materialPixelCountBuffer->Capacity()) {
+		BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot::EnsureCompileFlagsBufferCapacity");
 		EnsureCompileFlagsBufferCapacity(compileFlagsSlotsUsed);
 	}
 
@@ -1239,18 +1241,21 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 		(std::min<unsigned int>)(slotResidentCapacity, scanCoveredSlots));
 
 	m_publishedCompileFlagsSlotsUsed = publishedSlots;
-	m_publishedActiveCompileFlags.clear();
-	m_publishedActiveCompileFlagsSlots.clear();
-	const auto& activeCompileFlags = m_compileFlagsRegistry.GetActiveFlags();
-	m_publishedActiveCompileFlags.reserve(activeCompileFlags.size());
-	m_publishedActiveCompileFlagsSlots.reserve(m_compileFlagsRegistry.GetActiveSlots().size());
-	for (MaterialCompileFlags flags : activeCompileFlags) {
-		unsigned int slot = 0u;
-		if (!TryGetCompileFlagsSlot(flags, slot) || slot >= publishedSlots) {
-			continue;
+	{
+		BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot::PublishActiveFlags");
+		m_publishedActiveCompileFlags.clear();
+		m_publishedActiveCompileFlagsSlots.clear();
+		const auto& activeCompileFlags = m_compileFlagsRegistry.GetActiveFlags();
+		m_publishedActiveCompileFlags.reserve(activeCompileFlags.size());
+		m_publishedActiveCompileFlagsSlots.reserve(m_compileFlagsRegistry.GetActiveSlots().size());
+		for (MaterialCompileFlags flags : activeCompileFlags) {
+			unsigned int slot = 0u;
+			if (!TryGetCompileFlagsSlot(flags, slot) || slot >= publishedSlots) {
+				continue;
+			}
+			m_publishedActiveCompileFlags.push_back(flags);
+			m_publishedActiveCompileFlagsSlots.push_back(slot);
 		}
-		m_publishedActiveCompileFlags.push_back(flags);
-		m_publishedActiveCompileFlagsSlots.push_back(slot);
 	}
 }
 

@@ -1107,6 +1107,7 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
 
 void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> newDataBuffer, size_t newSize, size_t previousCapacity) {
     BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked");
+    BT_ZONE_TEXT(m_name.data(), m_name.size());
     TracyPlot("DynamicBuffer.Resize.ApplyNewSizeBytes", static_cast<int64_t>(newSize));
     TracyPlot("DynamicBuffer.Resize.ApplyPreviousCapacityBytes", static_cast<int64_t>(previousCapacity));
     spdlog::debug(

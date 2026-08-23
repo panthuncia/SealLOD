@@ -26,6 +26,12 @@ void TbbTaskService::ParallelFor(std::string_view taskName, size_t itemCount, st
     TaskSchedulerManager::GetInstance().ParallelFor(taskName, itemCount, std::move(func));
 }
 
+void TbbTaskService::ParallelForLimited(std::string_view taskName, size_t itemCount, size_t maximumConcurrency,
+    std::function<void(size_t)> func) {
+    TaskSchedulerManager::GetInstance().ParallelForLimited(
+        taskName, itemCount, maximumConcurrency, std::move(func));
+}
+
 std::shared_ptr<org::runtime::ITaskScope> TbbTaskService::CreateScope(std::string_view name) {
     return std::make_shared<OrgTaskScope>(TaskSchedulerManager::GetInstance().CreateScope(name));
 }

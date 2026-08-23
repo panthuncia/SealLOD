@@ -104,11 +104,21 @@ public:
         Callable callable = std::forward<Func>(func);
         ParallelForImpl(name, itemCount, [callable = std::move(callable)](std::size_t i) mutable { callable(i); });
     }
+    template <typename Func>
+    void ParallelForLimited(std::string_view name, std::size_t itemCount,
+        std::size_t maximumConcurrency, Func&& func) {
+        using Callable = std::decay_t<Func>;
+        Callable callable = std::forward<Func>(func);
+        ParallelForLimitedImpl(name, itemCount, maximumConcurrency,
+            [callable = std::move(callable)](std::size_t i) mutable { callable(i); });
+    }
 
 private:
     TaskSchedulerManager() = default;
     void DispatchDomain(TaskDomain domain);
     void ParallelForImpl(std::string_view, std::size_t, std::function<void(std::size_t)>&&);
+    void ParallelForLimitedImpl(std::string_view, std::size_t, std::size_t,
+        std::function<void(std::size_t)>&&);
     std::unique_ptr<RuntimeState> m_runtimeState;
     std::atomic_bool m_initialized{ false };
     std::uint32_t m_workerCount = 0;

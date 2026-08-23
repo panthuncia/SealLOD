@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <flecs.h>
 #include <rhi.h>
+#include <BasicTelemetry/Tracy.h>
 
 #include "FidelityFX/FfxBackendAdapters.h"
 #include "slHooks.h"
@@ -546,7 +547,11 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         }
 
         const sl::BaseStructure* inputs[] = { &myViewport };
-        if (SL_FAILED(result, slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList)))
+        const auto evaluateResult = [&] {
+            BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
+            return slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList);
+        }();
+        if (SL_FAILED(result, evaluateResult))
         {
             if (result == sl::Result::eWarnOutOfVRAM) {
                 if (!m_reportedDlssOutOfMemory) {
@@ -598,7 +603,11 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         sl::ResourceTag mvecTag = sl::ResourceTag{ &mvec, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
 
         const sl::BaseStructure* inputs[] = { &myViewport, &depthTag, &mvecTag, &colorInTag, &colorOutTag };
-        if (SL_FAILED(result, slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList)))
+        const auto evaluateResult = [&] {
+            BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
+            return slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList);
+        }();
+        if (SL_FAILED(result, evaluateResult))
         {
             if (result == sl::Result::eWarnOutOfVRAM) {
                 if (!m_reportedDlssOutOfMemory) {

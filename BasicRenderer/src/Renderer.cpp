@@ -22,7 +22,7 @@
 #include <utility>
 
 #include <rhi_debug.h>
-#include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Tracy.h>
 #include <spdlog/spdlog.h>
 #include "Utilities/Utilities.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -831,23 +831,23 @@ void Renderer::Initialize(
 }
 
 void Renderer::RunGameUpdateStage(float elapsedSeconds) {
-    ZoneScopedN("Renderer::Update::GameUpdate");
+    BT_ZONE_SCOPE("Renderer::Update::GameUpdate");
     currentScene->Update(elapsedSeconds);
 }
 
 void Renderer::RunAnimationUpdateStage(float elapsedSeconds) {
-    ZoneScopedN("Renderer::Update::AnimationUpdate");
+    BT_ZONE_SCOPE("Renderer::Update::AnimationUpdate");
     m_pSkeletonManager->TickAnimations(elapsedSeconds);
     m_pSkeletonManager->UpdateAllDirtyInstances();
 }
 
 void Renderer::RunTransformPropagationStage() {
-    ZoneScopedN("Renderer::Update::TransformPropagation");
+    BT_ZONE_SCOPE("Renderer::Update::TransformPropagation");
     currentScene->PropagateTransforms();
 }
 
 void Renderer::RunSceneBridgeSyncStage() {
-    ZoneScopedN("Renderer::Update::SceneBridgeSync");
+    BT_ZONE_SCOPE("Renderer::Update::SceneBridgeSync");
     if (!currentScene) {
         return;
     }
@@ -1231,7 +1231,7 @@ void Renderer::BootstrapCommittedSceneSnapshot() {
 }
 
 void Renderer::CommitCompletedSceneSnapshot() {
-    ZoneScopedN("Renderer::CommitCompletedSceneSnapshot");
+    BT_ZONE_SCOPE("Renderer::CommitCompletedSceneSnapshot");
 
     if (!m_sceneTaskCompleted.exchange(false)) {
         return;
@@ -1239,7 +1239,7 @@ void Renderer::CommitCompletedSceneSnapshot() {
 
     std::shared_ptr<br::render::SceneFrameSnapshot> completedSnapshot;
     {
-        ZoneScopedN("Renderer::CommitCompletedSceneSnapshot::TakeCompletedSnapshot");
+        BT_ZONE_SCOPE("Renderer::CommitCompletedSceneSnapshot::TakeCompletedSnapshot");
         std::scoped_lock lock(m_sceneSnapshotMutex);
         completedSnapshot = std::exchange(m_completedSceneSnapshot, nullptr);
     }
@@ -1253,11 +1253,11 @@ void Renderer::CommitCompletedSceneSnapshot() {
     }
 
     {
-        ZoneScopedN("Renderer::CommitCompletedSceneSnapshot::IngestSnapshot");
+        BT_ZONE_SCOPE("Renderer::CommitCompletedSceneSnapshot::IngestSnapshot");
         m_sceneRenderBridge.IngestSnapshot(*completedSnapshot, m_managerInterface);
     }
     {
-        ZoneScopedN("Renderer::CommitCompletedSceneSnapshot::PublishCommittedSnapshot");
+        BT_ZONE_SCOPE("Renderer::CommitCompletedSceneSnapshot::PublishCommittedSnapshot");
         std::scoped_lock lock(m_sceneSnapshotMutex);
         m_hasCommittedSceneSnapshot = true;
         m_lastCommittedSceneSnapshotSequence = completedSnapshot->snapshotSequence;
@@ -1376,12 +1376,12 @@ br::render::SceneOverlapStatus Renderer::GetSceneOverlapStatus() const {
 }
 
 void Renderer::RunRenderResourceSyncStage() {
-    ZoneScopedN("Renderer::Update::RenderResourceSync");
+    BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync");
 
     auto& world = RendererECSManager::GetInstance().GetWorld();
 
     if (!m_renderSyncQueriesBuilt) {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::BuildQueries");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::BuildQueries");
         m_renderSyncObjectQuery = world.query_builder<Components::Matrix, Components::RenderableObject, Components::ObjectDrawInfo, Components::MeshInstances>()
             .with<Components::Active>()
             .with<Components::RenderTransformUpdated>()
@@ -1408,7 +1408,7 @@ void Renderer::RunRenderResourceSyncStage() {
     };
     std::vector<ObjectSyncItem> objectItems;
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::CollectObjectsAndMaterials");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CollectObjectsAndMaterials");
         m_renderSyncObjectQuery.run([&](flecs::iter& it) {
             while (it.next()) {
                 auto matrices = it.field<Components::Matrix>(0);
@@ -1429,7 +1429,7 @@ void Renderer::RunRenderResourceSyncStage() {
     }
 
     if (auto* terrainManager = m_managerInterface.GetTerrainManager()) {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::ProcessPendingTerrainUpdates");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::ProcessPendingTerrainUpdates");
         terrainManager->ProcessPendingUpdates();
     }
 
@@ -1442,7 +1442,7 @@ void Renderer::RunRenderResourceSyncStage() {
     normalMatrixDirtyRanges.reserve(objectItems.size());
 
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::ScanObjectDirtyRanges");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::ScanObjectDirtyRanges");
         const auto appendRanges = [](std::vector<std::pair<size_t, size_t>>& ranges, const std::vector<std::shared_ptr<BufferView>>& views, size_t stride) {
             for (const auto& view : views) {
                 if (!view) {
@@ -1476,7 +1476,7 @@ void Renderer::RunRenderResourceSyncStage() {
     auto normalMatrixHandle = objectManager->BeginNormalMatrixBulkWrite();
 
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::ObjectSync");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::ObjectSync");
         TaskSchedulerManager::GetInstance().ParallelFor("ObjectSync", objectItems.size(),
             [&objectItems, &perObjectHandle, &perInstanceTransformHandle, &normalMatrixHandle](size_t idx) {
                 auto& item = objectItems[idx];
@@ -1580,7 +1580,7 @@ void Renderer::RunRenderResourceSyncStage() {
     // Upload only the range actually written this frame. Uploading the entire
     // grown backing every frame scales badly
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::CommitObjectBulkWrites");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CommitObjectBulkWrites");
         const auto commitRanges = [](auto& ranges, auto&& commit) {
             if (ranges.empty()) {
                 return;
@@ -1605,19 +1605,19 @@ void Renderer::RunRenderResourceSyncStage() {
         };
 
         {
-            ZoneScopedN("Renderer::Update::RenderResourceSync::CommitPerObjectRanges");
+            BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CommitPerObjectRanges");
             commitRanges(perObjectDirtyRanges, [objectManager](size_t offset, size_t size) {
                 objectManager->EndPerObjectBulkWrite(offset, size);
             });
         }
         {
-            ZoneScopedN("Renderer::Update::RenderResourceSync::CommitPerInstanceTransformRanges");
+            BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CommitPerInstanceTransformRanges");
             commitRanges(perInstanceTransformDirtyRanges, [objectManager](size_t offset, size_t size) {
                 objectManager->EndPerInstanceTransformBulkWrite(offset, size);
             });
         }
         {
-            ZoneScopedN("Renderer::Update::RenderResourceSync::CommitNormalMatrixRanges");
+            BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CommitNormalMatrixRanges");
             commitRanges(normalMatrixDirtyRanges, [objectManager](size_t offset, size_t size) {
                 objectManager->EndNormalMatrixBulkWrite(offset, size);
             });
@@ -1625,7 +1625,7 @@ void Renderer::RunRenderResourceSyncStage() {
     }
 
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::CameraSync");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CameraSync");
         m_renderSyncCameraQuery.each([&](flecs::entity entity, Components::Matrix& worldMatrix, Components::Camera& camera, Components::RenderViewRef& renderView) {
             const auto* externalCamera = entity.try_get<Components::ExternalCameraMatrices>();
             const XMMATRIX cameraModel = externalCamera ? externalCamera->info.viewInverse : RemoveScalingFromMatrix(worldMatrix.matrix);
@@ -1677,7 +1677,7 @@ void Renderer::RunRenderResourceSyncStage() {
     }
 
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::LightSync");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::LightSync");
         m_renderSyncLightQuery.each([&](flecs::entity entity, Components::Matrix& worldMatrix, Components::Light& light) {
             const XMVECTOR worldForward = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
             light.lightInfo.dirWorldSpace = XMVector3Normalize(XMVector3TransformNormal(worldForward, worldMatrix.matrix));
@@ -2865,7 +2865,7 @@ void Renderer::Update(float elapsedSeconds) {
     if (m_deterministicSamplingMode) {
         elapsedSeconds = 0.0f;
     }
-    ZoneScopedN("Renderer::Update");
+    BT_ZONE_SCOPE("Renderer::Update");
     BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
 
 	std::vector<PSOManager::PipelineRetirementPoint> pipelineRetirementPoints;
@@ -2889,8 +2889,11 @@ void Renderer::Update(float elapsedSeconds) {
     };
 
     runCapturedStage("PublishDeferredBackingResizesEarly", []() {
-        ZoneScopedN("Renderer::Update::PublishDeferredBackingResizesEarly");
-        (void)PublishReadyDeferredBackingResizes(true);
+        BT_ZONE_SCOPE("Renderer::Update::PublishDeferredBackingResizesEarly");
+        // Publication is opportunistic at the frame boundary. Waiting here
+        // defeats the asynchronous resize path and can park the render thread
+        // behind backing creation for tens of milliseconds.
+        (void)PublishReadyDeferredBackingResizes(false);
     });
 
     if (!IsSceneReadyForFrame()) {
@@ -2899,7 +2902,7 @@ void Renderer::Update(float elapsedSeconds) {
 
     if (m_shaderReloadRequested) {
         runCapturedStage("ShaderReload", [&]() {
-            ZoneScopedN("Renderer::Update::ShaderReload");
+            BT_ZONE_SCOPE("Renderer::Update::ShaderReload");
             spdlog::info("Renderer: draining GPU work before shader reload.");
             StallPipeline();
             std::string rebuildError;
@@ -2913,19 +2916,19 @@ void Renderer::Update(float elapsedSeconds) {
     }
 
     runCapturedStage("SceneExplorerEdits", [&]() {
-        ZoneScopedN("Renderer::Update::SceneExplorerEdits");
+        BT_ZONE_SCOPE("Renderer::Update::SceneExplorerEdits");
         if (!m_externalSceneMode) {
             FlushPendingSceneExplorerEdits();
         }
     });
     if (m_externalSceneMode) {
         runCapturedStage("ExternalScene", []() {
-            ZoneScopedN("Renderer::Update::ExternalScene");
+            BT_ZONE_SCOPE("Renderer::Update::ExternalScene");
         });
     } else if (m_sceneRenderOverlapEnabled) {
         if (NeedsSceneSnapshotBootstrap()) {
             runCapturedStage("BootstrapSceneSnapshot", [&]() {
-                ZoneScopedN("Renderer::Update::BootstrapSceneSnapshot");
+                BT_ZONE_SCOPE("Renderer::Update::BootstrapSceneSnapshot");
                 ApplyPrimaryCameraInput(elapsedSeconds);
                 RunGameUpdateStage(elapsedSeconds);
                 RunTransformPropagationStage();
@@ -2933,13 +2936,13 @@ void Renderer::Update(float elapsedSeconds) {
             });
         } else {
             runCapturedStage("CommitSceneSnapshot", [&]() {
-                ZoneScopedN("Renderer::Update::CommitSceneSnapshot");
+                BT_ZONE_SCOPE("Renderer::Update::CommitSceneSnapshot");
                 CommitCompletedSceneSnapshot();
             });
         }
     } else {
         runCapturedStage("SynchronousSceneUpdate", [&]() {
-            ZoneScopedN("Renderer::Update::SynchronousSceneUpdate");
+            BT_ZONE_SCOPE("Renderer::Update::SynchronousSceneUpdate");
             ApplyPrimaryCameraInput(elapsedSeconds);
             RunGameUpdateStage(elapsedSeconds);
             RunTransformPropagationStage();
@@ -2960,7 +2963,7 @@ void Renderer::Update(float elapsedSeconds) {
     // are visible when the graph is constructed.
     if (!m_preFrameDeferredFunctions.empty()) {
         runCapturedStage("DeferredWorkEarly", [&]() {
-            ZoneScopedN("Renderer::Update::DeferredWorkEarly");
+            BT_ZONE_SCOPE("Renderer::Update::DeferredWorkEarly");
             m_preFrameDeferredFunctions.flush();
         });
     }
@@ -2969,7 +2972,7 @@ void Renderer::Update(float elapsedSeconds) {
 
     if (rebuildRenderGraph) {
         runCapturedStage("RenderGraphBuild", [&]() {
-            ZoneScopedN("Renderer::Update::RenderGraphBuild");
+            BT_ZONE_SCOPE("Renderer::Update::RenderGraphBuild");
             try {
 		        CreateRenderGraph();
                 m_pipelineRollbackRecipe.reset();
@@ -3001,7 +3004,7 @@ void Renderer::Update(float elapsedSeconds) {
     unsigned int cameraIndex = m_pViewManager->Get(camera.get<Components::RenderViewRef>().viewID)->gpu.cameraBufferIndex;
 
     runCapturedStage("WaitForFrame", [&]() {
-        ZoneScopedN("Renderer::Update::WaitForFrame");
+        BT_ZONE_SCOPE("Renderer::Update::WaitForFrame");
         WaitForFrame(m_frameIndex);
         if (m_pObjectManager) {
             const std::uint64_t retireDelayFrames = static_cast<std::uint64_t>(m_numFramesInFlight) + 1u;
@@ -3030,7 +3033,7 @@ void Renderer::Update(float elapsedSeconds) {
 	// material-buffer uploads are captured by CompileFrame.
 	if (m_pMaterialManager) {
 		runCapturedStage("MaterialTexturePublication", [&]() {
-			ZoneScopedN("Renderer::Update::MaterialTexturePublication");
+			BT_ZONE_SCOPE("Renderer::Update::MaterialTexturePublication");
 			m_pMaterialManager->ProcessPendingMaterialUpdates(m_totalFramesRendered + 1u);
 		});
 	}
@@ -3042,7 +3045,7 @@ void Renderer::Update(float elapsedSeconds) {
     auto& resourceManager = ::ResourceManager::GetInstance();
     auto res = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     runCapturedStage("PerFrameBuffer", [&]() {
-        ZoneScopedN("Renderer::Update::PerFrameBuffer");
+        BT_ZONE_SCOPE("Renderer::Update::PerFrameBuffer");
         resourceManager.UpdatePerFrameBuffer(cameraIndex, m_pLightManager->GetNumLights(), { res.x, res.y }, m_lightClusterSize, static_cast<uint32_t>(m_totalFramesRendered));
     });
 
@@ -3084,17 +3087,17 @@ void Renderer::Update(float elapsedSeconds) {
     updateHostData.data = &updateData;
 
     runCapturedStage("PublishDeferredBackingResizesLate", []() {
-        ZoneScopedN("Renderer::Update::PublishDeferredBackingResizesLate");
+        BT_ZONE_SCOPE("Renderer::Update::PublishDeferredBackingResizesLate");
         (void)PublishReadyDeferredBackingResizes(false);
     });
 
     runCapturedStage("FlushUploadPolicies", [&]() {
-        ZoneScopedN("Renderer::Update::FlushUploadPolicies");
+        BT_ZONE_SCOPE("Renderer::Update::FlushUploadPolicies");
         org::runtime::FlushUploadPolicies();
     });
 
     runCapturedStage("CommitGpuVisibleSnapshots", [&]() {
-        ZoneScopedN("Renderer::Update::CommitGpuVisibleSnapshots");
+        BT_ZONE_SCOPE("Renderer::Update::CommitGpuVisibleSnapshots");
         if (m_pMaterialManager) {
             m_pMaterialManager->CommitGpuVisibleSnapshot();
         }
@@ -3109,7 +3112,7 @@ void Renderer::Update(float elapsedSeconds) {
     context.deltaTime = elapsedSeconds;
     context.hostData = &updateHostData;
     context.beforeCompileFrame = [this]() {
-        ZoneScopedN("Renderer::Update::TerrainRvtTelemetry");
+        BT_ZONE_SCOPE("Renderer::Update::TerrainRvtTelemetry");
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
         static bool materialBufferReadbackRequested = false;
@@ -3156,7 +3159,7 @@ void Renderer::Update(float elapsedSeconds) {
     auto& deviceManager = DeviceManager::GetInstance();
 
     runCapturedStage("RenderGraphUpdate", [&]() {
-        ZoneScopedN("Renderer::Update::RenderGraphUpdate");
+        BT_ZONE_SCOPE("Renderer::Update::RenderGraphUpdate");
         currentRenderGraph->Update(context, deviceManager.GetDevice());
     });
     ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "after RenderGraphUpdate");
@@ -3181,13 +3184,13 @@ void Renderer::Update(float elapsedSeconds) {
 
     if (!m_externalSceneMode) {
         runCapturedStage("ScheduleSceneUpdate", [&]() {
-            ZoneScopedN("Renderer::Update::ScheduleSceneUpdate");
+            BT_ZONE_SCOPE("Renderer::Update::ScheduleSceneUpdate");
             ScheduleSceneUpdateTask(elapsedSeconds);
         });
     }
 
     runCapturedStage("BeginUploadPolicyFrame", [&]() {
-        ZoneScopedN("Renderer::Update::BeginUploadPolicyFrame");
+        BT_ZONE_SCOPE("Renderer::Update::BeginUploadPolicyFrame");
         org::runtime::BeginUploadPolicyFrame();
     });
 
@@ -3195,7 +3198,7 @@ void Renderer::Update(float elapsedSeconds) {
     auto computeQueue = deviceManager.GetComputeQueue();
     runCapturedStage("FrameMaintenance", [&]() {
         if (currentRenderGraph) {
-            ZoneScopedN("Renderer::Update::FrameStatistics");
+            BT_ZONE_SCOPE("Renderer::Update::FrameStatistics");
             if (auto* statisticsService = currentRenderGraph->GetStatisticsService()) {
                 statisticsService->OnFrameComplete(m_frameIndex, computeQueue); // Gather statistics for the last iteration of the frame
                 statisticsService->OnFrameComplete(m_frameIndex, graphicsQueue); // Gather statistics for the last iteration of the frame
@@ -3206,7 +3209,7 @@ void Renderer::Update(float elapsedSeconds) {
 }
 
 void Renderer::PostUpdate() {
-    ZoneScopedN("Renderer::PostUpdate");
+    BT_ZONE_SCOPE("Renderer::PostUpdate");
 	if (!currentScene) {
         return;
     }
@@ -4499,7 +4502,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
 }
 
 void Renderer::Render() {
-    ZoneScopedN("Renderer::Render");
+    BT_ZONE_SCOPE("Renderer::Render");
 
     const auto runCapturedStage = [this](const char* stageName, auto&& stageFn) {
         const auto stageStart = std::chrono::steady_clock::now();
@@ -4559,7 +4562,7 @@ void Renderer::Render() {
     auto& deviceManager = DeviceManager::GetInstance();
 
     {
-        ZoneScopedN("Renderer::Render::PrepareRenderContext");
+        BT_ZONE_SCOPE("Renderer::Render::PrepareRenderContext");
         runCapturedStage("PrepareRenderContext", [&]() {
             m_context.currentScene = m_sceneRenderOverlapEnabled ? nullptr : currentScene.get();
             m_context.hasPrimaryCamera = false;
@@ -4694,12 +4697,12 @@ void Renderer::Render() {
     }
 
     {
-        ZoneScopedN("Renderer::Render::CLodVisibilityTelemetry");
+        BT_ZONE_SCOPE("Renderer::Render::CLodVisibilityTelemetry");
         MaybeRequestCLodVisibilityTelemetry();
         MaybeRequestCLodVirtualShadowTelemetry();
     }
     runCapturedStage("RenderGraphExecute", [&]() {
-        ZoneScopedN("Renderer::Render::RenderGraphExecute");
+        BT_ZONE_SCOPE("Renderer::Render::RenderGraphExecute");
         if (renderGraphBatchTraceEnabled) {
             ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "before RenderGraph::Execute");
             spdlog::info("Renderer: frame {} entering RenderGraph::Execute", m_totalFramesRendered);
@@ -4745,7 +4748,7 @@ void Renderer::Render() {
     // Present the frame
     rhi::Result presentResult = rhi::Result::Ok;
     runCapturedStage("Present", [&]() {
-        ZoneScopedN("Renderer::Render::Present");
+        BT_ZONE_SCOPE("Renderer::Render::Present");
         if (renderGraphBatchTraceEnabled) {
             spdlog::info("Renderer: frame {} calling Present for slot {}", m_totalFramesRendered, renderedFrameIndex);
         }
@@ -4783,7 +4786,7 @@ void Renderer::Render() {
 	}
 
     runCapturedStage("SignalFence", [&]() {
-        ZoneScopedN("Renderer::Render::SignalFence");
+        BT_ZONE_SCOPE("Renderer::Render::SignalFence");
         SignalFence(graphicsQueue, renderedFrameIndex);
         br::telemetry::nvperf::EndFrameCapture(deviceManager.GetBackend(), graphicsQueue, m_totalFramesRendered);
     });
@@ -4792,7 +4795,7 @@ void Renderer::Render() {
 
     runCapturedStage("ReadbackRequests", [&]() {
         if (currentRenderGraph) {
-            ZoneScopedN("Renderer::Render::ReadbackRequests");
+            BT_ZONE_SCOPE("Renderer::Render::ReadbackRequests");
             if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
                 readbackService->ProcessReadbackRequests(); // Process readback captures
             }
