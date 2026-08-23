@@ -73,6 +73,7 @@ std::uint32_t ReadEnvironmentUint(const char* name, std::uint32_t fallback) {
 const char* DomainName(TaskDomain domain) {
     switch (domain) {
     case TaskDomain::General: return "General";
+    case TaskDomain::RendererState: return "RendererState";
     case TaskDomain::StaticImport: return "StaticImport";
     case TaskDomain::AssetImport: return "AssetImport";
     case TaskDomain::TextureProcessing: return "TextureProcessing";
@@ -343,6 +344,7 @@ void TaskSchedulerManager::Initialize(Config config) {
         state.domains[i].limit = m_workerCount;
     }
     state.domains[static_cast<std::size_t>(TaskDomain::StaticImport)].limit = staticLimit;
+    state.domains[static_cast<std::size_t>(TaskDomain::RendererState)].limit = 1u;
     state.domains[static_cast<std::size_t>(TaskDomain::AssetImport)].limit = std::min(4u, m_workerCount);
     state.domains[static_cast<std::size_t>(TaskDomain::TextureProcessing)].limit = std::min(2u, m_workerCount);
     state.domains[static_cast<std::size_t>(TaskDomain::ShaderCompile)].limit = shaderLimit;

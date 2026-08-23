@@ -722,6 +722,12 @@ void Renderer::Initialize(
     }
     ::ResourceManager::GetInstance().Initialize();
     TaskSchedulerManager::GetInstance().Initialize();
+    m_asyncStateGraph = std::make_unique<br::render::AsyncStateGraph>(
+        TaskSchedulerManager::GetInstance(), "RendererStateGraph");
+    m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight);
+    m_asyncStateGraph->SetReadyCallback([this](const br::render::ArtifactSnapshot& artifact) {
+        if (m_rendererStatePublisher) (void)m_rendererStatePublisher->PublishArtifact(artifact);
+    });
     SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
         TaskSchedulerManager::GetInstance().Submit(
             TaskLane::Background, TaskDomain::Cleanup, taskName, std::move(task));
@@ -3028,6 +3034,26 @@ void Renderer::Update(float elapsedSeconds) {
 		}
         });
 
+    runCapturedStage("CommitPublishedRendererState", [&]() {
+        BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState");
+        if (m_asyncStateGraph) m_asyncStateGraph->PumpGpuCompletions();
+        m_context.publishedRendererState = m_rendererStatePublisher
+            ? m_rendererStatePublisher->Commit(m_frameIndex)
+            : nullptr;
+        if (m_asyncStateGraph && m_context.publishedRendererState) {
+            const auto markFragmentPublished = [this](const br::render::PublishedStateFragment& fragment) {
+                for (const auto& artifact : fragment.dependencyClosure) {
+                    m_asyncStateGraph->MarkPublished(artifact.key, artifact.revision);
+                }
+            };
+            markFragmentPublished(m_context.publishedRendererState->materials);
+            markFragmentPublished(m_context.publishedRendererState->geometry);
+            markFragmentPublished(m_context.publishedRendererState->drawRecords);
+            markFragmentPublished(m_context.publishedRendererState->activeDrawLists);
+            markFragmentPublished(m_context.publishedRendererState->indirectWorkloads);
+        }
+    });
+
 	// Final material bindings are published only after the reusable frame slot is
 	// known idle. The transfer service pumps its own graphics work here, before
 	// material-buffer uploads are captured by CompileFrame.
@@ -3053,6 +3079,7 @@ void Renderer::Update(float elapsedSeconds) {
     auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     auto outputRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
     UpdateContext updateData{};
+    updateData.publishedRendererState = m_context.publishedRendererState;
     updateData.drawStats = drawStats;
     updateData.objectManager = m_pObjectManager.get();
     updateData.meshManager = m_pMeshManager.get();
@@ -4824,6 +4851,18 @@ void Renderer::SignalFence(rhi::Queue commandQueue, uint8_t frameIndexToSignal) 
     }
     m_currentFrameFenceValue = nextFrameFenceValue;
 
+    if (currentRenderGraph) {
+        if (auto* uploadService = currentRenderGraph->GetUploadService()) {
+            auto timeline = std::make_shared<rhi::Timeline>(m_frameFence.Get());
+            uploadService->NotifyTrackedUploadsSubmitted(
+                timeline,
+                m_currentFrameFenceValue,
+                [timeline](std::uint64_t value) {
+                    return timeline->GetCompletedValue() >= value;
+                });
+        }
+    }
+
     // Store the fence value for the current frame
     m_frameFenceValues[frameIndexToSignal] = m_currentFrameFenceValue;
     spdlog::debug(
@@ -4879,6 +4918,17 @@ void Renderer::Cleanup() {
 		m_pMaterialManager->ShutdownTextureStreaming();
 	}
 	spdlog::info("Cleaning up resources");
+    // Close the renderer-state request boundary before any upload/descriptor
+    // service it can target is destroyed. CancelAndWait also prevents a late
+    // producer completion from publishing into manager teardown.
+    if (m_asyncStateGraph) {
+        m_asyncStateGraph->Shutdown();
+        m_asyncStateGraph.reset();
+    }
+    if (m_rendererStatePublisher) {
+        m_rendererStatePublisher->DiscardCandidate();
+        m_rendererStatePublisher.reset();
+    }
     if (currentRenderGraph) {
         if (auto* uploadService = currentRenderGraph->GetUploadService()) {
             uploadService->Cleanup();

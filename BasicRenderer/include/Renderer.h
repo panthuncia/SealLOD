@@ -50,6 +50,8 @@
 #include "Render/Pipeline/PipelineRecipe.h"
 #include "Render/ProducerPassServices.h"
 #include "Render/ProducerPersistentState.h"
+#include "Render/AsyncStateGraph.h"
+#include "Render/PublishedRendererState.h"
 
 class DynamicResource;
 namespace org { class ExternalTextureResource; }
@@ -260,6 +262,8 @@ private:
     std::unique_ptr<br::ReadbackManager> m_pReadbackManager = nullptr;
     std::unique_ptr<TextureFactory> m_pTextureFactory = nullptr;
     std::unique_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
+    std::unique_ptr<br::render::AsyncStateGraph> m_asyncStateGraph;
+    std::unique_ptr<br::render::RendererStatePublisher> m_rendererStatePublisher;
     ShaderVariantRequestService m_shaderVariantRequestService;
 
 	ManagerInterface m_managerInterface;

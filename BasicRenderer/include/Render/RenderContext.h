@@ -5,6 +5,7 @@
 
 #include "Scene/Components.h"
 #include "Render/SceneFrameSnapshot.h"
+#include "Render/PublishedRendererState.h"
 
 class Scene;
 class ObjectManager;
@@ -23,6 +24,7 @@ class CLodRayTracingSystem;
 }
 
 struct RenderContext {
+	std::shared_ptr<const br::render::PublishedRendererState> publishedRendererState;
 	Components::DrawStats drawStats;
 	ObjectManager* objectManager;
 	MeshManager* meshManager;
@@ -56,6 +58,7 @@ struct RenderContext {
 };
 
 struct UpdateContext {
+	std::shared_ptr<const br::render::PublishedRendererState> publishedRendererState;
 	Components::DrawStats drawStats;
 	ObjectManager* objectManager = nullptr;
 	MeshManager* meshManager = nullptr;

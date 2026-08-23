@@ -18,7 +18,7 @@ namespace br {
 
 enum class TaskLane : std::uint8_t { FrameCritical, Streaming, Background, Count };
 enum class TaskDomain : std::uint8_t {
-    General, StaticImport, AssetImport, TextureProcessing, ShaderCompile, Cleanup, Count
+    General, RendererState, StaticImport, AssetImport, TextureProcessing, ShaderCompile, Cleanup, Count
 };
 
 class TaskScope {

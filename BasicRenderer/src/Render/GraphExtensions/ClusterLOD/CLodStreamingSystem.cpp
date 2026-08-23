@@ -242,6 +242,10 @@ namespace {
 
         void RecordImmediateCommands(ImmediateExecutionContext& context) override {
             for (const auto& upload : m_inputs.uploads) {
+                if (upload.ticket && upload.ticket->state.load(std::memory_order_acquire) ==
+                    TrackedUploadTicketState::Cancelled) {
+                    continue;
+                }
                 if (!upload.dstResource || !upload.srcUploadBuffer || upload.size == 0) {
                     continue;
                 }
