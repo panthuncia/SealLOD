@@ -47,7 +47,7 @@ std::uint64_t VersionedGpuBufferJournal::AppendWrite(std::uint64_t elementOffset
     VersionedGpuBufferWrite write;
     write.sequence = ++m_writeSequence;
     write.elementOffset = elementOffset;
-    write.bytes.assign(bytes.begin(), bytes.end());
+    write.bytes = std::make_shared<const std::vector<std::byte>>(bytes.begin(), bytes.end());
     m_writes.push_back(std::move(write));
     m_elementCount = (std::max)(m_elementCount, resultingElementCount);
     return m_writeSequence;
@@ -124,7 +124,8 @@ std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferShadow(
             error = "versioned buffer write journal sequence invalid";
             return {};
         }
-        if (write.bytes.size() % input.elementStride != 0u) {
+        const auto& bytes = write.bytes;
+        if (bytes && bytes->size() % input.elementStride != 0u) {
             error = "versioned buffer journal write is not row aligned";
             return {};
         }
@@ -133,11 +134,12 @@ std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferShadow(
             return {};
         }
         const auto byteOffset = static_cast<std::size_t>(write.elementOffset * input.elementStride);
-        if (byteOffset > shadow->size() || write.bytes.size() > shadow->size() - byteOffset) {
+        const auto byteCount = bytes ? bytes->size() : 0u;
+        if (byteOffset > shadow->size() || byteCount > shadow->size() - byteOffset) {
             error = "versioned buffer journal write exceeds desired size";
             return {};
         }
-        std::copy(write.bytes.begin(), write.bytes.end(), shadow->begin() + byteOffset);
+        if (bytes) std::copy(bytes->begin(), bytes->end(), shadow->begin() + byteOffset);
         lastSequence = write.sequence;
     }
     if ((!input.writes.empty() && lastSequence != input.writeSequence) ||

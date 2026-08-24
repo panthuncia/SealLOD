@@ -31,7 +31,7 @@ namespace org { class DynamicBuffer; }
 using org::DynamicBuffer;
 namespace org::runtime { class IUploadService; }
 class PublishedStateResourceResolver;
-namespace br::render { class RendererStateRequestService; }
+namespace br::render { class RendererStateRequestService; struct PublishedRendererState; }
 class Material;
 class Mesh;
 
@@ -493,7 +493,8 @@ public:
 	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
 		org::runtime::IUploadService* uploads);
 	std::uint64_t PublishDesiredBufferState();
-	bool TryActivatePublishedBufferState();
+	void AcknowledgePublishedBufferState(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
 	std::shared_ptr<SortedUnsignedIntBuffer> TryGetActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
 		auto it = m_activeDrawSetIndices.find(workloadKey);
@@ -597,7 +598,7 @@ private:
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	org::runtime::IUploadService* m_uploadService = nullptr;
 	std::uint64_t m_objectBufferStateRevision = 0;
-	std::uint64_t m_activeObjectBufferStateRevision = 0;
+	std::atomic<std::uint64_t> m_activeObjectBufferStateRevision{ 0 };
 	std::uint64_t m_objectBufferFingerprint = 0;
 	std::uint32_t m_objectBufferDiagnosticTicks = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;

@@ -125,13 +125,14 @@ struct RendererStatePublisherStats {
 
 struct RendererStateCommitResult {
     std::shared_ptr<const PublishedRendererState> state;
+    bool committed = false;
     std::array<std::shared_ptr<const PublishedRendererState>, 3> retiredStates{};
     std::uint8_t retiredStateCount = 0;
     std::function<void(std::uint64_t)> rejectedCallback;
     std::uint64_t rejectedEpoch = 0;
 
     [[nodiscard]] bool HasDeferredWork() const noexcept {
-        return retiredStateCount != 0 || static_cast<bool>(rejectedCallback);
+        return committed || retiredStateCount != 0 || static_cast<bool>(rejectedCallback);
     }
     void RunDeferred() noexcept;
 };

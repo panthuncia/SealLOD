@@ -23,7 +23,7 @@ struct PublishedGpuBufferVersion;
 struct VersionedGpuBufferWrite {
     std::uint64_t sequence = 0;
     std::uint64_t elementOffset = 0;
-    std::vector<std::byte> bytes;
+    std::shared_ptr<const std::vector<std::byte>> bytes;
 };
 
 struct VersionedGpuBufferBuildInput {

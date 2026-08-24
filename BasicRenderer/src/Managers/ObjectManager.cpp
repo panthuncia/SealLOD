@@ -307,7 +307,8 @@ void ObjectManager::SetRendererStateServices(
 				br::render::PublishedResourceKey{
 					br::render::PublishedFragmentKind::DrawRecords,
 					br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
-				buffer, false));
+				buffer, true));
+		buffer->SetVersionedGraphExclusive(true);
 		m_resources.erase(identifier);
 	}
 }
@@ -364,7 +365,7 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 			"Object buffer graph progress: desiredRevision={} artifactRevision={} readiness={} activeRevision={} publishedRevision={} blockers={} ageMs={} chain='{}' error='{}'",
 			diagnostic.desiredRevision, diagnostic.artifact.revision,
 			static_cast<unsigned int>(diagnostic.artifact.readiness),
-			m_activeObjectBufferStateRevision,
+			m_activeObjectBufferStateRevision.load(std::memory_order_acquire),
 			published ? published->drawRecords.revision : 0u,
 			diagnostic.blockers.size(), diagnostic.stateAge.count() / 1000,
 			diagnostic.blockerChain, diagnostic.error);
@@ -388,13 +389,12 @@ std::optional<br::render::ArtifactRequirement> ObjectManager::DesiredBufferState
 		m_objectBufferStateRevision, br::render::ArtifactReadiness::GpuReady };
 }
 
-bool ObjectManager::TryActivatePublishedBufferState() {
-	const auto source = br::render::PublishedStateSource::ProcessSource();
-	const auto published = source ? source->Load() : nullptr;
+void ObjectManager::AcknowledgePublishedBufferState(
+	const std::shared_ptr<const br::render::PublishedRendererState>& published) {
 	const auto state = published
 		? published->drawRecords.payload.Get<br::render::PublishedObjectBufferState>() : nullptr;
-	if (!state) return false;
-	if (m_activeObjectBufferStateRevision == published->drawRecords.revision) return true;
+	if (!state || m_activeObjectBufferStateRevision.load(std::memory_order_acquire) ==
+		published->drawRecords.revision) return;
 
 	bool exactSnapshot = true;
 	for (auto& binding : m_graphBufferBindings) {
@@ -402,7 +402,7 @@ bool ObjectManager::TryActivatePublishedBufferState() {
 			[&](const br::render::ObjectBufferDependencyDTO& value) {
 				return value.key == binding.key;
 			});
-		if (expected == state->buffers.end()) return false;
+		if (expected == state->buffers.end()) return;
 		const auto dependency = std::ranges::find_if(
 			published->drawRecords.dependencyClosure,
 			[&](const br::render::ArtifactSnapshot& value) {
@@ -412,7 +412,7 @@ bool ObjectManager::TryActivatePublishedBufferState() {
 			? dependency->payload.Get<br::render::RendererStateFragmentArtifact>() : nullptr;
 		const auto version = root
 			? root->fragment.payload.Get<br::render::PublishedGpuBufferVersion>() : nullptr;
-		if (!version || version->revision != expected->revision) return false;
+		if (!version || version->revision != expected->revision) return;
 		const auto desired = binding.buffer->CaptureVersionedGraphState();
 		if (desired.writeSequence != version->writeSequence) {
 			exactSnapshot = false;
@@ -425,7 +425,7 @@ bool ObjectManager::TryActivatePublishedBufferState() {
 				"Object buffer graph parity failed: buffer='{}' revision={} graphBytes={} liveBytes={}",
 				binding.identifier.ToString(), version->revision,
 				version->cpuShadow ? version->cpuShadow->size() : 0u, liveBytes.size());
-			return false;
+			return;
 		}
 		const auto mismatch = std::mismatch(
 			version->cpuShadow->begin(), version->cpuShadow->end(), liveBytes.begin());
@@ -434,23 +434,13 @@ bool ObjectManager::TryActivatePublishedBufferState() {
 				"Object buffer graph parity failed: buffer='{}' revision={} firstMismatch={}",
 				binding.identifier.ToString(), version->revision,
 				std::distance(version->cpuShadow->begin(), mismatch.first));
-			return false;
+			return;
 		}
 		binding.buffer->AcknowledgeVersionedGraphState(version);
 	}
-	const bool firstActivation = m_activeObjectBufferStateRevision == 0;
-	if (firstActivation) {
-		for (auto& binding : m_graphBufferBindings) binding.buffer->SetVersionedGraphExclusive(true);
-	}
-	for (const auto& [_, resolver] : m_graphBufferResolvers) {
-		if (!resolver) return false;
-		resolver->SetPublishedEnabled(true);
-		if (firstActivation) resolver->ClearFallback();
-	}
-	m_activeObjectBufferStateRevision = published->drawRecords.revision;
-	spdlog::info("Object buffer graph state activated: epoch={} revision={} buffers={} exactLiveSnapshot={}",
+	m_activeObjectBufferStateRevision.store(published->drawRecords.revision, std::memory_order_release);
+	spdlog::info("Object buffer graph state acknowledged: epoch={} revision={} buffers={} exactLiveSnapshot={}",
 		published->epoch, published->drawRecords.revision, m_graphBufferBindings.size(), exactSnapshot);
-	return true;
 }
 
 void ObjectManager::StopDeferredRetireWorker() {

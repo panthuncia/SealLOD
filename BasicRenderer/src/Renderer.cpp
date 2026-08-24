@@ -729,6 +729,8 @@ void Renderer::Initialize(
     }
     ::ResourceManager::GetInstance().Initialize();
     TaskSchedulerManager::GetInstance().Initialize();
+    m_rendererStateCommitScope = TaskSchedulerManager::GetInstance().CreateScope(
+        "RendererStateCommitCleanup");
     m_asyncStateGraph = std::make_unique<br::render::AsyncStateGraph>(
         TaskSchedulerManager::GetInstance(), "RendererStateGraph");
     m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight);
@@ -3077,10 +3079,34 @@ void Renderer::Update(float elapsedSeconds) {
                 auto commit = m_rendererStatePublisher->Commit(m_frameIndex);
                 m_context.publishedRendererState = commit.state;
                 if (commit.HasDeferredWork()) {
+                    auto* objectManager = commit.committed ? m_pObjectManager.get() : nullptr;
+                    auto committedState = commit.committed ? commit.state : nullptr;
+                    auto* stateGraph = m_asyncStateGraph.get();
                     const bool submitted = TaskSchedulerManager::GetInstance().Submit(
-                        TaskLane::Background, TaskDomain::Cleanup,
+                        m_rendererStateCommitScope, TaskLane::Background, TaskDomain::Cleanup,
                         "RendererStatePublisher::DeferredCommit",
-                        [commit = std::move(commit)]() mutable { commit.RunDeferred(); });
+                        [commit = std::move(commit), objectManager,
+                            stateGraph, committedState = std::move(committedState)](
+                            const br::TaskContext& context) mutable {
+                            if (context.StopRequested()) return;
+                            if (objectManager && committedState) {
+                                objectManager->AcknowledgePublishedBufferState(committedState);
+                            }
+                            if (stateGraph && committedState) {
+                                for (std::size_t slot = 0; slot < br::render::kPublishedFragmentCount; ++slot) {
+                                    const auto& fragment = committedState->Fragment(
+                                        static_cast<br::render::PublishedFragmentKind>(slot));
+                                    if (fragment.revision != 0 &&
+                                        fragment.publicationRoot.kind != br::render::ArtifactKind::Generic) {
+                                        stateGraph->MarkPublished(fragment.publicationRoot, fragment.revision);
+                                    }
+                                    for (const auto& artifact : fragment.dependencyClosure) {
+                                        stateGraph->MarkPublished(artifact.key, artifact.revision);
+                                    }
+                                }
+                            }
+                            commit.RunDeferred();
+                        });
                     if (!submitted) {
                         spdlog::warn("Renderer-state deferred commit cleanup was rejected by the scheduler");
                     }
@@ -3092,31 +3118,11 @@ void Renderer::Update(float elapsedSeconds) {
             spdlog::critical("CommitPublishedRendererState: publisher Commit failed: {}", exception.what());
             throw;
         }
-        if (m_asyncStateGraph && m_context.publishedRendererState) {
-            const auto markFragmentPublished = [this](const br::render::PublishedStateFragment& fragment) {
-                if (fragment.revision != 0 &&
-                    fragment.publicationRoot.kind != br::render::ArtifactKind::Generic) {
-                    m_asyncStateGraph->MarkPublished(fragment.publicationRoot, fragment.revision);
-                }
-                for (const auto& artifact : fragment.dependencyClosure) {
-                    m_asyncStateGraph->MarkPublished(artifact.key, artifact.revision);
-                }
-            };
-            markFragmentPublished(m_context.publishedRendererState->materials);
-			markFragmentPublished(m_context.publishedRendererState->terrain);
-            markFragmentPublished(m_context.publishedRendererState->geometry);
-            markFragmentPublished(m_context.publishedRendererState->drawRecords);
-            markFragmentPublished(m_context.publishedRendererState->activeDrawLists);
-            markFragmentPublished(m_context.publishedRendererState->indirectWorkloads);
-        }
 		if (m_pMaterialManager) {
 			(void)m_pMaterialManager->TryActivatePublishedMaterialState();
 		}
 		if (m_pTerrainManager) {
 			(void)m_pTerrainManager->TryActivatePublishedTerrainState();
-		}
-		if (m_pObjectManager) {
-			(void)m_pObjectManager->TryActivatePublishedBufferState();
 		}
     });
 
@@ -5038,6 +5044,10 @@ void Renderer::Cleanup() {
     // service it can target is destroyed. CancelAndWait also prevents a late
     // producer completion from publishing into manager teardown.
     m_managerInterface.SetRendererStateRequests(nullptr);
+    if (m_rendererStateCommitScope.Valid()) {
+        m_rendererStateCommitScope.CancelAndWait();
+        m_rendererStateCommitScope = {};
+    }
     if (m_rendererStateRequests) {
         spdlog::info("Renderer state cleanup: stopping request service");
         m_rendererStateRequests->Stop();

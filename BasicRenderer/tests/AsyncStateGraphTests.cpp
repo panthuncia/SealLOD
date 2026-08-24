@@ -54,6 +54,9 @@ int main() {
         capture = journal.CaptureDesired();
         Check(capture.previous == published && capture.initialBytes.empty() &&
             capture.writes.size() == 2 && capture.capacity == 8 && capture.elementCount == 4);
+        const auto repeatedCapture = journal.CaptureDesired();
+        Check(repeatedCapture.writes.size() == capture.writes.size() &&
+            repeatedCapture.writes.back().bytes == capture.writes.back().bytes);
 
         VersionedGpuBufferBuildInput input{};
         input.elementStride = sizeof(std::uint32_t);
@@ -92,12 +95,14 @@ int main() {
         successor.previous = previous;
         const std::uint32_t replacement = 200;
         const std::uint32_t appended = 40;
+        auto replacementBytes = std::make_shared<std::vector<std::byte>>(sizeof(replacement));
+        auto appendedBytes = std::make_shared<std::vector<std::byte>>(sizeof(appended));
+        std::memcpy(replacementBytes->data(), &replacement, sizeof(replacement));
+        std::memcpy(appendedBytes->data(), &appended, sizeof(appended));
         successor.writes = {
-            { 2, 1, std::vector<std::byte>(sizeof(replacement)) },
-            { 3, 3, std::vector<std::byte>(sizeof(appended)) }
+            { 2, 1, replacementBytes },
+            { 3, 3, appendedBytes }
         };
-        std::memcpy(successor.writes[0].bytes.data(), &replacement, sizeof(replacement));
-        std::memcpy(successor.writes[1].bytes.data(), &appended, sizeof(appended));
         const auto successorShadow = ReplayVersionedGpuBufferShadow(successor, error);
         Check(successorShadow && error.empty());
         const auto* rows = reinterpret_cast<const std::uint32_t*>(successorShadow->data());

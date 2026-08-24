@@ -266,6 +266,7 @@ private:
     std::unique_ptr<br::render::AsyncStateGraph> m_asyncStateGraph;
     std::unique_ptr<br::render::RendererStatePublisher> m_rendererStatePublisher;
     std::unique_ptr<br::render::RendererStateRequestService> m_rendererStateRequests;
+    TaskScope m_rendererStateCommitScope;
     ShaderVariantRequestService m_shaderVariantRequestService;
 
 	ManagerInterface m_managerInterface;

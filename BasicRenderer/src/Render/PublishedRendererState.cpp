@@ -160,6 +160,7 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         if (m_candidate.baseEpoch == activeEpoch) {
             if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
             m_active = std::move(m_candidate.state);
+            result.committed = true;
             ++m_stats.committed;
         } else {
             ++m_stats.rejectedBaseEpoch;
