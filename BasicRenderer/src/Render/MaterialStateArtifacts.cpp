@@ -64,6 +64,16 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::Materials;
     root->fragment.revision = context.revision;
+    // Material rows contain bindless descriptor indices. Retain the exact
+    // texture-binding revisions that those indices were validated against for
+    // as long as this published state (and any in-flight frame using it) lives.
+    root->fragment.dependencyClosure = context.dependencies;
+    for (const auto& expected : input->textureBindings) {
+        const auto found = textureDependencies.find(expected.streamingTextureID);
+        if (found == textureDependencies.end()) continue;
+        const auto binding = found->second->payload.Get<PublishedTextureBinding>();
+        if (binding && binding->image) root->fragment.resourceHolds.push_back(binding->image);
+    }
     root->fragment.payload = ArtifactPayload::Make<PublishedMaterialState>(std::move(state));
     const auto addCatalogEntry = [&](std::uint64_t variant,
         const std::shared_ptr<const PublishedGpuBufferVersion>& version) {

@@ -1411,9 +1411,6 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 }
 
 bool MaterialManager::TryActivatePublishedMaterialState() {
-	if (m_materialGraphActive) {
-		return true;
-	}
 	const auto source = br::render::PublishedStateSource::ProcessSource();
 	const auto published = source ? source->Load() : nullptr;
 	const auto materialState = published
@@ -1430,11 +1427,15 @@ bool MaterialManager::TryActivatePublishedMaterialState() {
 			return false;
 		}
 	}
+	if (published->materials.revision == m_activeMaterialPublishedRevision) {
+		return true;
+	}
+	const bool firstActivation = !m_materialGraphActive;
 	for (const auto& resolver : m_materialTableResolvers) {
 		resolver->SetPublishedEnabled(true);
-		resolver->ClearFallback();
+		if (firstActivation) resolver->ClearFallback();
 	}
-	m_materialStartupFallbacks = {};
+	if (firstActivation) m_materialStartupFallbacks = {};
 	m_materialGraphActive = true;
 	m_activeMaterialPublishedRevision = published->materials.revision;
 	const auto resolvedBase = m_materialTableResolvers[0]->Resolve();
