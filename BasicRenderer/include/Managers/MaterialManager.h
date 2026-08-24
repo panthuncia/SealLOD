@@ -67,7 +67,6 @@ public:
 			std::memcmp(&signature.openPBRData, &data, sizeof(data)) == 0) {
 			return;
 		}
-		if (!m_materialGraphActive) m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, data);
 		signature.openPBRData = data;
 		signature.valid = true;
 		++m_materialRowsRevision;
@@ -79,6 +78,7 @@ public:
 	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
 
 	std::uint64_t CommitGpuVisibleSnapshot(bool forceGraphSnapshot = false);
+	bool TryActivatePublishedMaterialState();
 	const std::vector<unsigned int>& GetActiveCompileFlagsSlots() const { return m_publishedActiveCompileFlagsSlots; }
 	const std::vector<MaterialCompileFlags>& GetActiveCompileFlags() const { return m_publishedActiveCompileFlags; }
 	unsigned int GetCompileFlagsSlotsUsed() const { return m_publishedCompileFlagsSlotsUsed; }
@@ -145,7 +145,6 @@ private:
 
 	static constexpr unsigned int kBufferGrowthSize = 100;
 	static constexpr unsigned int kInitialMaterialBufferCapacity = 4096;
-	static constexpr bool kForceMaterialBufferResizeEveryMaterial = false;
 
 	static constexpr unsigned int kScanBlockSize = 1024;
 
@@ -164,9 +163,6 @@ private:
 	std::shared_ptr<DynamicStructuredBuffer<uint32_t>> m_scannedBlockSumsBuffer;
 	std::shared_ptr<DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>> m_materialEvaluationCommandBuffer;
 
-	std::shared_ptr<DynamicStructuredBuffer<PerMaterialCB>> m_perMaterialDataBuffer;
-	std::shared_ptr<DynamicStructuredBuffer<PerMaterialEvalCB>> m_perMaterialEvalDataBuffer;
-	std::shared_ptr<DynamicStructuredBuffer<PerMaterialOpenPBRCB>> m_perMaterialOpenPBRDataBuffer;
 	std::unique_ptr<TextureStreamingManager> m_textureStreamingManager;
 	std::vector<uint32_t> m_dirtyMaterialIDs;
 	std::unordered_set<uint32_t> m_dirtyMaterialIDSet;
@@ -177,9 +173,7 @@ private:
 	std::uint64_t m_materialRowsRevision = 1;
 	bool m_materialGraphActive = false;
 	std::uint64_t m_activeMaterialPublishedRevision = 0;
-	std::shared_ptr<org::DynamicGloballyIndexedResource> m_publishedMaterialBaseResource;
-	std::shared_ptr<org::DynamicGloballyIndexedResource> m_publishedMaterialEvalResource;
-	std::shared_ptr<org::DynamicGloballyIndexedResource> m_publishedMaterialOpenPbrResource;
+	std::array<std::shared_ptr<org::DynamicGloballyIndexedResource>, 3> m_materialStartupFallbacks;
 	std::uint64_t m_materialStateFingerprint = 0;
 	std::uint64_t m_pendingMaterialStateFingerprint = 0;
 	std::uint32_t m_materialStateStableFrames = 0;

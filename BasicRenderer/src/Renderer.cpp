@@ -3083,6 +3083,9 @@ void Renderer::Update(float elapsedSeconds) {
             markFragmentPublished(m_context.publishedRendererState->activeDrawLists);
             markFragmentPublished(m_context.publishedRendererState->indirectWorkloads);
         }
+		if (m_pMaterialManager) {
+			(void)m_pMaterialManager->TryActivatePublishedMaterialState();
+		}
     });
 
 	// Final material bindings are published only after the reusable frame slot is
