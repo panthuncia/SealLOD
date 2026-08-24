@@ -426,6 +426,23 @@ MaterialManager::MaterialManager() {
 	m_resources[Builtin::PerMaterialDataBuffer] = m_publishedMaterialBaseResource;
 	m_resources["Builtin::PerMaterialEvalDataBuffer"] = m_publishedMaterialEvalResource;
 	m_resources[Builtin::PerMaterialOpenPBRDataBuffer] = m_publishedMaterialOpenPbrResource;
+	const auto publishedSource = br::render::PublishedStateSource::ProcessSource();
+	const auto makeMaterialResolver = [&](std::uint64_t variant,
+		const std::shared_ptr<Resource>& fallback) {
+		return std::make_shared<PublishedStateResourceResolver>(publishedSource,
+			br::render::PublishedResourceKey{
+				br::render::PublishedFragmentKind::Materials,
+				br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
+			fallback, false);
+	};
+	m_materialTableResolvers = {
+		makeMaterialResolver(br::render::kMaterialBaseTableVariant, m_publishedMaterialBaseResource),
+		makeMaterialResolver(br::render::kMaterialEvalTableVariant, m_publishedMaterialEvalResource),
+		makeMaterialResolver(br::render::kMaterialOpenPbrTableVariant, m_publishedMaterialOpenPbrResource)
+	};
+	m_resolvers[Builtin::PerMaterialDataBuffer] = m_materialTableResolvers[0];
+	m_resolvers["Builtin::PerMaterialEvalDataBuffer"] = m_materialTableResolvers[1];
+	m_resolvers[Builtin::PerMaterialOpenPBRDataBuffer] = m_materialTableResolvers[2];
 
 	// Reserve built-in material bins up front so render-graph material evaluation buffers are
 	// fully sized before passes/materialization/upload steps touch them.

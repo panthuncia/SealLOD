@@ -13,6 +13,7 @@
 #include "Render/IndirectCommand.h"
 #include "Render/MaterialCompileFlagsSlotRegistry.h"
 #include "Render/RasterBucketFlags.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 
 namespace org::runtime {
 class IReadbackService;
@@ -118,6 +119,7 @@ private:
 	std::vector<std::shared_ptr<Resource>> CollectActiveMaterialTextureResources() const;
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
+	std::array<std::shared_ptr<PublishedStateResourceResolver>, 3> m_materialTableResolvers;
 	std::unordered_map<uint32_t, std::vector<std::shared_ptr<Resource>>> m_trackedMaterialTextures;
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;

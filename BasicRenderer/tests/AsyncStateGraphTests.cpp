@@ -275,6 +275,16 @@ int main() {
     PublishedStateResourceResolver resolver(source, {});
     Check(resolver.GetContentVersion() == materialState->epoch);
     Check(resolver.Resolve().empty());
+	PublishedStateResourceResolver stagedResolver(source, {}, {}, false);
+	const auto stagedFallbackVersion = stagedResolver.GetContentVersion();
+	Check(stagedResolver.Resolve().empty());
+	auto epochAdvance = std::make_shared<PublishedRendererState>(*publisher.Active());
+	epochAdvance->epoch = publisher.ActiveEpoch() + 1u;
+	Check(publisher.PublishCandidate({ publisher.ActiveEpoch(), epochAdvance }));
+	(void)publisher.Commit(1);
+	Check(stagedResolver.GetContentVersion() == stagedFallbackVersion);
+	stagedResolver.SetPublishedEnabled(true);
+	Check(stagedResolver.GetContentVersion() != stagedFallbackVersion);
 
     RendererStatePublisher manifestPublisher(2);
     RendererStateRequestService requestService(graph, manifestPublisher);
