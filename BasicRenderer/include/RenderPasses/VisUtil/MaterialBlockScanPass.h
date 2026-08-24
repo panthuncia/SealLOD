@@ -2,6 +2,7 @@
 #include "RenderPasses/Base/ComputePass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
+#include "Render/MaterialStateArtifacts.h"
 
 // Pass A: per-block exclusive scan producing per-element local offsets and per-block totals.
 // Dispatch dimension: x = numBlocks, where numBlocks = ceil(NumMaterials / blockSize).
@@ -32,7 +33,10 @@ public:
         auto& pm = PSOManager::GetInstance();
         auto& cl = executionContext.commandList;
 
-		auto numMaterials = ctx.materialManager->GetCompileFlagsSlotsUsed();
+		const auto materialState = ctx.publishedRendererState
+			? ctx.publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>()
+			: nullptr;
+		const auto numMaterials = materialState ? materialState->compileFlagSlotsUsed : 0u;
         // numBlocks = ceil(N / K)
         const uint32_t numBlocks = (numMaterials + m_blockSize - 1) / m_blockSize;
 

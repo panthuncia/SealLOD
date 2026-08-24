@@ -2,6 +2,7 @@
 #include "RenderPasses/Base/ComputePass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
+#include "Render/MaterialStateArtifacts.h"
 
 // Pass B: scan block sums, add block prefixes to per-element offsets, and write total pixel count.
 // Dispatch dimension: x = 1 (single group), unless we implement recursive scan for very large numBlocks.
@@ -33,7 +34,10 @@ public:
         auto& pm = PSOManager::GetInstance();
         auto& cl = executionContext.commandList;
 
-		auto numMaterials = ctx.materialManager->GetCompileFlagsSlotsUsed();
+		const auto materialState = ctx.publishedRendererState
+			? ctx.publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>()
+			: nullptr;
+		const auto numMaterials = materialState ? materialState->compileFlagSlotsUsed : 0u;
         // numBlocks must match prior pass
         const uint32_t numBlocks = (numMaterials + m_blockSize - 1) / m_blockSize;
 

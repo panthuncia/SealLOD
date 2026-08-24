@@ -13,6 +13,7 @@
 #include "Managers/MaterialManager.h"
 #include "Managers/MeshManager.h"
 #include "Render/RenderContext.h"
+#include "Render/MaterialStateArtifacts.h"
 #include "Render/IndirectCommand.h"
 #include "Render/OutputTypes.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
@@ -275,7 +276,8 @@ public:
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = m_services.renderContext;
+        auto* renderContext = executionContext.hostData->Get<RenderContext>();
+        if (!renderContext) return {};
         auto& ctx = *renderContext;
         auto& cl = executionContext.commandList;
         auto& psoMgr = *m_services.pipelines;
@@ -283,8 +285,12 @@ public:
         cl.SetDescriptorHeaps(ctx.textureDescriptorHeap.GetHandle(), ctx.samplerDescriptorHeap.GetHandle());
         cl.BindLayout(psoMgr.GetComputeRootSignature().GetHandle());
 
-        // Execute one indirect compute per active material slot.
-        const auto& active = ctx.materialManager->GetActiveCompileFlags();
+        // Execute one indirect compute per compile-flag slot captured by this
+        // frame's immutable renderer-state snapshot.
+        const auto materialState = ctx.publishedRendererState
+            ? ctx.publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>()
+            : nullptr;
+        if (!materialState) return {};
         const auto& sig = m_services.commandSignatures->GetMaterialEvaluationCommandSignature();
 
         const uint64_t stride = sizeof(MaterialEvaluationIndirectCommand);
@@ -294,16 +300,17 @@ public:
         const bool terrainRegionMaterialEvaluation =
             m_services.settings->getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation")();
         const auto outputType = m_services.settings->getSettingGetter<unsigned int>("outputType")();
-		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes
+		for (std::size_t activeIndex = 0; activeIndex < materialState->activeCompileFlags.size(); ++activeIndex) {
+            const MaterialCompileFlags flags = materialState->activeCompileFlags[activeIndex];
             if (terrainRegionMaterialEvaluation &&
                 (flags & MaterialCompileFlags::MaterialCompileTerrain) != 0) {
                 continue;
             }
-			unsigned int slot = 0u;
-            if (!ctx.materialManager->TryGetCompileFlagsSlot(flags, slot) ||
-                slot >= ctx.materialManager->GetCompileFlagsSlotsUsed()) {
+            if (activeIndex >= materialState->activeCompileFlagSlots.size()) {
                 continue;
             }
+            const unsigned int slot = materialState->activeCompileFlagSlots[activeIndex];
+            if (slot >= materialState->compileFlagSlotsUsed) continue;
             MaterialCompileFlags shaderKey = GetMaterialEvaluationShaderKey(flags);
             if (outputType == OutputType::COLOR) {
                 shaderKey |= MaterialCompileFlags::MaterialCompileMaterialEvalColorOnly;

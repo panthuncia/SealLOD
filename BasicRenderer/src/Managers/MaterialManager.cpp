@@ -1207,22 +1207,20 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 		compileFlagsSlotsUsed,
 		(std::min<unsigned int>)(slotResidentCapacity, scanCoveredSlots));
 
-	m_publishedCompileFlagsSlotsUsed = publishedSlots;
+	std::vector<br::render::MaterialCompileFlagEntryDTO> activeCompileFlags;
 	{
 		BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot::PublishActiveFlags");
-		m_publishedActiveCompileFlags.clear();
-		m_publishedActiveCompileFlagsSlots.clear();
-		const auto& activeCompileFlags = m_compileFlagsRegistry.GetActiveFlags();
-		m_publishedActiveCompileFlags.reserve(activeCompileFlags.size());
-		m_publishedActiveCompileFlagsSlots.reserve(m_compileFlagsRegistry.GetActiveSlots().size());
-		for (MaterialCompileFlags flags : activeCompileFlags) {
+		const auto& registryActiveFlags = m_compileFlagsRegistry.GetActiveFlags();
+		::std::vector<br::render::MaterialCompileFlagEntryDTO> captured;
+		captured.reserve(registryActiveFlags.size());
+		for (MaterialCompileFlags flags : registryActiveFlags) {
 			unsigned int slot = 0u;
 			if (!TryGetCompileFlagsSlot(flags, slot) || slot >= publishedSlots) {
 				continue;
 			}
-			m_publishedActiveCompileFlags.push_back(flags);
-			m_publishedActiveCompileFlagsSlots.push_back(slot);
+			captured.push_back({ flags, slot });
 		}
+		activeCompileFlags = std::move(captured);
 	}
 
 	if constexpr (kEnableMaterialStateShadow) if (const auto source = br::render::PublishedStateSource::ProcessSource()) {
@@ -1275,13 +1273,13 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 		}
 	}
 	if constexpr (kEnableMaterialStateShadow) if (m_rendererStateRequests) {
-		std::uint64_t fingerprint = m_publishedCompileFlagsSlotsUsed;
+		std::uint64_t fingerprint = publishedSlots;
 		const auto mix = [&fingerprint](std::uint64_t value) {
 			fingerprint ^= value + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
 		};
-		for (std::size_t i = 0; i < m_publishedActiveCompileFlags.size(); ++i) {
-			mix(static_cast<std::uint64_t>(m_publishedActiveCompileFlags[i]));
-			mix(m_publishedActiveCompileFlagsSlots[i]);
+		for (const auto& entry : activeCompileFlags) {
+			mix(static_cast<std::uint64_t>(entry.flags));
+			mix(entry.slot);
 		}
 		mix(m_materialRowsRevision);
 		if (fingerprint != m_pendingMaterialStateFingerprint) {
@@ -1377,12 +1375,8 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			for (const auto& [_, binding] : textureBindingDependencies) {
 				input->textureBindings.push_back(binding);
 			}
-			input->slotsUsed = m_publishedCompileFlagsSlotsUsed;
-			input->activeCompileFlags.reserve(m_publishedActiveCompileFlags.size());
-			for (std::size_t i = 0; i < m_publishedActiveCompileFlags.size(); ++i) {
-				input->activeCompileFlags.push_back({
-					m_publishedActiveCompileFlags[i], m_publishedActiveCompileFlagsSlots[i] });
-			}
+			input->slotsUsed = publishedSlots;
+			input->activeCompileFlags = activeCompileFlags;
 			input->baseTableKey = baseKey;
 			input->evalTableKey = evalKey;
 			input->openPbrTableKey = openPbrKey;
@@ -1442,9 +1436,10 @@ bool MaterialManager::TryActivatePublishedMaterialState() {
 	const auto resolvedEval = m_materialTableResolvers[1]->Resolve();
 	const auto resolvedOpenPbr = m_materialTableResolvers[2]->Resolve();
 	spdlog::info(
-		"MaterialManager: activated graph-owned material tables epoch={} revision={} rows={} capacity={} resolved(base={} expected={} eval={} expected={} openPbr={} expected={})",
+		"MaterialManager: activated graph-owned material tables epoch={} revision={} rows={} capacity={} compileFlagSlots={} activeCompileFlags={} resolved(base={} expected={} eval={} expected={} openPbr={} expected={})",
 		published->epoch, published->materials.revision, materialState->baseTable->elementCount,
-		materialState->baseTable->capacity,
+		materialState->baseTable->capacity, materialState->compileFlagSlotsUsed,
+		materialState->activeCompileFlags.size(),
 		resolvedBase.empty() ? 0u : resolvedBase.front()->GetGlobalResourceID(),
 		materialState->baseTable->resource->GetGlobalResourceID(),
 		resolvedEval.empty() ? 0u : resolvedEval.front()->GetGlobalResourceID(),

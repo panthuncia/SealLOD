@@ -9,6 +9,7 @@
 #include "Managers/MaterialManager.h"
 #include "Managers/MeshManager.h"
 #include "Render/RenderContext.h"
+#include "Render/MaterialStateArtifacts.h"
 #include "Render/IndirectCommand.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -108,15 +109,20 @@ protected:
         rc[0] = TerrainRegionMaterialEval::TerrainSetIndexV1;
         cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rc);
 
-        for (MaterialCompileFlags flags : ctx.materialManager->GetActiveCompileFlags()) {
+        const auto materialState = ctx.publishedRendererState
+            ? ctx.publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>()
+            : nullptr;
+        if (!materialState) return;
+        for (std::size_t activeIndex = 0; activeIndex < materialState->activeCompileFlags.size(); ++activeIndex) {
+            const MaterialCompileFlags flags = materialState->activeCompileFlags[activeIndex];
             if (!TerrainRegionMaterialEval::IsTerrainMaterialFlags(flags)) {
                 continue;
             }
-            uint32_t slot = 0u;
-            if (!ctx.materialManager->TryGetCompileFlagsSlot(flags, slot) ||
-                slot >= ctx.materialManager->GetCompileFlagsSlotsUsed()) {
+            if (activeIndex >= materialState->activeCompileFlagSlots.size()) {
                 continue;
             }
+            const uint32_t slot = materialState->activeCompileFlagSlots[activeIndex];
+            if (slot >= materialState->compileFlagSlotsUsed) continue;
             const uint64_t argOffset = static_cast<uint64_t>(slot) * stride;
             cl.ExecuteIndirect(sig.GetHandle(), argBuf.GetHandle(), argOffset, rhi::ResourceHandle{}, 0, 1);
         }

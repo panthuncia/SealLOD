@@ -3,6 +3,7 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Managers/Singletons/CommandSignatureManager.h"
 #include "Render/RenderContext.h"
+#include "Render/MaterialStateArtifacts.h"
 
 // Runs after histogram + prefix sum + pixel list build.
 // Fills a single indirect arguments buffer with one entry per material.
@@ -45,7 +46,10 @@ public:
         // Push constants:
         // UintRootConstant0 = NumMaterials
         unsigned int rc[NumMiscUintRootConstants] = {};
-        rc[0] = ctx.materialManager->GetCompileFlagsSlotsUsed();
+        const auto materialState = ctx.publishedRendererState
+            ? ctx.publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>()
+            : nullptr;
+        rc[0] = materialState ? materialState->compileFlagSlotsUsed : 0u;
         cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rc);
 
         // Dispatch: one thread per material, rounded up by 64

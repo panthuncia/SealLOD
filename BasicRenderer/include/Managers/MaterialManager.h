@@ -79,9 +79,6 @@ public:
 
 	std::uint64_t CommitGpuVisibleSnapshot(bool forceGraphSnapshot = false);
 	bool TryActivatePublishedMaterialState();
-	const std::vector<unsigned int>& GetActiveCompileFlagsSlots() const { return m_publishedActiveCompileFlagsSlots; }
-	const std::vector<MaterialCompileFlags>& GetActiveCompileFlags() const { return m_publishedActiveCompileFlags; }
-	unsigned int GetCompileFlagsSlotsUsed() const { return m_publishedCompileFlagsSlotsUsed; }
 	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
 		org::runtime::IUploadService* uploads) {
 		m_rendererStateRequests = requests;
@@ -127,9 +124,6 @@ private:
 	std::unordered_map<uint32_t, std::vector<uint32_t>> m_materialTextureStreamingTextureIDs;
 	bool m_textureStreamingFeedbackSuppressed = false;
 	MaterialCompileFlagsSlotRegistry m_compileFlagsRegistry;
-	std::vector<unsigned int> m_publishedActiveCompileFlagsSlots;
-	std::vector<MaterialCompileFlags> m_publishedActiveCompileFlags;
-	unsigned int m_publishedCompileFlagsSlotsUsed = 1;
 
 	unsigned int m_materialSlotsUsed = 0;
 	std::vector<unsigned int> m_freeMaterialSlots;

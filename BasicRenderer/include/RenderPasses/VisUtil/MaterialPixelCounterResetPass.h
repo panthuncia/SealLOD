@@ -2,6 +2,7 @@
 #include "RenderPasses/Base/ComputePass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
+#include "Render/MaterialStateArtifacts.h"
 #include "Materials/TechniqueDescriptor.h"
 
 class MaterialUAVResetPass : public ComputePass {
@@ -36,7 +37,10 @@ public:
         cl.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
         BindResourceDescriptorIndices(cl, m_pso.GetResourceDescriptorSlots());
 
-        auto numMaterials = context.materialManager->GetCompileFlagsSlotsUsed();
+        const auto materialState = context.publishedRendererState
+            ? context.publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>()
+            : nullptr;
+        const auto numMaterials = materialState ? materialState->compileFlagSlotsUsed : 0u;
         if (numMaterials == 0u) {
             return {};
         }
