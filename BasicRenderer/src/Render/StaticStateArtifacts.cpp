@@ -101,10 +101,10 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
 
 void RegisterStaticStateProducers(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::StaticTransaction, {
-        TaskLane::Streaming, TaskDomain::RendererState,
+        TaskLane::Streaming, TaskDomain::General,
         "StaticStateArtifact::BuildTransaction", BuildStaticTransaction });
     graph.RegisterProducer(ArtifactKind::StaticScene, {
-        TaskLane::Streaming, TaskDomain::RendererState,
+        TaskLane::Streaming, TaskDomain::General,
         "StaticStateArtifact::BuildScene", BuildStaticScene });
 }
 

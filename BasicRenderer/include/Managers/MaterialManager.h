@@ -4,6 +4,7 @@
 #include <mutex>
 #include <chrono>
 #include <functional>
+#include <cstring>
 
 #include "Materials/Material.h"
 #include "Managers/TextureStreamingManager.h"
@@ -57,12 +58,17 @@ public:
 	void UpdateMaterialDataBuffer(Material& material);
 	void MarkMaterialDirty(Material& material);
 	void UpdateOpenPBRMaterialDataBuffer(unsigned int materialSlot, const PerMaterialOpenPBRCB& data) {
-		if (!m_materialGraphActive) m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, data);
 		if (materialSlot >= m_materialUploadSignatures.size()) {
 			m_materialUploadSignatures.resize(static_cast<std::size_t>(materialSlot) + 1u);
 		}
-		m_materialUploadSignatures[materialSlot].openPBRData = data;
-		m_materialUploadSignatures[materialSlot].valid = true;
+		auto& signature = m_materialUploadSignatures[materialSlot];
+		if (signature.valid &&
+			std::memcmp(&signature.openPBRData, &data, sizeof(data)) == 0) {
+			return;
+		}
+		if (!m_materialGraphActive) m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, data);
+		signature.openPBRData = data;
+		signature.valid = true;
 		++m_materialRowsRevision;
 	}
 
@@ -173,6 +179,8 @@ private:
 	std::shared_ptr<org::DynamicGloballyIndexedResource> m_publishedMaterialEvalResource;
 	std::shared_ptr<org::DynamicGloballyIndexedResource> m_publishedMaterialOpenPbrResource;
 	std::uint64_t m_materialStateFingerprint = 0;
+	std::uint64_t m_pendingMaterialStateFingerprint = 0;
+	std::uint32_t m_materialStateStableFrames = 0;
 	std::uint64_t m_materialStateRevision = 0;
 	std::uint64_t m_materialStateValidatedRevision = 0;
 	std::unordered_map<std::uint64_t, std::uint64_t> m_materialStateExpectedFingerprints;

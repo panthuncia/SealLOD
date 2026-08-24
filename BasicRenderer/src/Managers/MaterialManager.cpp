@@ -32,7 +32,7 @@ namespace {
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
 	// Keep post-indirect graph cutovers dormant until static activation has a
 	// complete, visually validated dependency closure.
-	constexpr bool kEnableMaterialStateShadow = false;
+	constexpr bool kEnableMaterialStateShadow = true;
 
 	const std::string& MaterialTextureTraceFilter() {
 		static const std::string filter = [] {
@@ -1323,7 +1323,17 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 			mix(m_publishedActiveCompileFlagsSlots[i]);
 		}
 		mix(m_materialRowsRevision);
-		if (fingerprint != m_materialStateFingerprint) {
+		if (fingerprint != m_pendingMaterialStateFingerprint) {
+			m_pendingMaterialStateFingerprint = fingerprint;
+			m_materialStateStableFrames = 0;
+		} else if (m_materialStateStableFrames < 4u) {
+			++m_materialStateStableFrames;
+		}
+		// Bulk material creation can modify rows over many consecutive frames.  Wait
+		// for a short quiet window so only the latest immutable table version is
+		// copied and uploaded instead of retaining a full GPU table per transient
+		// startup revision.
+		if (fingerprint != m_materialStateFingerprint && m_materialStateStableFrames >= 4u) {
 			m_materialStateFingerprint = fingerprint;
 			if (!m_uploadService) {
 				spdlog::error("Material graph publication skipped: upload service unavailable");

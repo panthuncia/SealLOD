@@ -62,7 +62,7 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
 
 void RegisterMaterialStateProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::MaterialTable, {
-        TaskLane::Streaming, TaskDomain::RendererState,
+        TaskLane::Streaming, TaskDomain::TextureProcessing,
         "MaterialStateArtifact::Build", BuildMaterialState });
 }
 
