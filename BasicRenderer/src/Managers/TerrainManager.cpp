@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string_view>
@@ -18,7 +19,13 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Managers/TextureStreamingManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
-#include "Resources/Resolvers/ResourceGroupResolver.h"
+#include "Render/PublishedRendererState.h"
+#include "Render/RendererStateRequestService.h"
+#include "Render/TerrainStateArtifacts.h"
+#include "Render/TextureBindingArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/Runtime/IUploadService.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 
 namespace {
     constexpr std::uint32_t kInvalidDescriptor = 0xffffffffu;
@@ -447,6 +454,23 @@ TerrainManager::TerrainManager()
     m_layerRefs->UpdateAt(0u, MakeFallbackLayerRef());
     m_regions->UpdateAt(0u, MakeFallbackRegion());
     m_weightBlocks->UpdateAt(0u, MakeFallbackWeightBlock());
+	const auto source = br::render::PublishedStateSource::ProcessSource();
+	const auto makeResolver = [&](std::uint64_t variant, const std::shared_ptr<Resource>& fallback) {
+		return std::make_shared<PublishedStateResourceResolver>(source,
+			br::render::PublishedResourceKey{
+				br::render::PublishedFragmentKind::Terrain,
+				br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
+			fallback, false);
+	};
+	m_terrainResolvers = {
+		makeResolver(br::render::kTerrainSetsVariant, m_sets),
+		makeResolver(br::render::kTerrainLayersVariant, m_layers),
+		makeResolver(br::render::kTerrainStochasticLayersVariant, m_stochasticLayers),
+		makeResolver(br::render::kTerrainLayerRefsVariant, m_layerRefs),
+		makeResolver(br::render::kTerrainRegionsVariant, m_regions),
+		makeResolver(br::render::kTerrainWeightBlocksVariant, m_weightBlocks),
+		makeResolver(br::render::kTerrainTextureGroupVariant, std::shared_ptr<Resource>{})
+	};
 }
 
 std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory, MaterialManager* materialManager)
@@ -514,7 +538,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                 source.diffuse,
                 textureFactory,
-                nullptr,
+                materialManager,
                 m_textureGroup,
                 m_layerTextures,
                 true,
@@ -539,7 +563,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.normal,
                     textureFactory,
-                    nullptr,
+                    materialManager,
                     m_textureGroup,
                     m_layerTextures,
                     true,
@@ -565,7 +589,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                 source.height,
                 textureFactory,
-                nullptr,
+                materialManager,
                 m_textureGroup,
                 m_layerTextures,
                 true,
@@ -590,7 +614,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                 source.rmaos,
                 textureFactory,
-                nullptr,
+                materialManager,
                 m_textureGroup,
                 m_layerTextures,
                 true,
@@ -620,7 +644,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.diffuse.gaussian,
                     textureFactory,
-                    nullptr,
+                    materialManager,
                     m_textureGroup,
                     m_layerTextures,
                     true,
@@ -633,7 +657,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.diffuse.inverseLut,
                     textureFactory,
-                    nullptr,
+                    materialManager,
                     m_textureGroup,
                     m_layerTextures,
                     false,
@@ -678,7 +702,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.normal.gaussian,
                     textureFactory,
-                    nullptr,
+                    materialManager,
                     m_textureGroup,
                     m_layerTextures,
                     true,
@@ -691,7 +715,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.normal.inverseLut,
                     textureFactory,
-                    nullptr,
+                    materialManager,
                     m_textureGroup,
                     m_layerTextures,
                     false,
@@ -710,7 +734,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.height.gaussian,
                     textureFactory,
-                    nullptr,
+                    materialManager,
                     m_textureGroup,
                     m_layerTextures,
                     true,
@@ -723,7 +747,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.height.inverseLut,
                     textureFactory,
-                    nullptr,
+                    materialManager,
                     m_textureGroup,
                     m_layerTextures,
                     false,
@@ -749,7 +773,6 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         layers.push_back(layer);
     }
     m_layerData = std::move(layers);
-    m_layers->ReplaceData(m_layerData);
     if (m_textureStreamingManager && textureFactory) {
         m_initialBindingReady.assign(pendingTextureBindings.size(), 0u);
         m_readyInitialBindingCount = 0u;
@@ -803,7 +826,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     if (stochasticLayers.empty()) {
         stochasticLayers.push_back(MakeFallbackStochasticLayer());
     }
-    m_stochasticLayers->ReplaceData(std::move(stochasticLayers));
+	m_stochasticLayerData = std::move(stochasticLayers);
     const auto stochasticEnd = std::chrono::steady_clock::now();
 
     const auto layerRefCount = (std::max)(1u, static_cast<std::uint32_t>(desc.layerRefs.size()));
@@ -816,7 +839,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         }
         layerRefs.push_back(layerRef);
     }
-    m_layerRefs->ReplaceData(std::move(layerRefs));
+	m_layerRefData = std::move(layerRefs);
     const auto layerRefsEnd = std::chrono::steady_clock::now();
 
     std::vector<std::uint32_t> packedWeightBlocks = PackTerrainWeightBlocks(desc.weightBlocks, denseRegions);
@@ -839,11 +862,11 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     const auto weightBlockCount = (std::max)(
         1u,
         static_cast<std::uint32_t>(packedWeightBlocks.size() * 4u));
-    m_weightBlocks->ReplaceData(std::move(packedWeightBlocks));
+	m_weightBlockData = std::move(packedWeightBlocks);
     const auto weightBlocksEnd = std::chrono::steady_clock::now();
 
     const auto regionCount = static_cast<std::uint32_t>(denseRegions.size());
-    m_regions->ReplaceData(std::move(denseRegions));
+	m_regionData = std::move(denseRegions);
     const auto regionsEnd = std::chrono::steady_clock::now();
 
     TerrainSetGPU set = MakeEmptySet();
@@ -868,18 +891,13 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     SettingsManager::GetInstance().getSettingSetter<float>("directionalShadowSceneExtent")(
         std::hypot(terrainWidth, terrainHeight));
     m_desiredSet = set;
+	++m_terrainRowsRevision;
+	m_terrainGraphDirty = true;
+	m_terrainGraphStableFrames = 0;
     // A terrain set with valid extents is enough for the RVT to begin creating
     // permanent pages.  Do not expose it until every initial streaming owner has
     // observed a non-placeholder published image.  The binding callbacks queue
     // the layer-buffer writes behind the corresponding texture upload.
-    if (m_readyInitialBindingCount == m_initialBindingReady.size()) {
-        m_sets->UpdateAt(0u, m_desiredSet);
-        m_terrainSetActive = true;
-    }
-    else {
-        m_sets->UpdateAt(0u, MakeEmptySet());
-        m_terrainSetActive = false;
-    }
     const auto totalEnd = std::chrono::steady_clock::now();
     std::uint32_t boundDiffuseLayerCount = 0;
     std::uint32_t boundNormalLayerCount = 0;
@@ -1021,9 +1039,12 @@ void TerrainManager::RefreshTerrainLayerTextureBinding(
     }
 
     m_textureGroup->AddResource(image);
-    m_layerTextures.push_back(texture);
-    m_layers->UpdateAt(layerIndex, layer);
-
+	if (std::ranges::find(m_layerTextures, texture) == m_layerTextures.end()) {
+		m_layerTextures.push_back(texture);
+	}
+	++m_terrainRowsRevision;
+	m_terrainGraphDirty = true;
+	m_terrainGraphStableFrames = 0;
     const bool isFinalBinding = !texture->IsUsingFallbackImage();
     if (isFinalBinding && initialDependencyIndex < m_initialBindingReady.size() &&
         m_initialBindingReady[initialDependencyIndex] == 0u) {
@@ -1031,61 +1052,130 @@ void TerrainManager::RefreshTerrainLayerTextureBinding(
         ++m_readyInitialBindingCount;
     }
 
-    if (m_readyInitialBindingCount == m_initialBindingReady.size()) {
-        InvalidateAndScheduleTerrainSetActivation();
-    }
-    else if (m_terrainSetActive) {
-        // A later descriptor replacement changes the source content of every RVT
-        // page which sampled this layer.  Pulse the set inactive for one complete
-        // RVT frame so FrameReset invalidates those cached page-table entries.
-        InvalidateAndScheduleTerrainSetActivation();
-    }
 }
 
-void TerrainManager::InvalidateAndScheduleTerrainSetActivation()
+void TerrainManager::RequestGraphState()
 {
-    // Descriptor replacements commonly arrive as one batch. The set is already
-    // empty while activation is pending, so repeated callbacks do not require
-    // another empty-set upload or another delay-frame restart.
-    if (m_pendingTerrainSetActivation) {
-        return;
-    }
-    m_sets->UpdateAt(0u, MakeEmptySet());
-    m_terrainSetActive = false;
-    m_pendingTerrainSetActivation = true;
-    m_activationDelayFrames = 1u;
-    if (TerrainTextureDiagnosticsEnabled()) {
-        spdlog::info(
-            "TerrainManager: terrain set gated generation={} readyBindings={}/{}",
-            m_terrainGeneration,
-            m_readyInitialBindingCount,
-            m_initialBindingReady.size());
-    }
+	if (!m_rendererStateRequests || !m_uploadService || m_terrainRowsRevision == 0 ||
+		m_readyInitialBindingCount != m_initialBindingReady.size()) return;
+	auto* requests = static_cast<br::render::RendererStateRequestService*>(m_rendererStateRequests);
+	auto* uploads = static_cast<org::runtime::IUploadService*>(m_uploadService);
+	const std::array<br::render::ArtifactKey, 6> keys{
+		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainSetsVariant },
+		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainLayersVariant },
+		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainStochasticLayersVariant },
+		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainLayerRefsVariant },
+		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainRegionsVariant },
+		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainWeightBlocksVariant }
+	};
+	const auto requestBuffer = [this, requests, uploads](const br::render::ArtifactKey& key,
+		std::string name, const auto& values) {
+		using Value = typename std::decay_t<decltype(values)>::value_type;
+		auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
+		input->uploadService = uploads;
+		input->debugName = std::move(name);
+		input->writeSequence = m_terrainRowsRevision;
+		input->elementStride = sizeof(Value);
+		input->elementCount = values.size();
+		input->capacity = (std::max<std::uint64_t>)(values.size(), 1u);
+		input->catalogOwner = br::render::PublishedFragmentKind::Terrain;
+		input->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
+		input->catalogVariant = key.variantID;
+		input->bytes.resize(values.size() * sizeof(Value));
+		if (!values.empty()) std::memcpy(input->bytes.data(), values.data(), input->bytes.size());
+		return requests->Request(key, m_terrainRowsRevision, {},
+			br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)));
+	};
+	const std::vector<TerrainSetGPU> sets{ m_desiredSet };
+	(void)requestBuffer(keys[0], "Published::Terrain::Sets", sets);
+	(void)requestBuffer(keys[1], "Published::Terrain::Layers", m_layerData);
+	(void)requestBuffer(keys[2], "Published::Terrain::StochasticLayers", m_stochasticLayerData);
+	(void)requestBuffer(keys[3], "Published::Terrain::LayerRefs", m_layerRefData);
+	(void)requestBuffer(keys[4], "Published::Terrain::Regions", m_regionData);
+	(void)requestBuffer(keys[5], "Published::Terrain::WeightBlocks", m_weightBlockData);
+
+	std::unordered_map<std::uint32_t, br::render::MaterialTextureBindingDependencyDTO> bindings;
+	for (const auto& texture : m_layerTextures) {
+		if (!texture || texture->GetStreamingTextureID() == 0 ||
+			!texture->Meta().processing.isParticipatingMaterialTexture) continue;
+		const auto published = texture->GetPublishedBindingSnapshot();
+		if (!published.image || published.bindingRevision == 0 ||
+			!published.image->HasValidBackingResource()) continue;
+		bindings[texture->GetStreamingTextureID()] = {
+			texture->GetStreamingTextureID(), published.bindingRevision,
+			published.image->GetSRVInfo(0).slot.index, texture->SamplerDescriptorIndex() };
+	}
+	auto input = std::make_shared<br::render::TerrainStateBuildInput>();
+	input->terrainGeneration = m_terrainGeneration;
+	input->stateRevision = ++m_terrainStateRevision;
+	input->bufferKeys = keys;
+	input->textureBindings.reserve(bindings.size());
+	std::vector<br::render::ArtifactRequirement> requirements;
+	requirements.reserve(keys.size() + bindings.size());
+	for (const auto& key : keys) {
+		requirements.push_back({ key, m_terrainRowsRevision, br::render::ArtifactReadiness::GpuReady });
+	}
+	for (const auto& [textureID, binding] : bindings) {
+		input->textureBindings.push_back(binding);
+		requirements.push_back({
+			{ br::render::ArtifactKind::TextureBinding, textureID, 0 },
+			binding.bindingRevision, br::render::ArtifactReadiness::GpuReady });
+	}
+	const auto stateRevision = input->stateRevision;
+	(void)requests->Request(
+		{ br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration },
+		stateRevision, std::move(requirements),
+		br::render::ArtifactPayload::Make<br::render::TerrainStateBuildInput>(std::move(input)));
+	m_terrainGraphDirty = false;
+	m_terrainGraphRequestPending = true;
+	m_terrainGraphStableFrames = 0;
 }
 
 void TerrainManager::ProcessPendingUpdates()
 {
-    if (!m_pendingTerrainSetActivation) {
-        return;
-    }
-    if (m_activationDelayFrames != 0u) {
-        --m_activationDelayFrames;
-        return;
-    }
-    if (m_readyInitialBindingCount != m_initialBindingReady.size()) {
-        return;
-    }
+	if (m_terrainGraphRequestPending && m_rendererStateRequests) {
+		auto* requests = static_cast<br::render::RendererStateRequestService*>(m_rendererStateRequests);
+		const auto diagnostic = requests->Diagnose(
+			{ br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration });
+		if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
+			diagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
+			spdlog::error("TerrainManager: graph state revision={} failed: {} {}",
+				m_terrainStateRevision, diagnostic.error, diagnostic.blockerChain);
+			m_terrainGraphRequestPending = false;
+			m_terrainGraphDirty = true;
+		}
+	}
+	if (!m_terrainGraphRequestPending && m_terrainGraphDirty &&
+		m_readyInitialBindingCount == m_initialBindingReady.size()) {
+		const auto source = br::render::PublishedStateSource::ProcessSource();
+		const auto published = source ? source->Load() : nullptr;
+		// Initial terrain uploads are deliberately sequenced after the first
+		// indirect workload. Both are multi-buffer copy transactions; allowing
+		// terrain to race initial scene publication can indefinitely supersede the
+		// workload which makes already-imported static draws visible.
+		if (published && published->indirectWorkloads.revision != 0 &&
+			++m_terrainGraphStableFrames >= 30u) RequestGraphState();
+	}
+}
 
-    m_sets->UpdateAt(0u, m_desiredSet);
-    m_terrainSetActive = true;
-    m_pendingTerrainSetActivation = false;
-    if (TerrainTextureDiagnosticsEnabled()) {
-        spdlog::info(
-            "TerrainManager: terrain set activated generation={} readyBindings={}/{}",
-            m_terrainGeneration,
-            m_readyInitialBindingCount,
-            m_initialBindingReady.size());
-    }
+bool TerrainManager::TryActivatePublishedTerrainState()
+{
+	const auto source = br::render::PublishedStateSource::ProcessSource();
+	const auto published = source ? source->Load() : nullptr;
+	const auto terrain = published
+		? published->terrain.payload.Get<br::render::PublishedTerrainState>() : nullptr;
+	if (!terrain || terrain->terrainGeneration != m_terrainGeneration ||
+		terrain->stateRevision == 0 || terrain->stateRevision != m_terrainStateRevision ||
+		published->terrain.revision != m_terrainStateRevision) return false;
+	if (terrain->stateRevision == m_activeTerrainPublishedRevision) return true;
+	for (const auto& resolver : m_terrainResolvers) if (!resolver) return false;
+	for (const auto& resolver : m_terrainResolvers) resolver->SetPublishedEnabled(true);
+	m_terrainGraphRequestPending = false;
+	m_terrainGraphActive = true;
+	m_activeTerrainPublishedRevision = terrain->stateRevision;
+	spdlog::info("TerrainManager: activated graph-owned terrain state epoch={} revision={} generation={}",
+		published->epoch, terrain->stateRevision, terrain->terrainGeneration);
+	return true;
 }
 
 void TerrainManager::ClearActiveTerrain()
@@ -1106,65 +1196,56 @@ void TerrainManager::ClearActiveTerrain()
     }
     m_layerTextures.clear();
     m_layerData.clear();
+	m_stochasticLayerData.clear();
+	m_layerRefData.clear();
+	m_regionData.clear();
+	m_weightBlockData.clear();
     m_initialBindingReady.clear();
     m_readyInitialBindingCount = 0u;
-    m_activationDelayFrames = 0u;
-    m_terrainSetActive = false;
-    m_pendingTerrainSetActivation = false;
+	m_terrainGraphDirty = false;
+	m_terrainGraphRequestPending = false;
+	m_terrainGraphStableFrames = 0;
+	m_terrainGraphActive = false;
+	m_activeTerrainPublishedRevision = 0;
+	for (const auto& resolver : m_terrainResolvers) {
+		if (resolver) resolver->SetPublishedEnabled(false);
+	}
     m_desiredSet = MakeEmptySet();
-    m_sets->UpdateAt(0u, MakeEmptySet());
-    m_layers->UpdateAt(0u, MakeFallbackLayer());
-    m_stochasticLayers->UpdateAt(0u, MakeFallbackStochasticLayer());
-    m_layerRefs->UpdateAt(0u, MakeFallbackLayerRef());
-    m_regions->UpdateAt(0u, MakeFallbackRegion());
-    m_weightBlocks->UpdateAt(0u, MakeFallbackWeightBlock());
 }
 
 std::shared_ptr<Resource> TerrainManager::ProvideResource(ResourceIdentifier const& key)
 {
-    const auto text = key.ToString();
-    if (text == Builtin::Terrain::Sets) {
-        return m_sets;
-    }
-    if (text == Builtin::Terrain::Layers) {
-        return m_layers;
-    }
-    if (text == Builtin::Terrain::StochasticLayers) {
-        return m_stochasticLayers;
-    }
-    if (text == Builtin::Terrain::LayerRefs) {
-        return m_layerRefs;
-    }
-    if (text == Builtin::Terrain::Regions) {
-        return m_regions;
-    }
-    if (text == Builtin::Terrain::WeightBlocks) {
-        return m_weightBlocks;
-    }
+    (void)key;
     return nullptr;
 }
 
 std::vector<ResourceIdentifier> TerrainManager::GetSupportedKeys()
 {
-    return {
-        Builtin::Terrain::Sets,
-        Builtin::Terrain::Layers,
-        Builtin::Terrain::StochasticLayers,
-        Builtin::Terrain::LayerRefs,
-        Builtin::Terrain::Regions,
-        Builtin::Terrain::WeightBlocks,
-    };
+    return {};
 }
 
 std::vector<ResourceIdentifier> TerrainManager::GetSupportedResolverKeys()
 {
-    return { Builtin::Terrain::TextureGroup };
+    return {
+		Builtin::Terrain::Sets,
+		Builtin::Terrain::Layers,
+		Builtin::Terrain::StochasticLayers,
+		Builtin::Terrain::LayerRefs,
+		Builtin::Terrain::Regions,
+		Builtin::Terrain::WeightBlocks,
+		Builtin::Terrain::TextureGroup
+	};
 }
 
 std::shared_ptr<IResourceResolver> TerrainManager::ProvideResolver(ResourceIdentifier const& key)
 {
-    if (key.ToString() == Builtin::Terrain::TextureGroup) {
-        return std::make_shared<ResourceGroupResolver>(m_textureGroup);
-    }
+	const auto text = key.ToString();
+	if (text == Builtin::Terrain::Sets) return m_terrainResolvers[0];
+	if (text == Builtin::Terrain::Layers) return m_terrainResolvers[1];
+	if (text == Builtin::Terrain::StochasticLayers) return m_terrainResolvers[2];
+	if (text == Builtin::Terrain::LayerRefs) return m_terrainResolvers[3];
+	if (text == Builtin::Terrain::Regions) return m_terrainResolvers[4];
+	if (text == Builtin::Terrain::WeightBlocks) return m_terrainResolvers[5];
+	if (text == Builtin::Terrain::TextureGroup) return m_terrainResolvers[6];
     return nullptr;
 }

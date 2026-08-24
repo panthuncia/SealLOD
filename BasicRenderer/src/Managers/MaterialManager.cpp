@@ -1235,9 +1235,25 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				if (shadow->baseTable && shadow->evalTable && shadow->openPbrTable &&
 					published->materials.revision > m_activeMaterialPublishedRevision) {
 					m_activeMaterialPublishedRevision = published->materials.revision;
+					std::size_t validRows = 0;
+					std::size_t nonzeroBaseDescriptors = 0;
+					for (std::size_t slot = 0; slot < m_materialUploadSignatures.size(); ++slot) {
+						if (!m_materialUploadSignatures[slot].valid) continue;
+						++validRows;
+						if (m_materialUploadSignatures[slot].materialData.baseColorTextureIndex != UINT32_MAX) {
+							++nonzeroBaseDescriptors;
+						}
+					}
+					const auto resourceID = [](const auto& table) {
+						return table && table->resource ? table->resource->GetGlobalResourceID() : 0u;
+					};
 					spdlog::info(
-						"MaterialManager: graph-owned material table shadow ready at publication epoch={} revision={}",
-						published->epoch, published->materials.revision);
+						"MaterialManager: graph-owned material table ready epoch={} revision={} rows(valid={}/{} slotsUsed={} capacity={}) baseDescriptors={} resources(base={} eval={} openPbr={})",
+						published->epoch, published->materials.revision, validRows,
+						shadow->baseTable->elementCount, m_materialSlotsUsed,
+						shadow->baseTable->capacity, nonzeroBaseDescriptors,
+						resourceID(shadow->baseTable), resourceID(shadow->evalTable),
+						resourceID(shadow->openPbrTable));
 				}
 				const auto revision = published->materials.revision;
 				if (revision > m_materialStateValidatedRevision) {
@@ -1421,9 +1437,19 @@ bool MaterialManager::TryActivatePublishedMaterialState() {
 	m_materialStartupFallbacks = {};
 	m_materialGraphActive = true;
 	m_activeMaterialPublishedRevision = published->materials.revision;
+	const auto resolvedBase = m_materialTableResolvers[0]->Resolve();
+	const auto resolvedEval = m_materialTableResolvers[1]->Resolve();
+	const auto resolvedOpenPbr = m_materialTableResolvers[2]->Resolve();
 	spdlog::info(
-		"MaterialManager: activated graph-owned material tables at publication epoch={} revision={}",
-		published->epoch, published->materials.revision);
+		"MaterialManager: activated graph-owned material tables epoch={} revision={} rows={} capacity={} resolved(base={} expected={} eval={} expected={} openPbr={} expected={})",
+		published->epoch, published->materials.revision, materialState->baseTable->elementCount,
+		materialState->baseTable->capacity,
+		resolvedBase.empty() ? 0u : resolvedBase.front()->GetGlobalResourceID(),
+		materialState->baseTable->resource->GetGlobalResourceID(),
+		resolvedEval.empty() ? 0u : resolvedEval.front()->GetGlobalResourceID(),
+		materialState->evalTable->resource->GetGlobalResourceID(),
+		resolvedOpenPbr.empty() ? 0u : resolvedOpenPbr.front()->GetGlobalResourceID(),
+		materialState->openPbrTable->resource->GetGlobalResourceID());
 	return true;
 }
 

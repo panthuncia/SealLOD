@@ -28,6 +28,7 @@ enum class ArtifactKind : std::uint16_t {
     IndirectWorkload,
     StaticTransaction,
     StaticScene,
+    TerrainState,
     BufferVersion,
     FrameManifest,
 };

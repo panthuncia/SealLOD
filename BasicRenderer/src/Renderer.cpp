@@ -104,6 +104,7 @@
 #include "Render/IndirectStateArtifacts.h"
 #include "Render/MaterialStateArtifacts.h"
 #include "Render/TextureBindingArtifacts.h"
+#include "Render/TerrainStateArtifacts.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/StaticStateArtifacts.h"
 #include "Render/RasterBucketFlags.h"
@@ -736,6 +737,7 @@ void Renderer::Initialize(
     br::render::RegisterIndirectStateProducer(*m_asyncStateGraph);
     br::render::RegisterMaterialStateProducer(*m_asyncStateGraph);
 	br::render::RegisterTextureBindingProducer(*m_asyncStateGraph);
+	br::render::RegisterTerrainStateProducer(*m_asyncStateGraph);
     br::render::RegisterVersionedGpuBufferProducer(*m_asyncStateGraph);
     br::render::RegisterStaticStateProducers(*m_asyncStateGraph);
     m_asyncStateGraph->SetReadyCallback([this](const br::render::ArtifactSnapshot& artifact) {
@@ -815,6 +817,9 @@ void Renderer::Initialize(
                 false);
         });
     m_pTerrainManager = TerrainManager::CreateUnique();
+	m_pTerrainManager->SetRendererStateServices(
+		m_rendererStateRequests.get(),
+		currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr);
 	//ResourceManager::GetInstance().SetEnvironmentBufferDescriptorIndex(m_pEnvironmentManager->GetEnvironmentBufferSRVDescriptorIndex());
 	m_pLightManager->SetViewManager(m_pViewManager.get()); // Light manager needs access to view manager for shadow cameras
 	m_pViewManager->SetIndirectCommandBufferManager(m_pIndirectCommandBufferManager.get()); // View manager needs to make indirect command buffers
@@ -3080,6 +3085,7 @@ void Renderer::Update(float elapsedSeconds) {
                 }
             };
             markFragmentPublished(m_context.publishedRendererState->materials);
+			markFragmentPublished(m_context.publishedRendererState->terrain);
             markFragmentPublished(m_context.publishedRendererState->geometry);
             markFragmentPublished(m_context.publishedRendererState->drawRecords);
             markFragmentPublished(m_context.publishedRendererState->activeDrawLists);
@@ -3087,6 +3093,9 @@ void Renderer::Update(float elapsedSeconds) {
         }
 		if (m_pMaterialManager) {
 			(void)m_pMaterialManager->TryActivatePublishedMaterialState();
+		}
+		if (m_pTerrainManager) {
+			(void)m_pTerrainManager->TryActivatePublishedTerrainState();
 		}
     });
 

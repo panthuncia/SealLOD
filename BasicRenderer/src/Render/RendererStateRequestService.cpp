@@ -71,6 +71,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         if (!artifact) return ArtifactBuildResult::Failure("manifest root payload type mismatch");
         switch (artifact->kind) {
         case PublishedFragmentKind::Materials: state->materials = artifact->fragment; break;
+        case PublishedFragmentKind::Terrain: state->terrain = artifact->fragment; break;
         case PublishedFragmentKind::Geometry: state->geometry = artifact->fragment; break;
         case PublishedFragmentKind::DrawRecords: state->drawRecords = artifact->fragment; break;
         case PublishedFragmentKind::ActiveDrawLists: state->activeDrawLists = artifact->fragment; break;

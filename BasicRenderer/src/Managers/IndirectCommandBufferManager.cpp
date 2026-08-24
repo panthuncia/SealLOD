@@ -93,7 +93,23 @@ void IndirectCommandBufferManager::PublishDesiredState(ObjectManager& objectMana
         mix(active->Size());
     }
     for (const auto viewID : m_viewIDs) mix(viewID);
-    if (fingerprint == m_graphInputFingerprint) return;
+    if (fingerprint == m_graphInputFingerprint) {
+        if (m_graphRevision != 0 && ++m_graphDiagnosticTicks >= 120u) {
+            m_graphDiagnosticTicks = 0;
+            const auto diagnostic = m_rendererStateRequests->Diagnose(
+                { br::render::ArtifactKind::IndirectWorkload, 0, 0 });
+            const auto source = br::render::PublishedStateSource::ProcessSource();
+            const auto published = source ? source->Load() : nullptr;
+            spdlog::info(
+                "Indirect state progress: desiredRevision={} artifactRevision={} readiness={} blockers={} ageMs={} publishedRevision={} chain='{}' error='{}'",
+                diagnostic.desiredRevision, diagnostic.artifact.revision,
+                static_cast<unsigned int>(diagnostic.artifact.readiness), diagnostic.blockers.size(),
+                diagnostic.stateAge.count() / 1000,
+                published ? published->indirectWorkloads.revision : 0u,
+                diagnostic.blockerChain, diagnostic.error);
+        }
+        return;
+    }
     if (fingerprint != m_graphPendingFingerprint) {
         m_graphPendingFingerprint = fingerprint;
         m_graphStableTicks = 0;
@@ -204,6 +220,7 @@ void IndirectCommandBufferManager::PublishDesiredState(ObjectManager& objectMana
     }
     m_graphInputFingerprint = fingerprint;
     m_graphStableTicks = 0;
+    m_graphDiagnosticTicks = 0;
     ++m_graphRevision;
     spdlog::info(
         "Indirect state request: revision={} views={} workloads={}/{} sourceEntries={} safeDraws={} drawRecordExtent={} dependencies={}",

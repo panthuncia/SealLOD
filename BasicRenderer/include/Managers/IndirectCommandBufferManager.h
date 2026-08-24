@@ -88,6 +88,7 @@ private:
     std::uint64_t m_graphPendingFingerprint = 0;
     std::uint32_t m_graphStableTicks = 0;
     std::uint64_t m_graphRevision = 0;
+    std::uint32_t m_graphDiagnosticTicks = 0;
 
     // Helpers
     unsigned int RoundUp(unsigned int x) const {

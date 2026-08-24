@@ -17,6 +17,7 @@
 class TextureFactory;
 class MaterialManager;
 class TextureStreamingManager;
+class PublishedStateResourceResolver;
 
 inline constexpr float kDefaultTerrainLayerUvScale = 24.0f / 4096.0f;
 inline constexpr float kDefaultTerrainRegionSizeWorld = 2048.0f;
@@ -103,6 +104,11 @@ public:
     // binding callbacks have been drained for the frame.
     void ProcessPendingUpdates();
     void ClearActiveTerrain();
+	void SetRendererStateServices(void* requests, void* uploads) noexcept {
+		m_rendererStateRequests = requests;
+		m_uploadService = uploads;
+	}
+	bool TryActivatePublishedTerrainState();
 
     std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
     std::vector<ResourceIdentifier> GetSupportedKeys() override;
@@ -123,7 +129,7 @@ private:
         const std::shared_ptr<TextureAsset>& texture,
         std::uint64_t terrainGeneration,
         std::size_t initialDependencyIndex);
-    void InvalidateAndScheduleTerrainSetActivation();
+	void RequestGraphState();
 
     std::shared_ptr<DynamicStructuredBuffer<TerrainSetGPU>> m_sets;
     std::shared_ptr<DynamicStructuredBuffer<TerrainLayerGPU>> m_layers;
@@ -135,13 +141,24 @@ private:
     std::shared_ptr<ResourceGroup> m_textureGroup;
     std::vector<std::shared_ptr<TextureAsset>> m_layerTextures;
     std::vector<TerrainLayerGPU> m_layerData;
+	std::vector<TerrainStochasticLayerGPU> m_stochasticLayerData;
+	std::vector<TerrainLayerRefGPU> m_layerRefData;
+	std::vector<TerrainRegionGPU> m_regionData;
+	std::vector<std::uint32_t> m_weightBlockData;
     TerrainSetGPU m_desiredSet{};
     std::vector<std::uint8_t> m_initialBindingReady;
     std::size_t m_readyInitialBindingCount = 0;
     std::uint64_t m_terrainGeneration = 0;
-    std::uint32_t m_activationDelayFrames = 0;
-    bool m_terrainSetActive = false;
-    bool m_pendingTerrainSetActivation = false;
     std::vector<std::uint64_t> m_streamingBindingIDs;
     TextureStreamingManager* m_textureStreamingManager = nullptr;
+	void* m_rendererStateRequests = nullptr;
+	void* m_uploadService = nullptr;
+	std::array<std::shared_ptr<PublishedStateResourceResolver>, 7> m_terrainResolvers;
+	std::uint64_t m_terrainRowsRevision = 0;
+	std::uint64_t m_terrainStateRevision = 0;
+	std::uint64_t m_activeTerrainPublishedRevision = 0;
+	std::uint32_t m_terrainGraphStableFrames = 0;
+	bool m_terrainGraphDirty = false;
+	bool m_terrainGraphRequestPending = false;
+	bool m_terrainGraphActive = false;
 };

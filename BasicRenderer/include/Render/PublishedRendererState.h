@@ -21,7 +21,7 @@ enum class PublishedResourceUsage : std::uint8_t {
 };
 
 enum class PublishedFragmentKind : std::uint8_t {
-    Materials, Geometry, DrawRecords, ActiveDrawLists, IndirectWorkloads
+    Materials, Terrain, Geometry, DrawRecords, ActiveDrawLists, IndirectWorkloads
 };
 
 struct PublishedResourceKey {
@@ -70,6 +70,7 @@ struct RendererStateFragmentArtifact {
 struct PublishedRendererState {
     std::uint64_t epoch = 0;
     PublishedStateFragment materials;
+    PublishedStateFragment terrain;
     PublishedStateFragment geometry;
     PublishedStateFragment drawRecords;
     PublishedStateFragment activeDrawLists;
