@@ -1065,31 +1065,11 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
 						std::move(input)));
 			}
-			const auto diagnostic = m_rendererStateRequests->Diagnose(bindingKey);
-			if (diagnostic.artifact.revision != change.bindingRevision ||
-				(diagnostic.artifact.readiness != br::render::ArtifactReadiness::GpuReady &&
-				 diagnostic.artifact.readiness != br::render::ArtifactReadiness::Published)) {
-				if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
-					diagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
-					spdlog::error(
-						"Texture binding graph publication failed: textureID={} revision={} error='{}' blockers='{}'",
-						change.streamingTextureID, change.bindingRevision,
-						diagnostic.error, diagnostic.blockerChain);
-					if (change.texture) {
-						(void)change.texture->RejectPreparedImage(change.bindingRevision, change.newImage);
-						EnqueueTextureUploadAdvance(change.texture, "graph_binding_failed");
-					}
-				} else {
-					waitingForGpu.push_back(std::move(change));
-				}
-				continue;
-			}
-			const auto binding = diagnostic.artifact.payload.Get<br::render::PublishedTextureBinding>();
-			if (!binding || binding->image != change.newImage ||
-				binding->bindingRevision != change.bindingRevision) {
-				waitingForGpu.push_back(std::move(change));
-				continue;
-			}
+			// Upload completion owns image adoption. Requiring graph publication here
+			// creates a cycle: the material artifact depends on this binding while its
+			// immutable row cannot be rebuilt with the new descriptor until adoption.
+			// Adoption invalidates the material root; the manifest then closes over the
+			// already-requested binding artifact.
 		}
 		const auto adoptionStart = std::chrono::steady_clock::now();
 		std::shared_ptr<PixelBuffer> replacedPublishedImage;

@@ -6,7 +6,7 @@
 #include "Interfaces/IResourceResolver.h"
 #include "Render/PublishedRendererState.h"
 
-class PublishedStateResourceResolver final : public ClonableResolver<PublishedStateResourceResolver> {
+class PublishedStateResourceResolver final : public org::ClonableResolver<PublishedStateResourceResolver> {
 public:
     PublishedStateResourceResolver() = default;
     PublishedStateResourceResolver(std::shared_ptr<br::render::PublishedStateSource> source,
