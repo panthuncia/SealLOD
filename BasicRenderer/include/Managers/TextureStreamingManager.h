@@ -20,6 +20,7 @@
 #include "Managers/Singletons/TaskSchedulerManager.h"
 
 class TextureFactory;
+namespace br::render { class RendererStateRequestService; }
 namespace org { class CopyPass; }
 using org::CopyPass;
 namespace org { class Buffer; }
@@ -98,6 +99,9 @@ public:
 	~TextureStreamingManager();
 
 	void Initialize(TextureFactory& textureFactory, uint32_t framesInFlight);
+	void SetRendererStateRequestService(br::render::RendererStateRequestService* service) noexcept {
+		m_rendererStateRequests = service;
+	}
 	void Shutdown();
 	void EnqueueFrameTick(uint64_t frameIndex);
 	void EnqueueTextureUploadAdvance(const std::shared_ptr<TextureAsset>& texture, const char* reason = "external");
@@ -156,6 +160,7 @@ private:
 		std::shared_ptr<PixelBuffer> newImage;
 		TextureStreamingGPUInfo metadata{};
 		std::vector<std::shared_ptr<PixelBuffer>> supersededImages;
+		bool graphRequested = false;
 	};
 	struct MainThreadBindingOwner {
 		uint32_t streamingTextureID = 0;
@@ -209,6 +214,7 @@ private:
 	std::unordered_map<uint32_t, std::map<uint32_t, uint32_t>> m_maximumResidentTopMipBindingCountsByStreamingTextureID;
 	std::atomic<uint64_t> m_nextBindingID{1u};
 	TextureFactory* m_textureFactory = nullptr;
+	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	std::unique_ptr<MaterialTextureTransferService> m_materialTextureTransfers;
 	TaskScope m_taskScope;
 	std::mutex m_workerCommandMutex;

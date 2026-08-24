@@ -2,19 +2,13 @@
 
 #include "Render/PublishedRendererState.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/TextureBindingArtifacts.h"
 #include "Resources/GloballyIndexedResource.h"
+
+#include <unordered_map>
 
 namespace br::render {
 namespace {
-
-std::uint64_t HashBytes(const std::vector<std::byte>& bytes) {
-    std::uint64_t hash = 1469598103934665603ull;
-    for (const auto value : bytes) {
-        hash ^= std::to_integer<std::uint8_t>(value);
-        hash *= 1099511628211ull;
-    }
-    return hash;
-}
 
 ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     const auto input = context.input.Get<MaterialStateBuildInput>();
@@ -29,7 +23,27 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
         if (entry.slot >= input->slotsUsed) continue;
         state->activeCompileFlags.push_back(entry.flags);
         state->activeCompileFlagSlots.push_back(entry.slot);
-    }
+	}
+	std::unordered_map<std::uint64_t, const ArtifactSnapshot*> textureDependencies;
+	textureDependencies.reserve(input->textureBindings.size());
+	for (const auto& dependency : context.dependencies) {
+		if (dependency.key.kind == ArtifactKind::TextureBinding) {
+			textureDependencies[dependency.key.primaryID] = &dependency;
+		}
+	}
+	for (const auto& expected : input->textureBindings) {
+		const auto found = textureDependencies.find(expected.streamingTextureID);
+		if (found == textureDependencies.end() ||
+			found->second->revision != expected.bindingRevision) {
+			return ArtifactBuildResult::Failure("material texture-binding revision mismatch");
+		}
+		const auto binding = found->second->payload.Get<PublishedTextureBinding>();
+		if (!binding || binding->bindingRevision != expected.bindingRevision ||
+			binding->imageDescriptorIndex != expected.imageDescriptorIndex ||
+			binding->samplerDescriptorIndex != expected.samplerDescriptorIndex) {
+			return ArtifactBuildResult::Failure("material texture-binding descriptor mismatch");
+		}
+	}
 
     const auto resolveTable = [&](const ArtifactKey& key, std::uint32_t expectedStride) {
         for (const auto& dependency : context.dependencies) {
@@ -47,16 +61,6 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     if (!state->baseTable || !state->evalTable || !state->openPbrTable) {
         return ArtifactBuildResult::Failure("material table dependency missing or has incompatible ABI");
     }
-	const std::array actualHashes{
-		HashBytes(*state->baseTable->cpuShadow),
-		HashBytes(*state->evalTable->cpuShadow),
-		HashBytes(*state->openPbrTable->cpuShadow)
-	};
-	if (actualHashes != input->tableContentHashes) {
-		return ArtifactBuildResult::Failure("material table content hash mismatch");
-	}
-	state->tableContentHashes = actualHashes;
-
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::Materials;
     root->fragment.revision = context.revision;

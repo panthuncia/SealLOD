@@ -1309,14 +1309,6 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				}
 				return table;
 			};
-			const auto hashBytes = [](const std::vector<std::byte>& bytes) {
-				std::uint64_t hash = 1469598103934665603ull;
-				for (const auto value : bytes) {
-					hash ^= std::to_integer<std::uint8_t>(value);
-					hash *= 1099511628211ull;
-				}
-				return hash;
-			};
 			const auto copyBase = [&](std::size_t slot, std::byte* destination) {
 				const auto row = slot < m_materialUploadSignatures.size() &&
 					m_materialUploadSignatures[slot].valid
@@ -1341,8 +1333,22 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				br::render::kMaterialEvalTableVariant, copyEval);
 			auto openPbrTable = makeTableInput("Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB),
 				br::render::kMaterialOpenPbrTableVariant, copyOpenPbr);
-			const std::array tableContentHashes{
-				hashBytes(baseTable->bytes), hashBytes(evalTable->bytes), hashBytes(openPbrTable->bytes) };
+			std::unordered_map<std::uint32_t, br::render::MaterialTextureBindingDependencyDTO>
+				textureBindingDependencies;
+			for (const auto& [_, material] : m_activeMaterialsByID) {
+				if (!material) continue;
+				for (const auto& texture : CollectMaterialTextureAssets(*material)) {
+					if (!texture || texture->GetStreamingTextureID() == 0 ||
+						!texture->Meta().processing.isParticipatingMaterialTexture) continue;
+					const auto binding = texture->GetPublishedBindingSnapshot();
+					if (!binding.image || binding.bindingRevision == 0 ||
+						!binding.image->HasValidBackingResource()) continue;
+					textureBindingDependencies[texture->GetStreamingTextureID()] = {
+						texture->GetStreamingTextureID(), binding.bindingRevision,
+						binding.image->GetSRVInfo(0).slot.index,
+						texture->SamplerDescriptorIndex() };
+				}
+			}
 			(void)m_rendererStateRequests->Request(baseKey, m_materialRowsRevision, {},
 				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(baseTable)));
 			(void)m_rendererStateRequests->Request(evalKey, m_materialRowsRevision, {},
@@ -1351,7 +1357,10 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(openPbrTable)));
 			auto input = std::make_shared<br::render::MaterialStateBuildInput>();
 			input->sourceFingerprint = fingerprint;
-			input->tableContentHashes = tableContentHashes;
+			input->textureBindings.reserve(textureBindingDependencies.size());
+			for (const auto& [_, binding] : textureBindingDependencies) {
+				input->textureBindings.push_back(binding);
+			}
 			input->slotsUsed = m_publishedCompileFlagsSlotsUsed;
 			input->activeCompileFlags.reserve(m_publishedActiveCompileFlags.size());
 			for (std::size_t i = 0; i < m_publishedActiveCompileFlags.size(); ++i) {
@@ -1363,11 +1372,18 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			input->openPbrTableKey = openPbrKey;
 			const auto revision = ++m_materialStateRevision;
 			m_materialStateExpectedFingerprints[revision] = fingerprint;
-			const std::vector<br::render::ArtifactRequirement> requirements{
+			std::vector<br::render::ArtifactRequirement> requirements{
 				{ baseKey, m_materialRowsRevision, br::render::ArtifactReadiness::GpuReady },
 				{ evalKey, m_materialRowsRevision, br::render::ArtifactReadiness::GpuReady },
 				{ openPbrKey, m_materialRowsRevision, br::render::ArtifactReadiness::GpuReady }
 			};
+			requirements.reserve(requirements.size() + textureBindingDependencies.size());
+			for (const auto& [textureID, binding] : textureBindingDependencies) {
+				requirements.push_back({
+					{ br::render::ArtifactKind::TextureBinding, textureID, 0 },
+					binding.bindingRevision,
+					br::render::ArtifactReadiness::GpuReady });
+			}
 			(void)m_rendererStateRequests->Request(
 				{ br::render::ArtifactKind::MaterialTable, 0, 0 }, revision, requirements,
 				br::render::ArtifactPayload::Make<br::render::MaterialStateBuildInput>(std::move(input)));

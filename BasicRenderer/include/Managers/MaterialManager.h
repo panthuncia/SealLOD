@@ -86,6 +86,7 @@ public:
 		org::runtime::IUploadService* uploads) {
 		m_rendererStateRequests = requests;
 		m_uploadService = uploads;
+		if (m_textureStreamingManager) m_textureStreamingManager->SetRendererStateRequestService(requests);
 	}
 	unsigned int GetRasterBucketCount() const { return m_rasterBucketsUsed; }
 	unsigned int GetRasterBucketForFlags(MaterialRasterFlags rasterFlags) const {

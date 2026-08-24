@@ -9,7 +9,9 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Materials/MaterialTextureStreaming.h"
 #include "Render/MemoryIntrospectionAPI.h"
+#include "Render/RendererStateRequestService.h"
 #include "Render/RendererSettings.h"
+#include "Render/TextureBindingArtifacts.h"
 #include "Render/Runtime/IReadbackService.h"
 #include "RenderPasses/Base/CopyPass.h"
 #include "Resources/Buffers/Buffer.h"
@@ -1044,6 +1046,50 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 				EnqueueTextureUploadAdvance(change.texture, "external_transfer_failed");
 			}
 			continue;
+		}
+		if (m_rendererStateRequests) {
+			const br::render::ArtifactKey bindingKey{
+				br::render::ArtifactKind::TextureBinding,
+				change.streamingTextureID,
+				0 };
+			if (!change.graphRequested) {
+				auto input = std::make_shared<br::render::TextureBindingBuildInput>();
+				input->streamingTextureID = change.streamingTextureID;
+				input->bindingRevision = change.bindingRevision;
+				input->streamingStateRevision = change.streamingStateRevision;
+				input->samplerDescriptorIndex = change.texture
+					? change.texture->SamplerDescriptorIndex() : 0u;
+				input->image = change.newImage;
+				change.graphRequested = m_rendererStateRequests->Request(
+					bindingKey, change.bindingRevision, {},
+					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
+						std::move(input)));
+			}
+			const auto diagnostic = m_rendererStateRequests->Diagnose(bindingKey);
+			if (diagnostic.artifact.revision != change.bindingRevision ||
+				(diagnostic.artifact.readiness != br::render::ArtifactReadiness::GpuReady &&
+				 diagnostic.artifact.readiness != br::render::ArtifactReadiness::Published)) {
+				if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
+					diagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
+					spdlog::error(
+						"Texture binding graph publication failed: textureID={} revision={} error='{}' blockers='{}'",
+						change.streamingTextureID, change.bindingRevision,
+						diagnostic.error, diagnostic.blockerChain);
+					if (change.texture) {
+						(void)change.texture->RejectPreparedImage(change.bindingRevision, change.newImage);
+						EnqueueTextureUploadAdvance(change.texture, "graph_binding_failed");
+					}
+				} else {
+					waitingForGpu.push_back(std::move(change));
+				}
+				continue;
+			}
+			const auto binding = diagnostic.artifact.payload.Get<br::render::PublishedTextureBinding>();
+			if (!binding || binding->image != change.newImage ||
+				binding->bindingRevision != change.bindingRevision) {
+				waitingForGpu.push_back(std::move(change));
+				continue;
+			}
 		}
 		const auto adoptionStart = std::chrono::steady_clock::now();
 		std::shared_ptr<PixelBuffer> replacedPublishedImage;

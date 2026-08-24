@@ -103,6 +103,7 @@
 #include "Render/DrawWorkload.h"
 #include "Render/IndirectStateArtifacts.h"
 #include "Render/MaterialStateArtifacts.h"
+#include "Render/TextureBindingArtifacts.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/StaticStateArtifacts.h"
 #include "Render/RasterBucketFlags.h"
@@ -734,6 +735,7 @@ void Renderer::Initialize(
         *m_asyncStateGraph, *m_rendererStatePublisher);
     br::render::RegisterIndirectStateProducer(*m_asyncStateGraph);
     br::render::RegisterMaterialStateProducer(*m_asyncStateGraph);
+	br::render::RegisterTextureBindingProducer(*m_asyncStateGraph);
     br::render::RegisterVersionedGpuBufferProducer(*m_asyncStateGraph);
     br::render::RegisterStaticStateProducers(*m_asyncStateGraph);
     m_asyncStateGraph->SetReadyCallback([this](const br::render::ArtifactSnapshot& artifact) {
