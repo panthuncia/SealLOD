@@ -460,7 +460,7 @@ TerrainManager::TerrainManager()
 			br::render::PublishedResourceKey{
 				br::render::PublishedFragmentKind::Terrain,
 				br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
-			fallback, false);
+			fallback, true);
 	};
 	m_terrainResolvers = {
 		makeResolver(br::render::kTerrainSetsVariant, m_sets),
@@ -893,7 +893,6 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     m_desiredSet = set;
 	++m_terrainRowsRevision;
 	m_terrainGraphDirty = true;
-	m_terrainGraphStableFrames = 0;
     // A terrain set with valid extents is enough for the RVT to begin creating
     // permanent pages.  Do not expose it until every initial streaming owner has
     // observed a non-placeholder published image.  The binding callbacks queue
@@ -1044,7 +1043,6 @@ void TerrainManager::RefreshTerrainLayerTextureBinding(
 	}
 	++m_terrainRowsRevision;
 	m_terrainGraphDirty = true;
-	m_terrainGraphStableFrames = 0;
     const bool isFinalBinding = !texture->IsUsingFallbackImage();
     if (isFinalBinding && initialDependencyIndex < m_initialBindingReady.size() &&
         m_initialBindingReady[initialDependencyIndex] == 0u) {
@@ -1128,7 +1126,6 @@ void TerrainManager::RequestGraphState()
 		br::render::ArtifactPayload::Make<br::render::TerrainStateBuildInput>(std::move(input)));
 	m_terrainGraphDirty = false;
 	m_terrainGraphRequestPending = true;
-	m_terrainGraphStableFrames = 0;
 }
 
 void TerrainManager::ProcessPendingUpdates()
@@ -1144,38 +1141,22 @@ void TerrainManager::ProcessPendingUpdates()
 			m_terrainGraphRequestPending = false;
 			m_terrainGraphDirty = true;
 		}
+		const auto source = br::render::PublishedStateSource::ProcessSource();
+		const auto published = source ? source->Load() : nullptr;
+		const auto terrain = published
+			? published->terrain.payload.Get<br::render::PublishedTerrainState>() : nullptr;
+		if (terrain && terrain->terrainGeneration == m_terrainGeneration &&
+			terrain->stateRevision == m_terrainStateRevision &&
+			published->terrain.revision == m_terrainStateRevision) {
+			m_terrainGraphRequestPending = false;
+			spdlog::info("TerrainManager: graph-owned terrain state published epoch={} revision={} generation={}",
+				published->epoch, terrain->stateRevision, terrain->terrainGeneration);
+		}
 	}
 	if (!m_terrainGraphRequestPending && m_terrainGraphDirty &&
 		m_readyInitialBindingCount == m_initialBindingReady.size()) {
-		const auto source = br::render::PublishedStateSource::ProcessSource();
-		const auto published = source ? source->Load() : nullptr;
-		// Initial terrain uploads are deliberately sequenced after the first
-		// indirect workload. Both are multi-buffer copy transactions; allowing
-		// terrain to race initial scene publication can indefinitely supersede the
-		// workload which makes already-imported static draws visible.
-		if (published && published->indirectWorkloads.revision != 0 &&
-			++m_terrainGraphStableFrames >= 30u) RequestGraphState();
+		RequestGraphState();
 	}
-}
-
-bool TerrainManager::TryActivatePublishedTerrainState()
-{
-	const auto source = br::render::PublishedStateSource::ProcessSource();
-	const auto published = source ? source->Load() : nullptr;
-	const auto terrain = published
-		? published->terrain.payload.Get<br::render::PublishedTerrainState>() : nullptr;
-	if (!terrain || terrain->terrainGeneration != m_terrainGeneration ||
-		terrain->stateRevision == 0 || terrain->stateRevision != m_terrainStateRevision ||
-		published->terrain.revision != m_terrainStateRevision) return false;
-	if (terrain->stateRevision == m_activeTerrainPublishedRevision) return true;
-	for (const auto& resolver : m_terrainResolvers) if (!resolver) return false;
-	for (const auto& resolver : m_terrainResolvers) resolver->SetPublishedEnabled(true);
-	m_terrainGraphRequestPending = false;
-	m_terrainGraphActive = true;
-	m_activeTerrainPublishedRevision = terrain->stateRevision;
-	spdlog::info("TerrainManager: activated graph-owned terrain state epoch={} revision={} generation={}",
-		published->epoch, terrain->stateRevision, terrain->terrainGeneration);
-	return true;
 }
 
 void TerrainManager::ClearActiveTerrain()
@@ -1204,12 +1185,6 @@ void TerrainManager::ClearActiveTerrain()
     m_readyInitialBindingCount = 0u;
 	m_terrainGraphDirty = false;
 	m_terrainGraphRequestPending = false;
-	m_terrainGraphStableFrames = 0;
-	m_terrainGraphActive = false;
-	m_activeTerrainPublishedRevision = 0;
-	for (const auto& resolver : m_terrainResolvers) {
-		if (resolver) resolver->SetPublishedEnabled(false);
-	}
     m_desiredSet = MakeEmptySet();
 }
 

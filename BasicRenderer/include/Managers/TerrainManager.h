@@ -108,7 +108,6 @@ public:
 		m_rendererStateRequests = requests;
 		m_uploadService = uploads;
 	}
-	bool TryActivatePublishedTerrainState();
 
     std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
     std::vector<ResourceIdentifier> GetSupportedKeys() override;
@@ -156,9 +155,6 @@ private:
 	std::array<std::shared_ptr<PublishedStateResourceResolver>, 7> m_terrainResolvers;
 	std::uint64_t m_terrainRowsRevision = 0;
 	std::uint64_t m_terrainStateRevision = 0;
-	std::uint64_t m_activeTerrainPublishedRevision = 0;
-	std::uint32_t m_terrainGraphStableFrames = 0;
 	bool m_terrainGraphDirty = false;
 	bool m_terrainGraphRequestPending = false;
-	bool m_terrainGraphActive = false;
 };
