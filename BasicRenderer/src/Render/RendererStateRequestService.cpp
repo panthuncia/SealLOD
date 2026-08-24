@@ -39,8 +39,24 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
         std::lock_guard lock(m_mutex);
         const auto index = static_cast<std::size_t>(fragment->kind);
         if (index >= m_roots.size()) return;
-        auto& root = m_roots[index];
-        if (!root || artifact.revision >= root->revision) root = artifact;
+        auto& roots = m_roots[index];
+        const auto existing = std::ranges::find_if(roots, [&](const ArtifactSnapshot& value) {
+            return value.key == artifact.key && value.revision == artifact.revision;
+        });
+        if (existing != roots.end()) *existing = artifact;
+        else roots.push_back(artifact);
+
+        const auto active = m_publisher.Active();
+        const auto& activeFragment = active ? active->Fragment(fragment->kind) : PublishedStateFragment{};
+        const auto newest = std::ranges::max_element(roots, {}, &ArtifactSnapshot::revision);
+        const auto newestKey = newest != roots.end() ? newest->key : ArtifactKey{};
+        const auto newestRevision = newest != roots.end() ? newest->revision : 0u;
+        std::erase_if(roots, [&](const ArtifactSnapshot& value) {
+            const bool isNewest = value.key == newestKey && value.revision == newestRevision;
+            const bool isActive = active && value.key == activeFragment.publicationRoot &&
+                value.revision == activeFragment.revision;
+            return !isNewest && !isActive;
+        });
     }
     RequestManifest();
 }
@@ -55,8 +71,28 @@ void RendererStateRequestService::RequestManifest() {
         std::lock_guard lock(m_mutex);
         input->base = m_publisher.Active();
         input->baseEpoch = input->base ? input->base->epoch : 0u;
-        input->roots.reserve(m_roots.size());
-        for (const auto& root : m_roots) if (root) input->roots.push_back(*root);
+        input->roots.reserve(m_roots.size() * 2u);
+        const auto appendRoot = [&input](const ArtifactSnapshot& root) {
+            const auto duplicate = std::ranges::any_of(input->roots, [&](const ArtifactSnapshot& value) {
+                return value.key == root.key && value.revision == root.revision;
+            });
+            if (!duplicate) input->roots.push_back(root);
+        };
+        for (const auto& roots : m_roots) {
+            for (const auto& root : roots) appendRoot(root);
+        }
+        // A ready successor may have been built from an intermediate root that
+        // is no longer the active or newest root for that slot. Its exact
+        // dependency snapshot is the authoritative history needed to assemble
+        // the coherent combination; do not require producers to republish it.
+        for (std::size_t cursor = 0; cursor < input->roots.size(); ++cursor) {
+            const auto artifact = input->roots[cursor].payload.Get<RendererStateFragmentArtifact>();
+            if (!artifact) continue;
+            for (const auto& dependency : artifact->fragment.dependencyClosure) {
+                const auto dependencyRoot = dependency.payload.Get<RendererStateFragmentArtifact>();
+                if (dependencyRoot && dependencyRoot->publishRoot) appendRoot(dependency);
+            }
+        }
         ++m_manifestRevision;
     }
     (void)m_graph.Request({ ArtifactKind::FrameManifest, 0, 0 }, m_manifestRevision, {},
@@ -83,23 +119,27 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         return true;
     };
 
+    if (input->roots.size() >= 63u) {
+        return ArtifactBuildResult::Failure("frame manifest root history exceeds selection mask capacity");
+    }
     std::uint64_t selectedMask = 0;
-    if (const auto checkpoint = context.checkpoint.Get<ManifestSelection>()) {
-        selectedMask = checkpoint->rootMask;
-    } else {
-        const auto combinationCount = std::uint64_t{ 1 } << input->roots.size();
-        std::size_t bestCount = 0;
-        std::uint64_t bestRevisionScore = 0;
-        for (std::uint64_t mask = 1; mask < combinationCount; ++mask) {
+    const auto combinationCount = std::uint64_t{ 1 } << input->roots.size();
+    std::size_t bestCount = 0;
+    std::uint64_t bestRevisionScore = 0;
+    for (std::uint64_t mask = 1; mask < combinationCount; ++mask) {
             auto candidate = input->base ? *input->base : PublishedRendererState{};
             std::size_t selectedCount = 0;
             std::uint64_t revisionScore = 0;
+            std::uint64_t selectedKinds = 0;
             bool valid = true;
             for (std::size_t index = 0; index < input->roots.size(); ++index) {
                 if ((mask & (std::uint64_t{ 1 } << index)) == 0) continue;
                 const auto& root = input->roots[index];
                 const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
                 if (!artifact || artifact->kind == PublishedFragmentKind::Count) { valid = false; break; }
+                const auto kindMask = PublishedFragmentMask(artifact->kind);
+                if ((selectedKinds & kindMask) != 0) { valid = false; break; }
+                selectedKinds |= kindMask;
                 auto fragment = artifact->fragment;
                 fragment.publicationRoot = root.key;
                 candidate.Fragment(artifact->kind) = std::move(fragment);
@@ -113,20 +153,8 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                 bestCount = selectedCount;
                 bestRevisionScore = revisionScore;
             }
-        }
-        if (selectedMask == 0) return ArtifactBuildResult::Cancelled();
-        std::vector<ArtifactRequirement> requirements;
-        requirements.reserve(input->roots.size());
-        for (std::size_t index = 0; index < input->roots.size(); ++index) {
-            if ((selectedMask & (std::uint64_t{ 1 } << index)) == 0) continue;
-            const auto& root = input->roots[index];
-            requirements.push_back({ root.key, root.revision, ArtifactReadiness::GpuReady });
-        }
-        auto selection = std::make_shared<ManifestSelection>();
-        selection->rootMask = selectedMask;
-        return ArtifactBuildResult::Needs(std::move(requirements),
-            ArtifactPayload::Make<ManifestSelection>(std::move(selection)));
     }
+    if (selectedMask == 0) return ArtifactBuildResult::Cancelled();
 
     auto state = input->base ? std::make_shared<PublishedRendererState>(*input->base)
                              : std::make_shared<PublishedRendererState>();
@@ -160,7 +188,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
 void RendererStateRequestService::Stop() {
     if (!m_accepting.exchange(false, std::memory_order_acq_rel)) return;
     std::lock_guard lock(m_mutex);
-    for (auto& root : m_roots) root.reset();
+    for (auto& roots : m_roots) roots.clear();
 }
 
 } // namespace br::render

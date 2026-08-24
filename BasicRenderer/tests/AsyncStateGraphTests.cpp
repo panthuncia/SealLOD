@@ -356,6 +356,29 @@ int main() {
     graph.WaitIdle();
     Check(graph.Snapshot(gpuKey).readiness == ArtifactReadiness::GpuReady);
 
+    // The upload may complete while ApplyCompletion is still running and the
+    // current drain is marked scheduled. The notification must hand off to a
+    // successor drain instead of being lost when the current drain goes idle.
+    auto completesDuringSubscribe = std::make_shared<std::atomic_bool>(false);
+    graph.RegisterProducer(ArtifactKind::MeshTable, {
+        TaskLane::Streaming, TaskDomain::TextureProcessing, "ImmediateGpuNotificationProducer",
+        [completesDuringSubscribe](const ArtifactBuildContext& context) {
+            auto token = std::make_shared<GpuDependencyToken>();
+            token->isComplete = [completesDuringSubscribe] {
+                return completesDuringSubscribe->load(std::memory_order_acquire);
+            };
+            token->subscribe = [completesDuringSubscribe](std::function<void()> callback) {
+                completesDuringSubscribe->store(true, std::memory_order_release);
+                callback();
+            };
+            return ArtifactBuildResult::Ready(Payload(context.revision), std::move(token));
+        }
+    });
+    const ArtifactKey immediateGpuKey{ ArtifactKind::MeshTable, 91, 0 };
+    Check(graph.Request(immediateGpuKey, 1));
+    graph.WaitIdle();
+    Check(graph.Snapshot(immediateGpuKey).readiness == ArtifactReadiness::GpuReady);
+
     std::atomic_uint retryAttempts{ 0 };
     graph.RegisterProducer(ArtifactKind::Mesh, {
         TaskLane::Streaming, TaskDomain::General, "RetryProducer",

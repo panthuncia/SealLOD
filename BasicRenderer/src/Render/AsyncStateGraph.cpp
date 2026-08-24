@@ -536,8 +536,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             }
         }
         // Complete() may synchronously notify ticket subscribers. Never call
-        // it while holding the graph mutex because the subscriber queues a
-        // graph signal and must acquire that same mutex.
+        // it while holding the graph mutex; subscribers are allowed to queue
+        // another completion signal immediately.
         std::vector<PendingGpuSignal> completedGpu;
         completedGpu.reserve(signalledGpu.size());
         for (auto& signal : signalledGpu) {
@@ -622,8 +622,14 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     : std::chrono::steady_clock::duration::zero();
                 retryDelay = retryDelay ? (std::min)(*retryDelay, remaining) : remaining;
             }
-            drainScheduled.store(false, std::memory_order_release);
         }
+        // Publish the idle state before the final signal check. A GPU callback
+        // may have observed drainScheduled=true after hasImmediateWork was
+        // sampled above. Rechecking the lock-free queue after clearing the flag
+        // closes that handoff race: either this drain sees the signal, or the
+        // callback sees false and schedules the successor drain itself.
+        drainScheduled.store(false, std::memory_order_release);
+        hasImmediateWork = hasImmediateWork || !gpuSignals.empty();
         for (auto& [registration, context] : builds) SubmitBuild(registration, std::move(context));
         if (callback) for (const auto& snapshot : ready) callback(snapshot);
         if (hasImmediateWork) ScheduleDrain();

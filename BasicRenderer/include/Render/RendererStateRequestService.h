@@ -33,15 +33,16 @@ private:
         std::shared_ptr<const PublishedRendererState> base;
         std::vector<ArtifactSnapshot> roots;
     };
-    struct ManifestSelection { std::uint64_t rootMask = 0; };
-
     void RequestManifest();
     static ArtifactBuildResult BuildManifest(const ArtifactBuildContext& context);
 
     AsyncStateGraph& m_graph;
     RendererStatePublisher& m_publisher;
     mutable std::mutex m_mutex;
-    std::array<std::optional<ArtifactSnapshot>, kPublishedFragmentCount> m_roots;
+    // Each slot retains the active root and the newest ready successor. A
+    // single latest-root entry loses the old half of a coherent combination
+    // when interdependent slots complete out of order.
+    std::array<std::vector<ArtifactSnapshot>, kPublishedFragmentCount> m_roots;
     std::uint64_t m_manifestRevision = 0;
     std::atomic_bool m_accepting{ true };
 };
