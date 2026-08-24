@@ -69,13 +69,15 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
     for (const auto& root : input->roots) {
         const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
         if (!artifact) return ArtifactBuildResult::Failure("manifest root payload type mismatch");
+        auto fragment = artifact->fragment;
+        fragment.publicationRoot = root.key;
         switch (artifact->kind) {
-        case PublishedFragmentKind::Materials: state->materials = artifact->fragment; break;
-        case PublishedFragmentKind::Terrain: state->terrain = artifact->fragment; break;
-        case PublishedFragmentKind::Geometry: state->geometry = artifact->fragment; break;
-        case PublishedFragmentKind::DrawRecords: state->drawRecords = artifact->fragment; break;
-        case PublishedFragmentKind::ActiveDrawLists: state->activeDrawLists = artifact->fragment; break;
-        case PublishedFragmentKind::IndirectWorkloads: state->indirectWorkloads = artifact->fragment; break;
+        case PublishedFragmentKind::Materials: state->materials = std::move(fragment); break;
+        case PublishedFragmentKind::Terrain: state->terrain = std::move(fragment); break;
+        case PublishedFragmentKind::Geometry: state->geometry = std::move(fragment); break;
+        case PublishedFragmentKind::DrawRecords: state->drawRecords = std::move(fragment); break;
+        case PublishedFragmentKind::ActiveDrawLists: state->activeDrawLists = std::move(fragment); break;
+        case PublishedFragmentKind::IndirectWorkloads: state->indirectWorkloads = std::move(fragment); break;
         }
         for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
             const bool ownedByRoot = entry->first.owner == artifact->kind ||

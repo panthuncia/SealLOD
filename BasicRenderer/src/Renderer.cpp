@@ -3080,6 +3080,10 @@ void Renderer::Update(float elapsedSeconds) {
         }
         if (m_asyncStateGraph && m_context.publishedRendererState) {
             const auto markFragmentPublished = [this](const br::render::PublishedStateFragment& fragment) {
+                if (fragment.revision != 0 &&
+                    fragment.publicationRoot.kind != br::render::ArtifactKind::Generic) {
+                    m_asyncStateGraph->MarkPublished(fragment.publicationRoot, fragment.revision);
+                }
                 for (const auto& artifact : fragment.dependencyClosure) {
                     m_asyncStateGraph->MarkPublished(artifact.key, artifact.revision);
                 }

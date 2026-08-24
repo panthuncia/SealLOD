@@ -54,6 +54,9 @@ struct PublishedResourceCatalog {
 
 struct PublishedStateFragment {
     std::uint64_t revision = 0;
+    // The graph artifact whose payload became this manifest fragment. Frame
+    // commit acknowledges both this root and its dependency closure.
+    ArtifactKey publicationRoot{};
     ArtifactPayload payload;
     std::vector<ArtifactSnapshot> dependencyClosure;
     std::vector<std::shared_ptr<const void>> resourceHolds;
