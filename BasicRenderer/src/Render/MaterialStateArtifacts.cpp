@@ -7,6 +7,15 @@
 namespace br::render {
 namespace {
 
+std::uint64_t HashBytes(const std::vector<std::byte>& bytes) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const auto value : bytes) {
+        hash ^= std::to_integer<std::uint8_t>(value);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
 ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     const auto input = context.input.Get<MaterialStateBuildInput>();
     if (!input) return ArtifactBuildResult::Failure("material-state immutable input missing");
@@ -38,6 +47,15 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     if (!state->baseTable || !state->evalTable || !state->openPbrTable) {
         return ArtifactBuildResult::Failure("material table dependency missing or has incompatible ABI");
     }
+	const std::array actualHashes{
+		HashBytes(*state->baseTable->cpuShadow),
+		HashBytes(*state->evalTable->cpuShadow),
+		HashBytes(*state->openPbrTable->cpuShadow)
+	};
+	if (actualHashes != input->tableContentHashes) {
+		return ArtifactBuildResult::Failure("material table content hash mismatch");
+	}
+	state->tableContentHashes = actualHashes;
 
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::Materials;

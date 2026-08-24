@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -27,6 +28,7 @@ struct MaterialStateBuildInput {
     std::uint64_t sourceFingerprint = 0;
     std::uint32_t slotsUsed = 0;
     std::vector<MaterialCompileFlagEntryDTO> activeCompileFlags;
+	std::array<std::uint64_t, 3> tableContentHashes{};
     ArtifactKey baseTableKey{ ArtifactKind::BufferVersion, 0, kMaterialBaseTableVariant };
     ArtifactKey evalTableKey{ ArtifactKind::BufferVersion, 0, kMaterialEvalTableVariant };
     ArtifactKey openPbrTableKey{ ArtifactKind::BufferVersion, 0, kMaterialOpenPbrTableVariant };
@@ -37,6 +39,7 @@ struct PublishedMaterialState {
     std::uint32_t compileFlagSlotsUsed = 0;
     std::vector<MaterialCompileFlags> activeCompileFlags;
     std::vector<std::uint32_t> activeCompileFlagSlots;
+	std::array<std::uint64_t, 3> tableContentHashes{};
     std::shared_ptr<const PublishedGpuBufferVersion> baseTable;
     std::shared_ptr<const PublishedGpuBufferVersion> evalTable;
     std::shared_ptr<const PublishedGpuBufferVersion> openPbrTable;

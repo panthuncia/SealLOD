@@ -1363,6 +1363,14 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 				}
 				return table;
 			};
+			const auto hashBytes = [](const std::vector<std::byte>& bytes) {
+				std::uint64_t hash = 1469598103934665603ull;
+				for (const auto value : bytes) {
+					hash ^= std::to_integer<std::uint8_t>(value);
+					hash *= 1099511628211ull;
+				}
+				return hash;
+			};
 			const auto copyBase = [&](std::size_t slot, std::byte* destination) {
 				const auto row = slot < m_materialUploadSignatures.size() &&
 					m_materialUploadSignatures[slot].valid
@@ -1381,20 +1389,23 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 					? m_materialUploadSignatures[slot].openPBRData : PerMaterialOpenPBRCB{};
 				std::memcpy(destination, &row, sizeof(row));
 			};
+			auto baseTable = makeTableInput("Published::PerMaterialDataBuffer", sizeof(PerMaterialCB),
+				br::render::kMaterialBaseTableVariant, copyBase);
+			auto evalTable = makeTableInput("Published::PerMaterialEvalDataBuffer", sizeof(PerMaterialEvalCB),
+				br::render::kMaterialEvalTableVariant, copyEval);
+			auto openPbrTable = makeTableInput("Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB),
+				br::render::kMaterialOpenPbrTableVariant, copyOpenPbr);
+			const std::array tableContentHashes{
+				hashBytes(baseTable->bytes), hashBytes(evalTable->bytes), hashBytes(openPbrTable->bytes) };
 			(void)m_rendererStateRequests->Request(baseKey, m_materialRowsRevision, {},
-				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
-					makeTableInput("Published::PerMaterialDataBuffer", sizeof(PerMaterialCB),
-						br::render::kMaterialBaseTableVariant, copyBase)));
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(baseTable)));
 			(void)m_rendererStateRequests->Request(evalKey, m_materialRowsRevision, {},
-				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
-					makeTableInput("Published::PerMaterialEvalDataBuffer", sizeof(PerMaterialEvalCB),
-						br::render::kMaterialEvalTableVariant, copyEval)));
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(evalTable)));
 			(void)m_rendererStateRequests->Request(openPbrKey, m_materialRowsRevision, {},
-				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
-					makeTableInput("Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB),
-						br::render::kMaterialOpenPbrTableVariant, copyOpenPbr)));
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(openPbrTable)));
 			auto input = std::make_shared<br::render::MaterialStateBuildInput>();
 			input->sourceFingerprint = fingerprint;
+			input->tableContentHashes = tableContentHashes;
 			input->slotsUsed = m_publishedCompileFlagsSlotsUsed;
 			input->activeCompileFlags.reserve(m_publishedActiveCompileFlags.size());
 			for (std::size_t i = 0; i < m_publishedActiveCompileFlags.size(); ++i) {
