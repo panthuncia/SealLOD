@@ -3121,6 +3121,9 @@ void Renderer::Update(float elapsedSeconds) {
 		if (m_pMaterialManager) {
 			(void)m_pMaterialManager->TryActivatePublishedMaterialState();
 		}
+		if (m_pTerrainManager) {
+			(void)m_pTerrainManager->TryActivatePublishedTerrainState();
+		}
     });
 
 	// Final material bindings are published only after the reusable frame slot is
