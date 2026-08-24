@@ -25,6 +25,7 @@ enum class ArtifactKind : std::uint16_t {
     MeshTable,
     DrawRecordPage,
     ActiveDrawList,
+    ViewLifetime,
     IndirectWorkload,
     StaticTransaction,
     StaticScene,

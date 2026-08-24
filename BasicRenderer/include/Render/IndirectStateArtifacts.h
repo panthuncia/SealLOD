@@ -22,6 +22,11 @@ struct ActiveDrawEntryDTO {
     std::uint32_t generation = 0;
 };
 
+struct ViewLifetimeArtifact {
+    std::uint64_t viewID = 0;
+    std::uint64_t lifetimeRevision = 0;
+};
+
 struct IndirectWorkloadInputDTO {
     DrawWorkloadKey key;
     ArtifactKey activeListArtifactKey{ ArtifactKind::ActiveDrawList, 0, 0 };

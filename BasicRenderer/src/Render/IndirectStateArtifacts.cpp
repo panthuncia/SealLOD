@@ -12,6 +12,16 @@
 namespace br::render {
 namespace {
 
+ArtifactBuildResult BuildViewLifetime(const ArtifactBuildContext& context) {
+    const auto input = context.input.Get<ViewLifetimeArtifact>();
+    if (!input || input->viewID != context.key.primaryID ||
+        input->lifetimeRevision != context.revision) {
+        return ArtifactBuildResult::Failure("view-lifetime identity/revision mismatch");
+    }
+    return ArtifactBuildResult::Ready(
+        ArtifactPayload::Make<ViewLifetimeArtifact>(input));
+}
+
 std::uint32_t RoundUp(std::uint32_t value, std::uint32_t increment) {
     increment = (std::max)(increment, 1u);
     const auto result = ((static_cast<std::uint64_t>(value) + increment - 1u) / increment) * increment;
@@ -127,6 +137,9 @@ std::vector<const PublishedIndirectWorkload*> PublishedIndirectState::Find(
 }
 
 void RegisterIndirectStateProducer(AsyncStateGraph& graph) {
+    graph.RegisterProducer(ArtifactKind::ViewLifetime, {
+        TaskLane::Streaming, TaskDomain::RendererState,
+        "ViewLifetimeArtifact::Build", BuildViewLifetime });
     graph.RegisterProducer(ArtifactKind::IndirectWorkload, {
         TaskLane::Streaming, TaskDomain::RendererState,
         "IndirectStateArtifact::Build", BuildIndirectState });

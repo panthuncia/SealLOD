@@ -7,6 +7,7 @@
 
 #include "Scene/Components.h"
 #include "Materials/TechniqueDescriptor.h"
+#include "Render/IndirectStateArtifacts.h"
 
 namespace org { class DynamicGloballyIndexedResource; }
 using org::DynamicGloballyIndexedResource;
@@ -78,17 +79,26 @@ private:
     // Per-workload requested and published draw count (unrounded)
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToRequestedCount;
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToPublishedCount;
+    std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> m_workloadIDs;
+    std::uint64_t m_nextWorkloadID = 1;
 
     std::unordered_set<std::uint64_t> m_viewIDs;
+    std::unordered_map<std::uint64_t, std::uint64_t> m_viewLifetimeRevisions;
 
     // Growth granularity
     unsigned int m_incrementSize = 1000;
     br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
     org::runtime::IUploadService* m_uploadService = nullptr;
-    std::uint64_t m_graphInputFingerprint = 0;
-    std::uint64_t m_graphPendingFingerprint = 0;
-    std::uint32_t m_graphStableTicks = 0;
-	std::uint32_t m_graphDirtyTicks = 0;
+    struct ActiveSnapshot {
+        std::uint64_t revision = 0;
+        std::vector<br::render::ActiveDrawEntryDTO> entries;
+    };
+    std::unordered_map<DrawWorkloadKey, ActiveSnapshot, DrawWorkloadKey::Hasher> m_activeSnapshots;
+    std::uint64_t m_desiredMutationRevision = 1;
+    std::uint64_t m_consumedMutationRevision = 0;
+    std::uint64_t m_lastObjectBufferRevision = 0;
+    std::uint64_t m_lastMaterialRevision = 0;
+    std::uint64_t m_lastResidentDrawRecordCount = 0;
     std::uint64_t m_graphRevision = 0;
     std::uint32_t m_graphDiagnosticTicks = 0;
 
@@ -97,4 +107,5 @@ private:
         return ((x + m_incrementSize - 1) / m_incrementSize) * m_incrementSize;
     }
     void EnsureWorkloadRegistered(const DrawWorkloadKey& workloadKey);
+    [[nodiscard]] std::uint64_t WorkloadID(const DrawWorkloadKey& workloadKey) const;
 };
