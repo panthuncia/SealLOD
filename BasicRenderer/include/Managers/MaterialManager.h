@@ -174,6 +174,7 @@ private:
 	std::uint64_t m_materialRowsRevision = 1;
 	bool m_materialGraphActive = false;
 	std::uint64_t m_activeMaterialPublishedRevision = 0;
+	std::uint64_t m_observedMaterialPublishedRevision = 0;
 	std::array<std::shared_ptr<org::DynamicGloballyIndexedResource>, 3> m_materialStartupFallbacks;
 	std::uint64_t m_materialStateFingerprint = 0;
 	std::uint64_t m_pendingMaterialStateFingerprint = 0;

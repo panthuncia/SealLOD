@@ -3205,26 +3205,49 @@ void Renderer::Update(float elapsedSeconds) {
                 std::free(outputPath);
                 outputPath = nullptr;
                 if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
-                    auto resource = m_pMaterialManager->ProvideResource(
-                        ResourceIdentifier("Builtin::PerMaterialEvalDataBuffer"));
-                    if (resource) {
+                    const auto source = br::render::PublishedStateSource::ProcessSource();
+                    const auto published = source ? source->Load() : nullptr;
+                    const auto materialState = published
+                        ? published->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
+                    if (materialState && materialState->baseTable && materialState->evalTable &&
+                        materialState->openPbrTable) {
+                        const auto requestTable = [readbackService, &path](
+                            const char* label,
+                            const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& table) {
+                            if (!table || !table->resource || !table->cpuShadow) return;
+                            auto tablePath = path;
+                            tablePath += std::filesystem::path(fmt::format(".{}.bin", label));
+                            const auto expected = table->cpuShadow;
+                            const auto resourceID = table->resource->GetGlobalResourceID();
+                            readbackService->RequestReadbackCapture(
+                                "MenuRenderPass", table->resource.get(), RangeSpec{},
+                                [tablePath, expected, resourceID, label](ReadbackCaptureResult&& result) {
+                                    std::ofstream output(tablePath, std::ios::binary | std::ios::trunc);
+                                    if (output && !result.data.empty()) {
+                                        output.write(reinterpret_cast<const char*>(result.data.data()),
+                                            static_cast<std::streamsize>(result.data.size()));
+                                    }
+                                    const auto comparedBytes = (std::min)(result.data.size(), expected->size());
+                                    std::size_t firstMismatch = comparedBytes;
+                                    for (std::size_t offset = 0; offset < comparedBytes; ++offset) {
+                                        if (result.data[offset] != (*expected)[offset]) {
+                                            firstMismatch = offset;
+                                            break;
+                                        }
+                                    }
+                                    const bool exactPrefix = result.data.size() >= expected->size() &&
+                                        firstMismatch == comparedBytes;
+                                    spdlog::info(
+                                        "Published material GPU readback: table={} resource={} gpuBytes={} expectedBytes={} exactPrefix={} firstMismatch={} output='{}'.",
+                                        label, resourceID, result.data.size(), expected->size(), exactPrefix,
+                                        firstMismatch == comparedBytes ? UINT64_MAX : firstMismatch,
+                                        tablePath.string());
+                                });
+                        };
                         materialBufferReadbackRequested = true;
-                        readbackService->RequestReadbackCapture(
-                            "MenuRenderPass",
-                            resource.get(),
-                            RangeSpec{},
-                            [path](ReadbackCaptureResult&& result) {
-                                std::ofstream output(path, std::ios::binary | std::ios::trunc);
-                                if (output && !result.data.empty()) {
-                                    output.write(
-                                        reinterpret_cast<const char*>(result.data.data()),
-                                        static_cast<std::streamsize>(result.data.size()));
-                                }
-                                spdlog::info(
-                                    "SARP material texture trace: material eval GPU readback bytes={} output='{}'.",
-                                    result.data.size(),
-                                    path.string());
-                            });
+                        requestTable("base", materialState->baseTable);
+                        requestTable("eval", materialState->evalTable);
+                        requestTable("openpbr", materialState->openPbrTable);
                     }
                 }
             }

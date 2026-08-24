@@ -1233,8 +1233,8 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				// otherwise expose an older (including startup-empty) table to newly activated
 				// draws, making valid geometry disappear.
 				if (shadow->baseTable && shadow->evalTable && shadow->openPbrTable &&
-					published->materials.revision > m_activeMaterialPublishedRevision) {
-					m_activeMaterialPublishedRevision = published->materials.revision;
+					published->materials.revision > m_observedMaterialPublishedRevision) {
+					m_observedMaterialPublishedRevision = published->materials.revision;
 					std::size_t validRows = 0;
 					std::size_t nonzeroBaseDescriptors = 0;
 					for (std::size_t slot = 0; slot < m_materialUploadSignatures.size(); ++slot) {
