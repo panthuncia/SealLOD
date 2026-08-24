@@ -2,6 +2,8 @@
 
 #include <chrono>
 
+#include <spdlog/spdlog.h>
+
 namespace br::render {
 namespace {
 std::mutex g_processSourceMutex;
@@ -62,6 +64,23 @@ std::uint64_t PublishedStateSource::Epoch() const noexcept {
     return state ? state->epoch : 0u;
 }
 
+PublishedStateFragment& PublishedRendererState::Fragment(PublishedFragmentKind kind) {
+    switch (kind) {
+    case PublishedFragmentKind::Materials: return materials;
+    case PublishedFragmentKind::Terrain: return terrain;
+    case PublishedFragmentKind::Geometry: return geometry;
+    case PublishedFragmentKind::DrawRecords: return drawRecords;
+    case PublishedFragmentKind::ActiveDrawLists: return activeDrawLists;
+    case PublishedFragmentKind::IndirectWorkloads: return indirectWorkloads;
+    case PublishedFragmentKind::Count: break;
+    }
+    throw std::out_of_range("published renderer fragment kind");
+}
+
+const PublishedStateFragment& PublishedRendererState::Fragment(PublishedFragmentKind kind) const {
+    return const_cast<PublishedRendererState*>(this)->Fragment(kind);
+}
+
 RendererStatePublisher::RendererStatePublisher(std::size_t framesInFlight) {
     auto fallback = std::make_shared<PublishedRendererState>();
     Bootstrap(std::move(fallback), framesInFlight);
@@ -110,56 +129,52 @@ bool RendererStatePublisher::PublishArtifact(const ArtifactSnapshot& artifact) {
     return true;
 }
 
-std::shared_ptr<const PublishedRendererState> RendererStatePublisher::Commit(std::size_t frameSlot) {
+void RendererStateCommitResult::RunDeferred() noexcept {
+    if (rejectedCallback) {
+        try { rejectedCallback(rejectedEpoch); }
+        catch (const std::exception& exception) {
+            spdlog::error("Renderer-state candidate rejection callback failed: {}", exception.what());
+        } catch (...) {
+            spdlog::error("Renderer-state candidate rejection callback failed");
+        }
+        rejectedCallback = {};
+    }
+    for (std::uint8_t index = 0; index < retiredStateCount; ++index) retiredStates[index].reset();
+    retiredStateCount = 0;
+}
+
+RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) {
     const auto started = std::chrono::steady_clock::now();
-    std::function<void(std::uint64_t)> rejected;
-    std::uint64_t rejectedEpoch = 0;
-    std::shared_ptr<const PublishedRendererState> retiredFrameState;
-    std::shared_ptr<const PublishedRendererState> retiredActiveState;
-    std::shared_ptr<const PublishedRendererState> retiredCandidateState;
-    std::unique_lock lock(m_mutex);
-    if (frameSlot >= m_frameStates.size()) m_frameStates.resize(frameSlot + 1u);
-    retiredFrameState = std::move(m_frameStates[frameSlot]);
+    RendererStateCommitResult result;
+    std::lock_guard lock(m_mutex);
+    if (frameSlot >= m_frameStates.size()) {
+        result.state = m_active;
+        return result;
+    }
+    if (m_frameStates[frameSlot]) {
+        result.retiredStates[result.retiredStateCount++] = std::move(m_frameStates[frameSlot]);
+        if (m_stats.retainedFrameStates) --m_stats.retainedFrameStates;
+    }
     if (m_candidate.state) {
         const auto activeEpoch = m_active ? m_active->epoch : 0u;
         if (m_candidate.baseEpoch == activeEpoch) {
-            retiredActiveState = std::move(m_active);
+            if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
             m_active = std::move(m_candidate.state);
             ++m_stats.committed;
         } else {
             ++m_stats.rejectedBaseEpoch;
-            rejected = m_candidateRejected;
-            rejectedEpoch = activeEpoch;
-            retiredCandidateState = std::move(m_candidate.state);
+            result.rejectedCallback = m_candidateRejected;
+            result.rejectedEpoch = activeEpoch;
+            result.retiredStates[result.retiredStateCount++] = std::move(m_candidate.state);
         }
         m_candidate.baseEpoch = 0;
     }
     m_frameStates[frameSlot] = m_active;
-    m_stats.retainedFrameStates = 0;
-    for (const auto& state : m_frameStates) if (state) ++m_stats.retainedFrameStates;
+    if (m_active) ++m_stats.retainedFrameStates;
     m_stats.commitMicros = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started).count());
-    auto result = m_active;
-    lock.unlock();
-    try {
-        m_source->Store(result);
-    } catch (...) {
-        std::throw_with_nested(std::runtime_error("PublishedStateSource::Store failed"));
-    }
-    if (rejected) {
-        try {
-            rejected(rejectedEpoch);
-        } catch (...) {
-            std::throw_with_nested(std::runtime_error("candidate rejection callback failed"));
-        }
-    }
-    try {
-        retiredCandidateState.reset();
-        retiredActiveState.reset();
-        retiredFrameState.reset();
-    } catch (...) {
-        std::throw_with_nested(std::runtime_error("published state retirement failed"));
-    }
+    result.state = m_active;
+    m_source->Store(result.state);
     return result;
 }
 

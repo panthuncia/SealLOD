@@ -107,6 +107,7 @@
 #include "Render/TerrainStateArtifacts.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/StaticStateArtifacts.h"
+#include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/RasterBucketFlags.h"
 #include "Render/TerrainRvtTelemetry.h"
 
@@ -739,6 +740,7 @@ void Renderer::Initialize(
 	br::render::RegisterTextureBindingProducer(*m_asyncStateGraph);
 	br::render::RegisterTerrainStateProducer(*m_asyncStateGraph);
     br::render::RegisterVersionedGpuBufferProducer(*m_asyncStateGraph);
+    br::render::RegisterObjectBufferStateProducer(*m_asyncStateGraph);
     br::render::RegisterStaticStateProducers(*m_asyncStateGraph);
     m_asyncStateGraph->SetReadyCallback([this](const br::render::ArtifactSnapshot& artifact) {
         if (m_rendererStateRequests) m_rendererStateRequests->OnArtifactReady(artifact);
@@ -785,6 +787,9 @@ void Renderer::Initialize(
     m_pLightManager = LightManager::CreateUnique();
     m_pMeshManager = MeshManager::CreateUnique();
 	m_pObjectManager = ObjectManager::CreateUnique();
+	m_pObjectManager->SetRendererStateServices(
+		m_rendererStateRequests.get(),
+		currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr);
 	m_pIndirectCommandBufferManager = IndirectCommandBufferManager::CreateUnique();
 	m_pViewManager = ViewManager::CreateUnique();
 	m_pEnvironmentManager = EnvironmentManager::CreateUnique();
@@ -955,7 +960,10 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
         for (const auto& record : textureStats.largestResidentTextures) {
             std::ostringstream stream;
             stream
-                << "bytes=" << record.residentBytes
+                << "streaming_id=" << record.streamingTextureID
+                << " descriptor=" << record.imageDescriptorIndex
+                << " resource=" << record.imageResourceID
+                << " bytes=" << record.residentBytes
                 << " resident_dimensions=" << record.residentWidth << "x" << record.residentHeight
                 << " expected_resident_dimensions=" << record.expectedResidentWidth << "x" << record.expectedResidentHeight
                 << " total_mips=" << record.totalMipCount
@@ -3065,15 +3073,21 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("CommitPublishedRendererState", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState");
         try {
-            if (m_asyncStateGraph) m_asyncStateGraph->PumpGpuCompletions();
-        } catch (const std::exception& exception) {
-            spdlog::critical("CommitPublishedRendererState: PumpGpuCompletions failed: {}", exception.what());
-            throw;
-        }
-        try {
-            m_context.publishedRendererState = m_rendererStatePublisher
-                ? m_rendererStatePublisher->Commit(m_frameIndex)
-                : nullptr;
+            if (m_rendererStatePublisher) {
+                auto commit = m_rendererStatePublisher->Commit(m_frameIndex);
+                m_context.publishedRendererState = commit.state;
+                if (commit.HasDeferredWork()) {
+                    const bool submitted = TaskSchedulerManager::GetInstance().Submit(
+                        TaskLane::Background, TaskDomain::Cleanup,
+                        "RendererStatePublisher::DeferredCommit",
+                        [commit = std::move(commit)]() mutable { commit.RunDeferred(); });
+                    if (!submitted) {
+                        spdlog::warn("Renderer-state deferred commit cleanup was rejected by the scheduler");
+                    }
+                }
+            } else {
+                m_context.publishedRendererState.reset();
+            }
         } catch (const std::exception& exception) {
             spdlog::critical("CommitPublishedRendererState: publisher Commit failed: {}", exception.what());
             throw;
@@ -3100,6 +3114,9 @@ void Renderer::Update(float elapsedSeconds) {
 		}
 		if (m_pTerrainManager) {
 			(void)m_pTerrainManager->TryActivatePublishedTerrainState();
+		}
+		if (m_pObjectManager) {
+			(void)m_pObjectManager->TryActivatePublishedBufferState();
 		}
     });
 
@@ -3177,8 +3194,12 @@ void Renderer::Update(float elapsedSeconds) {
         if (m_pMaterialManager) {
             m_pMaterialManager->CommitGpuVisibleSnapshot();
         }
-        if (m_pIndirectCommandBufferManager && m_pObjectManager) {
-            m_pIndirectCommandBufferManager->PublishDesiredState(*m_pObjectManager);
+		if (m_pObjectManager) {
+			m_pObjectManager->PublishDesiredBufferState();
+		}
+        if (m_pIndirectCommandBufferManager && m_pObjectManager && m_pMaterialManager) {
+			m_pIndirectCommandBufferManager->PublishDesiredState(
+				*m_pObjectManager, *m_pMaterialManager);
         }
     });
 
@@ -3192,7 +3213,7 @@ void Renderer::Update(float elapsedSeconds) {
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
         static bool materialBufferReadbackRequested = false;
-        if (!materialBufferReadbackRequested && m_totalFramesRendered >= 120u &&
+        if (!materialBufferReadbackRequested && m_totalFramesRendered >= 600u &&
             currentRenderGraph && m_pMaterialManager) {
             wchar_t* outputPath = nullptr;
             size_t outputPathLength = 0;
@@ -3211,6 +3232,22 @@ void Renderer::Update(float elapsedSeconds) {
                         ? published->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
                     if (materialState && materialState->baseTable && materialState->evalTable &&
                         materialState->openPbrTable) {
+                        auto metadataPath = path;
+                        metadataPath += L".meta.txt";
+                        std::ofstream metadata(metadataPath, std::ios::trunc);
+                        if (metadata) {
+                            metadata << "epoch=" << published->epoch << '\n';
+                            metadata << "revision=" << published->materials.revision << '\n';
+                            metadata << "compile_flag_slots=" << materialState->compileFlagSlotsUsed << '\n';
+                            metadata << "active_compile_flags=" << materialState->activeCompileFlags.size() << '\n';
+                            for (std::size_t index = 0;
+                                index < materialState->activeCompileFlags.size() &&
+                                index < materialState->activeCompileFlagSlots.size(); ++index) {
+                                metadata << "active[" << index << "].flags="
+                                    << static_cast<std::uint64_t>(materialState->activeCompileFlags[index])
+                                    << " slot=" << materialState->activeCompileFlagSlots[index] << '\n';
+                            }
+                        }
                         const auto requestTable = [readbackService, &path](
                             const char* label,
                             const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& table) {
@@ -3226,6 +3263,13 @@ void Renderer::Update(float elapsedSeconds) {
                                     if (output && !result.data.empty()) {
                                         output.write(reinterpret_cast<const char*>(result.data.data()),
                                             static_cast<std::streamsize>(result.data.size()));
+                                    }
+                                    auto expectedPath = tablePath;
+                                    expectedPath += L".expected";
+                                    std::ofstream expectedOutput(expectedPath, std::ios::binary | std::ios::trunc);
+                                    if (expectedOutput && !expected->empty()) {
+                                        expectedOutput.write(reinterpret_cast<const char*>(expected->data()),
+                                            static_cast<std::streamsize>(expected->size()));
                                     }
                                     const auto comparedBytes = (std::min)(result.data.size(), expected->size());
                                     std::size_t firstMismatch = comparedBytes;
@@ -5198,8 +5242,9 @@ std::shared_ptr<Scene> Renderer::AppendScene(std::shared_ptr<Scene> scene) {
 	if (m_pMaterialManager) {
 		m_pMaterialManager->CommitGpuVisibleSnapshot();
 	}
-	if (m_pIndirectCommandBufferManager && m_pObjectManager) {
-		m_pIndirectCommandBufferManager->PublishDesiredState(*m_pObjectManager);
+	if (m_pIndirectCommandBufferManager && m_pObjectManager && m_pMaterialManager) {
+		m_pIndirectCommandBufferManager->PublishDesiredState(
+			*m_pObjectManager, *m_pMaterialManager);
 	}
 
 	m_warnedNullScene = false;

@@ -1038,6 +1038,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     spdlog::info("CLOD transparency mode: AVBOIT");
     SettingsManager::GetInstance().getSettingSetter<bool>("rememberCameraPose")(
         cameraState.rememberCameraPose);
+    if (const char* outputTypeValue = std::getenv("SARP_DEBUG_OUTPUT_TYPE");
+        outputTypeValue && outputTypeValue[0] != '\0') {
+        char* end = nullptr;
+        const auto parsed = std::strtoul(outputTypeValue, &end, 10);
+        if (end != outputTypeValue && *end == '\0' && parsed < OutputTypeNames.size()) {
+            SettingsManager::GetInstance().getSettingSetter<unsigned int>("outputType")(
+                static_cast<unsigned int>(parsed));
+            spdlog::info("Debug output type selected from SARP_DEBUG_OUTPUT_TYPE: {}", parsed);
+        }
+    }
     if (vsmPageStateTest) {
         SettingsManager::GetInstance().getSettingSetter<unsigned int>("outputType")(
             static_cast<unsigned int>(OutputType::VSM_PAGE_STATE));

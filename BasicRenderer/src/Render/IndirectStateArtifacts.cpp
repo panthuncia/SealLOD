@@ -29,7 +29,10 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
     auto state = std::make_shared<PublishedIndirectState>();
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::IndirectWorkloads;
+    root->catalogOwnerMask = PublishedFragmentMask(PublishedFragmentKind::IndirectWorkloads) |
+        PublishedFragmentMask(PublishedFragmentKind::ActiveDrawLists);
     root->fragment.revision = context.revision;
+	root->fragment.dependencyClosure = context.dependencies;
 
     for (const auto& workload : input->workloads) {
         const auto logicalCount = static_cast<std::uint64_t>(workload.activeEntries.size());

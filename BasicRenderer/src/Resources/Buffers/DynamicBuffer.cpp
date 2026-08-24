@@ -100,6 +100,18 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
         elementSize,
         m_capacity);
 
+	// Graph-exclusive buffers grow their logical allocation range without mutating
+	// the currently published GPU backing.  Do this before consuming the trailing
+	// free block: ExtendTrackedCapacityLocked owns the free-list update and must see
+	// the complete old range in order to preserve it.
+	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) {
+		const size_t newCapacity = ComputeReserveCapacityLocked(requiredSize);
+		if (newCapacity <= m_capacity || !ExtendTrackedCapacityLocked(newCapacity)) {
+			return nullptr;
+		}
+		return Allocate(size, elementSize);
+	}
+
 	// Absorb the last block if it is free
     size_t previousCapacity = m_capacity;
 	size_t newBlockSize = (std::max)(m_capacity, requiredSize);
@@ -115,7 +127,7 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
 			m_freeBlocks.erase({ lastIt->second.size, lastIt->second.offset });
 			m_blocksByOffset.erase(lastIt);
 		}
-	}
+    }
     size_t newCapacity = DynamicBuffer::AlignBufferCapacity(previousCapacity + growBy, m_byteAddress);
 
 	GrowBuffer(newCapacity);
@@ -254,6 +266,10 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
         requestedCapacity = ComputeReserveCapacityLocked(size);
     }
     const size_t desiredBackingCapacity = (std::max)(requestedCapacity, m_capacity);
+	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) {
+		(void)ExtendTrackedCapacityLocked(desiredBackingCapacity);
+		return;
+	}
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.ComputedRequestedCapacityBytes", static_cast<int64_t>(requestedCapacity));
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.DesiredBackingCapacityBytes", static_cast<int64_t>(desiredBackingCapacity));
     if (desiredBackingCapacity <= static_cast<size_t>(GetBufferSize()) ||
@@ -328,6 +344,7 @@ size_t DynamicBuffer::ConsumeDeferredAsyncReserveBytes() {
 
 bool DynamicBuffer::PublishReadyAsyncResize(bool wait) {
     BT_ZONE_SCOPE("DynamicBuffer::PublishReadyAsyncResize");
+	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return false;
     std::lock_guard lock(m_allocationMutex);
     const size_t deferredSize = ConsumeDeferredAsyncReserveBytes();
     if (deferredSize != 0) {
@@ -438,6 +455,7 @@ bool DynamicBuffer::CanAllocateBytes(size_t size) const {
 }
 
 bool DynamicBuffer::HasPendingBackingResize() const {
+	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return false;
     if (m_deferredAsyncReserveBytes.load(std::memory_order_acquire) != 0) {
         return true;
     }
@@ -906,6 +924,7 @@ void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) 
         BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload::RetainCpuShadow");
         RetainCpuShadowWrite(data, size, offset);
     }
+	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return;
     if (offset + size > GetBufferSize()) {
         // The logical view has been allocated ahead of the GPU backing resize.
         // Keep the CPU shadow authoritative and replay it when the resize publishes.
@@ -974,18 +993,32 @@ void DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t o
 		m_versionedGraphJournal->AppendWrite(
 			offset / m_elementSize,
 			std::span<const std::byte>(reinterpret_cast<const std::byte*>(data), size),
-			m_capacity / m_elementSize);
+			(offset + size) / m_elementSize);
 	}
 }
 
 void DynamicBuffer::EnableVersionedGraphJournal() {
-	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+	std::scoped_lock lock(m_allocationMutex, m_uploadPolicyMirrorMutex);
 	if (m_versionedGraphJournal) return;
-	EnsureCpuShadowSize(m_capacity);
+	size_t populatedBytes = 0;
+	for (const auto& [offset, block] : m_blocksByOffset) {
+		if (!block.isFree) populatedBytes = (std::max)(populatedBytes, offset + block.size);
+	}
+	EnsureCpuShadowSize(populatedBytes);
 	auto journal = std::make_unique<br::render::VersionedGpuBufferJournal>(
 		static_cast<std::uint32_t>(m_elementSize));
-	journal->Initialize(m_cpuShadowData, m_capacity / m_elementSize, m_capacity / m_elementSize);
+	journal->Initialize(
+		std::span<const std::byte>(m_cpuShadowData.data(), populatedBytes),
+		populatedBytes / m_elementSize,
+		m_capacity / m_elementSize);
 	m_versionedGraphJournal = std::move(journal);
+}
+
+void DynamicBuffer::SetVersionedGraphExclusive(bool exclusive) {
+	const bool previous = m_versionedGraphExclusive.exchange(exclusive, std::memory_order_acq_rel);
+	if (!previous && exclusive) {
+		UnregisterDeferredBackingResizeClient(this);
+	}
 }
 
 br::render::VersionedGpuBufferJournal::Capture DynamicBuffer::CaptureVersionedGraphState() const {
@@ -994,6 +1027,11 @@ br::render::VersionedGpuBufferJournal::Capture DynamicBuffer::CaptureVersionedGr
 		throw std::logic_error("versioned graph journal is not enabled for DynamicBuffer");
 	}
 	return m_versionedGraphJournal->CaptureDesired();
+}
+
+std::vector<std::byte> DynamicBuffer::CaptureCpuShadowBytes() const {
+	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+	return m_cpuShadowData;
 }
 
 void DynamicBuffer::AcknowledgeVersionedGraphState(

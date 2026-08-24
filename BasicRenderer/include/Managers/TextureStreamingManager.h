@@ -33,6 +33,9 @@ class IReadbackService;
 
 struct MaterialTextureStreamingRecord {
 	std::string identifier;
+	uint32_t streamingTextureID = 0;
+	uint32_t imageDescriptorIndex = UINT32_MAX;
+	uint64_t imageResourceID = 0;
 	uint64_t residentBytes = 0;
 	uint32_t residentWidth = 0;
 	uint32_t residentHeight = 0;
@@ -109,6 +112,10 @@ public:
 	void RetirePatchedBindingResources();
 	bool RequestExternalMaterialTextureReadback(
 		const std::shared_ptr<PixelBuffer>& image,
+		std::wstring outputFile,
+		std::function<void()> callback);
+	bool RequestStreamingTextureReadback(
+		uint32_t streamingTextureID,
 		std::wstring outputFile,
 		std::function<void()> callback);
 

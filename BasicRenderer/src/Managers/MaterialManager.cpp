@@ -488,6 +488,24 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 		m_textureStreamingManager->EnqueueFrameTick(frameIndex);
 		m_textureStreamingManager->DrainPendingBindingChanges();
 	}
+	static bool debugTextureReadbackRequested = false;
+	if (!debugTextureReadbackRequested && frameIndex >= 120u && m_textureStreamingManager) {
+		char* idValue = nullptr;
+		size_t idLength = 0;
+		wchar_t* pathValue = nullptr;
+		size_t pathLength = 0;
+		if (_dupenv_s(&idValue, &idLength, "SARP_TEXTURE_READBACK_STREAMING_ID") == 0 && idValue &&
+			_wdupenv_s(&pathValue, &pathLength, L"SARP_TEXTURE_READBACK_PATH") == 0 && pathValue) {
+			char* end = nullptr;
+			const auto id = std::strtoul(idValue, &end, 10);
+			if (end != idValue && *end == '\0') {
+				debugTextureReadbackRequested = m_textureStreamingManager->RequestStreamingTextureReadback(
+					static_cast<uint32_t>(id), pathValue, {});
+			}
+		}
+		std::free(idValue);
+		std::free(pathValue);
+	}
 	const auto streamingEnd = std::chrono::steady_clock::now();
 	const auto& lateReadbackPath = MaterialTextureLateReadbackPath();
 	if (!m_traceLateReadbackRequested && frameIndex >= 600u && !lateReadbackPath.empty()) {
@@ -1288,13 +1306,20 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 		} else if (m_materialStateStableFrames < 4u) {
 			++m_materialStateStableFrames;
 		}
-		// Bulk material creation can modify rows over many consecutive frames.  Wait
-		// for a short quiet window so only the latest immutable table version is
-		// copied and uploaded instead of retaining a full GPU table per transient
-		// startup revision.
+		if (fingerprint != m_materialStateFingerprint) {
+			++m_materialStateDirtyFrames;
+		} else {
+			m_materialStateDirtyFrames = 0;
+		}
+		// Prefer a short quiet window during bulk creation, but cap the debounce.
+		// Texture adoption can change at least one row every frame for a long time;
+		// waiting for global quiescence would leave the active table pointing at
+		// descriptors displaced by newer texture bindings indefinitely.
 		if (fingerprint != m_materialStateFingerprint &&
-			(forceGraphSnapshot || m_materialStateStableFrames >= 4u)) {
+			(forceGraphSnapshot || m_materialStateStableFrames >= 4u ||
+				m_materialStateDirtyFrames >= 4u)) {
 			m_materialStateFingerprint = fingerprint;
+			m_materialStateDirtyFrames = 0;
 			if (!m_uploadService) {
 				spdlog::error("Material graph publication skipped: upload service unavailable");
 				return m_materialStateRevision;
@@ -1411,11 +1436,15 @@ bool MaterialManager::TryActivatePublishedMaterialState() {
 		? published->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
 	if (!materialState || !materialState->baseTable || !materialState->evalTable ||
 		!materialState->openPbrTable || published->materials.revision == 0 ||
-		published->materials.revision != m_materialStateRevision ||
-		materialState->sourceFingerprint != m_materialStateFingerprint ||
-		m_materialStateFingerprint != m_pendingMaterialStateFingerprint) {
+		published->materials.revision < m_activeMaterialPublishedRevision) {
 		return false;
 	}
+	// A published material state is immutable and closed over the exact texture
+	// binding and upload revisions used to build it.  Do not require it to equal
+	// the newest desired revision here: texture streaming can invalidate the next
+	// revision every frame, and that latest-only gate prevented every completed
+	// intermediate state from ever becoming active.  Activate coherent revisions
+	// monotonically while the graph continues preparing the newest state.
 	for (const auto& resolver : m_materialTableResolvers) {
 		if (!resolver) {
 			return false;

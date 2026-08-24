@@ -112,7 +112,9 @@ struct GpuDependencyToken {
     std::function<bool()> isComplete;
     std::function<std::shared_ptr<const void>()> currentTimelineOwner;
     std::function<std::uint64_t()> currentValue;
+    std::function<std::string()> describe;
     std::function<void(std::function<void()>)> subscribe;
+    std::function<bool()> cancel;
 
     [[nodiscard]] bool Complete() const { return !isComplete || isComplete(); }
     [[nodiscard]] std::shared_ptr<const void> TimelineOwner() const {
@@ -121,6 +123,8 @@ struct GpuDependencyToken {
     [[nodiscard]] std::uint64_t TimelineValue() const {
         return currentValue ? currentValue() : value;
     }
+	[[nodiscard]] std::string Describe() const { return describe ? describe() : std::string{}; }
+    [[nodiscard]] bool Cancel() const { return cancel && cancel(); }
 };
 
 std::shared_ptr<const GpuDependencyToken> MakeGpuDependencyToken(
@@ -134,6 +138,23 @@ struct ArtifactBuildContext {
     ArtifactPayload input;
     ArtifactPayload checkpoint;
     std::function<bool()> stopRequested;
+};
+
+enum class ArtifactRequestStatus : std::uint8_t {
+    Accepted,
+    AlreadyDesired,
+    StaleRevision,
+    ConflictingRevision,
+    ShuttingDown,
+};
+
+struct ArtifactRequestResult {
+    ArtifactRequestStatus status = ArtifactRequestStatus::ShuttingDown;
+    std::uint64_t generation = 0;
+    constexpr operator bool() const noexcept {
+        return status == ArtifactRequestStatus::Accepted ||
+            status == ArtifactRequestStatus::AlreadyDesired;
+    }
 };
 
 struct ArtifactBuildResult {
@@ -199,8 +220,9 @@ public:
     AsyncStateGraph& operator=(const AsyncStateGraph&) = delete;
 
     void RegisterProducer(ArtifactKind kind, ArtifactProducerRegistration registration);
-    bool Request(ArtifactKey key, std::uint64_t desiredRevision,
-        std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {});
+    ArtifactRequestResult Request(ArtifactKey key, std::uint64_t desiredRevision,
+        std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
+        std::uint64_t requestFingerprint = 0);
     bool Invalidate(ArtifactKey key, std::uint64_t desiredRevision);
     void Cancel(ArtifactKey key);
     void MarkPublished(ArtifactKey key, std::uint64_t revision);

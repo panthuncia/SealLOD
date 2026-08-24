@@ -241,6 +241,17 @@ namespace {
         void Setup() override {}
 
         void RecordImmediateCommands(ImmediateExecutionContext& context) override {
+			// Declaration refreshes are not guaranteed every frame.  This pass uses
+			// immediate commands and declares no per-resource barriers, so acquire any
+			// uploads that arrived after the last refresh at the actual recording
+			// boundary.  Otherwise their tracked tickets can remain Queued forever.
+			if (!m_uploadSnapshotValid) {
+				m_uploadSnapshot = m_consumeUploads
+					? m_consumeUploads()
+					: std::vector<StreamingUploadDescriptor>{};
+				m_uploadSnapshotValid = true;
+				m_inputs.uploads = m_uploadSnapshot;
+			}
             for (const auto& upload : m_inputs.uploads) {
                 if (upload.ticket && upload.ticket->state.load(std::memory_order_acquire) ==
                     TrackedUploadTicketState::Cancelled) {
@@ -1657,21 +1668,6 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
     rg.RegisterResource(Builtin::CLod::StreamingRuntimeState, m_streamingRuntimeState);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsCounter, m_usedGroupsCounter);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, m_usedGroupsBuffer);
-
-    auto streamingUploadInsertPoint =
-        RenderGraph::ExternalInsertPoint::After("EvaluateMaterialGroupsPass");
-    streamingUploadInsertPoint.AlsoBefore("GTAOFilterPass");
-    streamingUploadInsertPoint.AlsoBefore("DeferredShadingPass");
-    streamingUploadInsertPoint.keepExtensionOrder = false;
-    outPasses.push_back(
-        RenderGraph::ExternalPassDesc::Copy(
-            "CLod::StreamingUpload",
-            std::make_shared<CLodStructuralStreamingUploadPass>(
-                []() {
-                    return org::runtime::ConsumeStreamingUploadsDispatch();
-                }))
-            .At(std::move(streamingUploadInsertPoint))
-            .PreferQueue(QueueKind::Copy));
 
     auto asyncUploadInsertPoint =
         RenderGraph::ExternalInsertPoint::After("EvaluateMaterialGroupsPass");

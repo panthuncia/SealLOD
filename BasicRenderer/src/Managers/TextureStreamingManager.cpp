@@ -1197,6 +1197,18 @@ bool TextureStreamingManager::RequestExternalMaterialTextureReadback(
 	return true;
 }
 
+bool TextureStreamingManager::RequestStreamingTextureReadback(
+	uint32_t streamingTextureID,
+	std::wstring outputFile,
+	std::function<void()> callback)
+{
+	const auto found = m_streamingTexturesByID.find(streamingTextureID);
+	const auto texture = found != m_streamingTexturesByID.end() ? found->second.lock() : nullptr;
+	return texture && RequestExternalMaterialTextureReadback(
+		texture->GetPublishedBindingSnapshot().image,
+		std::move(outputFile), std::move(callback));
+}
+
 void TextureStreamingManager::FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture)
 {
 	ZoneScopedN("TextureStreamingManager::FlushDirtyTextureMetadata");
@@ -1605,6 +1617,9 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 			.identifier = !pendingInfo.filePath.empty()
 				? pendingInfo.filePath
 				: (!pendingInfo.initialData.empty() ? pendingInfo.initialData : pendingInfo.label),
+			.streamingTextureID = streamingTextureID,
+			.imageDescriptorIndex = image->GetSRVInfo(0).slot.index,
+			.imageResourceID = imageResourceID,
 			.residentBytes = residentBytes,
 			.residentWidth = residentDimensions.width,
 			.residentHeight = residentDimensions.height,

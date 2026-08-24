@@ -1,5 +1,7 @@
 #include "Render/RendererStateRequestService.h"
 
+#include <algorithm>
+
 namespace br::render {
 
 RendererStateRequestService::RendererStateRequestService(
@@ -35,7 +37,10 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
     if (!fragment || !fragment->publishRoot) return;
     {
         std::lock_guard lock(m_mutex);
-        m_roots.insert_or_assign(artifact.key, artifact);
+        const auto index = static_cast<std::size_t>(fragment->kind);
+        if (index >= m_roots.size()) return;
+        auto& root = m_roots[index];
+        if (!root || artifact.revision >= root->revision) root = artifact;
     }
     RequestManifest();
 }
@@ -51,7 +56,7 @@ void RendererStateRequestService::RequestManifest() {
         input->base = m_publisher.Active();
         input->baseEpoch = input->base ? input->base->epoch : 0u;
         input->roots.reserve(m_roots.size());
-        for (const auto& [_, root] : m_roots) input->roots.push_back(root);
+        for (const auto& root : m_roots) if (root) input->roots.push_back(*root);
         ++m_manifestRevision;
     }
     (void)m_graph.Request({ ArtifactKind::FrameManifest, 0, 0 }, m_manifestRevision, {},
@@ -61,33 +66,90 @@ void RendererStateRequestService::RequestManifest() {
 ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBuildContext& context) {
     const auto input = context.input.Get<ManifestInput>();
     if (!input) return ArtifactBuildResult::Failure("frame manifest input type mismatch");
+
+    const auto coherent = [](const PublishedRendererState& candidate) {
+        for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+            const auto kind = static_cast<PublishedFragmentKind>(index);
+            const auto& fragment = candidate.Fragment(kind);
+            if (fragment.revision == 0) continue;
+            for (const auto& dependency : fragment.dependencyClosure) {
+                const auto root = dependency.payload.Get<RendererStateFragmentArtifact>();
+                if (!root || !root->publishRoot) continue;
+                const auto& selected = candidate.Fragment(root->kind);
+                if (selected.publicationRoot != dependency.key ||
+                    selected.revision != dependency.revision) return false;
+            }
+        }
+        return true;
+    };
+
+    std::uint64_t selectedMask = 0;
+    if (const auto checkpoint = context.checkpoint.Get<ManifestSelection>()) {
+        selectedMask = checkpoint->rootMask;
+    } else {
+        const auto combinationCount = std::uint64_t{ 1 } << input->roots.size();
+        std::size_t bestCount = 0;
+        std::uint64_t bestRevisionScore = 0;
+        for (std::uint64_t mask = 1; mask < combinationCount; ++mask) {
+            auto candidate = input->base ? *input->base : PublishedRendererState{};
+            std::size_t selectedCount = 0;
+            std::uint64_t revisionScore = 0;
+            bool valid = true;
+            for (std::size_t index = 0; index < input->roots.size(); ++index) {
+                if ((mask & (std::uint64_t{ 1 } << index)) == 0) continue;
+                const auto& root = input->roots[index];
+                const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
+                if (!artifact || artifact->kind == PublishedFragmentKind::Count) { valid = false; break; }
+                auto fragment = artifact->fragment;
+                fragment.publicationRoot = root.key;
+                candidate.Fragment(artifact->kind) = std::move(fragment);
+                ++selectedCount;
+                revisionScore += root.revision;
+            }
+            if (!valid || !coherent(candidate)) continue;
+            if (selectedCount > bestCount ||
+                (selectedCount == bestCount && revisionScore > bestRevisionScore)) {
+                selectedMask = mask;
+                bestCount = selectedCount;
+                bestRevisionScore = revisionScore;
+            }
+        }
+        if (selectedMask == 0) return ArtifactBuildResult::Cancelled();
+        std::vector<ArtifactRequirement> requirements;
+        requirements.reserve(input->roots.size());
+        for (std::size_t index = 0; index < input->roots.size(); ++index) {
+            if ((selectedMask & (std::uint64_t{ 1 } << index)) == 0) continue;
+            const auto& root = input->roots[index];
+            requirements.push_back({ root.key, root.revision, ArtifactReadiness::GpuReady });
+        }
+        auto selection = std::make_shared<ManifestSelection>();
+        selection->rootMask = selectedMask;
+        return ArtifactBuildResult::Needs(std::move(requirements),
+            ArtifactPayload::Make<ManifestSelection>(std::move(selection)));
+    }
+
     auto state = input->base ? std::make_shared<PublishedRendererState>(*input->base)
                              : std::make_shared<PublishedRendererState>();
     auto catalog = state->resourceCatalog
         ? std::make_shared<PublishedResourceCatalog>(*state->resourceCatalog)
         : std::make_shared<PublishedResourceCatalog>();
-    for (const auto& root : input->roots) {
+    for (std::size_t index = 0; index < input->roots.size(); ++index) {
+        if ((selectedMask & (std::uint64_t{ 1 } << index)) == 0) continue;
+        const auto& root = input->roots[index];
         const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
         if (!artifact) return ArtifactBuildResult::Failure("manifest root payload type mismatch");
         auto fragment = artifact->fragment;
         fragment.publicationRoot = root.key;
-        switch (artifact->kind) {
-        case PublishedFragmentKind::Materials: state->materials = std::move(fragment); break;
-        case PublishedFragmentKind::Terrain: state->terrain = std::move(fragment); break;
-        case PublishedFragmentKind::Geometry: state->geometry = std::move(fragment); break;
-        case PublishedFragmentKind::DrawRecords: state->drawRecords = std::move(fragment); break;
-        case PublishedFragmentKind::ActiveDrawLists: state->activeDrawLists = std::move(fragment); break;
-        case PublishedFragmentKind::IndirectWorkloads: state->indirectWorkloads = std::move(fragment); break;
-        }
+        state->Fragment(artifact->kind) = std::move(fragment);
+        const auto ownerMask = artifact->catalogOwnerMask != 0
+            ? artifact->catalogOwnerMask : PublishedFragmentMask(artifact->kind);
         for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
-            const bool ownedByRoot = entry->first.owner == artifact->kind ||
-                (artifact->kind == PublishedFragmentKind::IndirectWorkloads &&
-                    entry->first.owner == PublishedFragmentKind::ActiveDrawLists);
-            if (ownedByRoot) entry = catalog->entries.erase(entry);
+            if ((ownerMask & PublishedFragmentMask(entry->first.owner)) != 0) entry = catalog->entries.erase(entry);
             else ++entry;
         }
         for (const auto& [key, resources] : artifact->catalogEntries) catalog->entries[key] = resources;
     }
+    if (!coherent(*state)) return ArtifactBuildResult::Failure("manifest dependency closure changed during build");
     state->resourceCatalog = std::move(catalog);
     auto manifest = std::make_shared<FrameManifestPayload>();
     manifest->baseEpoch = input->baseEpoch;
@@ -98,7 +160,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
 void RendererStateRequestService::Stop() {
     if (!m_accepting.exchange(false, std::memory_order_acq_rel)) return;
     std::lock_guard lock(m_mutex);
-    m_roots.clear();
+    for (auto& root : m_roots) root.reset();
 }
 
 } // namespace br::render

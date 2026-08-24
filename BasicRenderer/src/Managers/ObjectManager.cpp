@@ -13,6 +13,11 @@
 #include "../../generated/BuiltinResources.h"
 #include "Materials/Material.h"
 #include "Render/DrawWorkload.h"
+#include "Render/ObjectBufferStateArtifacts.h"
+#include "Render/PublishedRendererState.h"
+#include "Render/RendererStateRequestService.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 #include "Resources/components.h"
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
@@ -267,6 +272,185 @@ ObjectManager::~ObjectManager() {
 void ObjectManager::StartDeferredRetireWorker() {
 	m_deferredRetireStop.store(false, std::memory_order_release);
 	m_deferredRetireScope = TaskSchedulerManager::GetInstance().CreateScope("ObjectManager::DeferredRetire");
+}
+
+void ObjectManager::SetRendererStateServices(
+	br::render::RendererStateRequestService* requests,
+	org::runtime::IUploadService* uploads) {
+	m_rendererStateRequests = requests;
+	m_uploadService = uploads;
+	if (!requests || !uploads || !m_graphBufferBindings.empty()) return;
+
+	const std::array definitions{
+		std::tuple{ ResourceIdentifier{ Builtin::PerObjectBuffer }, m_perObjectBuffers,
+			br::render::kObjectPerObjectVariant, static_cast<std::uint32_t>(sizeof(PerObjectCB)) },
+		std::tuple{ ResourceIdentifier{ Builtin::PerInstanceTransformBuffer }, m_perInstanceTransformBuffers,
+			br::render::kObjectInstanceTransformVariant, static_cast<std::uint32_t>(sizeof(PerInstanceTransformCB)) },
+		std::tuple{ ResourceIdentifier{ Builtin::InstanceDrawRecordBuffer }, m_instanceDrawRecordBuffers,
+			br::render::kObjectDrawRecordVariant, static_cast<std::uint32_t>(sizeof(InstanceDrawRecordCB)) },
+		std::tuple{ ResourceIdentifier{ Builtin::NormalMatrixBuffer }, m_normalMatrixBuffer,
+			br::render::kObjectNormalMatrixVariant, static_cast<std::uint32_t>(sizeof(DirectX::XMFLOAT4X4)) }
+	};
+	const auto source = br::render::PublishedStateSource::ProcessSource();
+	for (const auto& [identifier, buffer, variant, stride] : definitions) {
+		buffer->EnableVersionedGraphJournal();
+		buffer->ReleaseECSEntity();
+		GraphBufferBinding binding{};
+		binding.identifier = identifier;
+		binding.buffer = buffer;
+		binding.key = { br::render::ArtifactKind::BufferVersion, 0x4f424a4255460000ull, variant };
+		binding.catalogVariant = variant;
+		binding.elementStride = stride;
+		m_graphBufferBindings.push_back(std::move(binding));
+		m_graphBufferResolvers.emplace(identifier,
+			std::make_shared<PublishedStateResourceResolver>(source,
+				br::render::PublishedResourceKey{
+					br::render::PublishedFragmentKind::DrawRecords,
+					br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
+				buffer, false));
+		m_resources.erase(identifier);
+	}
+}
+
+std::uint64_t ObjectManager::PublishDesiredBufferState() {
+	if (!m_rendererStateRequests || !m_uploadService || m_graphBufferBindings.empty()) return 0;
+
+	auto rootInput = std::make_shared<br::render::ObjectBufferStateBuildInput>();
+	std::vector<br::render::ArtifactRequirement> requirements;
+	std::uint64_t fingerprint = 1469598103934665603ull;
+	for (auto& binding : m_graphBufferBindings) {
+		const auto capture = binding.buffer->CaptureVersionedGraphState();
+		const auto revision = (std::max<std::uint64_t>)(capture.writeSequence, 1u);
+		fingerprint ^= revision + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
+		if (binding.submittedRevision != revision) {
+			auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
+			input->uploadService = m_uploadService;
+			input->debugName = "Published::" + binding.identifier.ToString();
+			input->writeSequence = capture.writeSequence;
+			input->elementStride = binding.elementStride;
+			input->elementCount = capture.elementCount;
+			input->capacity = capture.capacity;
+			input->catalogOwner = br::render::PublishedFragmentKind::DrawRecords;
+			input->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
+			input->catalogVariant = binding.catalogVariant;
+			input->previous = capture.previous;
+			input->writes = capture.writes;
+			input->bytes = capture.initialBytes;
+			if (m_rendererStateRequests->Request(binding.key, revision, {},
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)))) {
+				binding.submittedRevision = revision;
+			}
+		}
+		rootInput->buffers.push_back({ binding.key, revision,
+			binding.elementStride, binding.catalogVariant });
+		requirements.push_back({ binding.key, revision,
+			br::render::ArtifactReadiness::GpuReady });
+	}
+	if (fingerprint != m_objectBufferFingerprint) {
+		m_objectBufferFingerprint = fingerprint;
+		++m_objectBufferStateRevision;
+		(void)m_rendererStateRequests->Request(
+			{ br::render::ArtifactKind::DrawRecordPage, 0, 0 },
+			m_objectBufferStateRevision, std::move(requirements),
+			br::render::ArtifactPayload::Make<br::render::ObjectBufferStateBuildInput>(std::move(rootInput)));
+		m_objectBufferDiagnosticTicks = 0;
+	} else if (++m_objectBufferDiagnosticTicks >= 120u) {
+		m_objectBufferDiagnosticTicks = 0;
+		const auto diagnostic = m_rendererStateRequests->Diagnose(
+			{ br::render::ArtifactKind::DrawRecordPage, 0, 0 });
+		const auto source = br::render::PublishedStateSource::ProcessSource();
+		const auto published = source ? source->Load() : nullptr;
+		spdlog::info(
+			"Object buffer graph progress: desiredRevision={} artifactRevision={} readiness={} activeRevision={} publishedRevision={} blockers={} ageMs={} chain='{}' error='{}'",
+			diagnostic.desiredRevision, diagnostic.artifact.revision,
+			static_cast<unsigned int>(diagnostic.artifact.readiness),
+			m_activeObjectBufferStateRevision,
+			published ? published->drawRecords.revision : 0u,
+			diagnostic.blockers.size(), diagnostic.stateAge.count() / 1000,
+			diagnostic.blockerChain, diagnostic.error);
+		for (const auto& binding : m_graphBufferBindings) {
+			const auto bufferDiagnostic = m_rendererStateRequests->Diagnose(binding.key);
+			if (bufferDiagnostic.artifact.readiness == br::render::ArtifactReadiness::UploadSubmitted) {
+				spdlog::info("Object buffer upload progress: buffer='{}' desiredRevision={} artifactRevision={} ageMs={} chain='{}'",
+					binding.identifier.ToString(), bufferDiagnostic.desiredRevision,
+					bufferDiagnostic.artifact.revision, bufferDiagnostic.stateAge.count() / 1000,
+					bufferDiagnostic.blockerChain);
+			}
+		}
+	}
+	return m_objectBufferStateRevision;
+}
+
+std::optional<br::render::ArtifactRequirement> ObjectManager::DesiredBufferStateRequirement() const {
+	if (m_objectBufferStateRevision == 0) return std::nullopt;
+	return br::render::ArtifactRequirement{
+		{ br::render::ArtifactKind::DrawRecordPage, 0, 0 },
+		m_objectBufferStateRevision, br::render::ArtifactReadiness::GpuReady };
+}
+
+bool ObjectManager::TryActivatePublishedBufferState() {
+	const auto source = br::render::PublishedStateSource::ProcessSource();
+	const auto published = source ? source->Load() : nullptr;
+	const auto state = published
+		? published->drawRecords.payload.Get<br::render::PublishedObjectBufferState>() : nullptr;
+	if (!state) return false;
+	if (m_activeObjectBufferStateRevision == published->drawRecords.revision) return true;
+
+	bool exactSnapshot = true;
+	for (auto& binding : m_graphBufferBindings) {
+		const auto expected = std::ranges::find_if(state->buffers,
+			[&](const br::render::ObjectBufferDependencyDTO& value) {
+				return value.key == binding.key;
+			});
+		if (expected == state->buffers.end()) return false;
+		const auto dependency = std::ranges::find_if(
+			published->drawRecords.dependencyClosure,
+			[&](const br::render::ArtifactSnapshot& value) {
+				return value.key == binding.key && value.revision == expected->revision;
+			});
+		const auto root = dependency != published->drawRecords.dependencyClosure.end()
+			? dependency->payload.Get<br::render::RendererStateFragmentArtifact>() : nullptr;
+		const auto version = root
+			? root->fragment.payload.Get<br::render::PublishedGpuBufferVersion>() : nullptr;
+		if (!version || version->revision != expected->revision) return false;
+		const auto desired = binding.buffer->CaptureVersionedGraphState();
+		if (desired.writeSequence != version->writeSequence) {
+			exactSnapshot = false;
+			binding.buffer->AcknowledgeVersionedGraphState(version);
+			continue;
+		}
+		const auto liveBytes = binding.buffer->CaptureCpuShadowBytes();
+		if (!version->cpuShadow || version->cpuShadow->size() > liveBytes.size()) {
+			spdlog::error(
+				"Object buffer graph parity failed: buffer='{}' revision={} graphBytes={} liveBytes={}",
+				binding.identifier.ToString(), version->revision,
+				version->cpuShadow ? version->cpuShadow->size() : 0u, liveBytes.size());
+			return false;
+		}
+		const auto mismatch = std::mismatch(
+			version->cpuShadow->begin(), version->cpuShadow->end(), liveBytes.begin());
+		if (mismatch.first != version->cpuShadow->end()) {
+			spdlog::error(
+				"Object buffer graph parity failed: buffer='{}' revision={} firstMismatch={}",
+				binding.identifier.ToString(), version->revision,
+				std::distance(version->cpuShadow->begin(), mismatch.first));
+			return false;
+		}
+		binding.buffer->AcknowledgeVersionedGraphState(version);
+	}
+	const bool firstActivation = m_activeObjectBufferStateRevision == 0;
+	if (firstActivation) {
+		for (auto& binding : m_graphBufferBindings) binding.buffer->SetVersionedGraphExclusive(true);
+	}
+	for (const auto& [_, resolver] : m_graphBufferResolvers) {
+		if (!resolver) return false;
+		resolver->SetPublishedEnabled(true);
+		if (firstActivation) resolver->ClearFallback();
+	}
+	m_activeObjectBufferStateRevision = published->drawRecords.revision;
+	spdlog::info("Object buffer graph state activated: epoch={} revision={} buffers={} exactLiveSnapshot={}",
+		published->epoch, published->drawRecords.revision, m_graphBufferBindings.size(), exactSnapshot);
+	return true;
 }
 
 void ObjectManager::StopDeferredRetireWorker() {
@@ -3323,5 +3507,17 @@ std::vector<ResourceIdentifier> ObjectManager::GetSupportedKeys() {
 	for (auto const& [key, _] : m_resources)
 		keys.push_back(key);
 
+	return keys;
+}
+
+std::shared_ptr<IResourceResolver> ObjectManager::ProvideResolver(ResourceIdentifier const& key) {
+	const auto it = m_graphBufferResolvers.find(key);
+	return it != m_graphBufferResolvers.end() ? it->second : nullptr;
+}
+
+std::vector<ResourceIdentifier> ObjectManager::GetSupportedResolverKeys() {
+	std::vector<ResourceIdentifier> keys;
+	keys.reserve(m_graphBufferResolvers.size());
+	for (const auto& [key, _] : m_graphBufferResolvers) keys.push_back(key);
 	return keys;
 }

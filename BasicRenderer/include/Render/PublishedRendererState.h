@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <atomic>
 #include <optional>
+#include <array>
 
 #include "Render/AsyncStateGraph.h"
 
@@ -21,8 +22,14 @@ enum class PublishedResourceUsage : std::uint8_t {
 };
 
 enum class PublishedFragmentKind : std::uint8_t {
-    Materials, Terrain, Geometry, DrawRecords, ActiveDrawLists, IndirectWorkloads
+    Materials, Terrain, Geometry, DrawRecords, ActiveDrawLists, IndirectWorkloads, Count
 };
+
+inline constexpr std::size_t kPublishedFragmentCount =
+    static_cast<std::size_t>(PublishedFragmentKind::Count);
+inline constexpr std::uint64_t PublishedFragmentMask(PublishedFragmentKind kind) noexcept {
+    return std::uint64_t{ 1 } << static_cast<std::uint8_t>(kind);
+}
 
 struct PublishedResourceKey {
     PublishedFragmentKind owner = PublishedFragmentKind::Geometry;
@@ -65,6 +72,8 @@ struct PublishedStateFragment {
 struct RendererStateFragmentArtifact {
     PublishedFragmentKind kind = PublishedFragmentKind::Geometry;
     bool publishRoot = true;
+    // Zero means that this fragment replaces its own catalog namespace.
+    std::uint64_t catalogOwnerMask = 0;
     PublishedStateFragment fragment;
     std::vector<std::pair<PublishedResourceKey,
         std::shared_ptr<const PublishedResourceCatalog::ResourceList>>> catalogEntries;
@@ -79,6 +88,9 @@ struct PublishedRendererState {
     PublishedStateFragment activeDrawLists;
     PublishedStateFragment indirectWorkloads;
     std::shared_ptr<const PublishedResourceCatalog> resourceCatalog;
+
+    [[nodiscard]] PublishedStateFragment& Fragment(PublishedFragmentKind kind);
+    [[nodiscard]] const PublishedStateFragment& Fragment(PublishedFragmentKind kind) const;
 };
 
 class PublishedStateSource {
@@ -111,6 +123,19 @@ struct RendererStatePublisherStats {
     std::size_t retainedFrameStates = 0;
 };
 
+struct RendererStateCommitResult {
+    std::shared_ptr<const PublishedRendererState> state;
+    std::array<std::shared_ptr<const PublishedRendererState>, 3> retiredStates{};
+    std::uint8_t retiredStateCount = 0;
+    std::function<void(std::uint64_t)> rejectedCallback;
+    std::uint64_t rejectedEpoch = 0;
+
+    [[nodiscard]] bool HasDeferredWork() const noexcept {
+        return retiredStateCount != 0 || static_cast<bool>(rejectedCallback);
+    }
+    void RunDeferred() noexcept;
+};
+
 class RendererStatePublisher {
 public:
     explicit RendererStatePublisher(std::size_t framesInFlight = 0);
@@ -121,7 +146,7 @@ public:
 
     // Must be called after the frame slot fence has completed. This releases
     // that slot's old state and captures the selected state for the new frame.
-    std::shared_ptr<const PublishedRendererState> Commit(std::size_t frameSlot);
+    RendererStateCommitResult Commit(std::size_t frameSlot);
     void ReleaseFrameSlot(std::size_t frameSlot);
     void DiscardCandidate();
 

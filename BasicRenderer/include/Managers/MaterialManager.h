@@ -78,6 +78,7 @@ public:
 	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
 
 	std::uint64_t CommitGpuVisibleSnapshot(bool forceGraphSnapshot = false);
+	std::uint64_t DesiredPublishedStateRevision() const noexcept { return m_materialStateRevision; }
 	bool TryActivatePublishedMaterialState();
 	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
 		org::runtime::IUploadService* uploads) {
@@ -173,6 +174,7 @@ private:
 	std::uint64_t m_materialStateFingerprint = 0;
 	std::uint64_t m_pendingMaterialStateFingerprint = 0;
 	std::uint32_t m_materialStateStableFrames = 0;
+	std::uint32_t m_materialStateDirtyFrames = 0;
 	std::uint64_t m_materialStateRevision = 0;
 	std::uint64_t m_materialStateValidatedRevision = 0;
 	std::unordered_map<std::uint64_t, std::uint64_t> m_materialStateExpectedFingerprints;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -28,6 +29,9 @@ namespace org { class BufferView; }
 using org::BufferView;
 namespace org { class DynamicBuffer; }
 using org::DynamicBuffer;
+namespace org::runtime { class IUploadService; }
+class PublishedStateResourceResolver;
+namespace br::render { class RendererStateRequestService; }
 class Material;
 class Mesh;
 
@@ -484,6 +488,13 @@ public:
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
 	std::vector<ResourceIdentifier> GetSupportedKeys() override;
+	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
+	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
+		org::runtime::IUploadService* uploads);
+	std::uint64_t PublishDesiredBufferState();
+	bool TryActivatePublishedBufferState();
+	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
 	std::shared_ptr<SortedUnsignedIntBuffer> TryGetActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
 		auto it = m_activeDrawSetIndices.find(workloadKey);
 		return it != m_activeDrawSetIndices.end() ? it->second : nullptr;
@@ -506,6 +517,14 @@ private:
 	std::uint32_t AllocateSkinnedAssemblyPlacement(SkinnedAssemblyPlacementGPU placement);
 	void FreeSkinnedAssemblyPlacement(std::uint32_t placementIndex);
 	ObjectManager();
+	struct GraphBufferBinding {
+		ResourceIdentifier identifier;
+		std::shared_ptr<DynamicBuffer> buffer;
+		br::render::ArtifactKey key;
+		std::uint64_t catalogVariant = 0;
+		std::uint32_t elementStride = 0;
+		std::uint64_t submittedRevision = 0;
+	};
 
 	struct DeferredBufferRangeRetire {
 		std::shared_ptr<DynamicBuffer> buffer;
@@ -572,6 +591,15 @@ private:
 	std::vector<SkinnedAssemblyPlacementGPU> m_skinnedAssemblyPlacementCPU;
 	std::vector<std::uint32_t> m_freeSkinnedAssemblyPlacementIndices;
 	std::vector<std::uint8_t> m_skinnedAssemblyPlacementFree;
+	std::vector<GraphBufferBinding> m_graphBufferBindings;
+	std::unordered_map<ResourceIdentifier, std::shared_ptr<PublishedStateResourceResolver>,
+		ResourceIdentifier::Hasher> m_graphBufferResolvers;
+	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
+	org::runtime::IUploadService* m_uploadService = nullptr;
+	std::uint64_t m_objectBufferStateRevision = 0;
+	std::uint64_t m_activeObjectBufferStateRevision = 0;
+	std::uint64_t m_objectBufferFingerprint = 0;
+	std::uint32_t m_objectBufferDiagnosticTicks = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
 	std::uint64_t m_nextStaticImportTransactionID = 1;
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object

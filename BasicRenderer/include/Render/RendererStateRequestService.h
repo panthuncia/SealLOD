@@ -1,8 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <mutex>
-#include <unordered_map>
+#include <optional>
 
 #include "Render/AsyncStateGraph.h"
 #include "Render/PublishedRendererState.h"
@@ -32,6 +33,7 @@ private:
         std::shared_ptr<const PublishedRendererState> base;
         std::vector<ArtifactSnapshot> roots;
     };
+    struct ManifestSelection { std::uint64_t rootMask = 0; };
 
     void RequestManifest();
     static ArtifactBuildResult BuildManifest(const ArtifactBuildContext& context);
@@ -39,7 +41,7 @@ private:
     AsyncStateGraph& m_graph;
     RendererStatePublisher& m_publisher;
     mutable std::mutex m_mutex;
-    std::unordered_map<ArtifactKey, ArtifactSnapshot, ArtifactKey::Hasher> m_roots;
+    std::array<std::optional<ArtifactSnapshot>, kPublishedFragmentCount> m_roots;
     std::uint64_t m_manifestRevision = 0;
     std::atomic_bool m_accepting{ true };
 };

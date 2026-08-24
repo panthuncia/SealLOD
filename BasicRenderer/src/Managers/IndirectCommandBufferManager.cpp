@@ -17,6 +17,7 @@
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Buffers/SortedUnsignedIntBuffer.h"
 #include "Managers/ObjectManager.h"
+#include "Managers/MaterialManager.h"
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/IndirectStateArtifacts.h"
@@ -77,10 +78,13 @@ void IndirectCommandBufferManager::SetRendererStateServices(
     m_uploadService = uploads;
 }
 
-void IndirectCommandBufferManager::PublishDesiredState(ObjectManager& objectManager) {
+void IndirectCommandBufferManager::PublishDesiredState(
+	ObjectManager& objectManager, MaterialManager& materialManager) {
     BT_ZONE_SCOPE("IndirectCommandBufferManager::PublishDesiredState");
     if (!m_rendererStateRequests || !m_uploadService) return;
     std::uint64_t fingerprint = objectManager.GetResidentInstanceDrawRecordCount();
+	const auto objectBufferRequirement = objectManager.DesiredBufferStateRequirement();
+	const auto materialRevision = materialManager.DesiredPublishedStateRevision();
     const auto mix = [&fingerprint](std::uint64_t value) {
         fingerprint ^= value + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
     };
@@ -93,7 +97,10 @@ void IndirectCommandBufferManager::PublishDesiredState(ObjectManager& objectMana
         mix(active->Size());
     }
     for (const auto viewID : m_viewIDs) mix(viewID);
+	if (objectBufferRequirement) mix(objectBufferRequirement->minimumRevision);
+	mix(materialRevision);
     if (fingerprint == m_graphInputFingerprint) {
+		m_graphDirtyTicks = 0;
         if (m_graphRevision != 0 && ++m_graphDiagnosticTicks >= 120u) {
             m_graphDiagnosticTicks = 0;
             const auto diagnostic = m_rendererStateRequests->Diagnose(
@@ -113,9 +120,11 @@ void IndirectCommandBufferManager::PublishDesiredState(ObjectManager& objectMana
     if (fingerprint != m_graphPendingFingerprint) {
         m_graphPendingFingerprint = fingerprint;
         m_graphStableTicks = 0;
-        return;
+	} else if (m_graphStableTicks < 4u) {
+		++m_graphStableTicks;
     }
-    if (++m_graphStableTicks < 4) return;
+	if (m_graphDirtyTicks < 4u) ++m_graphDirtyTicks;
+	if (m_graphStableTicks < 4u && m_graphDirtyTicks < 4u) return;
 
     auto input = std::make_shared<br::render::IndirectStateBuildInput>();
     input->materializeResources = true;
@@ -125,6 +134,11 @@ void IndirectCommandBufferManager::PublishDesiredState(ObjectManager& objectMana
     input->workloads.reserve(m_workloadToRequestedCount.size());
     std::vector<br::render::ArtifactRequirement> requirements;
     requirements.reserve(m_workloadToRequestedCount.size());
+	if (objectBufferRequirement) requirements.push_back(*objectBufferRequirement);
+	if (materialRevision != 0) {
+		requirements.push_back({ { br::render::ArtifactKind::MaterialTable, 0, 0 },
+			materialRevision, br::render::ArtifactReadiness::GpuReady });
+	}
     std::uint64_t sourceEntryCount = 0;
     std::uint64_t safeDrawCount = 0;
     std::uint32_t nonEmptyWorkloads = 0;
@@ -220,6 +234,7 @@ void IndirectCommandBufferManager::PublishDesiredState(ObjectManager& objectMana
     }
     m_graphInputFingerprint = fingerprint;
     m_graphStableTicks = 0;
+	m_graphDirtyTicks = 0;
     m_graphDiagnosticTicks = 0;
     ++m_graphRevision;
     spdlog::info(

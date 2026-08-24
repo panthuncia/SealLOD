@@ -1,6 +1,7 @@
 #include "Render/VersionedGpuBufferArtifacts.h"
 
 #include <algorithm>
+#include <format>
 #include <limits>
 #include <mutex>
 
@@ -48,7 +49,7 @@ std::uint64_t VersionedGpuBufferJournal::AppendWrite(std::uint64_t elementOffset
     write.elementOffset = elementOffset;
     write.bytes.assign(bytes.begin(), bytes.end());
     m_writes.push_back(std::move(write));
-    m_elementCount = resultingElementCount;
+    m_elementCount = (std::max)(m_elementCount, resultingElementCount);
     return m_writeSequence;
 }
 
@@ -162,9 +163,18 @@ std::shared_ptr<const GpuDependencyToken> TokenForTicket(
         std::lock_guard lock(ticket->timelineMutex);
         return ticket->timelineValue;
     };
-    token->subscribe = [ticket](std::function<void()> callback) {
+	token->describe = [ticket] {
+		const auto state = ticket->state.load(std::memory_order_acquire);
+		std::lock_guard lock(ticket->timelineMutex);
+		const bool timelineComplete = ticket->isTimelineComplete &&
+			ticket->isTimelineComplete(ticket->timelineValue);
+		return std::format("ticket-state={} timeline-complete={}",
+			static_cast<unsigned>(state), timelineComplete);
+	};
+	token->subscribe = [ticket](std::function<void()> callback) {
         ticket->SetChangeCallback(std::move(callback));
     };
+	token->cancel = [ticket] { return ticket->Cancel(); };
     return token;
 }
 

@@ -142,6 +142,52 @@ int main() {
     Check(built.revision == 3);
     Check(built.payload.Get<Value>() && built.payload.Get<Value>()->value == 5);
 
+    const ArtifactKey stampedDependency{ ArtifactKind::Generic, 30, 0 };
+    const ArtifactKey stampedDependent{ ArtifactKind::Material, 31, 0 };
+    Check(graph.Request(stampedDependency, 1));
+    graph.WaitIdle();
+    std::atomic_bool stampedBuildStarted{ false };
+    std::atomic_bool releaseStampedBuild{ false };
+    std::atomic_uint stampedBuildCount{ 0 };
+    graph.RegisterProducer(ArtifactKind::Material, {
+        TaskLane::Streaming, TaskDomain::General, "DependencyStampProducer",
+        [&stampedBuildStarted, &releaseStampedBuild, &stampedBuildCount](
+            const ArtifactBuildContext& context) {
+            const auto attempt = stampedBuildCount.fetch_add(1, std::memory_order_relaxed);
+            if (attempt == 0) {
+                stampedBuildStarted.store(true, std::memory_order_release);
+                while (!releaseStampedBuild.load(std::memory_order_acquire)) std::this_thread::yield();
+            }
+            Check(context.dependencies.size() == 1);
+            const auto value = context.dependencies.front().payload.Get<Value>();
+            Check(static_cast<bool>(value));
+            return ArtifactBuildResult::Ready(Payload(value->value));
+        }
+    });
+    Check(graph.Request(stampedDependent, 1, {
+        { stampedDependency, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf }
+    }));
+    const auto stampDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!stampedBuildStarted.load(std::memory_order_acquire) &&
+        std::chrono::steady_clock::now() < stampDeadline) std::this_thread::yield();
+    Check(stampedBuildStarted.load(std::memory_order_acquire));
+    Check(graph.Request(stampedDependency, 2));
+    releaseStampedBuild.store(true, std::memory_order_release);
+    graph.WaitIdle();
+    const auto rebuiltFromCurrentDependency = graph.Snapshot(stampedDependent);
+    Check(rebuiltFromCurrentDependency.readiness == ArtifactReadiness::GpuReady);
+    Check(static_cast<bool>(rebuiltFromCurrentDependency.payload.Get<Value>()));
+    Check(rebuiltFromCurrentDependency.payload.Get<Value>()->value == 2);
+    Check(stampedBuildCount.load(std::memory_order_relaxed) == 2);
+    Check(graph.Stats().staleCompletions != 0);
+
+    const ArtifactKey fingerprinted{ ArtifactKind::Generic, 32, 0 };
+    Check(graph.Request(fingerprinted, 1, {}, Payload(1), 100));
+    graph.WaitIdle();
+    const auto conflict = graph.Request(fingerprinted, 1, {}, Payload(2), 200);
+    Check(conflict.status == ArtifactRequestStatus::ConflictingRevision);
+    Check(graph.Snapshot(fingerprinted).payload.Get<Value>()->value == 1);
+
     const ArtifactKey staticTransactionA{ ArtifactKind::StaticTransaction, 101, 7 };
     const ArtifactKey staticTransactionB{ ArtifactKind::StaticTransaction, 102, 7 };
     const ArtifactKey staticScene{ ArtifactKind::StaticScene, 1, 0 };
@@ -246,9 +292,11 @@ int main() {
     Check(trackedUpload->state.load() == org::TrackedUploadTicketState::Completed);
 
     std::atomic_bool gpuComplete{ false };
+	std::atomic_uint gpuBuilds{ 0 };
     graph.RegisterProducer(ArtifactKind::TextureBinding, {
         TaskLane::Streaming, TaskDomain::TextureProcessing, "GpuProducer",
-        [&gpuComplete](const ArtifactBuildContext& context) {
+        [&gpuComplete, &gpuBuilds](const ArtifactBuildContext& context) {
+			gpuBuilds.fetch_add(1, std::memory_order_relaxed);
             auto token = std::make_shared<GpuDependencyToken>();
             token->value = context.revision;
             token->isComplete = [&gpuComplete] { return gpuComplete.load(std::memory_order_acquire); };
@@ -259,6 +307,12 @@ int main() {
     Check(graph.Request(gpuKey, 7));
     graph.WaitIdle();
     Check(graph.Snapshot(gpuKey).readiness == ArtifactReadiness::UploadSubmitted);
+	Check(graph.Request(gpuKey, 8));
+	graph.WaitIdle();
+	const auto supersededGpu = graph.Snapshot(gpuKey);
+	Check(supersededGpu.revision == 8);
+	Check(supersededGpu.readiness == ArtifactReadiness::UploadSubmitted);
+	Check(gpuBuilds.load(std::memory_order_relaxed) == 2);
     gpuComplete.store(true, std::memory_order_release);
     graph.PumpGpuCompletions();
     graph.WaitIdle();
@@ -283,17 +337,23 @@ int main() {
     auto candidateState = std::make_shared<PublishedRendererState>();
     candidateState->epoch = 1;
     Check(publisher.PublishCandidate({ 0, candidateState }));
-    Check(publisher.Commit(0)->epoch == 1);
+    auto commit0 = publisher.Commit(0);
+    Check(commit0.state->epoch == 1);
+    commit0.RunDeferred();
     auto staleState = std::make_shared<PublishedRendererState>();
     staleState->epoch = 2;
     Check(publisher.PublishCandidate({ 0, staleState }));
-    Check(publisher.Commit(1)->epoch == 1);
+    auto commit1 = publisher.Commit(1);
+    Check(commit1.state->epoch == 1);
+    commit1.RunDeferred();
     Check(publisher.Stats().rejectedBaseEpoch == 1);
 
     auto nextState = std::make_shared<PublishedRendererState>();
     nextState->epoch = 2;
     Check(publisher.PublishCandidate({ 1, nextState }));
-    Check(publisher.Commit(2)->epoch == 2);
+    auto commit2 = publisher.Commit(2);
+    Check(commit2.state->epoch == 2);
+    commit2.RunDeferred();
     // Slots 0 and 1 retain epoch 1 until their respective fences are released.
     Check(candidateState.use_count() >= 3);
     publisher.ReleaseFrameSlot(0);
@@ -313,9 +373,11 @@ int main() {
         { ArtifactKind::FrameManifest, 0, 0 }, 13, 1, ArtifactReadiness::GpuReady,
         ArtifactPayload::Make<FrameManifestPayload>(manifestPayload) };
     Check(publisher.PublishArtifact(manifestArtifact));
-    const auto materialState = publisher.Commit(0);
+    auto materialCommit = publisher.Commit(0);
+    const auto materialState = materialCommit.state;
     Check(materialState->materials.revision == 12);
     Check(materialState->materials.payload.Get<Value>()->value == 12);
+    materialCommit.RunDeferred();
     auto source = publisher.ResourceSource();
     PublishedStateResourceResolver resolver(source, PublishedResourceKey{});
     Check(resolver.GetContentVersion() != 0);
@@ -326,7 +388,8 @@ int main() {
 	auto epochAdvance = std::make_shared<PublishedRendererState>(*publisher.Active());
 	epochAdvance->epoch = publisher.ActiveEpoch() + 1u;
 	Check(publisher.PublishCandidate({ publisher.ActiveEpoch(), epochAdvance }));
-	(void)publisher.Commit(1);
+	auto epochCommit = publisher.Commit(1);
+	epochCommit.RunDeferred();
 	Check(stagedResolver.GetContentVersion() == stagedFallbackVersion);
 	stagedResolver.SetPublishedEnabled(true);
 	Check(stagedResolver.GetContentVersion() != stagedFallbackVersion);
@@ -353,10 +416,12 @@ int main() {
     });
     Check(requestService.Request({ ArtifactKind::MaterialTable, 100, 0 }, 7, {}, Payload(77)));
     graph.WaitIdle();
-    const auto manifestState = manifestPublisher.Commit(0);
+    auto manifestCommit = manifestPublisher.Commit(0);
+    const auto manifestState = manifestCommit.state;
     Check(manifestState->epoch == 1);
     Check(manifestState->materials.revision == 7);
     Check(manifestState->materials.payload.Get<Value>()->value == 77);
+    manifestCommit.RunDeferred();
     requestService.Stop();
 
     auto& ecs = RendererECSManager::GetInstance();

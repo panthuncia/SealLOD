@@ -13,6 +13,7 @@ using org::DynamicGloballyIndexedResource;
 namespace org { class ResourceGroup; }
 using org::ResourceGroup;
 class ObjectManager;
+class MaterialManager;
 class SortedUnsignedIntBuffer;
 namespace org::runtime { class IUploadService; }
 namespace br::render { class RendererStateRequestService; }
@@ -60,7 +61,7 @@ public:
     void UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate> updates);
     void RequestWorkloadCount(const DrawWorkloadKey& workloadKey, unsigned int numDraws);
     void RequestWorkloadCounts(std::span<const WorkloadCountUpdate> updates);
-    void PublishDesiredState(ObjectManager& objectManager);
+    void PublishDesiredState(ObjectManager& objectManager, MaterialManager& materialManager);
     void SetRendererStateServices(br::render::RendererStateRequestService* requests,
         org::runtime::IUploadService* uploads);
 
@@ -87,6 +88,7 @@ private:
     std::uint64_t m_graphInputFingerprint = 0;
     std::uint64_t m_graphPendingFingerprint = 0;
     std::uint32_t m_graphStableTicks = 0;
+	std::uint32_t m_graphDirtyTicks = 0;
     std::uint64_t m_graphRevision = 0;
     std::uint32_t m_graphDiagnosticTicks = 0;
 

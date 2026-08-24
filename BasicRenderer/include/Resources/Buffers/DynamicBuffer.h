@@ -117,6 +117,9 @@ public:
         }
 
         EnsureCpuShadowSize(dirtyOffset + dirtySize);
+		RetainCpuShadowWrite(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(dirtyOffset),
+			dirtySize, dirtyOffset);
+		if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return;
         StageOrUploadLocked(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(dirtyOffset), dirtySize, dirtyOffset);
         if (org::runtime::GetActiveUploadPolicyService() != nullptr && m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();
@@ -130,6 +133,7 @@ public:
     }
 
     void OnUploadPolicyFlush() override {
+		if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return;
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
@@ -143,6 +147,7 @@ public:
     }
 
     bool HasPendingUploadPolicyWork() const override {
+		if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.HasPendingWork();
     }
@@ -153,7 +158,9 @@ public:
     }
 
     void EnableVersionedGraphJournal();
+	void SetVersionedGraphExclusive(bool exclusive);
     br::render::VersionedGpuBufferJournal::Capture CaptureVersionedGraphState() const;
+    std::vector<std::byte> CaptureCpuShadowBytes() const;
     void AcknowledgeVersionedGraphState(
         const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version);
     bool HasUnpublishedVersionedGraphState() const;
@@ -274,6 +281,7 @@ private:
     size_t m_requestedResizeCapacity = 0;
     bool m_pendingResizeValid = false;
     std::unique_ptr<br::render::VersionedGpuBufferJournal> m_versionedGraphJournal;
+	std::atomic_bool m_versionedGraphExclusive{ false };
 };
 
 } // namespace org
