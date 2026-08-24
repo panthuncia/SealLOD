@@ -1259,7 +1259,7 @@ bool MaterialManager::RequestExternalMaterialTextureReadback(
 			image, std::move(outputFile), std::move(callback));
 }
 
-void MaterialManager::CommitGpuVisibleSnapshot() {
+std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot) {
 	BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot");
 	const unsigned int compileFlagsSlotsUsed = m_compileFlagsRegistry.GetSlotsUsed();
 	if (m_materialPixelCountBuffer && compileFlagsSlotsUsed > m_materialPixelCountBuffer->Capacity()) {
@@ -1350,11 +1350,12 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 		// for a short quiet window so only the latest immutable table version is
 		// copied and uploaded instead of retaining a full GPU table per transient
 		// startup revision.
-		if (fingerprint != m_materialStateFingerprint && m_materialStateStableFrames >= 4u) {
+		if (fingerprint != m_materialStateFingerprint &&
+			(forceGraphSnapshot || m_materialStateStableFrames >= 4u)) {
 			m_materialStateFingerprint = fingerprint;
 			if (!m_uploadService) {
 				spdlog::error("Material graph publication skipped: upload service unavailable");
-				return;
+				return m_materialStateRevision;
 			}
 			const br::render::ArtifactKey baseKey{
 				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialBaseTableVariant };
@@ -1444,6 +1445,9 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 				br::render::ArtifactPayload::Make<br::render::MaterialStateBuildInput>(std::move(input)));
 		}
 	}
+	return m_materialStateRevision != 0 &&
+		m_materialStateFingerprint == m_pendingMaterialStateFingerprint
+		? m_materialStateRevision : 0;
 }
 
 unsigned int MaterialManager::AcquireCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count) {

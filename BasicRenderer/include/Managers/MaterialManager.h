@@ -78,7 +78,7 @@ public:
 	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
 	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
 
-	void CommitGpuVisibleSnapshot();
+	std::uint64_t CommitGpuVisibleSnapshot(bool forceGraphSnapshot = false);
 	const std::vector<unsigned int>& GetActiveCompileFlagsSlots() const { return m_publishedActiveCompileFlagsSlots; }
 	const std::vector<MaterialCompileFlags>& GetActiveCompileFlags() const { return m_publishedActiveCompileFlags; }
 	unsigned int GetCompileFlagsSlotsUsed() const { return m_publishedCompileFlagsSlotsUsed; }
