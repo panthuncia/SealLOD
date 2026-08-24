@@ -7,10 +7,17 @@
 
 namespace br::render {
 
+struct StaticTransactionGroup {
+    std::uint64_t groupID = 0;
+    std::uint64_t drawRecordCount = 0;
+    std::uint64_t activeEntryCount = 0;
+};
+
 struct StaticTransactionBuildInput {
     std::uint64_t transactionID = 0;
     std::uint64_t streamGeneration = 0;
     std::uint64_t sourceFingerprint = 0;
+    std::vector<StaticTransactionGroup> groups;
     std::uint64_t groupCount = 0;
     std::uint64_t drawRecordCount = 0;
     std::uint64_t activeEntryCount = 0;
@@ -20,6 +27,7 @@ struct PublishedStaticTransaction {
     std::uint64_t transactionID = 0;
     std::uint64_t streamGeneration = 0;
     std::uint64_t sourceFingerprint = 0;
+    std::vector<StaticTransactionGroup> groups;
     std::uint64_t groupCount = 0;
     std::uint64_t drawRecordCount = 0;
     std::uint64_t activeEntryCount = 0;
@@ -28,7 +36,9 @@ struct PublishedStaticTransaction {
 
 struct StaticSceneBuildInput {
     std::uint64_t sourceFingerprint = 0;
+    bool publishRoot = false;
     std::vector<ArtifactKey> transactionKeys;
+    std::vector<std::uint64_t> activeGroupIDs;
 };
 
 struct PublishedStaticSceneState {
@@ -36,6 +46,7 @@ struct PublishedStaticSceneState {
     std::uint64_t groupCount = 0;
     std::uint64_t drawRecordCount = 0;
     std::uint64_t activeEntryCount = 0;
+    std::vector<std::uint64_t> activeGroupIDs;
     std::vector<PublishedStaticTransaction> transactions;
 };
 

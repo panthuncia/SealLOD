@@ -17,11 +17,21 @@ ArtifactBuildResult BuildStaticTransaction(const ArtifactBuildContext& context) 
     if (input->streamGeneration != context.key.variantID) {
         return ArtifactBuildResult::Failure("static transaction generation mismatch");
     }
+    if (input->groups.empty() || input->groupCount != input->groups.size()) {
+        return ArtifactBuildResult::Failure("static transaction group closure is incomplete");
+    }
+    auto groups = input->groups;
+    std::ranges::sort(groups, {}, &StaticTransactionGroup::groupID);
+    if (std::ranges::adjacent_find(groups, {}, &StaticTransactionGroup::groupID) != groups.end() ||
+        groups.front().groupID == 0) {
+        return ArtifactBuildResult::Failure("static transaction contains duplicate groups");
+    }
 
     auto transaction = std::make_shared<PublishedStaticTransaction>();
     transaction->transactionID = input->transactionID;
     transaction->streamGeneration = input->streamGeneration;
     transaction->sourceFingerprint = input->sourceFingerprint;
+    transaction->groups = std::move(groups);
     transaction->groupCount = input->groupCount;
     transaction->drawRecordCount = input->drawRecordCount;
     transaction->activeEntryCount = input->activeEntryCount;
@@ -47,6 +57,13 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
 
     auto scene = std::make_shared<PublishedStaticSceneState>();
     scene->sourceFingerprint = input->sourceFingerprint;
+    scene->activeGroupIDs = input->activeGroupIDs;
+    std::ranges::sort(scene->activeGroupIDs);
+    if (std::ranges::adjacent_find(scene->activeGroupIDs) != scene->activeGroupIDs.end()) {
+        return ArtifactBuildResult::Failure("static scene contains duplicate active groups");
+    }
+    std::unordered_set<std::uint64_t> activeGroups(
+        scene->activeGroupIDs.begin(), scene->activeGroupIDs.end());
     scene->transactions.reserve(context.dependencies.size());
     for (const auto& dependency : context.dependencies) {
         if (!expected.contains(dependency.key)) {
@@ -57,15 +74,22 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
             transaction->streamGeneration != dependency.key.variantID) {
             return ArtifactBuildResult::Failure("static scene transaction payload mismatch");
         }
-        scene->groupCount += transaction->groupCount;
-        scene->drawRecordCount += transaction->drawRecordCount;
-        scene->activeEntryCount += transaction->activeEntryCount;
+        for (const auto& group : transaction->groups) {
+            if (!activeGroups.erase(group.groupID)) continue;
+            ++scene->groupCount;
+            scene->drawRecordCount += group.drawRecordCount;
+            scene->activeEntryCount += group.activeEntryCount;
+        }
         scene->transactions.push_back(*transaction);
+    }
+    if (!activeGroups.empty()) {
+        return ArtifactBuildResult::Failure("static scene active group closure is incomplete");
     }
     std::ranges::sort(scene->transactions, {}, &PublishedStaticTransaction::transactionID);
 
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::Geometry;
+    root->publishRoot = input->publishRoot;
     root->fragment.revision = context.revision;
     root->fragment.dependencyClosure = context.dependencies;
     root->fragment.payload = ArtifactPayload::Make<PublishedStaticSceneState>(std::move(scene));

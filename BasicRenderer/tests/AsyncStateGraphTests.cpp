@@ -106,6 +106,7 @@ int main() {
     staticA->transactionID = 101;
     staticA->streamGeneration = 7;
     staticA->sourceFingerprint = 1001;
+    staticA->groups = { { 10001, 5, 10 }, { 10002, 6, 12 } };
     staticA->groupCount = 2;
     staticA->drawRecordCount = 11;
     staticA->activeEntryCount = 22;
@@ -113,6 +114,7 @@ int main() {
     staticB->transactionID = 102;
     staticB->streamGeneration = 7;
     staticB->sourceFingerprint = 1002;
+    staticB->groups = { { 10003, 4, 8 }, { 10004, 4, 8 }, { 10005, 5, 10 } };
     staticB->groupCount = 3;
     staticB->drawRecordCount = 13;
     staticB->activeEntryCount = 26;
@@ -123,6 +125,7 @@ int main() {
     auto staticSceneInput = std::make_shared<StaticSceneBuildInput>();
     staticSceneInput->sourceFingerprint = 9001;
     staticSceneInput->transactionKeys = { staticTransactionB, staticTransactionA };
+    staticSceneInput->activeGroupIDs = { 10001, 10002, 10003, 10004, 10005 };
     Check(graph.Request(staticScene, 1, {
         { staticTransactionA, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf },
         { staticTransactionB, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf },
@@ -131,6 +134,7 @@ int main() {
     const auto staticRoot = graph.Snapshot(staticScene)
         .payload.Get<RendererStateFragmentArtifact>();
     Check(staticRoot && staticRoot->kind == PublishedFragmentKind::Geometry);
+    Check(!staticRoot->publishRoot);
     const auto staticPublished = staticRoot->fragment.payload.Get<PublishedStaticSceneState>();
     Check(staticPublished && staticPublished->transactions.size() == 2);
     Check(staticPublished->transactions[0].transactionID == 101);
