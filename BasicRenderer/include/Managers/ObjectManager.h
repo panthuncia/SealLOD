@@ -464,9 +464,11 @@ public:
 	}
 
 	std::uint64_t GetResidentInstanceDrawRecordCount() const {
-		return m_instanceDrawRecordBuffers
-			? m_instanceDrawRecordBuffers->GetBufferSize() / sizeof(InstanceDrawRecordCB)
-			: 0u;
+		// The visibility-generation sidecar has exactly one logical row per allocated
+		// draw-record index. Use that logical extent for immutable active-list
+		// validation; backing capacity can temporarily lag while an asynchronous grow
+		// is awaiting publication.
+		return m_drawRecordVisibilityGenerations.size();
 	}
 	std::uint64_t GetResidentInstanceTransformCount() const {
 		return m_perInstanceTransformBuffers

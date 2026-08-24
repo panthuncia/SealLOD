@@ -101,6 +101,10 @@
 #include "Render/TbbTaskService.h"
 #include "Mesh/MeshInstance.h"
 #include "Render/DrawWorkload.h"
+#include "Render/IndirectStateArtifacts.h"
+#include "Render/MaterialStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/StaticStateArtifacts.h"
 #include "Render/RasterBucketFlags.h"
 #include "Render/TerrainRvtTelemetry.h"
 
@@ -725,8 +729,18 @@ void Renderer::Initialize(
     m_asyncStateGraph = std::make_unique<br::render::AsyncStateGraph>(
         TaskSchedulerManager::GetInstance(), "RendererStateGraph");
     m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight);
+    br::render::PublishedStateSource::SetProcessSource(m_rendererStatePublisher->ResourceSource());
+    m_rendererStateRequests = std::make_unique<br::render::RendererStateRequestService>(
+        *m_asyncStateGraph, *m_rendererStatePublisher);
+    br::render::RegisterIndirectStateProducer(*m_asyncStateGraph);
+    br::render::RegisterMaterialStateProducer(*m_asyncStateGraph);
+    br::render::RegisterVersionedGpuBufferProducer(*m_asyncStateGraph);
+    br::render::RegisterStaticStateProducers(*m_asyncStateGraph);
     m_asyncStateGraph->SetReadyCallback([this](const br::render::ArtifactSnapshot& artifact) {
-        if (m_rendererStatePublisher) (void)m_rendererStatePublisher->PublishArtifact(artifact);
+        if (m_rendererStateRequests) m_rendererStateRequests->OnArtifactReady(artifact);
+    });
+    m_rendererStatePublisher->SetCandidateRejectedCallback([this](std::uint64_t epoch) {
+        if (m_rendererStateRequests) m_rendererStateRequests->OnCandidateRejected(epoch);
     });
     SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
         TaskSchedulerManager::GetInstance().Submit(
@@ -778,7 +792,10 @@ void Renderer::Initialize(
 
         m_pReadbackManager->RequestReadback(std::move(texture), std::move(outputFile), std::move(callback), cubemap);
     });
-	m_pMaterialManager = MaterialManager::CreateUnique();
+    m_pMaterialManager = MaterialManager::CreateUnique();
+    m_pMaterialManager->SetRendererStateServices(
+        m_rendererStateRequests.get(),
+        currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr);
     m_pMaterialManager->SetRequestTextureReadbackFn(
         [this](std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
             if (m_pMaterialManager &&
@@ -827,7 +844,11 @@ void Renderer::Initialize(
         m_pTerrainManager.get(),
         std::addressof(m_shaderVariantRequestService),
 		currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr,
-		currentRenderGraph ? currentRenderGraph->GetDescriptorService() : nullptr);
+		currentRenderGraph ? currentRenderGraph->GetDescriptorService() : nullptr,
+        m_rendererStateRequests.get());
+    m_pIndirectCommandBufferManager->SetRendererStateServices(
+        m_rendererStateRequests.get(),
+        currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr);
 
     m_warnedNullScene = false;
     m_warnedMissingPrimaryCamera = false;
@@ -3036,10 +3057,20 @@ void Renderer::Update(float elapsedSeconds) {
 
     runCapturedStage("CommitPublishedRendererState", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState");
-        if (m_asyncStateGraph) m_asyncStateGraph->PumpGpuCompletions();
-        m_context.publishedRendererState = m_rendererStatePublisher
-            ? m_rendererStatePublisher->Commit(m_frameIndex)
-            : nullptr;
+        try {
+            if (m_asyncStateGraph) m_asyncStateGraph->PumpGpuCompletions();
+        } catch (const std::exception& exception) {
+            spdlog::critical("CommitPublishedRendererState: PumpGpuCompletions failed: {}", exception.what());
+            throw;
+        }
+        try {
+            m_context.publishedRendererState = m_rendererStatePublisher
+                ? m_rendererStatePublisher->Commit(m_frameIndex)
+                : nullptr;
+        } catch (const std::exception& exception) {
+            spdlog::critical("CommitPublishedRendererState: publisher Commit failed: {}", exception.what());
+            throw;
+        }
         if (m_asyncStateGraph && m_context.publishedRendererState) {
             const auto markFragmentPublished = [this](const br::render::PublishedStateFragment& fragment) {
                 for (const auto& artifact : fragment.dependencyClosure) {
@@ -3129,7 +3160,7 @@ void Renderer::Update(float elapsedSeconds) {
             m_pMaterialManager->CommitGpuVisibleSnapshot();
         }
         if (m_pIndirectCommandBufferManager && m_pObjectManager) {
-            m_pIndirectCommandBufferManager->CommitGpuVisibleSnapshot(*m_pObjectManager);
+            m_pIndirectCommandBufferManager->PublishDesiredState(*m_pObjectManager);
         }
     });
 
@@ -4921,13 +4952,27 @@ void Renderer::Cleanup() {
     // Close the renderer-state request boundary before any upload/descriptor
     // service it can target is destroyed. CancelAndWait also prevents a late
     // producer completion from publishing into manager teardown.
+    m_managerInterface.SetRendererStateRequests(nullptr);
+    if (m_rendererStateRequests) {
+        spdlog::info("Renderer state cleanup: stopping request service");
+        m_rendererStateRequests->Stop();
+        m_rendererStateRequests.reset();
+        spdlog::info("Renderer state cleanup: request service stopped");
+    }
     if (m_asyncStateGraph) {
+        spdlog::info("Renderer state cleanup: shutting down graph");
         m_asyncStateGraph->Shutdown();
+        spdlog::info("Renderer state cleanup: graph shutdown complete");
         m_asyncStateGraph.reset();
+        spdlog::info("Renderer state cleanup: graph destroyed");
     }
     if (m_rendererStatePublisher) {
+        spdlog::info("Renderer state cleanup: releasing captured and published states");
+        m_context.publishedRendererState.reset();
+        br::render::PublishedStateSource::SetProcessSource({});
         m_rendererStatePublisher->DiscardCandidate();
         m_rendererStatePublisher.reset();
+        spdlog::info("Renderer state cleanup: publisher destroyed");
     }
     if (currentRenderGraph) {
         if (auto* uploadService = currentRenderGraph->GetUploadService()) {
@@ -5113,7 +5158,7 @@ std::shared_ptr<Scene> Renderer::AppendScene(std::shared_ptr<Scene> scene) {
 		m_pMaterialManager->CommitGpuVisibleSnapshot();
 	}
 	if (m_pIndirectCommandBufferManager && m_pObjectManager) {
-		m_pIndirectCommandBufferManager->CommitGpuVisibleSnapshot(*m_pObjectManager);
+		m_pIndirectCommandBufferManager->PublishDesiredState(*m_pObjectManager);
 	}
 
 	m_warnedNullScene = false;

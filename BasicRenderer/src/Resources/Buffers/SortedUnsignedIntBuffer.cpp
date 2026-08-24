@@ -10,7 +10,7 @@
 #include "Managers/Singletons/DeviceManager.h"
 
 SortedUnsignedIntBuffer::~SortedUnsignedIntBuffer() {
-    UnregisterDeferredBackingResizeClient(this);
+    if (!m_graphManaged) UnregisterDeferredBackingResizeClient(this);
 }
 
 void SortedUnsignedIntBuffer::OnSetName() {
@@ -114,6 +114,10 @@ void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elemen
 }
 
 void SortedUnsignedIntBuffer::RequestAsyncReserveCapacity(uint64_t requiredSize) {
+    if (m_graphManaged) {
+        while (m_capacity < requiredSize) m_capacity = (std::max<std::uint64_t>)(m_capacity * 2u, 1u);
+        return;
+    }
     if (requiredSize <= m_capacity ||
         (m_pendingResizeValid && m_pendingResizeCapacity >= requiredSize)) {
         return;
@@ -364,6 +368,7 @@ void SortedUnsignedIntBuffer::RemoveMany(const std::vector<unsigned int>& elemen
 }
 
 void SortedUnsignedIntBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
+    if (m_graphManaged) return;
     RetainCpuShadowWrite(data, size, offset);
     if (offset + size > GetBufferSize()) {
         return;
@@ -480,6 +485,10 @@ void SortedUnsignedIntBuffer::EnsureCapacityForSize(uint64_t requiredSize) {
     uint64_t newCapacity = (std::max<uint64_t>)(m_capacity, 1u);
     while (newCapacity < requiredSize) {
         newCapacity *= 2;
+    }
+    if (m_graphManaged) {
+        m_capacity = newCapacity;
+        return;
     }
     if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
         RequestAsyncReserveCapacity(newCapacity);

@@ -12,6 +12,7 @@ class TextureFactory;
 class TerrainManager;
 class ShaderVariantRequestService;
 namespace org::runtime { class IDescriptorService; class IUploadService; }
+namespace br::render { class RendererStateRequestService; }
 
 class ManagerInterface {
 public:
@@ -29,7 +30,8 @@ public:
 		TerrainManager* terrainManager = nullptr,
 		ShaderVariantRequestService* shaderVariantRequestService = nullptr,
 		org::runtime::IUploadService* uploadService = nullptr,
-		org::runtime::IDescriptorService* descriptorService = nullptr
+		org::runtime::IDescriptorService* descriptorService = nullptr,
+		br::render::RendererStateRequestService* rendererStateRequests = nullptr
 	) : m_pMeshManager(meshManager),
 		m_pObjectManager(objectManager),
 		m_pIndirectCommandBufferManager(indirectCommandBufferManager),
@@ -42,7 +44,8 @@ public:
 		m_pTerrainManager(terrainManager),
 		m_pShaderVariantRequestService(shaderVariantRequestService),
 		m_pUploadService(uploadService),
-		m_pDescriptorService(descriptorService) {
+		m_pDescriptorService(descriptorService),
+		m_pRendererStateRequests(rendererStateRequests) {
 	}
 
 	void SetManagers(MeshManager* meshManager,
@@ -57,7 +60,8 @@ public:
 		TerrainManager* terrainManager = nullptr,
 		ShaderVariantRequestService* shaderVariantRequestService = nullptr,
 		org::runtime::IUploadService* uploadService = nullptr,
-		org::runtime::IDescriptorService* descriptorService = nullptr) {
+		org::runtime::IDescriptorService* descriptorService = nullptr,
+		br::render::RendererStateRequestService* rendererStateRequests = nullptr) {
 		m_pMeshManager = meshManager;
 		m_pObjectManager = objectManager;
 		m_pIndirectCommandBufferManager = indirectCommandBufferManager;
@@ -71,6 +75,7 @@ public:
 		m_pShaderVariantRequestService = shaderVariantRequestService;
 		m_pUploadService = uploadService;
 		m_pDescriptorService = descriptorService;
+		m_pRendererStateRequests = rendererStateRequests;
 	}
 
 	MeshManager* GetMeshManager() const { return m_pMeshManager; }
@@ -86,6 +91,8 @@ public:
 	ShaderVariantRequestService* GetShaderVariantRequestService() const { return m_pShaderVariantRequestService; }
 	org::runtime::IUploadService* GetUploadService() const { return m_pUploadService; }
 	org::runtime::IDescriptorService* GetDescriptorService() const { return m_pDescriptorService; }
+	br::render::RendererStateRequestService* GetRendererStateRequests() const { return m_pRendererStateRequests; }
+	void SetRendererStateRequests(br::render::RendererStateRequestService* service) { m_pRendererStateRequests = service; }
 private:
 	MeshManager* m_pMeshManager = nullptr;
 	ObjectManager* m_pObjectManager = nullptr;
@@ -100,4 +107,5 @@ private:
 	ShaderVariantRequestService* m_pShaderVariantRequestService = nullptr;
 	org::runtime::IUploadService* m_pUploadService = nullptr;
 	org::runtime::IDescriptorService* m_pDescriptorService = nullptr;
+	br::render::RendererStateRequestService* m_pRendererStateRequests = nullptr;
 };

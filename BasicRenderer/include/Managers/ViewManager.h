@@ -167,18 +167,6 @@ public:
                 std::forward<F>(f)(v.id);
     }
 
-    // Indirect workloads + full view data
-    template<class F>
-    void ForEachIndirectWorkload(F&& f) {
-        if (!m_indirectManager) return;
-        m_indirectManager->ForEachIndirectBuffer(
-            [&](uint64_t viewID, const DrawWorkloadKey& key, const IndirectWorkload& wl) {
-                auto it = m_views.find(viewID);
-                if (it == m_views.end()) return;
-                std::forward<F>(f)(it->second, key, wl);
-            });
-    }
-
     // Descriptor index baking (optional, for convenience)
     void BakeDescriptorIndices();
 

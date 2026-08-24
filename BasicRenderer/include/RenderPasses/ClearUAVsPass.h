@@ -8,6 +8,8 @@
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Scene/Components.h"
 #include "boost/container_hash/hash.hpp"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
+#include "Materials/TechniqueDescriptor.h"
 
 struct ClearIndirectDrawCommandUAVPassInputs {
 	bool clearBlend;
@@ -23,19 +25,18 @@ public:
 		auto inputs = Inputs<ClearIndirectDrawCommandUAVPassInputs>();
 		m_clearBlend = inputs.clearBlend;
 
-		auto ecsWorld = RendererECSManager::GetInstance().GetWorld();
-		auto blendEntity = RendererECSManager::GetInstance().GetRenderPhaseEntity(Engine::Primary::OITAccumulationPass);
-		m_nonBlendQuery = ECSResourceResolver(ecsWorld.query_builder<>()
-			.with<Components::IsIndirectArguments>()
-			.without<Components::ParticipatesInPass>(blendEntity)
-			.build());
-		builder->WithCopyDest(ECSResourceResolver(m_nonBlendQuery));
+		br::render::PublishedResourceQuery nonBlend{};
+		nonBlend.owner = br::render::PublishedFragmentKind::IndirectWorkloads;
+		nonBlend.usage = br::render::PublishedResourceUsage::IndirectArguments;
+		nonBlend.forbiddenVariantMask = static_cast<std::uint64_t>(MaterialCompileBlend);
+		m_nonBlendQuery = PublishedStateResourceResolver(br::render::PublishedStateSource::ProcessSource(), nonBlend);
+		builder->WithCopyDest(m_nonBlendQuery);
 		if (m_clearBlend) {
-			m_blendQuery = ECSResourceResolver(ecsWorld.query_builder<>()
-				.with<Components::IsIndirectArguments>()
-				.with<Components::ParticipatesInPass>(blendEntity)
-				.build());
-			builder->WithCopyDest(ECSResourceResolver(m_blendQuery));
+			br::render::PublishedResourceQuery blend = nonBlend;
+			blend.forbiddenVariantMask = 0;
+			blend.requiredVariantMask = static_cast<std::uint64_t>(MaterialCompileBlend);
+			m_blendQuery = PublishedStateResourceResolver(br::render::PublishedStateSource::ProcessSource(), blend);
+			builder->WithCopyDest(m_blendQuery);
 		}
 	}
   
@@ -78,8 +79,8 @@ public:
 
 	void Cleanup() override {
 		lightQuery = {};
-		m_nonBlendQuery = ECSResourceResolver();
-		m_blendQuery = ECSResourceResolver();
+		m_nonBlendQuery = PublishedStateResourceResolver();
+		m_blendQuery = PublishedStateResourceResolver();
 		m_nonBlendIndirectCommandBuffers.clear();
 		m_blendIndirectCommandBuffers.clear();
 	}
@@ -89,8 +90,8 @@ private:
 	flecs::query<Components::LightViewInfo> lightQuery;
 	ComPtr<ID3D12PipelineState> m_PSO;
 
-	ECSResourceResolver m_nonBlendQuery;
-	ECSResourceResolver m_blendQuery;
+	PublishedStateResourceResolver m_nonBlendQuery;
+	PublishedStateResourceResolver m_blendQuery;
 
 	std::vector<std::shared_ptr<DynamicGloballyIndexedResource>> m_nonBlendIndirectCommandBuffers;
 	std::vector<std::shared_ptr<DynamicGloballyIndexedResource>> m_blendIndirectCommandBuffers;

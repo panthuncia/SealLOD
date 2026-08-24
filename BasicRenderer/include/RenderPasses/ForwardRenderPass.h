@@ -17,6 +17,8 @@
 #include "Managers/LightManager.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Resolvers/ECSResourceResolver.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
+#include "Render/IndirectStateArtifacts.h"
 #include "../../shaders/PerPassRootConstants/amplificationShaderRootConstants.h"
 #include "boost/container_hash/hash.hpp"
 
@@ -96,14 +98,12 @@ public:
         if (m_meshShaders) {
             //builder->WithShaderResource(MESH_RESOURCE_IDFENTIFIERS, Builtin::PrimaryCamera::MeshletBitfield);
             if (m_indirect) { // Indirect draws only supported with mesh shaders, becasue I'm not writing a separate codepath for doing it the bad way
-                auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-                auto forwardPassEntity = RendererECSManager::GetInstance().GetRenderPhaseEntity(Engine::Primary::ForwardPass);
-				flecs::query<> indirectQuery = ecsWorld.query_builder<>()
-                    .with<Components::IsIndirectArguments>()
-					.with<Components::ParticipatesInPass>(forwardPassEntity) // Query for command lists that participate in this pass
-                    //.cached().cache_kind(flecs::QueryCacheAll)
-                    .build();
-                builder->WithIndirectArguments(ECSResourceResolver(indirectQuery));
+                br::render::PublishedResourceQuery query{};
+                query.owner = br::render::PublishedFragmentKind::IndirectWorkloads;
+                query.usage = br::render::PublishedResourceUsage::IndirectArguments;
+                query.renderPhaseHash = RenderPhase{ Engine::Primary::ForwardPass }.hash;
+                builder->WithIndirectArguments(PublishedStateResourceResolver(
+                    br::render::PublishedStateSource::ProcessSource(), query));
             }
         }
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -258,25 +258,27 @@ private:
         auto& psoManager = PSOManager::GetInstance();
 
         auto commandSignature = CommandSignatureManager::GetInstance().GetDispatchMeshCommandSignature();
-		auto manager = context.indirectCommandBufferManager;
-
         auto primaryViewID = context.primaryViewID;
-        auto workloads = manager->GetBuffersForRenderPhase(primaryViewID, Engine::Primary::ForwardPass);
+        const auto published = context.publishedRendererState
+            ? context.publishedRendererState->indirectWorkloads.payload.Get<br::render::PublishedIndirectState>()
+            : nullptr;
+        if (!published) return;
+        auto workloads = published->Find(primaryViewID, Engine::Primary::ForwardPass, false);
 
-		for (auto& workload : workloads) {
+		for (const auto* workload : workloads) {
 
-            auto& indirectBuffer = workload.second;
-			auto materialCompileFlags = workload.first;
+            if (!workload || !workload->indirectArguments) continue;
+			auto materialCompileFlags = workload->key.compileFlags;
             auto& pso = psoManager.GetMeshPSO(context.globalPSOFlags, materialCompileFlags, m_wireframe);
             BindResourceDescriptorIndices(commandList, pso.GetResourceDescriptorSlots());
 			commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
 
-            auto apiResource = workload.second.buffer->GetAPIResource();
-            const auto commandCount = workload.second.count;
+            auto apiResource = workload->indirectArguments->GetAPIResource();
+            const auto commandCount = workload->count;
             if (commandCount == 0u) {
                 continue;
             }
-            if (const auto backing = std::dynamic_pointer_cast<Buffer>(workload.second.buffer->GetResource())) {
+            if (const auto backing = std::dynamic_pointer_cast<Buffer>(workload->indirectArguments)) {
                 const auto requiredBytes = static_cast<uint64_t>(commandCount) * sizeof(DispatchMeshIndirectCommand);
                 if (backing->GetSize() < requiredBytes) {
                     spdlog::error(
@@ -294,7 +296,7 @@ private:
                 apiResource.GetHandle(), 
                 0, 
                 apiResource.GetHandle(), 
-                workload.second.buffer->GetResource()->GetUAVCounterOffset(),
+                workload->indirectArguments->GetUAVCounterOffset(),
                 commandCount);
         }
     }

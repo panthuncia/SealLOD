@@ -1,0 +1,143 @@
+#include "Render/VersionedGpuBufferArtifacts.h"
+
+#include <algorithm>
+#include <limits>
+#include <mutex>
+
+#include "Render/Runtime/IUploadService.h"
+#include "Resources/Buffers/Buffer.h"
+#include "Resources/Resource.h"
+#include "Utilities/Utilities.h"
+
+namespace br::render {
+
+std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferShadow(
+    const VersionedGpuBufferBuildInput& input,
+    std::string& error) {
+    error.clear();
+    if (input.elementStride == 0u || input.elementCount > input.capacity ||
+        input.capacity > (std::numeric_limits<std::uint32_t>::max)()) {
+        error = "versioned buffer count/capacity/stride invalid";
+        return {};
+    }
+    if (input.elementCount > (std::numeric_limits<std::size_t>::max)() / input.elementStride) {
+        error = "versioned buffer byte count overflows address space";
+        return {};
+    }
+    const auto requiredBytes = static_cast<std::size_t>(input.elementCount * input.elementStride);
+    auto shadow = std::make_shared<std::vector<std::byte>>(requiredBytes);
+    if (!input.bytes.empty()) {
+        if (requiredBytes != input.bytes.size()) {
+            error = "versioned buffer byte count does not match rows";
+            return {};
+        }
+        *shadow = input.bytes;
+    } else if (input.previous && input.previous->cpuShadow) {
+        const auto copyBytes = (std::min)(shadow->size(), input.previous->cpuShadow->size());
+        std::copy_n(input.previous->cpuShadow->begin(), copyBytes, shadow->begin());
+    }
+    std::uint64_t lastSequence = input.previous ? input.previous->writeSequence : 0u;
+    for (const auto& write : input.writes) {
+        if (write.sequence <= lastSequence || write.sequence > input.writeSequence) {
+            error = "versioned buffer write journal sequence invalid";
+            return {};
+        }
+        if (write.bytes.size() % input.elementStride != 0u) {
+            error = "versioned buffer journal write is not row aligned";
+            return {};
+        }
+        if (write.elementOffset > (std::numeric_limits<std::size_t>::max)() / input.elementStride) {
+            error = "versioned buffer journal offset overflows address space";
+            return {};
+        }
+        const auto byteOffset = static_cast<std::size_t>(write.elementOffset * input.elementStride);
+        if (byteOffset > shadow->size() || write.bytes.size() > shadow->size() - byteOffset) {
+            error = "versioned buffer journal write exceeds desired size";
+            return {};
+        }
+        std::copy(write.bytes.begin(), write.bytes.end(), shadow->begin() + byteOffset);
+        lastSequence = write.sequence;
+    }
+    if ((!input.writes.empty() && lastSequence != input.writeSequence) ||
+        (input.writes.empty() && input.previous && input.writeSequence != input.previous->writeSequence)) {
+        error = "versioned buffer is not closed through requested write sequence";
+        return {};
+    }
+    return shadow;
+}
+
+namespace {
+
+std::shared_ptr<const GpuDependencyToken> TokenForTicket(
+    const std::shared_ptr<org::TrackedUploadTicket>& ticket) {
+    if (!ticket) return {};
+    auto token = std::make_shared<GpuDependencyToken>();
+    token->isComplete = [ticket] { return ticket->Complete(); };
+    token->currentTimelineOwner = [ticket] {
+        std::lock_guard lock(ticket->timelineMutex);
+        return ticket->timelineOwner;
+    };
+    token->currentValue = [ticket] {
+        std::lock_guard lock(ticket->timelineMutex);
+        return ticket->timelineValue;
+    };
+    token->subscribe = [ticket](std::function<void()> callback) {
+        ticket->SetChangeCallback(std::move(callback));
+    };
+    return token;
+}
+
+ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context) {
+    const auto input = context.input.Get<VersionedGpuBufferBuildInput>();
+    if (!input || !input->uploadService || input->elementStride == 0u) {
+        return ArtifactBuildResult::Failure("versioned buffer input/upload service/stride missing");
+    }
+    std::string replayError;
+    auto shadow = ReplayVersionedGpuBufferShadow(*input, replayError);
+    if (!shadow) return ArtifactBuildResult::Failure(std::move(replayError));
+
+    Resource::ScopedECSRegistrationSuppression suppressECS;
+    auto resource = CreateIndexedStructuredBuffer(
+        static_cast<std::uint32_t>((std::max<std::uint64_t>)(input->capacity, 1u)),
+        input->elementStride, input->unorderedAccess, input->indirectArguments);
+    resource->SetName(input->debugName);
+
+    std::shared_ptr<org::TrackedUploadTicket> ticket;
+    if (!shadow->empty()) {
+        ticket = input->uploadService->QueueTrackedStreamingUpload(
+            shadow->data(), shadow->size(), resource, 0);
+    }
+
+    auto version = std::make_shared<PublishedGpuBufferVersion>();
+    version->revision = context.revision;
+    version->writeSequence = input->writeSequence;
+    version->elementCount = input->elementCount;
+    version->capacity = input->capacity;
+    version->elementStride = input->elementStride;
+    version->resource = resource;
+    version->cpuShadow = std::move(shadow);
+
+    auto root = std::make_shared<RendererStateFragmentArtifact>();
+    root->kind = input->catalogOwner;
+    root->publishRoot = false;
+    root->fragment.revision = context.revision;
+    root->fragment.payload = ArtifactPayload::Make<PublishedGpuBufferVersion>(version);
+    auto resources = std::make_shared<PublishedResourceCatalog::ResourceList>();
+    resources->push_back(resource);
+    root->catalogEntries.emplace_back(PublishedResourceKey{
+        input->catalogOwner, input->catalogUsage, 0, 0, input->catalogVariant }, resources);
+    return ArtifactBuildResult::Ready(
+        ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(root)), TokenForTicket(ticket));
+}
+
+} // namespace
+
+void RegisterVersionedGpuBufferProducer(AsyncStateGraph& graph) {
+    const ArtifactProducerRegistration registration{
+        TaskLane::Streaming, TaskDomain::RendererState,
+        "VersionedGpuBufferArtifact::Build", BuildVersionedGpuBuffer };
+    graph.RegisterProducer(ArtifactKind::BufferVersion, registration);
+    graph.RegisterProducer(ArtifactKind::ActiveDrawList, registration);
+}
+
+} // namespace br::render

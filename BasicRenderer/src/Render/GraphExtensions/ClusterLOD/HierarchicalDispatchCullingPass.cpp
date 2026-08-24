@@ -23,10 +23,12 @@
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/RenderContext.h"
+#include "Render/IndirectStateArtifacts.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Resources/components.h"
 #include "Resources/Resolvers/ECSResourceResolver.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 #include "ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodCreateCommandRootConstants.h"
@@ -90,25 +92,19 @@ bool BytesEqual(const T& left, const T& right)
 
 std::vector<uint64_t> CollectDeclaredDrawSetResourceIds(RenderPhase renderPhase, bool clodOnlyWorkloads)
 {
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-    auto queryBuilder = ecsWorld.query_builder<>()
-        .with<Components::IsActiveDrawSetIndices>()
-        .with<Components::ParticipatesInPass>(RendererECSManager::GetInstance().GetRenderPhaseEntity(renderPhase));
-    if (clodOnlyWorkloads) {
-        queryBuilder.with<Components::CLodOnlyDrawWorkload>();
-    }
-    else {
-        queryBuilder.with<Components::GeneralDrawWorkload>();
-    }
-
     std::vector<uint64_t> resourceIds;
-    queryBuilder.build().each([&](flecs::entity entity) {
-        if (const auto resource = entity.try_get<Components::Resource>(); resource) {
-            if (const auto shared = resource->resource.lock(); shared) {
-                resourceIds.push_back(shared->GetGlobalResourceID());
-            }
-        }
-    });
+    br::render::PublishedResourceQuery query{};
+    query.owner = br::render::PublishedFragmentKind::ActiveDrawLists;
+    query.usage = br::render::PublishedResourceUsage::ActiveDrawList;
+    query.renderPhaseHash = renderPhase.hash;
+    constexpr std::uint64_t clodBit = 1ull << 63u;
+    if (clodOnlyWorkloads) query.requiredVariantMask = clodBit;
+    else query.forbiddenVariantMask = clodBit;
+    const auto source = br::render::PublishedStateSource::ProcessSource();
+    const auto state = source ? source->Load() : nullptr;
+    const auto resources = state && state->resourceCatalog ? state->resourceCatalog->FindAll(query)
+                                                           : br::render::PublishedResourceCatalog::ResourceList{};
+    for (const auto& resource : resources) if (resource) resourceIds.push_back(resource->GetGlobalResourceID());
 
     std::sort(resourceIds.begin(), resourceIds.end());
     resourceIds.erase(std::unique(resourceIds.begin(), resourceIds.end()), resourceIds.end());
@@ -464,17 +460,13 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         rhi::ResourceSyncState::ExecuteIndirect
     };
 
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-    auto queryBuilder = ecsWorld.query_builder<>()
-        .with<Components::IsActiveDrawSetIndices>()
-        .with<Components::ParticipatesInPass>(RendererECSManager::GetInstance().GetRenderPhaseEntity(m_renderPhase));
-    if (m_clodOnlyWorkloads) {
-        queryBuilder.with<Components::CLodOnlyDrawWorkload>();
-    }
-    else {
-        queryBuilder.with<Components::GeneralDrawWorkload>();
-    }
-    flecs::query<> drawSetIndicesQuery = queryBuilder.build();
+    br::render::PublishedResourceQuery drawSetIndicesQuery{};
+    drawSetIndicesQuery.owner = br::render::PublishedFragmentKind::ActiveDrawLists;
+    drawSetIndicesQuery.usage = br::render::PublishedResourceUsage::ActiveDrawList;
+    drawSetIndicesQuery.renderPhaseHash = m_renderPhase.hash;
+    constexpr std::uint64_t clodBit = 1ull << 63u;
+    if (m_clodOnlyWorkloads) drawSetIndicesQuery.requiredVariantMask = clodBit;
+    else drawSetIndicesQuery.forbiddenVariantMask = clodBit;
 
     builder->WithUnorderedAccess(
             m_visibleClustersBuffer,
@@ -534,7 +526,8 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             Builtin::SkeletonResources::SkinningInstanceInfo,
             m_viewRasterInfoBuffer)
         .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
-        .WithShaderResource(ECSResourceResolver(drawSetIndicesQuery))
+        .WithShaderResource(PublishedStateResourceResolver(
+            br::render::PublishedStateSource::ProcessSource(), drawSetIndicesQuery))
         .WithInternalTransition(m_visibleClustersCounterBuffer, computeReadState)
         .WithInternalTransition(m_occlusionReplayStateBuffer, computeReadState)
         .WithInternalTransition(m_pureComputeCurrentNodeFrontierBuffer, computeReadState)
@@ -1203,22 +1196,23 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         context.viewManager->ForEachFiltered(filter, [&](uint64_t view) {
             auto viewInfo = context.viewManager->Get(view);
             auto cameraBufferIndex = viewInfo->gpu.cameraBufferIndex;
-			auto workloads = context.indirectCommandBufferManager->GetViewIndirectBuffersForRenderPhase(
-				view,
-				m_renderPhase,
-				m_clodOnlyWorkloads);
-			for (auto& wl : workloads) {
-				const auto activeDrawSetIndices = wl.workload.activeDrawSetIndices;
+            const auto published = context.publishedRendererState
+                ? context.publishedRendererState->indirectWorkloads.payload.Get<br::render::PublishedIndirectState>()
+                : nullptr;
+            const auto workloads = published ? published->Find(view, m_renderPhase, m_clodOnlyWorkloads)
+                                             : std::vector<const br::render::PublishedIndirectWorkload*>{};
+			for (const auto* wl : workloads) {
+				const auto activeDrawSetIndices = wl ? wl->activeDrawList : nullptr;
 				if (!activeDrawSetIndices) {
 					spdlog::warn(
 						"HierarchicalDispatchCullingPass: skipping stale workload without active draw set indices flags={} phase={} clodOnly={} count={}",
-						static_cast<std::uint64_t>(wl.key.compileFlags),
-						wl.key.renderPhase.hash,
-						wl.key.clodOnly,
-						wl.workload.count);
+						static_cast<std::uint64_t>(wl ? wl->key.compileFlags : 0u),
+						wl ? wl->key.renderPhase.hash : 0u,
+						wl ? wl->key.clodOnly : false,
+						wl ? wl->count : 0u);
 					continue;
 				}
-				const auto count = wl.workload.activeDrawCount;
+				const auto count = wl->count;
 				if (count == 0) {
 					continue;
 				}
@@ -1229,7 +1223,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
                 record.drawRecordVisibilityGenerationSRVIndex = context.objectManager->GetDrawRecordVisibilityGenerationBuffer()->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;
                 record.shadowCasterClass = UsesVirtualShadowOutput(m_rasterOutputKind)
-                    ? (wl.key.skinnedShadowCaster ? 2u : 1u)
+                    ? (wl->key.skinnedShadowCaster ? 2u : 1u)
                     : 0u;
                 record.dispatchGridX = static_cast<uint>((count + kPureComputeObjectCullThreadsPerGroup - 1u) / kPureComputeObjectCullThreadsPerGroup);
                 record.dispatchGridY = 1;
@@ -1510,9 +1504,8 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
     m_declaredResourcesChanged = false;
     {
         ZoneScopedN("HierarchicalDispatchCullingPass::CheckDeclaredDrawSetRevision");
-        const uint64_t drawSetRevision = context.objectManager
-            ? context.objectManager->GetDrawSetDeclarationRevision()
-            : m_lastDrawSetDeclarationRevision + 1u;
+        const auto source = br::render::PublishedStateSource::ProcessSource();
+        const uint64_t drawSetRevision = source ? source->Epoch() : 0u;
         if (drawSetRevision != m_lastDrawSetDeclarationRevision) {
             ZoneScopedN("HierarchicalDispatchCullingPass::CollectDeclaredDrawSets");
             m_lastDrawSetDeclarationRevision = drawSetRevision;

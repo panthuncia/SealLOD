@@ -13,8 +13,6 @@ namespace Components {
 		std::weak_ptr<::Resource> resource;
 	};
 	
-	struct IsIndirectArguments {};
-	struct IsActiveDrawSetIndices {};
     struct CLodOnlyDrawWorkload {};
     struct GeneralDrawWorkload {};
 

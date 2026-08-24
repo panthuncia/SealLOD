@@ -52,6 +52,7 @@
 #include "Render/ProducerPersistentState.h"
 #include "Render/AsyncStateGraph.h"
 #include "Render/PublishedRendererState.h"
+#include "Render/RendererStateRequestService.h"
 
 class DynamicResource;
 namespace org { class ExternalTextureResource; }
@@ -264,6 +265,7 @@ private:
     std::unique_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
     std::unique_ptr<br::render::AsyncStateGraph> m_asyncStateGraph;
     std::unique_ptr<br::render::RendererStatePublisher> m_rendererStatePublisher;
+    std::unique_ptr<br::render::RendererStateRequestService> m_rendererStateRequests;
     ShaderVariantRequestService m_shaderVariantRequestService;
 
 	ManagerInterface m_managerInterface;

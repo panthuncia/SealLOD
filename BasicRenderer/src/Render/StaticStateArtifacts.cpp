@@ -1,0 +1,87 @@
+#include "Render/StaticStateArtifacts.h"
+
+#include <algorithm>
+#include <unordered_set>
+
+#include "Render/PublishedRendererState.h"
+
+namespace br::render {
+namespace {
+
+ArtifactBuildResult BuildStaticTransaction(const ArtifactBuildContext& context) {
+    const auto input = context.input.Get<StaticTransactionBuildInput>();
+    if (!input) return ArtifactBuildResult::Failure("static transaction immutable input missing");
+    if (input->transactionID == 0 || input->transactionID != context.key.primaryID) {
+        return ArtifactBuildResult::Failure("static transaction identity mismatch");
+    }
+    if (input->streamGeneration != context.key.variantID) {
+        return ArtifactBuildResult::Failure("static transaction generation mismatch");
+    }
+
+    auto transaction = std::make_shared<PublishedStaticTransaction>();
+    transaction->transactionID = input->transactionID;
+    transaction->streamGeneration = input->streamGeneration;
+    transaction->sourceFingerprint = input->sourceFingerprint;
+    transaction->groupCount = input->groupCount;
+    transaction->drawRecordCount = input->drawRecordCount;
+    transaction->activeEntryCount = input->activeEntryCount;
+    transaction->dependencyClosure = context.dependencies;
+    return ArtifactBuildResult::Ready(
+        ArtifactPayload::Make<PublishedStaticTransaction>(std::move(transaction)));
+}
+
+ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
+    const auto input = context.input.Get<StaticSceneBuildInput>();
+    if (!input) return ArtifactBuildResult::Failure("static scene immutable input missing");
+
+    std::unordered_set<ArtifactKey, ArtifactKey::Hasher> expected;
+    expected.reserve(input->transactionKeys.size());
+    for (const auto key : input->transactionKeys) {
+        if (key.kind != ArtifactKind::StaticTransaction || !expected.insert(key).second) {
+            return ArtifactBuildResult::Failure("static scene transaction set is invalid");
+        }
+    }
+    if (context.dependencies.size() != expected.size()) {
+        return ArtifactBuildResult::Failure("static scene dependency closure is incomplete");
+    }
+
+    auto scene = std::make_shared<PublishedStaticSceneState>();
+    scene->sourceFingerprint = input->sourceFingerprint;
+    scene->transactions.reserve(context.dependencies.size());
+    for (const auto& dependency : context.dependencies) {
+        if (!expected.contains(dependency.key)) {
+            return ArtifactBuildResult::Failure("static scene contains an unexpected transaction");
+        }
+        const auto transaction = dependency.payload.Get<PublishedStaticTransaction>();
+        if (!transaction || transaction->transactionID != dependency.key.primaryID ||
+            transaction->streamGeneration != dependency.key.variantID) {
+            return ArtifactBuildResult::Failure("static scene transaction payload mismatch");
+        }
+        scene->groupCount += transaction->groupCount;
+        scene->drawRecordCount += transaction->drawRecordCount;
+        scene->activeEntryCount += transaction->activeEntryCount;
+        scene->transactions.push_back(*transaction);
+    }
+    std::ranges::sort(scene->transactions, {}, &PublishedStaticTransaction::transactionID);
+
+    auto root = std::make_shared<RendererStateFragmentArtifact>();
+    root->kind = PublishedFragmentKind::Geometry;
+    root->fragment.revision = context.revision;
+    root->fragment.dependencyClosure = context.dependencies;
+    root->fragment.payload = ArtifactPayload::Make<PublishedStaticSceneState>(std::move(scene));
+    return ArtifactBuildResult::Ready(
+        ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(root)));
+}
+
+} // namespace
+
+void RegisterStaticStateProducers(AsyncStateGraph& graph) {
+    graph.RegisterProducer(ArtifactKind::StaticTransaction, {
+        TaskLane::Streaming, TaskDomain::RendererState,
+        "StaticStateArtifact::BuildTransaction", BuildStaticTransaction });
+    graph.RegisterProducer(ArtifactKind::StaticScene, {
+        TaskLane::Streaming, TaskDomain::RendererState,
+        "StaticStateArtifact::BuildScene", BuildStaticScene });
+}
+
+} // namespace br::render

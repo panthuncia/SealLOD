@@ -3,9 +3,15 @@
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Materials/MaterialTextureStreaming.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
+#include "Resources/DynamicResource.h"
 #include "Render/MemoryIntrospectionAPI.h"
+#include "Render/MaterialStateArtifacts.h"
+#include "Render/PublishedRendererState.h"
+#include "Render/RendererStateRequestService.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/RasterBucketFlags.h"
 #include "Render/Runtime/IReadbackService.h"
+#include "Render/Runtime/IUploadService.h"
 
 #include <algorithm>
 #include <cctype>
@@ -24,6 +30,9 @@ namespace {
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
 	constexpr uint64_t kTextureStreamingIdleFramesBeforeCoarsen = 180u;
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
+	// Keep post-indirect graph cutovers dormant until static activation has a
+	// complete, visually validated dependency closure.
+	constexpr bool kEnableMaterialStateShadow = false;
 
 	const std::string& MaterialTextureTraceFilter() {
 		static const std::string filter = [] {
@@ -408,9 +417,15 @@ MaterialManager::MaterialManager() {
 	m_resources["Builtin::VisUtil::BlockSumsBuffer"] = m_blockSumsBuffer;
 	m_resources["Builtin::VisUtil::ScannedBlockSumsBuffer"] = m_scannedBlockSumsBuffer;
 	m_resources["Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer"] = m_materialEvaluationCommandBuffer;
-	m_resources[Builtin::PerMaterialDataBuffer] = m_perMaterialDataBuffer;
-	m_resources["Builtin::PerMaterialEvalDataBuffer"] = m_perMaterialEvalDataBuffer;
-	m_resources[Builtin::PerMaterialOpenPBRDataBuffer] = m_perMaterialOpenPBRDataBuffer;
+	m_publishedMaterialBaseResource = std::make_shared<org::DynamicGloballyIndexedResource>(m_perMaterialDataBuffer);
+	m_publishedMaterialEvalResource = std::make_shared<org::DynamicGloballyIndexedResource>(m_perMaterialEvalDataBuffer);
+	m_publishedMaterialOpenPbrResource = std::make_shared<org::DynamicGloballyIndexedResource>(m_perMaterialOpenPBRDataBuffer);
+	m_publishedMaterialBaseResource->SetName("Builtin::PerMaterialDataBuffer");
+	m_publishedMaterialEvalResource->SetName("Builtin::PerMaterialEvalDataBuffer");
+	m_publishedMaterialOpenPbrResource->SetName("Builtin::PerMaterialOpenPBRDataBuffer");
+	m_resources[Builtin::PerMaterialDataBuffer] = m_publishedMaterialBaseResource;
+	m_resources["Builtin::PerMaterialEvalDataBuffer"] = m_publishedMaterialEvalResource;
+	m_resources[Builtin::PerMaterialOpenPBRDataBuffer] = m_publishedMaterialOpenPbrResource;
 
 	// Reserve built-in material bins up front so render-graph material evaluation buffers are
 	// fully sized before passes/materialization/upload steps touch them.
@@ -830,15 +845,15 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			}
 		}
 		ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs");
-		{
+		if (!m_materialGraphActive) {
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Base");
 			m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
 		}
-		{
+		if (!m_materialGraphActive) {
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Eval");
 			m_perMaterialEvalDataBuffer->UpdateAt(materialSlot, evalData);
 		}
-		{
+		if (!m_materialGraphActive) {
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::OpenPBR");
 			m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, openPBRData);
 		}
@@ -848,6 +863,7 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			signature.evalData = evalData;
 			signature.openPBRData = openPBRData;
 			signature.valid = true;
+			++m_materialRowsRevision;
 		}
 	}
 
@@ -1078,7 +1094,7 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			}
 			m_materialUploadSignatures[slot].valid = false;
 		}
-		{
+		if (!m_materialGraphActive) {
 			ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot::ClearBuffers");
 			if (data.has_value()) {
 				m_perMaterialDataBuffer->UpdateAt(slot, data.value());
@@ -1097,7 +1113,7 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			slot = m_materialSlotsUsed++;
 			m_materialUsageCounts.push_back(0);
 		}
-		{
+		if (!m_materialGraphActive) {
 			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::EnsureCapacity");
 			if constexpr (kForceMaterialBufferResizeEveryMaterial) {
 				m_perMaterialDataBuffer->Resize(m_materialSlotsUsed);
@@ -1113,7 +1129,7 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			m_materialUploadSignatures.resize(m_materialSlotsUsed);
 			m_materialUploadSignatures[slot].valid = false;
 		}
-		{
+		if (!m_materialGraphActive) {
 			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::ClearBuffers");
 			if (data.has_value()) {
 				m_perMaterialDataBuffer->UpdateAt(slot, data.value());
@@ -1129,6 +1145,7 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 		ZoneScopedN("MaterialManager::GetMaterialSlot::StoreMapping");
 		m_materialIDSlotMapping[materialID] = slot;
 	}
+	++m_materialRowsRevision;
 	return slot;
 }
 
@@ -1137,6 +1154,12 @@ void MaterialManager::EnsureMaterialBufferCapacity(unsigned int requiredSlots) {
 	ZoneValue(requiredSlots);
 	if (requiredSlots <= m_materialBufferCapacity) {
 		TracyPlot("MaterialManager.MaterialBufferGrow", int64_t{ 0 });
+		return;
+	}
+	if (m_materialGraphActive) {
+		while (m_materialBufferCapacity < requiredSlots) {
+			m_materialBufferCapacity = (std::max)(m_materialBufferCapacity * 2u, 1u);
+		}
 		return;
 	}
 	TracyPlot("MaterialManager.MaterialBufferGrow", int64_t{ 1 });
@@ -1226,7 +1249,6 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 		BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot::EnsureCompileFlagsBufferCapacity");
 		EnsureCompileFlagsBufferCapacity(compileFlagsSlotsUsed);
 	}
-
 	const auto slotResidentCapacity = static_cast<unsigned int>((std::min<uint64_t>)(
 		(std::min<uint64_t>)(m_materialPixelCountBuffer ? m_materialPixelCountBuffer->ResidentCapacity() : 0u,
 			m_materialOffsetBuffer ? m_materialOffsetBuffer->ResidentCapacity() : 0u),
@@ -1255,6 +1277,133 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 			}
 			m_publishedActiveCompileFlags.push_back(flags);
 			m_publishedActiveCompileFlagsSlots.push_back(slot);
+		}
+	}
+
+	if constexpr (kEnableMaterialStateShadow) if (const auto source = br::render::PublishedStateSource::ProcessSource()) {
+		if (const auto published = source->Load()) {
+			if (const auto shadow = published->materials.payload.Get<br::render::PublishedMaterialState>()) {
+				// Material tables remain shadow-only until static draw activation carries an
+				// exact material-table dependency.  Switching the resource wrappers here can
+				// otherwise expose an older (including startup-empty) table to newly activated
+				// draws, making valid geometry disappear.
+				if (shadow->baseTable && shadow->evalTable && shadow->openPbrTable &&
+					published->materials.revision > m_activeMaterialPublishedRevision) {
+					m_activeMaterialPublishedRevision = published->materials.revision;
+					spdlog::info(
+						"MaterialManager: graph-owned material table shadow ready at publication epoch={} revision={}",
+						published->epoch, published->materials.revision);
+				}
+				const auto revision = published->materials.revision;
+				if (revision > m_materialStateValidatedRevision) {
+					if (const auto expected = m_materialStateExpectedFingerprints.find(revision);
+						expected != m_materialStateExpectedFingerprints.end()) {
+						if (shadow->sourceFingerprint != expected->second) {
+							spdlog::error("Material state shadow mismatch: revision={} graphFingerprint={} expectedFingerprint={}",
+								revision, shadow->sourceFingerprint, expected->second);
+						}
+						m_materialStateValidatedRevision = revision;
+						for (auto it = m_materialStateExpectedFingerprints.begin();
+							it != m_materialStateExpectedFingerprints.end();) {
+							if (it->first <= revision) it = m_materialStateExpectedFingerprints.erase(it);
+							else ++it;
+						}
+					}
+				}
+			}
+		}
+	}
+	if constexpr (kEnableMaterialStateShadow) if (m_rendererStateRequests) {
+		std::uint64_t fingerprint = m_publishedCompileFlagsSlotsUsed;
+		const auto mix = [&fingerprint](std::uint64_t value) {
+			fingerprint ^= value + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
+		};
+		for (std::size_t i = 0; i < m_publishedActiveCompileFlags.size(); ++i) {
+			mix(static_cast<std::uint64_t>(m_publishedActiveCompileFlags[i]));
+			mix(m_publishedActiveCompileFlagsSlots[i]);
+		}
+		mix(m_materialRowsRevision);
+		if (fingerprint != m_materialStateFingerprint) {
+			m_materialStateFingerprint = fingerprint;
+			if (!m_uploadService) {
+				spdlog::error("Material graph publication skipped: upload service unavailable");
+				return;
+			}
+			const br::render::ArtifactKey baseKey{
+				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialBaseTableVariant };
+			const br::render::ArtifactKey evalKey{
+				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialEvalTableVariant };
+			const br::render::ArtifactKey openPbrKey{
+				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialOpenPbrTableVariant };
+			const auto makeTableInput = [&](std::string name, std::uint32_t stride,
+				std::uint64_t variant, auto selectRow) {
+				auto table = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
+				table->uploadService = m_uploadService;
+				table->debugName = std::move(name);
+				table->writeSequence = m_materialRowsRevision;
+				table->elementStride = stride;
+				table->elementCount = m_materialSlotsUsed;
+				table->capacity = (std::max<std::uint64_t>)(m_materialBufferCapacity, 1u);
+				table->catalogOwner = br::render::PublishedFragmentKind::Materials;
+				table->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
+				table->catalogVariant = variant;
+				table->bytes.resize(static_cast<std::size_t>(m_materialSlotsUsed) * stride);
+				for (std::size_t slot = 0; slot < m_materialSlotsUsed; ++slot) {
+					selectRow(slot, table->bytes.data() + slot * stride);
+				}
+				return table;
+			};
+			const auto copyBase = [&](std::size_t slot, std::byte* destination) {
+				const auto row = slot < m_materialUploadSignatures.size() &&
+					m_materialUploadSignatures[slot].valid
+					? m_materialUploadSignatures[slot].materialData : PerMaterialCB{};
+				std::memcpy(destination, &row, sizeof(row));
+			};
+			const auto copyEval = [&](std::size_t slot, std::byte* destination) {
+				const auto row = slot < m_materialUploadSignatures.size() &&
+					m_materialUploadSignatures[slot].valid
+					? m_materialUploadSignatures[slot].evalData : PerMaterialEvalCB{};
+				std::memcpy(destination, &row, sizeof(row));
+			};
+			const auto copyOpenPbr = [&](std::size_t slot, std::byte* destination) {
+				const auto row = slot < m_materialUploadSignatures.size() &&
+					m_materialUploadSignatures[slot].valid
+					? m_materialUploadSignatures[slot].openPBRData : PerMaterialOpenPBRCB{};
+				std::memcpy(destination, &row, sizeof(row));
+			};
+			(void)m_rendererStateRequests->Request(baseKey, m_materialRowsRevision, {},
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
+					makeTableInput("Published::PerMaterialDataBuffer", sizeof(PerMaterialCB),
+						br::render::kMaterialBaseTableVariant, copyBase)));
+			(void)m_rendererStateRequests->Request(evalKey, m_materialRowsRevision, {},
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
+					makeTableInput("Published::PerMaterialEvalDataBuffer", sizeof(PerMaterialEvalCB),
+						br::render::kMaterialEvalTableVariant, copyEval)));
+			(void)m_rendererStateRequests->Request(openPbrKey, m_materialRowsRevision, {},
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
+					makeTableInput("Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB),
+						br::render::kMaterialOpenPbrTableVariant, copyOpenPbr)));
+			auto input = std::make_shared<br::render::MaterialStateBuildInput>();
+			input->sourceFingerprint = fingerprint;
+			input->slotsUsed = m_publishedCompileFlagsSlotsUsed;
+			input->activeCompileFlags.reserve(m_publishedActiveCompileFlags.size());
+			for (std::size_t i = 0; i < m_publishedActiveCompileFlags.size(); ++i) {
+				input->activeCompileFlags.push_back({
+					m_publishedActiveCompileFlags[i], m_publishedActiveCompileFlagsSlots[i] });
+			}
+			input->baseTableKey = baseKey;
+			input->evalTableKey = evalKey;
+			input->openPbrTableKey = openPbrKey;
+			const auto revision = ++m_materialStateRevision;
+			m_materialStateExpectedFingerprints[revision] = fingerprint;
+			const std::vector<br::render::ArtifactRequirement> requirements{
+				{ baseKey, m_materialRowsRevision, br::render::ArtifactReadiness::GpuReady },
+				{ evalKey, m_materialRowsRevision, br::render::ArtifactReadiness::GpuReady },
+				{ openPbrKey, m_materialRowsRevision, br::render::ArtifactReadiness::GpuReady }
+			};
+			(void)m_rendererStateRequests->Request(
+				{ br::render::ArtifactKind::MaterialTable, 0, 0 }, revision, requirements,
+				br::render::ArtifactPayload::Make<br::render::MaterialStateBuildInput>(std::move(input)));
 		}
 	}
 }

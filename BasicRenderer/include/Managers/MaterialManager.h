@@ -15,7 +15,10 @@
 
 namespace org::runtime {
 class IReadbackService;
+class IUploadService;
 }
+namespace org { class DynamicGloballyIndexedResource; }
+namespace br::render { class RendererStateRequestService; }
 
 class TextureFactory;
 namespace org { class CopyPass; }
@@ -54,7 +57,13 @@ public:
 	void UpdateMaterialDataBuffer(Material& material);
 	void MarkMaterialDirty(Material& material);
 	void UpdateOpenPBRMaterialDataBuffer(unsigned int materialSlot, const PerMaterialOpenPBRCB& data) {
-		m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, data);
+		if (!m_materialGraphActive) m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, data);
+		if (materialSlot >= m_materialUploadSignatures.size()) {
+			m_materialUploadSignatures.resize(static_cast<std::size_t>(materialSlot) + 1u);
+		}
+		m_materialUploadSignatures[materialSlot].openPBRData = data;
+		m_materialUploadSignatures[materialSlot].valid = true;
+		++m_materialRowsRevision;
 	}
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
@@ -66,7 +75,11 @@ public:
 	const std::vector<unsigned int>& GetActiveCompileFlagsSlots() const { return m_publishedActiveCompileFlagsSlots; }
 	const std::vector<MaterialCompileFlags>& GetActiveCompileFlags() const { return m_publishedActiveCompileFlags; }
 	unsigned int GetCompileFlagsSlotsUsed() const { return m_publishedCompileFlagsSlotsUsed; }
-
+	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
+		org::runtime::IUploadService* uploads) {
+		m_rendererStateRequests = requests;
+		m_uploadService = uploads;
+	}
 	unsigned int GetRasterBucketCount() const { return m_rasterBucketsUsed; }
 	unsigned int GetRasterBucketForFlags(MaterialRasterFlags rasterFlags) const {
 		auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
@@ -151,6 +164,18 @@ private:
 	std::unordered_set<uint32_t> m_dirtyMaterialIDSet;
 	std::chrono::steady_clock::time_point m_lastMaterialUpdateStatsLog = {};
 	RequestTextureReadbackFn m_requestTextureReadback;
+	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
+	org::runtime::IUploadService* m_uploadService = nullptr;
+	std::uint64_t m_materialRowsRevision = 1;
+	bool m_materialGraphActive = false;
+	std::uint64_t m_activeMaterialPublishedRevision = 0;
+	std::shared_ptr<org::DynamicGloballyIndexedResource> m_publishedMaterialBaseResource;
+	std::shared_ptr<org::DynamicGloballyIndexedResource> m_publishedMaterialEvalResource;
+	std::shared_ptr<org::DynamicGloballyIndexedResource> m_publishedMaterialOpenPbrResource;
+	std::uint64_t m_materialStateFingerprint = 0;
+	std::uint64_t m_materialStateRevision = 0;
+	std::uint64_t m_materialStateValidatedRevision = 0;
+	std::unordered_map<std::uint64_t, std::uint64_t> m_materialStateExpectedFingerprints;
 	std::unordered_set<uint64_t> m_traceReadbackResourceIDs;
 	std::weak_ptr<TextureAsset> m_traceBaseColorTexture;
 	bool m_traceLateReadbackRequested = false;

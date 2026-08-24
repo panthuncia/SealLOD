@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <span>
 
@@ -13,6 +14,9 @@ namespace org { class ResourceGroup; }
 using org::ResourceGroup;
 class ObjectManager;
 class SortedUnsignedIntBuffer;
+namespace org::runtime { class IUploadService; }
+namespace br::render { class RendererStateRequestService; }
+namespace br::render { struct PublishedRendererState; }
 
 struct RenderPhase; // forward
 
@@ -21,19 +25,6 @@ struct MaterialCompileFlagsHash {
     size_t operator()(MaterialCompileFlags f) const noexcept {
         return std::hash<uint64_t>()(static_cast<uint64_t>(f));
     }
-};
-
-struct IndirectWorkload {
-    std::shared_ptr<DynamicGloballyIndexedResource> buffer;
-    unsigned int count = 0;
-    unsigned int activeDrawCount = 0;
-    std::shared_ptr<SortedUnsignedIntBuffer> activeDrawSetIndices;
-};
-
-struct IndirectBufferEntry {
-    uint64_t viewID;
-    DrawWorkloadKey key;
-    IndirectWorkload workload;
 };
 
 struct WorkloadCountUpdate {
@@ -69,40 +60,17 @@ public:
     void UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate> updates);
     void RequestWorkloadCount(const DrawWorkloadKey& workloadKey, unsigned int numDraws);
     void RequestWorkloadCounts(std::span<const WorkloadCountUpdate> updates);
-    void CommitGpuVisibleSnapshot(ObjectManager& objectManager);
+    void PublishDesiredState(ObjectManager& objectManager);
+    void SetRendererStateServices(br::render::RendererStateRequestService* requests,
+        org::runtime::IUploadService* uploads);
 
     // Set growth granularity
     void SetIncrementSize(unsigned int incrementSize);
-
-    // Query: which (per-view) indirect command buffers participate in a render pass?
-    // Order is unspecified; returns empty if none registered.
-    std::vector<std::pair<MaterialCompileFlags, IndirectWorkload>>
-        GetBuffersForRenderPhase(uint64_t viewID, const RenderPhase& phase, bool clodOnly = false) const;
-
-    // per-view version of phase query, but returning viewID too
-    std::vector<IndirectBufferEntry> GetViewIndirectBuffersForRenderPhase(uint64_t viewID, const RenderPhase& phase, bool clodOnly = false) const;
-
-	// Iterate over all indirect buffers (all views, all flags):
-    template<class F>
-    void ForEachIndirectBuffer(F&& f) const {
-        for (auto const& [viewID, perView] : m_viewIDToBuffers) {
-            for (auto const& [key, wl] : perView.buffersByWorkload) {
-                std::forward<F>(f)(viewID, key, wl);
-            }
-        }
-    }
 
 private:
     IndirectCommandBufferManager();
 
     // Per-view buffer set
-    struct PerViewBuffers {
-        // One buffer per unique draw workload
-        std::unordered_map<DrawWorkloadKey,
-            IndirectWorkload,
-            DrawWorkloadKey::Hasher> buffersByWorkload;
-    };
-
     // Per-workload published capacity (rounded to increment)
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToCapacity;
 
@@ -110,14 +78,16 @@ private:
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToRequestedCount;
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToPublishedCount;
 
-    // Single group that owns all indirect command buffers (regardless of flags)
-    std::shared_ptr<ResourceGroup> m_indirectCommandsResourceGroup;
-
-    // ViewID -> buffers
-    std::unordered_map<uint64_t, PerViewBuffers> m_viewIDToBuffers;
+    std::unordered_set<std::uint64_t> m_viewIDs;
 
     // Growth granularity
     unsigned int m_incrementSize = 1000;
+    br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
+    org::runtime::IUploadService* m_uploadService = nullptr;
+    std::uint64_t m_graphInputFingerprint = 0;
+    std::uint64_t m_graphPendingFingerprint = 0;
+    std::uint32_t m_graphStableTicks = 0;
+    std::uint64_t m_graphRevision = 0;
 
     // Helpers
     unsigned int RoundUp(unsigned int x) const {

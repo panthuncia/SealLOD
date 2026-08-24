@@ -1,6 +1,7 @@
 #include "Managers/Singletons/RendererECSManager.h"
 
 #include <stdexcept>
+#include <format>
 
 #include "Scene/Components.h"
 
@@ -19,6 +20,7 @@ void RendererECSManager::Initialize() {
 }
 
 void RendererECSManager::Cleanup() {
+	RequireMainThread("Cleanup");
     FlushDeferredWorldOperations();
     m_entityPool.Clear();
     m_renderPhaseEntities.clear();
@@ -37,13 +39,15 @@ bool RendererECSManager::IsMainThread() const {
 }
 
 flecs::world& RendererECSManager::GetWorld() {
-    if (!m_world) {
+	if (!m_world) {
         throw std::runtime_error("RendererECSManager::GetWorld called before Initialize");
-    }
+	}
+	RequireMainThread("GetWorld");
     return *m_world;
 }
 
 flecs::entity RendererECSManager::GetRenderPhaseEntity(const RenderPhase& phase) {
+	RequireMainThread("GetRenderPhaseEntity");
     auto it = m_renderPhaseEntities.find(phase);
     if (it != m_renderPhaseEntities.end()) {
         return it->second;
@@ -55,6 +59,7 @@ flecs::entity RendererECSManager::GetRenderPhaseEntity(const RenderPhase& phase)
 }
 
 void RendererECSManager::CreateRenderPhaseEntity(const RenderPhase& phase) {
+	RequireMainThread("CreateRenderPhaseEntity");
     if (m_renderPhaseEntities.contains(phase)) {
         return;
     }
@@ -63,14 +68,17 @@ void RendererECSManager::CreateRenderPhaseEntity(const RenderPhase& phase) {
 }
 
 void RendererECSManager::ReserveEntityPool(std::size_t count) {
+	RequireMainThread("ReserveEntityPool");
     m_entityPool.Reserve(count);
 }
 
 flecs::entity RendererECSManager::AcquirePooledEntity() {
+	RequireMainThread("AcquirePooledEntity");
     return m_entityPool.Acquire();
 }
 
 void RendererECSManager::ReleasePooledEntity(flecs::entity entity, const std::function<void(flecs::entity)>& cleanup) {
+	RequireMainThread("ReleasePooledEntity");
     m_entityPool.Release(entity, cleanup);
 }
 
@@ -84,6 +92,7 @@ void RendererECSManager::EnqueueDeferredWorldOperation(std::function<void(flecs:
 }
 
 void RendererECSManager::FlushDeferredWorldOperations() {
+	if (m_world) RequireMainThread("FlushDeferredWorldOperations");
     if (!m_world) {
         std::scoped_lock lock(m_deferredWorldOperationsMutex);
         m_deferredWorldOperations.clear();
@@ -103,5 +112,13 @@ void RendererECSManager::FlushDeferredWorldOperations() {
 }
 
 const std::unordered_map<RenderPhase, flecs::entity, RenderPhase::Hasher>& RendererECSManager::GetRenderPhaseEntities() const {
-    return m_renderPhaseEntities;
+	RequireMainThread("GetRenderPhaseEntities");
+	return m_renderPhaseEntities;
+}
+
+void RendererECSManager::RequireMainThread(const char* operation) const {
+	if (m_mainThreadId != std::thread::id{} && std::this_thread::get_id() != m_mainThreadId) {
+		throw std::runtime_error(std::format(
+			"RendererECSManager::{} may only run on the renderer thread", operation));
+	}
 }

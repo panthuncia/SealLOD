@@ -8,6 +8,7 @@
 #include <string_view>
 #include <typeindex>
 #include <vector>
+#include <array>
 
 #include "Managers/Singletons/TaskSchedulerManager.h"
 
@@ -26,6 +27,7 @@ enum class ArtifactKind : std::uint16_t {
     ActiveDrawList,
     IndirectWorkload,
     StaticTransaction,
+    StaticScene,
     BufferVersion,
     FrameManifest,
 };
@@ -62,6 +64,8 @@ struct ArtifactRequirement {
     std::uint64_t minimumRevision = 0;
     ArtifactReadiness requiredReadiness = ArtifactReadiness::CpuReady;
     DependencyPolicy policy = DependencyPolicy::AllOf;
+    // Non-zero AnyOf requirements sharing a group form one alternative set.
+    std::uint32_t alternativeGroup = 0;
 };
 
 class ArtifactPayload {
@@ -105,8 +109,17 @@ struct GpuDependencyToken {
     std::shared_ptr<const void> timelineOwner;
     std::uint64_t value = 0;
     std::function<bool()> isComplete;
+    std::function<std::shared_ptr<const void>()> currentTimelineOwner;
+    std::function<std::uint64_t()> currentValue;
+    std::function<void(std::function<void()>)> subscribe;
 
     [[nodiscard]] bool Complete() const { return !isComplete || isComplete(); }
+    [[nodiscard]] std::shared_ptr<const void> TimelineOwner() const {
+        return currentTimelineOwner ? currentTimelineOwner() : timelineOwner;
+    }
+    [[nodiscard]] std::uint64_t TimelineValue() const {
+        return currentValue ? currentValue() : value;
+    }
 };
 
 std::shared_ptr<const GpuDependencyToken> MakeGpuDependencyToken(
@@ -117,6 +130,7 @@ struct ArtifactBuildContext {
     std::uint64_t revision = 0;
     std::uint64_t generation = 0;
     std::vector<ArtifactSnapshot> dependencies;
+    ArtifactPayload input;
     ArtifactPayload checkpoint;
     std::function<bool()> stopRequested;
 };
@@ -169,6 +183,11 @@ struct AsyncStateGraphStats {
     std::uint64_t cancelled = 0;
     std::uint64_t cycles = 0;
     std::uint64_t gpuWaiting = 0;
+    std::uint64_t retries = 0;
+    std::uint64_t queueWaitMicros = 0;
+    std::uint64_t buildMicros = 0;
+    std::uint64_t gpuWaitMicros = 0;
+    std::array<std::uint64_t, static_cast<std::size_t>(ArtifactReadiness::Failed) + 1u> stateCounts{};
 };
 
 class AsyncStateGraph {
@@ -180,7 +199,7 @@ public:
 
     void RegisterProducer(ArtifactKind kind, ArtifactProducerRegistration registration);
     bool Request(ArtifactKey key, std::uint64_t desiredRevision,
-        std::vector<ArtifactRequirement> requirements = {});
+        std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {});
     bool Invalidate(ArtifactKey key, std::uint64_t desiredRevision);
     void Cancel(ArtifactKey key);
     void MarkPublished(ArtifactKey key, std::uint64_t revision);

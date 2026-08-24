@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <spdlog/spdlog.h>
+
 #include "Render/Runtime/StreamingUploadTypes.h"
 
 namespace br::render {
@@ -84,6 +86,17 @@ std::shared_ptr<const GpuDependencyToken> MakeGpuDependencyToken(
         token->value = ticket->timelineValue;
     }
     token->isComplete = [ticket] { return ticket->Complete(); };
+    token->currentTimelineOwner = [ticket] {
+        std::lock_guard lock(ticket->timelineMutex);
+        return ticket->timelineOwner;
+    };
+    token->currentValue = [ticket] {
+        std::lock_guard lock(ticket->timelineMutex);
+        return ticket->timelineValue;
+    };
+    token->subscribe = [ticket](std::function<void()> callback) {
+        ticket->SetChangeCallback(std::move(callback));
+    };
     return token;
 }
 
@@ -95,6 +108,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::uint64_t generation = 0;
         ArtifactReadiness state = ArtifactReadiness::Missing;
         ArtifactPayload payload;
+        ArtifactPayload input;
         ArtifactPayload checkpoint;
         std::vector<ArtifactRequirement> requirements;
         std::shared_ptr<const GpuDependencyToken> gpuDependency;
@@ -102,6 +116,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::string error;
         std::chrono::steady_clock::time_point stateSince = std::chrono::steady_clock::now();
         bool buildInFlight = false;
+        std::chrono::steady_clock::time_point queuedAt{};
+        std::chrono::steady_clock::time_point buildStartedAt{};
+        std::chrono::steady_clock::time_point uploadSubmittedAt{};
     };
 
     struct Completion {
@@ -119,6 +136,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::unordered_map<ArtifactKind, ArtifactProducerRegistration> producers;
     std::deque<ArtifactKey> pending;
     std::deque<Completion> completions;
+    std::deque<ArtifactKey> gpuSignals;
     std::function<void(const ArtifactSnapshot&)> readyCallback;
     AsyncStateGraphStats stats;
     std::atomic_bool drainScheduled{ false };
@@ -211,20 +229,22 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     }
 
     bool DependenciesSatisfied(const Node& node) const {
-        bool hasAny = false;
-        bool anySatisfied = false;
+        std::unordered_map<std::uint32_t, bool> anyGroups;
         for (const auto& requirement : node.requirements) {
             const bool satisfied = RequirementSatisfied(requirement);
             switch (requirement.policy) {
             case DependencyPolicy::Optional: break;
-            case DependencyPolicy::AnyOf: hasAny = true; anySatisfied |= satisfied; break;
+            case DependencyPolicy::AnyOf:
+                anyGroups[requirement.alternativeGroup] |= satisfied;
+                break;
             case DependencyPolicy::AllOf:
             case DependencyPolicy::FallbackAllowed:
                 if (!satisfied) return false;
                 break;
             }
         }
-        return !hasAny || anySatisfied;
+        for (const auto& [_, satisfied] : anyGroups) if (!satisfied) return false;
+        return true;
     }
 
     void AppendBlockerChain(const ArtifactKey& key,
@@ -249,7 +269,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             output += std::format(" retry-in={}ms", (std::max)(std::int64_t{ 0 }, remaining));
         }
         if (node.state == ArtifactReadiness::UploadSubmitted && node.gpuDependency) {
-            output += std::format(" gpu-value={}", node.gpuDependency->value);
+            output += std::format(" gpu-value={}", node.gpuDependency->TimelineValue());
         }
         for (const auto& requirement : node.requirements) {
             if (requirement.policy == DependencyPolicy::Optional || RequirementSatisfied(requirement)) continue;
@@ -278,6 +298,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             return;
         }
         SetState(node, ArtifactReadiness::Queued);
+        node.queuedAt = std::chrono::steady_clock::now();
         pending.push_back(node.key);
     }
 
@@ -354,6 +375,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
         node.buildInFlight = false;
         ++stats.buildsCompleted;
+        if (node.buildStartedAt != std::chrono::steady_clock::time_point{}) {
+            stats.buildMicros += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - node.buildStartedAt).count());
+        }
         auto& result = completion.result;
         switch (result.outcome) {
         case ArtifactBuildResult::Outcome::Ready:
@@ -364,6 +389,21 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             node.gpuDependency = std::move(result.gpuDependency);
             if (node.gpuDependency && !node.gpuDependency->Complete()) {
                 SetState(node, ArtifactReadiness::UploadSubmitted);
+                node.uploadSubmittedAt = std::chrono::steady_clock::now();
+                ++stats.gpuWaiting;
+                if (node.gpuDependency->subscribe) {
+                    auto weak = weak_from_this();
+                    const auto key = node.key;
+                    node.gpuDependency->subscribe([weak, key] {
+                        if (auto self = weak.lock()) {
+                            {
+                                std::lock_guard lock(self->mutex);
+                                self->gpuSignals.push_back(key);
+                            }
+                            self->ScheduleDrain();
+                        }
+                    });
+                }
             } else {
                 node.gpuDependency.reset();
                 SetState(node, ArtifactReadiness::GpuReady);
@@ -388,6 +428,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             node.checkpoint = std::move(result.checkpoint);
             node.retryAt = std::chrono::steady_clock::now() + result.retryDelay;
             SetState(node, ArtifactReadiness::Blocked);
+            ++stats.retries;
             break;
         case ArtifactBuildResult::Outcome::Cancelled:
             SetState(node, ArtifactReadiness::Cancelled);
@@ -402,10 +443,37 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     }
 
     void Drain() {
+        struct PendingGpuSignal {
+            ArtifactKey key;
+            std::uint64_t generation = 0;
+            std::shared_ptr<const GpuDependencyToken> token;
+        };
         constexpr std::size_t maxTransitions = 128;
         constexpr auto maxDuration = std::chrono::milliseconds(2);
         const auto started = std::chrono::steady_clock::now();
         std::size_t transitions = 0;
+        std::vector<PendingGpuSignal> signalledGpu;
+        {
+            std::lock_guard lock(mutex);
+            while (!gpuSignals.empty() && transitions++ < maxTransitions &&
+                std::chrono::steady_clock::now() - started < maxDuration) {
+                const auto key = gpuSignals.front();
+                gpuSignals.pop_front();
+                const auto found = nodes.find(key);
+                if (found != nodes.end() && found->second.state == ArtifactReadiness::UploadSubmitted &&
+                    found->second.gpuDependency) {
+                    signalledGpu.push_back({ key, found->second.generation, found->second.gpuDependency });
+                }
+            }
+        }
+        // Complete() may synchronously notify ticket subscribers. Never call
+        // it while holding the graph mutex because the subscriber queues a
+        // graph signal and must acquire that same mutex.
+        std::vector<PendingGpuSignal> completedGpu;
+        completedGpu.reserve(signalledGpu.size());
+        for (auto& signal : signalledGpu) {
+            if (signal.token && signal.token->Complete()) completedGpu.push_back(std::move(signal));
+        }
         std::vector<std::pair<ArtifactProducerRegistration, ArtifactBuildContext>> builds;
         std::vector<ArtifactSnapshot> ready;
         std::function<void(const ArtifactSnapshot&)> callback;
@@ -414,6 +482,24 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         {
             std::lock_guard lock(mutex);
             const auto now = std::chrono::steady_clock::now();
+            for (const auto& signal : completedGpu) {
+                const auto found = nodes.find(signal.key);
+                if (found == nodes.end()) continue;
+                auto& node = found->second;
+                if (node.generation != signal.generation ||
+                    node.state != ArtifactReadiness::UploadSubmitted ||
+                    node.gpuDependency != signal.token) continue;
+                if (node.uploadSubmittedAt != std::chrono::steady_clock::time_point{}) {
+                    stats.gpuWaitMicros += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            now - node.uploadSubmittedAt).count());
+                }
+                node.gpuDependency.reset();
+                SetState(node, ArtifactReadiness::GpuReady);
+                ready.push_back(MakeSnapshot(node));
+                WakeWaiters(node.key);
+                if (stats.gpuWaiting) --stats.gpuWaiting;
+            }
             for (auto& [_, node] : nodes) {
                 if (!node.retryAt) continue;
                 if (*node.retryAt <= now) {
@@ -446,14 +532,19 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     continue;
                 }
                 node.buildInFlight = true;
+                node.buildStartedAt = std::chrono::steady_clock::now();
+                if (node.queuedAt != std::chrono::steady_clock::time_point{}) {
+                    stats.queueWaitMicros += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                        node.buildStartedAt - node.queuedAt).count());
+                }
                 SetState(node, ArtifactReadiness::Preparing);
                 ++stats.buildsStarted;
                 ArtifactBuildContext context{ node.key, node.desiredRevision, node.generation,
-                    DependencySnapshots(node), node.checkpoint, {} };
+                    DependencySnapshots(node), node.input, node.checkpoint, {} };
                 builds.emplace_back(producer->second, std::move(context));
             }
             callback = readyCallback;
-            hasImmediateWork = !pending.empty() || !completions.empty();
+            hasImmediateWork = !pending.empty() || !completions.empty() || !gpuSignals.empty();
             const auto afterWork = std::chrono::steady_clock::now();
             for (const auto& [_, node] : nodes) {
                 if (!node.retryAt) continue;
@@ -483,7 +574,7 @@ void AsyncStateGraph::RegisterProducer(ArtifactKind kind, ArtifactProducerRegist
 }
 
 bool AsyncStateGraph::Request(ArtifactKey key, std::uint64_t desiredRevision,
-    std::vector<ArtifactRequirement> requirements) {
+    std::vector<ArtifactRequirement> requirements, ArtifactPayload input) {
     if (m_impl->shuttingDown.load(std::memory_order_acquire)) return false;
     {
         std::lock_guard lock(m_impl->mutex);
@@ -496,7 +587,10 @@ bool AsyncStateGraph::Request(ArtifactKey key, std::uint64_t desiredRevision,
         node.desiredRevision = desiredRevision;
         ++node.generation;
         node.requirements = std::move(requirements);
+        node.input = std::move(input);
         node.error.clear();
+        if (node.state == ArtifactReadiness::UploadSubmitted && node.gpuDependency &&
+            m_impl->stats.gpuWaiting) --m_impl->stats.gpuWaiting;
         node.gpuDependency.reset();
         node.retryAt.reset();
         m_impl->InstallWaiterEdges(node);
@@ -514,15 +608,20 @@ bool AsyncStateGraph::Request(ArtifactKey key, std::uint64_t desiredRevision,
 
 bool AsyncStateGraph::Invalidate(ArtifactKey key, std::uint64_t desiredRevision) {
     std::vector<ArtifactRequirement> requirements;
+    ArtifactPayload input;
     bool foundNode = false;
     {
         std::lock_guard lock(m_impl->mutex);
         const auto found = m_impl->nodes.find(key);
         foundNode = found != m_impl->nodes.end();
-        if (foundNode) requirements = found->second.requirements;
+        if (foundNode) {
+            requirements = found->second.requirements;
+            input = found->second.input;
+        }
         ++m_impl->stats.invalidations;
     }
-    return Request(key, desiredRevision, foundNode ? std::move(requirements) : std::vector<ArtifactRequirement>{});
+    return Request(key, desiredRevision,
+        foundNode ? std::move(requirements) : std::vector<ArtifactRequirement>{}, std::move(input));
 }
 
 void AsyncStateGraph::Cancel(ArtifactKey key) {
@@ -532,6 +631,9 @@ void AsyncStateGraph::Cancel(ArtifactKey key) {
     ++found->second.generation;
     found->second.buildInFlight = false;
     found->second.retryAt.reset();
+    if (found->second.state == ArtifactReadiness::UploadSubmitted && found->second.gpuDependency &&
+        m_impl->stats.gpuWaiting) --m_impl->stats.gpuWaiting;
+    found->second.gpuDependency.reset();
     m_impl->SetState(found->second, ArtifactReadiness::Cancelled);
     ++m_impl->stats.cancelled;
 }
@@ -547,20 +649,55 @@ void AsyncStateGraph::MarkPublished(ArtifactKey key, std::uint64_t revision) {
 }
 
 void AsyncStateGraph::PumpGpuCompletions() {
+    struct PendingCompletion {
+        ArtifactKey key;
+        std::uint64_t generation = 0;
+        std::shared_ptr<const GpuDependencyToken> token;
+    };
+    std::vector<PendingCompletion> pending;
+    {
+        std::lock_guard lock(m_impl->mutex);
+        pending.reserve(m_impl->nodes.size());
+        for (const auto& [key, node] : m_impl->nodes) {
+            if (node.state == ArtifactReadiness::UploadSubmitted && node.gpuDependency) {
+                pending.push_back({ key, node.generation, node.gpuDependency });
+            }
+        }
+    }
+    std::vector<PendingCompletion> completed;
+    completed.reserve(pending.size());
+    for (auto& item : pending) {
+        if (item.token && item.token->Complete()) completed.push_back(std::move(item));
+    }
+
     std::vector<ArtifactSnapshot> ready;
     std::function<void(const ArtifactSnapshot&)> callback;
     {
         std::lock_guard lock(m_impl->mutex);
-        std::uint64_t waiting = 0;
-        for (auto& [_, node] : m_impl->nodes) {
-            if (node.state != ArtifactReadiness::UploadSubmitted || !node.gpuDependency) continue;
-            if (!node.gpuDependency->Complete()) { ++waiting; continue; }
+        for (const auto& item : completed) {
+            const auto found = m_impl->nodes.find(item.key);
+            if (found == m_impl->nodes.end()) continue;
+            auto& node = found->second;
+            if (node.generation != item.generation ||
+                node.state != ArtifactReadiness::UploadSubmitted ||
+                node.gpuDependency != item.token) continue;
+            if (node.uploadSubmittedAt != std::chrono::steady_clock::time_point{}) {
+                m_impl->stats.gpuWaitMicros += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - node.uploadSubmittedAt).count());
+            }
             node.gpuDependency.reset();
             m_impl->SetState(node, ArtifactReadiness::GpuReady);
+            if (m_impl->stats.gpuWaiting) --m_impl->stats.gpuWaiting;
             ready.push_back(m_impl->MakeSnapshot(node));
             m_impl->WakeWaiters(node.key);
         }
-        m_impl->stats.gpuWaiting = waiting;
+        m_impl->stats.gpuWaiting = 0;
+        for (const auto& [_, node] : m_impl->nodes) {
+            if (node.state == ArtifactReadiness::UploadSubmitted && node.gpuDependency) {
+                ++m_impl->stats.gpuWaiting;
+            }
+        }
         callback = m_impl->readyCallback;
     }
     if (callback) for (const auto& snapshot : ready) callback(snapshot);
@@ -600,17 +737,32 @@ ArtifactDiagnostic AsyncStateGraph::Diagnose(ArtifactKey key) const {
 
 AsyncStateGraphStats AsyncStateGraph::Stats() const {
     std::lock_guard lock(m_impl->mutex);
-    return m_impl->stats;
+    auto result = m_impl->stats;
+    result.stateCounts.fill(0);
+    for (const auto& [_, node] : m_impl->nodes) {
+        const auto index = static_cast<std::size_t>(node.state);
+        if (index < result.stateCounts.size()) ++result.stateCounts[index];
+    }
+    return result;
 }
 
 void AsyncStateGraph::WaitIdle() const { if (m_impl) m_impl->scope.Wait(); }
 
 void AsyncStateGraph::Shutdown() {
     if (!m_impl || m_impl->shuttingDown.exchange(true)) return;
-    m_impl->scope.CancelAndWait();
+    // Waiting is mandatory, but a task failure already captured at the
+    // scheduler boundary must not unwind renderer teardown.
+    try {
+        m_impl->scope.CancelAndWait();
+    } catch (const std::exception& exception) {
+        spdlog::error("AsyncStateGraph shutdown observed task failure: {}", exception.what());
+    } catch (...) {
+        spdlog::error("AsyncStateGraph shutdown observed unknown task failure");
+    }
     std::lock_guard lock(m_impl->mutex);
     m_impl->pending.clear();
     m_impl->completions.clear();
+    m_impl->gpuSignals.clear();
     m_impl->readyCallback = {};
 }
 

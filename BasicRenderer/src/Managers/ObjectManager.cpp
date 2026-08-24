@@ -712,18 +712,8 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 		+ ", phase=" + std::to_string(workloadKey.renderPhase.hash)
 		+ ", clodOnly=" + std::to_string(workloadKey.clodOnly ? 1 : 0) + ")";
 	const auto capacity = (std::max<std::uint64_t>)(1u, static_cast<std::uint64_t>(initialCapacity));
-	auto buffer = SortedUnsignedIntBuffer::CreateActiveDrawSetShared(capacity, debugName);
+	auto buffer = SortedUnsignedIntBuffer::CreateGraphActiveDrawSetShared(capacity, debugName);
 	org::memory::SetResourceUsageHint(*buffer, "PerMesh, PerMeshInstance, PerObject");
-	buffer->GetECSEntity().add<Components::IsActiveDrawSetIndices>();
-	buffer->GetECSEntity().set<Components::Resource>({ buffer });
-	buffer->GetECSEntity().add<Components::ParticipatesInPass>(
-		RendererECSManager::GetInstance().GetRenderPhaseEntity(workloadKey.renderPhase));
-	if (workloadKey.clodOnly) {
-		buffer->GetECSEntity().add<Components::CLodOnlyDrawWorkload>();
-	}
-	else {
-		buffer->GetECSEntity().add<Components::GeneralDrawWorkload>();
-	}
 	m_activeDrawSetIndices[workloadKey] = buffer;
 	++m_drawSetDeclarationRevision;
 	return buffer;
@@ -797,6 +787,8 @@ void ObjectManager::AssignStaticImportTransactionGenerations(std::span<Materiali
 			(std::max)(transaction.reservation.visibilityDirtyEnd, static_cast<std::size_t>(drawRecordIndex) + 1u);
 
 		const auto generation = ActivateDrawRecordCPU(drawRecordIndex);
+		m_stats.maxDrawRecordIndex = (std::max<std::uint64_t>)(
+			m_stats.maxDrawRecordIndex, drawRecordIndex);
 		++activatedDrawRecords;
 		return generation;
 	};

@@ -31,6 +31,10 @@ public:
         return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, false, true));
     }
 
+    static std::shared_ptr<SortedUnsignedIntBuffer> CreateGraphActiveDrawSetShared(uint64_t capacity = 64, std::string name = "") {
+        return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, false, true, true));
+    }
+
     ~SortedUnsignedIntBuffer() override;
 
     // Insert an element while maintaining sorted order (deduped)
@@ -66,11 +70,13 @@ public:
     }
 
     uint64_t ResidentCapacity() const {
+        if (m_graphManaged) return m_capacity;
         const auto stride = ElementStride();
         return stride == 0u ? 0u : GetBufferSize() / stride;
     }
 
     uint64_t ResidentSize() const {
+        if (m_graphManaged) return Size();
         return std::min<uint64_t>(Size(), ResidentCapacity());
     }
 
@@ -110,12 +116,12 @@ public:
     }
 
 private:
-    SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false, bool activeEntryMode = false)
-        : m_capacity(capacity), m_earliestModifiedIndex(0), m_UAV(UAV), m_activeEntryMode(activeEntryMode) {
+    SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false, bool activeEntryMode = false, bool graphManaged = false)
+        : m_capacity(capacity), m_earliestModifiedIndex(0), m_UAV(UAV), m_activeEntryMode(activeEntryMode), m_graphManaged(graphManaged) {
         SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
-        CreateBuffer(capacity);
+        if (!m_graphManaged) CreateBuffer(capacity);
         SetName(name);
-        RegisterDeferredBackingResizeClient(this);
+        if (!m_graphManaged) RegisterDeferredBackingResizeClient(this);
     }
 
     void OnUploadPolicyBeginFrame() override {
@@ -168,6 +174,7 @@ private:
 
     bool m_UAV = false;
     bool m_activeEntryMode = false;
+    bool m_graphManaged = false;
     AsyncBufferBackingResizeState m_asyncResizeState;
     uint64_t m_pendingResizeCapacity = 0;
     bool m_pendingResizeValid = false;
