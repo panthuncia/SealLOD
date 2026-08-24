@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
+#include <tbb/concurrent_queue.h>
 
 #include "Render/Runtime/StreamingUploadTypes.h"
 
@@ -140,7 +141,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::unordered_map<ArtifactKind, ArtifactProducerRegistration> producers;
     std::deque<ArtifactKey> pending;
     std::deque<Completion> completions;
-    std::deque<ArtifactKey> gpuSignals;
+    tbb::concurrent_queue<ArtifactKey> gpuSignals;
     std::function<void(const ArtifactSnapshot&)> readyCallback;
     AsyncStateGraphStats stats;
     std::atomic_bool drainScheduled{ false };
@@ -467,8 +468,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     node.gpuDependency->subscribe([weak, key] {
                         if (auto self = weak.lock()) {
                             {
-                                std::lock_guard lock(self->mutex);
-                                self->gpuSignals.push_back(key);
+                                self->gpuSignals.push(key);
                             }
                             self->ScheduleDrain();
                         }
@@ -525,10 +525,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::vector<PendingGpuSignal> signalledGpu;
         {
             std::lock_guard lock(mutex);
-            while (!gpuSignals.empty() && transitions++ < maxTransitions &&
+            ArtifactKey key;
+            while (gpuSignals.try_pop(key) && transitions++ < maxTransitions &&
                 std::chrono::steady_clock::now() - started < maxDuration) {
-                const auto key = gpuSignals.front();
-                gpuSignals.pop_front();
                 const auto found = nodes.find(key);
                 if (found != nodes.end() && found->second.state == ArtifactReadiness::UploadSubmitted &&
                     found->second.gpuDependency) {
@@ -861,7 +860,8 @@ void AsyncStateGraph::Shutdown() {
     }
     m_impl->pending.clear();
     m_impl->completions.clear();
-    m_impl->gpuSignals.clear();
+    ArtifactKey discardedSignal;
+    while (m_impl->gpuSignals.try_pop(discardedSignal)) {}
     m_impl->readyCallback = {};
 }
 

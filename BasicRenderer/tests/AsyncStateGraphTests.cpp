@@ -323,13 +323,21 @@ int main() {
 
     std::atomic_bool gpuComplete{ false };
 	std::atomic_uint gpuBuilds{ 0 };
+    auto gpuChangeCallback = std::make_shared<std::function<void()>>();
     graph.RegisterProducer(ArtifactKind::TextureBinding, {
         TaskLane::Streaming, TaskDomain::TextureProcessing, "GpuProducer",
-        [&gpuComplete, &gpuBuilds](const ArtifactBuildContext& context) {
+        [&gpuComplete, &gpuBuilds, gpuChangeCallback](const ArtifactBuildContext& context) {
 			gpuBuilds.fetch_add(1, std::memory_order_relaxed);
             auto token = std::make_shared<GpuDependencyToken>();
             token->value = context.revision;
             token->isComplete = [&gpuComplete] { return gpuComplete.load(std::memory_order_acquire); };
+            token->subscribe = [gpuChangeCallback](std::function<void()> callback) {
+                *gpuChangeCallback = std::move(callback);
+            };
+            token->cancel = [gpuChangeCallback] {
+                if (*gpuChangeCallback) (*gpuChangeCallback)();
+                return true;
+            };
             return ArtifactBuildResult::Ready(Payload(context.revision), std::move(token));
         }
     });

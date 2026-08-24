@@ -429,7 +429,7 @@ MaterialManager::MaterialManager() {
 			br::render::PublishedResourceKey{
 				br::render::PublishedFragmentKind::Materials,
 				br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
-			fallback, false);
+			fallback, true);
 	};
 	m_materialTableResolvers = {
 		makeMaterialResolver(br::render::kMaterialBaseTableVariant, m_materialStartupFallbacks[0]),
@@ -1453,12 +1453,6 @@ bool MaterialManager::TryActivatePublishedMaterialState() {
 	if (published->materials.revision == m_activeMaterialPublishedRevision) {
 		return true;
 	}
-	const bool firstActivation = !m_materialGraphActive;
-	for (const auto& resolver : m_materialTableResolvers) {
-		resolver->SetPublishedEnabled(true);
-		if (firstActivation) resolver->ClearFallback();
-	}
-	if (firstActivation) m_materialStartupFallbacks = {};
 	m_materialGraphActive = true;
 	m_activeMaterialPublishedRevision = published->materials.revision;
 	const auto resolvedBase = m_materialTableResolvers[0]->Resolve();
