@@ -192,6 +192,12 @@ bool DynamicBuffer::ExtendTrackedCapacityLocked(size_t newCapacity) {
     }
 
     m_capacity = newCapacity;
+	{
+		std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
+		if (m_versionedGraphJournal) {
+			m_versionedGraphJournal->RequestCapacity(m_capacity / m_elementSize);
+		}
+	}
     const size_t trackedFreeSize = m_capacity - newBlockOffset;
     if (trackedFreeSize != 0) {
         m_blocksByOffset[newBlockOffset] = { newBlockOffset, trackedFreeSize, true };
@@ -961,6 +967,44 @@ void DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t o
         BT_ZONE_SCOPE("DynamicBuffer::RetainCpuShadowWrite::Memcpy");
         std::memcpy(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset), data, size);
     }
+	if (m_versionedGraphJournal) {
+		if ((offset % m_elementSize) != 0 || (size % m_elementSize) != 0) {
+			throw std::runtime_error("versioned DynamicBuffer write is not element aligned");
+		}
+		m_versionedGraphJournal->AppendWrite(
+			offset / m_elementSize,
+			std::span<const std::byte>(reinterpret_cast<const std::byte*>(data), size),
+			m_capacity / m_elementSize);
+	}
+}
+
+void DynamicBuffer::EnableVersionedGraphJournal() {
+	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+	if (m_versionedGraphJournal) return;
+	EnsureCpuShadowSize(m_capacity);
+	auto journal = std::make_unique<br::render::VersionedGpuBufferJournal>(
+		static_cast<std::uint32_t>(m_elementSize));
+	journal->Initialize(m_cpuShadowData, m_capacity / m_elementSize, m_capacity / m_elementSize);
+	m_versionedGraphJournal = std::move(journal);
+}
+
+br::render::VersionedGpuBufferJournal::Capture DynamicBuffer::CaptureVersionedGraphState() const {
+	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+	if (!m_versionedGraphJournal) {
+		throw std::logic_error("versioned graph journal is not enabled for DynamicBuffer");
+	}
+	return m_versionedGraphJournal->CaptureDesired();
+}
+
+void DynamicBuffer::AcknowledgeVersionedGraphState(
+	const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version) {
+	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+	if (m_versionedGraphJournal) m_versionedGraphJournal->Acknowledge(version);
+}
+
+bool DynamicBuffer::HasUnpublishedVersionedGraphState() const {
+	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+	return m_versionedGraphJournal && m_versionedGraphJournal->HasUnpublishedChanges();
 }
 
 void DynamicBuffer::Deallocate(const BufferView* view) {
@@ -1165,6 +1209,12 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
     }
 
     m_capacity = newSize;
+	{
+		std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
+		if (m_versionedGraphJournal) {
+			m_versionedGraphJournal->RequestCapacity(m_capacity / m_elementSize);
+		}
+	}
 
     {
         BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::ApplyMetadata");

@@ -20,6 +20,7 @@
 #include "Resources/Buffers/MemoryBlock.h"
 #include "Interfaces/IHasMemoryMetadata.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 
 namespace org {
 
@@ -151,6 +152,12 @@ public:
         RetainCpuShadowWrite(data, size, offset);
     }
 
+    void EnableVersionedGraphJournal();
+    br::render::VersionedGpuBufferJournal::Capture CaptureVersionedGraphState() const;
+    void AcknowledgeVersionedGraphState(
+        const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version);
+    bool HasUnpublishedVersionedGraphState() const;
+
     uint64_t GetUploadPolicyLastFlushWrites() const override {
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.GetLastFlushStats().flushedWrites;
@@ -266,6 +273,7 @@ private:
     size_t m_pendingResizeCapacity = 0;
     size_t m_requestedResizeCapacity = 0;
     bool m_pendingResizeValid = false;
+    std::unique_ptr<br::render::VersionedGpuBufferJournal> m_versionedGraphJournal;
 };
 
 } // namespace org

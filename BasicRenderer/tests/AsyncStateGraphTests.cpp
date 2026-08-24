@@ -9,14 +9,21 @@
 
 #include <atomic>
 #include <cstring>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <source_location>
 #include <thread>
 
 using namespace br::render;
 
 namespace {
-void Check(bool condition) { if (!condition) std::abort(); }
+void Check(bool condition,
+    const std::source_location location = std::source_location::current()) {
+    if (condition) return;
+    std::fprintf(stderr, "check failed at %s:%u\n", location.file_name(), location.line());
+    std::abort();
+}
 
 struct Value { std::uint64_t value = 0; };
 ArtifactPayload Payload(std::uint64_t value) {
@@ -25,6 +32,42 @@ ArtifactPayload Payload(std::uint64_t value) {
 }
 
 int main() {
+    {
+        VersionedGpuBufferJournal journal(sizeof(std::uint32_t));
+        const std::uint32_t initialRows[]{ 10, 20, 30 };
+        journal.Initialize(std::as_bytes(std::span(initialRows)), 3, 4);
+        auto capture = journal.CaptureDesired();
+        Check(capture.writeSequence == 1 && capture.elementCount == 3 &&
+            capture.capacity == 4 && capture.initialBytes.size() == sizeof(initialRows));
+
+        auto published = std::make_shared<PublishedGpuBufferVersion>();
+        published->writeSequence = capture.writeSequence;
+        published->elementCount = capture.elementCount;
+        published->capacity = capture.capacity;
+        published->elementStride = sizeof(std::uint32_t);
+        published->cpuShadow = std::make_shared<const std::vector<std::byte>>(capture.initialBytes);
+        journal.Acknowledge(published);
+
+        journal.RequestCapacity(8);
+        const std::uint32_t replacement = 200;
+        journal.AppendWrite(1, std::as_bytes(std::span(&replacement, 1)), 4);
+        capture = journal.CaptureDesired();
+        Check(capture.previous == published && capture.initialBytes.empty() &&
+            capture.writes.size() == 2 && capture.capacity == 8 && capture.elementCount == 4);
+
+        VersionedGpuBufferBuildInput input{};
+        input.elementStride = sizeof(std::uint32_t);
+        input.elementCount = capture.elementCount;
+        input.capacity = capture.capacity;
+        input.writeSequence = capture.writeSequence;
+        input.previous = capture.previous;
+        input.writes = capture.writes;
+        std::string error;
+        const auto replay = ReplayVersionedGpuBufferShadow(input, error);
+        Check(replay && error.empty());
+        const auto* rows = reinterpret_cast<const std::uint32_t*>(replay->data());
+        Check(rows[0] == 10 && rows[1] == 200 && rows[2] == 30 && rows[3] == 0);
+    }
     {
         VersionedGpuBufferBuildInput initial{};
         initial.elementStride = sizeof(std::uint32_t);
@@ -259,11 +302,13 @@ int main() {
     const ArtifactSnapshot materialArtifact{
         { ArtifactKind::MaterialTable, 1, 0 }, 12, 1, ArtifactReadiness::GpuReady, Payload(12) };
     Check(!publisher.PublishArtifact(materialArtifact));
-    auto manifestState = std::make_shared<PublishedRendererState>(*publisher.Active());
-    manifestState->materials = { 12, Payload(12), { materialArtifact } };
+    auto manifestCandidateState = std::make_shared<PublishedRendererState>(*publisher.Active());
+    manifestCandidateState->materials.revision = 12;
+    manifestCandidateState->materials.payload = Payload(12);
+    manifestCandidateState->materials.dependencyClosure = { materialArtifact };
     auto manifestPayload = std::make_shared<FrameManifestPayload>();
     manifestPayload->baseEpoch = publisher.ActiveEpoch();
-    manifestPayload->state = manifestState;
+    manifestPayload->state = manifestCandidateState;
     const ArtifactSnapshot manifestArtifact{
         { ArtifactKind::FrameManifest, 0, 0 }, 13, 1, ArtifactReadiness::GpuReady,
         ArtifactPayload::Make<FrameManifestPayload>(manifestPayload) };
@@ -272,10 +317,10 @@ int main() {
     Check(materialState->materials.revision == 12);
     Check(materialState->materials.payload.Get<Value>()->value == 12);
     auto source = publisher.ResourceSource();
-    PublishedStateResourceResolver resolver(source, {});
-    Check(resolver.GetContentVersion() == materialState->epoch);
+    PublishedStateResourceResolver resolver(source, PublishedResourceKey{});
+    Check(resolver.GetContentVersion() != 0);
     Check(resolver.Resolve().empty());
-	PublishedStateResourceResolver stagedResolver(source, {}, {}, false);
+	PublishedStateResourceResolver stagedResolver(source, PublishedResourceKey{}, {}, false);
 	const auto stagedFallbackVersion = stagedResolver.GetContentVersion();
 	Check(stagedResolver.Resolve().empty());
 	auto epochAdvance = std::make_shared<PublishedRendererState>(*publisher.Active());

@@ -11,6 +11,87 @@
 
 namespace br::render {
 
+VersionedGpuBufferJournal::VersionedGpuBufferJournal(std::uint32_t elementStride)
+    : m_elementStride(elementStride) {}
+
+void VersionedGpuBufferJournal::Initialize(std::span<const std::byte> bytes,
+    std::uint64_t elementCount, std::uint64_t capacity) {
+    if (m_elementStride == 0 || elementCount > capacity ||
+        bytes.size() != elementCount * m_elementStride) {
+        throw std::invalid_argument("invalid versioned GPU buffer journal initial image");
+    }
+    std::lock_guard lock(m_mutex);
+    m_previous.reset();
+    m_writes.clear();
+    m_initialBytes.assign(bytes.begin(), bytes.end());
+    m_elementCount = elementCount;
+    m_capacity = capacity;
+    m_writeSequence = 1;
+}
+
+std::uint64_t VersionedGpuBufferJournal::AppendWrite(std::uint64_t elementOffset,
+    std::span<const std::byte> bytes, std::uint64_t resultingElementCount) {
+    if (m_elementStride == 0 || bytes.empty() || bytes.size() % m_elementStride != 0) {
+        throw std::invalid_argument("versioned GPU buffer journal write is not row aligned");
+    }
+    const auto writeElements = bytes.size() / m_elementStride;
+    if (elementOffset > (std::numeric_limits<std::uint64_t>::max)() - writeElements ||
+        elementOffset + writeElements > resultingElementCount) {
+        throw std::out_of_range("versioned GPU buffer journal write exceeds logical extent");
+    }
+    std::lock_guard lock(m_mutex);
+    if (resultingElementCount > m_capacity) {
+        throw std::out_of_range("versioned GPU buffer journal write exceeds desired capacity");
+    }
+    VersionedGpuBufferWrite write;
+    write.sequence = ++m_writeSequence;
+    write.elementOffset = elementOffset;
+    write.bytes.assign(bytes.begin(), bytes.end());
+    m_writes.push_back(std::move(write));
+    m_elementCount = resultingElementCount;
+    return m_writeSequence;
+}
+
+void VersionedGpuBufferJournal::RequestCapacity(std::uint64_t capacity) {
+    std::lock_guard lock(m_mutex);
+    if (capacity > m_capacity) {
+        m_capacity = capacity;
+        ++m_writeSequence;
+        // Capacity-only revisions need an explicit zero-length checkpoint to
+        // close the captured sequence without inventing a data write.
+        m_writes.push_back(VersionedGpuBufferWrite{ m_writeSequence, m_elementCount, {} });
+    }
+}
+
+VersionedGpuBufferJournal::Capture VersionedGpuBufferJournal::CaptureDesired() const {
+    std::lock_guard lock(m_mutex);
+    return Capture{ m_writeSequence, m_elementCount, m_capacity,
+        m_previous, m_writes, m_previous ? std::vector<std::byte>{} : m_initialBytes };
+}
+
+void VersionedGpuBufferJournal::Acknowledge(
+    const std::shared_ptr<const PublishedGpuBufferVersion>& version) {
+    if (!version) return;
+    std::lock_guard lock(m_mutex);
+    if (version->writeSequence > m_writeSequence ||
+        (m_previous && version->writeSequence <= m_previous->writeSequence)) return;
+    m_previous = version;
+    std::erase_if(m_writes, [&](const VersionedGpuBufferWrite& write) {
+        return write.sequence <= version->writeSequence;
+    });
+    m_initialBytes.clear();
+}
+
+std::uint64_t VersionedGpuBufferJournal::DesiredSequence() const {
+    std::lock_guard lock(m_mutex);
+    return m_writeSequence;
+}
+
+bool VersionedGpuBufferJournal::HasUnpublishedChanges() const {
+    std::lock_guard lock(m_mutex);
+    return !m_previous || m_previous->writeSequence != m_writeSequence;
+}
+
 std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferShadow(
     const VersionedGpuBufferBuildInput& input,
     std::string& error) {
