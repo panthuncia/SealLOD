@@ -9,6 +9,7 @@ ArtifactBuildResult BuildTextureBinding(const ArtifactBuildContext& context) {
     const auto input = context.input.Get<TextureBindingBuildInput>();
     if (!input || input->streamingTextureID == 0 ||
         input->streamingTextureID != context.key.primaryID ||
+        input->bindingRevision != context.key.variantID ||
         input->bindingRevision == 0 || input->bindingRevision != context.revision) {
         return ArtifactBuildResult::Failure("texture binding identity or revision mismatch");
     }

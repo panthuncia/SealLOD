@@ -260,6 +260,31 @@ int main() {
     graph.WaitIdle();
     Check(graph.Snapshot(alternativesRoot).payload.Get<Value>()->value == 42);
 
+    std::atomic_uint fallbackBuilds{ 0 };
+    graph.RegisterProducer(ArtifactKind::Material, {
+        TaskLane::Streaming, TaskDomain::General, "OrderedFallbackProducer",
+        [&fallbackBuilds](const ArtifactBuildContext& context) {
+            fallbackBuilds.fetch_add(1, std::memory_order_relaxed);
+            Check(context.dependencies.size() == 1);
+            return ArtifactBuildResult::Ready(Payload(context.dependencies.front().key.primaryID));
+        }
+    });
+    const ArtifactKey preferredBinding{ ArtifactKind::Generic, 40, 0 };
+    const ArtifactKey fallbackBinding{ ArtifactKind::Generic, 41, 0 };
+    const ArtifactKey fallbackConsumer{ ArtifactKind::Material, 42, 0 };
+    Check(graph.Request(fallbackBinding, 1));
+    graph.WaitIdle();
+    Check(graph.Request(fallbackConsumer, 1, {
+        { preferredBinding, 1, ArtifactReadiness::GpuReady, DependencyPolicy::FallbackAllowed, 1 },
+        { fallbackBinding, 1, ArtifactReadiness::GpuReady, DependencyPolicy::FallbackAllowed, 1 },
+    }));
+    graph.WaitIdle();
+    Check(graph.Snapshot(fallbackConsumer).payload.Get<Value>()->value == fallbackBinding.primaryID);
+    Check(graph.Request(preferredBinding, 1));
+    graph.WaitIdle();
+    Check(graph.Snapshot(fallbackConsumer).payload.Get<Value>()->value == preferredBinding.primaryID);
+    Check(fallbackBuilds.load(std::memory_order_relaxed) == 2);
+
     const ArtifactKey cycleA{ ArtifactKind::Generic, 10, 0 };
     const ArtifactKey cycleB{ ArtifactKind::Generic, 11, 0 };
     Check(graph.Request(cycleA, 1, { { cycleB, 1 } }));

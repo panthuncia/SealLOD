@@ -113,6 +113,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         ArtifactPayload input;
         ArtifactPayload checkpoint;
         std::vector<ArtifactRequirement> requirements;
+        std::vector<ArtifactSnapshot> resolvedDependencies;
         std::shared_ptr<const GpuDependencyToken> gpuDependency;
         std::optional<std::chrono::steady_clock::time_point> retryAt;
         std::string error;
@@ -233,6 +234,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
     bool DependenciesSatisfied(const Node& node) const {
         std::unordered_map<std::uint32_t, bool> anyGroups;
+        std::unordered_map<std::uint32_t, bool> fallbackGroups;
         for (const auto& requirement : node.requirements) {
             const bool satisfied = RequirementSatisfied(requirement);
             switch (requirement.policy) {
@@ -241,12 +243,15 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 anyGroups[requirement.alternativeGroup] |= satisfied;
                 break;
             case DependencyPolicy::AllOf:
-            case DependencyPolicy::FallbackAllowed:
                 if (!satisfied) return false;
+                break;
+            case DependencyPolicy::FallbackAllowed:
+                fallbackGroups[requirement.alternativeGroup] |= satisfied;
                 break;
             }
         }
         for (const auto& [_, satisfied] : anyGroups) if (!satisfied) return false;
+        for (const auto& [_, satisfied] : fallbackGroups) if (!satisfied) return false;
         return true;
     }
 
@@ -288,9 +293,18 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::vector<ArtifactSnapshot> DependencySnapshots(const Node& node) const {
         std::vector<ArtifactSnapshot> result;
         result.reserve(node.requirements.size());
+        std::unordered_set<std::uint64_t> selectedGroups;
         for (const auto& requirement : node.requirements) {
+            const bool alternative = requirement.policy == DependencyPolicy::AnyOf ||
+                requirement.policy == DependencyPolicy::FallbackAllowed;
+            const auto groupIdentity = (static_cast<std::uint64_t>(requirement.policy) << 32u) |
+                requirement.alternativeGroup;
+            if (alternative && selectedGroups.contains(groupIdentity)) continue;
             const auto found = nodes.find(requirement.key);
-            if (found != nodes.end() && RequirementSatisfied(requirement)) result.push_back(MakeSnapshot(found->second));
+            if (found != nodes.end() && RequirementSatisfied(requirement)) {
+                result.push_back(MakeSnapshot(found->second));
+                if (alternative) selectedGroups.insert(groupIdentity);
+            }
         }
         return result;
     }
@@ -326,6 +340,16 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             const auto dependent = nodes.find(dependentKey);
             if (dependent == nodes.end()) continue;
             auto& node = dependent->second;
+            const bool hasResolvedSelection = !node.resolvedDependencies.empty();
+            const bool selectedThisDependency = std::ranges::any_of(
+                node.resolvedDependencies,
+                [&](const ArtifactSnapshot& dependency) { return dependency.key == key; });
+            if (hasResolvedSelection && !selectedThisDependency &&
+                (node.state == ArtifactReadiness::GpuReady ||
+                 node.state == ArtifactReadiness::Published ||
+                 node.state == ArtifactReadiness::UploadSubmitted)) {
+                continue;
+            }
             ++node.generation;
             node.retryAt.reset();
             if (node.gpuDependency) {
@@ -428,6 +452,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         switch (result.outcome) {
         case ArtifactBuildResult::Outcome::Ready:
             node.payload = std::move(result.payload);
+            node.resolvedDependencies = completion.dependencies;
             node.checkpoint = {};
             node.retryAt.reset();
             node.producedRevision = node.desiredRevision;

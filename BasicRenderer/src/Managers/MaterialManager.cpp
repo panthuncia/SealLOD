@@ -1415,7 +1415,7 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			requirements.reserve(requirements.size() + textureBindingDependencies.size());
 			for (const auto& [textureID, binding] : textureBindingDependencies) {
 				requirements.push_back({
-					{ br::render::ArtifactKind::TextureBinding, textureID, 0 },
+					{ br::render::ArtifactKind::TextureBinding, textureID, binding.bindingRevision },
 					binding.bindingRevision,
 					br::render::ArtifactReadiness::GpuReady });
 			}
