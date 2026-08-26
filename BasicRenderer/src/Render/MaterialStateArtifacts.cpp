@@ -7,8 +7,6 @@
 #include "Resources/PixelBuffer.h"
 
 #include <unordered_map>
-#include <algorithm>
-#include <cstring>
 
 namespace br::render {
 namespace {
@@ -49,38 +47,6 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     state->openPbrTable = resolveTable(input->openPbrTableKey, sizeof(PerMaterialOpenPBRCB));
     if (!state->baseTable || !state->evalTable || !state->openPbrTable) {
         return ArtifactBuildResult::Failure("material table dependency missing or has incompatible ABI");
-    }
-    if (!state->baseTable->cpuShadow ||
-        state->baseTable->cpuShadow->size() < state->baseTable->elementCount * sizeof(PerMaterialCB)) {
-        return ArtifactBuildResult::Failure("material table CPU shadow missing or truncated");
-    }
-    const auto validateBinding = [&](std::uint32_t streamingID, std::uint32_t descriptor,
-        std::uint32_t sampler) {
-        if (streamingID == 0u) return true;
-		const auto expected = std::ranges::find_if(input->textureBindings,
-			[streamingID, descriptor, sampler](const MaterialTextureBindingDependencyDTO& binding) {
-				return binding.streamingTextureID == streamingID &&
-					binding.imageDescriptorIndex == descriptor &&
-					binding.samplerDescriptorIndex == sampler;
-			});
-        // Non-participating textures are owned by the ordinary material lifetime
-        // path and intentionally have no TextureBinding artifact.
-        if (expected == input->textureBindings.end()) return true;
-	return true;
-    };
-    for (std::size_t slot = 0; slot < state->baseTable->elementCount; ++slot) {
-        PerMaterialCB row{};
-        std::memcpy(&row, state->baseTable->cpuShadow->data() + slot * sizeof(row), sizeof(row));
-        if (!validateBinding(row.baseColorStreamingTextureID, row.baseColorTextureIndex, row.baseColorSamplerIndex) ||
-            !validateBinding(row.normalStreamingTextureID, row.normalTextureIndex, row.normalSamplerIndex) ||
-            !validateBinding(row.metallicStreamingTextureID, row.metallicTextureIndex, row.metallicSamplerIndex) ||
-            !validateBinding(row.roughnessStreamingTextureID, row.roughnessTextureIndex, row.roughnessSamplerIndex) ||
-            !validateBinding(row.emissiveStreamingTextureID, row.emissiveTextureIndex, row.emissiveSamplerIndex) ||
-            !validateBinding(row.aoStreamingTextureID, row.aoMapIndex, row.aoSamplerIndex) ||
-            !validateBinding(row.heightStreamingTextureID, row.heightMapIndex, row.heightSamplerIndex) ||
-            !validateBinding(row.opacityStreamingTextureID, row.opacityTextureIndex, row.opacitySamplerIndex)) {
-            return ArtifactBuildResult::Failure("material row texture descriptor does not match retained binding");
-        }
     }
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::Materials;

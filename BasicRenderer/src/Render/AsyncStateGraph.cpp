@@ -853,14 +853,6 @@ ArtifactDiagnostic AsyncStateGraph::Diagnose(ArtifactKey key) const {
     const auto& node = found->second;
     result.artifact = m_impl->MakeSnapshot(node);
     result.desiredRevision = node.desiredRevision;
-	result.generation = node.generation;
-	result.buildInFlight = node.buildInFlight;
-	result.hasGpuDependency = static_cast<bool>(node.gpuDependency);
-	if (node.gpuDependency) {
-		result.gpuComplete = node.gpuDependency->Complete();
-		result.gpuTimelineValue = node.gpuDependency->TimelineValue();
-		result.gpuState = node.gpuDependency->Describe();
-	}
     result.error = node.error;
     result.stateAge = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - node.stateSince);

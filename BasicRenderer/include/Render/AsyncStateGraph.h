@@ -190,12 +190,6 @@ struct ArtifactProducerRegistration {
 struct ArtifactDiagnostic {
     ArtifactSnapshot artifact;
     std::uint64_t desiredRevision = 0;
-	std::uint64_t generation = 0;
-	bool buildInFlight = false;
-	bool hasGpuDependency = false;
-	bool gpuComplete = false;
-	std::uint64_t gpuTimelineValue = 0;
-	std::string gpuState;
     std::vector<ArtifactRequirement> blockers;
     std::string error;
     std::string blockerChain;

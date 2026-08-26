@@ -391,26 +391,22 @@ MaterialManager::MaterialManager() {
 	org::memory::SetResourceUsageHint(*startupOpenPbr, "Material startup fallback");
 
 	// Visibility buffer resources
-	// Material variants are a small, bounded shader-feature set. Pre-size the
-	// slot-indexed GPU buffers so import-time slot discovery cannot race an
-	// asynchronous backing resize with histogram/indirect-command generation.
-	constexpr uint32_t initialCompileFlagCapacity = 64u;
-    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialPixelCountBuffer", true);
-    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialOffsetBuffer", true);
-	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialWriteCursorBuffer", true);
+    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialPixelCountBuffer", true);
+    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialOffsetBuffer", true);
+	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialWriteCursorBuffer", true);
 	org::memory::SetResourceUsageHint(*m_materialPixelCountBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_materialOffsetBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_materialWriteCursorBuffer, "Material evaluation buffers");
 
 	// Per-block arrays for hierarchical scan
-	const uint32_t numBlocks = (initialCompileFlagCapacity + kScanBlockSize - 1u) / kScanBlockSize;
+	const uint32_t numBlocks = (m_compileFlagsRegistry.GetSlotsUsed() + kScanBlockSize - 1u) / kScanBlockSize;
 	m_blockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::BlockSumsBuffer", true);
 	m_scannedBlockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::ScannedBlockSumsBuffer", true);
 	org::memory::SetResourceUsageHint(*m_blockSumsBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_scannedBlockSumsBuffer, "Material evaluation buffers");
 
 	// Indirect command buffer for material evaluation
-	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(initialCompileFlagCapacity, "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
+	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
 	org::memory::SetResourceUsageHint(*m_materialEvaluationCommandBuffer, "Indirect command buffers");
 
 	m_resources["Builtin::VisUtil::MaterialPixelCountBuffer"] = m_materialPixelCountBuffer;
@@ -1316,54 +1312,6 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 		}
 	}
 	if constexpr (kEnableMaterialStateShadow) if (m_rendererStateRequests) {
-		const auto materialDiagnostic = m_rendererStateRequests->Diagnose(
-			{ br::render::ArtifactKind::MaterialTable, 0, 0 });
-		const auto graphLogNow = std::chrono::steady_clock::now();
-		if (m_lastMaterialGraphProgressLog == std::chrono::steady_clock::time_point{} ||
-			graphLogNow - m_lastMaterialGraphProgressLog >= std::chrono::seconds(1)) {
-			m_lastMaterialGraphProgressLog = graphLogNow;
-			const auto baseDiagnostic = m_rendererStateRequests->Diagnose({
-				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialBaseTableVariant });
-			const auto evalDiagnostic = m_rendererStateRequests->Diagnose({
-				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialEvalTableVariant });
-			const auto openPbrDiagnostic = m_rendererStateRequests->Diagnose({
-				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialOpenPbrTableVariant });
-			const auto logNode = [](const char* name, const br::render::ArtifactDiagnostic& diagnostic) {
-				spdlog::info(
-					"Material graph node: name={} desired={} produced={} generation={} readiness={} buildInFlight={} blockers={} ageMs={} gpu(has={} complete={} value={} state='{}') error='{}' chain='{}'",
-					name, diagnostic.desiredRevision, diagnostic.artifact.revision,
-					diagnostic.generation, static_cast<unsigned>(diagnostic.artifact.readiness),
-					diagnostic.buildInFlight, diagnostic.blockers.size(),
-					diagnostic.stateAge.count() / 1000, diagnostic.hasGpuDependency,
-					diagnostic.gpuComplete, diagnostic.gpuTimelineValue, diagnostic.gpuState,
-					diagnostic.error, diagnostic.blockerChain);
-			};
-			std::uint64_t sourceEpoch = 0;
-			std::uint64_t sourceMaterialRevision = 0;
-			if (const auto source = br::render::PublishedStateSource::ProcessSource()) {
-				if (const auto state = source->Load()) {
-					sourceEpoch = state->epoch;
-					sourceMaterialRevision = state->materials.revision;
-				}
-			}
-			spdlog::info(
-				"Material graph progress: rowsRevision={} requestRevision={} observedPublished={} activatedPublished={} sourceEpoch={} sourceMaterialRevision={} fingerprint={} pendingFingerprint={} stableFrames={} dirtyFrames={} slotsUsed={} publishedSlots={}",
-				m_materialRowsRevision, m_materialStateRevision, m_observedMaterialPublishedRevision,
-				m_activeMaterialPublishedRevision, sourceEpoch, sourceMaterialRevision,
-				m_materialStateFingerprint, m_pendingMaterialStateFingerprint,
-				m_materialStateStableFrames, m_materialStateDirtyFrames,
-				m_materialSlotsUsed, publishedSlots);
-			logNode("root", materialDiagnostic);
-			logNode("base", baseDiagnostic);
-			logNode("eval", evalDiagnostic);
-			logNode("openpbr", openPbrDiagnostic);
-		}
-		if (materialDiagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
-			materialDiagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
-			// A failed immutable capture is retryable: texture publication may have
-			// converged since the rejected snapshot was assembled.
-			m_materialStateFingerprint = 0;
-		}
 		std::uint64_t fingerprint = publishedSlots;
 		const auto mix = [&fingerprint](std::uint64_t value) {
 			fingerprint ^= value + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
@@ -1526,24 +1474,17 @@ bool MaterialManager::TryActivatePublishedMaterialState() {
 	const auto resolvedBase = m_materialTableResolvers[0]->Resolve();
 	const auto resolvedEval = m_materialTableResolvers[1]->Resolve();
 	const auto resolvedOpenPbr = m_materialTableResolvers[2]->Resolve();
-	const auto descriptorOf = [](const std::shared_ptr<Resource>& resource) {
-		const auto* indexed = dynamic_cast<const GloballyIndexedResource*>(resource.get());
-		return indexed ? indexed->GetSRVInfo(0).slot.index : 0u;
-	};
 	spdlog::info(
-		"MaterialManager: activated graph-owned material tables epoch={} revision={} rows={} capacity={} compileFlagSlots={} activeCompileFlags={} resolved(base={} expected={} srv={} eval={} expected={} srv={} openPbr={} expected={} srv={})",
+		"MaterialManager: activated graph-owned material tables epoch={} revision={} rows={} capacity={} compileFlagSlots={} activeCompileFlags={} resolved(base={} expected={} eval={} expected={} openPbr={} expected={})",
 		published->epoch, published->materials.revision, materialState->baseTable->elementCount,
 		materialState->baseTable->capacity, materialState->compileFlagSlotsUsed,
 		materialState->activeCompileFlags.size(),
 		resolvedBase.empty() ? 0u : resolvedBase.front()->GetGlobalResourceID(),
 		materialState->baseTable->resource->GetGlobalResourceID(),
-		descriptorOf(materialState->baseTable->resource),
 		resolvedEval.empty() ? 0u : resolvedEval.front()->GetGlobalResourceID(),
 		materialState->evalTable->resource->GetGlobalResourceID(),
-		descriptorOf(materialState->evalTable->resource),
 		resolvedOpenPbr.empty() ? 0u : resolvedOpenPbr.front()->GetGlobalResourceID(),
-		materialState->openPbrTable->resource->GetGlobalResourceID(),
-		descriptorOf(materialState->openPbrTable->resource));
+		materialState->openPbrTable->resource->GetGlobalResourceID());
 	return true;
 }
 

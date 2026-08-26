@@ -52,33 +52,6 @@ void WriteCanonicalSurfaceSample(uint2 pixel, float2 motionVector, MaterialInput
     record.flags = flags;
     record.diagnosticReason = material.diagnosticReason;
     surfaceRecords[recordIndex] = record;
-
-    if (VISBUF_MATERIAL_PIXEL_TELEMETRY_ENABLED != 0u)
-    {
-        RWTexture2D<uint2> telemetry =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::DebugVisualization)];
-        const uint compileFlagsBinAndFrame = telemetry[pixel].x;
-        const float albedoMaximum = max(material.albedo.x, max(material.albedo.y, material.albedo.z));
-        const float weightedMaximum = max(weightedBaseColor.x, max(weightedBaseColor.y, weightedBaseColor.z));
-        // C2: material evaluation supplied zero albedo. C3: the OpenPBR table
-        // supplied zero base weight. C4: both inputs were nonzero but their
-        // weighted result still collapsed to zero. C1 is a healthy write.
-        uint outcomeMarker = 0xC1000000u;
-        if (baseWeight <= 0.0f) outcomeMarker = 0xC3000000u;
-        else if (albedoMaximum <= 0.0f)
-        {
-            const uint zeroReason = material.diagnosticReason & 0xFF000000u;
-            outcomeMarker = zeroReason == 0xD1000000u ? 0xC5000000u
-                : (zeroReason == 0xD2000000u ? 0xC6000000u
-                    : (zeroReason == 0xD3000000u ? 0xC7000000u
-                        : (zeroReason == 0xD4000000u ? 0xC8000000u
-                            : (zeroReason == 0xD5000000u ? 0xC9000000u : 0xC2000000u))));
-        }
-        else if (weightedMaximum <= 0.0f) outcomeMarker = 0xC4000000u;
-        telemetry[pixel] = uint2(
-            compileFlagsBinAndFrame,
-            outcomeMarker | (material.materialTableIndex & 0x00FFFFFFu));
-    }
 }
 
 bool CLodAssemblyPartDebugColorFromVisKey(uint64_t vis, out float3 debugColor)

@@ -2064,7 +2064,6 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             InterpolateWithDeriv(bary, c0.x, c1.x, c2.x).x,
             InterpolateWithDeriv(bary, c0.y, c1.y, c2.y).x,
             InterpolateWithDeriv(bary, c0.z, c1.z, c2.z).x);
-
     }
     float3x3 normalMatrix = CLodAssemblyAwareNormalMatrix(obj);
     const float3 interpolatedNormalOS = normalOS;
@@ -2271,7 +2270,6 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             : worldNormal;
         materialInputs.normalWS = normalize(lerp(worldNormal, materialNormalWS, reyesObjectNormalMapBlend));
     }
-
 #endif
 
     float3 positionVS = mul(float4(worldPosition, 1.0f), cam.view).xyz;
@@ -2304,34 +2302,10 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         mul(cam.prevView, cam.prevUnjitteredProjection));
     materialInputs.sourceObjectId = uint2(obj.stableSceneIdLo, obj.stableSceneIdHi);
     materialInputs.sourceMaterialId = materialInfo.sourceMaterialId;
-    materialInputs.openPBRMaterialDataIndex = materialInfo.openPBRMaterialDataIndex;
-    materialInputs.materialTableIndex = md.materialDataIndex;
+    materialInputs.materialTableIndex = materialInfo.openPBRMaterialDataIndex;
     materialInputs.semanticFamily = materialInfo.semanticFamily;
     materialInputs.surfaceFlags = materialInfo.surfaceFlags;
-    materialInputs.diagnosticReason = materialInfo.diagnosticReason & 0x00FFFFFFu;
-    const float evaluatedAlbedoMaximum = max(materialInputs.albedo.x,
-        max(materialInputs.albedo.y, materialInputs.albedo.z));
-    if (evaluatedAlbedoMaximum <= 0.0f)
-    {
-        const float factorMaximum = max(materialInfo.baseColorFactor.x,
-            max(materialInfo.baseColorFactor.y, materialInfo.baseColorFactor.z));
-        const float vertexColorMaximum = max(vertexColor.x, max(vertexColor.y, vertexColor.z));
-        // D1: material-table factor zero. D2: vertex color zero. D3: texel zero.
-        // D4: texel zero was not observed, leaving UV/sampler/gradient input.
-        // D5: the selected specialization did not include base-color sampling.
-        uint textureReason = 0xD5000000u;
-#if defined(PSO_BASE_COLOR_TEXTURE)
-        Texture2D<float4> diagnosticBaseColorTexture =
-            ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
-        const float4 diagnosticTexel = diagnosticBaseColorTexture.Load(int3(0, 0, 0));
-        const float diagnosticTexelMaximum = max(diagnosticTexel.x,
-            max(diagnosticTexel.y, diagnosticTexel.z));
-        textureReason = diagnosticTexelMaximum <= 0.0f ? 0xD3000000u : 0xD4000000u;
-#endif
-        const uint zeroReason = factorMaximum <= 0.0f ? 0xD1000000u
-            : (vertexColorMaximum <= 0.0f ? 0xD2000000u : textureReason);
-        materialInputs.diagnosticReason |= zeroReason;
-    }
+    materialInputs.diagnosticReason = materialInfo.diagnosticReason;
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     sample.materialInfo = (MaterialInfo)0;
 #else

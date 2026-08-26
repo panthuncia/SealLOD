@@ -32,20 +32,6 @@ void EvaluateMaterialGroupCS(
     pixel.x = ref.pixelXY & 0xFFFFu;
     pixel.y = ref.pixelXY >> 16;
 
-    if (VISBUF_MATERIAL_PIXEL_TELEMETRY_ENABLED != 0u)
-    {
-        // E1 means the indirect compile-flags group consumed this PixelRef. A
-        // successful canonical resolve replaces y with C1 + material-table row.
-        RWTexture2D<uint2> telemetry =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::DebugVisualization)];
-        ConstantBuffer<PerFrameBuffer> telemetryFrame =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-        telemetry[pixel] = uint2(
-            ((telemetryFrame.frameIndex & 0xFFu) << 24u) |
-                (IndirectCommandSignatureRootConstant0 & 0x00FFFFFFu),
-            0xE1000000u | (baseOffset & 0x00FFFFFFu));
-    }
-
 #if defined(VISUTIL_USE_CACHED_VIS_KEY)
     EvaluateCanonicalSurfaceOptimized(pixel, (uint64_t(ref.visibilityKey.y) << 32) | ref.visibilityKey.x);
 #else

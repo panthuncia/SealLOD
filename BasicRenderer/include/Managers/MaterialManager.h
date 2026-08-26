@@ -180,7 +180,6 @@ private:
 	std::uint32_t m_materialStateDirtyFrames = 0;
 	std::uint64_t m_materialStateRevision = 0;
 	std::uint64_t m_materialStateValidatedRevision = 0;
-	std::chrono::steady_clock::time_point m_lastMaterialGraphProgressLog = {};
 	std::unordered_map<std::uint64_t, std::uint64_t> m_materialStateExpectedFingerprints;
 	std::unordered_set<uint64_t> m_traceReadbackResourceIDs;
 	std::weak_ptr<TextureAsset> m_traceBaseColorTexture;
