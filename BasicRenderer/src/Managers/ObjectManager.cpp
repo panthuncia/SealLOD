@@ -320,6 +320,8 @@ void ObjectManager::SetRendererStateServices(
 			buffer->SetVersionedGraphExclusive(false);
 		}
 	}
+	m_visibilityGenerationBackingPool =
+		std::make_shared<br::render::VersionedGpuBufferBackingPool>();
 }
 
 std::uint64_t ObjectManager::PublishDesiredBufferState() {
@@ -357,6 +359,51 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 		requirements.push_back({ binding.key, revision,
 			br::render::ArtifactReadiness::GpuReady });
 	}
+	// The culling shader consumes generation[N] together with draw-record N and
+	// each active-list entry. Publish that sidecar in the same DrawRecords root;
+	// leaving it on the legacy upload path made otherwise byte-correct graph
+	// states timing-dependent.
+	const br::render::ArtifactKey visibilityKey{
+		br::render::ArtifactKind::BufferVersion, 0x4f424a4255460000ull,
+		br::render::kObjectVisibilityGenerationVariant };
+	const auto visibilityRevision =
+		(std::max<std::uint64_t>)(m_drawRecordVisibilityRevision, 1u);
+	fingerprint ^= visibilityRevision + 0x9e3779b97f4a7c15ull +
+		(fingerprint << 6u) + (fingerprint >> 2u);
+	if (m_visibilityGenerationSubmittedRevision != visibilityRevision) {
+		auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
+		input->uploadService = m_uploadService;
+		input->debugName = "Published::DrawRecordVisibilityGeneration";
+		input->writeSequence = visibilityRevision;
+		input->elementStride = sizeof(std::uint32_t);
+		input->elementCount = m_drawRecordVisibilityGenerations.size();
+		input->capacity = m_drawRecordVisibilityGenerations.size();
+		input->catalogOwner = br::render::PublishedFragmentKind::DrawRecords;
+		input->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
+		input->catalogVariant = br::render::kObjectVisibilityGenerationVariant;
+		input->backingPool = m_visibilityGenerationBackingPool;
+		auto image = std::make_shared<std::vector<std::byte>>(
+			m_drawRecordVisibilityGenerations.size() * sizeof(std::uint32_t));
+		if (!image->empty()) {
+			std::memcpy(image->data(), m_drawRecordVisibilityGenerations.data(),
+				image->size());
+		}
+		input->previous = m_visibilityGenerationPrevious;
+		if (input->previous) {
+			input->writes.push_back({ visibilityRevision, 0, std::move(image) });
+		} else {
+			input->bytes.assign(image->begin(), image->end());
+		}
+		if (m_rendererStateRequests->Request(visibilityKey, visibilityRevision, {},
+			br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
+				std::move(input)))) {
+			m_visibilityGenerationSubmittedRevision = visibilityRevision;
+		}
+	}
+	rootInput->buffers.push_back({ visibilityKey, visibilityRevision,
+		sizeof(std::uint32_t), br::render::kObjectVisibilityGenerationVariant });
+	requirements.push_back({ visibilityKey, visibilityRevision,
+		br::render::ArtifactReadiness::GpuReady });
 	if (fingerprint != m_objectBufferFingerprint) {
 		m_objectBufferFingerprint = fingerprint;
 		++m_objectBufferStateRevision;
@@ -448,6 +495,18 @@ void ObjectManager::AcknowledgePublishedBufferState(
 		}
 		binding.buffer->AcknowledgeVersionedGraphState(version);
 	}
+	const auto visibilityDependency = std::ranges::find_if(
+		published->drawRecords.dependencyClosure,
+		[](const br::render::ArtifactSnapshot& value) {
+			return value.key.kind == br::render::ArtifactKind::BufferVersion &&
+				value.key.variantID == br::render::kObjectVisibilityGenerationVariant;
+		});
+	const auto visibilityRoot = visibilityDependency != published->drawRecords.dependencyClosure.end()
+		? visibilityDependency->payload.Get<br::render::RendererStateFragmentArtifact>() : nullptr;
+	const auto visibilityVersion = visibilityRoot
+		? visibilityRoot->fragment.payload.Get<br::render::PublishedGpuBufferVersion>() : nullptr;
+	if (!visibilityVersion) return;
+	m_visibilityGenerationPrevious = visibilityVersion;
 	m_activeObjectBufferStateRevision.store(published->drawRecords.revision, std::memory_order_release);
 	spdlog::info("Object buffer graph state acknowledged: epoch={} revision={} buffers={} exactLiveSnapshot={}",
 		published->epoch, published->drawRecords.revision, m_graphBufferBindings.size(), exactSnapshot);
@@ -909,6 +968,18 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 	m_activeDrawSetIndices[workloadKey] = buffer;
 	++m_drawSetDeclarationRevision;
 	return buffer;
+}
+
+std::shared_ptr<org::GloballyIndexedResource>
+ObjectManager::GetPublishedDrawRecordVisibilityGenerationBuffer(
+	const std::shared_ptr<const br::render::PublishedRendererState>& published) const {
+	if (!published || !published->resourceCatalog) return {};
+	const auto resources = published->resourceCatalog->Find({
+		br::render::PublishedFragmentKind::DrawRecords,
+		br::render::PublishedResourceUsage::ShaderResource,
+		0, 0, br::render::kObjectVisibilityGenerationVariant });
+	if (!resources || resources->empty()) return {};
+	return std::dynamic_pointer_cast<org::GloballyIndexedResource>(resources->front());
 }
 
 void ObjectManager::SetActiveDrawSetMutationCallback(ActiveDrawSetMutationCallback callback) {

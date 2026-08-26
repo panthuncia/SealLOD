@@ -12,6 +12,7 @@ inline constexpr std::uint64_t kObjectPerObjectVariant = 1;
 inline constexpr std::uint64_t kObjectInstanceTransformVariant = 2;
 inline constexpr std::uint64_t kObjectDrawRecordVariant = 3;
 inline constexpr std::uint64_t kObjectNormalMatrixVariant = 4;
+inline constexpr std::uint64_t kObjectVisibilityGenerationVariant = 5;
 
 struct ObjectBufferDependencyDTO {
     ArtifactKey key{ ArtifactKind::BufferVersion, 0, 0 };

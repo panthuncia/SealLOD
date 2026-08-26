@@ -1220,7 +1220,15 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
 				ObjectCullRecord record{};
                 record.viewDataIndex = cameraBufferIndex;
                 record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
-                record.drawRecordVisibilityGenerationSRVIndex = context.objectManager->GetDrawRecordVisibilityGenerationBuffer()->GetSRVInfo(0).slot.index;
+				auto visibilityGenerations =
+					context.objectManager->GetPublishedDrawRecordVisibilityGenerationBuffer(
+						context.publishedRendererState);
+				if (!visibilityGenerations) {
+					visibilityGenerations = context.objectManager
+						->GetDrawRecordVisibilityGenerationBuffer();
+				}
+                record.drawRecordVisibilityGenerationSRVIndex =
+					visibilityGenerations->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;
                 record.shadowCasterClass = UsesVirtualShadowOutput(m_rasterOutputKind)
                     ? (wl->key.skinnedShadowCaster ? 2u : 1u)

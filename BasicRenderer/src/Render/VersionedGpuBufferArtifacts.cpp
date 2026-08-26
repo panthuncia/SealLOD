@@ -291,6 +291,13 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     }
 
     std::vector<std::shared_ptr<org::TrackedUploadTicket>> tickets;
+    // Indirect argument buffers are transient UAV outputs. The culling pass
+    // writes every command in the published logical range before ExecuteIndirect
+    // consumes it, so uploading the producer's zero-filled CPU shadow is both
+    // unnecessary and actively harmful: thousands of view/workload buffers can
+    // otherwise serialize behind the tracked copy timeline during scene load.
+    const bool needsInitialContent = !(input->unorderedAccess &&
+        input->indirectArguments && input->bytes.empty() && input->writes.empty());
     if (appendOnly) {
         for (const auto& write : input->writes) {
             if (!write.bytes || write.bytes->empty()) continue;
@@ -298,9 +305,11 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
                 write.bytes->data(), write.bytes->size(), resource,
                 write.elementOffset * input->elementStride));
         }
-    } else if (!shadow->empty()) {
+    } else if (needsInitialContent && !shadow->empty()) {
         tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
             shadow->data(), shadow->size(), resource, 0));
+    } else if (!needsInitialContent) {
+        basic_telemetry::AddCounter("SARP.VersionedBuffer.TransientInitializationSkipped");
     }
 
     auto version = std::make_shared<PublishedGpuBufferVersion>();

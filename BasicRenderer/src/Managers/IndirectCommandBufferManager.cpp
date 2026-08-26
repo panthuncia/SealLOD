@@ -21,6 +21,7 @@
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/IndirectStateArtifacts.h"
+#include "Render/GraphMigrationMode.h"
 #include "Render/PublishedRendererState.h"
 #include "Render/RendererStateRequestService.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
@@ -125,8 +126,18 @@ void IndirectCommandBufferManager::PublishDesiredState(
 					workloadKey, replace, revision, std::move(entries));
 			});
 	}
-	const auto objectBufferRequirement = objectManager.DesiredBufferStateRequirement();
-    (void)materialManager;
+	// The legacy object buffers remain authoritative while their graph migration is
+	// in shadow mode. Depending on the shadow BufferVersion here made the indirect
+	// path effectively active and could hold all visibility behind a comparison-only
+	// artifact.
+	const auto objectBufferRequirement =
+		br::render::GraphActive(br::render::kObjectBufferGraphMigrationMode)
+			? objectManager.DesiredBufferStateRequirement()
+			: std::optional<br::render::ArtifactRequirement>{};
+	const auto publishedSource = br::render::PublishedStateSource::ProcessSource();
+	const auto publishedState = publishedSource ? publishedSource->Load() : nullptr;
+	const auto materialRevision = publishedState
+		? publishedState->materials.revision : 0u;
     const auto residentDrawRecordCount = objectManager.GetResidentInstanceDrawRecordCount();
     bool changed = false;
     {
@@ -134,9 +145,11 @@ void IndirectCommandBufferManager::PublishDesiredState(
         const auto objectBufferRevision =
             objectBufferRequirement ? objectBufferRequirement->minimumRevision : 0u;
         if (m_lastObjectBufferRevision != objectBufferRevision ||
+			m_lastMaterialRevision != materialRevision ||
             m_lastResidentDrawRecordCount != residentDrawRecordCount) {
             m_lastObjectBufferRevision = objectBufferRevision;
             m_objectBufferRequirement = objectBufferRequirement;
+			m_lastMaterialRevision = materialRevision;
             m_lastResidentDrawRecordCount = residentDrawRecordCount;
             ++m_desiredMutationRevision;
             changed = true;
@@ -169,6 +182,7 @@ IndirectCommandBufferManager::DesiredSnapshot
 IndirectCommandBufferManager::CaptureDesiredSnapshotLocked() const {
     DesiredSnapshot snapshot;
     snapshot.revision = m_desiredMutationRevision;
+    snapshot.activeMaterialRevision = m_lastMaterialRevision;
     snapshot.objectBufferRequirement = m_objectBufferRequirement;
     snapshot.residentDrawRecordCount = m_lastResidentDrawRecordCount;
     snapshot.incrementSize = m_incrementSize;
@@ -225,6 +239,14 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
     input->workloads.reserve(snapshot.requestedCounts.size());
 
     std::vector<br::render::ArtifactRequirement> requirements;
+    // Do not publish graph-backed visibility against the empty startup
+    // material fragment. The current publisher cannot yet retain a rapidly
+    // advancing material root in every indirect closure without starving the
+    // independently publishable material fragment, so active-material
+    // readiness is an ordering gate here rather than a graph dependency.
+    if (snapshot.activeMaterialRevision == 0) return;
+    if (br::render::GraphActive(br::render::kObjectBufferGraphMigrationMode) &&
+        !snapshot.objectBufferRequirement) return;
     if (snapshot.objectBufferRequirement) requirements.push_back(*snapshot.objectBufferRequirement);
     for (const auto viewID : input->viewIDs) {
         const auto lifetimeRevision = snapshot.viewLifetimeRevisions.at(viewID);
@@ -240,6 +262,7 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
     }
 
     std::uint64_t sourceEntryCount = 0;
+    std::uint64_t deferredEntryCount = 0;
     std::uint64_t safeDrawCount = 0;
     std::uint32_t nonEmptyWorkloads = 0;
     const auto roundUp = [increment = snapshot.incrementSize](unsigned int value) {
@@ -267,17 +290,16 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
         for (const auto& append : journal.appends) appendEntries(append);
         sourceEntryCount += entries.size();
 
-        const auto invalidEntry = std::ranges::find_if(entries, [&](const auto& entry) {
+        // Active-set mutation and the logical draw-record extent are observed
+        // independently. A newly appended entry can therefore arrive one snapshot
+        // before its extent. Defer only those entries; rejecting the whole workload
+        // made every otherwise-valid static draw disappear. PublishDesiredState
+        // observes the later extent change and schedules the successor snapshot.
+        const auto originalEntryCount = entries.size();
+        std::erase_if(entries, [&](const auto& entry) {
             return entry.drawRecordIndex >= snapshot.residentDrawRecordCount;
         });
-        if (invalidEntry != entries.end()) {
-            spdlog::error(
-                "Indirect desired state rejected out-of-range draw record: index={} extent={} flags={} phase={} clodOnly={}",
-                invalidEntry->drawRecordIndex, snapshot.residentDrawRecordCount,
-                static_cast<std::uint64_t>(key.compileFlags),
-                key.renderPhase.hash, key.clodOnly);
-            continue;
-        }
+        deferredEntryCount += originalEntryCount - entries.size();
 
         br::render::IndirectWorkloadInputDTO dto{};
         dto.key = key;
@@ -371,6 +393,8 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
             std::chrono::steady_clock::now() - started).count()));
     basic_telemetry::SetGauge("SARP.Indirect.DesiredStateSourceEntries",
         static_cast<std::int64_t>(sourceEntryCount));
+    basic_telemetry::SetGauge("SARP.Indirect.DesiredStateDeferredEntries",
+        static_cast<std::int64_t>(deferredEntryCount));
     basic_telemetry::SetGauge("SARP.Indirect.DesiredStateSafeDraws",
         static_cast<std::int64_t>(safeDrawCount));
     basic_telemetry::SetGauge("SARP.Indirect.DesiredStateNonEmptyWorkloads",

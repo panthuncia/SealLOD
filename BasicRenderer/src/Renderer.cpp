@@ -3075,6 +3075,15 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("CommitPublishedRendererState", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState");
         try {
+            // Upload completion callbacks are the normal wakeup path.  Poll once
+            // per frame as a recovery path so a callback lost to a subscription
+            // race or upload-service callback replacement cannot strand an
+            // UploadSubmitted artifact forever.  In particular, a stranded object
+            // buffer revision leaves static visibility on an arbitrary partial
+            // startup snapshot even after its GPU timeline has completed.
+            if (m_asyncStateGraph) {
+                m_asyncStateGraph->PumpGpuCompletions();
+            }
             if (m_rendererStatePublisher) {
                 auto commit = m_rendererStatePublisher->Commit(m_frameIndex);
                 m_context.publishedRendererState = commit.state;
@@ -3298,6 +3307,208 @@ void Renderer::Update(float elapsedSeconds) {
                         requestTable("base", materialState->baseTable);
                         requestTable("eval", materialState->evalTable);
                         requestTable("openpbr", materialState->openPbrTable);
+                    }
+                }
+            }
+            std::free(outputPath);
+        }
+
+        // Active object-buffer cutover gate. Capture the bytes actually consumed
+        // by rendering and compare them with the immutable journal shadow owned by
+        // each published graph artifact. This is deliberately opt-in because a
+        // radius-10 scene contains many active-list resources.
+        static bool objectBufferReadbackRequested = false;
+        if (!objectBufferReadbackRequested && m_totalFramesRendered >= 600u && currentRenderGraph) {
+            wchar_t* outputPath = nullptr;
+            size_t outputPathLength = 0;
+            if (_wdupenv_s(&outputPath, &outputPathLength,
+                    L"SARP_OBJECT_BUFFER_READBACK_PATH") == 0 &&
+                outputPath != nullptr && outputPath[0] != L'\0') {
+                const std::filesystem::path basePath(outputPath);
+                if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+                    const auto source = br::render::PublishedStateSource::ProcessSource();
+                    const auto published = source ? source->Load() : nullptr;
+                    std::size_t captureIndex = 0;
+                    const auto captureFragment = [&](const char* fragmentName,
+                        const br::render::PublishedStateFragment& fragment,
+                        bool activeListsOnly = false,
+                        bool visibilityGenerationFirst = false) {
+                        const auto captureVersion = [&](const auto& version) {
+                            // Do not consume the one-shot validation request on the
+                            // empty startup publication. Static admission fills
+                            // these journals asynchronously after renderer startup.
+                            if (!version || !version->resource || !version->cpuShadow ||
+                                version->cpuShadow->empty()) return;
+                            auto capturePath = basePath;
+                            capturePath += std::filesystem::path(fmt::format(
+                                ".{}.{}.bin", fragmentName, captureIndex++));
+                            const auto expected = version->cpuShadow;
+                            const auto resourceID = version->resource->GetGlobalResourceID();
+                            const auto revision = version->revision;
+                            readbackService->RequestReadbackCapture(
+                                "MenuRenderPass", version->resource.get(), RangeSpec{},
+                                [capturePath, expected, resourceID, revision, fragmentName]
+                                (ReadbackCaptureResult&& result) {
+                                    std::ofstream output(capturePath,
+                                        std::ios::binary | std::ios::trunc);
+                                    if (output && !result.data.empty()) {
+                                        output.write(reinterpret_cast<const char*>(result.data.data()),
+                                            static_cast<std::streamsize>(result.data.size()));
+                                    }
+                                    auto expectedPath = capturePath;
+                                    expectedPath += L".expected";
+                                    std::ofstream expectedOutput(expectedPath,
+                                        std::ios::binary | std::ios::trunc);
+                                    if (expectedOutput && !expected->empty()) {
+                                        expectedOutput.write(
+                                            reinterpret_cast<const char*>(expected->data()),
+                                            static_cast<std::streamsize>(expected->size()));
+                                    }
+                                    const auto comparedBytes =
+                                        (std::min)(result.data.size(), expected->size());
+                                    std::size_t firstMismatch = comparedBytes;
+                                    for (std::size_t offset = 0; offset < comparedBytes; ++offset) {
+                                        if (result.data[offset] != (*expected)[offset]) {
+                                            firstMismatch = offset;
+                                            break;
+                                        }
+                                    }
+                                    const bool exactPrefix = result.data.size() >= expected->size() &&
+                                        firstMismatch == comparedBytes;
+                                    basic_telemetry::Record(
+                                        exactPrefix
+                                            ? "SARP.GraphReadback.ObjectBuffer.Match"
+                                            : "SARP.GraphReadback.ObjectBuffer.Mismatch", 1u);
+                                    spdlog::info(
+                                        "Published object GPU readback: fragment={} revision={} resource={} gpuBytes={} expectedBytes={} exactPrefix={} firstMismatch={} output='{}'.",
+                                        fragmentName, revision, resourceID, result.data.size(),
+                                        expected->size(), exactPrefix,
+                                        firstMismatch == comparedBytes ? UINT64_MAX : firstMismatch,
+                                        capturePath.string());
+                                });
+                        };
+                        captureVersion(fragment.payload
+                            .Get<br::render::PublishedGpuBufferVersion>());
+                        if (visibilityGenerationFirst) {
+                            for (const auto& dependency : fragment.dependencyClosure) {
+                                if (dependency.key.kind != br::render::ArtifactKind::BufferVersion ||
+                                    dependency.key.variantID !=
+                                        br::render::kObjectVisibilityGenerationVariant) continue;
+                                const auto dependencyRoot = dependency.payload
+                                    .Get<br::render::RendererStateFragmentArtifact>();
+                                captureVersion(dependencyRoot
+                                    ? dependencyRoot->fragment.payload
+                                        .Get<br::render::PublishedGpuBufferVersion>()
+                                    : nullptr);
+                            }
+                        }
+                        for (const auto& dependency : fragment.dependencyClosure) {
+                            if (activeListsOnly &&
+                                dependency.key.kind != br::render::ArtifactKind::ActiveDrawList) {
+                                continue;
+                            }
+                            if (visibilityGenerationFirst &&
+                                dependency.key.kind == br::render::ArtifactKind::BufferVersion &&
+                                dependency.key.variantID ==
+                                    br::render::kObjectVisibilityGenerationVariant) continue;
+                            const auto dependencyRoot = dependency.payload
+                                .Get<br::render::RendererStateFragmentArtifact>();
+                            captureVersion(dependencyRoot
+                                ? dependencyRoot->fragment.payload
+                                    .Get<br::render::PublishedGpuBufferVersion>()
+                                : nullptr);
+                        }
+                    };
+                    const auto visibilityGenerations = m_pObjectManager
+                        ? m_pObjectManager->GetDrawRecordVisibilityGenerations()
+                        : std::span<const std::uint32_t>{};
+                    const auto publishedVisibilityReady = published &&
+                        std::ranges::any_of(published->drawRecords.dependencyClosure,
+                            [](const br::render::ArtifactSnapshot& dependency) {
+                                if (dependency.key.kind != br::render::ArtifactKind::BufferVersion ||
+                                    dependency.key.variantID !=
+                                        br::render::kObjectVisibilityGenerationVariant) return false;
+                                const auto root = dependency.payload
+                                    .Get<br::render::RendererStateFragmentArtifact>();
+                                const auto version = root
+                                    ? root->fragment.payload
+                                        .Get<br::render::PublishedGpuBufferVersion>() : nullptr;
+                                return version && version->cpuShadow &&
+                                    !version->cpuShadow->empty();
+                            });
+                    // Do not consume the one-shot validation while only terrain
+                    // and other startup rows exist. Static admission initializes
+                    // the generation table; this is also the signal that the
+                    // captured active lists can validate real static eligibility.
+                    if (publishedVisibilityReady && !visibilityGenerations.empty()) {
+                        captureFragment("draw-records", published->drawRecords, false, true);
+                        captureFragment("active-lists", published->activeDrawLists);
+                        // Indirect publication retains the exact active-list and
+                        // argument-buffer versions it consumes. Traversing this
+                        // closure validates the resources bound by culling, even
+                        // when the catalog-only active-list fragment has no local
+                        // payload.
+                        captureFragment("indirect-closure", published->indirectWorkloads, true);
+
+                        // Active-list entries are accepted by the culling shader
+                        // only when their generation matches this sidecar.  It is
+                        // still on the legacy upload path, so validate the other
+                        // half of that ABI explicitly while the cutover is in
+                        // progress; byte-correct graph buffers alone cannot prove
+                        // that any static draw is eligible.
+                        if (m_pObjectManager) {
+                            const auto& sidecar =
+                                m_pObjectManager->GetDrawRecordVisibilityGenerationBuffer();
+                            const auto generations = visibilityGenerations;
+                            if (sidecar && !generations.empty()) {
+                                auto expected = std::make_shared<std::vector<std::byte>>(
+                                    generations.size_bytes());
+                                std::memcpy(expected->data(), generations.data(),
+                                    generations.size_bytes());
+                                auto capturePath = basePath;
+                                capturePath += std::filesystem::path(fmt::format(
+                                    ".visibility-generations.{}.bin", captureIndex++));
+                                const auto resourceID = sidecar->GetGlobalResourceID();
+                                readbackService->RequestReadbackCapture(
+                                    "MenuRenderPass", sidecar.get(), RangeSpec{},
+                                    [capturePath, expected, resourceID]
+                                    (ReadbackCaptureResult&& result) {
+                                        std::ofstream output(capturePath,
+                                            std::ios::binary | std::ios::trunc);
+                                        if (output && !result.data.empty()) {
+                                            output.write(
+                                                reinterpret_cast<const char*>(result.data.data()),
+                                                static_cast<std::streamsize>(result.data.size()));
+                                        }
+                                        auto expectedPath = capturePath;
+                                        expectedPath += L".expected";
+                                        std::ofstream expectedOutput(expectedPath,
+                                            std::ios::binary | std::ios::trunc);
+                                        if (expectedOutput && !expected->empty()) {
+                                            expectedOutput.write(
+                                                reinterpret_cast<const char*>(expected->data()),
+                                                static_cast<std::streamsize>(expected->size()));
+                                        }
+                                        const auto comparedBytes =
+                                            (std::min)(result.data.size(), expected->size());
+                                        const bool exactPrefix = result.data.size() >= expected->size() &&
+                                            std::equal(expected->begin(), expected->end(),
+                                                result.data.begin());
+                                        basic_telemetry::Record(
+                                            exactPrefix
+                                                ? "SARP.GraphReadback.VisibilityGeneration.Match"
+                                                : "SARP.GraphReadback.VisibilityGeneration.Mismatch", 1u);
+                                        spdlog::info(
+                                            "Visibility-generation GPU readback: resource={} gpuBytes={} expectedBytes={} exactPrefix={} output='{}'.",
+                                            resourceID, result.data.size(), expected->size(), exactPrefix,
+                                            capturePath.string());
+                                    });
+                            }
+                        }
+                        objectBufferReadbackRequested = captureIndex != 0;
+                        basic_telemetry::SetGauge(
+                            "SARP.GraphReadback.ObjectBuffer.Requested",
+                            static_cast<std::uint64_t>(captureIndex));
                     }
                 }
             }

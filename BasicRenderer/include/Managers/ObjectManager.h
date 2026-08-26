@@ -27,11 +27,12 @@
 
 namespace org { class BufferView; }
 using org::BufferView;
+namespace org { class GloballyIndexedResource; }
 namespace org { class DynamicBuffer; }
 using org::DynamicBuffer;
 namespace org::runtime { class IUploadService; }
 class PublishedStateResourceResolver;
-namespace br::render { class RendererStateRequestService; class VersionedGpuBufferBackingPool; struct PublishedRendererState; }
+namespace br::render { class RendererStateRequestService; class VersionedGpuBufferBackingPool; struct PublishedGpuBufferVersion; struct PublishedRendererState; }
 class Material;
 class Mesh;
 
@@ -485,6 +486,8 @@ public:
 	std::span<const std::uint32_t> GetDrawRecordVisibilityGenerations() const {
 		return m_drawRecordVisibilityGenerations;
 	}
+	std::shared_ptr<org::GloballyIndexedResource> GetPublishedDrawRecordVisibilityGenerationBuffer(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published) const;
 	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>>& GetSkinnedAssemblyPlacements() { return m_skinnedAssemblyPlacements; }
 	std::shared_ptr<SortedUnsignedIntBuffer>& GetActiveSkinnedAssemblyPlacements() { return m_activeSkinnedAssemblyPlacements; }
 	std::span<const SkinnedAssemblyPlacementGPU> GetSkinnedAssemblyPlacementCPU() const { return m_skinnedAssemblyPlacementCPU; }
@@ -608,6 +611,9 @@ private:
 	std::uint64_t m_objectBufferFingerprint = 0;
 	std::uint32_t m_objectBufferDiagnosticTicks = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
+	std::uint64_t m_visibilityGenerationSubmittedRevision = 0;
+	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_visibilityGenerationBackingPool;
+	std::shared_ptr<const br::render::PublishedGpuBufferVersion> m_visibilityGenerationPrevious;
 	std::uint64_t m_nextStaticImportTransactionID = 1;
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;

@@ -12,7 +12,7 @@ namespace Components {
 	struct Resource {
 		std::weak_ptr<::Resource> resource;
 	};
-	
+
     struct CLodOnlyDrawWorkload {};
     struct GeneralDrawWorkload {};
 
