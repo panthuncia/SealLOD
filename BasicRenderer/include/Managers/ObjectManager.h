@@ -31,12 +31,15 @@ namespace org { class DynamicBuffer; }
 using org::DynamicBuffer;
 namespace org::runtime { class IUploadService; }
 class PublishedStateResourceResolver;
-namespace br::render { class RendererStateRequestService; struct PublishedRendererState; }
+namespace br::render { class RendererStateRequestService; class VersionedGpuBufferBackingPool; struct PublishedRendererState; }
 class Material;
 class Mesh;
 
 class ObjectManager : public IResourceProvider {
 public:
+	using ActiveDrawSetMutationCallback = std::function<void(
+		const DrawWorkloadKey&, bool, std::uint64_t,
+		std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>>)>;
 	static std::unique_ptr<ObjectManager> CreateUnique() {
 		return std::unique_ptr<ObjectManager>(new ObjectManager());
 	}
@@ -500,6 +503,7 @@ public:
 		auto it = m_activeDrawSetIndices.find(workloadKey);
 		return it != m_activeDrawSetIndices.end() ? it->second : nullptr;
 	}
+	void SetActiveDrawSetMutationCallback(ActiveDrawSetMutationCallback callback);
 	std::shared_ptr<SortedUnsignedIntBuffer> GetActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
 		auto buffer = TryGetActiveDrawSetIndices(workloadKey);
 		if (!buffer) {
@@ -525,6 +529,7 @@ private:
 		std::uint64_t catalogVariant = 0;
 		std::uint32_t elementStride = 0;
 		std::uint64_t submittedRevision = 0;
+		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
 	};
 
 	struct DeferredBufferRangeRetire {
@@ -586,6 +591,7 @@ private:
 	std::shared_ptr<DynamicBuffer> m_masterIndirectCommandsBuffer; // Indirect draw command buffer
 	std::shared_ptr<DynamicBuffer> m_normalMatrixBuffer; // Normal matrices for each object
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
+	ActiveDrawSetMutationCallback m_activeDrawSetMutationCallback;
 	std::vector<std::uint32_t> m_drawRecordVisibilityGenerations;
 	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>> m_skinnedAssemblyPlacements;
 	std::shared_ptr<SortedUnsignedIntBuffer> m_activeSkinnedAssemblyPlacements;

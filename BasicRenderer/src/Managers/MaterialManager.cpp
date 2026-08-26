@@ -6,6 +6,7 @@
 #include "Resources/DynamicResource.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/MaterialStateArtifacts.h"
+#include "Render/GraphMigrationMode.h"
 #include "Render/PublishedRendererState.h"
 #include "Render/RendererStateRequestService.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
@@ -33,7 +34,8 @@ namespace {
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
 	// Keep post-indirect graph cutovers dormant until static activation has a
 	// complete, visually validated dependency closure.
-	constexpr bool kEnableMaterialStateShadow = true;
+	constexpr bool kEnableMaterialStateShadow =
+		br::render::GraphEnabled(br::render::kMaterialGraphMigrationMode);
 
 	const std::string& MaterialTextureTraceFilter() {
 		static const std::string filter = [] {
@@ -378,10 +380,16 @@ namespace {
 MaterialManager::MaterialManager() {
 	auto& rm = ::ResourceManager::GetInstance();
 
-	// Graph-managed tables are the only mutable material-table versions. These
-	// one-row zero buffers keep retained declarations valid until the first
-	// immutable manifest reaches frame-start commit.
 	m_materialBufferCapacity = kInitialMaterialBufferCapacity;
+	for (auto& pool : m_materialBackingPools) {
+		pool = std::make_shared<br::render::VersionedGpuBufferBackingPool>();
+	}
+	m_perMaterialDataBuffer = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(
+		m_materialBufferCapacity, "Builtin::PerMaterialDataBuffer", true);
+	m_perMaterialEvalDataBuffer = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(
+		m_materialBufferCapacity, "Builtin::PerMaterialEvalDataBuffer", true);
+	m_perMaterialOpenPBRDataBuffer = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(
+		m_materialBufferCapacity, "Builtin::PerMaterialOpenPBRDataBuffer", true);
 	auto startupBase = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(1, "StartupFallback::PerMaterialDataBuffer", true);
 	auto startupEval = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(1, "StartupFallback::PerMaterialEvalDataBuffer", true);
 	auto startupOpenPbr = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(1, "StartupFallback::PerMaterialOpenPBRDataBuffer", true);
@@ -389,6 +397,9 @@ MaterialManager::MaterialManager() {
 	org::memory::SetResourceUsageHint(*startupBase, "Material startup fallback");
 	org::memory::SetResourceUsageHint(*startupEval, "Material startup fallback");
 	org::memory::SetResourceUsageHint(*startupOpenPbr, "Material startup fallback");
+	org::memory::SetResourceUsageHint(*m_perMaterialDataBuffer, "Material buffers");
+	org::memory::SetResourceUsageHint(*m_perMaterialEvalDataBuffer, "Material buffers");
+	org::memory::SetResourceUsageHint(*m_perMaterialOpenPBRDataBuffer, "Material buffers");
 
 	// Visibility buffer resources
     m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialPixelCountBuffer", true);
@@ -437,9 +448,15 @@ MaterialManager::MaterialManager() {
 		makeMaterialResolver(br::render::kMaterialEvalTableVariant, m_materialStartupFallbacks[1]),
 		makeMaterialResolver(br::render::kMaterialOpenPbrTableVariant, m_materialStartupFallbacks[2])
 	};
-	m_resolvers[Builtin::PerMaterialDataBuffer] = m_materialTableResolvers[0];
-	m_resolvers["Builtin::PerMaterialEvalDataBuffer"] = m_materialTableResolvers[1];
-	m_resolvers[Builtin::PerMaterialOpenPBRDataBuffer] = m_materialTableResolvers[2];
+	if constexpr (br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
+		m_resolvers[Builtin::PerMaterialDataBuffer] = m_materialTableResolvers[0];
+		m_resolvers["Builtin::PerMaterialEvalDataBuffer"] = m_materialTableResolvers[1];
+		m_resolvers[Builtin::PerMaterialOpenPBRDataBuffer] = m_materialTableResolvers[2];
+	} else {
+		m_resources[Builtin::PerMaterialDataBuffer] = m_perMaterialDataBuffer;
+		m_resources["Builtin::PerMaterialEvalDataBuffer"] = m_perMaterialEvalDataBuffer;
+		m_resources[Builtin::PerMaterialOpenPBRDataBuffer] = m_perMaterialOpenPBRDataBuffer;
+	}
 
 	// Reserve built-in material bins up front so render-graph material evaluation buffers are
 	// fully sized before passes/materialization/upload steps touch them.
@@ -835,6 +852,12 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		}
 	}
 	if (dataChanged) {
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadLegacyShadowAuthority");
+			m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
+			m_perMaterialEvalDataBuffer->UpdateAt(materialSlot, evalData);
+			m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, openPBRData);
+		}
 		if (materialData.geometricDisplacementEnabled != 0u &&
 			(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u) {
 			static std::atomic<std::uint32_t> loggedGeometricMaterials{ 0 };
@@ -1133,6 +1156,9 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			}
 			m_materialUploadSignatures[slot].valid = false;
 		}
+		m_perMaterialDataBuffer->UpdateAt(slot, data.value_or(PerMaterialCB{}));
+		m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
+		m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
 	}
 	else {
 		ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot");
@@ -1147,6 +1173,9 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			m_materialUploadSignatures.resize(m_materialSlotsUsed);
 			m_materialUploadSignatures[slot].valid = false;
 		}
+		m_perMaterialDataBuffer->UpdateAt(slot, data.value_or(PerMaterialCB{}));
+		m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
+		m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
 	}
 	{
 		ZoneScopedN("MaterialManager::GetMaterialSlot::StoreMapping");
@@ -1171,6 +1200,9 @@ void MaterialManager::EnsureMaterialBufferCapacity(unsigned int requiredSlots) {
 	}
 	TracyPlot("MaterialManager.MaterialBufferOldCapacity", static_cast<int64_t>(m_materialBufferCapacity));
 	TracyPlot("MaterialManager.MaterialBufferNewCapacity", static_cast<int64_t>(newCapacity));
+	m_perMaterialDataBuffer->Resize(newCapacity);
+	m_perMaterialEvalDataBuffer->Resize(newCapacity);
+	m_perMaterialOpenPBRDataBuffer->Resize(newCapacity);
 
 	m_materialBufferCapacity = newCapacity;
 }
@@ -1351,8 +1383,16 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialEvalTableVariant };
 			const br::render::ArtifactKey openPbrKey{
 				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialOpenPbrTableVariant };
+			std::array<std::shared_ptr<const br::render::PublishedGpuBufferVersion>, 3> previousTables;
+			if (const auto source = br::render::PublishedStateSource::ProcessSource()) {
+				if (const auto published = source->Load()) {
+					if (const auto state = published->materials.payload.Get<br::render::PublishedMaterialState>()) {
+						previousTables = { state->baseTable, state->evalTable, state->openPbrTable };
+					}
+				}
+			}
 			const auto makeTableInput = [&](std::string name, std::uint32_t stride,
-				std::uint64_t variant, auto selectRow) {
+				std::uint64_t variant, std::size_t poolIndex, auto selectRow) {
 				auto table = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
 				table->uploadService = m_uploadService;
 				table->debugName = std::move(name);
@@ -1363,9 +1403,29 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				table->catalogOwner = br::render::PublishedFragmentKind::Materials;
 				table->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
 				table->catalogVariant = variant;
+				table->backingPool = m_materialBackingPools[poolIndex];
 				table->bytes.resize(static_cast<std::size_t>(m_materialSlotsUsed) * stride);
 				for (std::size_t slot = 0; slot < m_materialSlotsUsed; ++slot) {
 					selectRow(slot, table->bytes.data() + slot * stride);
+				}
+				if (const auto& previous = previousTables[poolIndex]; previous && previous->cpuShadow) {
+					table->previous = previous;
+					const auto compareBytes = (std::min)(table->bytes.size(), previous->cpuShadow->size());
+					std::size_t firstDirty = 0;
+					while (firstDirty < compareBytes && table->bytes[firstDirty] == (*previous->cpuShadow)[firstDirty]) {
+						++firstDirty;
+					}
+					if (table->bytes.size() > compareBytes || firstDirty != compareBytes) {
+						firstDirty = (firstDirty / stride) * stride;
+						auto changed = std::make_shared<std::vector<std::byte>>(
+							table->bytes.begin() + firstDirty, table->bytes.end());
+						table->writes.push_back({ table->writeSequence,
+							firstDirty / stride, std::move(changed) });
+					}
+					if (table->writes.empty() && table->writeSequence > previous->writeSequence) {
+						table->writes.push_back({ table->writeSequence, table->elementCount, {} });
+					}
+					table->bytes.clear();
 				}
 				return table;
 			};
@@ -1388,11 +1448,11 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				std::memcpy(destination, &row, sizeof(row));
 			};
 			auto baseTable = makeTableInput("Published::PerMaterialDataBuffer", sizeof(PerMaterialCB),
-				br::render::kMaterialBaseTableVariant, copyBase);
+				br::render::kMaterialBaseTableVariant, 0, copyBase);
 			auto evalTable = makeTableInput("Published::PerMaterialEvalDataBuffer", sizeof(PerMaterialEvalCB),
-				br::render::kMaterialEvalTableVariant, copyEval);
+				br::render::kMaterialEvalTableVariant, 1, copyEval);
 			auto openPbrTable = makeTableInput("Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB),
-				br::render::kMaterialOpenPbrTableVariant, copyOpenPbr);
+				br::render::kMaterialOpenPbrTableVariant, 2, copyOpenPbr);
 			(void)m_rendererStateRequests->Request(baseKey, m_materialRowsRevision, {},
 				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(baseTable)));
 			(void)m_rendererStateRequests->Request(evalKey, m_materialRowsRevision, {},
@@ -1446,6 +1506,9 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 }
 
 bool MaterialManager::TryActivatePublishedMaterialState() {
+	if constexpr (!br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
+		return false;
+	}
 	const auto source = br::render::PublishedStateSource::ProcessSource();
 	const auto published = source ? source->Load() : nullptr;
 	const auto materialState = published

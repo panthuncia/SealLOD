@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -7,6 +8,8 @@
 #include <string>
 #include <string_view>
 #include <typeindex>
+#include <type_traits>
+#include <variant>
 #include <vector>
 #include <array>
 
@@ -70,6 +73,17 @@ struct ArtifactRequirement {
     std::uint32_t alternativeGroup = 0;
 };
 
+struct HandleRequirement {
+    ArtifactKey key;
+    std::uint64_t minimumRevision = 0;
+    ArtifactReadiness requiredReadiness = ArtifactReadiness::CpuReady;
+};
+struct Require { HandleRequirement requirement; };
+struct Optional { HandleRequirement requirement; };
+struct FirstReady { std::vector<HandleRequirement> alternatives; };
+struct AnyReady { std::vector<HandleRequirement> alternatives; };
+using DependencyExpression = std::variant<Require, Optional, FirstReady, AnyReady>;
+
 class ArtifactPayload {
 public:
     ArtifactPayload() = default;
@@ -102,6 +116,7 @@ struct ArtifactSnapshot {
     std::uint64_t generation = 0;
     ArtifactReadiness readiness = ArtifactReadiness::Missing;
     ArtifactPayload payload;
+    std::shared_ptr<const struct GpuDependencyToken> gpuDependency;
 };
 
 struct GpuDependencyToken {
@@ -128,6 +143,26 @@ struct GpuDependencyToken {
     [[nodiscard]] bool Cancel() const { return cancel && cancel(); }
 };
 
+template <class T>
+struct ArtifactHandle {
+    ArtifactKey key;
+    std::uint64_t revision = 0;
+    std::uint64_t generation = 0;
+    ArtifactReadiness readiness = ArtifactReadiness::Missing;
+    std::shared_ptr<const T> payload;
+    std::shared_ptr<const GpuDependencyToken> gpuDependency;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return static_cast<bool>(payload);
+    }
+};
+
+template <class T>
+[[nodiscard]] ArtifactHandle<T> MakeArtifactHandle(const ArtifactSnapshot& snapshot) {
+    return { snapshot.key, snapshot.revision, snapshot.generation, snapshot.readiness,
+        snapshot.payload.Get<T>(), snapshot.gpuDependency };
+}
+
 std::shared_ptr<const GpuDependencyToken> MakeGpuDependencyToken(
     const std::shared_ptr<org::TrackedUploadTicket>& ticket);
 
@@ -139,6 +174,16 @@ struct ArtifactBuildContext {
     ArtifactPayload input;
     ArtifactPayload checkpoint;
     std::function<bool()> stopRequested;
+
+    template <class T>
+    [[nodiscard]] ArtifactHandle<T> Dependency(ArtifactKey dependencyKey) const {
+        const auto found = std::ranges::find_if(dependencies,
+            [&](const ArtifactSnapshot& dependency) {
+                return dependency.key == dependencyKey;
+            });
+        return found == dependencies.end() ? ArtifactHandle<T>{}
+                                           : MakeArtifactHandle<T>(*found);
+    }
 };
 
 enum class ArtifactRequestStatus : std::uint8_t {
@@ -146,6 +191,7 @@ enum class ArtifactRequestStatus : std::uint8_t {
     AlreadyDesired,
     StaleRevision,
     ConflictingRevision,
+    TypeMismatch,
     ShuttingDown,
 };
 
@@ -185,6 +231,8 @@ struct ArtifactProducerRegistration {
     TaskDomain domain = TaskDomain::General;
     std::string taskName;
     ArtifactProducer producer;
+    std::type_index inputType{ typeid(void) };
+    std::type_index outputType{ typeid(void) };
 };
 
 struct ArtifactDiagnostic {
@@ -221,11 +269,38 @@ public:
     AsyncStateGraph& operator=(const AsyncStateGraph&) = delete;
 
     void RegisterProducer(ArtifactKind kind, ArtifactProducerRegistration registration);
+    template <class Input, class Output>
+    void RegisterTypedProducer(ArtifactKind kind, TaskLane lane, TaskDomain domain,
+        std::string taskName,
+        std::function<ArtifactBuildResult(const ArtifactBuildContext&,
+            std::shared_ptr<const Input>)> producer) {
+        ArtifactProducerRegistration registration;
+        registration.lane = lane;
+        registration.domain = domain;
+        registration.taskName = std::move(taskName);
+        registration.inputType = std::type_index(typeid(Input));
+        registration.outputType = std::type_index(typeid(Output));
+        registration.producer = [producer = std::move(producer)](const ArtifactBuildContext& context) {
+            const auto input = context.input.Get<Input>();
+            if (!input) return ArtifactBuildResult::Failure("artifact input type mismatch");
+            auto result = producer(context, input);
+            if (result.outcome == ArtifactBuildResult::Outcome::Ready &&
+                !result.payload.Get<Output>()) {
+                return ArtifactBuildResult::Failure("artifact output type mismatch");
+            }
+            return result;
+        };
+        RegisterProducer(kind, std::move(registration));
+    }
     ArtifactRequestResult Request(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
         std::uint64_t requestFingerprint = 0);
+    ArtifactRequestResult RequestExpressions(ArtifactKey key, std::uint64_t desiredRevision,
+        std::vector<DependencyExpression> dependencies, ArtifactPayload input = {},
+        std::uint64_t requestFingerprint = 0);
     bool Invalidate(ArtifactKey key, std::uint64_t desiredRevision);
     void Cancel(ArtifactKey key);
+    void Release(ArtifactKey key);
     void MarkPublished(ArtifactKey key, std::uint64_t revision);
     void PumpGpuCompletions();
     void SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback);

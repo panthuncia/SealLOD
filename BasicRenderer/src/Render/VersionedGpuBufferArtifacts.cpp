@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <format>
 #include <limits>
 #include <mutex>
@@ -10,8 +11,34 @@
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Resource.h"
 #include "Utilities/Utilities.h"
+#include <BasicTelemetry/Telemetry.h>
 
 namespace br::render {
+
+std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
+    std::uint64_t capacityClass, std::uint32_t elementStride,
+    bool unorderedAccess, bool indirectArguments, std::string_view debugName,
+    bool& expanded) {
+    std::lock_guard lock(m_mutex);
+    for (const auto& backing : m_backings) {
+        if (backing && backing.use_count() == 1 && backing->capacityClass == capacityClass) {
+            expanded = false;
+            return backing;
+        }
+    }
+    Resource::ScopedECSRegistrationSuppression suppressECS;
+    auto resource = CreateIndexedStructuredBuffer(
+        static_cast<std::uint32_t>((std::max<std::uint64_t>)(capacityClass, 1u)),
+        elementStride, unorderedAccess, indirectArguments);
+    resource->SetName(std::string(debugName));
+    auto backing = std::make_shared<BufferBackingArtifact>();
+    backing->resource = std::move(resource);
+    backing->backingGeneration = m_nextGeneration++;
+    backing->capacityClass = capacityClass;
+    m_backings.push_back(backing);
+    expanded = true;
+    return backing;
+}
 
 VersionedGpuBufferJournal::VersionedGpuBufferJournal(std::uint32_t elementStride)
     : m_elementStride(elementStride) {}
@@ -186,6 +213,43 @@ std::shared_ptr<const GpuDependencyToken> TokenForTicket(
     return token;
 }
 
+std::shared_ptr<const GpuDependencyToken> TokenForTickets(
+    std::vector<std::shared_ptr<org::TrackedUploadTicket>> tickets) {
+    std::erase(tickets, nullptr);
+    if (tickets.empty()) return {};
+    if (tickets.size() == 1) return TokenForTicket(tickets.front());
+    auto token = std::make_shared<GpuDependencyToken>();
+    auto shared = std::make_shared<const std::vector<std::shared_ptr<org::TrackedUploadTicket>>>(
+        std::move(tickets));
+    token->isComplete = [shared] {
+        return std::ranges::all_of(*shared, [](const auto& ticket) { return ticket->Complete(); });
+    };
+    token->subscribe = [shared](std::function<void()> callback) {
+        auto fired = std::make_shared<std::atomic_bool>(false);
+        auto notify = [shared, callback = std::move(callback), fired]() mutable {
+            if (!std::ranges::all_of(*shared, [](const auto& ticket) { return ticket->Complete(); })) return;
+            if (!fired->exchange(true, std::memory_order_acq_rel) && callback) callback();
+        };
+        for (const auto& ticket : *shared) ticket->SetChangeCallback(notify);
+        notify();
+    };
+    token->cancel = [shared] {
+        bool cancelled = false;
+        for (const auto& ticket : *shared) cancelled = ticket->Cancel() || cancelled;
+        return cancelled;
+    };
+    token->describe = [shared] { return std::format("batched-tickets={}", shared->size()); };
+    return token;
+}
+
+std::uint64_t ReplacementCapacity(const VersionedGpuBufferBuildInput& input) {
+    const auto required = (std::max<std::uint64_t>)(input.capacity, 1u);
+    const auto rounded = std::bit_ceil(required);
+    if (!input.previous) return rounded;
+    const auto grown = input.previous->capacity + (std::max<std::uint64_t>)(input.previous->capacity / 2u, 1u);
+    return (std::max)(rounded, grown);
+}
+
 ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context) {
     const auto input = context.input.Get<VersionedGpuBufferBuildInput>();
     if (!input || !input->uploadService || input->elementStride == 0u) {
@@ -195,24 +259,59 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     auto shadow = ReplayVersionedGpuBufferShadow(*input, replayError);
     if (!shadow) return ArtifactBuildResult::Failure(std::move(replayError));
 
-    Resource::ScopedECSRegistrationSuppression suppressECS;
-    auto resource = CreateIndexedStructuredBuffer(
-        static_cast<std::uint32_t>((std::max<std::uint64_t>)(input->capacity, 1u)),
-        input->elementStride, input->unorderedAccess, input->indirectArguments);
-    resource->SetName(input->debugName);
+    const bool fitsBacking = input->previous && input->previous->resource &&
+        input->capacity <= input->previous->capacity;
+    const bool appendOnly = fitsBacking && std::ranges::all_of(input->writes, [&](const auto& write) {
+        return !write.bytes || write.elementOffset >= input->previous->elementCount;
+    });
+    const auto mode = fitsBacking ? BufferRevisionMode::Patch : BufferRevisionMode::Replace;
+    auto pool = input->backingPool ? input->backingPool
+                                   : std::make_shared<VersionedGpuBufferBackingPool>();
+    std::shared_ptr<BufferBackingArtifact> backing;
+    bool backingExpanded = false;
+    if (appendOnly) {
+        backing = input->previous->backing;
+        if (!backing) {
+            backing = std::make_shared<BufferBackingArtifact>();
+            backing->resource = input->previous->resource;
+            backing->capacityClass = input->previous->capacity;
+        }
+    } else {
+        const auto capacityClass = mode == BufferRevisionMode::Replace
+            ? ReplacementCapacity(*input) : input->previous->capacity;
+        backing = pool->Acquire(capacityClass, input->elementStride,
+            input->unorderedAccess, input->indirectArguments, input->debugName,
+            backingExpanded);
+    }
+    auto resource = backing->resource;
+    basic_telemetry::AddCounter(mode == BufferRevisionMode::Patch
+        ? "SARP.VersionedBuffer.Patch" : "SARP.VersionedBuffer.Replace");
+    if (mode == BufferRevisionMode::Patch && backingExpanded) {
+        basic_telemetry::AddCounter("SARP.VersionedBuffer.PatchBackingExpansion");
+    }
 
-    std::shared_ptr<org::TrackedUploadTicket> ticket;
-    if (!shadow->empty()) {
-        ticket = input->uploadService->QueueTrackedStreamingUpload(
-            shadow->data(), shadow->size(), resource, 0);
+    std::vector<std::shared_ptr<org::TrackedUploadTicket>> tickets;
+    if (appendOnly) {
+        for (const auto& write : input->writes) {
+            if (!write.bytes || write.bytes->empty()) continue;
+            tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
+                write.bytes->data(), write.bytes->size(), resource,
+                write.elementOffset * input->elementStride));
+        }
+    } else if (!shadow->empty()) {
+        tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
+            shadow->data(), shadow->size(), resource, 0));
     }
 
     auto version = std::make_shared<PublishedGpuBufferVersion>();
     version->revision = context.revision;
     version->writeSequence = input->writeSequence;
     version->elementCount = input->elementCount;
-    version->capacity = input->capacity;
+    version->capacity = backing->capacityClass;
     version->elementStride = input->elementStride;
+    version->revisionMode = mode;
+    version->contentVersion = context.revision;
+    version->backing = std::move(backing);
     version->resource = resource;
     version->cpuShadow = std::move(shadow);
 
@@ -226,7 +325,8 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     root->catalogEntries.emplace_back(PublishedResourceKey{
         input->catalogOwner, input->catalogUsage, 0, 0, input->catalogVariant }, resources);
     return ArtifactBuildResult::Ready(
-        ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(root)), TokenForTicket(ticket));
+        ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(root)),
+        TokenForTickets(std::move(tickets)));
 }
 
 } // namespace

@@ -14,9 +14,6 @@ ArtifactBuildResult BuildStaticTransaction(const ArtifactBuildContext& context) 
     if (input->transactionID == 0 || input->transactionID != context.key.primaryID) {
         return ArtifactBuildResult::Failure("static transaction identity mismatch");
     }
-    if (input->streamGeneration != context.key.variantID) {
-        return ArtifactBuildResult::Failure("static transaction generation mismatch");
-    }
     if (input->groups.empty() || input->groupCount != input->groups.size()) {
         return ArtifactBuildResult::Failure("static transaction group closure is incomplete");
     }
@@ -70,8 +67,7 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
             return ArtifactBuildResult::Failure("static scene contains an unexpected transaction");
         }
         const auto transaction = dependency.payload.Get<PublishedStaticTransaction>();
-        if (!transaction || transaction->transactionID != dependency.key.primaryID ||
-            transaction->streamGeneration != dependency.key.variantID) {
+        if (!transaction || transaction->transactionID != dependency.key.primaryID) {
             return ArtifactBuildResult::Failure("static scene transaction payload mismatch");
         }
         for (const auto& group : transaction->groups) {

@@ -216,6 +216,10 @@ void SortedUnsignedIntBuffer::AppendActiveEntries(const std::vector<ActiveDrawSe
     EnsureCapacityForSize(firstIndex + entries.size());
     m_activeEntries.insert(m_activeEntries.end(), entries.begin(), entries.end());
     ++m_mutationRevision;
+    if (m_activeMutationCallback) {
+        m_activeMutationCallback(false, m_mutationRevision,
+            std::make_shared<const std::vector<ActiveDrawSetEntry>>(entries));
+    }
     StageOrUpload(
         entries.data(),
         sizeof(ActiveDrawSetEntry) * entries.size(),
@@ -245,6 +249,10 @@ void SortedUnsignedIntBuffer::AssignActiveSnapshot(std::vector<ActiveDrawSetEntr
     m_liveSize = m_activeEntries.size();
     m_activeTombstoneEstimate = 0;
     ++m_mutationRevision;
+    if (m_activeMutationCallback) {
+        m_activeMutationCallback(true, m_mutationRevision,
+            std::make_shared<const std::vector<ActiveDrawSetEntry>>(m_activeEntries));
+    }
     if (!m_activeEntries.empty()) {
         StageOrUpload(m_activeEntries.data(), sizeof(ActiveDrawSetEntry) * m_activeEntries.size(), 0);
     }

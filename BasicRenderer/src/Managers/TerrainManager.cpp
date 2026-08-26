@@ -1118,7 +1118,7 @@ void TerrainManager::RequestGraphState()
 	for (const auto& [textureID, binding] : bindings) {
 		input->textureBindings.push_back(binding);
 		requirements.push_back({
-			{ br::render::ArtifactKind::TextureBinding, textureID, binding.bindingRevision },
+			{ br::render::ArtifactKind::TextureBinding, textureID, 0 },
 			binding.bindingRevision, br::render::ArtifactReadiness::GpuReady });
 	}
 	const auto stateRevision = input->stateRevision;

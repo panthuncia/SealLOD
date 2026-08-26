@@ -5,6 +5,7 @@
 #include <algorithm> // For std::lower_bound, std::upper_bound
 #include <cstddef>
 #include <cstring>
+#include <functional>
 #include <rhi.h>
 
 #include "Resources/Buffers/Buffer.h"
@@ -22,6 +23,9 @@ public:
         uint32_t drawRecordIndex = 0;
         uint32_t generation = 0;
     };
+    using ActiveMutationCallback = std::function<void(
+        bool replace, std::uint64_t revision,
+        std::shared_ptr<const std::vector<ActiveDrawSetEntry>> entries)>;
 
     static std::shared_ptr<SortedUnsignedIntBuffer> CreateShared(uint64_t capacity = 64, std::string name = "", bool UAV = false) {
         return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, UAV));
@@ -50,6 +54,9 @@ public:
     std::vector<ActiveDrawSetEntry> SnapshotActiveEntries() const;
     uint64_t MutationRevision() const {
         return m_mutationRevision;
+    }
+    void SetActiveMutationCallback(ActiveMutationCallback callback) {
+        m_activeMutationCallback = std::move(callback);
     }
 
     // Remove an element (and shift the tail on GPU)
@@ -166,6 +173,7 @@ private:
     uint64_t m_liveSize = 0;
     uint64_t m_activeTombstoneEstimate = 0;
     uint64_t m_mutationRevision = 1;
+    ActiveMutationCallback m_activeMutationCallback;
     uint64_t m_earliestModifiedIndex; // To avoid updating the entire buffer every time
 
     std::vector<EntityComponentBundle> m_metadataBundles;

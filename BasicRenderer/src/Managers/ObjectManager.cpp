@@ -16,6 +16,7 @@
 #include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/PublishedRendererState.h"
 #include "Render/RendererStateRequestService.h"
+#include "Render/GraphMigrationMode.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Resources/Resolvers/PublishedStateResourceResolver.h"
 #include "Resources/components.h"
@@ -267,6 +268,9 @@ ObjectManager::ObjectManager() {
 ObjectManager::~ObjectManager() {
 	StopActiveDrawSetCompactionWorker();
 	StopDeferredRetireWorker();
+	for (auto& [_, buffer] : m_activeDrawSetIndices) {
+		if (buffer) buffer->SetActiveMutationCallback({});
+	}
 }
 
 void ObjectManager::StartDeferredRetireWorker() {
@@ -294,22 +298,27 @@ void ObjectManager::SetRendererStateServices(
 	const auto source = br::render::PublishedStateSource::ProcessSource();
 	for (const auto& [identifier, buffer, variant, stride] : definitions) {
 		buffer->EnableVersionedGraphJournal();
-		buffer->ReleaseECSEntity();
 		GraphBufferBinding binding{};
 		binding.identifier = identifier;
 		binding.buffer = buffer;
 		binding.key = { br::render::ArtifactKind::BufferVersion, 0x4f424a4255460000ull, variant };
 		binding.catalogVariant = variant;
 		binding.elementStride = stride;
+		binding.backingPool = std::make_shared<br::render::VersionedGpuBufferBackingPool>();
 		m_graphBufferBindings.push_back(std::move(binding));
-		m_graphBufferResolvers.emplace(identifier,
-			std::make_shared<PublishedStateResourceResolver>(source,
-				br::render::PublishedResourceKey{
-					br::render::PublishedFragmentKind::DrawRecords,
-					br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
-				buffer, true));
-		buffer->SetVersionedGraphExclusive(true);
-		m_resources.erase(identifier);
+		if constexpr (br::render::GraphActive(br::render::kObjectBufferGraphMigrationMode)) {
+			buffer->ReleaseECSEntity();
+			m_graphBufferResolvers.emplace(identifier,
+				std::make_shared<PublishedStateResourceResolver>(source,
+					br::render::PublishedResourceKey{
+						br::render::PublishedFragmentKind::DrawRecords,
+						br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
+					buffer, true));
+			buffer->SetVersionedGraphExclusive(true);
+			m_resources.erase(identifier);
+		} else {
+			buffer->SetVersionedGraphExclusive(false);
+		}
 	}
 }
 
@@ -335,6 +344,7 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 			input->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
 			input->catalogVariant = binding.catalogVariant;
 			input->previous = capture.previous;
+			input->backingPool = binding.backingPool;
 			input->writes = capture.writes;
 			input->bytes = capture.initialBytes;
 			if (m_rendererStateRequests->Request(binding.key, revision, {},
@@ -887,10 +897,39 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 		+ ", clodOnly=" + std::to_string(workloadKey.clodOnly ? 1 : 0) + ")";
 	const auto capacity = (std::max<std::uint64_t>)(1u, static_cast<std::uint64_t>(initialCapacity));
 	auto buffer = SortedUnsignedIntBuffer::CreateGraphActiveDrawSetShared(capacity, debugName);
+	buffer->SetActiveMutationCallback(
+		[this, workloadKey](bool replace, std::uint64_t revision,
+			std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>> entries) {
+			if (m_activeDrawSetMutationCallback) {
+				m_activeDrawSetMutationCallback(
+					workloadKey, replace, revision, std::move(entries));
+			}
+		});
 	org::memory::SetResourceUsageHint(*buffer, "PerMesh, PerMeshInstance, PerObject");
 	m_activeDrawSetIndices[workloadKey] = buffer;
 	++m_drawSetDeclarationRevision;
 	return buffer;
+}
+
+void ObjectManager::SetActiveDrawSetMutationCallback(ActiveDrawSetMutationCallback callback) {
+	m_activeDrawSetMutationCallback = std::move(callback);
+	for (auto& [workloadKey, buffer] : m_activeDrawSetIndices) {
+		if (!buffer) continue;
+		buffer->SetActiveMutationCallback(
+			[this, workloadKey](bool replace, std::uint64_t revision,
+				std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>> entries) {
+				if (m_activeDrawSetMutationCallback) {
+					m_activeDrawSetMutationCallback(
+						workloadKey, replace, revision, std::move(entries));
+				}
+			});
+		if (m_activeDrawSetMutationCallback) {
+			m_activeDrawSetMutationCallback(
+				workloadKey, true, buffer->MutationRevision(),
+				std::make_shared<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>>(
+					buffer->SnapshotActiveEntries()));
+		}
+	}
 }
 
 std::uint32_t ObjectManager::ActivateDrawRecordCPU(std::uint32_t drawRecordIndex) {

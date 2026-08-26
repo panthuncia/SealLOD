@@ -28,21 +28,36 @@
 IndirectCommandBufferManager::IndirectCommandBufferManager() = default;
 
 IndirectCommandBufferManager::~IndirectCommandBufferManager() {
+    m_stopping.store(true, std::memory_order_release);
+    if (m_observedObjectManager) m_observedObjectManager->SetActiveDrawSetMutationCallback({});
+    if (m_buildScope.Valid()) m_buildScope.CancelAndWait();
 }
 
 void IndirectCommandBufferManager::RegisterWorkload(const DrawWorkloadKey& workloadKey) {
-    EnsureWorkloadRegistered(workloadKey);
+    {
+        std::lock_guard lock(m_desiredMutex);
+        EnsureWorkloadRegistered(workloadKey);
+    }
+    ScheduleDesiredBuild();
 }
 
 void IndirectCommandBufferManager::CreateBuffersForView(uint64_t viewID) {
-    if (m_viewIDs.insert(viewID).second) {
+    {
+        std::lock_guard lock(m_desiredMutex);
+        if (!m_viewIDs.insert(viewID).second) return;
         ++m_viewLifetimeRevisions[viewID];
         ++m_desiredMutationRevision;
     }
+    ScheduleDesiredBuild();
 }
 
 void IndirectCommandBufferManager::UnregisterBuffers(uint64_t viewID) {
-    if (m_viewIDs.erase(viewID) != 0) ++m_desiredMutationRevision;
+    {
+        std::lock_guard lock(m_desiredMutex);
+        if (m_viewIDs.erase(viewID) == 0) return;
+        ++m_desiredMutationRevision;
+    }
+    ScheduleDesiredBuild();
 }
 
 void IndirectCommandBufferManager::UpdateBuffersForWorkload(const DrawWorkloadKey& workloadKey, unsigned int numDraws) {
@@ -69,122 +84,210 @@ void IndirectCommandBufferManager::RequestWorkloadCounts(std::span<const Workloa
         deduped[update.workloadKey] = update.count;
     }
 
-    for (const auto& [workloadKey, count] : deduped) {
-        EnsureWorkloadRegistered(workloadKey);
-        auto& desired = m_workloadToRequestedCount[workloadKey];
-        if (desired != count) {
-            desired = count;
-            ++m_desiredMutationRevision;
+    bool changed = false;
+    {
+        std::lock_guard lock(m_desiredMutex);
+        for (const auto& [workloadKey, count] : deduped) {
+            EnsureWorkloadRegistered(workloadKey);
+            auto& desired = m_workloadToRequestedCount[workloadKey];
+            if (desired != count) {
+                desired = count;
+                ++m_desiredMutationRevision;
+                changed = true;
+            }
         }
     }
+    if (changed) ScheduleDesiredBuild();
 }
 
 void IndirectCommandBufferManager::SetRendererStateServices(
     br::render::RendererStateRequestService* requests, org::runtime::IUploadService* uploads) {
     m_rendererStateRequests = requests;
     m_uploadService = uploads;
+    if (requests && !m_buildScope.Valid()) {
+        m_buildScope = TaskSchedulerManager::GetInstance().CreateScope(
+            "IndirectCommandBufferManager::DesiredState");
+    }
 }
 
 void IndirectCommandBufferManager::PublishDesiredState(
 	ObjectManager& objectManager, MaterialManager& materialManager) {
     BT_ZONE_SCOPE("IndirectCommandBufferManager::PublishDesiredState");
     if (!m_rendererStateRequests || !m_uploadService) return;
+	if (!m_activeObserverInstalled) {
+		m_activeObserverInstalled = true;
+		m_observedObjectManager = &objectManager;
+		objectManager.SetActiveDrawSetMutationCallback(
+			[this](const DrawWorkloadKey& workloadKey, bool replace,
+				std::uint64_t revision,
+				std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>> entries) {
+				OnActiveDrawSetMutation(
+					workloadKey, replace, revision, std::move(entries));
+			});
+	}
 	const auto objectBufferRequirement = objectManager.DesiredBufferStateRequirement();
-	const auto materialRevision = materialManager.DesiredPublishedStateRevision();
+    (void)materialManager;
     const auto residentDrawRecordCount = objectManager.GetResidentInstanceDrawRecordCount();
-    bool changed = m_consumedMutationRevision != m_desiredMutationRevision ||
-        m_lastObjectBufferRevision != (objectBufferRequirement ? objectBufferRequirement->minimumRevision : 0u) ||
-        m_lastMaterialRevision != materialRevision ||
-        m_lastResidentDrawRecordCount != residentDrawRecordCount;
-    for (const auto& [key, requestedCount] : m_workloadToRequestedCount) {
-        auto active = objectManager.TryGetActiveDrawSetIndices(key);
-        if (!active) continue;
-        auto& snapshot = m_activeSnapshots[key];
-        if (snapshot.revision != active->MutationRevision()) {
-            const auto entries = active->SnapshotActiveEntries();
-            snapshot.entries.clear();
-            snapshot.entries.reserve(entries.size());
-            for (const auto& entry : entries) {
-                snapshot.entries.push_back({ entry.drawRecordIndex, entry.generation });
-            }
-            snapshot.revision = active->MutationRevision();
+    bool changed = false;
+    {
+        std::lock_guard lock(m_desiredMutex);
+        const auto objectBufferRevision =
+            objectBufferRequirement ? objectBufferRequirement->minimumRevision : 0u;
+        if (m_lastObjectBufferRevision != objectBufferRevision ||
+            m_lastResidentDrawRecordCount != residentDrawRecordCount) {
+            m_lastObjectBufferRevision = objectBufferRevision;
+            m_objectBufferRequirement = objectBufferRequirement;
+            m_lastResidentDrawRecordCount = residentDrawRecordCount;
+            ++m_desiredMutationRevision;
             changed = true;
         }
+        changed = changed || m_consumedMutationRevision != m_desiredMutationRevision;
     }
-    if (!changed) {
-        if (m_graphRevision != 0 && ++m_graphDiagnosticTicks >= 120u) {
-            m_graphDiagnosticTicks = 0;
-            const auto diagnostic = m_rendererStateRequests->Diagnose(
-                { br::render::ArtifactKind::IndirectWorkload, 0, 0 });
-            const auto source = br::render::PublishedStateSource::ProcessSource();
-            const auto published = source ? source->Load() : nullptr;
-            spdlog::info(
-                "Indirect state progress: desiredRevision={} artifactRevision={} readiness={} blockers={} ageMs={} publishedRevision={} chain='{}' error='{}'",
-                diagnostic.desiredRevision, diagnostic.artifact.revision,
-                static_cast<unsigned int>(diagnostic.artifact.readiness), diagnostic.blockers.size(),
-                diagnostic.stateAge.count() / 1000,
-                published ? published->indirectWorkloads.revision : 0u,
-                diagnostic.blockerChain, diagnostic.error);
+    if (changed) ScheduleDesiredBuild();
+}
+
+void IndirectCommandBufferManager::OnActiveDrawSetMutation(
+    const DrawWorkloadKey& workloadKey, bool replace, std::uint64_t revision,
+    std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>> entries) {
+    {
+        std::lock_guard lock(m_desiredMutex);
+        EnsureWorkloadRegistered(workloadKey);
+        auto& journal = m_activeJournals[workloadKey];
+        if (revision <= journal.revision) return;
+        if (replace) {
+            journal.base = std::move(entries);
+            journal.appends.clear();
+        } else if (entries && !entries->empty()) {
+            journal.appends.push_back(std::move(entries));
         }
+        journal.revision = revision;
+        ++m_desiredMutationRevision;
+    }
+}
+
+IndirectCommandBufferManager::DesiredSnapshot
+IndirectCommandBufferManager::CaptureDesiredSnapshotLocked() const {
+    DesiredSnapshot snapshot;
+    snapshot.revision = m_desiredMutationRevision;
+    snapshot.objectBufferRequirement = m_objectBufferRequirement;
+    snapshot.residentDrawRecordCount = m_lastResidentDrawRecordCount;
+    snapshot.incrementSize = m_incrementSize;
+    snapshot.requestedCounts = m_workloadToRequestedCount;
+    snapshot.capacities = m_workloadToCapacity;
+    snapshot.workloadIDs = m_workloadIDs;
+    snapshot.activeJournals = m_activeJournals;
+    snapshot.viewIDs = m_viewIDs;
+    snapshot.viewLifetimeRevisions = m_viewLifetimeRevisions;
+    return snapshot;
+}
+
+void IndirectCommandBufferManager::ScheduleDesiredBuild() {
+    if (m_stopping.load(std::memory_order_acquire) || !m_buildScope.Valid() ||
+        !m_rendererStateRequests || !m_uploadService ||
+        m_buildScheduled.exchange(true, std::memory_order_acq_rel)) return;
+    const auto accepted = TaskSchedulerManager::GetInstance().Submit(
+        m_buildScope, TaskLane::Streaming, TaskDomain::General,
+        "IndirectCommandBufferManager::BuildDesiredState",
+        [this](const br::TaskContext& context) { DrainDesiredBuild(context); });
+    if (!accepted) m_buildScheduled.store(false, std::memory_order_release);
+}
+
+void IndirectCommandBufferManager::DrainDesiredBuild(const br::TaskContext& context) {
+    if (context.StopRequested() || m_stopping.load(std::memory_order_acquire)) {
+        m_buildScheduled.store(false, std::memory_order_release);
         return;
     }
+    DesiredSnapshot snapshot;
+    {
+        std::lock_guard lock(m_desiredMutex);
+        if (m_consumedMutationRevision == m_desiredMutationRevision) {
+            m_buildScheduled.store(false, std::memory_order_release);
+            return;
+        }
+        snapshot = CaptureDesiredSnapshotLocked();
+        m_consumedMutationRevision = snapshot.revision;
+    }
+    BuildDesiredState(std::move(snapshot));
 
+    // Publish at most one coalesced snapshot per frame. The preparation task
+    // runs outside the single-slot RendererState domain so it cannot delay the
+    // graph producers that consume these requests.
+    m_buildScheduled.store(false, std::memory_order_release);
+}
+
+void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
+    const auto started = std::chrono::steady_clock::now();
     auto input = std::make_shared<br::render::IndirectStateBuildInput>();
     input->materializeResources = true;
-    input->incrementSize = m_incrementSize;
-    input->viewIDs.reserve(m_viewIDs.size());
-    for (const auto viewID : m_viewIDs) input->viewIDs.push_back(viewID);
-    input->workloads.reserve(m_workloadToRequestedCount.size());
+    input->incrementSize = snapshot.incrementSize;
+    input->viewIDs.assign(snapshot.viewIDs.begin(), snapshot.viewIDs.end());
+    std::ranges::sort(input->viewIDs);
+    input->workloads.reserve(snapshot.requestedCounts.size());
+
     std::vector<br::render::ArtifactRequirement> requirements;
-    requirements.reserve(m_workloadToRequestedCount.size());
-	if (objectBufferRequirement) requirements.push_back(*objectBufferRequirement);
-	if (materialRevision != 0) {
-		requirements.push_back({ { br::render::ArtifactKind::MaterialTable, 0, 0 },
-			materialRevision, br::render::ArtifactReadiness::GpuReady });
-	}
+    if (snapshot.objectBufferRequirement) requirements.push_back(*snapshot.objectBufferRequirement);
     for (const auto viewID : input->viewIDs) {
-        const auto lifetimeRevision = m_viewLifetimeRevisions.at(viewID);
+        const auto lifetimeRevision = snapshot.viewLifetimeRevisions.at(viewID);
         const br::render::ArtifactKey lifetimeKey{
             br::render::ArtifactKind::ViewLifetime, viewID, 0 };
         auto lifetime = std::make_shared<br::render::ViewLifetimeArtifact>(
             br::render::ViewLifetimeArtifact{ viewID, lifetimeRevision });
         (void)m_rendererStateRequests->Request(lifetimeKey, lifetimeRevision, {},
-            br::render::ArtifactPayload::Make<br::render::ViewLifetimeArtifact>(std::move(lifetime)));
-        requirements.push_back({ lifetimeKey, lifetimeRevision,
-            br::render::ArtifactReadiness::GpuReady });
+            br::render::ArtifactPayload::Make<br::render::ViewLifetimeArtifact>(
+                std::move(lifetime)));
+        requirements.push_back({
+            lifetimeKey, lifetimeRevision, br::render::ArtifactReadiness::GpuReady });
     }
+
     std::uint64_t sourceEntryCount = 0;
     std::uint64_t safeDrawCount = 0;
     std::uint32_t nonEmptyWorkloads = 0;
-    for (const auto& [key, requestedCount] : m_workloadToRequestedCount) {
-        auto active = objectManager.TryGetActiveDrawSetIndices(key);
-        if (!active) continue;
-        const auto cached = m_activeSnapshots.find(key);
-        if (cached == m_activeSnapshots.end()) continue;
-        const auto& entries = cached->second.entries;
+    const auto roundUp = [increment = snapshot.incrementSize](unsigned int value) {
+        return ((value + increment - 1u) / increment) * increment;
+    };
+    for (const auto& [key, requestedCount] : snapshot.requestedCounts) {
+        const auto journalFound = snapshot.activeJournals.find(key);
+        const auto idFound = snapshot.workloadIDs.find(key);
+        if (journalFound == snapshot.activeJournals.end() ||
+            idFound == snapshot.workloadIDs.end() || journalFound->second.revision == 0) continue;
+        const auto& journal = journalFound->second;
+        std::size_t entryCount = journal.base ? journal.base->size() : 0u;
+        for (const auto& append : journal.appends) {
+            if (append) entryCount += append->size();
+        }
+        std::vector<br::render::ActiveDrawEntryDTO> entries;
+        entries.reserve(entryCount);
+        const auto appendEntries = [&entries](const auto& source) {
+            if (!source) return;
+            for (const auto& entry : *source) {
+                entries.push_back({ entry.drawRecordIndex, entry.generation });
+            }
+        };
+        appendEntries(journal.base);
+        for (const auto& append : journal.appends) appendEntries(append);
         sourceEntryCount += entries.size();
-        const auto drawRecordExtent = objectManager.GetResidentInstanceDrawRecordCount();
-        const auto invalidEntry = std::ranges::find_if(entries, [drawRecordExtent](const auto& entry) {
-            return entry.drawRecordIndex >= drawRecordExtent;
+
+        const auto invalidEntry = std::ranges::find_if(entries, [&](const auto& entry) {
+            return entry.drawRecordIndex >= snapshot.residentDrawRecordCount;
         });
         if (invalidEntry != entries.end()) {
             spdlog::error(
-                "Indirect state rejected workload with out-of-range draw record: index={} extent={} flags={} phase={} clodOnly={}",
-                invalidEntry->drawRecordIndex, drawRecordExtent, static_cast<std::uint64_t>(key.compileFlags),
+                "Indirect desired state rejected out-of-range draw record: index={} extent={} flags={} phase={} clodOnly={}",
+                invalidEntry->drawRecordIndex, snapshot.residentDrawRecordCount,
+                static_cast<std::uint64_t>(key.compileFlags),
                 key.renderPhase.hash, key.clodOnly);
             continue;
         }
+
         br::render::IndirectWorkloadInputDTO dto{};
         dto.key = key;
         dto.activeListArtifactKey = {
-            br::render::ArtifactKind::ActiveDrawList,
-            WorkloadID(key), 0 };
+            br::render::ArtifactKind::ActiveDrawList, idFound->second, 0 };
         dto.requestedCount = requestedCount;
-        dto.residentDrawRecordCount = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
-            objectManager.GetResidentInstanceDrawRecordCount(),
-            (std::numeric_limits<std::uint32_t>::max)()));
-        dto.minimumCapacity = m_workloadToCapacity[key];
-        dto.activeListRevision = cached->second.revision;
+        dto.residentDrawRecordCount = static_cast<std::uint32_t>(
+            (std::min<std::uint64_t>)(snapshot.residentDrawRecordCount,
+                (std::numeric_limits<std::uint32_t>::max)()));
+        dto.activeListRevision = journal.revision;
         dto.activeEntries = entries;
 
         auto activeInput = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
@@ -192,82 +295,97 @@ void IndirectCommandBufferManager::PublishDesiredState(
         activeInput->debugName = "PublishedActiveDrawList";
         activeInput->writeSequence = dto.activeListRevision;
         activeInput->elementStride = sizeof(br::render::ActiveDrawEntryDTO);
-        activeInput->elementCount = dto.activeEntries.size();
-        activeInput->capacity = dto.activeEntries.size();
+        activeInput->elementCount = entries.size();
+        activeInput->capacity = entries.size();
         activeInput->catalogOwner = br::render::PublishedFragmentKind::ActiveDrawLists;
         activeInput->catalogUsage = br::render::PublishedResourceUsage::ActiveDrawList;
         activeInput->catalogVariant = static_cast<std::uint64_t>(key.compileFlags) |
             (static_cast<std::uint64_t>(key.skinnedShadowCaster) << 62u) |
             (static_cast<std::uint64_t>(key.clodOnly) << 63u);
-        activeInput->bytes.resize(dto.activeEntries.size() * sizeof(br::render::ActiveDrawEntryDTO));
+        activeInput->bytes.resize(entries.size() * sizeof(br::render::ActiveDrawEntryDTO));
         if (!activeInput->bytes.empty()) {
-            std::memcpy(activeInput->bytes.data(), dto.activeEntries.data(), activeInput->bytes.size());
+            std::memcpy(activeInput->bytes.data(), entries.data(), activeInput->bytes.size());
         }
-        const auto activeRevision = (std::max<std::uint64_t>)(dto.activeListRevision, 1u);
+        const auto activeRevision = (std::max<std::uint64_t>)(journal.revision, 1u);
         (void)m_rendererStateRequests->Request(dto.activeListArtifactKey, activeRevision, {},
-            br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(activeInput)));
-        requirements.push_back({ dto.activeListArtifactKey, activeRevision,
-            br::render::ArtifactReadiness::GpuReady, br::render::DependencyPolicy::AllOf });
+            br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
+                std::move(activeInput)));
+        requirements.push_back({
+            dto.activeListArtifactKey, activeRevision, br::render::ArtifactReadiness::GpuReady });
+
         const auto safeCount = static_cast<unsigned int>((std::min<std::uint64_t>)({
-            requestedCount, active->ResidentSize(), dto.residentDrawRecordCount }));
+            requestedCount, entries.size(), dto.residentDrawRecordCount }));
         safeDrawCount += safeCount;
         nonEmptyWorkloads += safeCount != 0u ? 1u : 0u;
-        m_workloadToPublishedCount[key] = safeCount;
-        m_workloadToCapacity[key] = (std::max)(m_workloadToCapacity[key],
-            safeCount == 0u ? 0u : RoundUp(safeCount));
-        dto.minimumCapacity = m_workloadToCapacity[key];
+        auto& capacity = snapshot.capacities[key];
+        capacity = (std::max)(capacity, safeCount == 0u ? 0u : roundUp(safeCount));
+        dto.minimumCapacity = capacity;
         if (safeCount != 0u) {
             for (const auto viewID : input->viewIDs) {
                 const br::render::ArtifactKey argumentKey{
-                    br::render::ArtifactKind::BufferVersion,
-                    WorkloadID(key),
-                    viewID };
+                    br::render::ArtifactKind::BufferVersion, idFound->second, viewID };
                 auto argumentInput = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
                 argumentInput->uploadService = m_uploadService;
                 argumentInput->debugName = "PublishedIndirectArguments";
-                argumentInput->writeSequence = dto.minimumCapacity;
+                argumentInput->writeSequence = capacity;
                 argumentInput->elementStride = sizeof(DispatchMeshIndirectCommand);
-                argumentInput->elementCount = dto.minimumCapacity;
-                argumentInput->capacity = dto.minimumCapacity;
+                argumentInput->elementCount = capacity;
+                argumentInput->capacity = capacity;
                 argumentInput->unorderedAccess = true;
                 argumentInput->indirectArguments = true;
-                argumentInput->catalogOwner = br::render::PublishedFragmentKind::IndirectWorkloads;
-                argumentInput->catalogUsage = br::render::PublishedResourceUsage::IndirectArguments;
-                argumentInput->catalogVariant = static_cast<std::uint64_t>(key.compileFlags) |
+                argumentInput->catalogOwner =
+                    br::render::PublishedFragmentKind::IndirectWorkloads;
+                argumentInput->catalogUsage =
+                    br::render::PublishedResourceUsage::IndirectArguments;
+                argumentInput->catalogVariant =
+                    static_cast<std::uint64_t>(key.compileFlags) |
                     (static_cast<std::uint64_t>(key.skinnedShadowCaster) << 62u) |
                     (static_cast<std::uint64_t>(key.clodOnly) << 63u);
-                const auto argumentRevision = (std::max<std::uint64_t>)(dto.minimumCapacity, 1u);
-                (void)m_rendererStateRequests->Request(argumentKey, argumentRevision, {},
+                const auto argumentRevision =
+                    (std::max<std::uint64_t>)(capacity, 1u);
+                (void)m_rendererStateRequests->Request(
+                    argumentKey, argumentRevision, {},
                     br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
                         std::move(argumentInput)));
-                requirements.push_back({ argumentKey, argumentRevision,
-                    br::render::ArtifactReadiness::GpuReady, br::render::DependencyPolicy::AllOf });
+                requirements.push_back({
+                    argumentKey, argumentRevision, br::render::ArtifactReadiness::GpuReady });
                 dto.argumentArtifacts.push_back({ viewID, argumentKey });
             }
         }
         input->workloads.push_back(std::move(dto));
     }
-    m_consumedMutationRevision = m_desiredMutationRevision;
-    m_lastObjectBufferRevision = objectBufferRequirement ? objectBufferRequirement->minimumRevision : 0u;
-    m_lastMaterialRevision = materialRevision;
-    m_lastResidentDrawRecordCount = residentDrawRecordCount;
-    m_graphDiagnosticTicks = 0;
-    ++m_graphRevision;
-    spdlog::info(
-        "Indirect state request: revision={} views={} workloads={}/{} sourceEntries={} safeDraws={} drawRecordExtent={} dependencies={}",
-        m_graphRevision, input->viewIDs.size(), nonEmptyWorkloads, input->workloads.size(),
-        sourceEntryCount, safeDrawCount, objectManager.GetResidentInstanceDrawRecordCount(), requirements.size());
+
+    {
+        std::lock_guard lock(m_desiredMutex);
+        for (const auto& [key, capacity] : snapshot.capacities) {
+            m_workloadToCapacity[key] = (std::max)(m_workloadToCapacity[key], capacity);
+        }
+    }
     (void)m_rendererStateRequests->Request(
-        { br::render::ArtifactKind::IndirectWorkload, 0, 0 }, m_graphRevision, std::move(requirements),
-        br::render::ArtifactPayload::Make<br::render::IndirectStateBuildInput>(std::move(input)));
+        { br::render::ArtifactKind::IndirectWorkload, 0, 0 },
+        snapshot.revision, std::move(requirements),
+        br::render::ArtifactPayload::Make<br::render::IndirectStateBuildInput>(
+            std::move(input)), snapshot.revision);
+    basic_telemetry::Record("SARP.Indirect.DesiredStateWorkerBuildNs",
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count()));
+    basic_telemetry::SetGauge("SARP.Indirect.DesiredStateSourceEntries",
+        static_cast<std::int64_t>(sourceEntryCount));
+    basic_telemetry::SetGauge("SARP.Indirect.DesiredStateSafeDraws",
+        static_cast<std::int64_t>(safeDrawCount));
+    basic_telemetry::SetGauge("SARP.Indirect.DesiredStateNonEmptyWorkloads",
+        static_cast<std::int64_t>(nonEmptyWorkloads));
 }
 
 void IndirectCommandBufferManager::SetIncrementSize(unsigned int incrementSize) {
     const auto desired = incrementSize == 0u ? 1u : incrementSize;
-    if (m_incrementSize != desired) {
+    {
+        std::lock_guard lock(m_desiredMutex);
+        if (m_incrementSize == desired) return;
         m_incrementSize = desired;
         ++m_desiredMutationRevision;
     }
+    ScheduleDesiredBuild();
 }
 
 // -------------------- helpers --------------------
@@ -289,9 +407,4 @@ void IndirectCommandBufferManager::EnsureWorkloadRegistered(const DrawWorkloadKe
         inserted = true;
     }
     if (inserted) ++m_desiredMutationRevision;
-}
-
-std::uint64_t IndirectCommandBufferManager::WorkloadID(const DrawWorkloadKey& workloadKey) const {
-    const auto found = m_workloadIDs.find(workloadKey);
-    return found == m_workloadIDs.end() ? 0u : found->second;
 }

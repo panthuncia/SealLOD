@@ -1425,3 +1425,23 @@ add_test(NAME TaskSchedulerManagerTests COMMAND TaskSchedulerManagerTests)
 add_test(NAME AsyncStateGraphTests COMMAND AsyncStateGraphTests)
 add_test(NAME CLodCoordinatorTests COMMAND CLodCoordinatorTests)
 add_test(NAME StatisticalSamplerTests COMMAND StatisticalSamplerTests)
+
+if(WIN32)
+    # BasicRenderer keeps its shared runtime payload in the common output root,
+    # while test executables live in a per-target configuration directory.
+    # Make tests runnable through CTest without requiring a developer shell to
+    # manually reproduce the renderer's deployed PATH.
+    set(_basicrenderer_runtime_tests
+        ShaderPreprocessTests
+        SkeletonArtifactCacheTests
+        PipelineRecipeTests
+        MaterialEvalVariantTests
+        VirtualShadowBudgetTests
+        BoundedSpscQueueTests
+        TaskSchedulerManagerTests
+        AsyncStateGraphTests
+        CLodCoordinatorTests
+        StatisticalSamplerTests)
+    set_tests_properties(${_basicrenderer_runtime_tests} PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_OUTPUT_ROOT}")
+endif()

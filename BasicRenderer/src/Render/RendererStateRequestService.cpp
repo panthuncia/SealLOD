@@ -15,9 +15,11 @@ RendererStateRequestService::RendererStateRequestService(
 RendererStateRequestService::~RendererStateRequestService() { Stop(); }
 
 bool RendererStateRequestService::Request(ArtifactKey key, std::uint64_t revision,
-    std::vector<ArtifactRequirement> requirements, ArtifactPayload input) {
+    std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
+    std::uint64_t inputFingerprint) {
     return m_accepting.load(std::memory_order_acquire) &&
-        m_graph.Request(key, revision, std::move(requirements), std::move(input));
+        m_graph.Request(key, revision, std::move(requirements), std::move(input),
+            inputFingerprint);
 }
 
 bool RendererStateRequestService::Invalidate(ArtifactKey key, std::uint64_t revision) {
@@ -119,63 +121,105 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         return true;
     };
 
-    if (input->roots.size() >= 63u) {
-        return ArtifactBuildResult::Failure("frame manifest root history exceeds selection mask capacity");
-    }
-    std::uint64_t selectedMask = 0;
-    const auto combinationCount = std::uint64_t{ 1 } << input->roots.size();
-    std::size_t bestCount = 0;
-    std::uint64_t bestRevisionScore = 0;
-    for (std::uint64_t mask = 1; mask < combinationCount; ++mask) {
-            auto candidate = input->base ? *input->base : PublishedRendererState{};
-            std::size_t selectedCount = 0;
-            std::uint64_t revisionScore = 0;
-            std::uint64_t selectedKinds = 0;
-            bool valid = true;
-            for (std::size_t index = 0; index < input->roots.size(); ++index) {
-                if ((mask & (std::uint64_t{ 1 } << index)) == 0) continue;
-                const auto& root = input->roots[index];
-                const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
-                if (!artifact || artifact->kind == PublishedFragmentKind::Count) { valid = false; break; }
-                const auto kindMask = PublishedFragmentMask(artifact->kind);
-                if ((selectedKinds & kindMask) != 0) { valid = false; break; }
-                selectedKinds |= kindMask;
-                auto fragment = artifact->fragment;
-                fragment.publicationRoot = root.key;
-                candidate.Fragment(artifact->kind) = std::move(fragment);
-                ++selectedCount;
-                revisionScore += root.revision;
-            }
-            if (!valid || !coherent(candidate)) continue;
-            if (selectedCount > bestCount ||
-                (selectedCount == bestCount && revisionScore > bestRevisionScore)) {
-                selectedMask = mask;
-                bestCount = selectedCount;
-                bestRevisionScore = revisionScore;
-            }
-    }
-    if (selectedMask == 0) return ArtifactBuildResult::Cancelled();
+    using Selection = std::array<std::optional<ArtifactSnapshot>, kPublishedFragmentCount>;
+    const auto sameArtifact = [](const ArtifactSnapshot& left, const ArtifactSnapshot& right) {
+        return left.key == right.key && left.revision == right.revision;
+    };
+    const auto addClosure = [&](auto&& self, const ArtifactSnapshot& root, Selection& selection) -> bool {
+        const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
+        if (!artifact || !artifact->publishRoot || artifact->kind == PublishedFragmentKind::Count) {
+            return false;
+        }
+        auto& slot = selection[static_cast<std::size_t>(artifact->kind)];
+        if (slot) return sameArtifact(*slot, root);
+        slot = root;
+        for (const auto& dependency : artifact->fragment.dependencyClosure) {
+            const auto dependencyRoot = dependency.payload.Get<RendererStateFragmentArtifact>();
+            if (dependencyRoot && dependencyRoot->publishRoot &&
+                !self(self, dependency, selection)) return false;
+        }
+        return true;
+    };
+    const auto merge = [&](Selection& destination, const Selection& source) {
+        for (std::size_t index = 0; index < source.size(); ++index) {
+            if (destination[index] && source[index] &&
+                !sameArtifact(*destination[index], *source[index])) return false;
+        }
+        for (std::size_t index = 0; index < source.size(); ++index) {
+            if (source[index]) destination[index] = source[index];
+        }
+        return true;
+    };
+    const auto materialize = [&](const Selection& selection) {
+        auto candidate = input->base ? *input->base : PublishedRendererState{};
+        for (std::size_t index = 0; index < selection.size(); ++index) {
+            if (!selection[index]) continue;
+            const auto artifact = selection[index]->payload.Get<RendererStateFragmentArtifact>();
+            auto fragment = artifact->fragment;
+            fragment.publicationRoot = selection[index]->key;
+            candidate.Fragment(static_cast<PublishedFragmentKind>(index)) = std::move(fragment);
+        }
+        return candidate;
+    };
 
-    auto state = input->base ? std::make_shared<PublishedRendererState>(*input->base)
-                             : std::make_shared<PublishedRendererState>();
+    std::vector<Selection> closures;
+    closures.reserve(input->roots.size());
+    for (const auto& root : input->roots) {
+        Selection closure;
+        if (addClosure(addClosure, root, closure)) closures.push_back(std::move(closure));
+    }
+    const auto closureScore = [](const Selection& selection) {
+        std::pair<std::size_t, std::uint64_t> result{};
+        for (const auto& root : selection) {
+            if (!root) continue;
+            ++result.first;
+            result.second += root->revision;
+        }
+        return result;
+    };
+    std::ranges::sort(closures, [&](const Selection& left, const Selection& right) {
+        return closureScore(left) > closureScore(right);
+    });
+
+    Selection selected;
+    std::pair<std::size_t, std::uint64_t> bestScore{};
+    for (std::size_t seed = 0; seed < closures.size(); ++seed) {
+        auto trial = closures[seed];
+        for (std::size_t index = 0; index < closures.size(); ++index) {
+            if (index == seed) continue;
+            auto merged = trial;
+            if (merge(merged, closures[index])) trial = std::move(merged);
+        }
+        const auto candidate = materialize(trial);
+        const auto score = closureScore(trial);
+        if (coherent(candidate) && score > bestScore) {
+            bestScore = score;
+            selected = std::move(trial);
+        }
+    }
+    if (bestScore.first == 0) return ArtifactBuildResult::Cancelled();
+
+    auto state = std::make_shared<PublishedRendererState>(materialize(selected));
     auto catalog = state->resourceCatalog
         ? std::make_shared<PublishedResourceCatalog>(*state->resourceCatalog)
         : std::make_shared<PublishedResourceCatalog>();
-    for (std::size_t index = 0; index < input->roots.size(); ++index) {
-        if ((selectedMask & (std::uint64_t{ 1 } << index)) == 0) continue;
-        const auto& root = input->roots[index];
+    for (std::size_t index = 0; index < selected.size(); ++index) {
+        if (!selected[index]) continue;
+        const auto& root = *selected[index];
         const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
         if (!artifact) return ArtifactBuildResult::Failure("manifest root payload type mismatch");
-        auto fragment = artifact->fragment;
-        fragment.publicationRoot = root.key;
-        state->Fragment(artifact->kind) = std::move(fragment);
         const auto ownerMask = artifact->catalogOwnerMask != 0
             ? artifact->catalogOwnerMask : PublishedFragmentMask(artifact->kind);
         for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
-            if ((ownerMask & PublishedFragmentMask(entry->first.owner)) != 0) entry = catalog->entries.erase(entry);
-            else ++entry;
+            if ((ownerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
+                catalog->contentVersions.erase(entry->first);
+                entry = catalog->entries.erase(entry);
+            } else ++entry;
         }
-        for (const auto& [key, resources] : artifact->catalogEntries) catalog->entries[key] = resources;
+        for (const auto& [key, resources] : artifact->catalogEntries) {
+            catalog->entries[key] = resources;
+            catalog->contentVersions[key] = root.revision;
+        }
     }
     if (!coherent(*state)) return ArtifactBuildResult::Failure("manifest dependency closure changed during build");
     state->resourceCatalog = std::move(catalog);

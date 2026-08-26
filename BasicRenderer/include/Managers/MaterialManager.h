@@ -21,7 +21,7 @@ class IReadbackService;
 class IUploadService;
 }
 namespace org { class DynamicGloballyIndexedResource; }
-namespace br::render { class RendererStateRequestService; }
+namespace br::render { class RendererStateRequestService; class VersionedGpuBufferBackingPool; }
 
 class TextureFactory;
 namespace org { class CopyPass; }
@@ -60,6 +60,9 @@ public:
 	void UpdateMaterialDataBuffer(Material& material);
 	void MarkMaterialDirty(Material& material);
 	void UpdateOpenPBRMaterialDataBuffer(unsigned int materialSlot, const PerMaterialOpenPBRCB& data) {
+		if (m_perMaterialOpenPBRDataBuffer) {
+			m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, data);
+		}
 		if (materialSlot >= m_materialUploadSignatures.size()) {
 			m_materialUploadSignatures.resize(static_cast<std::size_t>(materialSlot) + 1u);
 		}
@@ -161,6 +164,11 @@ private:
 	std::shared_ptr<DynamicStructuredBuffer<uint32_t>> m_blockSumsBuffer;
 	std::shared_ptr<DynamicStructuredBuffer<uint32_t>> m_scannedBlockSumsBuffer;
 	std::shared_ptr<DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>> m_materialEvaluationCommandBuffer;
+	// Retained as the authoritative resources while material graph migration is
+	// in Shadow mode. Active cutover removes these only after parity validation.
+	std::shared_ptr<DynamicStructuredBuffer<PerMaterialCB>> m_perMaterialDataBuffer;
+	std::shared_ptr<DynamicStructuredBuffer<PerMaterialEvalCB>> m_perMaterialEvalDataBuffer;
+	std::shared_ptr<DynamicStructuredBuffer<PerMaterialOpenPBRCB>> m_perMaterialOpenPBRDataBuffer;
 
 	std::unique_ptr<TextureStreamingManager> m_textureStreamingManager;
 	std::vector<uint32_t> m_dirtyMaterialIDs;
@@ -181,6 +189,7 @@ private:
 	std::uint64_t m_materialStateRevision = 0;
 	std::uint64_t m_materialStateValidatedRevision = 0;
 	std::unordered_map<std::uint64_t, std::uint64_t> m_materialStateExpectedFingerprints;
+	std::array<std::shared_ptr<br::render::VersionedGpuBufferBackingPool>, 3> m_materialBackingPools;
 	std::unordered_set<uint64_t> m_traceReadbackResourceIDs;
 	std::weak_ptr<TextureAsset> m_traceBaseColorTexture;
 	bool m_traceLateReadbackRequested = false;

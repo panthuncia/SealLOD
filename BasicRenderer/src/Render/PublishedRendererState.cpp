@@ -3,6 +3,7 @@
 #include <chrono>
 
 #include <spdlog/spdlog.h>
+#include <BasicTelemetry/Telemetry.h>
 
 namespace br::render {
 namespace {
@@ -24,6 +25,31 @@ std::shared_ptr<const PublishedResourceCatalog::ResourceList> PublishedResourceC
     const PublishedResourceKey& key) const {
     const auto found = entries.find(key);
     return found == entries.end() ? nullptr : found->second;
+}
+
+std::uint64_t PublishedResourceCatalog::ContentVersion(
+    const PublishedResourceKey& key) const noexcept {
+    const auto found = contentVersions.find(key);
+    return found == contentVersions.end() ? 0u : found->second;
+}
+
+std::uint64_t PublishedResourceCatalog::ContentVersion(
+    const PublishedResourceQuery& query) const noexcept {
+    std::uint64_t version = 0;
+    bool matched = false;
+    for (const auto& [key, entryVersion] : contentVersions) {
+        if (!query.Matches(key)) continue;
+        matched = true;
+        const auto keyHash = static_cast<std::uint64_t>(PublishedResourceKey::Hasher{}(key));
+        auto entryHash = keyHash ^ (entryVersion + 0x9e3779b97f4a7c15ull +
+            (keyHash << 6u) + (keyHash >> 2u));
+        entryHash ^= entryHash >> 30u;
+        entryHash *= 0xbf58476d1ce4e5b9ull;
+        entryHash ^= entryHash >> 27u;
+        entryHash *= 0x94d049bb133111ebull;
+        version ^= entryHash ^ (entryHash >> 31u);
+    }
+    return matched ? version : 0u;
 }
 
 bool PublishedResourceQuery::Matches(const PublishedResourceKey& key) const noexcept {
@@ -100,7 +126,10 @@ bool RendererStatePublisher::PublishCandidate(RendererStateCandidate candidate) 
     if (!candidate.state || candidate.state->epoch <= candidate.baseEpoch) return false;
     std::unique_lock lock(m_mutex);
     ++m_stats.candidates;
-    if (m_candidate.state) ++m_stats.replacedCandidates;
+    if (m_candidate.state) {
+        ++m_stats.replacedCandidates;
+        basic_telemetry::AddCounter("SARP.RendererStatePublisher.CandidateReplacements");
+    }
     auto retired = std::move(m_candidate.state);
     m_candidate = std::move(candidate);
     lock.unlock();
@@ -164,6 +193,7 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
             ++m_stats.committed;
         } else {
             ++m_stats.rejectedBaseEpoch;
+            basic_telemetry::AddCounter("SARP.RendererStatePublisher.CandidateRejections");
             result.rejectedCallback = m_candidateRejected;
             result.rejectedEpoch = activeEpoch;
             result.retiredStates[result.retiredStateCount++] = std::move(m_candidate.state);
@@ -174,6 +204,11 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
     if (m_active) ++m_stats.retainedFrameStates;
     m_stats.commitMicros = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started).count());
+    basic_telemetry::Record("SARP.RendererStatePublisher.CommitDurationNs",
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count()));
+    basic_telemetry::SetGauge("SARP.RendererStatePublisher.RetainedFrameStates",
+        static_cast<std::int64_t>(m_stats.retainedFrameStates));
     result.state = m_active;
     m_source->Store(result.state);
     return result;

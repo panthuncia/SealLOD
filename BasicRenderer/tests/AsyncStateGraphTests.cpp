@@ -186,6 +186,58 @@ int main() {
     Check(stampedBuildCount.load(std::memory_order_relaxed) == 2);
     Check(graph.Stats().staleCompletions != 0);
 
+    graph.RegisterTypedProducer<Value, Value>(ArtifactKind::ActiveDrawList,
+        TaskLane::Streaming, TaskDomain::General, "TypedProducer",
+        [](const ArtifactBuildContext&, std::shared_ptr<const Value> input) {
+            return ArtifactBuildResult::Ready(Payload(input->value));
+        });
+    const ArtifactKey typedArtifact{ ArtifactKind::ActiveDrawList, 31, 0 };
+    const auto wrongTypedRequest = graph.Request(typedArtifact, 1, {},
+        ArtifactPayload::Make<std::uint64_t>(std::make_shared<const std::uint64_t>(1)));
+    Check(wrongTypedRequest.status == ArtifactRequestStatus::TypeMismatch);
+    Check(graph.Request(typedArtifact, 1, {}, Payload(31)));
+    graph.WaitIdle();
+    Check(graph.Snapshot(typedArtifact).payload.Get<Value>()->value == 31);
+
+    std::atomic_bool sameKeyBuildStarted{ false };
+    std::atomic_bool releaseSameKeyBuild{ false };
+    std::atomic_uint sameKeyActiveBuilds{ 0 };
+    std::atomic_uint sameKeyMaxActiveBuilds{ 0 };
+    std::atomic_uint sameKeyBuildCount{ 0 };
+    graph.RegisterProducer(ArtifactKind::BufferVersion, {
+        TaskLane::Streaming, TaskDomain::General, "SameKeySerialProducer",
+        [&](const ArtifactBuildContext& context) {
+            const auto active = sameKeyActiveBuilds.fetch_add(1, std::memory_order_acq_rel) + 1u;
+            auto observed = sameKeyMaxActiveBuilds.load(std::memory_order_acquire);
+            while (observed < active && !sameKeyMaxActiveBuilds.compare_exchange_weak(
+                observed, active, std::memory_order_acq_rel)) {}
+            const auto buildIndex = sameKeyBuildCount.fetch_add(1, std::memory_order_acq_rel);
+            if (buildIndex == 0) {
+                sameKeyBuildStarted.store(true, std::memory_order_release);
+                while (!releaseSameKeyBuild.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+            sameKeyActiveBuilds.fetch_sub(1, std::memory_order_acq_rel);
+            return ArtifactBuildResult::Ready(Payload(context.revision));
+        }
+    });
+    const ArtifactKey serialKey{ ArtifactKind::BufferVersion, 33, 0 };
+    Check(graph.Request(serialKey, 1));
+    const auto serialDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!sameKeyBuildStarted.load(std::memory_order_acquire) &&
+        std::chrono::steady_clock::now() < serialDeadline) std::this_thread::yield();
+    Check(sameKeyBuildStarted.load(std::memory_order_acquire));
+    Check(graph.Request(serialKey, 2));
+    Check(sameKeyBuildCount.load(std::memory_order_acquire) == 1);
+    releaseSameKeyBuild.store(true, std::memory_order_release);
+    graph.WaitIdle();
+    Check(graph.Snapshot(serialKey).payload.Get<Value>()->value == 2);
+    Check(sameKeyBuildCount.load(std::memory_order_acquire) == 2);
+    Check(sameKeyMaxActiveBuilds.load(std::memory_order_acquire) == 1);
+    graph.Release(serialKey);
+    Check(graph.Snapshot(serialKey).readiness == ArtifactReadiness::Missing);
+
     const ArtifactKey fingerprinted{ ArtifactKind::Generic, 32, 0 };
     Check(graph.Request(fingerprinted, 1, {}, Payload(1), 100));
     graph.WaitIdle();
@@ -274,9 +326,11 @@ int main() {
     const ArtifactKey fallbackConsumer{ ArtifactKind::Material, 42, 0 };
     Check(graph.Request(fallbackBinding, 1));
     graph.WaitIdle();
-    Check(graph.Request(fallbackConsumer, 1, {
-        { preferredBinding, 1, ArtifactReadiness::GpuReady, DependencyPolicy::FallbackAllowed, 1 },
-        { fallbackBinding, 1, ArtifactReadiness::GpuReady, DependencyPolicy::FallbackAllowed, 1 },
+    Check(graph.RequestExpressions(fallbackConsumer, 1, {
+        FirstReady{ {
+            { preferredBinding, 1, ArtifactReadiness::GpuReady },
+            { fallbackBinding, 1, ArtifactReadiness::GpuReady },
+        } },
     }));
     graph.WaitIdle();
     Check(graph.Snapshot(fallbackConsumer).payload.Get<Value>()->value == fallbackBinding.primaryID);
@@ -347,14 +401,18 @@ int main() {
     Check(graph.Snapshot(gpuKey).readiness == ArtifactReadiness::UploadSubmitted);
 	Check(graph.Request(gpuKey, 8));
 	graph.WaitIdle();
-	const auto supersededGpu = graph.Snapshot(gpuKey);
-	Check(supersededGpu.revision == 8);
-	Check(supersededGpu.readiness == ArtifactReadiness::UploadSubmitted);
-	Check(gpuBuilds.load(std::memory_order_relaxed) == 2);
+	const auto executingGpu = graph.Snapshot(gpuKey);
+	Check(executingGpu.revision == 7);
+	Check(executingGpu.readiness == ArtifactReadiness::UploadSubmitted);
+	Check(gpuBuilds.load(std::memory_order_relaxed) == 1);
     gpuComplete.store(true, std::memory_order_release);
     graph.PumpGpuCompletions();
     graph.WaitIdle();
-    Check(graph.Snapshot(gpuKey).readiness == ArtifactReadiness::GpuReady);
+	const auto completedGpuArtifact = graph.Snapshot(gpuKey);
+	Check(completedGpuArtifact.revision == 8);
+	Check(completedGpuArtifact.readiness == ArtifactReadiness::GpuReady);
+	Check(completedGpuArtifact.gpuDependency && completedGpuArtifact.gpuDependency->Complete());
+	Check(gpuBuilds.load(std::memory_order_relaxed) == 2);
 
     // The upload may complete while ApplyCompletion is still running and the
     // current drain is marked scheduled. The notification must hand off to a
@@ -441,7 +499,7 @@ int main() {
     materialCommit.RunDeferred();
     auto source = publisher.ResourceSource();
     PublishedStateResourceResolver resolver(source, PublishedResourceKey{});
-    Check(resolver.GetContentVersion() != 0);
+    const auto missingResourceVersion = resolver.GetContentVersion();
     Check(resolver.Resolve().empty());
 	PublishedStateResourceResolver stagedResolver(source, PublishedResourceKey{}, {}, false);
 	const auto stagedFallbackVersion = stagedResolver.GetContentVersion();
@@ -451,6 +509,7 @@ int main() {
 	Check(publisher.PublishCandidate({ publisher.ActiveEpoch(), epochAdvance }));
 	auto epochCommit = publisher.Commit(1);
 	epochCommit.RunDeferred();
+	Check(resolver.GetContentVersion() == missingResourceVersion);
 	Check(stagedResolver.GetContentVersion() == stagedFallbackVersion);
 	stagedResolver.SetPublishedEnabled(true);
 	Check(stagedResolver.GetContentVersion() != stagedFallbackVersion);

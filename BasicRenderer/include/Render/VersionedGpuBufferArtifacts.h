@@ -20,6 +20,29 @@ namespace br::render {
 
 struct PublishedGpuBufferVersion;
 
+enum class BufferRevisionMode : std::uint8_t {
+    Patch,
+    Replace,
+};
+
+struct BufferBackingArtifact {
+    std::shared_ptr<org::GloballyIndexedResource> resource;
+    std::uint64_t backingGeneration = 0;
+    std::uint64_t capacityClass = 0;
+};
+
+class VersionedGpuBufferBackingPool {
+public:
+    [[nodiscard]] std::shared_ptr<BufferBackingArtifact> Acquire(
+        std::uint64_t capacityClass, std::uint32_t elementStride,
+        bool unorderedAccess, bool indirectArguments, std::string_view debugName,
+        bool& expanded);
+private:
+    std::mutex m_mutex;
+    std::vector<std::shared_ptr<BufferBackingArtifact>> m_backings;
+    std::uint64_t m_nextGeneration = 1;
+};
+
 struct VersionedGpuBufferWrite {
     std::uint64_t sequence = 0;
     std::uint64_t elementOffset = 0;
@@ -39,6 +62,7 @@ struct VersionedGpuBufferBuildInput {
     PublishedResourceUsage catalogUsage = PublishedResourceUsage::ShaderResource;
     std::uint64_t catalogVariant = 0;
     std::shared_ptr<const PublishedGpuBufferVersion> previous;
+    std::shared_ptr<VersionedGpuBufferBackingPool> backingPool;
     std::vector<VersionedGpuBufferWrite> writes;
     // Optional complete initial image. Successors normally use previous+writes.
     std::vector<std::byte> bytes;
@@ -50,9 +74,15 @@ struct PublishedGpuBufferVersion {
     std::uint64_t elementCount = 0;
     std::uint64_t capacity = 0;
     std::uint32_t elementStride = 0;
+    BufferRevisionMode revisionMode = BufferRevisionMode::Replace;
+    std::uint64_t contentVersion = 0;
+    std::shared_ptr<BufferBackingArtifact> backing;
     std::shared_ptr<org::GloballyIndexedResource> resource;
     std::shared_ptr<const std::vector<std::byte>> cpuShadow;
 };
+
+using BufferContentArtifact = PublishedGpuBufferVersion;
+using BufferRevisionRequest = VersionedGpuBufferBuildInput;
 
 // Thread-safe desired-state journal used by mutable manager-facing allocators.
 // Captures are immutable and can be handed directly to graph producers without

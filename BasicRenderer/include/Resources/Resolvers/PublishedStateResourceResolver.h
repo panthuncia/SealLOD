@@ -37,12 +37,20 @@ public:
     std::uint64_t GetContentVersion() const override {
         const bool publishedEnabled = !m_selection ||
             m_selection->publishedEnabled.load(std::memory_order_acquire);
-        const auto epoch = publishedEnabled && m_source ? m_source->Epoch() : 0u;
+        std::uint64_t entryVersion = 0;
+        if (publishedEnabled && m_source) {
+            const auto state = m_source->Load();
+            if (state && state->resourceCatalog) {
+                entryVersion = m_exact
+                    ? state->resourceCatalog->ContentVersion(m_key)
+                    : state->resourceCatalog->ContentVersion(m_query);
+            }
+        }
         const auto fallbackGeneration = m_fallback
             ? m_fallback->generation.load(std::memory_order_acquire) : 0u;
         const auto selectionGeneration = m_selection
             ? m_selection->generation.load(std::memory_order_acquire) : 0u;
-        return (epoch << 2u) ^ (fallbackGeneration << 1u) ^ selectionGeneration;
+        return (entryVersion << 2u) ^ (fallbackGeneration << 1u) ^ selectionGeneration;
     }
 
     void SetPublishedEnabled(bool enabled) noexcept {

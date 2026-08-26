@@ -1055,7 +1055,7 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 			const br::render::ArtifactKey bindingKey{
 				br::render::ArtifactKind::TextureBinding,
 				change.streamingTextureID,
-				change.bindingRevision };
+				0 };
 			if (!change.graphRequested) {
 				auto input = std::make_shared<br::render::TextureBindingBuildInput>();
 				input->streamingTextureID = change.streamingTextureID;

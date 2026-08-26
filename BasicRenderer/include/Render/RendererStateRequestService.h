@@ -16,7 +16,8 @@ public:
     ~RendererStateRequestService();
 
     bool Request(ArtifactKey key, std::uint64_t revision,
-        std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {});
+        std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
+        std::uint64_t inputFingerprint = 0);
     bool Invalidate(ArtifactKey key, std::uint64_t revision);
     void Cancel(ArtifactKey key);
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;

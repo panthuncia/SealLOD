@@ -55,8 +55,12 @@ struct PublishedResourceCatalog {
     using ResourceList = std::vector<std::shared_ptr<org::Resource>>;
     std::unordered_map<PublishedResourceKey, std::shared_ptr<const ResourceList>,
         PublishedResourceKey::Hasher> entries;
+    std::unordered_map<PublishedResourceKey, std::uint64_t,
+        PublishedResourceKey::Hasher> contentVersions;
     [[nodiscard]] std::shared_ptr<const ResourceList> Find(const PublishedResourceKey& key) const;
     [[nodiscard]] ResourceList FindAll(const PublishedResourceQuery& query) const;
+    [[nodiscard]] std::uint64_t ContentVersion(const PublishedResourceKey& key) const noexcept;
+    [[nodiscard]] std::uint64_t ContentVersion(const PublishedResourceQuery& query) const noexcept;
 };
 
 struct PublishedStateFragment {

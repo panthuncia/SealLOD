@@ -4973,18 +4973,6 @@ void Renderer::SignalFence(rhi::Queue commandQueue, uint8_t frameIndexToSignal) 
     }
     m_currentFrameFenceValue = nextFrameFenceValue;
 
-    if (currentRenderGraph) {
-        if (auto* uploadService = currentRenderGraph->GetUploadService()) {
-            auto timeline = std::make_shared<rhi::Timeline>(m_frameFence.Get());
-            uploadService->NotifyTrackedUploadsSubmitted(
-                timeline,
-                m_currentFrameFenceValue,
-                [timeline](std::uint64_t value) {
-                    return timeline->GetCompletedValue() >= value;
-                });
-        }
-    }
-
     // Store the fence value for the current frame
     m_frameFenceValues[frameIndexToSignal] = m_currentFrameFenceValue;
     spdlog::debug(
