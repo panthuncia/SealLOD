@@ -9,6 +9,7 @@
 #include "Render/PublishedRendererState.h"
 #include "Render/RendererStateRequestService.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/TextureBindingArtifacts.h"
 #include "Render/RasterBucketFlags.h"
 #include "Render/Runtime/IReadbackService.h"
 #include "Render/Runtime/IUploadService.h"
@@ -390,22 +391,26 @@ MaterialManager::MaterialManager() {
 	org::memory::SetResourceUsageHint(*startupOpenPbr, "Material startup fallback");
 
 	// Visibility buffer resources
-    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialPixelCountBuffer", true);
-    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialOffsetBuffer", true);
-	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialWriteCursorBuffer", true);
+	// Material variants are a small, bounded shader-feature set. Pre-size the
+	// slot-indexed GPU buffers so import-time slot discovery cannot race an
+	// asynchronous backing resize with histogram/indirect-command generation.
+	constexpr uint32_t initialCompileFlagCapacity = 64u;
+    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialPixelCountBuffer", true);
+    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialOffsetBuffer", true);
+	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialWriteCursorBuffer", true);
 	org::memory::SetResourceUsageHint(*m_materialPixelCountBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_materialOffsetBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_materialWriteCursorBuffer, "Material evaluation buffers");
 
 	// Per-block arrays for hierarchical scan
-	const uint32_t numBlocks = (m_compileFlagsRegistry.GetSlotsUsed() + kScanBlockSize - 1u) / kScanBlockSize;
+	const uint32_t numBlocks = (initialCompileFlagCapacity + kScanBlockSize - 1u) / kScanBlockSize;
 	m_blockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::BlockSumsBuffer", true);
 	m_scannedBlockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::ScannedBlockSumsBuffer", true);
 	org::memory::SetResourceUsageHint(*m_blockSumsBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_scannedBlockSumsBuffer, "Material evaluation buffers");
 
 	// Indirect command buffer for material evaluation
-	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
+	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(initialCompileFlagCapacity, "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
 	org::memory::SetResourceUsageHint(*m_materialEvaluationCommandBuffer, "Indirect command buffers");
 
 	m_resources["Builtin::VisUtil::MaterialPixelCountBuffer"] = m_materialPixelCountBuffer;
@@ -880,6 +885,26 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			signature.materialData = materialData;
 			signature.evalData = evalData;
 			signature.openPBRData = openPBRData;
+			signature.textureBindings.clear();
+			signature.preparedTextureBindings.clear();
+			for (const auto& texture : CollectMaterialTextureAssets(material)) {
+				if (!texture || texture->GetStreamingTextureID() == 0u) continue;
+				const auto binding = texture->GetPublishedBindingSnapshot();
+				if (!binding.image || binding.bindingRevision == 0u ||
+					!binding.image->HasValidBackingResource()) continue;
+				const br::render::MaterialTextureBindingDependencyDTO dependency{
+					texture->GetStreamingTextureID(), binding.bindingRevision,
+					binding.image->GetSRVInfo(0).slot.index,
+					texture->SamplerDescriptorIndex() };
+				signature.textureBindings.push_back(dependency);
+				auto prepared = std::make_shared<br::render::PublishedTextureBinding>();
+				prepared->streamingTextureID = dependency.streamingTextureID;
+				prepared->bindingRevision = dependency.bindingRevision;
+				prepared->imageDescriptorIndex = dependency.imageDescriptorIndex;
+				prepared->samplerDescriptorIndex = dependency.samplerDescriptorIndex;
+				prepared->image = binding.image;
+				signature.preparedTextureBindings.push_back(std::move(prepared));
+			}
 			signature.valid = true;
 			++m_materialRowsRevision;
 		}
@@ -1291,6 +1316,54 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 		}
 	}
 	if constexpr (kEnableMaterialStateShadow) if (m_rendererStateRequests) {
+		const auto materialDiagnostic = m_rendererStateRequests->Diagnose(
+			{ br::render::ArtifactKind::MaterialTable, 0, 0 });
+		const auto graphLogNow = std::chrono::steady_clock::now();
+		if (m_lastMaterialGraphProgressLog == std::chrono::steady_clock::time_point{} ||
+			graphLogNow - m_lastMaterialGraphProgressLog >= std::chrono::seconds(1)) {
+			m_lastMaterialGraphProgressLog = graphLogNow;
+			const auto baseDiagnostic = m_rendererStateRequests->Diagnose({
+				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialBaseTableVariant });
+			const auto evalDiagnostic = m_rendererStateRequests->Diagnose({
+				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialEvalTableVariant });
+			const auto openPbrDiagnostic = m_rendererStateRequests->Diagnose({
+				br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialOpenPbrTableVariant });
+			const auto logNode = [](const char* name, const br::render::ArtifactDiagnostic& diagnostic) {
+				spdlog::info(
+					"Material graph node: name={} desired={} produced={} generation={} readiness={} buildInFlight={} blockers={} ageMs={} gpu(has={} complete={} value={} state='{}') error='{}' chain='{}'",
+					name, diagnostic.desiredRevision, diagnostic.artifact.revision,
+					diagnostic.generation, static_cast<unsigned>(diagnostic.artifact.readiness),
+					diagnostic.buildInFlight, diagnostic.blockers.size(),
+					diagnostic.stateAge.count() / 1000, diagnostic.hasGpuDependency,
+					diagnostic.gpuComplete, diagnostic.gpuTimelineValue, diagnostic.gpuState,
+					diagnostic.error, diagnostic.blockerChain);
+			};
+			std::uint64_t sourceEpoch = 0;
+			std::uint64_t sourceMaterialRevision = 0;
+			if (const auto source = br::render::PublishedStateSource::ProcessSource()) {
+				if (const auto state = source->Load()) {
+					sourceEpoch = state->epoch;
+					sourceMaterialRevision = state->materials.revision;
+				}
+			}
+			spdlog::info(
+				"Material graph progress: rowsRevision={} requestRevision={} observedPublished={} activatedPublished={} sourceEpoch={} sourceMaterialRevision={} fingerprint={} pendingFingerprint={} stableFrames={} dirtyFrames={} slotsUsed={} publishedSlots={}",
+				m_materialRowsRevision, m_materialStateRevision, m_observedMaterialPublishedRevision,
+				m_activeMaterialPublishedRevision, sourceEpoch, sourceMaterialRevision,
+				m_materialStateFingerprint, m_pendingMaterialStateFingerprint,
+				m_materialStateStableFrames, m_materialStateDirtyFrames,
+				m_materialSlotsUsed, publishedSlots);
+			logNode("root", materialDiagnostic);
+			logNode("base", baseDiagnostic);
+			logNode("eval", evalDiagnostic);
+			logNode("openpbr", openPbrDiagnostic);
+		}
+		if (materialDiagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
+			materialDiagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
+			// A failed immutable capture is retryable: texture publication may have
+			// converged since the rejected snapshot was assembled.
+			m_materialStateFingerprint = 0;
+		}
 		std::uint64_t fingerprint = publishedSlots;
 		const auto mix = [&fingerprint](std::uint64_t value) {
 			fingerprint ^= value + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
@@ -1372,22 +1445,6 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				br::render::kMaterialEvalTableVariant, copyEval);
 			auto openPbrTable = makeTableInput("Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB),
 				br::render::kMaterialOpenPbrTableVariant, copyOpenPbr);
-			std::unordered_map<std::uint32_t, br::render::MaterialTextureBindingDependencyDTO>
-				textureBindingDependencies;
-			for (const auto& [_, material] : m_activeMaterialsByID) {
-				if (!material) continue;
-				for (const auto& texture : CollectMaterialTextureAssets(*material)) {
-					if (!texture || texture->GetStreamingTextureID() == 0 ||
-						!texture->Meta().processing.isParticipatingMaterialTexture) continue;
-					const auto binding = texture->GetPublishedBindingSnapshot();
-					if (!binding.image || binding.bindingRevision == 0 ||
-						!binding.image->HasValidBackingResource()) continue;
-					textureBindingDependencies[texture->GetStreamingTextureID()] = {
-						texture->GetStreamingTextureID(), binding.bindingRevision,
-						binding.image->GetSRVInfo(0).slot.index,
-						texture->SamplerDescriptorIndex() };
-				}
-			}
 			(void)m_rendererStateRequests->Request(baseKey, m_materialRowsRevision, {},
 				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(baseTable)));
 			(void)m_rendererStateRequests->Request(evalKey, m_materialRowsRevision, {},
@@ -1396,9 +1453,27 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(openPbrTable)));
 			auto input = std::make_shared<br::render::MaterialStateBuildInput>();
 			input->sourceFingerprint = fingerprint;
-			input->textureBindings.reserve(textureBindingDependencies.size());
-			for (const auto& [_, binding] : textureBindingDependencies) {
-				input->textureBindings.push_back(binding);
+			// Texture mip residency is owned by TextureStreamingManager. The descriptor
+			// indices captured in the material rows already name usable coarse-mip
+			// bindings and remain stable while streaming upgrades their contents. Do not
+			// make table publication wait for every texture's asynchronous graph shadow.
+			std::unordered_set<std::uint64_t> retainedBindings;
+			for (std::size_t slot = 0;
+				slot < m_materialSlotsUsed && slot < m_materialUploadSignatures.size(); ++slot) {
+				const auto& signature = m_materialUploadSignatures[slot];
+				if (!signature.valid) continue;
+				for (std::size_t bindingIndex = 0;
+					bindingIndex < signature.textureBindings.size() &&
+					bindingIndex < signature.preparedTextureBindings.size(); ++bindingIndex) {
+					const auto& binding = signature.textureBindings[bindingIndex];
+					const std::uint64_t identity =
+						(static_cast<std::uint64_t>(binding.imageDescriptorIndex) << 32u) |
+						binding.samplerDescriptorIndex;
+					if (!retainedBindings.insert(identity).second) continue;
+					input->textureBindings.push_back(binding);
+					input->preparedTextureBindings.push_back(
+						signature.preparedTextureBindings[bindingIndex]);
+				}
 			}
 			input->slotsUsed = publishedSlots;
 			input->activeCompileFlags = activeCompileFlags;
@@ -1412,13 +1487,6 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				{ evalKey, m_materialRowsRevision, br::render::ArtifactReadiness::GpuReady },
 				{ openPbrKey, m_materialRowsRevision, br::render::ArtifactReadiness::GpuReady }
 			};
-			requirements.reserve(requirements.size() + textureBindingDependencies.size());
-			for (const auto& [textureID, binding] : textureBindingDependencies) {
-				requirements.push_back({
-					{ br::render::ArtifactKind::TextureBinding, textureID, binding.bindingRevision },
-					binding.bindingRevision,
-					br::render::ArtifactReadiness::GpuReady });
-			}
 			(void)m_rendererStateRequests->Request(
 				{ br::render::ArtifactKind::MaterialTable, 0, 0 }, revision, requirements,
 				br::render::ArtifactPayload::Make<br::render::MaterialStateBuildInput>(std::move(input)));
@@ -1458,17 +1526,24 @@ bool MaterialManager::TryActivatePublishedMaterialState() {
 	const auto resolvedBase = m_materialTableResolvers[0]->Resolve();
 	const auto resolvedEval = m_materialTableResolvers[1]->Resolve();
 	const auto resolvedOpenPbr = m_materialTableResolvers[2]->Resolve();
+	const auto descriptorOf = [](const std::shared_ptr<Resource>& resource) {
+		const auto* indexed = dynamic_cast<const GloballyIndexedResource*>(resource.get());
+		return indexed ? indexed->GetSRVInfo(0).slot.index : 0u;
+	};
 	spdlog::info(
-		"MaterialManager: activated graph-owned material tables epoch={} revision={} rows={} capacity={} compileFlagSlots={} activeCompileFlags={} resolved(base={} expected={} eval={} expected={} openPbr={} expected={})",
+		"MaterialManager: activated graph-owned material tables epoch={} revision={} rows={} capacity={} compileFlagSlots={} activeCompileFlags={} resolved(base={} expected={} srv={} eval={} expected={} srv={} openPbr={} expected={} srv={})",
 		published->epoch, published->materials.revision, materialState->baseTable->elementCount,
 		materialState->baseTable->capacity, materialState->compileFlagSlotsUsed,
 		materialState->activeCompileFlags.size(),
 		resolvedBase.empty() ? 0u : resolvedBase.front()->GetGlobalResourceID(),
 		materialState->baseTable->resource->GetGlobalResourceID(),
+		descriptorOf(materialState->baseTable->resource),
 		resolvedEval.empty() ? 0u : resolvedEval.front()->GetGlobalResourceID(),
 		materialState->evalTable->resource->GetGlobalResourceID(),
+		descriptorOf(materialState->evalTable->resource),
 		resolvedOpenPbr.empty() ? 0u : resolvedOpenPbr.front()->GetGlobalResourceID(),
-		materialState->openPbrTable->resource->GetGlobalResourceID());
+		materialState->openPbrTable->resource->GetGlobalResourceID(),
+		descriptorOf(materialState->openPbrTable->resource));
 	return true;
 }
 

@@ -1,6 +1,7 @@
 #include "Render/VersionedGpuBufferArtifacts.h"
 
 #include <algorithm>
+#include <atomic>
 #include <format>
 #include <limits>
 #include <mutex>
@@ -174,7 +175,12 @@ std::shared_ptr<const GpuDependencyToken> TokenForTicket(
 			static_cast<unsigned>(state), timelineComplete);
 	};
 	token->subscribe = [ticket](std::function<void()> callback) {
-        ticket->SetChangeCallback(std::move(callback));
+        auto fired = std::make_shared<std::atomic_bool>(false);
+        auto notify = [callback = std::move(callback), fired]() mutable {
+            if (!fired->exchange(true, std::memory_order_acq_rel) && callback) callback();
+        };
+        ticket->SetChangeCallback(notify);
+        if (ticket->Complete()) notify();
     };
 	token->cancel = [ticket] { return ticket->Cancel(); };
     return token;

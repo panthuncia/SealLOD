@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <sstream>
 #include <array>
+#include <bit>
+#include <mutex>
 #include <stacktrace>
 #include <thread>
 #include <unordered_map>
@@ -140,6 +142,301 @@ void D3D12DebugCallback(
 }
 
 namespace {
+
+float MaterialReadbackHalfToFloat(std::uint16_t value) noexcept {
+    const std::uint32_t sign = static_cast<std::uint32_t>(value & 0x8000u) << 16u;
+    const std::uint32_t exponent = (value >> 10u) & 0x1fu;
+    std::uint32_t mantissa = value & 0x3ffu;
+    std::uint32_t bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            std::int32_t normalizedExponent = -14;
+            while ((mantissa & 0x400u) == 0) {
+                mantissa <<= 1u;
+                --normalizedExponent;
+            }
+            mantissa &= 0x3ffu;
+            bits = sign |
+                (static_cast<std::uint32_t>(normalizedExponent + 127) << 23u) |
+                (mantissa << 13u);
+        }
+    } else if (exponent == 31u) {
+        bits = sign | 0x7f800000u | (mantissa << 13u);
+    } else {
+        bits = sign | ((exponent + 112u) << 23u) | (mantissa << 13u);
+    }
+    return std::bit_cast<float>(bits);
+}
+
+struct MaterialPixelOutcomeReadback {
+    std::mutex mutex;
+    std::vector<std::byte> baseColor;
+    std::vector<std::byte> visibility;
+    std::vector<std::byte> identity;
+    std::vector<std::byte> records;
+    std::vector<std::byte> materialGroupTelemetry;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t baseColorRowPitch = 0;
+    std::uint32_t visibilityRowPitch = 0;
+    std::uint32_t identityRowPitch = 0;
+    std::uint32_t materialGroupTelemetryRowPitch = 0;
+    rhi::Format baseColorFormat = rhi::Format::Unknown;
+    std::uint64_t requestedFrame = 0;
+    std::uint64_t publishedEpoch = 0;
+    std::uint64_t materialRevision = 0;
+    bool reported = false;
+
+    void Accept(std::string_view label, const ReadbackCaptureResult& result) {
+        std::lock_guard guard(mutex);
+        if (label == "basecolor") {
+            baseColor = result.data;
+            width = result.width;
+            height = result.height;
+            baseColorRowPitch = result.layouts.empty() ? 0u : result.layouts.front().rowPitch;
+            baseColorFormat = result.format;
+        } else if (label == "visibility") {
+            visibility = result.data;
+            visibilityRowPitch = result.layouts.empty() ? 0u : result.layouts.front().rowPitch;
+        } else if (label == "surface_identity") {
+            identity = result.data;
+            identityRowPitch = result.layouts.empty() ? 0u : result.layouts.front().rowPitch;
+        } else if (label == "surface_records") {
+            records = result.data;
+        } else if (label == "material_group_telemetry") {
+            materialGroupTelemetry = result.data;
+            materialGroupTelemetryRowPitch = result.layouts.empty() ? 0u : result.layouts.front().rowPitch;
+        } else {
+            return;
+        }
+        TryReportUnlocked();
+    }
+
+    void TryReportUnlocked() {
+        if (reported || baseColor.empty() || visibility.empty() || identity.empty() || records.empty() ||
+            materialGroupTelemetry.empty()) {
+            return;
+        }
+        reported = true;
+        const std::size_t baseColorStride = rhi::FormatByteSize(baseColorFormat);
+        constexpr std::size_t identityStride = 8u;
+        constexpr std::size_t recordStride = 32u;
+        if (baseColorStride == 0 || baseColorRowPitch == 0 || visibilityRowPitch == 0 ||
+            identityRowPitch == 0 || materialGroupTelemetryRowPitch == 0) {
+            spdlog::warn("Material pixel outcome: frame={} classification=INVALID_READBACK_LAYOUT", requestedFrame);
+            return;
+        }
+        const std::size_t pixelCount = static_cast<std::size_t>(width) * height;
+        std::size_t nonTerrainPixels = 0;
+        std::size_t blackPixels = 0;
+        std::size_t coloredPixels = 0;
+        std::size_t grassPixels = 0;
+        std::size_t terrainPixels = 0;
+        std::size_t otherScenePixels = 0;
+        std::size_t otherSceneBlackPixels = 0;
+        std::size_t otherSceneColoredPixels = 0;
+        float otherSceneMaximumChannel = 0.0f;
+        std::size_t invalidRecordPixels = 0;
+        float maximumChannel = 0.0f;
+        std::size_t groupEntryPixels = 0;
+        std::size_t groupResolvedPixels = 0;
+        std::size_t groupUntouchedPixels = 0;
+        std::size_t groupUnknownPixels = 0;
+        std::array<std::size_t, 10> groupOutcomeCounts{};
+        std::size_t staticResolvedPixels = 0;
+        std::array<std::size_t, 256> telemetryFrameCounts{};
+        std::unordered_map<std::uint32_t, std::size_t> groupBinCounts;
+        std::unordered_map<std::uint32_t, std::size_t> resolvedMaterialCounts;
+        std::unordered_map<std::uint32_t, std::size_t> otherSceneMaterialTableCounts;
+        std::unordered_map<std::uint32_t, std::size_t> otherSceneSemanticCounts;
+        std::unordered_map<std::uint32_t, std::size_t> otherSceneFlagCounts;
+        std::unordered_map<std::uint32_t, std::size_t> otherSceneDiagnosticCounts;
+        std::unordered_map<std::uint32_t, std::size_t> otherSceneSourceMaterialHiCounts;
+        constexpr float blackThreshold = 1.0f / 255.0f;
+        const auto readPixelMaximum = [&](std::size_t baseColorOffset) -> std::optional<float> {
+            float pixelMaximum = 0.0f;
+            if (baseColorFormat == rhi::Format::R8G8B8A8_UNorm ||
+                baseColorFormat == rhi::Format::R8G8B8A8_UNorm_sRGB) {
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    pixelMaximum = std::max(pixelMaximum,
+                        static_cast<float>(std::to_integer<std::uint8_t>(baseColor[baseColorOffset + channel])) / 255.0f);
+                }
+                return pixelMaximum;
+            }
+            if (baseColorFormat == rhi::Format::R16G16B16A16_Float) {
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    std::uint16_t half = 0;
+                    std::memcpy(&half, baseColor.data() + baseColorOffset + channel * sizeof(half), sizeof(half));
+                    pixelMaximum = std::max(pixelMaximum, std::abs(MaterialReadbackHalfToFloat(half)));
+                }
+                return pixelMaximum;
+            }
+            return std::nullopt;
+        };
+        for (std::size_t pixel = 0; pixel < pixelCount; ++pixel) {
+            const std::size_t x = pixel % width;
+            const std::size_t y = pixel / width;
+            const std::size_t visibilityOffset = y * visibilityRowPitch + x * sizeof(std::uint64_t);
+            const std::size_t identityOffset = y * identityRowPitch + x * identityStride;
+            const std::size_t baseColorOffset = y * baseColorRowPitch + x * baseColorStride;
+            const std::size_t telemetryOffset = y * materialGroupTelemetryRowPitch + x * 8u;
+            if (visibilityOffset + sizeof(std::uint64_t) > visibility.size() ||
+                identityOffset + identityStride > identity.size() ||
+                baseColorOffset + baseColorStride > baseColor.size()) {
+                continue;
+            }
+            std::uint32_t expectedMaterialIndex = 0;
+            std::uint32_t telemetryState = 0;
+            if (telemetryOffset + 8u <= materialGroupTelemetry.size()) {
+                std::memcpy(&expectedMaterialIndex, materialGroupTelemetry.data() + telemetryOffset, sizeof(expectedMaterialIndex));
+                std::memcpy(&telemetryState, materialGroupTelemetry.data() + telemetryOffset + 4u, sizeof(telemetryState));
+                const std::uint32_t telemetryFrame = expectedMaterialIndex >> 24u;
+                expectedMaterialIndex &= 0x00FFFFFFu;
+                const std::uint32_t marker = telemetryState & 0xFF000000u;
+                if (marker == 0xE1000000u) {
+                    ++groupEntryPixels;
+                    ++telemetryFrameCounts[telemetryFrame];
+                    ++groupBinCounts[expectedMaterialIndex];
+                }
+                else if (marker >= 0xC1000000u && marker <= 0xC9000000u) {
+                    ++groupResolvedPixels;
+					++groupOutcomeCounts[(marker >> 24u) - 0xC0u];
+                    ++telemetryFrameCounts[telemetryFrame];
+                    ++groupBinCounts[expectedMaterialIndex];
+                    ++resolvedMaterialCounts[telemetryState & 0x00FFFFFFu];
+                } else if (expectedMaterialIndex == 0u && telemetryState == 0u) ++groupUntouchedPixels;
+                else ++groupUnknownPixels;
+            }
+            std::uint64_t visibilityKey = ~std::uint64_t{};
+            std::memcpy(&visibilityKey, visibility.data() + visibilityOffset, sizeof(visibilityKey));
+            if (visibilityKey == ~std::uint64_t{}) {
+                continue;
+            }
+            constexpr std::uint64_t clusterMask = (std::uint64_t{ 1 } << 26u) - 1u;
+            constexpr std::uint32_t grassClusterBase = 0x02000000u;
+            const auto clusterIndex = static_cast<std::uint32_t>((visibilityKey >> 7u) & clusterMask);
+            if (clusterIndex >= grassClusterBase) {
+                ++grassPixels;
+                continue;
+            }
+            std::uint32_t recordIndex = 0;
+            std::memcpy(&recordIndex, identity.data() + identityOffset, sizeof(recordIndex));
+            if (recordIndex != pixel) {
+                continue;
+            }
+            const std::size_t recordOffset = static_cast<std::size_t>(recordIndex) * recordStride;
+            if (recordOffset + recordStride > records.size()) {
+                ++invalidRecordPixels;
+                continue;
+            }
+            std::uint64_t sourceObjectId = 0;
+            std::memcpy(&sourceObjectId, records.data() + recordOffset, sizeof(sourceObjectId));
+            // RendererHost assigns direct static imports the 0xA namespace.
+            // Terrain is 0xB0 and grass is 0xB1; merely testing for a non-zero
+            // stable id therefore misclassifies a full terrain frame as static.
+            constexpr std::uint64_t objectNamespaceMask = 0xF000000000000000ull;
+            constexpr std::uint64_t staticObjectNamespace = 0xA000000000000000ull;
+            constexpr std::uint64_t terrainObjectNamespace = 0xB000000000000000ull;
+            constexpr std::uint64_t grassObjectNamespace = 0xB100000000000000ull;
+            if ((sourceObjectId & 0xFF00000000000000ull) == grassObjectNamespace) {
+                ++grassPixels;
+                continue;
+            }
+            if ((sourceObjectId & 0xFF00000000000000ull) == terrainObjectNamespace) {
+                ++terrainPixels;
+                continue;
+            }
+            if ((sourceObjectId & objectNamespaceMask) != staticObjectNamespace) {
+                ++otherScenePixels;
+                std::uint32_t sourceMaterialHi = 0;
+                std::uint32_t materialTableIndex = 0;
+                std::uint32_t semanticFamilyAndPayload = 0;
+                std::uint32_t flags = 0;
+                std::uint32_t diagnosticReason = 0;
+                std::memcpy(&sourceMaterialHi, records.data() + recordOffset + 12u, sizeof(sourceMaterialHi));
+                std::memcpy(&materialTableIndex, records.data() + recordOffset + 16u, sizeof(materialTableIndex));
+                std::memcpy(&semanticFamilyAndPayload, records.data() + recordOffset + 20u, sizeof(semanticFamilyAndPayload));
+                std::memcpy(&flags, records.data() + recordOffset + 24u, sizeof(flags));
+                std::memcpy(&diagnosticReason, records.data() + recordOffset + 28u, sizeof(diagnosticReason));
+                ++otherSceneSourceMaterialHiCounts[sourceMaterialHi];
+                ++otherSceneMaterialTableCounts[materialTableIndex];
+                ++otherSceneSemanticCounts[semanticFamilyAndPayload & 0xFFFFu];
+                ++otherSceneFlagCounts[flags];
+                ++otherSceneDiagnosticCounts[diagnosticReason];
+                if (const auto pixelMaximum = readPixelMaximum(baseColorOffset)) {
+                    otherSceneMaximumChannel = std::max(otherSceneMaximumChannel, *pixelMaximum);
+                    if (*pixelMaximum <= blackThreshold) ++otherSceneBlackPixels;
+                    else ++otherSceneColoredPixels;
+                }
+                continue;
+            }
+            if ((telemetryState & 0xFF000000u) == 0xC1000000u) {
+                ++staticResolvedPixels;
+            }
+            ++nonTerrainPixels;
+            const auto pixelMaximum = readPixelMaximum(baseColorOffset);
+            if (!pixelMaximum) {
+                ++invalidRecordPixels;
+                continue;
+            }
+            maximumChannel = std::max(maximumChannel, *pixelMaximum);
+            if (*pixelMaximum <= blackThreshold) {
+                ++blackPixels;
+            } else {
+                ++coloredPixels;
+            }
+        }
+        // A handful of geometry (or grass misidentified as a scene object) is not
+        // representative of the static-only validation view.  That view should
+        // cover most of this 1.8 MP target.
+        const std::size_t minimumConclusivePixels =
+            std::min(pixelCount, std::max<std::size_t>(1000000u, pixelCount / 2u));
+        const double blackFraction = nonTerrainPixels == 0
+            ? 0.0 : static_cast<double>(blackPixels) / static_cast<double>(nonTerrainPixels);
+        const double coloredFraction = nonTerrainPixels == 0
+            ? 0.0 : static_cast<double>(coloredPixels) / static_cast<double>(nonTerrainPixels);
+        const char* classification = nonTerrainPixels < minimumConclusivePixels
+            ? "NO_NON_TERRAIN_PIXELS_CAPTURE_TOO_EARLY_OR_LOAD_STALLED"
+            : (blackFraction >= 0.90 ? "BLACK_BUG_PRESENT"
+                : (coloredFraction >= 0.90 ? "COLORED_BUG_ABSENT" : "MIXED_REQUIRES_INVESTIGATION"));
+        const auto summarizeCounts = [](const auto& counts, std::size_t limit) {
+            std::vector<std::pair<std::uint32_t, std::size_t>> sorted;
+            for (const auto& [key, count] : counts) sorted.emplace_back(key, count);
+            std::ranges::sort(sorted, [](const auto& lhs, const auto& rhs) { return lhs.second > rhs.second; });
+            std::string result;
+            for (std::size_t index = 0; index < std::min(limit, sorted.size()); ++index) {
+                if (!result.empty()) result += ',';
+                result += fmt::format("{}:{}", sorted[index].first, sorted[index].second);
+            }
+            return result;
+        };
+        std::unordered_map<std::uint32_t, std::size_t> nonzeroFrameCounts;
+        for (std::uint32_t frame = 0; frame < telemetryFrameCounts.size(); ++frame) {
+            if (telemetryFrameCounts[frame] != 0) nonzeroFrameCounts.emplace(frame, telemetryFrameCounts[frame]);
+        }
+        spdlog::info(
+            "Material pixel outcome: frame={} epoch={} materialRevision={} classification={} dimensions={}x{} format={} pixels={} minimumConclusive={} nonTerrain={} grass={} terrain={} otherScene={} black={} colored={} blackFraction={:.6f} coloredFraction={:.6f} invalidRecord={} maxRgb={:.6f} group(entry={} resolved={} untouched={} unknown={} outcomes(healthy={} zeroAlbedo={} zeroBaseWeight={} zeroWeighted={} zeroFactor={} zeroVertex={} zeroTextureContent={} zeroUvSample={} specializationMissingTexture={}) stamps='{}' bins='{}' resolvedMaterials='{}') staticGroup(resolved={}) otherSceneDetail(black={} colored={} maxRgb={:.6f} table='{}' sourceMaterialHi='{}' semantic='{}' flags='{}' diagnostic='{}')",
+            requestedFrame, publishedEpoch, materialRevision, classification, width, height,
+            static_cast<unsigned>(baseColorFormat), pixelCount,
+            minimumConclusivePixels, nonTerrainPixels, grassPixels, terrainPixels, otherScenePixels,
+            blackPixels, coloredPixels,
+            blackFraction, coloredFraction, invalidRecordPixels, maximumChannel,
+            groupEntryPixels, groupResolvedPixels, groupUntouchedPixels, groupUnknownPixels,
+            groupOutcomeCounts[1], groupOutcomeCounts[2], groupOutcomeCounts[3], groupOutcomeCounts[4],
+            groupOutcomeCounts[5], groupOutcomeCounts[6], groupOutcomeCounts[7],
+            groupOutcomeCounts[8], groupOutcomeCounts[9],
+            summarizeCounts(nonzeroFrameCounts, 8), summarizeCounts(groupBinCounts, 8),
+            summarizeCounts(resolvedMaterialCounts, 8), staticResolvedPixels,
+            otherSceneBlackPixels, otherSceneColoredPixels, otherSceneMaximumChannel,
+            summarizeCounts(otherSceneMaterialTableCounts, 8),
+            summarizeCounts(otherSceneSourceMaterialHiCounts, 8),
+            summarizeCounts(otherSceneSemanticCounts, 8),
+            summarizeCounts(otherSceneFlagCounts, 8),
+            summarizeCounts(otherSceneDiagnosticCounts, 8));
+    }
+};
 
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
 constexpr const char* CLodVirtualShadowTelemetryDebugSettingName = "clodVirtualShadowTelemetryDebug";
@@ -449,6 +746,93 @@ bool DefaultEnableReShapeForBuild() {
     return true;
 #else
     return false;
+#endif
+}
+
+void UpdateMaterialEvaluationReShapePreset(rhi::Device device, std::uint64_t frameIndex) {
+#if BASICRHI_ENABLE_RESHAPE
+    static std::unordered_set<std::uint64_t> configuredPipelines;
+    static std::unordered_set<std::string> loggedIssues;
+    static bool loggedPreset = false;
+    const bool needsPipelineSelection = configuredPipelines.empty();
+    if (!needsPipelineSelection && frameIndex % 60u != 0u) {
+        return;
+    }
+
+    const auto features = rhi::debug::GetInstrumentationFeatures(device);
+    std::uint64_t validationMask = 0;
+    for (const auto& feature : features) {
+        std::string name(feature.name);
+        std::ranges::transform(name, name.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        if (name.contains("descriptor") || name.contains("resource bounds") ||
+            name.contains("resourcebounds")) {
+            validationMask |= feature.featureBit;
+        }
+    }
+
+    const auto pipelines = rhi::debug::GetInstrumentationPipelines(device);
+    const auto usages = rhi::debug::GetInstrumentationPipelineUsages(device);
+    std::unordered_set<std::uint64_t> materialPipelineUids;
+    for (const auto& usage : usages) {
+        if (std::string_view(usage.passName) == "EvaluateMaterialGroupsPass") {
+            materialPipelineUids.insert(usage.pipelineUid);
+        }
+    }
+
+    if (!loggedPreset) {
+        loggedPreset = true;
+        (void)rhi::debug::SetGlobalInstrumentationMask(device, 0);
+        spdlog::info(
+            "GPU-Reshape material-evaluation preset: synchronous recording requested; features={} validationMask=0x{:016X}",
+            features.size(), validationMask);
+    }
+
+    for (const auto& pipeline : pipelines) {
+        if (!materialPipelineUids.contains(pipeline.pipelineUid) ||
+            configuredPipelines.contains(pipeline.pipelineUid) || validationMask == 0) {
+            continue;
+        }
+        const auto result = rhi::debug::SetPipelineInstrumentationMask(
+            device, pipeline.pipelineUid, validationMask);
+        if (rhi::IsOk(result)) {
+            configuredPipelines.insert(pipeline.pipelineUid);
+            spdlog::info(
+                "GPU-Reshape material pipeline selected: uid={} label='{}' pass='{}' featureMask=0x{:016X}",
+                pipeline.pipelineUid, pipeline.label, pipeline.lastPassName, validationMask);
+        } else {
+            spdlog::error(
+                "GPU-Reshape material pipeline instrumentation failed: uid={} result={}",
+                pipeline.pipelineUid, static_cast<std::uint32_t>(result));
+        }
+    }
+
+    std::size_t instrumentedMaterialPipelines = 0;
+    for (const auto& pipeline : rhi::debug::GetInstrumentationPipelines(device)) {
+        if (materialPipelineUids.contains(pipeline.pipelineUid) && pipeline.instrumented) {
+            ++instrumentedMaterialPipelines;
+        }
+    }
+    spdlog::info(
+        "GPU-Reshape material preset status: discovered={} selected={} instrumented={} issues={}",
+        materialPipelineUids.size(), configuredPipelines.size(),
+        instrumentedMaterialPipelines, rhi::debug::GetInstrumentationIssueCount(device));
+
+    for (const auto& issue : rhi::debug::GetInstrumentationIssues(device)) {
+        const std::string identity = fmt::format("{}:{}:{}", issue.objectUid,
+            issue.parentPipelineUid, issue.message);
+        if (!loggedIssues.insert(identity).second) {
+            continue;
+        }
+        spdlog::error(
+            "GPU-Reshape feedback: severity={} type={} objectUid={} pipelineUid={} label='{}' path='{}' message='{}'",
+            static_cast<std::uint32_t>(issue.severity), static_cast<std::uint32_t>(issue.type),
+            issue.objectUid, issue.parentPipelineUid, issue.label, issue.path, issue.message);
+    }
+#else
+    (void)device;
+    (void)frameIndex;
 #endif
 }
 
@@ -2906,6 +3290,7 @@ void Renderer::WaitForFrame(uint8_t currentFrameIndex) {
 }
 
 void Renderer::Update(float elapsedSeconds) {
+	UpdateMaterialEvaluationReShapePreset(DeviceManager::GetInstance().GetDevice(), m_totalFramesRendered);
     if (m_deterministicSamplingMode) {
         elapsedSeconds = 0.0f;
     }
@@ -3078,6 +3463,26 @@ void Renderer::Update(float elapsedSeconds) {
             if (m_rendererStatePublisher) {
                 auto commit = m_rendererStatePublisher->Commit(m_frameIndex);
                 m_context.publishedRendererState = commit.state;
+				static auto lastStateProgressLog = std::chrono::steady_clock::time_point{};
+				const auto stateProgressNow = std::chrono::steady_clock::now();
+				if (lastStateProgressLog == std::chrono::steady_clock::time_point{} ||
+					stateProgressNow - lastStateProgressLog >= std::chrono::seconds(1)) {
+					lastStateProgressLog = stateProgressNow;
+					const auto publisherStats = m_rendererStatePublisher->Stats();
+					const auto graphStats = m_asyncStateGraph ? m_asyncStateGraph->Stats()
+						: br::render::AsyncStateGraphStats{};
+					spdlog::info(
+						"Renderer-state progress: activeEpoch={} frameEpoch={} materialRevision={} candidates={} committed={} replaced={} rejectedBaseEpoch={} retainedFrames={} commitTotalUs={} graph(requests={} invalidations={} started={} completed={} stale={} failed={} cancelled={} gpuWaiting={} retries={})",
+						m_rendererStatePublisher->ActiveEpoch(),
+						commit.state ? commit.state->epoch : 0u,
+						commit.state ? commit.state->materials.revision : 0u,
+						publisherStats.candidates, publisherStats.committed,
+						publisherStats.replacedCandidates, publisherStats.rejectedBaseEpoch,
+						publisherStats.retainedFrameStates, publisherStats.commitMicros,
+						graphStats.requests, graphStats.invalidations, graphStats.buildsStarted,
+						graphStats.buildsCompleted, graphStats.staleCompletions, graphStats.failed,
+						graphStats.cancelled, graphStats.gpuWaiting, graphStats.retries);
+				}
                 if (commit.HasDeferredWork()) {
                     auto* objectManager = commit.committed ? m_pObjectManager.get() : nullptr;
                     auto committedState = commit.committed ? commit.state : nullptr;
@@ -3218,6 +3623,178 @@ void Renderer::Update(float elapsedSeconds) {
         BT_ZONE_SCOPE("Renderer::Update::TerrainRvtTelemetry");
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
+        static std::size_t materialPipelineReadbackIndex = 0;
+        static constexpr std::array<std::uint64_t, 9> materialPipelineReadbackFrames{
+            120u, 180u, 240u, 300u, 360u, 480u, 600u, 750u, 900u };
+        if (materialPipelineReadbackIndex < materialPipelineReadbackFrames.size() &&
+            m_totalFramesRendered >= materialPipelineReadbackFrames[materialPipelineReadbackIndex] && currentRenderGraph) {
+            wchar_t* outputPath = nullptr;
+            size_t outputPathLength = 0;
+            if (_wdupenv_s(&outputPath, &outputPathLength,
+                    L"SARP_MATERIAL_PIPELINE_READBACK_PATH") == 0 &&
+                outputPath != nullptr && outputPath[0] != L'\0') {
+                auto basePath = std::filesystem::path(outputPath);
+                basePath += std::filesystem::path(fmt::format(".frame_{}",
+                    materialPipelineReadbackFrames[materialPipelineReadbackIndex]));
+                if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+					auto capturedMaterialState = m_context.publishedRendererState
+						? m_context.publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>()
+						: nullptr;
+                    auto materialPixelOutcome = std::make_shared<MaterialPixelOutcomeReadback>();
+                    materialPixelOutcome->requestedFrame = materialPipelineReadbackFrames[materialPipelineReadbackIndex];
+                    materialPixelOutcome->publishedEpoch = m_context.publishedRendererState
+                        ? m_context.publishedRendererState->epoch : 0u;
+                    materialPixelOutcome->materialRevision = m_context.publishedRendererState
+                        ? m_context.publishedRendererState->materials.revision : 0u;
+                    const auto request = [this, readbackService, &basePath, capturedMaterialState, materialPixelOutcome](
+                        const char* label, std::string_view resourceName) {
+                        auto resource = currentRenderGraph->RequestResourcePtr(
+                            ResourceIdentifier(resourceName), true);
+                        if (!resource) {
+                            spdlog::error("Material pipeline readback: resource '{}' unavailable", resourceName);
+                            return;
+                        }
+                        auto path = basePath;
+                        path += std::filesystem::path(fmt::format(".{}.bin", label));
+                        // Capture at a downstream consumer. Anchoring this on the
+                        // producer observes the resource before that pass writes it.
+                        readbackService->RequestReadbackCapture(
+                            "DeferredShadingPass", resource.get(), RangeSpec{},
+                            [this, path, label, capturedMaterialState, readbackService, materialPixelOutcome](ReadbackCaptureResult&& result) {
+                                std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                                if (output && !result.data.empty()) {
+                                    output.write(reinterpret_cast<const char*>(result.data.data()),
+                                        static_cast<std::streamsize>(result.data.size()));
+                                }
+                                const auto nonzero = std::ranges::count_if(result.data,
+                                    [](std::byte value) { return value != std::byte{}; });
+                                const auto nonff = std::ranges::count_if(result.data,
+                                    [](std::byte value) { return value != std::byte{ 0xff }; });
+                                spdlog::info(
+                                    "Material pipeline readback: label={} bytes={} nonzero={} nonff={} dimensions={}x{}x{} format={} output='{}'",
+                                    label, result.data.size(), nonzero, nonff, result.width,
+                                    result.height, result.depth, static_cast<unsigned>(result.format),
+                                    path.string());
+								materialPixelOutcome->Accept(label, result);
+								if (std::string_view(label) == "surface_records" && capturedMaterialState &&
+									capturedMaterialState->baseTable && capturedMaterialState->baseTable->cpuShadow) {
+									std::unordered_set<std::uint32_t> visibleMaterials;
+									for (std::size_t offset = 0; offset + 32u <= result.data.size(); offset += 32u) {
+										std::uint32_t materialIndex = 0;
+										std::memcpy(&materialIndex, result.data.data() + offset + 16u, sizeof(materialIndex));
+										if (materialIndex < capturedMaterialState->baseTable->elementCount) {
+											visibleMaterials.insert(materialIndex);
+										}
+									}
+									std::size_t textureReadbacks = 0;
+									for (const auto materialIndex : visibleMaterials) {
+										PerMaterialCB row{};
+										std::memcpy(&row, capturedMaterialState->baseTable->cpuShadow->data() +
+											static_cast<std::size_t>(materialIndex) * sizeof(row), sizeof(row));
+										PerMaterialEvalCB evalRow{};
+										const bool hasEvalRow = capturedMaterialState->evalTable &&
+											capturedMaterialState->evalTable->cpuShadow &&
+											materialIndex < capturedMaterialState->evalTable->elementCount;
+										if (hasEvalRow) std::memcpy(&evalRow,
+											capturedMaterialState->evalTable->cpuShadow->data() +
+											static_cast<std::size_t>(materialIndex) * sizeof(evalRow), sizeof(evalRow));
+										PerMaterialOpenPBRCB openPbrRow{};
+										const bool hasOpenPbrRow = capturedMaterialState->openPbrTable &&
+											capturedMaterialState->openPbrTable->cpuShadow &&
+											row.openPBRMaterialDataIndex < capturedMaterialState->openPbrTable->elementCount;
+										if (hasOpenPbrRow) std::memcpy(&openPbrRow,
+											capturedMaterialState->openPbrTable->cpuShadow->data() +
+											static_cast<std::size_t>(row.openPBRMaterialDataIndex) * sizeof(openPbrRow), sizeof(openPbrRow));
+										const auto binding = std::ranges::find_if(capturedMaterialState->textureBindings,
+											[&row](const auto& candidate) {
+												return candidate && candidate->image &&
+													candidate->imageDescriptorIndex == row.baseColorTextureIndex;
+											});
+										const bool retained = binding != capturedMaterialState->textureBindings.end();
+										const auto actualDescriptor = retained
+											? (*binding)->image->GetSRVInfo(0).slot.index : 0xFFFFFFFFu;
+										spdlog::info(
+											"Visible material descriptor: material={} baseFlags=0x{:08X} evalFlags=0x{:08X} baseDescriptor={} evalDescriptor={} descriptorMatch={} baseFactor=({:.3f},{:.3f},{:.3f},{:.3f}) evalFactor=({:.3f},{:.3f},{:.3f},{:.3f}) openPbrIndex={} openPbrValid={} baseWeight={:.6f} openBaseColor=({:.3f},{:.3f},{:.3f}) geometryOpacity={:.3f} retained={} actual={} resource={} validBacking={} dimensions={}x{} format={} name='{}' streamingID={} bindingRevision={}",
+											materialIndex, row.materialFlags, evalRow.materialFlags,
+											row.baseColorTextureIndex, evalRow.baseColorTextureIndex,
+											hasEvalRow && row.baseColorTextureIndex == evalRow.baseColorTextureIndex,
+											row.baseColorFactor.x, row.baseColorFactor.y, row.baseColorFactor.z, row.baseColorFactor.w,
+											evalRow.baseColorFactor.x, evalRow.baseColorFactor.y, evalRow.baseColorFactor.z, evalRow.baseColorFactor.w,
+											row.openPBRMaterialDataIndex, hasOpenPbrRow, openPbrRow.baseWeight,
+											openPbrRow.baseColor.x, openPbrRow.baseColor.y, openPbrRow.baseColor.z,
+											openPbrRow.geometryOpacity,
+											retained, actualDescriptor,
+											retained ? (*binding)->image->GetGlobalResourceID() : 0u,
+											retained && (*binding)->image->HasValidBackingResource(),
+											retained ? (*binding)->image->GetWidth() : 0u,
+											retained ? (*binding)->image->GetHeight() : 0u,
+											retained ? static_cast<unsigned>((*binding)->image->GetFormat()) : 0u,
+											retained ? (*binding)->image->GetName() : std::string{},
+											retained ? (*binding)->streamingTextureID : 0u,
+											retained ? (*binding)->bindingRevision : 0u);
+										if (retained && actualDescriptor == row.baseColorTextureIndex && textureReadbacks++ < 8u) {
+											auto texturePath = path;
+											texturePath += std::filesystem::path(fmt::format(".material_{}_descriptor_{}.bin",
+												materialIndex, actualDescriptor));
+											if (!m_pMaterialManager->RequestExternalMaterialTextureReadback(
+													(*binding)->image, texturePath.wstring(),
+													[texturePath, materialIndex, actualDescriptor]() {
+														spdlog::info("Visible material texture readback complete: material={} descriptor={} output='{}'",
+															materialIndex, actualDescriptor, texturePath.string());
+													})) {
+												spdlog::warn("Visible material texture readback rejected: material={} descriptor={}",
+													materialIndex, actualDescriptor);
+											}
+										}
+									}
+								}
+                            });
+                    };
+                    ++materialPipelineReadbackIndex;
+                    request("visibility", Builtin::PrimaryCamera::VisibilityTexture);
+                    request("basecolor", Builtin::Surface::BaseColorOpacity);
+                    request("vertex_color_multiplier", Builtin::Surface::Emissive);
+                    request("albedo_sample_grad", Builtin::Surface::Payload0);
+                    request("albedo_evaluated", Builtin::Surface::Payload1);
+                    request("material_counts", "Builtin::VisUtil::MaterialPixelCountBuffer");
+                    request("material_args", "Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+                    request("material_eval", "Builtin::PerMaterialEvalDataBuffer");
+                    request("surface_identity", Builtin::Surface::Identity);
+                    request("surface_records", Builtin::Surface::Records);
+                    request("material_group_telemetry", Builtin::DebugVisualization);
+					if (capturedMaterialState) {
+						for (const std::uint32_t streamingID : { 127u, 128u, 133u, 311u, 319u, 336u }) {
+							const auto binding = std::ranges::find_if(capturedMaterialState->textureBindings,
+								[streamingID](const auto& candidate) {
+									return candidate && candidate->image &&
+										candidate->streamingTextureID == streamingID;
+								});
+							if (binding == capturedMaterialState->textureBindings.end()) {
+								spdlog::warn("Visible texture probe: streamingID={} has no retained binding", streamingID);
+								continue;
+							}
+							auto texturePath = basePath;
+							texturePath += std::filesystem::path(fmt::format(".streaming_{}.bin", streamingID));
+							const auto descriptor = (*binding)->imageDescriptorIndex;
+							readbackService->RequestReadbackCapture("DeferredShadingPass",
+								(*binding)->image.get(), RangeSpec{},
+								[texturePath, streamingID, descriptor](ReadbackCaptureResult&& texture) {
+									std::ofstream output(texturePath, std::ios::binary | std::ios::trunc);
+									if (output && !texture.data.empty()) output.write(
+										reinterpret_cast<const char*>(texture.data.data()),
+										static_cast<std::streamsize>(texture.data.size()));
+									const auto nonzero = std::ranges::count_if(texture.data,
+										[](std::byte value) { return value != std::byte{}; });
+									spdlog::info("Visible texture probe: streamingID={} descriptor={} bytes={} nonzero={} dimensions={}x{} format={} output='{}'",
+										streamingID, descriptor, texture.data.size(), nonzero, texture.width,
+										texture.height, static_cast<unsigned>(texture.format), texturePath.string());
+								});
+						}
+					}
+                }
+            }
+            std::free(outputPath);
+        }
         static bool materialBufferReadbackRequested = false;
         if (!materialBufferReadbackRequested && m_totalFramesRendered >= 600u &&
             currentRenderGraph && m_pMaterialManager) {
@@ -3298,6 +3875,63 @@ void Renderer::Update(float elapsedSeconds) {
                         requestTable("base", materialState->baseTable);
                         requestTable("eval", materialState->evalTable);
                         requestTable("openpbr", materialState->openPbrTable);
+                        std::unordered_map<std::uint32_t, std::size_t> baseDescriptorUse;
+                        if (materialState->baseTable->cpuShadow) {
+                            for (std::size_t slot = 0;
+                                slot < materialState->baseTable->elementCount; ++slot) {
+                                PerMaterialCB row{};
+                                std::memcpy(&row,
+                                    materialState->baseTable->cpuShadow->data() + slot * sizeof(row),
+                                    sizeof(row));
+                                ++baseDescriptorUse[row.baseColorTextureIndex];
+                            }
+                        }
+                        std::vector<std::pair<std::uint32_t, std::size_t>> rankedDescriptors(
+                            baseDescriptorUse.begin(), baseDescriptorUse.end());
+                        std::ranges::sort(rankedDescriptors,
+                            [](const auto& left, const auto& right) { return left.second > right.second; });
+                        const auto descriptorLimit = (std::min<std::size_t>)(rankedDescriptors.size(), 1u);
+                        auto bindingsPath = path;
+                        bindingsPath += L".texture_bindings.txt";
+                        std::ofstream bindingsOutput(bindingsPath, std::ios::trunc);
+                        if (bindingsOutput) {
+                            bindingsOutput << "retained_bindings=" << materialState->textureBindings.size() << '\n';
+                        }
+                        for (std::size_t descriptorRank = 0; descriptorRank < descriptorLimit; ++descriptorRank) {
+                            const auto descriptor = rankedDescriptors[descriptorRank].first;
+                            const auto binding = std::ranges::find_if(materialState->textureBindings,
+                                [descriptor](const auto& candidate) {
+                                    return candidate && candidate->imageDescriptorIndex == descriptor &&
+                                        candidate->image;
+                                });
+                            if (bindingsOutput) {
+                                bindingsOutput << "rank=" << descriptorRank << " descriptor=" << descriptor
+                                    << " rows=" << rankedDescriptors[descriptorRank].second
+                                    << " retained=" << (binding != materialState->textureBindings.end()) << '\n';
+                            }
+                            if (binding == materialState->textureBindings.end()) {
+                                spdlog::warn("Material texture readback: descriptor={} rows={} has no retained binding",
+                                    descriptor, rankedDescriptors[descriptorRank].second);
+                                continue;
+                            }
+                            auto texturePath = path;
+                            texturePath += std::filesystem::path(fmt::format(
+                                ".texture_descriptor_{}.dds", descriptor));
+                            const auto image = (*binding)->image;
+                            const auto streamingID = (*binding)->streamingTextureID;
+                            const auto bindingRevision = (*binding)->bindingRevision;
+                            if (!m_pMaterialManager->RequestExternalMaterialTextureReadback(
+                                    image, texturePath.wstring(),
+                                    [texturePath, descriptor, streamingID, bindingRevision]() {
+                                        spdlog::info(
+                                            "Material texture readback complete: descriptor={} streamingID={} revision={} output='{}'",
+                                            descriptor, streamingID, bindingRevision, texturePath.string());
+                                    })) {
+                                spdlog::warn(
+                                    "Material texture readback rejected: descriptor={} streamingID={} revision={}",
+                                    descriptor, streamingID, bindingRevision);
+                            }
+                        }
                     }
                 }
             }

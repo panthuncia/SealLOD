@@ -1,7 +1,9 @@
 #pragma once
 #include <vector>
+#include <array>
 #include <cstdint>
 #include <bit>
+#include <cstdlib>
 #include <stdexcept>
 
 #include <spdlog/spdlog.h>
@@ -29,6 +31,9 @@ public:
     EvaluateMaterialGroupsPass(ProducerPassServices& services, bool terrainRvtEnabled)
         : m_services(services), m_terrainRvtEnabled(terrainRvtEnabled) {
         if (!m_services.IsValid()) throw std::invalid_argument("EvaluateMaterialGroupsPass requires producer services");
+        if (const char* path = std::getenv("SARP_MATERIAL_PIPELINE_READBACK_PATH")) {
+            m_materialPixelTelemetryEnabled = path[0] != '\0';
+        }
         auto& ecsWorld = m_services.ecs->GetWorld();
 
         // Global LOD extension visibility buffer tag
@@ -83,6 +88,11 @@ public:
     }
 
     void DeclareResourceUsages(ComputePassBuilder* b) override {
+        // TODO(async-state-coherence): CLOD visibility/mesh metadata is still
+        // sourced from live manager resources while draw records, object data,
+        // and material tables may come from PublishedRendererState. Make the
+        // static/draw transaction select exact generations of both sides before
+        // activation; GPU barriers alone cannot make mixed generations coherent.
         b->WithShaderResource(ECSResourceResolver(m_visibleClustersQuery));
         b->WithShaderResource(ECSResourceResolver(m_visibleClusterTransformIndicesQuery));
     	b->WithShaderResource(ECSResourceResolver(m_reyesDiceQueueQuery));
@@ -292,6 +302,35 @@ public:
             : nullptr;
         if (!materialState) return {};
         const auto& sig = m_services.commandSignatures->GetMaterialEvaluationCommandSignature();
+		m_publishedMaterialDescriptors[0] = materialState->baseTable && materialState->baseTable->resource
+			? materialState->baseTable->resource->GetSRVInfo(0).slot.index : 0xFFFFFFFFu;
+		m_publishedMaterialDescriptors[1] = materialState->evalTable && materialState->evalTable->resource
+			? materialState->evalTable->resource->GetSRVInfo(0).slot.index : 0xFFFFFFFFu;
+		m_publishedMaterialDescriptors[2] = materialState->openPbrTable && materialState->openPbrTable->resource
+			? materialState->openPbrTable->resource->GetSRVInfo(0).slot.index : 0xFFFFFFFFu;
+		const auto materialRevision = ctx.publishedRendererState->materials.revision;
+		if (materialRevision != m_lastLoggedMaterialRevision) {
+			m_lastLoggedMaterialRevision = materialRevision;
+			std::string compileFlagMapping;
+			for (std::size_t index = 0; index < materialState->activeCompileFlags.size() &&
+				index < materialState->activeCompileFlagSlots.size(); ++index) {
+				if (!compileFlagMapping.empty()) compileFlagMapping += ',';
+				compileFlagMapping += fmt::format("{}:0x{:X}",
+					materialState->activeCompileFlagSlots[index],
+					static_cast<std::uint64_t>(materialState->activeCompileFlags[index]));
+			}
+			spdlog::info(
+				"Material evaluation binding: stateEpoch={} revision={} descriptors(base={} eval={} openpbr={}) resources(base={} eval={} openpbr={}) rows(base={} eval={} openpbr={}) activeVariants={} slotFlags='{}'",
+				ctx.publishedRendererState->epoch, materialRevision,
+				m_publishedMaterialDescriptors[0], m_publishedMaterialDescriptors[1], m_publishedMaterialDescriptors[2],
+				materialState->baseTable && materialState->baseTable->resource ? materialState->baseTable->resource->GetGlobalResourceID() : 0u,
+				materialState->evalTable && materialState->evalTable->resource ? materialState->evalTable->resource->GetGlobalResourceID() : 0u,
+				materialState->openPbrTable && materialState->openPbrTable->resource ? materialState->openPbrTable->resource->GetGlobalResourceID() : 0u,
+				materialState->baseTable ? materialState->baseTable->elementCount : 0u,
+				materialState->evalTable ? materialState->evalTable->elementCount : 0u,
+				materialState->openPbrTable ? materialState->openPbrTable->elementCount : 0u,
+				materialState->activeCompileFlags.size(), compileFlagMapping);
+		}
 
         const uint64_t stride = sizeof(MaterialEvaluationIndirectCommand);
         auto argBuf = m_materialEvalCmds->GetAPIResource();
@@ -336,6 +375,7 @@ public:
             miscRootConstants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(CLodReyesTerrainNormalBlend());
             miscRootConstants[VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS] = CLodReyesTerrainNormalMipBias();
             miscRootConstants[VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT] = std::bit_cast<uint32_t>(CLodReyesObjectNormalMapBlend());
+            miscRootConstants[VISBUF_MATERIAL_PIXEL_TELEMETRY_ENABLED] = m_materialPixelTelemetryEnabled ? 1u : 0u;
             cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, miscRootConstants);
 
             const uint64_t argOffset = static_cast<uint64_t>(slot) * stride;
@@ -375,6 +415,10 @@ public:
 
 private:
     ProducerPassServices& m_services;
+	std::array<unsigned int, 3> m_publishedMaterialDescriptors{
+		0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+	std::uint64_t m_lastLoggedMaterialRevision = std::numeric_limits<std::uint64_t>::max();
+    bool m_materialPixelTelemetryEnabled = false;
     void BindMaterialResourceDescriptorIndices(
         rhi::CommandList& commandList,
         const PipelineResources& resources) {
@@ -383,8 +427,12 @@ private:
         for (const auto& binding : resources.mandatoryResourceDescriptorSlots) {
             const bool allowMissing =
                 !m_terrainRvtEnabled && binding.name.starts_with("Builtin::Terrain::Rvt");
-            indices[indexCount++] =
-                m_resourceDescriptorIndexHelper->GetResourceDescriptorIndex(binding, allowMissing);
+			unsigned int descriptor =
+				m_resourceDescriptorIndexHelper->GetResourceDescriptorIndex(binding, allowMissing);
+			if (binding.name == Builtin::PerMaterialDataBuffer) descriptor = m_publishedMaterialDescriptors[0];
+			else if (binding.name == "Builtin::PerMaterialEvalDataBuffer") descriptor = m_publishedMaterialDescriptors[1];
+			else if (binding.name == Builtin::PerMaterialOpenPBRDataBuffer) descriptor = m_publishedMaterialDescriptors[2];
+			indices[indexCount++] = descriptor;
         }
         for (const auto& binding : resources.optionalResourceDescriptorSlots) {
             indices[indexCount++] =

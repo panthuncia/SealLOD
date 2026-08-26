@@ -14,6 +14,7 @@
 #define VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS UintRootConstant15
 #define VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT UintRootConstant16
 #define VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX UintRootConstant17
+#define VISBUF_MATERIAL_PIXEL_TELEMETRY_ENABLED UintRootConstant18
 
 // External visibility producers can reserve high cluster-id ranges in the
 // existing vis-key payload. SARP grass owns this range and resolves those

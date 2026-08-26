@@ -491,7 +491,25 @@ private:
                     auto& cache = this->*cacheMember;
                     cache.emplace(key, std::move(pipelineState));
                 }
+                catch (const std::exception& error) {
+                    spdlog::error(
+                        "Async PSO compilation failed: task='{}' keyHash={} error='{}'",
+                        taskName,
+                        std::hash<TKey>{}(key),
+                        error.what());
+                    std::scoped_lock lock(m_cacheMutex);
+                    if (generation != m_asyncPSOGeneration.load(std::memory_order_acquire)) {
+                        return;
+                    }
+
+                    auto& pending = this->*pendingMember;
+                    pending.erase(key);
+                }
                 catch (...) {
+                    spdlog::error(
+                        "Async PSO compilation failed: task='{}' keyHash={} error='<non-standard exception>'",
+                        taskName,
+                        std::hash<TKey>{}(key));
                     std::scoped_lock lock(m_cacheMutex);
                     if (generation != m_asyncPSOGeneration.load(std::memory_order_acquire)) {
                         return;

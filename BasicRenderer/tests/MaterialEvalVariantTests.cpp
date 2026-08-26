@@ -117,15 +117,20 @@ void TestSlotLifecycle()
         "final release must succeed");
 
     unsigned int releasedSlot = 0u;
-    Require(!registry.TryGet(MaterialCompileClodSkinning, releasedSlot),
-        "final release must remove the variant mapping");
+    Require(registry.TryGet(MaterialCompileClodSkinning, releasedSlot) && releasedSlot == first.slot,
+        "final release must preserve the interned GPU-visible variant mapping");
+    Require(registry.GetUsageCount(MaterialCompileClodSkinning) == 0u,
+        "final release must drop the CPU ownership count");
     Require(!registry.Release(MaterialCompileClodSkinning),
-        "unknown release must be rejected");
+        "over-release must be rejected");
 
-    const auto reused = registry.Acquire(MaterialCompileNormalMap);
-    Require(reused.slot == first.slot, "a released slot must be reusable");
+    const auto reacquired = registry.Acquire(MaterialCompileClodSkinning);
+    Require(reacquired.slot == first.slot,
+        "reacquiring a released variant must retain its lifetime-stable slot");
+    const auto distinct = registry.Acquire(MaterialCompileNormalMap);
+    Require(distinct.slot != first.slot, "an interned slot must never be reused for different flags");
     Require(registry.GetUsageCount(MaterialCompileVoxel) == 1u,
-        "slot reuse must not disturb the pinned voxel variant");
+        "new variants must not disturb the pinned voxel variant");
 }
 }
 

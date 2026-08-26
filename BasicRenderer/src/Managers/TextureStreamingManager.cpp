@@ -406,7 +406,9 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 		.debugLabel = std::move(command.debugLabel),
 		.options = command.options,
 	});
-	m_bindingIDsByStreamingTextureID[streamingTextureID].push_back(command.bindingID);
+	auto& bindingIDs = m_bindingIDsByStreamingTextureID[streamingTextureID];
+	bindingIDs.push_back(command.bindingID);
+	const bool firstBindingOwner = bindingIDs.size() == 1u;
 	if (command.options.alphaTested) {
 		++m_alphaTestedBindingCountsByStreamingTextureID[streamingTextureID];
 	}
@@ -433,15 +435,17 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 	MarkTextureStreamingMetadataDirty(texture, true, "track_binding");
 	if (command.options.seedCurrentBinding) {
 		auto preparedImage = texture->PreparedImagePtr();
-		const auto published = texture->GetPublishedBindingSnapshot();
-		if (preparedImage &&
-			(preparedImage != published.image ||
-			 texture->GetBindingRevision() != published.bindingRevision)) {
+		if (preparedImage && firstBindingOwner) {
 			// Seed the publication boundary. The main-thread owner registry independently
 			// tracks which individual owners still need to observe this binding.  Do not
 			// republish an already-current image for every additional owner: that dirtied
 			// all existing owners and produced an O(owner registrations) material rewrite
 			// storm without changing a descriptor.
+			//
+			// The first owner must pass through this boundary even when the prepared and
+			// published images are already identical. External-immutable images are no
+			// longer transitioned by the render graph, so skipping this seed left initial
+			// bindings outside the transfer service's shader-ready state machine.
 			QueueBindingChanged(*texture, {});
 		}
 	}

@@ -96,7 +96,14 @@ std::shared_ptr<const GpuDependencyToken> MakeGpuDependencyToken(
         return ticket->timelineValue;
     };
     token->subscribe = [ticket](std::function<void()> callback) {
-        ticket->SetChangeCallback(std::move(callback));
+        auto fired = std::make_shared<std::atomic_bool>(false);
+        auto notify = [callback = std::move(callback), fired]() mutable {
+            if (!fired->exchange(true, std::memory_order_acq_rel) && callback) callback();
+        };
+        ticket->SetChangeCallback(notify);
+        // Completion can race callback installation. Recheck after subscribing so
+        // an already-complete ticket cannot strand its graph node indefinitely.
+        if (ticket->Complete()) notify();
     };
     token->cancel = [ticket] { return ticket->Cancel(); };
     return token;
@@ -142,6 +149,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::deque<ArtifactKey> pending;
     std::deque<Completion> completions;
     tbb::concurrent_queue<ArtifactKey> gpuSignals;
+    std::deque<ArtifactKey> gpuRecovery;
     std::function<void(const ArtifactSnapshot&)> readyCallback;
     AsyncStateGraphStats stats;
     std::atomic_bool drainScheduled{ false };
@@ -313,6 +321,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     void QueueNode(Node& node) {
         if (node.buildInFlight || node.state == ArtifactReadiness::Queued ||
             node.state == ArtifactReadiness::UploadSubmitted) return;
+        if (node.producedRevision == node.desiredRevision &&
+            (node.state == ArtifactReadiness::GpuReady ||
+             node.state == ArtifactReadiness::Published)) return;
         if (!DependenciesSatisfied(node)) {
             SetState(node, ArtifactReadiness::Blocked);
             return;
@@ -462,6 +473,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 SetState(node, ArtifactReadiness::UploadSubmitted);
                 node.uploadSubmittedAt = std::chrono::steady_clock::now();
                 ++stats.gpuWaiting;
+                gpuRecovery.push_back(node.key);
                 if (node.gpuDependency->subscribe) {
                     auto weak = weak_from_this();
                     const auto key = node.key;
@@ -533,6 +545,21 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     found->second.gpuDependency) {
                     signalledGpu.push_back({ key, found->second.generation, found->second.gpuDependency });
                 }
+            }
+            // Completion callbacks are the primary wakeup path. Keep a bounded,
+            // rotating recovery cursor as a safety net for callbacks lost across
+            // upload-service shutdown/replacement or an unlucky subscription race.
+            constexpr std::size_t maxGpuRecoveryChecks = 32;
+            const auto recoveryChecks = (std::min)(maxGpuRecoveryChecks, gpuRecovery.size());
+            for (std::size_t index = 0; index < recoveryChecks; ++index) {
+                const auto recoveryKey = gpuRecovery.front();
+                gpuRecovery.pop_front();
+                const auto found = nodes.find(recoveryKey);
+                if (found == nodes.end() || found->second.state != ArtifactReadiness::UploadSubmitted ||
+                    !found->second.gpuDependency) continue;
+                signalledGpu.push_back({ recoveryKey, found->second.generation,
+                    found->second.gpuDependency });
+                gpuRecovery.push_back(recoveryKey);
             }
         }
         // Complete() may synchronously notify ticket subscribers. Never call
@@ -614,6 +641,11 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             }
             callback = readyCallback;
             hasImmediateWork = !pending.empty() || !completions.empty() || !gpuSignals.empty();
+            if (!gpuRecovery.empty()) {
+                const auto recoveryDelay = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::milliseconds(2));
+                retryDelay = retryDelay ? (std::min)(*retryDelay, recoveryDelay) : recoveryDelay;
+            }
             const auto afterWork = std::chrono::steady_clock::now();
             for (const auto& [_, node] : nodes) {
                 if (!node.retryAt) continue;
@@ -821,6 +853,14 @@ ArtifactDiagnostic AsyncStateGraph::Diagnose(ArtifactKey key) const {
     const auto& node = found->second;
     result.artifact = m_impl->MakeSnapshot(node);
     result.desiredRevision = node.desiredRevision;
+	result.generation = node.generation;
+	result.buildInFlight = node.buildInFlight;
+	result.hasGpuDependency = static_cast<bool>(node.gpuDependency);
+	if (node.gpuDependency) {
+		result.gpuComplete = node.gpuDependency->Complete();
+		result.gpuTimelineValue = node.gpuDependency->TimelineValue();
+		result.gpuState = node.gpuDependency->Describe();
+	}
     result.error = node.error;
     result.stateAge = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - node.stateSince);

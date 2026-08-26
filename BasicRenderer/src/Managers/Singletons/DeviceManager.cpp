@@ -163,6 +163,9 @@ void DeviceManager::Initialize() {
     catch (const std::exception&) {
         enableRuntimeInstrumentation = false;
     }
+    if (IsTruthyEnvironmentValue("BASICRENDERER_RESHAPE_ENABLE")) {
+        enableRuntimeInstrumentation = true;
+    }
 
 #if !BASICRHI_ENABLE_RESHAPE
     enableRuntimeInstrumentation = false;
@@ -173,6 +176,9 @@ void DeviceManager::Initialize() {
     }
     catch (const std::exception&) {
         enableSynchronousRecording = false;
+    }
+    if (IsTruthyEnvironmentValue("BASICRENDERER_RESHAPE_SYNCHRONOUS_RECORDING")) {
+        enableSynchronousRecording = true;
     }
 
     try {

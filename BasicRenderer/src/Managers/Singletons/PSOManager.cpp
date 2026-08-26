@@ -2147,7 +2147,9 @@ void PSOManager::PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags mater
     ShaderInfoBundle shaderInfo;
     shaderInfo.computeShader = { L"shaders/VisUtilEvaluate.hlsl", L"EvaluateMaterialGroupCS", L"cs_6_6" };
     shaderInfo.defines = std::move(shaderDefines);
-    CompileShaders(shaderInfo);
+    // Offline preprocessing has no DeviceManager device, so its runtime backend
+    // is intentionally Null. Produce the default renderer-host artifacts.
+    CompileShadersForBackend(shaderInfo, rhi::Backend::D3D12);
 }
 
 PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,
@@ -2921,6 +2923,14 @@ ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, 
     collectPreparedIDs(preparedPixel);
     collectPreparedIDs(preparedVertex);
     collectPreparedIDs(preparedCompute);
+
+    // A resource referenced through both mandatory and optional code paths is
+    // mandatory for the combined pipeline. Keep one canonical root-constant
+    // slot; otherwise the optional replacement overwrites the shader macro
+    // while both entries remain in the CPU binding array.
+    for (const auto& mandatoryID : usedMandatoryIDs) {
+        usedOptionalIDs.erase(mandatoryID);
+    }
 
 	std::unordered_map<std::string, std::string> replacementMap;
 	uint32_t nextIndex = 0;

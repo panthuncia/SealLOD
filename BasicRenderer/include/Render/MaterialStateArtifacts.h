@@ -13,6 +13,7 @@
 namespace br::render {
 
 struct PublishedGpuBufferVersion;
+struct PublishedTextureBinding;
 
 inline constexpr std::uint64_t kMaterialBaseTableVariant = 1;
 inline constexpr std::uint64_t kMaterialEvalTableVariant = 2;
@@ -36,6 +37,9 @@ struct MaterialStateBuildInput {
     std::uint32_t slotsUsed = 0;
     std::vector<MaterialCompileFlagEntryDTO> activeCompileFlags;
 	std::vector<MaterialTextureBindingDependencyDTO> textureBindings;
+	// Immutable, already-usable coarse bindings captured from the streaming
+	// owner. These are lifetime holds, not mip-residency graph prerequisites.
+	std::vector<std::shared_ptr<const PublishedTextureBinding>> preparedTextureBindings;
     ArtifactKey baseTableKey{ ArtifactKind::BufferVersion, 0, kMaterialBaseTableVariant };
     ArtifactKey evalTableKey{ ArtifactKind::BufferVersion, 0, kMaterialEvalTableVariant };
     ArtifactKey openPbrTableKey{ ArtifactKind::BufferVersion, 0, kMaterialOpenPbrTableVariant };
@@ -49,6 +53,7 @@ struct PublishedMaterialState {
     std::shared_ptr<const PublishedGpuBufferVersion> baseTable;
     std::shared_ptr<const PublishedGpuBufferVersion> evalTable;
     std::shared_ptr<const PublishedGpuBufferVersion> openPbrTable;
+    std::vector<std::shared_ptr<const PublishedTextureBinding>> textureBindings;
 };
 
 void RegisterMaterialStateProducer(AsyncStateGraph& graph);

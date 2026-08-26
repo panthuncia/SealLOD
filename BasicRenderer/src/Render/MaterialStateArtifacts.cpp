@@ -4,8 +4,11 @@
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/TextureBindingArtifacts.h"
 #include "Resources/GloballyIndexedResource.h"
+#include "Resources/PixelBuffer.h"
 
 #include <unordered_map>
+#include <algorithm>
+#include <cstring>
 
 namespace br::render {
 namespace {
@@ -24,25 +27,11 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
         state->activeCompileFlags.push_back(entry.flags);
         state->activeCompileFlagSlots.push_back(entry.slot);
 	}
-	std::unordered_map<std::uint64_t, const ArtifactSnapshot*> textureDependencies;
-	textureDependencies.reserve(input->textureBindings.size());
-	for (const auto& dependency : context.dependencies) {
-		if (dependency.key.kind == ArtifactKind::TextureBinding) {
-			textureDependencies[dependency.key.primaryID] = &dependency;
+	for (const auto& binding : input->preparedTextureBindings) {
+		if (!binding || !binding->image || !binding->image->HasValidBackingResource()) {
+			return ArtifactBuildResult::Failure("prepared material texture binding is invalid");
 		}
-	}
-	for (const auto& expected : input->textureBindings) {
-		const auto found = textureDependencies.find(expected.streamingTextureID);
-		if (found == textureDependencies.end() ||
-			found->second->revision != expected.bindingRevision) {
-			return ArtifactBuildResult::Failure("material texture-binding revision mismatch");
-		}
-		const auto binding = found->second->payload.Get<PublishedTextureBinding>();
-		if (!binding || binding->bindingRevision != expected.bindingRevision ||
-			binding->imageDescriptorIndex != expected.imageDescriptorIndex ||
-			binding->samplerDescriptorIndex != expected.samplerDescriptorIndex) {
-			return ArtifactBuildResult::Failure("material texture-binding descriptor mismatch");
-		}
+		state->textureBindings.push_back(binding);
 	}
 
     const auto resolveTable = [&](const ArtifactKey& key, std::uint32_t expectedStride) {
@@ -61,6 +50,38 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     if (!state->baseTable || !state->evalTable || !state->openPbrTable) {
         return ArtifactBuildResult::Failure("material table dependency missing or has incompatible ABI");
     }
+    if (!state->baseTable->cpuShadow ||
+        state->baseTable->cpuShadow->size() < state->baseTable->elementCount * sizeof(PerMaterialCB)) {
+        return ArtifactBuildResult::Failure("material table CPU shadow missing or truncated");
+    }
+    const auto validateBinding = [&](std::uint32_t streamingID, std::uint32_t descriptor,
+        std::uint32_t sampler) {
+        if (streamingID == 0u) return true;
+		const auto expected = std::ranges::find_if(input->textureBindings,
+			[streamingID, descriptor, sampler](const MaterialTextureBindingDependencyDTO& binding) {
+				return binding.streamingTextureID == streamingID &&
+					binding.imageDescriptorIndex == descriptor &&
+					binding.samplerDescriptorIndex == sampler;
+			});
+        // Non-participating textures are owned by the ordinary material lifetime
+        // path and intentionally have no TextureBinding artifact.
+        if (expected == input->textureBindings.end()) return true;
+	return true;
+    };
+    for (std::size_t slot = 0; slot < state->baseTable->elementCount; ++slot) {
+        PerMaterialCB row{};
+        std::memcpy(&row, state->baseTable->cpuShadow->data() + slot * sizeof(row), sizeof(row));
+        if (!validateBinding(row.baseColorStreamingTextureID, row.baseColorTextureIndex, row.baseColorSamplerIndex) ||
+            !validateBinding(row.normalStreamingTextureID, row.normalTextureIndex, row.normalSamplerIndex) ||
+            !validateBinding(row.metallicStreamingTextureID, row.metallicTextureIndex, row.metallicSamplerIndex) ||
+            !validateBinding(row.roughnessStreamingTextureID, row.roughnessTextureIndex, row.roughnessSamplerIndex) ||
+            !validateBinding(row.emissiveStreamingTextureID, row.emissiveTextureIndex, row.emissiveSamplerIndex) ||
+            !validateBinding(row.aoStreamingTextureID, row.aoMapIndex, row.aoSamplerIndex) ||
+            !validateBinding(row.heightStreamingTextureID, row.heightMapIndex, row.heightSamplerIndex) ||
+            !validateBinding(row.opacityStreamingTextureID, row.opacityTextureIndex, row.opacitySamplerIndex)) {
+            return ArtifactBuildResult::Failure("material row texture descriptor does not match retained binding");
+        }
+    }
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::Materials;
     root->fragment.revision = context.revision;
@@ -68,12 +89,9 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     // texture-binding revisions that those indices were validated against for
     // as long as this published state (and any in-flight frame using it) lives.
     root->fragment.dependencyClosure = context.dependencies;
-    for (const auto& expected : input->textureBindings) {
-        const auto found = textureDependencies.find(expected.streamingTextureID);
-        if (found == textureDependencies.end()) continue;
-        const auto binding = found->second->payload.Get<PublishedTextureBinding>();
-        if (binding && binding->image) root->fragment.resourceHolds.push_back(binding->image);
-    }
+	for (const auto& binding : input->preparedTextureBindings) {
+		if (binding && binding->image) root->fragment.resourceHolds.push_back(binding->image);
+	}
     root->fragment.payload = ArtifactPayload::Make<PublishedMaterialState>(std::move(state));
     const auto addCatalogEntry = [&](std::uint64_t variant,
         const std::shared_ptr<const PublishedGpuBufferVersion>& version) {
