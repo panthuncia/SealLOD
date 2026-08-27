@@ -5,6 +5,9 @@
 #include <chrono>
 #include <functional>
 #include <cstring>
+#include <unordered_set>
+
+#include <tbb/concurrent_queue.h>
 
 #include "Materials/Material.h"
 #include "Managers/TextureStreamingManager.h"
@@ -71,6 +74,7 @@ public:
 
 	std::uint64_t CommitGpuVisibleSnapshot(bool forceGraphSnapshot = false);
 	std::uint64_t DesiredPublishedStateRevision() const noexcept { return m_materialStateRevision; }
+	br::render::ArtifactVersionID DesiredPublishedStateVersion() const noexcept { return m_materialStateVersion; }
 	bool TryActivatePublishedMaterialState();
 	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
 		org::runtime::IUploadService* uploads) {
@@ -115,6 +119,9 @@ private:
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
 	std::unordered_map<uint32_t, std::vector<uint32_t>> m_materialTextureStreamingTextureIDs;
+	std::unordered_map<uint32_t, std::unordered_set<uint32_t>> m_graphTextureMaterials;
+	std::unordered_map<uint32_t, std::uint64_t> m_graphTextureSubscriptions;
+	tbb::concurrent_queue<uint32_t> m_graphTextureWakeups;
 	bool m_textureStreamingFeedbackSuppressed = false;
 	MaterialCompileFlagsSlotRegistry m_compileFlagsRegistry;
 
@@ -204,9 +211,10 @@ private:
 	std::uint32_t m_materialStateStableFrames = 0;
 	std::uint32_t m_materialStateDirtyFrames = 0;
 	std::uint64_t m_materialStateRevision = 0;
+	br::render::ArtifactVersionID m_materialStateVersion{};
 	std::uint64_t m_materialStateValidatedRevision = 0;
 	std::unordered_map<std::uint64_t, std::uint64_t> m_materialStateExpectedFingerprints;
-	std::array<std::shared_ptr<br::render::VersionedGpuBufferBackingPool>, 3> m_materialBackingPools;
+	std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 3> m_materialBufferFamilies;
 	std::unordered_set<uint64_t> m_traceReadbackResourceIDs;
 	std::weak_ptr<TextureAsset> m_traceBaseColorTexture;
 	bool m_traceLateReadbackRequested = false;

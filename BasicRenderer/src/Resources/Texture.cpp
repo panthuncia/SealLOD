@@ -2580,6 +2580,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		}
 		m_hasUploadedPlaceholder = true;
 		BumpBindingRevision();
+		if (!m_meta.processing.isParticipatingMaterialTexture && m_publishedImage == m_image) {
+			m_publishedBindingRevision = m_streamingState.bindingRevision;
+		}
 		return true;
 	};
 
@@ -2829,6 +2832,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		m_hasUploadedPlaceholder = false;
 		didMainThreadUpload = true;
 		BumpBindingRevision();
+		if (!m_meta.processing.isParticipatingMaterialTexture && m_publishedImage == m_image) {
+			m_publishedBindingRevision = m_streamingState.bindingRevision;
+		}
 		if (!m_initialDataString.empty()) {
 			m_initialStorage = m_initialDataString;
 		}

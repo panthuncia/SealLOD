@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <stdexcept>
 
 #include <DirectXTex.h>
@@ -14,6 +15,7 @@
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
+#include "Render/AsyncStateGraph.h"
 #include "Resources/PixelBuffer.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/ResourceStateTracker.h"
@@ -113,8 +115,10 @@ void MaterialTextureTransferService::Initialize()
 	auto& manager = DeviceManager::GetInstance();
 	m_device = manager.GetDevice();
 	m_graphicsQueue = manager.GetGraphicsQueue();
+	m_timeline = std::make_shared<rhi::TimelinePtr>();
 	if (!m_device.IsValid() || !m_graphicsQueue.IsValid() ||
-		rhi::Failed(m_device.CreateTimeline(m_timeline, 0, "MaterialTextureTransfers"))) {
+		rhi::Failed(m_device.CreateTimeline(*m_timeline, 0, "MaterialTextureTransfers"))) {
+		m_timeline.reset();
 		throw std::runtime_error("failed to initialize material texture transfer service");
 	}
 	m_taskScope = TaskSchedulerManager::GetInstance().CreateScope("MaterialTextureTransferService");
@@ -134,14 +138,15 @@ void MaterialTextureTransferService::Shutdown()
 		if (!m_initialized) return;
 		waitValue = m_nextFenceValue;
 	}
-	if (waitValue != 0) (void)m_timeline->HostWait(waitValue);
+	if (waitValue != 0 && m_timeline && *m_timeline) (void)(*m_timeline)->HostWait(waitValue);
 	std::scoped_lock lock(m_mutex);
 	ReapCompletedLocked();
 	m_pending.clear();
 	m_pendingReadbacks.clear();
 	m_inFlight.clear();
 	m_records.clear();
-	m_timeline.Reset();
+	if (m_timeline) m_timeline->Reset();
+	m_timeline.reset();
 	m_device = {};
 	m_graphicsQueue = {};
 	m_initialized = false;
@@ -198,8 +203,8 @@ rhi::TextureBarrier MaterialTextureTransferService::MakeWholeTextureBarrier(
 
 void MaterialTextureTransferService::ReapCompletedLocked()
 {
-	if (!m_timeline) return;
-	const uint64_t completed = m_timeline->GetCompletedValue();
+	if (!m_timeline || !*m_timeline) return;
+	const uint64_t completed = (*m_timeline)->GetCompletedValue();
 	for (size_t i = 0; i < m_inFlight.size();) {
 		auto& batch = m_inFlight[i];
 		if (completed < batch.fenceValue) {
@@ -404,7 +409,8 @@ void MaterialTextureTransferService::PumpWorker()
 		return;
 	}
 	batch.fenceValue = ++m_nextFenceValue;
-	if (rhi::Failed(m_graphicsQueue.Signal({m_timeline->GetHandle(), batch.fenceValue}))) {
+	if (!m_timeline || !*m_timeline ||
+		rhi::Failed(m_graphicsQueue.Signal({(*m_timeline)->GetHandle(), batch.fenceValue}))) {
 		// Submission already transferred ownership to the queue.  Keep every
 		// allocation alive and force completion before marking the ticket failed.
 		(void)m_device.WaitIdle();
@@ -430,6 +436,30 @@ bool MaterialTextureTransferService::IsShaderReady(const std::shared_ptr<PixelBu
 	if (!lock.owns_lock()) return false;
 	const auto it = m_records.find(image->GetGlobalResourceID());
 	return it != m_records.end() && it->second.state == State::Ready;
+}
+
+std::shared_ptr<const br::render::GpuSubmissionSet>
+MaterialTextureTransferService::ShaderReadySubmission(
+	const std::shared_ptr<PixelBuffer>& image) const
+{
+	if (!image) return {};
+	std::unique_lock lock(m_mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return {};
+	const auto found = m_records.find(image->GetGlobalResourceID());
+	if (found == m_records.end() ||
+		(found->second.state != State::InFlight && found->second.state != State::Ready) ||
+		found->second.fenceValue == 0 || !m_timeline || !*m_timeline) return {};
+	auto timeline = m_timeline;
+	const auto value = found->second.fenceValue;
+	auto result = std::make_shared<br::render::GpuSubmissionSet>();
+	result->submissions.push_back({ timeline, value });
+	result->isComplete = [timeline, value] {
+		return timeline && *timeline && (*timeline)->GetCompletedValue() >= value;
+	};
+	result->describe = [value] {
+		return std::format("material-texture-transfer value={}", value);
+	};
+	return result;
 }
 
 bool MaterialTextureTransferService::HasFailed(const std::shared_ptr<PixelBuffer>& image) const

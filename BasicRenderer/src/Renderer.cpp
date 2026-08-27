@@ -3079,6 +3079,7 @@ void Renderer::Update(float elapsedSeconds) {
             if (m_rendererStatePublisher) {
                 auto commit = m_rendererStatePublisher->Commit(m_frameIndex);
                 m_context.publishedRendererState = commit.state;
+                m_context.publishedManifestLease = commit.lease;
                 if (commit.HasDeferredWork()) {
                     auto* objectManager = commit.committed ? m_pObjectManager.get() : nullptr;
                     auto committedState = commit.committed ? commit.state : nullptr;
@@ -3098,8 +3099,8 @@ void Renderer::Update(float elapsedSeconds) {
                                     const auto& fragment = committedState->Fragment(
                                         static_cast<br::render::PublishedFragmentKind>(slot));
                                     if (fragment.revision != 0 &&
-                                        fragment.publicationRoot.kind != br::render::ArtifactKind::Generic) {
-                                        stateGraph->MarkPublished(fragment.publicationRoot, fragment.revision);
+                                        fragment.publicationRoot.address.kind != br::render::ArtifactKind::Generic) {
+                                        stateGraph->MarkPublished(fragment.publicationRoot);
                                     }
                                     for (const auto& artifact : fragment.dependencyClosure) {
                                         stateGraph->MarkPublished(artifact.key, artifact.revision);
@@ -3114,6 +3115,7 @@ void Renderer::Update(float elapsedSeconds) {
                 }
             } else {
                 m_context.publishedRendererState.reset();
+                m_context.publishedManifestLease.reset();
             }
         } catch (const std::exception& exception) {
             spdlog::critical("CommitPublishedRendererState: publisher Commit failed: {}", exception.what());
@@ -3153,6 +3155,7 @@ void Renderer::Update(float elapsedSeconds) {
     auto outputRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
     UpdateContext updateData{};
     updateData.publishedRendererState = m_context.publishedRendererState;
+    updateData.publishedManifestLease = m_context.publishedManifestLease;
     updateData.drawStats = drawStats;
     updateData.objectManager = m_pObjectManager.get();
     updateData.meshManager = m_pMeshManager.get();
@@ -3220,7 +3223,7 @@ void Renderer::Update(float elapsedSeconds) {
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
         static bool materialBufferReadbackRequested = false;
-        if (!materialBufferReadbackRequested && m_totalFramesRendered >= 600u &&
+        if (!materialBufferReadbackRequested && m_totalFramesRendered >= 120u &&
             currentRenderGraph && m_pMaterialManager) {
             wchar_t* outputPath = nullptr;
             size_t outputPathLength = 0;
@@ -3284,11 +3287,11 @@ void Renderer::Update(float elapsedSeconds) {
                                     << published->materials.revision << '\n';
                                 tableMetadata << "manifest_material_root_kind="
                                     << static_cast<std::uint32_t>(
-                                        published->materials.publicationRoot.kind) << '\n';
+                                        published->materials.publicationRoot.address.kind) << '\n';
                                 tableMetadata << "manifest_material_root_primary="
-                                    << published->materials.publicationRoot.primaryID << '\n';
+                                    << published->materials.publicationRoot.address.primaryID << '\n';
                                 tableMetadata << "manifest_material_root_variant="
-                                    << published->materials.publicationRoot.variantID << '\n';
+                                    << published->materials.publicationRoot.address.variantID << '\n';
                                 tableMetadata << "buffer_revision=" << table->revision << '\n';
                                 tableMetadata << "buffer_write_sequence="
                                     << table->writeSequence << '\n';
@@ -3355,12 +3358,114 @@ void Renderer::Update(float elapsedSeconds) {
             std::free(outputPath);
         }
 
+        // Terrain cutover gate. These are the exact graph-selected buffers used
+        // by the terrain draw path; scheduling after MenuRenderPass validates
+        // the consumer-visible contents, not merely the upload destination.
+        static bool terrainBufferReadbackRequested = false;
+        if (!terrainBufferReadbackRequested && m_totalFramesRendered >= 120u && currentRenderGraph) {
+            wchar_t* outputPath = nullptr;
+            size_t outputPathLength = 0;
+            if (_wdupenv_s(&outputPath, &outputPathLength,
+                    L"SARP_TERRAIN_BUFFER_READBACK_PATH") == 0 &&
+                outputPath != nullptr && outputPath[0] != L'\0') {
+                const std::filesystem::path basePath(outputPath);
+                if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+                    const auto source = br::render::PublishedStateSource::ProcessSource();
+                    const auto published = source ? source->Load() : nullptr;
+                    const auto lease = source ? source->LoadLease() : nullptr;
+                    const auto terrain = published
+                        ? published->terrain.payload.Get<br::render::PublishedTerrainState>() : nullptr;
+                    if (terrain && !terrain->textureBindings.empty()) {
+                        constexpr std::array<const char*, 6> labels{
+                            "sets", "layers", "stochastic", "layer-refs", "regions", "weights" };
+                        for (std::size_t index = 0; index < terrain->buffers.size(); ++index) {
+                            const auto& artifact = terrain->buffers[index];
+                            const auto fragment = artifact.payload
+                                .Get<br::render::RendererStateFragmentArtifact>();
+                            const auto version = fragment
+                                ? fragment->fragment.payload
+                                    .Get<br::render::PublishedGpuBufferVersion>() : nullptr;
+                            if (!version || !version->resource || !version->cpuShadow) continue;
+                            auto capturePath = basePath;
+                            capturePath += std::filesystem::path(fmt::format(
+                                ".{}.bin", labels[index]));
+                            auto metadataPath = capturePath;
+                            metadataPath += L".meta.txt";
+                            std::ofstream metadata(metadataPath, std::ios::trunc);
+                            if (metadata) {
+                                metadata << "manifest_epoch=" << published->epoch << '\n';
+                                metadata << "manifest_terrain_revision="
+                                    << published->terrain.revision << '\n';
+                                metadata << "frame_number=" << m_totalFramesRendered << '\n';
+                                metadata << "lease_epoch=" << (lease ? lease->epoch : 0u) << '\n';
+                                metadata << "lease_frame_slot=" << (lease ? lease->frameSlot : 0u) << '\n';
+                                metadata << "artifact_kind="
+                                    << static_cast<std::uint32_t>(artifact.key.kind) << '\n';
+                                metadata << "artifact_variant=" << artifact.key.variantID << '\n';
+                                metadata << "artifact_revision=" << artifact.revision << '\n';
+                                metadata << "artifact_generation=" << artifact.generation << '\n';
+                                metadata << "buffer_revision=" << version->revision << '\n';
+                                metadata << "buffer_content_version=" << version->contentVersion << '\n';
+                                metadata << "buffer_backing_generation="
+                                    << (version->backing ? version->backing->backingGeneration : 0u) << '\n';
+                                metadata << "resource_id="
+                                    << version->resource->GetGlobalResourceID() << '\n';
+                                metadata << "texture_binding_count="
+                                    << terrain->textureBindings.size() << '\n';
+                            }
+                            const auto expected = version->cpuShadow;
+                            const auto resourceID = version->resource->GetGlobalResourceID();
+                            const auto revision = version->revision;
+                            const auto label = std::string(labels[index]);
+                            readbackService->RequestReadbackCapture(
+                                "MenuRenderPass", version->resource.get(), RangeSpec{},
+                                [capturePath, expected, resourceID, revision, label]
+                                (ReadbackCaptureResult&& result) {
+                                    std::ofstream output(capturePath,
+                                        std::ios::binary | std::ios::trunc);
+                                    if (output && !result.data.empty()) {
+                                        output.write(reinterpret_cast<const char*>(result.data.data()),
+                                            static_cast<std::streamsize>(result.data.size()));
+                                    }
+                                    auto expectedPath = capturePath;
+                                    expectedPath += L".expected";
+                                    std::ofstream expectedOutput(expectedPath,
+                                        std::ios::binary | std::ios::trunc);
+                                    if (expectedOutput && !expected->empty()) {
+                                        expectedOutput.write(
+                                            reinterpret_cast<const char*>(expected->data()),
+                                            static_cast<std::streamsize>(expected->size()));
+                                    }
+                                    const auto compared = (std::min)(result.data.size(), expected->size());
+                                    const auto mismatch = std::mismatch(
+                                        result.data.begin(), result.data.begin() + compared,
+                                        expected->begin()).first - result.data.begin();
+                                    const bool match = result.data.size() >= expected->size() &&
+                                        static_cast<std::size_t>(mismatch) == compared;
+                                    basic_telemetry::Record(match
+                                        ? "SARP.GraphReadback.TerrainBuffer.Match"
+                                        : "SARP.GraphReadback.TerrainBuffer.Mismatch", 1u);
+                                    spdlog::info(
+                                        "Published terrain GPU readback: buffer={} revision={} resource={} gpuBytes={} expectedBytes={} exactPrefix={} firstMismatch={} output='{}'.",
+                                        label, revision, resourceID, result.data.size(), expected->size(),
+                                        match, static_cast<std::size_t>(mismatch) == compared
+                                            ? UINT64_MAX : static_cast<std::size_t>(mismatch),
+                                        capturePath.string());
+                                });
+                        }
+                        terrainBufferReadbackRequested = true;
+                    }
+                }
+            }
+            std::free(outputPath);
+        }
+
         // Active object-buffer cutover gate. Capture the bytes actually consumed
         // by rendering and compare them with the immutable journal shadow owned by
         // each published graph artifact. This is deliberately opt-in because a
         // radius-10 scene contains many active-list resources.
         static bool objectBufferReadbackRequested = false;
-        if (!objectBufferReadbackRequested && m_totalFramesRendered >= 600u && currentRenderGraph) {
+        if (!objectBufferReadbackRequested && m_totalFramesRendered >= 120u && currentRenderGraph) {
             wchar_t* outputPath = nullptr;
             size_t outputPathLength = 0;
             if (_wdupenv_s(&outputPath, &outputPathLength,
@@ -3396,11 +3501,11 @@ void Renderer::Update(float elapsedSeconds) {
                                 metadata << "fragment=" << fragmentName << '\n';
                                 metadata << "fragment_revision=" << fragment.revision << '\n';
                                 metadata << "fragment_root_kind="
-                                    << static_cast<std::uint32_t>(fragment.publicationRoot.kind) << '\n';
+                                    << static_cast<std::uint32_t>(fragment.publicationRoot.address.kind) << '\n';
                                 metadata << "fragment_root_primary="
-                                    << fragment.publicationRoot.primaryID << '\n';
+                                    << fragment.publicationRoot.address.primaryID << '\n';
                                 metadata << "fragment_root_variant="
-                                    << fragment.publicationRoot.variantID << '\n';
+                                    << fragment.publicationRoot.address.variantID << '\n';
                                 metadata << "artifact_kind="
                                     << static_cast<std::uint32_t>(artifact.key.kind) << '\n';
                                 metadata << "artifact_primary=" << artifact.key.primaryID << '\n';
@@ -3437,11 +3542,11 @@ void Renderer::Update(float elapsedSeconds) {
                                         << manifestFragment.revision << '\n';
                                     metadata << "manifest_fragment[" << manifestIndex << "].root_kind="
                                         << static_cast<std::uint32_t>(
-                                            manifestFragment.publicationRoot.kind) << '\n';
+                                            manifestFragment.publicationRoot.address.kind) << '\n';
                                     metadata << "manifest_fragment[" << manifestIndex << "].root_primary="
-                                        << manifestFragment.publicationRoot.primaryID << '\n';
+                                        << manifestFragment.publicationRoot.address.primaryID << '\n';
                                     metadata << "manifest_fragment[" << manifestIndex << "].root_variant="
-                                        << manifestFragment.publicationRoot.variantID << '\n';
+                                        << manifestFragment.publicationRoot.address.variantID << '\n';
                                 }
                             }
                             readbackService->RequestReadbackCapture(
@@ -3487,7 +3592,7 @@ void Renderer::Update(float elapsedSeconds) {
                                 });
                         };
                         const br::render::ArtifactSnapshot fragmentArtifact{
-                            fragment.publicationRoot, fragment.revision, 0,
+                            fragment.publicationRoot.address, fragment.revision, 0,
                             br::render::ArtifactReadiness::Published, fragment.payload };
                         captureVersion(fragment.payload
                             .Get<br::render::PublishedGpuBufferVersion>(), fragmentArtifact);
@@ -5306,6 +5411,7 @@ void Renderer::Cleanup() {
     if (m_rendererStatePublisher) {
         spdlog::info("Renderer state cleanup: releasing captured and published states");
         m_context.publishedRendererState.reset();
+        m_context.publishedManifestLease.reset();
         br::render::PublishedStateSource::SetProcessSource({});
         m_rendererStatePublisher->DiscardCandidate();
         m_rendererStatePublisher.reset();

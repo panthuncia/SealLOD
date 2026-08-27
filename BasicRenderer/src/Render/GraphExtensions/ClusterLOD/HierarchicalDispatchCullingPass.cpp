@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Telemetry.h>
 
 #include "BuiltinResources.h"
 #include "Managers/MaterialManager.h"
@@ -652,6 +653,29 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     auto* renderContext = executionContext.hostData->Get<RenderContext>();
     auto& context = *renderContext;
     auto& commandList = executionContext.commandList;
+	if (m_isFirstPass) {
+		const auto recordResolver = m_resourceRegistryView->RequestResolver(
+			Builtin::InstanceDrawRecordBuffer);
+		const auto transformResolver = m_resourceRegistryView->RequestResolver(
+			Builtin::PerInstanceTransformBuffer);
+		const auto objectResolver = m_resourceRegistryView->RequestResolver(
+			Builtin::PerObjectBuffer);
+		const auto recordResources = recordResolver ? recordResolver->Resolve()
+			: std::vector<std::shared_ptr<Resource>>{};
+		const auto transformResources = transformResolver ? transformResolver->Resolve()
+			: std::vector<std::shared_ptr<Resource>>{};
+		const auto objectResources = objectResolver ? objectResolver->Resolve()
+			: std::vector<std::shared_ptr<Resource>>{};
+		basic_telemetry::SetGauge("SARP.Culling.BoundDrawRecordResource",
+			recordResources.empty() ? 0 : static_cast<std::int64_t>(
+				recordResources.front()->GetGlobalResourceID()));
+		basic_telemetry::SetGauge("SARP.Culling.BoundTransformResource",
+			transformResources.empty() ? 0 : static_cast<std::int64_t>(
+				transformResources.front()->GetGlobalResourceID()));
+		basic_telemetry::SetGauge("SARP.Culling.BoundPerObjectResource",
+			objectResources.empty() ? 0 : static_cast<std::int64_t>(
+				objectResources.front()->GetGlobalResourceID()));
+	}
 
     commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
     commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
@@ -1239,6 +1263,8 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
                 cullRecords.push_back(record);
             }
         });
+		basic_telemetry::SetGauge("SARP.Culling.GraphWorkloadRecords.Dispatch",
+			static_cast<std::int64_t>(cullRecords.size()));
 
         BindResourceDescriptorIndices(commandList, m_pureComputeObjectCullPipelineState.GetResourceDescriptorSlots());
         commandList.BindPipeline(m_pureComputeObjectCullPipelineState.GetAPIPipelineState().GetHandle());

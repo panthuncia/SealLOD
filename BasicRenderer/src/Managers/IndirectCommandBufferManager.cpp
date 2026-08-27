@@ -164,6 +164,28 @@ void IndirectCommandBufferManager::PublishDesiredState(
         changed = changed || m_consumedMutationRevision != m_desiredMutationRevision;
     }
     if (changed) ScheduleDesiredBuild();
+	const auto diagnostic = m_rendererStateRequests->Diagnose(
+		{ br::render::ArtifactKind::IndirectWorkload, 0, 0 });
+	basic_telemetry::SetGauge("SARP.Indirect.GraphDesiredRevision",
+		static_cast<std::int64_t>(diagnostic.desiredRevision));
+	basic_telemetry::SetGauge("SARP.Indirect.GraphArtifactRevision",
+		static_cast<std::int64_t>(diagnostic.artifact.revision));
+	basic_telemetry::SetGauge("SARP.Indirect.GraphReadiness",
+		static_cast<std::int64_t>(diagnostic.artifact.readiness));
+	basic_telemetry::SetGauge("SARP.Indirect.GraphBlockers",
+		static_cast<std::int64_t>(diagnostic.blockers.size()));
+	if (!diagnostic.blockers.empty()) {
+		const auto& blocker = diagnostic.blockers.front();
+		const auto blockerDiagnostic = m_rendererStateRequests->Diagnose(blocker.key);
+		basic_telemetry::SetGauge("SARP.Indirect.GraphBlockerKind",
+			static_cast<std::int64_t>(blocker.key.kind));
+		basic_telemetry::SetGauge("SARP.Indirect.GraphBlockerRequiredRevision",
+			static_cast<std::int64_t>(blocker.minimumRevision));
+		basic_telemetry::SetGauge("SARP.Indirect.GraphBlockerArtifactRevision",
+			static_cast<std::int64_t>(blockerDiagnostic.artifact.revision));
+		basic_telemetry::SetGauge("SARP.Indirect.GraphBlockerReadiness",
+			static_cast<std::int64_t>(blockerDiagnostic.artifact.readiness));
+	}
 }
 
 void IndirectCommandBufferManager::OnActiveDrawSetMutation(
@@ -360,8 +382,10 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
         dto.minimumCapacity = capacity;
         if (safeCount != 0u) {
             for (const auto viewID : input->viewIDs) {
+				const auto argumentRevision =
+					(std::max<std::uint64_t>)(capacity, 1u);
                 const br::render::ArtifactKey argumentKey{
-                    br::render::ArtifactKind::BufferVersion, idFound->second, viewID };
+					br::render::ArtifactKind::BufferVersion, idFound->second, viewID };
                 auto argumentInput = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
                 argumentInput->uploadService = m_uploadService;
                 argumentInput->debugName = "PublishedIndirectArguments";
@@ -379,8 +403,6 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
                     static_cast<std::uint64_t>(key.compileFlags) |
                     (static_cast<std::uint64_t>(key.skinnedShadowCaster) << 62u) |
                     (static_cast<std::uint64_t>(key.clodOnly) << 63u);
-                const auto argumentRevision =
-                    (std::max<std::uint64_t>)(capacity, 1u);
                 (void)m_rendererStateRequests->Request(
                     argumentKey, argumentRevision, {},
                     br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(

@@ -112,6 +112,22 @@ int main() {
         successor.writeSequence = 4;
         Check(!ReplayVersionedGpuBufferShadow(successor, error));
         Check(!error.empty());
+
+        // RequestSnapshot successors carry a complete immutable image rather
+        // than a journal delta. They may advance independently of the prior
+        // journal sequence and must replace, not silently reuse, its contents.
+        VersionedGpuBufferBuildInput fullSuccessor{};
+        fullSuccessor.elementStride = sizeof(std::uint32_t);
+        fullSuccessor.elementCount = 3;
+        fullSuccessor.capacity = 4;
+        fullSuccessor.writeSequence = 9;
+        fullSuccessor.previous = previous;
+        const std::uint32_t fullRows[]{ 70, 80, 90 };
+        fullSuccessor.bytes.resize(sizeof(fullRows));
+        std::memcpy(fullSuccessor.bytes.data(), fullRows, sizeof(fullRows));
+        const auto fullShadow = ReplayVersionedGpuBufferShadow(fullSuccessor, error);
+        Check(fullShadow && error.empty());
+        Check(std::memcmp(fullShadow->data(), fullRows, sizeof(fullRows)) == 0);
     }
 
     auto& scheduler = TaskSchedulerManager::GetInstance();
@@ -136,6 +152,41 @@ int main() {
             return ArtifactBuildResult::Ready(Payload(value));
         }
     });
+
+    // Request returns an exact handle that is resolvable immediately, even
+    // before the producer runs and even while the version is queued behind a
+    // predecessor. A handle must never transiently alias Missing state.
+    const ArtifactKey immediateKey{ ArtifactKind::Generic, 899, 0 };
+    const auto immediateV1 = graph.Request(immediateKey, 1, {}, Payload(1), 1);
+    const auto immediateV2 = graph.Request(immediateKey, 2, {}, Payload(2), 2);
+    Check(immediateV1 && immediateV2);
+    const auto immediateV1Snapshot = graph.Snapshot(immediateV1.version);
+    const auto immediateV2Snapshot = graph.Snapshot(immediateV2.version);
+    Check(immediateV1Snapshot.readiness != ArtifactReadiness::Missing);
+    Check(immediateV2Snapshot.readiness == ArtifactReadiness::Blocked);
+    graph.WaitIdle();
+    Check(graph.Snapshot(immediateV1.version).revision == 1);
+    Check(graph.Snapshot(immediateV2.version).revision == 2);
+
+    // Returned version IDs own their archive entry until the last copied lease
+    // is released. Once superseded and unreferenced, the payload is reclaimed
+    // without allowing its revision/generation identity to be reused.
+    const ArtifactKey leasedKey{ ArtifactKind::Generic, 898, 0 };
+    auto leasedV1 = graph.Request(leasedKey, 1, {}, Payload(1), 1);
+    Check(leasedV1);
+    graph.WaitIdle();
+    const ArtifactVersionID expiredLeaseID{
+        leasedV1.version.address, leasedV1.version.revision, leasedV1.version.generation };
+    auto leasedV2 = graph.Request(leasedKey, 2, {}, Payload(2), 2);
+    Check(leasedV2);
+    graph.WaitIdle();
+    Check(graph.Snapshot(leasedV1.version).payload.Get<Value>() != nullptr);
+    const auto reclaimedBeforeLeaseRelease = graph.Stats().reclaimedVersions;
+    leasedV1.version.lease.reset();
+    Check(graph.Request({ ArtifactKind::Generic, 897, 0 }, 1));
+    graph.WaitIdle();
+    Check(graph.Stats().reclaimedVersions > reclaimedBeforeLeaseRelease);
+    Check(graph.Snapshot(expiredLeaseID).readiness == ArtifactReadiness::Missing);
 
     std::atomic_uint readySubscriberA{ 0 };
     std::atomic_uint readySubscriberB{ 0 };
@@ -191,9 +242,10 @@ int main() {
             return ArtifactBuildResult::Ready(Payload(value->value));
         }
     });
-    Check(graph.Request(stampedDependent, 1, {
+    const auto stampedV1Request = graph.Request(stampedDependent, 1, {
         { stampedDependency, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf }
-    }));
+    });
+    Check(stampedV1Request);
     const auto stampDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!stampedBuildStarted.load(std::memory_order_acquire) &&
         std::chrono::steady_clock::now() < stampDeadline) std::this_thread::yield();
@@ -206,7 +258,9 @@ int main() {
     Check(static_cast<bool>(rebuiltFromCurrentDependency.payload.Get<Value>()));
     Check(rebuiltFromCurrentDependency.payload.Get<Value>()->value == 2);
     Check(stampedBuildCount.load(std::memory_order_relaxed) == 2);
-    Check(graph.Stats().staleCompletions != 0);
+    const auto retainedStampedV1 = graph.Snapshot(stampedV1Request.version);
+    Check(retainedStampedV1.payload.Get<Value>() &&
+        retainedStampedV1.payload.Get<Value>()->value == 1);
 
     // Exact snapshots and readiness gates retain the immutable dependency
     // selected for the build; only Latest consumers rebuild on advancement.
@@ -223,6 +277,28 @@ int main() {
     Check(graph.Request(exactDependency, 2));
     graph.WaitIdle();
     Check(graph.Snapshot(exactConsumer).payload.Get<Value>()->value == 2);
+    const auto exactV1 = graph.Snapshot(ArtifactVersionID{
+        exactDependency, 1, graph.Request(exactDependency, 1).version.generation });
+    Check(exactV1.readiness == ArtifactReadiness::GpuReady);
+    Check(exactV1.payload.Get<Value>() && exactV1.payload.Get<Value>()->value == 1);
+    const ArtifactKey lateExactConsumer{ ArtifactKind::Generic, 310, 0 };
+    Check(graph.Request(lateExactConsumer, 1, {
+        Exact(exactV1.Version(), ArtifactReadiness::GpuReady)
+    }));
+    graph.WaitIdle();
+    Check(graph.Snapshot(lateExactConsumer).payload.Get<Value>()->value == 2);
+
+    std::atomic_uint64_t observedSequence{ 0 };
+    const auto observation = graph.ObserveWithSnapshot(exactDependency,
+        [&](std::uint64_t sequence, const ArtifactSnapshot&) {
+            observedSequence.store(sequence, std::memory_order_release);
+        });
+    Check(observation.subscription != 0);
+    Check(observation.snapshot.revision == 2);
+    Check(graph.Request(exactDependency, 3));
+    graph.WaitIdle();
+    Check(observedSequence.load(std::memory_order_acquire) != 0);
+    graph.RemoveReadyCallback(observation.subscription);
 
     const ArtifactKey gateDependency{ ArtifactKind::Generic, 306, 0 };
     const ArtifactKey gateConsumer{ ArtifactKind::Generic, 307, 0 };
@@ -234,6 +310,27 @@ int main() {
     Check(graph.Request(gateDependency, 1));
     graph.WaitIdle();
     Check(graph.Snapshot(gateConsumer).payload.Get<Value>()->value == 2);
+
+    // A completed Latest consumer advances by creating a new immutable version.
+    // The old exact handle must retain its original dependency closure.
+    const ArtifactKey latestDependency{ ArtifactKind::Generic, 311, 0 };
+    const ArtifactKey latestConsumer{ ArtifactKind::Generic, 312, 0 };
+    Check(graph.Request(latestDependency, 1));
+    graph.WaitIdle();
+    const auto latestV1Request = graph.Request(latestConsumer, 1, {
+        Latest(latestDependency, ArtifactReadiness::GpuReady)
+    });
+    Check(latestV1Request);
+    graph.WaitIdle();
+    const auto latestV1 = graph.Snapshot(latestV1Request.version);
+    Check(latestV1.payload.Get<Value>() && latestV1.payload.Get<Value>()->value == 2);
+    Check(graph.Request(latestDependency, 2));
+    graph.WaitIdle();
+    const auto latestV2 = graph.Snapshot(latestConsumer);
+    Check(latestV2.revision == 2);
+    Check(latestV2.payload.Get<Value>() && latestV2.payload.Get<Value>()->value == 4);
+    const auto retainedLatestV1 = graph.Snapshot(latestV1Request.version);
+    Check(retainedLatestV1.payload.Get<Value>() && retainedLatestV1.payload.Get<Value>()->value == 2);
     Check(graph.Request(gateDependency, 2));
     graph.WaitIdle();
     Check(graph.Snapshot(gateConsumer).payload.Get<Value>()->value == 2);
@@ -275,7 +372,7 @@ int main() {
         TaskLane::Streaming, TaskDomain::General, "QueuedClosureReplacementProducer",
         [&queuedRootBuilds](const ArtifactBuildContext& context) {
             ++queuedRootBuilds;
-            Check(context.dependencies.size() == 2);
+            Check(context.dependencies.size() == context.revision);
             return ArtifactBuildResult::Ready(Payload(context.revision));
         }
     });
@@ -289,11 +386,11 @@ int main() {
     releaseHeldDrain.store(true, std::memory_order_release);
     holdDrainScope.Wait();
     graph.WaitIdle();
-    Check(queuedRootBuilds.load(std::memory_order_acquire) == 0);
+    Check(queuedRootBuilds.load(std::memory_order_acquire) == 1);
     Check(graph.Snapshot(queuedRoot).readiness == ArtifactReadiness::Blocked);
     Check(graph.Request(addedDependency, 1));
     graph.WaitIdle();
-    Check(queuedRootBuilds.load(std::memory_order_acquire) == 1);
+    Check(queuedRootBuilds.load(std::memory_order_acquire) == 2);
     Check(graph.Snapshot(queuedRoot).readiness == ArtifactReadiness::GpuReady);
 
     graph.RegisterTypedProducer<Value, Value>(ArtifactKind::ActiveDrawList,
@@ -526,6 +623,44 @@ int main() {
     Check(trackedToken->Complete());
     Check(trackedUpload->state.load() == org::TrackedUploadTicketState::Completed);
 
+    auto stagedTicket = std::make_shared<org::TrackedUploadTicket>();
+    auto stagedTimeline = std::make_shared<std::atomic_uint64_t>(0);
+    graph.RegisterProducer(ArtifactKind::ViewLifetime, {
+        TaskLane::Streaming, TaskDomain::RendererState, "SubmissionMilestoneProducer",
+        [stagedTicket](const ArtifactBuildContext& context) {
+            return ArtifactBuildResult::Ready(
+                Payload(context.revision), MakeGpuSubmissionSet(stagedTicket));
+        }
+    });
+    const ArtifactKey stagedKey{ ArtifactKind::ViewLifetime, 90, 0 };
+    Check(graph.Request(stagedKey, 1));
+    graph.WaitIdle();
+    Check(graph.Snapshot(stagedKey).readiness == ArtifactReadiness::CpuReady);
+    auto stagedQueued = org::TrackedUploadTicketState::Queued;
+    Check(stagedTicket->state.compare_exchange_strong(
+        stagedQueued, org::TrackedUploadTicketState::Claimed));
+    stagedTicket->NotifyChanged();
+    graph.WaitIdle();
+    Check(graph.Snapshot(stagedKey).readiness == ArtifactReadiness::CpuReady);
+    {
+        std::lock_guard lock(stagedTicket->timelineMutex);
+        stagedTicket->timelineOwner = stagedTimeline;
+        stagedTicket->timelineValue = 11;
+        stagedTicket->isTimelineComplete = [stagedTimeline](std::uint64_t value) {
+            return stagedTimeline->load(std::memory_order_acquire) >= value;
+        };
+    }
+    auto stagedClaimed = org::TrackedUploadTicketState::Claimed;
+    Check(stagedTicket->state.compare_exchange_strong(
+        stagedClaimed, org::TrackedUploadTicketState::Submitted));
+    stagedTicket->NotifyChanged();
+    graph.WaitIdle();
+    Check(graph.Snapshot(stagedKey).readiness == ArtifactReadiness::UploadSubmitted);
+    stagedTimeline->store(11, std::memory_order_release);
+    stagedTicket->NotifyChanged();
+    graph.WaitIdle();
+    Check(graph.Snapshot(stagedKey).readiness == ArtifactReadiness::GpuReady);
+
     std::atomic_bool gpuComplete{ false };
 	std::atomic_uint gpuBuilds{ 0 };
     auto gpuChangeCallback = std::make_shared<std::function<void()>>();
@@ -547,18 +682,28 @@ int main() {
         }
     });
     const ArtifactKey gpuKey{ ArtifactKind::TextureBinding, 1, 0 };
-    Check(graph.Request(gpuKey, 7));
+    const auto gpuV7Request = graph.Request(gpuKey, 7);
+    Check(gpuV7Request);
     graph.WaitIdle();
     Check(graph.Snapshot(gpuKey).readiness == ArtifactReadiness::UploadSubmitted);
 	Check(graph.Request(gpuKey, 8));
 	graph.WaitIdle();
 	const auto executingGpu = graph.Snapshot(gpuKey);
-	Check(executingGpu.revision == 7);
+	Check(executingGpu.revision == 8);
 	Check(executingGpu.readiness == ArtifactReadiness::UploadSubmitted);
-	Check(gpuBuilds.load(std::memory_order_relaxed) == 1);
+	Check(gpuBuilds.load(std::memory_order_relaxed) == 2);
+	const auto submittedV7 = graph.Snapshot(gpuV7Request.version);
+    Check(submittedV7.revision == 7);
+	Check(submittedV7.readiness == ArtifactReadiness::UploadSubmitted);
+    // No completion callback is fired when this synthetic timeline advances.
+    // Level-triggered graph reconciliation must still observe it after the old
+    // finite recovery window would have expired.
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
     gpuComplete.store(true, std::memory_order_release);
-    graph.PumpGpuCompletions();
-    graph.WaitIdle();
+	for (std::size_t attempt = 0; attempt < 100 &&
+		graph.Snapshot(gpuKey).readiness != ArtifactReadiness::GpuReady; ++attempt) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
 	const auto completedGpuArtifact = graph.Snapshot(gpuKey);
 	Check(completedGpuArtifact.revision == 8);
 	Check(completedGpuArtifact.readiness == ArtifactReadiness::GpuReady);
@@ -609,6 +754,9 @@ int main() {
     Check(publisher.PublishCandidate({ 0, candidateState }));
     auto commit0 = publisher.Commit(0);
     Check(commit0.state->epoch == 1);
+    Check(commit0.lease && commit0.lease->state == commit0.state);
+    Check(commit0.lease->epoch == 1 && commit0.lease->frameSlot == 0);
+    const auto frame0Lease = commit0.lease;
     commit0.RunDeferred();
     auto staleState = std::make_shared<PublishedRendererState>();
     staleState->epoch = 2;
@@ -623,6 +771,10 @@ int main() {
     Check(publisher.PublishCandidate({ 1, nextState }));
     auto commit2 = publisher.Commit(2);
     Check(commit2.state->epoch == 2);
+    Check(commit2.lease && commit2.lease->state == commit2.state);
+    Check(commit2.lease->sequence > frame0Lease->sequence);
+    // Advancing publication cannot retarget a previously committed frame.
+    Check(frame0Lease->state->epoch == 1 && frame0Lease->frameSlot == 0);
     commit2.RunDeferred();
     // Slots 0 and 1 retain epoch 1 until their respective fences are released.
     Check(candidateState.use_count() >= 3);
@@ -672,14 +824,14 @@ int main() {
     materialPatch.sourceEpoch = 0;
     PublishedStateFragment materialFragment;
     materialFragment.revision = 10;
-    materialFragment.publicationRoot = { ArtifactKind::MaterialTable, 10, 0 };
+    materialFragment.publicationRoot = { { ArtifactKind::MaterialTable, 10, 0 }, 10, 1 };
     materialPatch.fragments[static_cast<std::size_t>(PublishedFragmentKind::Materials)] =
         materialFragment;
     PublishedStatePatch terrainPatch;
     terrainPatch.sourceEpoch = 0;
     PublishedStateFragment terrainFragment;
     terrainFragment.revision = 20;
-    terrainFragment.publicationRoot = { ArtifactKind::TerrainState, 20, 0 };
+    terrainFragment.publicationRoot = { { ArtifactKind::TerrainState, 20, 0 }, 20, 1 };
     terrainPatch.fragments[static_cast<std::size_t>(PublishedFragmentKind::Terrain)] =
         terrainFragment;
     Check(patchPublisher.PublishPatch(materialPatch));
@@ -694,7 +846,7 @@ int main() {
     staleButIndependent.sourceEpoch = 0;
     PublishedStateFragment geometryFragment;
     geometryFragment.revision = 30;
-    geometryFragment.publicationRoot = { ArtifactKind::StaticScene, 30, 0 };
+    geometryFragment.publicationRoot = { { ArtifactKind::StaticScene, 30, 0 }, 30, 1 };
     staleButIndependent.fragments[static_cast<std::size_t>(PublishedFragmentKind::Geometry)] =
         geometryFragment;
     Check(patchPublisher.PublishPatch(staleButIndependent));
@@ -711,7 +863,7 @@ int main() {
     conflictingPatch.fragments[static_cast<std::size_t>(PublishedFragmentKind::DrawRecords)] =
         drawFragment;
     conflictingPatch.preconditions.push_back({ PublishedFragmentKind::Materials,
-        { ArtifactKind::MaterialTable, 999, 0 }, 999 });
+        { { ArtifactKind::MaterialTable, 999, 0 }, 999, 1 } });
     Check(patchPublisher.PublishPatch(conflictingPatch));
     auto rejectedPatchCommit = patchPublisher.Commit(0);
     Check(!rejectedPatchCommit.committed && rejectedPatchCommit.state->epoch == 2);

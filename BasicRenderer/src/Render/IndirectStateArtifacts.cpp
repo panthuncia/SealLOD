@@ -42,7 +42,17 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
     root->catalogOwnerMask = PublishedFragmentMask(PublishedFragmentKind::IndirectWorkloads) |
         PublishedFragmentMask(PublishedFragmentKind::ActiveDrawLists);
     root->fragment.revision = context.revision;
-	root->fragment.dependencyClosure = context.dependencies;
+	// ReadyGate dependencies authorize this build but do not form an exact
+	// publication constraint. Keeping the material root in the immutable closure
+	// pinned the active manifest to the material revision that happened to be
+	// ready when indirect state was built, preventing every later material table
+	// from publishing. View lifetimes have the same gate-only semantics. Buffer
+	// artifacts remain in the closure because they are exact resource inputs.
+	for (const auto& dependency : context.dependencies) {
+		if (dependency.key.kind == ArtifactKind::MaterialTable ||
+			dependency.key.kind == ArtifactKind::ViewLifetime) continue;
+		root->fragment.dependencyClosure.push_back(dependency);
+	}
 
     for (const auto& workload : input->workloads) {
         const auto logicalCount = static_cast<std::uint64_t>(workload.activeEntries.size());

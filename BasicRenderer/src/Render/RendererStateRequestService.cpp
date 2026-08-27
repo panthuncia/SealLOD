@@ -14,12 +14,14 @@ RendererStateRequestService::RendererStateRequestService(
 
 RendererStateRequestService::~RendererStateRequestService() { Stop(); }
 
-bool RendererStateRequestService::Request(ArtifactKey key, std::uint64_t revision,
+ArtifactRequestResult RendererStateRequestService::Request(ArtifactAddress key, std::uint64_t revision,
     std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
     std::uint64_t inputFingerprint) {
-    return m_accepting.load(std::memory_order_acquire) &&
-        m_graph.Request(key, revision, std::move(requirements), std::move(input),
-            inputFingerprint);
+    if (!m_accepting.load(std::memory_order_acquire)) {
+        return { ArtifactRequestStatus::ShuttingDown, 0, {} };
+    }
+    return m_graph.Request(key, revision, std::move(requirements), std::move(input),
+        inputFingerprint);
 }
 
 bool RendererStateRequestService::Invalidate(ArtifactKey key, std::uint64_t revision) {
@@ -55,8 +57,7 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
         const auto newestRevision = newest != roots.end() ? newest->revision : 0u;
         std::erase_if(roots, [&](const ArtifactSnapshot& value) {
             const bool isNewest = value.key == newestKey && value.revision == newestRevision;
-            const bool isActive = active && value.key == activeFragment.publicationRoot &&
-                value.revision == activeFragment.revision;
+            const bool isActive = active && value.Version() == activeFragment.publicationRoot;
             return !isNewest && !isActive;
         });
     }
@@ -114,8 +115,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                 const auto root = dependency.payload.Get<RendererStateFragmentArtifact>();
                 if (!root || !root->publishRoot) continue;
                 const auto& selected = candidate.Fragment(root->kind);
-                if (selected.publicationRoot != dependency.key ||
-                    selected.revision != dependency.revision) return false;
+                if (selected.publicationRoot != dependency.Version()) return false;
             }
         }
         return true;
@@ -156,7 +156,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             if (!selection[index]) continue;
             const auto artifact = selection[index]->payload.Get<RendererStateFragmentArtifact>();
             auto fragment = artifact->fragment;
-            fragment.publicationRoot = selection[index]->key;
+            fragment.publicationRoot = selection[index]->Version();
             candidate.Fragment(static_cast<PublishedFragmentKind>(index)) = std::move(fragment);
         }
         return candidate;
@@ -213,12 +213,25 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
             if ((ownerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
                 catalog->contentVersions.erase(entry->first);
+                catalog->selections.erase(entry->first);
                 entry = catalog->entries.erase(entry);
             } else ++entry;
         }
         for (const auto& [key, resources] : artifact->catalogEntries) {
             catalog->entries[key] = resources;
             catalog->contentVersions[key] = root.revision;
+            PublishedResourceSelection selection;
+            selection.resources = resources;
+            selection.contentVersion = root.revision;
+            selection.sourceArtifact = root.Version();
+            selection.lifetimeHolds = artifact->fragment.resourceHolds;
+            if (root.gpuSubmissions) selection.gpuSubmissions.push_back(root.gpuSubmissions);
+            for (const auto& dependency : artifact->fragment.dependencyClosure) {
+                if (dependency.gpuSubmissions) {
+                    selection.gpuSubmissions.push_back(dependency.gpuSubmissions);
+                }
+            }
+            catalog->selections.insert_or_assign(key, std::move(selection));
         }
     }
     if (!coherent(*state)) return ArtifactBuildResult::Failure("manifest dependency closure changed during build");
@@ -231,13 +244,29 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         const auto kind = static_cast<PublishedFragmentKind>(index);
         const auto artifact = selected[index]->payload.Get<RendererStateFragmentArtifact>();
         auto fragment = artifact->fragment;
-        fragment.publicationRoot = selected[index]->key;
+        fragment.publicationRoot = selected[index]->Version();
         patch->fragments[index] = std::move(fragment);
         selectedMask |= PublishedFragmentMask(kind);
         patch->catalogOwnerMask |= artifact->catalogOwnerMask != 0
             ? artifact->catalogOwnerMask : PublishedFragmentMask(kind);
         patch->catalogEntries.insert(patch->catalogEntries.end(),
             artifact->catalogEntries.begin(), artifact->catalogEntries.end());
+        for (const auto& [key, resources] : artifact->catalogEntries) {
+            PublishedResourceSelection selection;
+            selection.resources = resources;
+            selection.contentVersion = selected[index]->revision;
+            selection.sourceArtifact = selected[index]->Version();
+            selection.lifetimeHolds = artifact->fragment.resourceHolds;
+            if (selected[index]->gpuSubmissions) {
+                selection.gpuSubmissions.push_back(selected[index]->gpuSubmissions);
+            }
+            for (const auto& dependency : artifact->fragment.dependencyClosure) {
+                if (dependency.gpuSubmissions) {
+                    selection.gpuSubmissions.push_back(dependency.gpuSubmissions);
+                }
+            }
+            patch->catalogSelections.emplace_back(key, std::move(selection));
+        }
     }
     // Only unchanged fragments whose exact closure mentions a replaced slot
     // constrain rebasing. Completely independent fragments may advance while
@@ -254,8 +283,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                         (selectedMask & PublishedFragmentMask(root->kind)) != 0;
                 });
             if (observesReplacement) {
-                patch->preconditions.push_back(
-                    { kind, fragment.publicationRoot, fragment.revision });
+                patch->preconditions.push_back({ kind, fragment.publicationRoot });
             }
         }
     }

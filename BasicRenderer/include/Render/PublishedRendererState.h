@@ -51,13 +51,29 @@ struct PublishedResourceQuery {
     [[nodiscard]] bool Matches(const PublishedResourceKey& key) const noexcept;
 };
 
+struct PublishedResourceSelection {
+    using ResourceList = std::vector<std::shared_ptr<org::Resource>>;
+    std::shared_ptr<const ResourceList> resources;
+    std::uint64_t contentVersion = 0;
+    ArtifactVersionID sourceArtifact;
+    std::vector<std::shared_ptr<const GpuSubmissionSet>> gpuSubmissions;
+    std::vector<std::shared_ptr<const void>> lifetimeHolds;
+    std::uint64_t manifestEpoch = 0;
+};
+
 struct PublishedResourceCatalog {
     using ResourceList = std::vector<std::shared_ptr<org::Resource>>;
     std::unordered_map<PublishedResourceKey, std::shared_ptr<const ResourceList>,
         PublishedResourceKey::Hasher> entries;
     std::unordered_map<PublishedResourceKey, std::uint64_t,
         PublishedResourceKey::Hasher> contentVersions;
+    std::unordered_map<PublishedResourceKey, PublishedResourceSelection,
+        PublishedResourceKey::Hasher> selections;
     [[nodiscard]] std::shared_ptr<const ResourceList> Find(const PublishedResourceKey& key) const;
+    [[nodiscard]] const PublishedResourceSelection* FindSelection(
+        const PublishedResourceKey& key) const noexcept;
+    [[nodiscard]] std::vector<const PublishedResourceSelection*> FindSelections(
+        const PublishedResourceQuery& query) const;
     [[nodiscard]] ResourceList FindAll(const PublishedResourceQuery& query) const;
     [[nodiscard]] std::uint64_t ContentVersion(const PublishedResourceKey& key) const noexcept;
     [[nodiscard]] std::uint64_t ContentVersion(const PublishedResourceQuery& query) const noexcept;
@@ -67,7 +83,7 @@ struct PublishedStateFragment {
     std::uint64_t revision = 0;
     // The graph artifact whose payload became this manifest fragment. Frame
     // commit acknowledges both this root and its dependency closure.
-    ArtifactKey publicationRoot{};
+    ArtifactVersionID publicationRoot{};
     ArtifactPayload payload;
     std::vector<ArtifactSnapshot> dependencyClosure;
     std::vector<std::shared_ptr<const void>> resourceHolds;
@@ -97,15 +113,32 @@ struct PublishedRendererState {
     [[nodiscard]] const PublishedStateFragment& Fragment(PublishedFragmentKind kind) const;
 };
 
+// Immutable ownership token for the renderer state selected after a frame
+// slot's fence completes.  Render-graph resource resolution must retain this
+// token rather than independently reloading the process publication source.
+struct PublishedManifestLease {
+    std::shared_ptr<const PublishedRendererState> state;
+    std::uint64_t epoch = 0;
+    std::uint64_t sequence = 0;
+    std::size_t frameSlot = 0;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(state); }
+};
+
 class PublishedStateSource {
 public:
     static void SetProcessSource(std::shared_ptr<PublishedStateSource> source) noexcept;
     [[nodiscard]] static std::shared_ptr<PublishedStateSource> ProcessSource() noexcept;
     void Store(std::shared_ptr<const PublishedRendererState> state) noexcept;
     [[nodiscard]] std::shared_ptr<const PublishedRendererState> Load() const noexcept;
+    [[nodiscard]] std::shared_ptr<const PublishedManifestLease> AcquireLease(
+        std::size_t frameSlot, std::shared_ptr<const PublishedRendererState> state = {}) noexcept;
+    [[nodiscard]] std::shared_ptr<const PublishedManifestLease> LoadLease() const noexcept;
     [[nodiscard]] std::uint64_t Epoch() const noexcept;
 private:
     std::atomic<std::shared_ptr<const PublishedRendererState>> m_state;
+    std::atomic<std::shared_ptr<const PublishedManifestLease>> m_lease;
+    std::atomic<std::uint64_t> m_leaseSequence{ 0 };
 };
 
 struct RendererStateCandidate {
@@ -115,8 +148,7 @@ struct RendererStateCandidate {
 
 struct PublishedFragmentPrecondition {
     PublishedFragmentKind kind = PublishedFragmentKind::Geometry;
-    ArtifactKey publicationRoot{};
-    std::uint64_t revision = 0;
+    ArtifactVersionID publicationRoot{};
 };
 
 struct PublishedStatePatch {
@@ -126,6 +158,7 @@ struct PublishedStatePatch {
     std::uint64_t catalogOwnerMask = 0;
     std::vector<std::pair<PublishedResourceKey,
         std::shared_ptr<const PublishedResourceCatalog::ResourceList>>> catalogEntries;
+    std::vector<std::pair<PublishedResourceKey, PublishedResourceSelection>> catalogSelections;
 };
 
 struct FrameManifestPayload {
@@ -147,6 +180,7 @@ struct RendererStatePublisherStats {
 
 struct RendererStateCommitResult {
     std::shared_ptr<const PublishedRendererState> state;
+    std::shared_ptr<const PublishedManifestLease> lease;
     bool committed = false;
     std::array<std::shared_ptr<const PublishedRendererState>, 3> retiredStates{};
     std::uint8_t retiredStateCount = 0;

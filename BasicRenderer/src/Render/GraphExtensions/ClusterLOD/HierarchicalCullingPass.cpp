@@ -11,6 +11,7 @@
 #include <rhi_interop_dx12.h>
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Telemetry.h>
 
 #include "Managers\IndirectCommandBufferManager.h"
 #include "Managers\MaterialManager.h"
@@ -837,6 +838,8 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
                 cullRecords.push_back(record);
             }
         });
+		basic_telemetry::SetGauge("SARP.Culling.GraphWorkloadRecords.WorkGraph",
+			static_cast<std::int64_t>(cullRecords.size()));
 
         rhi::WorkGraphDispatchDesc dispatchDesc{};
         dispatchDesc.dispatchMode = rhi::WorkGraphDispatchMode::NodeCpuInput;

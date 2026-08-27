@@ -10,8 +10,10 @@
 #include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
+#include <BasicTelemetry/Telemetry.h>
 
 #include "../generated/BuiltinResources.h"
 #include "Factories/TextureFactory.h"
@@ -774,9 +776,10 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     }
     m_layerData = std::move(layers);
     if (m_textureStreamingManager && textureFactory) {
-        m_initialBindingReady.assign(pendingTextureBindings.size(), 0u);
-        m_readyInitialBindingCount = 0u;
         m_streamingBindingIDs.reserve(pendingTextureBindings.size());
+		std::size_t publishedImages = 0;
+		std::size_t versionedPublishedImages = 0;
+		std::size_t readyGraphBindings = 0;
         for (std::size_t dependencyIndex = 0; dependencyIndex < pendingTextureBindings.size(); ++dependencyIndex) {
             const auto& pending = pendingTextureBindings[dependencyIndex];
             LogTerrainTextureState(
@@ -786,19 +789,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 pending.texture);
             const uint64_t bindingID = m_textureStreamingManager->RegisterTextureBinding(
                 pending.texture,
-                [this,
-                 layerIndex = pending.layerIndex,
-                 slot = pending.slot,
-                 texture = pending.texture,
-                 terrainGeneration,
-                 dependencyIndex](TextureAsset&) {
-                    RefreshTerrainLayerTextureBinding(
-                        layerIndex,
-                        slot,
-                        texture,
-                        terrainGeneration,
-                        dependencyIndex);
-                },
+                {},
                 "terrain-layer:" + std::to_string(pending.layerIndex),
                 TextureStreamingBindingOptions{
                     .allowIdleCoarsening = false,
@@ -807,19 +798,34 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (bindingID != 0u) {
                 m_streamingBindingIDs.push_back(bindingID);
             }
-            else if (pending.texture->ImagePtr() && !pending.texture->IsUsingFallbackImage()) {
-                // Textures without a streaming ID have no asynchronous owner
-                // callback. Their directly uploaded published binding is the
-                // complete dependency for this slot.
-                m_initialBindingReady[dependencyIndex] = 1u;
-                ++m_readyInitialBindingCount;
-            }
+			if (m_rendererStateRequests && pending.texture->GetStreamingTextureID() != 0u) {
+				const auto publishedBinding = pending.texture->GetPublishedBindingSnapshot();
+				publishedImages += publishedBinding.image != nullptr;
+				versionedPublishedImages += publishedBinding.image != nullptr &&
+					publishedBinding.bindingRevision != 0u;
+				GraphTextureBinding graphBinding;
+				graphBinding.layerIndex = pending.layerIndex;
+				graphBinding.slot = pending.slot;
+				graphBinding.texture = pending.texture;
+				graphBinding.address = { br::render::ArtifactKind::TextureBinding,
+					pending.texture->GetStreamingTextureID(), 0 };
+				m_graphTextureBindings.push_back(std::move(graphBinding));
+				const auto observation = static_cast<br::render::RendererStateRequestService*>(
+					m_rendererStateRequests)->Snapshot(m_graphTextureBindings.back().address);
+				readyGraphBindings += br::render::ArtifactReachedMilestone(
+					observation.readiness, br::render::ArtifactReadiness::UploadSubmitted);
+			}
             LogTerrainTextureState(
                 bindingID != 0u ? "register-binding-after" : "register-binding-skipped",
                 pending.layerIndex,
                 static_cast<std::uint32_t>(pending.slot),
                 pending.texture);
         }
+		spdlog::info(
+			"TerrainManager: texture graph registration candidates={} streamingOwners={} observations={} publishedImages={} versionedPublishedImages={} readyGraphBindings={}",
+			pendingTextureBindings.size(), m_streamingBindingIDs.size(),
+			m_graphTextureBindings.size(), publishedImages, versionedPublishedImages,
+			readyGraphBindings);
     }
     const auto layersEnd = std::chrono::steady_clock::now();
 
@@ -894,10 +900,8 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
 	++m_terrainRowsRevision;
 	m_terrainGraphDirty = true;
 	m_terrainGraphStableFrames = 0;
-    // A terrain set with valid extents is enough for the RVT to begin creating
-    // permanent pages.  Do not expose it until every initial streaming owner has
-    // observed a non-placeholder published image.  The binding callbacks queue
-    // the layer-buffer writes behind the corresponding texture upload.
+    // Publish valid fallback rows immediately. Graph binding observations
+    // produce exact successor rows as final texture versions arrive.
     const auto totalEnd = std::chrono::steady_clock::now();
     std::uint32_t boundDiffuseLayerCount = 0;
     std::uint32_t boundNormalLayerCount = 0;
@@ -962,102 +966,9 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     return 0u;
 }
 
-void TerrainManager::RefreshTerrainLayerTextureBinding(
-    std::uint32_t layerIndex,
-    TerrainTextureSlot slot,
-    const std::shared_ptr<TextureAsset>& texture,
-    std::uint64_t terrainGeneration,
-    std::size_t initialDependencyIndex)
-{
-    if (terrainGeneration != m_terrainGeneration) {
-        return;
-    }
-    if (!texture) {
-        LogTerrainTextureState("refresh-callback-null-texture", layerIndex, static_cast<std::uint32_t>(slot), texture);
-        return;
-    }
-    if (layerIndex >= m_layerData.size()) {
-        LogTerrainTextureState("refresh-callback-invalid-layer", layerIndex, static_cast<std::uint32_t>(slot), texture);
-        return;
-    }
-
-    auto image = texture->ImagePtr();
-    if (!image) {
-        LogTerrainTextureState("refresh-callback-no-image", layerIndex, static_cast<std::uint32_t>(slot), texture);
-        return;
-    }
-    if (texture->IsUsingFallbackImage()) {
-        static std::atomic_uint32_t fallbackRefreshWarningCount{ 0 };
-        const uint32_t warningIndex = fallbackRefreshWarningCount.fetch_add(1, std::memory_order_relaxed);
-        if (warningIndex < 64u) {
-            const auto info = texture->GetPendingDebugInfo();
-            spdlog::warn(
-                "TerrainManager: terrain texture refresh still using fallback image layer={} slot={} label='{}' source='{}' file='{}' streamingID={} requestedTopMip={} pendingTopMip={} residentTopMip={} hasPlaceholder={} processing={} reload={} directStorage={}",
-                layerIndex,
-                static_cast<std::uint32_t>(slot),
-                info.label,
-                info.sourceIdentity,
-                info.filePath,
-                info.streamingTextureID,
-                info.requestedTopMip,
-                info.pendingTopMip,
-                info.residentTopMip,
-                info.hasPlaceholder,
-                info.processingState,
-                info.reloadState,
-                info.directStorageState);
-        }
-    }
-
-    TerrainLayerGPU& layer = m_layerData[layerIndex];
-    const std::uint32_t textureIndex = image->GetSRVInfo(0).slot.index;
-    const std::uint32_t samplerIndex = texture->SamplerDescriptorIndex();
-    const std::uint32_t streamingTextureID = texture->GetStreamingTextureID();
-    LogTerrainTextureState("refresh-callback-image", layerIndex, static_cast<std::uint32_t>(slot), texture, textureIndex, samplerIndex);
-    switch (slot) {
-    case TerrainTextureSlot::Diffuse:
-        layer.diffuseTextureIndex = textureIndex;
-        layer.diffuseSamplerIndex = samplerIndex;
-        layer.diffuseStreamingTextureID = streamingTextureID;
-        break;
-    case TerrainTextureSlot::Normal:
-        layer.normalTextureIndex = textureIndex;
-        layer.normalSamplerIndex = samplerIndex;
-        layer.normalStreamingTextureID = streamingTextureID;
-        layer.normalChannels = NormalChannelsForTexture(texture);
-        break;
-    case TerrainTextureSlot::Height:
-        layer.heightTextureIndex = textureIndex;
-        layer.heightSamplerIndex = samplerIndex;
-        layer.heightStreamingTextureID = streamingTextureID;
-        break;
-    case TerrainTextureSlot::RMAOS:
-        layer.rmaosTextureIndex = textureIndex;
-        layer.rmaosSamplerIndex = samplerIndex;
-        layer.rmaosStreamingTextureID = streamingTextureID;
-        break;
-    }
-
-    m_textureGroup->AddResource(image);
-	if (std::ranges::find(m_layerTextures, texture) == m_layerTextures.end()) {
-		m_layerTextures.push_back(texture);
-	}
-	++m_terrainRowsRevision;
-	m_terrainGraphDirty = true;
-	m_terrainGraphStableFrames = 0;
-    const bool isFinalBinding = !texture->IsUsingFallbackImage();
-    if (isFinalBinding && initialDependencyIndex < m_initialBindingReady.size() &&
-        m_initialBindingReady[initialDependencyIndex] == 0u) {
-        m_initialBindingReady[initialDependencyIndex] = 1u;
-        ++m_readyInitialBindingCount;
-    }
-
-}
-
 void TerrainManager::RequestGraphState()
 {
-	if (!m_rendererStateRequests || !m_uploadService || m_terrainRowsRevision == 0 ||
-		m_readyInitialBindingCount != m_initialBindingReady.size()) return;
+	if (!m_rendererStateRequests || !m_uploadService || m_terrainRowsRevision == 0) return;
 	auto* requests = static_cast<br::render::RendererStateRequestService*>(m_rendererStateRequests);
 	auto* uploads = static_cast<org::runtime::IUploadService*>(m_uploadService);
 	const std::array<br::render::ArtifactKey, 6> keys{
@@ -1068,71 +979,88 @@ void TerrainManager::RequestGraphState()
 		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainRegionsVariant },
 		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainWeightBlocksVariant }
 	};
-	const auto requestBuffer = [this, requests, uploads](const br::render::ArtifactKey& key,
-		std::string name, const auto& values) {
+	const auto ensureFamily = [this](std::size_t familyIndex,
+		const br::render::ArtifactKey& key, std::string name, const auto& values) {
 		using Value = typename std::decay_t<decltype(values)>::value_type;
-		auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
-		input->uploadService = uploads;
-		input->debugName = std::move(name);
-		input->writeSequence = m_terrainRowsRevision;
-		input->elementStride = sizeof(Value);
-		input->elementCount = values.size();
-		input->capacity = (std::max<std::uint64_t>)(values.size(), 1u);
-		input->catalogOwner = br::render::PublishedFragmentKind::Terrain;
-		input->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
-		input->catalogVariant = key.variantID;
-		input->bytes.resize(values.size() * sizeof(Value));
-		if (!values.empty()) std::memcpy(input->bytes.data(), values.data(), input->bytes.size());
-		return requests->Request(key, m_terrainRowsRevision, {},
-			br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)),
-			(m_terrainRowsRevision << 8u) ^ key.variantID);
+		if (!m_bufferFamilies[familyIndex]) {
+			m_bufferFamilies[familyIndex] = std::make_shared<br::render::VersionedBufferFamily>(
+				br::render::VersionedBufferFamily::Config{
+					key, std::move(name), sizeof(Value), false, false,
+					br::render::PublishedFragmentKind::Terrain,
+					br::render::PublishedResourceUsage::ShaderResource, key.variantID });
+		}
 	};
 	const std::vector<TerrainSetGPU> sets{ m_desiredSet };
-	(void)requestBuffer(keys[0], "Published::Terrain::Sets", sets);
-	(void)requestBuffer(keys[1], "Published::Terrain::Layers", m_layerData);
-	(void)requestBuffer(keys[2], "Published::Terrain::StochasticLayers", m_stochasticLayerData);
-	(void)requestBuffer(keys[3], "Published::Terrain::LayerRefs", m_layerRefData);
-	(void)requestBuffer(keys[4], "Published::Terrain::Regions", m_regionData);
-	(void)requestBuffer(keys[5], "Published::Terrain::WeightBlocks", m_weightBlockData);
-
-	std::unordered_map<std::uint32_t, br::render::MaterialTextureBindingDependencyDTO> bindings;
-	for (const auto& texture : m_layerTextures) {
-		if (!texture || texture->GetStreamingTextureID() == 0 ||
-			!texture->Meta().processing.isParticipatingMaterialTexture) continue;
-		const auto published = texture->GetPublishedBindingSnapshot();
-		if (!published.image || published.bindingRevision == 0 ||
-			!published.image->HasValidBackingResource()) continue;
-		bindings[texture->GetStreamingTextureID()] = {
-			texture->GetStreamingTextureID(), published.bindingRevision,
-			published.image->GetSRVInfo(0).slot.index, texture->SamplerDescriptorIndex() };
+	ensureFamily(0, keys[0], "Published::Terrain::Sets", sets);
+	ensureFamily(1, keys[1], "Published::Terrain::Layers", m_layerData);
+	ensureFamily(2, keys[2], "Published::Terrain::StochasticLayers", m_stochasticLayerData);
+	ensureFamily(3, keys[3], "Published::Terrain::LayerRefs", m_layerRefData);
+	ensureFamily(4, keys[4], "Published::Terrain::Regions", m_regionData);
+	ensureFamily(5, keys[5], "Published::Terrain::WeightBlocks", m_weightBlockData);
+	std::array<br::render::ArtifactRequestResult, 6> bufferRequests{};
+	const auto requestBuffer = [&](std::size_t index, const auto& values) {
+		bufferRequests[index] = m_bufferFamilies[index]->RequestSnapshot(*requests, *uploads,
+			m_terrainRowsRevision, std::as_bytes(std::span(values)), values.size());
+	};
+	requestBuffer(0, sets);
+	// Layer rows are derived inside TerrainState from Latest texture bindings.
+	requestBuffer(2, m_stochasticLayerData);
+	requestBuffer(3, m_layerRefData);
+	requestBuffer(4, m_regionData);
+	requestBuffer(5, m_weightBlockData);
+	if (std::ranges::any_of(bufferRequests, [](const auto& request) {
+		return request.version.revision != 0u && !request;
+	})) {
+		spdlog::error("TerrainManager: one or more immutable buffer-version requests were rejected");
+		m_terrainGraphDirty = true;
+		return;
 	}
 	auto input = std::make_shared<br::render::TerrainStateBuildInput>();
 	input->terrainGeneration = m_terrainGeneration;
-	input->stateRevision = ++m_terrainStateRevision;
-	input->bufferKeys = keys;
-	input->textureBindings.reserve(bindings.size());
+	input->baseLayers = m_layerData;
+	input->requestService = requests;
+	input->uploadService = uploads;
+	input->layerBufferFamily = m_bufferFamilies[1];
+	for (std::size_t index = 0; index < bufferRequests.size(); ++index)
+		input->bufferVersions[index] = bufferRequests[index].version;
+	for (const auto& observed : m_graphTextureBindings) {
+		input->textureTargets.push_back({ observed.address, observed.layerIndex,
+			static_cast<br::render::TerrainTextureTargetSlot>(observed.slot) });
+	}
 	std::vector<br::render::ArtifactRequirement> requirements;
-	requirements.reserve(keys.size() + bindings.size());
-	for (const auto& key : keys) {
-		requirements.push_back({ key, m_terrainRowsRevision,
+	requirements.reserve(keys.size() + input->textureTargets.size());
+	for (std::size_t index = 0; index < bufferRequests.size(); ++index) {
+		if (index == 1) continue;
+		const auto& request = bufferRequests[index];
+		requirements.push_back(br::render::Exact(
+			request.version, br::render::ArtifactReadiness::UploadSubmitted));
+	}
+	std::unordered_set<br::render::ArtifactAddress, br::render::ArtifactAddress::Hasher> uniqueBindings;
+	for (const auto& target : input->textureTargets) {
+		if (!uniqueBindings.insert(target.bindingAddress).second) continue;
+		requirements.push_back(br::render::Latest(target.bindingAddress,
 			br::render::ArtifactReadiness::UploadSubmitted,
-			br::render::DependencyPolicy::AllOf, 0,
-			br::render::DependencyInvalidationPolicy::ExactSnapshot });
+			br::render::DependencyPolicy::Optional));
 	}
-	for (const auto& [textureID, binding] : bindings) {
-		input->textureBindings.push_back(binding);
-		requirements.push_back({
-			{ br::render::ArtifactKind::TextureBinding, textureID, 0 },
-			binding.bindingRevision, br::render::ArtifactReadiness::GpuReady,
-			br::render::DependencyPolicy::AllOf, 0,
-			br::render::DependencyInvalidationPolicy::LifetimeHold });
+	const auto stateRevision = ++m_terrainStateRevision;
+	std::uint64_t fingerprint = stateRevision ^ m_terrainGeneration ^
+		m_terrainRowsRevision ^ 0x5445525241494eull;
+	for (const auto value : std::as_bytes(std::span(input->baseLayers))) {
+		fingerprint ^= static_cast<std::uint8_t>(value);
+		fingerprint *= 1099511628211ull;
 	}
-	const auto stateRevision = input->stateRevision;
-	(void)requests->Request(
+	if (fingerprint == 0u) fingerprint = 1u;
+	const auto stateRequest = requests->Request(
 		{ br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration },
 		stateRevision, std::move(requirements),
 		br::render::ArtifactPayload::Make<br::render::TerrainStateBuildInput>(std::move(input)),
-		(stateRevision << 1u) ^ m_terrainGeneration ^ m_terrainRowsRevision ^ 0x5445525241494eull);
+		fingerprint);
+	if (!stateRequest) {
+		spdlog::error("TerrainManager: immutable terrain-state request revision={} was rejected status={}",
+			stateRevision, static_cast<unsigned>(stateRequest.status));
+		m_terrainGraphDirty = true;
+		return;
+	}
 	m_terrainGraphDirty = false;
 	m_terrainGraphRequestPending = true;
 	m_terrainGraphStableFrames = 0;
@@ -1144,6 +1072,14 @@ void TerrainManager::ProcessPendingUpdates()
 		auto* requests = static_cast<br::render::RendererStateRequestService*>(m_rendererStateRequests);
 		const auto diagnostic = requests->Diagnose(
 			{ br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration });
+		basic_telemetry::SetGauge("SARP.Terrain.GraphDesiredRevision",
+			static_cast<std::int64_t>(diagnostic.desiredRevision));
+		basic_telemetry::SetGauge("SARP.Terrain.GraphArtifactRevision",
+			static_cast<std::int64_t>(diagnostic.artifact.revision));
+		basic_telemetry::SetGauge("SARP.Terrain.GraphReadiness",
+			static_cast<std::int64_t>(diagnostic.artifact.readiness));
+		basic_telemetry::SetGauge("SARP.Terrain.GraphBlockers",
+			static_cast<std::int64_t>(diagnostic.blockers.size()));
 		if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
 			diagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
 			spdlog::error("TerrainManager: graph state revision={} failed: {} {}",
@@ -1152,8 +1088,11 @@ void TerrainManager::ProcessPendingUpdates()
 			m_terrainGraphDirty = true;
 		}
 	}
-	if (!m_terrainGraphRequestPending && m_terrainGraphDirty &&
-		m_readyInitialBindingCount == m_initialBindingReady.size()) {
+	// Row and texture-binding updates may arrive while an earlier terrain root is
+	// still building. Do not let that pending root suppress its successor: the
+	// graph coalesces revisions, whereas waiting for activation can deadlock on a
+	// root whose exact buffer snapshot has already been superseded.
+	if (m_terrainGraphDirty) {
 		RequestGraphState();
 	}
 }
@@ -1165,16 +1104,25 @@ bool TerrainManager::TryActivatePublishedTerrainState()
 	const auto terrain = published
 		? published->terrain.payload.Get<br::render::PublishedTerrainState>() : nullptr;
 	if (!terrain || terrain->terrainGeneration != m_terrainGeneration ||
-		terrain->stateRevision == 0 || terrain->stateRevision != m_terrainStateRevision ||
-		published->terrain.revision != m_terrainStateRevision) return false;
+		terrain->stateRevision == 0 ||
+		published->terrain.revision != terrain->stateRevision) return false;
 	if (terrain->stateRevision == m_activeTerrainPublishedRevision) return true;
+	for (std::size_t index = 0; index < terrain->buffers.size(); ++index) {
+		if (!m_bufferFamilies[index]) continue;
+		const auto fragment = terrain->buffers[index].payload.Get<br::render::RendererStateFragmentArtifact>();
+		const auto version = fragment
+			? fragment->fragment.payload.Get<br::render::PublishedGpuBufferVersion>() : nullptr;
+		m_bufferFamilies[index]->Acknowledge(version);
+	}
 	for (const auto& resolver : m_terrainResolvers) if (!resolver) return false;
 	for (const auto& resolver : m_terrainResolvers) resolver->SetPublishedEnabled(true);
 	m_terrainGraphRequestPending = false;
 	m_terrainGraphActive = true;
+	m_terrainStateRevision = (std::max)(m_terrainStateRevision, terrain->stateRevision);
 	m_activeTerrainPublishedRevision = terrain->stateRevision;
-	spdlog::info("TerrainManager: activated graph-owned terrain state epoch={} revision={} generation={}",
-		published->epoch, terrain->stateRevision, terrain->terrainGeneration);
+	spdlog::info("TerrainManager: activated graph-owned terrain state epoch={} revision={} generation={} textureBindings={}",
+		published->epoch, terrain->stateRevision, terrain->terrainGeneration,
+		terrain->textureBindings.size());
 	return true;
 }
 
@@ -1182,6 +1130,7 @@ void TerrainManager::ClearActiveTerrain()
 {
     SettingsManager::GetInstance().getSettingSetter<float>("directionalShadowSceneExtent")(0.0f);
     ++m_terrainGeneration;
+	m_graphTextureBindings.clear();
     if (m_textureStreamingManager) {
         m_textureStreamingManager->UnregisterTextureBindings(m_streamingBindingIDs);
     }
@@ -1200,8 +1149,6 @@ void TerrainManager::ClearActiveTerrain()
 	m_layerRefData.clear();
 	m_regionData.clear();
 	m_weightBlockData.clear();
-    m_initialBindingReady.clear();
-    m_readyInitialBindingCount = 0u;
 	m_terrainGraphDirty = false;
 	m_terrainGraphRequestPending = false;
 	m_terrainGraphStableFrames = 0;

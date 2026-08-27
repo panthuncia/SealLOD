@@ -25,6 +25,7 @@ class CLodRayTracingSystem;
 
 struct RenderContext {
 	std::shared_ptr<const br::render::PublishedRendererState> publishedRendererState;
+	std::shared_ptr<const br::render::PublishedManifestLease> publishedManifestLease;
 	Components::DrawStats drawStats;
 	ObjectManager* objectManager;
 	MeshManager* meshManager;
@@ -59,6 +60,7 @@ struct RenderContext {
 
 struct UpdateContext {
 	std::shared_ptr<const br::render::PublishedRendererState> publishedRendererState;
+	std::shared_ptr<const br::render::PublishedManifestLease> publishedManifestLease;
 	Components::DrawStats drawStats;
 	ObjectManager* objectManager = nullptr;
 	MeshManager* meshManager = nullptr;

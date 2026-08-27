@@ -15,12 +15,22 @@ public:
     RendererStateRequestService(AsyncStateGraph& graph, RendererStatePublisher& publisher);
     ~RendererStateRequestService();
 
-    bool Request(ArtifactKey key, std::uint64_t revision,
+    ArtifactRequestResult Request(ArtifactAddress address, std::uint64_t revision,
         std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
         std::uint64_t inputFingerprint = 0);
     bool Invalidate(ArtifactKey key, std::uint64_t revision);
     void Cancel(ArtifactKey key);
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;
+    [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactAddress address) const {
+        return m_graph.Snapshot(address);
+    }
+    [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactVersionID version) const {
+        return m_graph.Snapshot(version);
+    }
+    [[nodiscard]] ArtifactObservation ObserveWithSnapshot(ArtifactAddress address,
+        std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback) {
+        return m_graph.ObserveWithSnapshot(address, std::move(callback));
+    }
     [[nodiscard]] AsyncStateGraphStats Stats() const { return m_graph.Stats(); }
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const {
         return m_graph.Outstanding(kind);

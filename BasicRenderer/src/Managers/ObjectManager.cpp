@@ -375,11 +375,11 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	// each active-list entry. Publish that sidecar in the same DrawRecords root;
 	// leaving it on the legacy upload path made otherwise byte-correct graph
 	// states timing-dependent.
+	const auto visibilityRevision =
+		(std::max<std::uint64_t>)(m_drawRecordVisibilityRevision, 1u);
 	const br::render::ArtifactKey visibilityKey{
 		br::render::ArtifactKind::BufferVersion, 0x4f424a4255460000ull,
 		br::render::kObjectVisibilityGenerationVariant };
-	const auto visibilityRevision =
-		(std::max<std::uint64_t>)(m_drawRecordVisibilityRevision, 1u);
 	fingerprint ^= visibilityRevision + 0x9e3779b97f4a7c15ull +
 		(fingerprint << 6u) + (fingerprint >> 2u);
 	if (m_visibilityGenerationSubmittedRevision != visibilityRevision) {

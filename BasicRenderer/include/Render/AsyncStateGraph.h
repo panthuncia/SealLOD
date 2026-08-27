@@ -38,15 +38,36 @@ enum class ArtifactKind : std::uint16_t {
     FrameManifest,
 };
 
-struct ArtifactKey {
+struct ArtifactAddress {
     ArtifactKind kind = ArtifactKind::Generic;
     std::uint64_t primaryID = 0;
     std::uint64_t variantID = 0;
-    auto operator<=>(const ArtifactKey&) const = default;
+    auto operator<=>(const ArtifactAddress&) const = default;
 
     struct Hasher {
-        std::size_t operator()(const ArtifactKey& key) const noexcept;
+        std::size_t operator()(const ArtifactAddress& key) const noexcept;
     };
+};
+
+// ArtifactKey remains as a source-compatible spelling while callers migrate.
+// It identifies a logical address only; revisions are never encoded into it.
+using ArtifactKey = ArtifactAddress;
+
+struct ArtifactVersionID {
+    ArtifactAddress address;
+    std::uint64_t revision = 0;
+    // Assigned once by the graph. It is never reused and detects stale/ABA handles.
+    std::uint64_t generation = 0;
+    // Owning lifetime pin for this immutable version. Identity comparisons do
+    // not include the pin itself.
+    std::shared_ptr<const void> lease;
+    bool operator==(const ArtifactVersionID& other) const noexcept {
+        return address == other.address && revision == other.revision && generation == other.generation;
+    }
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return revision != 0 && generation != 0;
+    }
 };
 
 enum class ArtifactReadiness : std::uint8_t {
@@ -62,6 +83,9 @@ enum class ArtifactReadiness : std::uint8_t {
     Cancelled,
     Failed,
 };
+
+[[nodiscard]] bool ArtifactReachedMilestone(
+    ArtifactReadiness actual, ArtifactReadiness required) noexcept;
 
 // How a requirement participates in dependency selection.
 enum class DependencyPolicy : std::uint8_t { AllOf, AnyOf, Optional, FallbackAllowed };
@@ -83,8 +107,45 @@ struct ArtifactRequirement {
     // Non-zero AnyOf requirements sharing a group form one alternative set.
     std::uint32_t alternativeGroup = 0;
     DependencyInvalidationPolicy invalidation = DependencyInvalidationPolicy::Latest;
-    auto operator<=>(const ArtifactRequirement&) const = default;
+    // Non-zero for handle-based requirements. This prevents an exact revision
+    // from accidentally binding to a different internal incarnation (ABA).
+    std::uint64_t requiredGeneration = 0;
+    std::shared_ptr<const void> versionLease;
+    bool operator==(const ArtifactRequirement& other) const noexcept {
+        return key == other.key && minimumRevision == other.minimumRevision &&
+            requiredReadiness == other.requiredReadiness && policy == other.policy &&
+            alternativeGroup == other.alternativeGroup && invalidation == other.invalidation &&
+            requiredGeneration == other.requiredGeneration;
+    }
 };
+
+[[nodiscard]] inline ArtifactRequirement Exact(ArtifactVersionID version,
+    ArtifactReadiness readiness = ArtifactReadiness::CpuReady,
+    DependencyPolicy policy = DependencyPolicy::AllOf,
+    std::uint32_t alternativeGroup = 0) {
+    return { version.address, version.revision, readiness, policy, alternativeGroup,
+        DependencyInvalidationPolicy::ExactSnapshot, version.generation, version.lease };
+}
+
+[[nodiscard]] inline ArtifactRequirement Latest(ArtifactAddress address,
+    ArtifactReadiness readiness = ArtifactReadiness::CpuReady,
+    DependencyPolicy policy = DependencyPolicy::AllOf,
+    std::uint32_t alternativeGroup = 0) {
+    return { address, 0, readiness, policy, alternativeGroup,
+        DependencyInvalidationPolicy::Latest };
+}
+
+[[nodiscard]] inline ArtifactRequirement ReadyGate(ArtifactVersionID version,
+    ArtifactReadiness readiness = ArtifactReadiness::CpuReady) {
+    return { version.address, version.revision, readiness, DependencyPolicy::AllOf, 0,
+        DependencyInvalidationPolicy::ReadyGate, version.generation, version.lease };
+}
+
+[[nodiscard]] inline ArtifactRequirement LifetimeHold(ArtifactVersionID version) {
+    return { version.address, version.revision, ArtifactReadiness::CpuReady,
+        DependencyPolicy::Optional, 0, DependencyInvalidationPolicy::LifetimeHold,
+        version.generation, version.lease };
+}
 
 struct HandleRequirement {
     ArtifactKey key;
@@ -130,6 +191,11 @@ struct ArtifactSnapshot {
     ArtifactReadiness readiness = ArtifactReadiness::Missing;
     ArtifactPayload payload;
     std::shared_ptr<const struct GpuSubmissionSet> gpuSubmissions;
+    std::shared_ptr<const void> versionLease;
+
+    [[nodiscard]] ArtifactVersionID Version() const noexcept {
+        return { key, revision, generation, versionLease };
+    }
 };
 
 struct GpuQueueSubmission {
@@ -150,11 +216,13 @@ struct GpuSubmissionSet {
     // Queue timeline/value pairs are intentionally backend-opaque. Published
     // manifests can forward these to ORG without waiting on the CPU.
     std::vector<GpuQueueSubmission> submissions;
+    std::function<bool()> isSubmitted;
     std::function<bool()> isComplete;
     std::function<std::string()> describe;
     std::function<void(std::function<void()>)> subscribe;
     std::function<bool()> cancel;
 
+    [[nodiscard]] bool Submitted() const { return !isSubmitted || isSubmitted(); }
     [[nodiscard]] bool Complete() const { return !isComplete || isComplete(); }
     [[nodiscard]] std::uint64_t MaximumTimelineValue() const {
         std::uint64_t result = 0;
@@ -175,16 +243,21 @@ struct ArtifactHandle {
     ArtifactReadiness readiness = ArtifactReadiness::Missing;
     std::shared_ptr<const T> payload;
     std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
+    std::shared_ptr<const void> versionLease;
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return static_cast<bool>(payload);
+    }
+
+    [[nodiscard]] ArtifactVersionID Version() const noexcept {
+        return { key, revision, generation, versionLease };
     }
 };
 
 template <class T>
 [[nodiscard]] ArtifactHandle<T> MakeArtifactHandle(const ArtifactSnapshot& snapshot) {
     return { snapshot.key, snapshot.revision, snapshot.generation, snapshot.readiness,
-        snapshot.payload.Get<T>(), snapshot.gpuSubmissions };
+        snapshot.payload.Get<T>(), snapshot.gpuSubmissions, snapshot.versionLease };
 }
 
 std::shared_ptr<const GpuSubmissionSet> MakeGpuSubmissionSet(
@@ -223,10 +296,17 @@ enum class ArtifactRequestStatus : std::uint8_t {
 struct ArtifactRequestResult {
     ArtifactRequestStatus status = ArtifactRequestStatus::ShuttingDown;
     std::uint64_t generation = 0;
+    ArtifactVersionID version;
     constexpr operator bool() const noexcept {
         return status == ArtifactRequestStatus::Accepted ||
             status == ArtifactRequestStatus::AlreadyDesired;
     }
+};
+
+struct ArtifactObservation {
+    std::uint64_t subscription = 0;
+    std::uint64_t sequence = 0;
+    ArtifactSnapshot snapshot;
 };
 
 struct ArtifactBuildResult {
@@ -283,6 +363,8 @@ struct AsyncStateGraphStats {
     std::uint64_t queueWaitMicros = 0;
     std::uint64_t buildMicros = 0;
     std::uint64_t gpuWaitMicros = 0;
+    std::uint64_t archivedVersions = 0;
+    std::uint64_t reclaimedVersions = 0;
     std::array<std::uint64_t, static_cast<std::size_t>(ArtifactReadiness::Failed) + 1u> stateCounts{};
 };
 
@@ -327,13 +409,17 @@ public:
     void Cancel(ArtifactKey key);
     void Release(ArtifactKey key);
     void MarkPublished(ArtifactKey key, std::uint64_t revision);
+    void MarkPublished(ArtifactVersionID version);
     void PumpGpuCompletions();
     void SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback);
     [[nodiscard]] std::uint64_t AddReadyCallback(
         std::function<void(const ArtifactSnapshot&)> callback);
     void RemoveReadyCallback(std::uint64_t subscription);
+    [[nodiscard]] ArtifactObservation ObserveWithSnapshot(ArtifactKey address,
+        std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback);
 
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactKey key) const;
+    [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactVersionID version) const;
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;
     [[nodiscard]] AsyncStateGraphStats Stats() const;
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const;

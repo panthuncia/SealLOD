@@ -7,12 +7,13 @@
 #include <vector>
 
 #include <DirectXMath.h>
-
 #include "Interfaces/IResourceProvider.h"
 #include "ShaderBuffers.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/ResourceGroup.h"
 #include "Resources/Texture.h"
+#include "Render/AsyncStateGraph.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 
 class TextureFactory;
 class MaterialManager;
@@ -100,8 +101,8 @@ public:
     static std::unique_ptr<TerrainManager> CreateUnique();
 
     std::uint32_t SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory, MaterialManager* materialManager = nullptr);
-    // Advances the main-thread terrain activation boundary after streaming
-    // binding callbacks have been drained for the frame.
+    // Reconciles level-triggered graph binding observations and advances the
+    // terrain publication boundary.
     void ProcessPendingUpdates();
     void ClearActiveTerrain();
 	void SetRendererStateServices(void* requests, void* uploads) noexcept {
@@ -123,12 +124,12 @@ private:
         Height,
         RMAOS
     };
-    void RefreshTerrainLayerTextureBinding(
-        std::uint32_t layerIndex,
-        TerrainTextureSlot slot,
-        const std::shared_ptr<TextureAsset>& texture,
-        std::uint64_t terrainGeneration,
-        std::size_t initialDependencyIndex);
+    struct GraphTextureBinding {
+        std::uint32_t layerIndex = 0;
+        TerrainTextureSlot slot = TerrainTextureSlot::Diffuse;
+        std::shared_ptr<TextureAsset> texture;
+        br::render::ArtifactAddress address{};
+    };
 	void RequestGraphState();
 
     std::shared_ptr<DynamicStructuredBuffer<TerrainSetGPU>> m_sets;
@@ -146,14 +147,14 @@ private:
 	std::vector<TerrainRegionGPU> m_regionData;
 	std::vector<std::uint32_t> m_weightBlockData;
     TerrainSetGPU m_desiredSet{};
-    std::vector<std::uint8_t> m_initialBindingReady;
-    std::size_t m_readyInitialBindingCount = 0;
     std::uint64_t m_terrainGeneration = 0;
     std::vector<std::uint64_t> m_streamingBindingIDs;
+    std::vector<GraphTextureBinding> m_graphTextureBindings;
     TextureStreamingManager* m_textureStreamingManager = nullptr;
 	void* m_rendererStateRequests = nullptr;
 	void* m_uploadService = nullptr;
 	std::array<std::shared_ptr<PublishedStateResourceResolver>, 7> m_terrainResolvers;
+	std::array<std::shared_ptr<br::render::VersionedBufferFamily>, 6> m_bufferFamilies;
 	std::uint64_t m_terrainRowsRevision = 0;
 	std::uint64_t m_terrainStateRevision = 0;
 	std::uint64_t m_activeTerrainPublishedRevision = 0;

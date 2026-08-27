@@ -434,9 +434,9 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 	}
 	TrackTexture(texture);
 	MarkTextureStreamingMetadataDirty(texture, true, "track_binding");
-	if (command.options.seedCurrentBinding) {
+	if (command.options.seedCurrentBinding && firstBindingOwner) {
 		auto preparedImage = texture->PreparedImagePtr();
-		if (preparedImage && firstBindingOwner) {
+		if (preparedImage) {
 			// Seed the publication boundary. The main-thread owner registry independently
 			// tracks which individual owners still need to observe this binding.  Do not
 			// republish an already-current image for every additional owner: that dirtied
@@ -448,6 +448,39 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 			// longer transitioned by the render graph, so skipping this seed left initial
 			// bindings outside the transfer service's shader-ready state machine.
 			QueueBindingChanged(*texture, {});
+		}
+	}
+	if (command.options.seedCurrentBinding && m_rendererStateRequests) {
+		// Every owner registration idempotently ensures the graph vertex. The first
+		// owner is only a streaming-policy optimization: it may have registered
+		// before an image was published, so it cannot own graph correctness.
+		const auto published = texture->GetPublishedBindingSnapshot();
+		const auto address = br::render::ArtifactAddress{
+			br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 };
+		const auto diagnostic = m_rendererStateRequests->Diagnose(address);
+		if (published.image && published.bindingRevision != 0u &&
+			published.image->HasValidBackingResource() &&
+			diagnostic.desiredRevision < published.bindingRevision) {
+				auto input = std::make_shared<br::render::TextureBindingBuildInput>();
+				input->streamingTextureID = streamingTextureID;
+				input->bindingRevision = published.bindingRevision;
+				input->streamingStateRevision = texture->GetStreamingStateRevision();
+				input->samplerDescriptorIndex = texture->SamplerDescriptorIndex();
+				input->image = published.image;
+				const auto fingerprint =
+					(published.bindingRevision << 1u) ^ input->streamingStateRevision ^
+					streamingTextureID ^ 0x54455842494e44ull;
+				const auto request = m_rendererStateRequests->Request(
+					address,
+					published.bindingRevision, {},
+					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
+						std::move(input)), fingerprint);
+				if (!request) {
+					spdlog::error(
+						"TextureStreamingManager: failed to seed published graph binding textureID={} revision={} status={}",
+						streamingTextureID, published.bindingRevision,
+						static_cast<unsigned>(request.status));
+				}
 		}
 	}
 }
@@ -1042,16 +1075,20 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 	std::size_t waitingForGraphCount = 0;
 	std::size_t graphFailureCount = 0;
 	for (auto& change : coalesced) {
+		std::shared_ptr<const br::render::GpuSubmissionSet> transferSubmission;
 		if (m_materialTextureTransfers && change.newImage &&
 			!m_materialTextureTransfers->IsShaderReady(change.newImage)) {
-			if (!m_materialTextureTransfers->HasFailed(change.newImage)) {
+			transferSubmission = m_materialTextureTransfers->ShaderReadySubmission(change.newImage);
+			if (!transferSubmission && !m_materialTextureTransfers->HasFailed(change.newImage)) {
 				waitingForGpu.push_back(std::move(change));
 			}
-			else if (change.texture) {
+			else if (!transferSubmission && change.texture) {
 				(void)change.texture->RejectPreparedImage(change.bindingRevision, change.newImage);
 				EnqueueTextureUploadAdvance(change.texture, "external_transfer_failed");
 			}
-			continue;
+			if (!transferSubmission) continue;
+		} else if (m_materialTextureTransfers && change.newImage) {
+			transferSubmission = m_materialTextureTransfers->ShaderReadySubmission(change.newImage);
 		}
 		if (m_rendererStateRequests) {
 			const br::render::ArtifactKey bindingKey{
@@ -1066,6 +1103,7 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 				input->samplerDescriptorIndex = change.texture
 					? change.texture->SamplerDescriptorIndex() : 0u;
 				input->image = change.newImage;
+				input->gpuSubmissions = transferSubmission;
 				change.graphRequested = m_rendererStateRequests->Request(
 					bindingKey, change.bindingRevision, {},
 					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
@@ -1086,7 +1124,8 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 			}
 			if (!change.graphRequested ||
 				diagnostic.artifact.revision != change.bindingRevision ||
-				diagnostic.artifact.readiness < br::render::ArtifactReadiness::GpuReady) {
+				!br::render::ArtifactReachedMilestone(diagnostic.artifact.readiness,
+					br::render::ArtifactReadiness::UploadSubmitted)) {
 				waitingForGpu.push_back(std::move(change));
 				++waitingForGraphCount;
 				continue;

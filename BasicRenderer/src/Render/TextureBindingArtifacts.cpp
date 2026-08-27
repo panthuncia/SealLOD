@@ -25,7 +25,8 @@ ArtifactBuildResult BuildTextureBinding(const ArtifactBuildContext& context) {
     binding->samplerDescriptorIndex = input->samplerDescriptorIndex;
     binding->image = input->image;
     return ArtifactBuildResult::Ready(
-        ArtifactPayload::Make<PublishedTextureBinding>(std::move(binding)));
+        ArtifactPayload::Make<PublishedTextureBinding>(std::move(binding)),
+        input->gpuSubmissions);
 }
 
 } // namespace

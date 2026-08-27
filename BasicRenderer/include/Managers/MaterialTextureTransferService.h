@@ -18,6 +18,7 @@ namespace org { class PixelBuffer; }
 using org::PixelBuffer;
 namespace org { class Resource; }
 using org::Resource;
+namespace br::render { struct GpuSubmissionSet; }
 
 // Owns final material-texture uploads and the one-time transition into the
 // immutable shader-resource state.  Resources submitted here must never be
@@ -41,6 +42,8 @@ public:
 	// run in the service task scope.
 	void Pump();
 	bool IsShaderReady(const std::shared_ptr<PixelBuffer>& image) const;
+	std::shared_ptr<const br::render::GpuSubmissionSet> ShaderReadySubmission(
+		const std::shared_ptr<PixelBuffer>& image) const;
 	bool HasFailed(const std::shared_ptr<PixelBuffer>& image) const;
 
 private:
@@ -95,7 +98,7 @@ private:
 	mutable std::mutex m_mutex;
 	rhi::Device m_device;
 	rhi::Queue m_graphicsQueue;
-	rhi::TimelinePtr m_timeline;
+	std::shared_ptr<rhi::TimelinePtr> m_timeline;
 	uint64_t m_nextFenceValue = 0;
 	std::vector<Request> m_pending;
 	std::vector<ReadbackRequest> m_pendingReadbacks;

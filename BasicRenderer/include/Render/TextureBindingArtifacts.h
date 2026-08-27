@@ -15,6 +15,7 @@ struct TextureBindingBuildInput {
     std::uint64_t streamingStateRevision = 0;
     std::uint32_t samplerDescriptorIndex = 0;
     std::shared_ptr<org::PixelBuffer> image;
+    std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
 };
 
 struct PublishedTextureBinding {

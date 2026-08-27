@@ -14,23 +14,27 @@ public:
         bool publishedEnabled = true)
         : m_source(std::move(source)), m_key(key), m_exact(true),
           m_fallback(std::make_shared<FallbackState>()),
-          m_selection(std::make_shared<SelectionState>()) {
+          m_selection(std::make_shared<SelectionState>()),
+          m_leaseBinding(std::make_shared<LeaseBinding>()) {
         m_fallback->resource.store(std::move(fallback), std::memory_order_release);
         m_selection->publishedEnabled.store(publishedEnabled, std::memory_order_release);
+        CaptureLatestLease();
     }
     PublishedStateResourceResolver(std::shared_ptr<br::render::PublishedStateSource> source,
         br::render::PublishedResourceQuery query)
-        : m_source(std::move(source)), m_query(std::move(query)) {}
+        : m_source(std::move(source)), m_query(std::move(query)),
+          m_leaseBinding(std::make_shared<LeaseBinding>()) { CaptureLatestLease(); }
 
     std::vector<std::shared_ptr<org::Resource>> Resolve() const override {
         if (m_selection && !m_selection->publishedEnabled.load(std::memory_order_acquire)) {
             return ResolveFallback();
         }
-        const auto source = m_source;
-        const auto state = source ? source->Load() : nullptr;
+        const auto lease = BoundLease();
+        const auto state = lease ? lease->state : nullptr;
         if (!state || !state->resourceCatalog) return ResolveFallback();
         if (!m_exact) return state->resourceCatalog->FindAll(m_query);
-        const auto resources = state->resourceCatalog->Find(m_key);
+        const auto selection = state->resourceCatalog->FindSelection(m_key);
+        const auto resources = selection ? selection->resources : state->resourceCatalog->Find(m_key);
         return resources && !resources->empty() ? *resources : ResolveFallback();
     }
 
@@ -39,7 +43,9 @@ public:
             m_selection->publishedEnabled.load(std::memory_order_acquire);
         std::uint64_t entryVersion = 0;
         if (publishedEnabled && m_source) {
-            const auto state = m_source->Load();
+            CaptureLatestLease();
+            const auto lease = BoundLease();
+            const auto state = lease ? lease->state : nullptr;
             if (state && state->resourceCatalog) {
                 entryVersion = m_exact
                     ? state->resourceCatalog->ContentVersion(m_key)
@@ -56,12 +62,13 @@ public:
     std::vector<org::ExternalTimelinePoint> GetExternalTimelineWaits() const override {
         std::vector<org::ExternalTimelinePoint> waits;
         if (m_selection && !m_selection->publishedEnabled.load(std::memory_order_acquire)) return waits;
-        const auto state = m_source ? m_source->Load() : nullptr;
-        if (!state) return waits;
-        const auto appendFragment = [&](const br::render::PublishedStateFragment& fragment) {
-            for (const auto& dependency : fragment.dependencyClosure) {
-                if (!dependency.gpuSubmissions || dependency.gpuSubmissions->Complete()) continue;
-                for (const auto& submission : dependency.gpuSubmissions->submissions) {
+        const auto lease = BoundLease();
+        const auto state = lease ? lease->state : nullptr;
+        if (!state || !state->resourceCatalog) return waits;
+        const auto appendSelection = [&](const br::render::PublishedResourceSelection& selection) {
+            for (const auto& submissions : selection.gpuSubmissions) {
+                if (!submissions || submissions->Complete()) continue;
+                for (const auto& submission : submissions->submissions) {
                     const auto owner = std::static_pointer_cast<const rhi::TimelinePtr>(
                         submission.TimelineOwner());
                     if (!owner || !*owner) continue;
@@ -70,12 +77,12 @@ public:
             }
         };
         if (m_exact) {
-            appendFragment(state->Fragment(m_key.owner));
-        } else if (m_query.owner) {
-            appendFragment(state->Fragment(*m_query.owner));
+            if (const auto* selection = state->resourceCatalog->FindSelection(m_key)) {
+                appendSelection(*selection);
+            }
         } else {
-            for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
-                appendFragment(state->Fragment(static_cast<br::render::PublishedFragmentKind>(index)));
+            for (const auto* selection : state->resourceCatalog->FindSelections(m_query)) {
+                if (selection) appendSelection(*selection);
             }
         }
         return waits;
@@ -102,6 +109,23 @@ private:
         std::atomic<bool> publishedEnabled{ true };
         std::atomic<std::uint64_t> generation{ 0 };
     };
+    struct LeaseBinding {
+        std::atomic<std::shared_ptr<const br::render::PublishedManifestLease>> lease;
+        std::atomic<std::uint64_t> sequence{ 0 };
+    };
+    void CaptureLatestLease() const {
+        if (!m_source || !m_leaseBinding) return;
+        auto lease = m_source->LoadLease();
+        if (!lease) lease = m_source->AcquireLease(0u);
+        const auto current = m_leaseBinding->lease.load(std::memory_order_acquire);
+        if (current && current->sequence >= lease->sequence) return;
+        m_leaseBinding->lease.store(lease, std::memory_order_release);
+        m_leaseBinding->sequence.store(lease->sequence, std::memory_order_release);
+    }
+    [[nodiscard]] std::shared_ptr<const br::render::PublishedManifestLease> BoundLease() const {
+        if (!m_leaseBinding) return {};
+        return m_leaseBinding->lease.load(std::memory_order_acquire);
+    }
     std::vector<std::shared_ptr<org::Resource>> ResolveFallback() const {
         const auto fallback = m_fallback
             ? m_fallback->resource.load(std::memory_order_acquire) : nullptr;
@@ -114,4 +138,5 @@ private:
     bool m_exact = false;
     std::shared_ptr<FallbackState> m_fallback;
     std::shared_ptr<SelectionState> m_selection;
+    std::shared_ptr<LeaseBinding> m_leaseBinding;
 };

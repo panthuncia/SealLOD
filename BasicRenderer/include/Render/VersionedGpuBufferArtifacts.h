@@ -19,6 +19,7 @@ namespace runtime { class IUploadService; }
 namespace br::render {
 
 struct PublishedGpuBufferVersion;
+class RendererStateRequestService;
 
 enum class BufferRevisionMode : std::uint8_t {
     Patch,
@@ -29,10 +30,12 @@ struct BufferBackingArtifact {
     std::shared_ptr<org::GloballyIndexedResource> resource;
     std::uint64_t backingGeneration = 0;
     std::uint64_t capacityClass = 0;
+    std::uint64_t byteCapacity = 0;
 };
 
 class VersionedGpuBufferBackingPool {
 public:
+    ~VersionedGpuBufferBackingPool();
     [[nodiscard]] std::shared_ptr<BufferBackingArtifact> Acquire(
         std::uint64_t capacityClass, std::uint32_t elementStride,
         bool unorderedAccess, bool indirectArguments, std::string_view debugName,
@@ -119,6 +122,40 @@ private:
     std::shared_ptr<const PublishedGpuBufferVersion> m_previous;
     std::vector<VersionedGpuBufferWrite> m_writes;
     std::vector<std::byte> m_initialBytes;
+};
+
+// The single manager-facing authority for one persistent buffer address. It
+// owns backing reuse and constructs immutable graph requests; callers retain
+// only the returned version handle.
+class VersionedBufferFamily {
+public:
+    struct Config {
+        ArtifactAddress address{};
+        std::string debugName;
+        std::uint32_t elementStride = 0;
+        bool unorderedAccess = false;
+        bool indirectArguments = false;
+        PublishedFragmentKind catalogOwner = PublishedFragmentKind::Geometry;
+        PublishedResourceUsage catalogUsage = PublishedResourceUsage::ShaderResource;
+        std::uint64_t catalogVariant = 0;
+    };
+
+    explicit VersionedBufferFamily(Config config);
+    [[nodiscard]] ArtifactRequestResult RequestSnapshot(RendererStateRequestService& requests,
+        org::runtime::IUploadService& uploads, std::uint64_t revision,
+        std::span<const std::byte> bytes, std::uint64_t elementCount,
+        std::uint64_t capacity = 0);
+    [[nodiscard]] ArtifactRequestResult RequestCapture(RendererStateRequestService& requests,
+        org::runtime::IUploadService& uploads, std::uint64_t revision,
+        VersionedGpuBufferJournal::Capture capture);
+    void Acknowledge(std::shared_ptr<const PublishedGpuBufferVersion> version);
+    [[nodiscard]] const Config& Configuration() const noexcept { return m_config; }
+
+private:
+    Config m_config;
+    std::shared_ptr<VersionedGpuBufferBackingPool> m_backingPool;
+    std::mutex m_mutex;
+    std::shared_ptr<const PublishedGpuBufferVersion> m_previous;
 };
 
 // Pure replay step shared by the producer and deterministic journal tests.

@@ -27,6 +27,22 @@ std::shared_ptr<const PublishedResourceCatalog::ResourceList> PublishedResourceC
     return found == entries.end() ? nullptr : found->second;
 }
 
+const PublishedResourceSelection* PublishedResourceCatalog::FindSelection(
+    const PublishedResourceKey& key) const noexcept {
+    const auto found = selections.find(key);
+    return found == selections.end() ? nullptr : &found->second;
+}
+
+std::vector<const PublishedResourceSelection*> PublishedResourceCatalog::FindSelections(
+    const PublishedResourceQuery& query) const {
+    std::vector<const PublishedResourceSelection*> result;
+    result.reserve(selections.size());
+    for (const auto& [key, selection] : selections) {
+        if (query.Matches(key)) result.push_back(&selection);
+    }
+    return result;
+}
+
 std::uint64_t PublishedResourceCatalog::ContentVersion(
     const PublishedResourceKey& key) const noexcept {
     const auto found = contentVersions.find(key);
@@ -88,6 +104,22 @@ std::shared_ptr<const PublishedRendererState> PublishedStateSource::Load() const
 std::uint64_t PublishedStateSource::Epoch() const noexcept {
     const auto state = Load();
     return state ? state->epoch : 0u;
+}
+
+std::shared_ptr<const PublishedManifestLease> PublishedStateSource::AcquireLease(
+    std::size_t frameSlot, std::shared_ptr<const PublishedRendererState> state) noexcept {
+    if (!state) state = Load();
+    auto lease = std::make_shared<PublishedManifestLease>();
+    lease->state = std::move(state);
+    lease->epoch = lease->state ? lease->state->epoch : 0u;
+    lease->sequence = m_leaseSequence.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    lease->frameSlot = frameSlot;
+    m_lease.store(lease, std::memory_order_release);
+    return lease;
+}
+
+std::shared_ptr<const PublishedManifestLease> PublishedStateSource::LoadLease() const noexcept {
+    return m_lease.load(std::memory_order_acquire);
 }
 
 PublishedStateFragment& PublishedRendererState::Fragment(PublishedFragmentKind kind) {
@@ -230,8 +262,7 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
             const bool preconditionsSatisfied = std::ranges::all_of(
                 patch.preconditions, [&](const PublishedFragmentPrecondition& precondition) {
                     const auto& active = patched->Fragment(precondition.kind);
-                    return active.publicationRoot == precondition.publicationRoot &&
-                        active.revision == precondition.revision;
+                    return active.publicationRoot == precondition.publicationRoot;
                 });
             if (!preconditionsSatisfied) {
                 ++m_stats.rejectedPatchPreconditions;
@@ -253,6 +284,7 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
             for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
                 if ((patch.catalogOwnerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
                     catalog->contentVersions.erase(entry->first);
+                    catalog->selections.erase(entry->first);
                     entry = catalog->entries.erase(entry);
                 } else ++entry;
             }
@@ -261,11 +293,22 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
                 catalog->contentVersions[key] =
                     patched->Fragment(key.owner).revision;
             }
+            for (const auto& [key, selection] : patch.catalogSelections) {
+                catalog->selections.insert_or_assign(key, selection);
+            }
             patched->resourceCatalog = std::move(catalog);
         }
         m_patches.clear();
         if (changed) {
             patched->epoch = (m_active ? m_active->epoch : 0u) + 1u;
+            if (patched->resourceCatalog) {
+                auto stampedCatalog = std::make_shared<PublishedResourceCatalog>(
+                    *patched->resourceCatalog);
+                for (auto& [_, selection] : stampedCatalog->selections) {
+                    selection.manifestEpoch = patched->epoch;
+                }
+                patched->resourceCatalog = std::move(stampedCatalog);
+            }
             if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
             m_active = std::move(patched);
             result.committed = true;
@@ -283,6 +326,7 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         static_cast<std::int64_t>(m_stats.retainedFrameStates));
     result.state = m_active;
     m_source->Store(result.state);
+    result.lease = m_source->AcquireLease(frameSlot, result.state);
     return result;
 }
 
