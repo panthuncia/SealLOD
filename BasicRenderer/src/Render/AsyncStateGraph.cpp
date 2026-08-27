@@ -1620,6 +1620,27 @@ ArtifactObservation AsyncStateGraph::ObserveWithSnapshot(ArtifactKey address,
         } };
 }
 
+ArtifactObservation AsyncStateGraph::ObserveKind(ArtifactKind kind,
+	std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback) {
+	auto sequence = std::make_shared<std::atomic_uint64_t>(0);
+	const auto subscription = AddReadyCallback(
+		[kind, sequence, callback = std::move(callback)](const ArtifactSnapshot& snapshot) {
+			if (snapshot.key.kind != kind) return;
+			const auto next = sequence->fetch_add(1, std::memory_order_acq_rel) + 1;
+			if (callback) callback(next, snapshot);
+		});
+	auto weak = std::weak_ptr<Impl>(m_impl);
+	return { subscription, sequence->load(std::memory_order_acquire), {},
+		[weak, subscription] {
+			if (subscription == 0) return;
+			if (const auto graph = weak.lock()) {
+				std::lock_guard lock(graph->mutex);
+				graph->readyCallbacks.erase(subscription);
+				graph->ScheduleDrain();
+			}
+		} };
+}
+
 ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactKey key) const {
     std::lock_guard lock(m_impl->mutex);
     const auto found = m_impl->nodes.find(key);

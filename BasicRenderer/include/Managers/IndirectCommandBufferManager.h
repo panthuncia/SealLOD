@@ -118,7 +118,6 @@ private:
     std::optional<br::render::ArtifactRequirement> m_objectBufferRequirement;
     std::uint64_t m_lastMaterialRevision = 0;
     std::uint64_t m_lastResidentDrawRecordCount = 0;
-    std::uint32_t m_graphDiagnosticTicks = 0;
 
     void OnActiveDrawSetMutation(const DrawWorkloadKey& workloadKey, bool replace,
         std::uint64_t revision,

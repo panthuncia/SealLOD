@@ -32,6 +32,10 @@ public:
         std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback) {
         return m_graph.ObserveWithSnapshot(address, std::move(callback));
     }
+	[[nodiscard]] ArtifactObservation ObserveKind(ArtifactKind kind,
+		std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback) {
+		return m_graph.ObserveKind(kind, std::move(callback));
+	}
     [[nodiscard]] AsyncStateGraphStats Stats() const { return m_graph.Stats(); }
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const {
         return m_graph.Outstanding(kind);

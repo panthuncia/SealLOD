@@ -367,12 +367,26 @@ int main() {
         [&](std::uint64_t sequence, const ArtifactSnapshot&) {
             observedSequence.store(sequence, std::memory_order_release);
         });
+	std::atomic_uint64_t kindObservedSequence{ 0 };
+	std::atomic_bool kindObservedExactRevision{ false };
+	auto kindObservation = graph.ObserveKind(ArtifactKind::Generic,
+		[&](std::uint64_t sequence, const ArtifactSnapshot& snapshot) {
+			if (snapshot.key == exactDependency && snapshot.revision == 3) {
+				kindObservedExactRevision.store(true, std::memory_order_release);
+			}
+			kindObservedSequence.store(sequence, std::memory_order_release);
+		});
     Check(observation.subscription != 0);
     Check(observation.snapshot.revision == 2);
+	Check(kindObservation.subscription != 0);
+	Check(kindObservation.snapshot.readiness == ArtifactReadiness::Missing);
     Check(graph.Request(exactDependency, 3));
     graph.WaitIdle();
     Check(observedSequence.load(std::memory_order_acquire) != 0);
+	Check(kindObservedSequence.load(std::memory_order_acquire) != 0);
+	Check(kindObservedExactRevision.load(std::memory_order_acquire));
     observation.Reset();
+	kindObservation.Reset();
 
     const ArtifactKey gateDependency{ ArtifactKind::Generic, 306, 0 };
     const ArtifactKey gateConsumer{ ArtifactKind::Generic, 307, 0 };
@@ -406,7 +420,11 @@ int main() {
     const ArtifactKey advancingGateDependency{ ArtifactKind::Generic, 1310, 0 };
     const ArtifactKey missingGateBlocker{ ArtifactKind::Generic, 1311, 0 };
     const ArtifactKey advancingGateConsumer{ ArtifactKind::Generic, 1312, 0 };
-    Check(graph.Request(advancingGateDependency, 1));
+    // Retain the completed version while advancing the address. ReadyGate can
+    // latch an older milestone only while some explicit owner keeps that
+    // immutable version alive; historical readiness is not itself a pin.
+    const auto advancingGateV1 = graph.Request(advancingGateDependency, 1);
+    Check(advancingGateV1);
     graph.WaitIdle();
     Check(graph.Request(advancingGateDependency, 2, {
         Exact(ArtifactVersionID{ missingGateBlocker, 1, 0 }, ArtifactReadiness::GpuReady)
@@ -661,6 +679,54 @@ int main() {
         [](const PublishedStaticTransaction& transaction) {
             return transaction.groups.size() == 1;
         }));
+
+    // The authoritative renderer path adds one coherent resource closure at
+    // the scene root. Historical transactions stay metadata-only, so replacing
+    // a material/object/indirect successor does not invalidate every placement
+    // transaction or retain one GPU generation per transaction.
+    const auto registerFragmentProducer = [&graph](
+        ArtifactKind kind, PublishedFragmentKind fragmentKind) {
+        graph.RegisterProducer(kind, {
+            TaskLane::Streaming, TaskDomain::General, "StaticSceneResourceRoot",
+            [fragmentKind](const ArtifactBuildContext& context) {
+                auto root = std::make_shared<RendererStateFragmentArtifact>();
+                root->kind = fragmentKind;
+                root->fragment.revision = context.revision;
+                return ArtifactBuildResult::Ready(
+                    ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(root)));
+            }
+        });
+    };
+    registerFragmentProducer(ArtifactKind::MaterialTable, PublishedFragmentKind::Materials);
+    registerFragmentProducer(ArtifactKind::DrawRecordPage, PublishedFragmentKind::DrawRecords);
+    registerFragmentProducer(ArtifactKind::IndirectWorkload,
+        PublishedFragmentKind::IndirectWorkloads);
+    const ArtifactKey materialRoot{ ArtifactKind::MaterialTable, 0, 0 };
+    const ArtifactKey objectRoot{ ArtifactKind::DrawRecordPage, 0, 0 };
+    const ArtifactKey indirectRoot{ ArtifactKind::IndirectWorkload, 0, 0 };
+    const auto materialRootVersion = graph.Request(materialRoot, 1, {}, Payload(1), 9101);
+    const auto objectRootVersion = graph.Request(objectRoot, 1, {}, Payload(1), 9102);
+    const auto indirectRootVersion = graph.Request(indirectRoot, 1, {}, Payload(1), 9103);
+    Check(materialRootVersion && objectRootVersion && indirectRootVersion);
+    auto closedScene = std::make_shared<StaticSceneBuildInput>();
+    closedScene->sourceFingerprint = 9003;
+    closedScene->publishRoot = true;
+    closedScene->requireResourceClosure = true;
+    closedScene->desiredPlacementCount = 5;
+    closedScene->materializedPlacementCount = 5;
+    closedScene->groupOwners = {
+        { 10001, staticVersionC.version }, { 10002, staticVersionA.version } };
+    Check(graph.Request(staticScene, 3, {
+        Exact(staticVersionA.version, ArtifactReadiness::GpuReady),
+        Exact(staticVersionC.version, ArtifactReadiness::GpuReady),
+        Exact(materialRootVersion.version, ArtifactReadiness::GpuReady),
+        Exact(objectRootVersion.version, ArtifactReadiness::GpuReady),
+        Exact(indirectRootVersion.version, ArtifactReadiness::GpuReady),
+    }, ArtifactPayload::Make<StaticSceneBuildInput>(std::move(closedScene)), 9003));
+    graph.WaitIdle();
+    const auto closedRoot = graph.Snapshot(staticScene)
+        .payload.Get<RendererStateFragmentArtifact>();
+    Check(closedRoot && closedRoot->fragment.dependencyClosure.size() == 5);
 
     const ArtifactKey mismatchedTransaction{ ArtifactKind::StaticTransaction, 103, 7 };
     auto mismatchedInput = std::make_shared<StaticTransactionBuildInput>();

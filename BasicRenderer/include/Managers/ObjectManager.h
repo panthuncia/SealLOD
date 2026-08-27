@@ -356,6 +356,8 @@ public:
 		std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 		std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> activeDrawSetSpans;
 		std::uint64_t materializeUs = 0;
+		bool transformRowsStaged = false;
+		bool drawRecordRowsStaged = false;
 	};
 
 	struct StaticImportPublishResult {
@@ -431,6 +433,12 @@ public:
 	MaterializedStaticImportTransaction MaterializeStaticImportTransaction(
 		StaticImportReservation&& reservation,
 		StaticImportBuildBatch& buildScratch) const;
+	// Copies immutable transaction rows into the versioned buffer journals. This
+	// is safe to run during worker preparation after ranges have been reserved;
+	// publication only activates generations and selects the resulting versions.
+	void StageStaticImportTransactionUploads(
+		MaterializedStaticImportTransaction& transaction,
+		bool includeDrawRecords = true);
 	StaticImportPublishResult PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction);
 	StaticImportBulkPublishResult PublishStaticImportTransactionsBulk(std::span<MaterializedStaticImportTransaction*> transactions);
 	void CancelStaticImportTransaction(StaticImportReservation reservation, std::uint64_t retireFrame = 0);
@@ -616,7 +624,7 @@ private:
 	br::render::ArtifactVersionID m_visibilityGenerationSubmittedVersion{};
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_visibilityGenerationBackingPool;
 	std::shared_ptr<const br::render::PublishedGpuBufferVersion> m_visibilityGenerationPrevious;
-	std::uint64_t m_nextStaticImportTransactionID = 1;
+	std::atomic<std::uint64_t> m_nextStaticImportTransactionID{ 1 };
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
 	Stats m_stats{};

@@ -378,6 +378,8 @@ namespace {
 
 // TODO: Use LazyDynamicStructuredBuffer and active indices buffer like draw calls? Would reduce number of no-op indirect arguments
 MaterialManager::MaterialManager() {
+	m_snapshotCommitScope = TaskSchedulerManager::GetInstance().CreateScope(
+		"MaterialManager::SnapshotCommit");
 	auto& rm = ::ResourceManager::GetInstance();
 
 	m_materialBufferCapacity = kInitialMaterialBufferCapacity;
@@ -482,6 +484,10 @@ MaterialManager::MaterialManager() {
 	CommitGpuVisibleSnapshot();
 }
 
+MaterialManager::~MaterialManager() {
+	if (m_snapshotCommitScope.Valid()) m_snapshotCommitScope.CancelAndWait();
+}
+
 void MaterialManager::BeginTextureStreamingFeedbackFrame(uint64_t frameIndex) {
 	(void)frameIndex;
 }
@@ -523,18 +529,27 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 	const auto updateStart = std::chrono::steady_clock::now();
 	const auto streamingStart = std::chrono::steady_clock::now();
 	if (m_textureStreamingManager) {
-		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming");
-		m_textureStreamingManager->EnqueueFrameTick(frameIndex);
-		m_textureStreamingManager->DrainPendingBindingChanges();
+		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming");
+		{
+			BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming::EnqueueFrameTick");
+			m_textureStreamingManager->EnqueueFrameTick(frameIndex);
+		}
+		{
+			BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming::AdoptBindings");
+			m_textureStreamingManager->DrainPendingBindingChanges();
+		}
 	}
 	uint32_t changedTextureID = 0;
 	std::unordered_set<uint32_t> changedTextures;
-	while (m_graphTextureWakeups.try_pop(changedTextureID)) changedTextures.insert(changedTextureID);
-	for (const auto textureID : changedTextures) {
-		const auto observed = m_graphTextureMaterials.find(textureID);
-		if (observed == m_graphTextureMaterials.end()) continue;
-		for (const auto materialID : observed->second) {
-			if (m_dirtyMaterialIDSet.insert(materialID).second) m_dirtyMaterialIDs.push_back(materialID);
+	{
+		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::ReconcileGraphTextureChanges");
+		while (m_graphTextureWakeups.try_pop(changedTextureID)) changedTextures.insert(changedTextureID);
+		for (const auto textureID : changedTextures) {
+			const auto observed = m_graphTextureMaterials.find(textureID);
+			if (observed == m_graphTextureMaterials.end()) continue;
+			for (const auto materialID : observed->second) {
+				if (m_dirtyMaterialIDSet.insert(materialID).second) m_dirtyMaterialIDs.push_back(materialID);
+			}
 		}
 	}
 	static bool debugTextureReadbackRequested = false;
@@ -591,7 +606,7 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 	std::size_t dirtyMaterialsVisited = 0;
 	std::size_t dirtyMaterialsFlushed = 0;
 	{
-		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials");
+		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials");
 		for (const uint32_t materialID : dirtyMaterialIDs) {
 			ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials::Material");
 			ZoneValue(materialID);
@@ -606,6 +621,7 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 		}
 	}
 	if (m_textureStreamingManager) {
+		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::RetirePatchedBindings");
 		m_textureStreamingManager->RetirePatchedBindingResources();
 	}
 	const auto dirtyMaterialEnd = std::chrono::steady_clock::now();
@@ -1467,14 +1483,16 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 	{
 		BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot::PublishActiveFlags");
 		const auto& registryActiveFlags = m_compileFlagsRegistry.GetActiveFlags();
+		const auto& registryActiveSlots = m_compileFlagsRegistry.GetActiveSlots();
 		::std::vector<br::render::MaterialCompileFlagEntryDTO> captured;
 		captured.reserve(registryActiveFlags.size());
-		for (MaterialCompileFlags flags : registryActiveFlags) {
-			unsigned int slot = 0u;
-			if (!TryGetCompileFlagsSlot(flags, slot) || slot >= publishedSlots) {
+		const auto activeCount = (std::min)(registryActiveFlags.size(), registryActiveSlots.size());
+		for (std::size_t i = 0; i < activeCount; ++i) {
+			const auto slot = registryActiveSlots[i];
+			if (slot >= publishedSlots) {
 				continue;
 			}
-			captured.push_back({ flags, slot });
+			captured.push_back({ registryActiveFlags[i], slot });
 		}
 		activeCompileFlags = std::move(captured);
 	}
@@ -1482,12 +1500,19 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 	if constexpr (kEnableMaterialStateShadow) if (const auto source = br::render::PublishedStateSource::ProcessSource()) {
 		if (const auto published = source->Load()) {
 			if (const auto shadow = published->materials.payload.Get<br::render::PublishedMaterialState>()) {
-				m_materialBaseJournal.Acknowledge(shadow->baseTable);
-				m_materialEvalJournal.Acknowledge(shadow->evalTable);
-				m_materialOpenPbrJournal.Acknowledge(shadow->openPbrTable);
-				m_materialBufferFamilies[0]->Acknowledge(shadow->baseTable);
-				m_materialBufferFamilies[1]->Acknowledge(shadow->evalTable);
-				m_materialBufferFamilies[2]->Acknowledge(shadow->openPbrTable);
+				const auto revision = published->materials.revision;
+				// Acknowledgement advances several journals and buffer-family retirement
+				// cursors. Replaying it every render update was both unnecessary and a
+				// sizeable host-thread cost while a material revision remained current.
+				if (revision > m_acknowledgedMaterialPublishedRevision) {
+					m_materialBaseJournal.Acknowledge(shadow->baseTable);
+					m_materialEvalJournal.Acknowledge(shadow->evalTable);
+					m_materialOpenPbrJournal.Acknowledge(shadow->openPbrTable);
+					m_materialBufferFamilies[0]->Acknowledge(shadow->baseTable);
+					m_materialBufferFamilies[1]->Acknowledge(shadow->evalTable);
+					m_materialBufferFamilies[2]->Acknowledge(shadow->openPbrTable);
+					m_acknowledgedMaterialPublishedRevision = revision;
+				}
 				// Material tables remain shadow-only until static draw activation carries an
 				// exact material-table dependency.  Switching the resource wrappers here can
 				// otherwise expose an older (including startup-empty) table to newly activated
@@ -1506,7 +1531,6 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 						resourceID(shadow->baseTable), resourceID(shadow->evalTable),
 						resourceID(shadow->openPbrTable));
 				}
-				const auto revision = published->materials.revision;
 				if (revision > m_materialStateValidatedRevision) {
 					if (const auto expected = m_materialStateExpectedFingerprints.find(revision);
 						expected != m_materialStateExpectedFingerprints.end()) {
@@ -1657,6 +1681,32 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 	return m_materialStateRevision != 0 &&
 		m_materialStateFingerprint == m_pendingMaterialStateFingerprint
 		? m_materialStateRevision : 0;
+}
+
+void MaterialManager::ScheduleGpuVisibleSnapshotCommit(bool forceGraphSnapshot) {
+	if (forceGraphSnapshot) m_forceSnapshotCommit.store(true, std::memory_order_release);
+	bool expected = false;
+	if (!m_snapshotCommitScheduled.compare_exchange_strong(
+		expected, true, std::memory_order_acq_rel)) return;
+	const bool submitted = m_snapshotCommitScope.Valid() &&
+		TaskSchedulerManager::GetInstance().Submit(
+			m_snapshotCommitScope, TaskLane::Streaming, TaskDomain::RendererState,
+			"MaterialManager::CommitGpuVisibleSnapshot",
+			[this](const br::TaskContext& context) {
+				if (!context.StopRequested()) {
+					const bool force = m_forceSnapshotCommit.exchange(
+						false, std::memory_order_acq_rel);
+					(void)CommitGpuVisibleSnapshot(force);
+				}
+				m_snapshotCommitScheduled.store(false, std::memory_order_release);
+				// Close the producer race: a force request arriving after the exchange
+				// above must schedule a successor even if it observed this task active.
+				if (!context.StopRequested() &&
+					m_forceSnapshotCommit.load(std::memory_order_acquire)) {
+					ScheduleGpuVisibleSnapshotCommit(true);
+				}
+			});
+	if (!submitted) m_snapshotCommitScheduled.store(false, std::memory_order_release);
 }
 
 bool MaterialManager::TryActivatePublishedMaterialState() {

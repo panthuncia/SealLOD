@@ -173,28 +173,6 @@ void IndirectCommandBufferManager::PublishDesiredState(
         changed = changed || m_consumedMutationRevision != m_desiredMutationRevision;
     }
     if (changed) ScheduleDesiredBuild();
-	const auto diagnostic = m_rendererStateRequests->Diagnose(
-		{ br::render::ArtifactKind::IndirectWorkload, 0, 0 });
-	basic_telemetry::SetGauge("SARP.Indirect.GraphDesiredRevision",
-		static_cast<std::int64_t>(diagnostic.desiredRevision));
-	basic_telemetry::SetGauge("SARP.Indirect.GraphArtifactRevision",
-		static_cast<std::int64_t>(diagnostic.artifact.revision));
-	basic_telemetry::SetGauge("SARP.Indirect.GraphReadiness",
-		static_cast<std::int64_t>(diagnostic.artifact.readiness));
-	basic_telemetry::SetGauge("SARP.Indirect.GraphBlockers",
-		static_cast<std::int64_t>(diagnostic.blockers.size()));
-	if (!diagnostic.blockers.empty()) {
-		const auto& blocker = diagnostic.blockers.front();
-		const auto blockerDiagnostic = m_rendererStateRequests->Diagnose(blocker.key);
-		basic_telemetry::SetGauge("SARP.Indirect.GraphBlockerKind",
-			static_cast<std::int64_t>(blocker.key.kind));
-		basic_telemetry::SetGauge("SARP.Indirect.GraphBlockerRequiredRevision",
-			static_cast<std::int64_t>(blocker.minimumRevision));
-		basic_telemetry::SetGauge("SARP.Indirect.GraphBlockerArtifactRevision",
-			static_cast<std::int64_t>(blockerDiagnostic.artifact.revision));
-		basic_telemetry::SetGauge("SARP.Indirect.GraphBlockerReadiness",
-			static_cast<std::int64_t>(blockerDiagnostic.artifact.readiness));
-	}
 }
 
 void IndirectCommandBufferManager::OnActiveDrawSetMutation(

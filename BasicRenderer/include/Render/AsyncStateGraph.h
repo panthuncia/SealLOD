@@ -501,6 +501,11 @@ public:
     void RemoveReadyCallback(std::uint64_t subscription);
     [[nodiscard]] ArtifactObservation ObserveWithSnapshot(ArtifactKey address,
         std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback);
+	// Installs one level-triggered wakeup for a resource family. Consumers still
+	// reconcile exact versions from graph state; the notification is never an
+	// ownership-transfer event.
+	[[nodiscard]] ArtifactObservation ObserveKind(ArtifactKind kind,
+		std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback);
 
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactKey key) const;
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactVersionID version) const;

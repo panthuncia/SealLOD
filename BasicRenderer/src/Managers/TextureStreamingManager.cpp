@@ -158,6 +158,34 @@ TextureStreamingManager::~TextureStreamingManager()
 	Shutdown();
 }
 
+void TextureStreamingManager::SetRendererStateRequestService(
+	br::render::RendererStateRequestService* service)
+{
+	m_graphBindingObservation.Reset();
+	m_rendererStateRequests = service;
+	{
+		std::lock_guard lock(m_graphBindingStateMutex);
+		m_observedGraphBindingStates.clear();
+	}
+	if (!m_rendererStateRequests) return;
+	m_graphBindingObservation = m_rendererStateRequests->ObserveKind(
+		br::render::ArtifactKind::TextureBinding,
+		[this](std::uint64_t, const br::render::ArtifactSnapshot& snapshot) {
+			if (snapshot.revision == 0 || snapshot.generation == 0) return;
+			std::lock_guard lock(m_graphBindingStateMutex);
+			auto& observed = m_observedGraphBindingStates[
+				static_cast<uint32_t>(snapshot.key.primaryID)];
+			const br::render::ArtifactVersionID version{
+				snapshot.key, snapshot.revision, snapshot.generation };
+			if (!observed.version || version.revision > observed.version.revision ||
+				(version.revision == observed.version.revision &&
+				 version.generation >= observed.version.generation)) {
+				observed.version = version;
+				observed.readiness = snapshot.readiness;
+			}
+		});
+}
+
 void TextureStreamingManager::Initialize(TextureFactory& textureFactory, uint32_t framesInFlight)
 {
 	(void)framesInFlight;
@@ -184,6 +212,11 @@ void TextureStreamingManager::Shutdown()
 		return;
 	}
 	m_workerQuit.store(true, std::memory_order_release);
+	m_graphBindingObservation.Reset();
+	{
+		std::lock_guard lock(m_graphBindingStateMutex);
+		m_observedGraphBindingStates.clear();
+	}
 	if (m_taskScope.Valid()) m_taskScope.CancelAndWait();
 	m_drainScheduled.store(false, std::memory_order_release);
 	if (m_textureFactory) m_textureFactory->SetMaterialTextureTransferService(nullptr);
@@ -1026,33 +1059,21 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 			ownersIt->second.size(),
 			pending.label);
 	}
-	std::lock_guard lock(m_pendingBindingChangeMutex);
-	for (auto& pending : m_pendingBindingChanges) {
-		if (pending.streamingTextureID == change.streamingTextureID &&
-			pending.bindingRevision == change.bindingRevision &&
-			pending.newImage == change.newImage) {
-			// Worker service ticks can observe the same prepared image again before the
-			// main thread reaches its adoption boundary.  Keep one immutable record and
-			// refresh its owner snapshot instead of publishing duplicate adoptions.
-			if (!pending.previousImage && change.previousImage) {
-				pending.previousImage = std::move(change.previousImage);
-			}
-			pending.queuedAt = change.queuedAt;
-			pending.texture = std::move(change.texture);
-			pending.streamingStateRevision = change.streamingStateRevision;
-			pending.metadata = change.metadata;
-			return;
-		}
-	}
-	m_pendingBindingChanges.push_back(std::move(change));
+	// Producers publish immutable observations without holding a lock needed by
+	// the render thread. Duplicate observations are folded after detachment in
+	// DrainPendingBindingChanges, where they cannot stall upload producers.
+	m_pendingBindingChanges.push(std::move(change));
 }
 
 std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 {
 	std::vector<PendingBindingChange> changes;
 	{
-		std::lock_guard lock(m_pendingBindingChangeMutex);
-		changes.swap(m_pendingBindingChanges);
+		BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::Detach");
+		PendingBindingChange queuedChange;
+		while (m_pendingBindingChanges.try_pop(queuedChange)) {
+			changes.push_back(std::move(queuedChange));
+		}
 	}
 	std::unordered_map<uint32_t, std::size_t> latestByTexture;
 	std::vector<PendingBindingChange> coalesced;
@@ -1073,12 +1094,56 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		previous.previousImage = std::move(change.previousImage);
 		previous.newImage = std::move(change.newImage);
 		previous.metadata = change.metadata;
+		// A newer immutable binding revision must issue its own graph request.
+		// Retaining the superseded request bit here stranded the replacement.
+		previous.graphRequested = change.graphRequested;
+		previous.waitingForGraphWake = change.waitingForGraphWake;
+		previous.graphVersion = change.graphVersion;
+	}
+	// Copy only observations which this detached batch can consume.  The old
+	// whole-map copy made the render thread walk every historical texture while
+	// graph completion producers were also trying to publish into the map.
+	std::unordered_map<uint32_t, ObservedGraphBindingState> observedGraphBindings;
+	observedGraphBindings.reserve(coalesced.size());
+	{
+		BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::CaptureObservedState");
+		std::lock_guard lock(m_graphBindingStateMutex);
+		for (const auto& change : coalesced) {
+			if (!change.waitingForGraphWake) continue;
+			if (const auto found = m_observedGraphBindingStates.find(change.streamingTextureID);
+				found != m_observedGraphBindingStates.end()) {
+				observedGraphBindings.emplace(found->first, found->second);
+			}
+		}
 	}
 	std::size_t adopted = 0;
 	std::vector<PendingBindingChange> waitingForGpu;
 	std::size_t waitingForGraphCount = 0;
 	std::size_t graphFailureCount = 0;
 	for (auto& change : coalesced) {
+		if (change.waitingForGraphWake) {
+			const auto observed = observedGraphBindings.find(change.streamingTextureID);
+			const bool exactVersionObserved = observed != observedGraphBindings.end() &&
+				observed->second.version == change.graphVersion;
+			if (exactVersionObserved &&
+				(observed->second.readiness == br::render::ArtifactReadiness::Failed ||
+				 observed->second.readiness == br::render::ArtifactReadiness::Cancelled)) {
+				++graphFailureCount;
+				if (change.texture) {
+					(void)change.texture->RejectPreparedImage(
+						change.bindingRevision, change.newImage);
+					EnqueueTextureUploadAdvance(change.texture, "graph_binding_failed");
+				}
+				continue;
+			}
+			if (!exactVersionObserved ||
+				!br::render::ArtifactReachedMilestone(observed->second.readiness,
+					br::render::ArtifactReadiness::UploadSubmitted)) {
+				waitingForGpu.push_back(std::move(change));
+				continue;
+			}
+		}
+		change.waitingForGraphWake = false;
 		// Unregistration and upload completion are independent queues. A change
 		// captured before the last owner disappeared must not recreate the graph
 		// address after ApplyUnregisterCommand released it.
@@ -1098,21 +1163,25 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 			continue;
 		}
 		std::shared_ptr<const br::render::GpuSubmissionSet> transferSubmission;
-		if (m_materialTextureTransfers && change.newImage &&
-			!m_materialTextureTransfers->IsShaderReady(change.newImage)) {
-			transferSubmission = m_materialTextureTransfers->ShaderReadySubmission(change.newImage);
-			if (!transferSubmission && !m_materialTextureTransfers->HasFailed(change.newImage)) {
-				waitingForGpu.push_back(std::move(change));
+		{
+			BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::TransferState");
+			if (m_materialTextureTransfers && change.newImage &&
+				!m_materialTextureTransfers->IsShaderReady(change.newImage)) {
+				transferSubmission = m_materialTextureTransfers->ShaderReadySubmission(change.newImage);
+				if (!transferSubmission && !m_materialTextureTransfers->HasFailed(change.newImage)) {
+					waitingForGpu.push_back(std::move(change));
+				}
+				else if (!transferSubmission && change.texture) {
+					(void)change.texture->RejectPreparedImage(change.bindingRevision, change.newImage);
+					EnqueueTextureUploadAdvance(change.texture, "external_transfer_failed");
+				}
+				if (!transferSubmission) continue;
+			} else if (m_materialTextureTransfers && change.newImage) {
+				transferSubmission = m_materialTextureTransfers->ShaderReadySubmission(change.newImage);
 			}
-			else if (!transferSubmission && change.texture) {
-				(void)change.texture->RejectPreparedImage(change.bindingRevision, change.newImage);
-				EnqueueTextureUploadAdvance(change.texture, "external_transfer_failed");
-			}
-			if (!transferSubmission) continue;
-		} else if (m_materialTextureTransfers && change.newImage) {
-			transferSubmission = m_materialTextureTransfers->ShaderReadySubmission(change.newImage);
 		}
 		if (m_rendererStateRequests) {
+			BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::GraphRequest");
 			const br::render::ArtifactKey bindingKey{
 				br::render::ArtifactKind::TextureBinding,
 				change.streamingTextureID,
@@ -1126,16 +1195,40 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 					? change.texture->SamplerDescriptorIndex() : 0u;
 				input->image = change.newImage;
 				input->gpuSubmissions = transferSubmission;
-				change.graphRequested = m_rendererStateRequests->Request(
+				const auto request = m_rendererStateRequests->Request(
 					bindingKey, change.bindingRevision, {},
 					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
 						std::move(input)),
 					(change.bindingRevision << 1u) ^ change.streamingStateRevision ^
 						change.streamingTextureID ^ 0x54455842494e44ull);
+				change.graphRequested = static_cast<bool>(request);
+				change.graphVersion = request.version;
+				if (!change.graphRequested) {
+					// A rejected immutable revision cannot become accepted by retrying it
+					// every frame.  In particular, StaleRevision means the address already
+					// desires a successor.  Drop this historical observation and enqueue a
+					// reconciliation from the texture's current prepared/published state.
+					if (change.texture) {
+						(void)change.texture->RejectPreparedImage(
+							change.bindingRevision, change.newImage);
+						MarkLiveTextureBindingsDirty(change.streamingTextureID);
+						EnqueueTextureUploadAdvance(change.texture, "graph_binding_superseded");
+						const auto currentPrepared = change.texture->PreparedImagePtr();
+						const auto currentPublished = change.texture->ImagePtr();
+						if (change.newImage && change.newImage != currentPrepared &&
+							change.newImage != currentPublished) {
+							DescriptorHeapManager::GetInstance().RetireResource(
+								std::move(change.newImage));
+						}
+					}
+					continue;
+				}
 			}
-			const auto diagnostic = m_rendererStateRequests->Diagnose(bindingKey);
-			if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
-				diagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
+			const auto graphSnapshot = change.graphVersion
+				? m_rendererStateRequests->Snapshot(change.graphVersion)
+				: br::render::ArtifactSnapshot{};
+			if (graphSnapshot.readiness == br::render::ArtifactReadiness::Failed ||
+				graphSnapshot.readiness == br::render::ArtifactReadiness::Cancelled) {
 				++graphFailureCount;
 				if (change.texture) {
 					(void)change.texture->RejectPreparedImage(
@@ -1145,9 +1238,11 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 				continue;
 			}
 			if (!change.graphRequested ||
-				diagnostic.artifact.revision != change.bindingRevision ||
-				!br::render::ArtifactReachedMilestone(diagnostic.artifact.readiness,
+				graphSnapshot.revision != change.bindingRevision ||
+				graphSnapshot.generation != change.graphVersion.generation ||
+				!br::render::ArtifactReachedMilestone(graphSnapshot.readiness,
 					br::render::ArtifactReadiness::UploadSubmitted)) {
+				change.waitingForGraphWake = change.graphRequested;
 				waitingForGpu.push_back(std::move(change));
 				++waitingForGraphCount;
 				continue;
@@ -1246,10 +1341,13 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		++adopted;
 	}
 	if (!waitingForGpu.empty()) {
-		std::lock_guard lock(m_pendingBindingChangeMutex);
-		for (auto& change : waitingForGpu) m_pendingBindingChanges.push_back(std::move(change));
+		for (auto& change : waitingForGpu) m_pendingBindingChanges.push(std::move(change));
 	}
-	const std::size_t refreshed = RefreshDirtyLiveBindings();
+	std::size_t refreshed = 0;
+	{
+		BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::RefreshOwners");
+		refreshed = RefreshDirtyLiveBindings();
+	}
 	TracyPlot("TextureStreaming.MainThreadAdoptions", static_cast<int64_t>(adopted));
 	TracyPlot("TextureStreaming.MainThreadBindingRefreshes", static_cast<int64_t>(refreshed));
 	TracyPlot("TextureStreaming.GraphBindingWaits", static_cast<int64_t>(waitingForGraphCount));
@@ -1260,7 +1358,10 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		static_cast<std::uint64_t>(graphFailureCount));
 	// Kick recording only after readiness queries and adoptions are complete, so
 	// the render thread never contends with the worker's transfer-state lock.
-	if (m_materialTextureTransfers) m_materialTextureTransfers->Pump();
+	{
+		BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::PumpTransfers");
+		if (m_materialTextureTransfers) m_materialTextureTransfers->Pump();
+	}
 	return adopted;
 }
 

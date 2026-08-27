@@ -68,8 +68,43 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
                 "static scene selects multiple versions of one transaction");
         }
     }
-    if (context.dependencies.size() != expected.size()) {
+    const auto expectedResourceRoots = input->requireResourceClosure ? 3u : 0u;
+    if (context.dependencies.size() != expected.size() + expectedResourceRoots) {
         return ArtifactBuildResult::Failure("static scene dependency closure is incomplete");
+    }
+
+    bool hasMaterialRoot = false;
+    bool hasObjectBufferRoot = false;
+    bool hasIndirectRoot = false;
+    for (const auto& dependency : context.dependencies) {
+        if (dependency.key.kind == ArtifactKind::StaticTransaction) continue;
+        const auto root = dependency.payload.Get<RendererStateFragmentArtifact>();
+        if (!root) {
+            return ArtifactBuildResult::Failure(
+                "static scene resource dependency is not a published fragment");
+        }
+        switch (dependency.key.kind) {
+        case ArtifactKind::MaterialTable:
+            hasMaterialRoot = !hasMaterialRoot &&
+                root->kind == PublishedFragmentKind::Materials;
+            break;
+        case ArtifactKind::DrawRecordPage:
+            hasObjectBufferRoot = !hasObjectBufferRoot &&
+                root->kind == PublishedFragmentKind::DrawRecords;
+            break;
+        case ArtifactKind::IndirectWorkload:
+            hasIndirectRoot = !hasIndirectRoot &&
+                root->kind == PublishedFragmentKind::IndirectWorkloads;
+            break;
+        default:
+            return ArtifactBuildResult::Failure(
+                "static scene contains an unexpected resource dependency");
+        }
+    }
+    if (input->requireResourceClosure &&
+        (!hasMaterialRoot || !hasObjectBufferRoot || !hasIndirectRoot)) {
+        return ArtifactBuildResult::Failure(
+            "static scene renderer resource closure is incomplete");
     }
 
     auto scene = std::make_shared<PublishedStaticSceneState>();
@@ -91,6 +126,7 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     materializedActiveGroups.reserve(activeGroups.size());
     scene->transactions.reserve(context.dependencies.size());
     for (const auto& dependency : context.dependencies) {
+        if (dependency.key.kind != ArtifactKind::StaticTransaction) continue;
         const auto expectedVersion = expected.find(dependency.key);
         if (expectedVersion == expected.end() || expectedVersion->second != dependency.Version()) {
             return ArtifactBuildResult::Failure("static scene contains an unexpected transaction");

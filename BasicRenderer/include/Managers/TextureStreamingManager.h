@@ -14,7 +14,10 @@
 #include <unordered_set>
 #include <vector>
 
+#include <tbb/concurrent_queue.h>
+
 #include "Interfaces/IResourceProvider.h"
+#include "Render/AsyncStateGraph.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/Texture.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
@@ -102,9 +105,7 @@ public:
 	~TextureStreamingManager();
 
 	void Initialize(TextureFactory& textureFactory, uint32_t framesInFlight);
-	void SetRendererStateRequestService(br::render::RendererStateRequestService* service) noexcept {
-		m_rendererStateRequests = service;
-	}
+	void SetRendererStateRequestService(br::render::RendererStateRequestService* service);
 	void Shutdown();
 	void EnqueueFrameTick(uint64_t frameIndex);
 	void EnqueueTextureUploadAdvance(const std::shared_ptr<TextureAsset>& texture, const char* reason = "external");
@@ -168,6 +169,8 @@ private:
 		TextureStreamingGPUInfo metadata{};
 		std::vector<std::shared_ptr<PixelBuffer>> supersededImages;
 		bool graphRequested = false;
+		bool waitingForGraphWake = false;
+		br::render::ArtifactVersionID graphVersion{};
 	};
 	struct MainThreadBindingOwner {
 		uint32_t streamingTextureID = 0;
@@ -222,6 +225,13 @@ private:
 	std::atomic<uint64_t> m_nextBindingID{1u};
 	TextureFactory* m_textureFactory = nullptr;
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
+	br::render::ArtifactObservation m_graphBindingObservation;
+	struct ObservedGraphBindingState {
+		br::render::ArtifactVersionID version{};
+		br::render::ArtifactReadiness readiness = br::render::ArtifactReadiness::Missing;
+	};
+	std::mutex m_graphBindingStateMutex;
+	std::unordered_map<uint32_t, ObservedGraphBindingState> m_observedGraphBindingStates;
 	std::unique_ptr<MaterialTextureTransferService> m_materialTextureTransfers;
 	TaskScope m_taskScope;
 	std::mutex m_workerCommandMutex;
@@ -244,8 +254,7 @@ private:
 	std::mutex m_readbackSlotMutex;
 	std::vector<ReadbackSlot> m_readbackSlots;
 	uint32_t m_readbackSlotCursor = 0;
-	std::mutex m_pendingBindingChangeMutex;
-	std::vector<PendingBindingChange> m_pendingBindingChanges;
+	tbb::concurrent_queue<PendingBindingChange> m_pendingBindingChanges;
 	std::vector<std::shared_ptr<PixelBuffer>> m_imagesPendingOwnerPatchRetirement;
 	std::mutex m_liveBindingMutex;
 	std::unordered_map<uint64_t, MainThreadBindingOwner> m_liveBindingsByID;

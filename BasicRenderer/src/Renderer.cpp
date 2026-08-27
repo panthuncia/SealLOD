@@ -752,7 +752,7 @@ void Renderer::Initialize(
         if (m_rendererStateRequests) m_rendererStateRequests->OnCandidateRejected(epoch);
     });
     SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
-        TaskSchedulerManager::GetInstance().Submit(
+        return TaskSchedulerManager::GetInstance().Submit(
             TaskLane::Background, TaskDomain::Cleanup, taskName, std::move(task));
     });
     currentRenderGraph->SetTaskService(std::make_shared<br::TbbTaskService>());
@@ -3195,7 +3195,7 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("CommitGpuVisibleSnapshots", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::CommitGpuVisibleSnapshots");
         if (m_pMaterialManager) {
-            m_pMaterialManager->CommitGpuVisibleSnapshot();
+			m_pMaterialManager->ScheduleGpuVisibleSnapshotCommit();
         }
 		if (m_pObjectManager) {
 			m_pObjectManager->PublishDesiredBufferState();

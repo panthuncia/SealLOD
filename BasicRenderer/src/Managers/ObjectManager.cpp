@@ -1748,7 +1748,6 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 		return statuses;
 	}
 
-	std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> activeReserveCounts;
 	for (auto* buildPtr : builds) {
 		if (!buildPtr) {
 			continue;
@@ -1758,14 +1757,12 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 		if (build.prepared.groups.empty()) {
 			continue;
 		}
-		for (const auto& [workloadKey, count] : build.activeReserveCounts) {
-			activeReserveCounts[workloadKey] += count;
-		}
 	}
-	for (const auto& [workloadKey, count] : activeReserveCounts) {
-		auto buffer = EnsureActiveDrawSetIndices(workloadKey, static_cast<std::size_t>(count));
-		buffer->RequestAsyncReserveCapacity(static_cast<std::uint64_t>(buffer->Size()) + count);
-	}
+	// Active-list capacity is requested by ProbeStaticImportTransactionResources
+	// before the immutable batch is admitted to a preparation worker. Repeating
+	// EnsureActiveDrawSetIndices here would mutate the manager's workload map from
+	// concurrent workers. The graph-owned active-list successor remains the
+	// authoritative capacity publication boundary.
 
 	std::size_t readyCount = 0;
 	std::uint64_t readyDrawRecords = 0;
@@ -1832,7 +1829,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 			continue;
 		}
 
-		reservation.id = m_nextStaticImportTransactionID++;
+		reservation.id = m_nextStaticImportTransactionID.fetch_add(1, std::memory_order_relaxed);
 		reservation.transformCounts = build.transformCounts;
 		reservation.drawRecordCounts = build.drawRecordCounts;
 		reservation.normalMatrixRanges = std::move(normalRanges);
@@ -2233,6 +2230,50 @@ void ObjectManager::FreeSkinnedAssemblyPlacement(std::uint32_t placementIndex) {
 	m_freeSkinnedAssemblyPlacementIndices.push_back(placementIndex);
 }
 
+void ObjectManager::StageStaticImportTransactionUploads(
+	MaterializedStaticImportTransaction& transaction,
+	bool includeDrawRecords)
+{
+	ZoneScopedN("ObjectManager::StageStaticImportTransactionUploads");
+	const auto firstValidRange = [](const std::vector<DynamicBuffer::PagedAllocation>& ranges)
+		-> const DynamicBuffer::PagedAllocation* {
+		for (const auto& range : ranges) {
+			if (range.IsValid()) return &range;
+		}
+		return nullptr;
+	};
+
+	if (!transaction.transformRowsStaged) {
+		if (!transaction.normalRows.empty()) {
+			if (const auto* range = firstValidRange(transaction.reservation.normalMatrixRanges)) {
+				m_normalMatrixBuffer->StageWriteRange(transaction.normalRows.data(),
+					transaction.normalRows.size() * sizeof(DirectX::XMFLOAT4X4), range->offset);
+			}
+		}
+		if (!transaction.perObjectRows.empty()) {
+			if (const auto* range = firstValidRange(transaction.reservation.perObjectRanges)) {
+				m_perObjectBuffers->StageWriteRange(transaction.perObjectRows.data(),
+					transaction.perObjectRows.size() * sizeof(PerObjectCB), range->offset);
+			}
+			if (const auto* range = firstValidRange(transaction.reservation.instanceTransformRanges)) {
+				m_perInstanceTransformBuffers->StageWriteRange(transaction.perObjectRows.data(),
+					transaction.perObjectRows.size() * sizeof(PerInstanceTransformCB), range->offset);
+			}
+		}
+		transaction.transformRowsStaged = true;
+	}
+
+	if (includeDrawRecords && !transaction.drawRecordRowsStaged) {
+		if (!transaction.drawRecordRows.empty()) {
+			if (const auto* range = firstValidRange(transaction.reservation.instanceDrawRecordRanges)) {
+				m_instanceDrawRecordBuffers->StageWriteRange(transaction.drawRecordRows.data(),
+					transaction.drawRecordRows.size() * sizeof(InstanceDrawRecordCB), range->offset);
+			}
+		}
+		transaction.drawRecordRowsStaged = true;
+	}
+}
+
 ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction) {
 	ZoneScopedN("ObjectManager::PublishStaticImportTransaction");
 	ZoneValue(static_cast<int64_t>(transaction.reservation.drawRecords));
@@ -2249,37 +2290,7 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 	// them before staging draw records so every assembly component shares the
 	// fitted assembly-wide coarse culling sphere.
 	PublishSkinnedAssemblyPlacements(transaction);
-	{
-		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows");
-		if (!transaction.normalRows.empty() && !transaction.reservation.normalMatrixRanges.empty()) {
-			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows::NormalMatrices");
-			if (const auto& range = transaction.reservation.normalMatrixRanges.front(); range.IsValid()) {
-				ZoneValue(static_cast<int64_t>(transaction.normalRows.size()));
-				m_normalMatrixBuffer->StageWriteRange(transaction.normalRows.data(), transaction.normalRows.size() * sizeof(DirectX::XMFLOAT4X4), range.offset);
-			}
-		}
-		if (!transaction.perObjectRows.empty() && !transaction.reservation.perObjectRanges.empty()) {
-			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows::PerObject");
-			if (const auto& range = transaction.reservation.perObjectRanges.front(); range.IsValid()) {
-				ZoneValue(static_cast<int64_t>(transaction.perObjectRows.size()));
-				m_perObjectBuffers->StageWriteRange(transaction.perObjectRows.data(), transaction.perObjectRows.size() * sizeof(PerObjectCB), range.offset);
-			}
-		}
-		if (!transaction.perObjectRows.empty() && !transaction.reservation.instanceTransformRanges.empty()) {
-			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows::InstanceTransforms");
-			if (const auto& range = transaction.reservation.instanceTransformRanges.front(); range.IsValid()) {
-				ZoneValue(static_cast<int64_t>(transaction.perObjectRows.size()));
-				m_perInstanceTransformBuffers->StageWriteRange(transaction.perObjectRows.data(), transaction.perObjectRows.size() * sizeof(PerInstanceTransformCB), range.offset);
-			}
-		}
-		if (!transaction.drawRecordRows.empty() && !transaction.reservation.instanceDrawRecordRanges.empty()) {
-			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows::DrawRecords");
-			if (const auto& range = transaction.reservation.instanceDrawRecordRanges.front(); range.IsValid()) {
-				ZoneValue(static_cast<int64_t>(transaction.drawRecordRows.size()));
-				m_instanceDrawRecordBuffers->StageWriteRange(transaction.drawRecordRows.data(), transaction.drawRecordRows.size() * sizeof(InstanceDrawRecordCB), range.offset);
-			}
-		}
-	}
+	StageStaticImportTransactionUploads(transaction);
 
 	AssignStaticImportTransactionGenerations(transaction);
 
@@ -2390,49 +2401,11 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 		assert(transactionPtr);
 		PublishSkinnedAssemblyPlacements(*transactionPtr);
 	}
-	const auto firstValidRange = [](const std::vector<DynamicBuffer::PagedAllocation>& ranges) -> const DynamicBuffer::PagedAllocation* {
-		for (const auto& range : ranges) {
-			if (range.IsValid()) {
-				return &range;
-			}
-		}
-		return nullptr;
-	};
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk::StageUploadRows");
-		for (const auto* transactionPtr : transactions) {
+		for (auto* transactionPtr : transactions) {
 			assert(transactionPtr);
-			const auto& transaction = *transactionPtr;
-			if (!transaction.normalRows.empty()) {
-				if (const auto* range = firstValidRange(transaction.reservation.normalMatrixRanges)) {
-					m_normalMatrixBuffer->StageWriteRange(
-						transaction.normalRows.data(),
-						transaction.normalRows.size() * sizeof(DirectX::XMFLOAT4X4),
-						range->offset);
-				}
-			}
-			if (!transaction.perObjectRows.empty()) {
-				if (const auto* range = firstValidRange(transaction.reservation.perObjectRanges)) {
-					m_perObjectBuffers->StageWriteRange(
-						transaction.perObjectRows.data(),
-						transaction.perObjectRows.size() * sizeof(PerObjectCB),
-						range->offset);
-				}
-				if (const auto* range = firstValidRange(transaction.reservation.instanceTransformRanges)) {
-					m_perInstanceTransformBuffers->StageWriteRange(
-						transaction.perObjectRows.data(),
-						transaction.perObjectRows.size() * sizeof(PerInstanceTransformCB),
-						range->offset);
-				}
-			}
-			if (!transaction.drawRecordRows.empty()) {
-				if (const auto* range = firstValidRange(transaction.reservation.instanceDrawRecordRanges)) {
-					m_instanceDrawRecordBuffers->StageWriteRange(
-						transaction.drawRecordRows.data(),
-						transaction.drawRecordRows.size() * sizeof(InstanceDrawRecordCB),
-						range->offset);
-				}
-			}
+			StageStaticImportTransactionUploads(*transactionPtr);
 		}
 	}
 
@@ -2464,6 +2437,18 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 				dirtyCount));
 	}
 
+	std::unordered_map<DrawWorkloadKey, std::size_t, DrawWorkloadKey::Hasher> activeDrawSetInsertCounts;
+	activeDrawSetInsertCounts.reserve(transactions.size());
+	for (const auto* transactionPtr : transactions) {
+		assert(transactionPtr);
+		for (const auto& [workloadKey, entries] : transactionPtr->activeDrawSetInserts) {
+			activeDrawSetInsertCounts[workloadKey] += entries.size();
+		}
+	}
+	activeDrawSetInserts.reserve(activeDrawSetInsertCounts.size());
+	for (const auto& [workloadKey, count] : activeDrawSetInsertCounts) {
+		activeDrawSetInserts[workloadKey].reserve(count);
+	}
 	for (auto* transactionPtr : transactions) {
 		assert(transactionPtr);
 		auto& transaction = *transactionPtr;
@@ -2472,7 +2457,6 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 				continue;
 			}
 			auto& dst = activeDrawSetInserts[workloadKey];
-			dst.reserve(dst.size() + entries.size());
 			dst.insert(
 				dst.end(),
 				std::make_move_iterator(entries.begin()),

@@ -35,6 +35,7 @@ using org::CopyPass;
 // Manages buffers for per-material-compile-flag work (e.g., visibility buffer per-material)
 class MaterialManager : public IResourceProvider {
 public:
+	~MaterialManager();
 	static std::unique_ptr<MaterialManager> CreateUnique() {
 		return std::unique_ptr<MaterialManager>(new MaterialManager());
 	}
@@ -74,6 +75,7 @@ public:
 	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
 
 	std::uint64_t CommitGpuVisibleSnapshot(bool forceGraphSnapshot = false);
+	void ScheduleGpuVisibleSnapshotCommit(bool forceGraphSnapshot = false);
 	std::uint64_t DesiredPublishedStateRevision() const noexcept { return m_materialStateRevision; }
 	br::render::ArtifactVersionID DesiredPublishedStateVersion() const noexcept {
 		return m_materialStateHandle.version;
@@ -110,6 +112,9 @@ public:
 		std::function<void()> callback);
 private:
 	MaterialManager();
+	TaskScope m_snapshotCommitScope;
+	std::atomic_bool m_snapshotCommitScheduled{ false };
+	std::atomic_bool m_forceSnapshotCommit{ false };
 	void UpdateMaterialTextureUsage(const Material& material, int delta);
 	void RefreshMaterialTextureUsage(const Material& material);
 	void TrackMaterialTextureAssets(const Material& material, int delta);
@@ -211,6 +216,7 @@ private:
 	bool m_materialGraphActive = false;
 	std::uint64_t m_activeMaterialPublishedRevision = 0;
 	std::uint64_t m_observedMaterialPublishedRevision = 0;
+	std::uint64_t m_acknowledgedMaterialPublishedRevision = 0;
 	std::array<std::shared_ptr<org::DynamicGloballyIndexedResource>, 3> m_materialStartupFallbacks;
 	std::uint64_t m_materialStateFingerprint = 0;
 	std::uint64_t m_pendingMaterialStateFingerprint = 0;

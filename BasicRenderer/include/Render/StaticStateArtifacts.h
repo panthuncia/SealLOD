@@ -46,6 +46,9 @@ struct StaticSceneGroupOwner {
 struct StaticSceneBuildInput {
     std::uint64_t sourceFingerprint = 0;
     bool publishRoot = false;
+    // Active renderer paths require one coherent material, object-buffer, and
+    // indirect/active-list root in addition to the immutable transactions.
+    bool requireResourceClosure = false;
     std::uint64_t desiredPlacementCount = 0;
     std::uint64_t materializedPlacementCount = 0;
     std::uint64_t retiredPlacementCount = 0;
