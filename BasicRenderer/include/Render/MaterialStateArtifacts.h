@@ -18,6 +18,24 @@ namespace br::render {
 struct PublishedGpuBufferVersion;
 struct PublishedTextureBinding;
 
+enum class MaterialTextureTarget : std::uint8_t {
+    BaseColor, Normal, Metallic, Roughness, Emissive, AmbientOcclusion,
+    Height, Opacity, CoatColor, CoatWeight, CoatRoughness,
+    FuzzColor, FuzzWeight, FuzzRoughness
+};
+struct MaterialRowTextureTarget { ArtifactAddress bindingAddress{}; MaterialTextureTarget target{}; };
+struct MaterialRowInput {
+    std::uint32_t materialID = 0, materialSlot = 0; std::uint64_t sourceRevision = 0;
+    PerMaterialCB base{}; PerMaterialEvalCB evaluation{}; PerMaterialOpenPBRCB openPbr{};
+    std::vector<MaterialRowTextureTarget> textureTargets;
+};
+struct MaterialRowArtifact {
+    std::uint32_t materialID = 0, materialSlot = 0; std::uint64_t sourceRevision = 0;
+    PerMaterialCB base{}; PerMaterialEvalCB evaluation{}; PerMaterialOpenPBRCB openPbr{};
+    std::vector<ArtifactVersionID> textureBindings;
+    std::vector<std::shared_ptr<const PublishedTextureBinding>> selectedBindings;
+};
+
 inline constexpr std::uint64_t kMaterialBaseTableVariant = 1;
 inline constexpr std::uint64_t kMaterialEvalTableVariant = 2;
 inline constexpr std::uint64_t kMaterialOpenPbrTableVariant = 3;
@@ -78,6 +96,9 @@ struct PublishedMaterialUsageBatch {
 };
 
 void RegisterMaterialStateProducer(AsyncStateGraph& graph);
+// Reserved for the generation-safe Latest-successor cutover. Not registered by
+// the renderer until internal rebuild generations stop consuming source revisions.
+void RegisterMaterialRowProducer(AsyncStateGraph& graph, MaterialManager& manager);
 void RegisterMaterialUsageBatchProducer(AsyncStateGraph& graph, MaterialManager& manager);
 
 } // namespace br::render

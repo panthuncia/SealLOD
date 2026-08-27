@@ -152,32 +152,116 @@ void MaterialTextureTransferService::Shutdown()
 	m_initialized = false;
 }
 
-void MaterialTextureTransferService::EnqueueUpload(
+std::shared_ptr<const br::render::TextureTransferArtifact>
+MaterialTextureTransferService::EnsureTransferRecordLocked(
+	const std::shared_ptr<PixelBuffer>& image)
+{
+	if (!image) return {};
+	const auto id = image->GetGlobalResourceID();
+	if (const auto found = m_records.find(id); found != m_records.end()) {
+		return found->second.artifact;
+	}
+	auto transfer = std::make_shared<TransferState>();
+	auto submissions = std::make_shared<br::render::GpuSubmissionSet>();
+	auto timeline = m_timeline;
+	br::render::GpuQueueSubmission queueSubmission{ timeline, 0 };
+	queueSubmission.currentValue = [transfer] {
+		return transfer->fenceValue.load(std::memory_order_acquire);
+	};
+	submissions->submissions.push_back(std::move(queueSubmission));
+	submissions->isSubmitted = [transfer] {
+		return transfer->state.load(std::memory_order_acquire) != State::Pending;
+	};
+	submissions->isComplete = [transfer, timeline] {
+		const auto state = transfer->state.load(std::memory_order_acquire);
+		if (state == State::Failed || state == State::Ready) return true;
+		const auto value = transfer->fenceValue.load(std::memory_order_acquire);
+		return state == State::InFlight && value != 0 && timeline && *timeline &&
+			(*timeline)->GetCompletedValue() >= value;
+	};
+	submissions->isFailed = [transfer] {
+		return transfer->state.load(std::memory_order_acquire) == State::Failed;
+	};
+	submissions->failure = [transfer] {
+		std::lock_guard lock(transfer->callbackMutex);
+		return transfer->error.empty() ? std::string{ "material texture transfer failed" }
+			: transfer->error;
+	};
+	submissions->subscribe = [transfer](std::function<void()> callback) {
+		if (!callback) return;
+		bool invoke = false;
+		{
+			std::lock_guard lock(transfer->callbackMutex);
+			if (transfer->state.load(std::memory_order_acquire) == State::Pending) {
+				transfer->callbacks.push_back(std::move(callback));
+			} else {
+				invoke = true;
+			}
+		}
+		if (invoke) callback();
+	};
+	auto artifact = std::make_shared<br::render::TextureTransferArtifact>();
+	artifact->image = image;
+	artifact->generation = id;
+	artifact->gpuSubmissions = std::move(submissions);
+	m_records.emplace(id, Record{ State::Pending, 0, transfer, artifact });
+	return artifact;
+}
+
+void MaterialTextureTransferService::PublishTransferState(
+	const std::shared_ptr<TransferState>& transfer, State state,
+	std::uint64_t fenceValue, std::string error)
+{
+	if (!transfer) return;
+	std::vector<std::function<void()>> callbacks;
+	{
+		std::lock_guard lock(transfer->callbackMutex);
+		if (fenceValue != 0) transfer->fenceValue.store(fenceValue, std::memory_order_release);
+		transfer->error = std::move(error);
+		transfer->state.store(state, std::memory_order_release);
+		callbacks.swap(transfer->callbacks);
+	}
+	for (auto& callback : callbacks) if (callback) callback();
+}
+
+std::shared_ptr<const br::render::TextureTransferArtifact>
+MaterialTextureTransferService::EnqueueUpload(
 	const std::shared_ptr<PixelBuffer>& image,
 	TextureDescription description,
 	TextureFactory::TextureInitialData initialData)
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::EnqueueUpload");
-	if (!image || initialData.Empty()) return;
+	if (!image || initialData.Empty()) return {};
 	image->SetGraphOwnership(Resource::GraphOwnership::ExternalImmutableShaderResource);
-	std::scoped_lock lock(m_mutex);
-	const uint64_t id = image->GetGlobalResourceID();
-	if (m_records.contains(id)) return;
-	m_records.emplace(id, Record{});
-	m_pending.push_back({image, std::move(description), std::move(initialData), true});
-	BT_PLOT("MaterialTextureTransfer.Pending", static_cast<int64_t>(m_pending.size()));
+	std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
+	{
+		std::scoped_lock lock(m_mutex);
+		const bool existed = m_records.contains(image->GetGlobalResourceID());
+		artifact = EnsureTransferRecordLocked(image);
+		if (!existed) {
+			m_pending.push_back({image, std::move(description), std::move(initialData), true});
+			BT_PLOT("MaterialTextureTransfer.Pending", static_cast<int64_t>(m_pending.size()));
+		}
+	}
+	Pump();
+	return artifact;
 }
 
-void MaterialTextureTransferService::EnsureShaderReady(const std::shared_ptr<PixelBuffer>& image)
+std::shared_ptr<const br::render::TextureTransferArtifact>
+MaterialTextureTransferService::EnsureShaderReady(const std::shared_ptr<PixelBuffer>& image)
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::EnsureShaderReady");
-	if (!image) return;
+	if (!image) return {};
 	image->SetGraphOwnership(Resource::GraphOwnership::ExternalImmutableShaderResource);
-	std::scoped_lock lock(m_mutex);
-	const uint64_t id = image->GetGlobalResourceID();
-	if (m_records.contains(id)) return;
-	m_records.emplace(id, Record{});
-	m_pending.push_back({image, image->GetDescription(), {}, false});
+	std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
+	{
+		std::scoped_lock lock(m_mutex);
+		const bool existed = m_records.contains(image->GetGlobalResourceID());
+		artifact = EnsureTransferRecordLocked(image);
+		if (!existed) m_pending.push_back({image, image->GetDescription(), {}, false});
+	}
+	Pump();
+	return artifact;
 }
 
 rhi::TextureBarrier MaterialTextureTransferService::MakeWholeTextureBarrier(
@@ -224,6 +308,8 @@ void MaterialTextureTransferService::ReapCompletedLocked()
 					rhi::ResourceLayout::ShaderResource,
 					rhi::ResourceSyncState::AllShading});
 			record->second.state = State::Ready;
+			PublishTransferState(record->second.transferState, State::Ready,
+				record->second.fenceValue);
 		}
 		for (auto& readback : batch.readbacks) {
 			TaskSchedulerManager::GetInstance().Submit(
@@ -271,7 +357,12 @@ void MaterialTextureTransferService::PumpWorker()
 	if (rhi::Failed(m_device.CreateCommandAllocator(rhi::QueueKind::Graphics, batch.allocator)) ||
 		rhi::Failed(m_device.CreateCommandList(rhi::QueueKind::Graphics, batch.allocator.Get(), batch.commandList))) {
 		for (const auto& request : requests) {
-			if (request.image) m_records[request.image->GetGlobalResourceID()].state = State::Failed;
+			if (request.image) {
+				auto& record = m_records[request.image->GetGlobalResourceID()];
+				record.state = State::Failed;
+				PublishTransferState(record.transferState, State::Failed, 0,
+					"failed to create transfer command list");
+			}
 		}
 		spdlog::error("MaterialTextureTransferService: failed to create graphics command list");
 		return;
@@ -279,7 +370,12 @@ void MaterialTextureTransferService::PumpWorker()
 
 	for (auto& request : requests) {
 		if (!request.image || !request.image->HasValidBackingResource()) {
-			if (request.image) m_records[request.image->GetGlobalResourceID()].state = State::Failed;
+			if (request.image) {
+				auto& record = m_records[request.image->GetGlobalResourceID()];
+				record.state = State::Failed;
+				PublishTransferState(record.transferState, State::Failed, 0,
+					"invalid texture transfer resource");
+			}
 			continue;
 		}
 		try {
@@ -340,7 +436,9 @@ void MaterialTextureTransferService::PumpWorker()
 			batch.images.push_back(request.image);
 		}
 		catch (const std::exception& ex) {
-			m_records[request.image->GetGlobalResourceID()].state = State::Failed;
+			auto& record = m_records[request.image->GetGlobalResourceID()];
+			record.state = State::Failed;
+			PublishTransferState(record.transferState, State::Failed, 0, ex.what());
 			spdlog::error("Material texture transfer recording failed for '{}' id={}: {}",
 				request.image->GetName(), request.image->GetGlobalResourceID(), ex.what());
 		}
@@ -404,7 +502,12 @@ void MaterialTextureTransferService::PumpWorker()
 	batch.commandList->End();
 	auto commandList = batch.commandList.Get();
 	if (rhi::Failed(m_graphicsQueue.Submit({&commandList, 1}))) {
-		for (const auto& image : batch.images) m_records[image->GetGlobalResourceID()].state = State::Failed;
+		for (const auto& image : batch.images) {
+			auto& record = m_records[image->GetGlobalResourceID()];
+			record.state = State::Failed;
+			PublishTransferState(record.transferState, State::Failed, 0,
+				"graphics submission failed");
+		}
 		spdlog::error("MaterialTextureTransferService: graphics submission failed");
 		return;
 	}
@@ -415,7 +518,10 @@ void MaterialTextureTransferService::PumpWorker()
 		// allocation alive and force completion before marking the ticket failed.
 		(void)m_device.WaitIdle();
 		for (const auto& image : batch.images) {
-			m_records[image->GetGlobalResourceID()].state = State::Failed;
+			auto& record = m_records[image->GetGlobalResourceID()];
+			record.state = State::Failed;
+			PublishTransferState(record.transferState, State::Failed, 0,
+				"completion signal failed");
 		}
 		spdlog::error("MaterialTextureTransferService: completion signal failed; graphics queue was drained safely");
 		return;
@@ -424,6 +530,7 @@ void MaterialTextureTransferService::PumpWorker()
 		auto& record = m_records[image->GetGlobalResourceID()];
 		record.state = State::InFlight;
 		record.fenceValue = batch.fenceValue;
+		PublishTransferState(record.transferState, State::InFlight, batch.fenceValue);
 	}
 	BT_PLOT("MaterialTextureTransfer.Submitted", static_cast<int64_t>(batch.images.size()));
 	m_inFlight.push_back(std::move(batch));

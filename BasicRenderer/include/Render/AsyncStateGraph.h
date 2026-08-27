@@ -261,12 +261,18 @@ struct GpuSubmissionSet {
     std::vector<GpuQueueSubmission> submissions;
     std::function<bool()> isSubmitted;
     std::function<bool()> isComplete;
+	std::function<bool()> isFailed;
+	std::function<std::string()> failure;
     std::function<std::string()> describe;
     std::function<void(std::function<void()>)> subscribe;
     std::function<bool()> cancel;
 
     [[nodiscard]] bool Submitted() const { return !isSubmitted || isSubmitted(); }
     [[nodiscard]] bool Complete() const { return !isComplete || isComplete(); }
+	[[nodiscard]] bool Failed() const { return isFailed && isFailed(); }
+	[[nodiscard]] std::string Failure() const {
+		return failure ? failure() : std::string{ "GPU submission failed" };
+	}
     [[nodiscard]] std::uint64_t MaximumTimelineValue() const {
         std::uint64_t result = 0;
         for (const auto& submission : submissions) {
@@ -388,6 +394,44 @@ private:
     std::function<void()> m_unsubscribe;
 };
 
+// Move-only registration for one immutable version milestone. Unlike the
+// address/kind observations, this is a correctness primitive: registration and
+// the initial exact-version sample are performed under the same graph lock.
+class ArtifactAwaiter {
+public:
+    ArtifactAwaiter() = default;
+    ArtifactAwaiter(std::uint64_t subscriptionValue, ArtifactSnapshot snapshotValue,
+        std::function<void()> cancelValue)
+        : subscription(subscriptionValue), snapshot(std::move(snapshotValue)),
+          m_cancel(std::move(cancelValue)) {}
+    ~ArtifactAwaiter() { Reset(); }
+    ArtifactAwaiter(const ArtifactAwaiter&) = delete;
+    ArtifactAwaiter& operator=(const ArtifactAwaiter&) = delete;
+    ArtifactAwaiter(ArtifactAwaiter&& other) noexcept
+        : subscription(std::exchange(other.subscription, 0)),
+          snapshot(std::move(other.snapshot)), m_cancel(std::move(other.m_cancel)) {}
+    ArtifactAwaiter& operator=(ArtifactAwaiter&& other) noexcept {
+        if (this == &other) return *this;
+        Reset();
+        subscription = std::exchange(other.subscription, 0);
+        snapshot = std::move(other.snapshot);
+        m_cancel = std::move(other.m_cancel);
+        return *this;
+    }
+    void Reset() noexcept {
+        if (!m_cancel) return;
+        auto cancel = std::move(m_cancel);
+        subscription = 0;
+        cancel();
+    }
+
+    std::uint64_t subscription = 0;
+    ArtifactSnapshot snapshot;
+
+private:
+    std::function<void()> m_cancel;
+};
+
 struct ArtifactBuildResult {
     enum class Outcome : std::uint8_t { Ready, NeedsDependencies, RetryAfter, Failed, Cancelled };
     Outcome outcome = Outcome::Failed;
@@ -448,6 +492,7 @@ struct AsyncStateGraphStats {
     std::uint64_t desiredVersions = 0;
     std::uint64_t recipePinnedVersions = 0;
     std::uint64_t unclassifiedRetainedVersions = 0;
+	std::uint64_t exactWaiters = 0;
     std::array<std::uint64_t, static_cast<std::size_t>(ArtifactReadiness::Failed) + 1u> stateCounts{};
 };
 
@@ -506,6 +551,9 @@ public:
 	// ownership-transfer event.
 	[[nodiscard]] ArtifactObservation ObserveKind(ArtifactKind kind,
 		std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback);
+	[[nodiscard]] ArtifactAwaiter AwaitExact(ArtifactVersionHandle handle,
+		ArtifactReadiness milestone, TaskLane lane, TaskDomain domain,
+		std::function<void(const ArtifactSnapshot&)> continuation);
 
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactKey key) const;
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactVersionID version) const;

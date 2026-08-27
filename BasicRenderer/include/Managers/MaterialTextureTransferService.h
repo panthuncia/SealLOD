@@ -18,7 +18,14 @@ namespace org { class PixelBuffer; }
 using org::PixelBuffer;
 namespace org { class Resource; }
 using org::Resource;
-namespace br::render { struct GpuSubmissionSet; }
+namespace br::render {
+struct GpuSubmissionSet;
+struct TextureTransferArtifact {
+	std::shared_ptr<PixelBuffer> image;
+	std::uint64_t generation = 0;
+	std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
+};
+}
 
 // Owns final material-texture uploads and the one-time transition into the
 // immutable shader-resource state.  Resources submitted here must never be
@@ -28,11 +35,12 @@ public:
 	void Initialize();
 	void Shutdown();
 
-	void EnqueueUpload(
+	std::shared_ptr<const br::render::TextureTransferArtifact> EnqueueUpload(
 		const std::shared_ptr<PixelBuffer>& image,
 		TextureDescription description,
 		TextureFactory::TextureInitialData initialData);
-	void EnsureShaderReady(const std::shared_ptr<PixelBuffer>& image);
+	std::shared_ptr<const br::render::TextureTransferArtifact> EnsureShaderReady(
+		const std::shared_ptr<PixelBuffer>& image);
 	void RequestReadback(
 		const std::shared_ptr<PixelBuffer>& image,
 		std::wstring outputFile,
@@ -48,9 +56,18 @@ public:
 
 private:
 	enum class State : uint8_t { Pending, InFlight, Ready, Failed };
+	struct TransferState {
+		std::atomic<State> state{ State::Pending };
+		std::atomic_uint64_t fenceValue{ 0 };
+		std::mutex callbackMutex;
+		std::vector<std::function<void()>> callbacks;
+		std::string error;
+	};
 	struct Record {
 		State state = State::Pending;
 		uint64_t fenceValue = 0;
+		std::shared_ptr<TransferState> transferState;
+		std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
 	};
 	struct Request {
 		std::shared_ptr<PixelBuffer> image;
@@ -83,6 +100,10 @@ private:
 		std::function<void()> callback;
 	};
 	static void SaveReadbackToDds(InFlightBatch::ReadbackCompletion completion);
+	std::shared_ptr<const br::render::TextureTransferArtifact> EnsureTransferRecordLocked(
+		const std::shared_ptr<PixelBuffer>& image);
+	static void PublishTransferState(const std::shared_ptr<TransferState>& transfer,
+		State state, std::uint64_t fenceValue = 0, std::string error = {});
 
 	void ReapCompletedLocked();
 	void PumpWorker();

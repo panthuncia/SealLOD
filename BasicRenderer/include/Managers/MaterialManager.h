@@ -49,6 +49,7 @@ public:
 	unsigned int IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory = nullptr, unsigned int count = 1u);
 	std::shared_ptr<const br::render::PublishedMaterialUsageBatch> ApplyMaterialUsageBatch(
 		const br::render::MaterialUsageBatchBuildInput& input);
+	bool ApplyMaterialRowArtifact(const br::render::MaterialRowArtifact& row);
 	void DecrementMaterialUsageCount(const Material& material);
 	void InitializeTextureStreaming(TextureFactory& textureFactory, uint32_t framesInFlight);
 	void ShutdownTextureStreaming();
@@ -130,6 +131,7 @@ private:
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
 	std::unordered_map<uint32_t, std::vector<uint32_t>> m_materialTextureStreamingTextureIDs;
+	std::unordered_map<uint32_t, std::uint64_t> m_materialRowSourceRevisions;
 	std::unordered_map<uint32_t, std::unordered_set<uint32_t>> m_graphTextureMaterials;
 	std::unordered_map<uint32_t, br::render::ArtifactObservation> m_graphTextureSubscriptions;
 	tbb::concurrent_queue<uint32_t> m_graphTextureWakeups;

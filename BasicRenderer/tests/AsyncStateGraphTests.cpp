@@ -168,6 +168,53 @@ int main() {
     Check(graph.Snapshot(immediateV1.version).revision == 1);
     Check(graph.Snapshot(immediateV2.version).revision == 2);
 
+	// Exact milestone waits are level-triggered and keyed by immutable version.
+	// Registration before completion and registration after completion both
+	// dispatch exactly once without an address-wide callback scan.
+	const ArtifactKey awaitedKey{ ArtifactKind::Generic, 894, 0 };
+	auto awaited = graph.Request(awaitedKey, 1, {}, Payload(41), 41);
+	Check(awaited);
+	std::atomic_uint32_t awaitedCallbacks{ 0 };
+	std::atomic_uint64_t awaitedValue{ 0 };
+	auto firstAwaiter = graph.AwaitExact(awaited.Handle(), ArtifactReadiness::GpuReady,
+		TaskLane::Streaming, TaskDomain::RendererState,
+		[&](const ArtifactSnapshot& snapshot) {
+			const auto value = snapshot.payload.Get<Value>();
+			if (value) awaitedValue.store(value->value, std::memory_order_release);
+			awaitedCallbacks.fetch_add(1, std::memory_order_acq_rel);
+		});
+	Check(firstAwaiter.snapshot.readiness != ArtifactReadiness::Missing);
+	graph.WaitIdle();
+	Check(awaitedCallbacks.load(std::memory_order_acquire) == 1);
+	Check(awaitedValue.load(std::memory_order_acquire) == 1);
+	auto secondAwaiter = graph.AwaitExact(awaited.Handle(), ArtifactReadiness::GpuReady,
+		TaskLane::Streaming, TaskDomain::RendererState,
+		[&](const ArtifactSnapshot&) {
+			awaitedCallbacks.fetch_add(1, std::memory_order_acq_rel);
+		});
+	graph.WaitIdle();
+	Check(awaitedCallbacks.load(std::memory_order_acquire) == 2);
+
+	// Dropping the RAII registration before a blocked version advances prevents
+	// dispatch and releases its waiter pin.
+	const ArtifactKey awaitDependency{ ArtifactKind::Generic, 892, 0 };
+	const ArtifactKey cancelledAwaitKey{ ArtifactKind::Generic, 893, 0 };
+	const ArtifactVersionID futureDependency{ awaitDependency, 1, 1 };
+	auto cancelledAwait = graph.Request(cancelledAwaitKey, 1,
+		{ Exact(futureDependency, ArtifactReadiness::GpuReady) }, Payload(1), 1);
+	Check(cancelledAwait);
+	std::atomic_bool cancelledAwaitCalled{ false };
+	auto cancelledRegistration = graph.AwaitExact(cancelledAwait.Handle(),
+		ArtifactReadiness::GpuReady, TaskLane::Streaming, TaskDomain::RendererState,
+		[&](const ArtifactSnapshot&) {
+			cancelledAwaitCalled.store(true, std::memory_order_release);
+		});
+	Check(cancelledRegistration.subscription != 0);
+	cancelledRegistration.Reset();
+	Check(graph.Request(awaitDependency, 1, {}, Payload(1), 1));
+	graph.WaitIdle();
+	Check(!cancelledAwaitCalled.load(std::memory_order_acquire));
+
     // Returned version IDs own their archive entry until the last copied lease
     // is released. Once superseded and unreferenced, the payload is reclaimed
     // without allowing its revision/generation identity to be reused.

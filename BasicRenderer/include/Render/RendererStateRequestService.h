@@ -36,6 +36,12 @@ public:
 		std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback) {
 		return m_graph.ObserveKind(kind, std::move(callback));
 	}
+	[[nodiscard]] ArtifactAwaiter AwaitExact(ArtifactVersionHandle handle,
+		ArtifactReadiness milestone, TaskLane lane, TaskDomain domain,
+		std::function<void(const ArtifactSnapshot&)> continuation) {
+		return m_graph.AwaitExact(std::move(handle), milestone, lane, domain,
+			std::move(continuation));
+	}
     [[nodiscard]] AsyncStateGraphStats Stats() const { return m_graph.Stats(); }
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const {
         return m_graph.Outstanding(kind);

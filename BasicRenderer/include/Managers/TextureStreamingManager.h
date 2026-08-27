@@ -23,7 +23,10 @@
 #include "Managers/Singletons/TaskSchedulerManager.h"
 
 class TextureFactory;
-namespace br::render { class RendererStateRequestService; }
+namespace br::render {
+class RendererStateRequestService;
+struct TextureTransferArtifact;
+}
 namespace org { class CopyPass; }
 using org::CopyPass;
 namespace org { class Buffer; }
@@ -168,8 +171,10 @@ private:
 		std::shared_ptr<PixelBuffer> newImage;
 		TextureStreamingGPUInfo metadata{};
 		std::vector<std::shared_ptr<PixelBuffer>> supersededImages;
+		std::shared_ptr<const br::render::TextureTransferArtifact> transfer;
 		bool graphRequested = false;
 		bool waitingForGraphWake = false;
+		bool graphReady = false;
 		br::render::ArtifactVersionID graphVersion{};
 	};
 	struct MainThreadBindingOwner {
@@ -232,6 +237,8 @@ private:
 	};
 	std::mutex m_graphBindingStateMutex;
 	std::unordered_map<uint32_t, ObservedGraphBindingState> m_observedGraphBindingStates;
+	std::mutex m_graphBindingAwaiterMutex;
+	std::unordered_map<uint32_t, br::render::ArtifactAwaiter> m_graphBindingAwaiters;
 	std::unique_ptr<MaterialTextureTransferService> m_materialTextureTransfers;
 	TaskScope m_taskScope;
 	std::mutex m_workerCommandMutex;

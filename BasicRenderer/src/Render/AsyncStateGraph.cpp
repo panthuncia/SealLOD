@@ -235,6 +235,17 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::deque<ArtifactKey> gpuRecovery;
     std::unordered_map<std::uint64_t, std::function<void(const ArtifactSnapshot&)>> readyCallbacks;
     std::uint64_t nextReadyCallback = 0;
+	struct ExactWaiter {
+		std::uint64_t subscription = 0;
+		ArtifactVersionID version;
+		ArtifactReadiness milestone = ArtifactReadiness::Missing;
+		TaskLane lane = TaskLane::Streaming;
+		TaskDomain domain = TaskDomain::RendererState;
+		std::function<void(const ArtifactSnapshot&)> continuation;
+		ArtifactLease lease;
+	};
+	std::unordered_map<VersionKey, std::vector<ExactWaiter>, VersionKey::Hasher> exactWaiters;
+	std::uint64_t nextExactWaiter = 0;
     AsyncStateGraphStats stats;
     std::atomic_bool drainScheduled{ false };
     std::atomic_bool shuttingDown{ false };
@@ -272,6 +283,35 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         versionLeases.insert_or_assign(version, lease);
         return ArtifactLease{ std::move(lease) };
     }
+
+	ArtifactSnapshot SnapshotExactLocked(ArtifactVersionID version) const {
+		const auto archived = versions.find({ version.address, version.revision });
+		if (archived != versions.end() && archived->second.generation == version.generation) {
+			auto snapshot = archived->second;
+			snapshot.lease = AcquireVersionLease({ version.address, version.revision });
+			return snapshot;
+		}
+		const auto current = nodes.find(version.address);
+		if (current == nodes.end()) return { version.address, version.revision, version.generation };
+		if (current->second.producedRevision == version.revision) {
+			auto snapshot = MakeSnapshot(current->second);
+			if (snapshot.generation == version.generation) return snapshot;
+		}
+		if (current->second.desiredRevision == version.revision &&
+			VersionGeneration(version.address, version.revision) == version.generation) {
+			return { version.address, version.revision, version.generation,
+				current->second.state, current->second.payload,
+				current->second.gpuSubmissions, current->second.lease };
+		}
+		const auto successor = std::ranges::find(
+			current->second.successors, version.revision, &RequestedVersion::revision);
+		if (successor != current->second.successors.end() &&
+			VersionGeneration(version.address, version.revision) == version.generation) {
+			return { version.address, version.revision, version.generation,
+				ArtifactReadiness::Blocked, {}, {}, successor->lease };
+		}
+		return { version.address, version.revision, version.generation };
+	}
 
     void StoreVersion(const Node& node) {
         if (node.producedRevision == 0 || !node.payload.Valid()) return;
@@ -935,7 +975,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         case ArtifactBuildResult::Outcome::Cancelled:
             SetState(node, ArtifactReadiness::Cancelled);
             ++stats.cancelled;
-            ready.push_back(MakeSnapshot(node));
+            ready.push_back({ node.key, completion.revision, completion.generation,
+                node.state, {}, {}, node.lease });
             PromoteSuccessor(node);
             break;
         case ArtifactBuildResult::Outcome::Failed:
@@ -945,7 +986,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             ++stats.failed;
             spdlog::error("AsyncStateGraph: artifact {} revision={} generation={} failed: {}",
                 KeyString(node.key), node.desiredRevision, node.generation, node.error);
-            ready.push_back(MakeSnapshot(node));
+            ready.push_back({ node.key, completion.revision, completion.generation,
+                node.state, {}, {}, node.lease });
             PromoteSuccessor(node);
             break;
         }
@@ -1004,18 +1046,24 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             PendingGpuSignal signal;
             bool submitted = false;
             bool complete = false;
+			bool failed = false;
+			std::string error;
         };
         std::vector<EvaluatedGpuSignal> evaluatedGpu;
         evaluatedGpu.reserve(signalledGpu.size());
         for (auto& signal : signalledGpu) {
             if (!signal.token) continue;
+			const bool failed = signal.token->Failed();
             const bool submitted = signal.token->Submitted();
             const bool complete = submitted && signal.token->Complete();
-            evaluatedGpu.push_back({ std::move(signal), submitted, complete });
+			const auto failure = failed ? signal.token->Failure() : std::string{};
+			evaluatedGpu.push_back({ std::move(signal), submitted, complete, failed,
+				failure });
         }
         std::vector<std::pair<ArtifactProducerRegistration, ArtifactBuildContext>> builds;
         std::vector<ArtifactSnapshot> ready;
         std::vector<std::function<void(const ArtifactSnapshot&)>> callbacks;
+		std::vector<std::pair<ExactWaiter, ArtifactSnapshot>> exactDispatches;
         std::optional<std::chrono::steady_clock::duration> retryDelay;
         bool hasImmediateWork = false;
         {
@@ -1028,6 +1076,20 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 auto& node = found->second;
                 if (node.generation != signal.generation ||
                     node.waitingGpuSubmissions != signal.token) continue;
+				if (evaluation.failed) {
+					node.error = evaluation.error.empty()
+						? "GPU submission failed" : evaluation.error;
+					node.terminalFailure = true;
+					node.waitingGpuSubmissions.reset();
+					SetState(node, ArtifactReadiness::Failed);
+					StoreVersion(node);
+					ready.push_back(MakeSnapshot(node));
+					WakeWaiters(node.key);
+					PromoteSuccessor(node);
+					++stats.failed;
+					if (stats.gpuWaiting) --stats.gpuWaiting;
+					continue;
+				}
                 if (node.state == ArtifactReadiness::CpuReady && evaluation.submitted) {
                     node.uploadSubmittedAt = now;
                     SetState(node, ArtifactReadiness::UploadSubmitted);
@@ -1124,6 +1186,27 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     DependencySnapshots(node), node.input, node.checkpoint, {} };
                 builds.emplace_back(producer->second, std::move(context));
             }
+			for (const auto& snapshot : ready) {
+				const VersionKey versionKey{ snapshot.key, snapshot.revision };
+				const auto found = exactWaiters.find(versionKey);
+				if (found == exactWaiters.end()) continue;
+				auto& registered = found->second;
+				for (std::size_t index = 0; index < registered.size();) {
+					auto& waiter = registered[index];
+					const bool terminal = snapshot.readiness == ArtifactReadiness::Failed ||
+						snapshot.readiness == ArtifactReadiness::Cancelled ||
+						snapshot.readiness == ArtifactReadiness::Superseded;
+					if (snapshot.generation != waiter.version.generation ||
+						(!terminal && !ArtifactReachedMilestone(snapshot.readiness, waiter.milestone))) {
+						++index;
+						continue;
+					}
+					exactDispatches.emplace_back(std::move(waiter), snapshot);
+					registered[index] = std::move(registered.back());
+					registered.pop_back();
+				}
+				if (registered.empty()) exactWaiters.erase(found);
+			}
             callbacks.reserve(readyCallbacks.size());
             for (const auto& [_, callback] : readyCallbacks) callbacks.push_back(callback);
             hasImmediateWork = !pending.empty() || !completions.empty() || !gpuSignals.empty();
@@ -1217,6 +1300,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 basic_telemetry::SetGauge("SARP.AsyncStateGraph.Retention.UnclassifiedVersions",
                     static_cast<std::int64_t>(unclassifiedRetainedVersions));
                 basic_telemetry::SetGauge("SARP.AsyncStateGraph.Retention.SignatureOwnedLeases", 0);
+				std::uint64_t exactWaiterCount = 0;
+				for (const auto& [_, registrations] : exactWaiters) {
+					exactWaiterCount += registrations.size();
+				}
+				stats.exactWaiters = exactWaiterCount;
+				basic_telemetry::SetGauge("SARP.AsyncStateGraph.ExactWaiters",
+					static_cast<std::int64_t>(exactWaiterCount));
                 basic_telemetry::SetGauge("SARP.AsyncStateGraph.Pending",
                     static_cast<std::int64_t>(pending.size()));
                 basic_telemetry::SetGauge("SARP.AsyncStateGraph.GpuWaiting",
@@ -1243,6 +1333,18 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         drainScheduled.store(false, std::memory_order_release);
         hasImmediateWork = hasImmediateWork || !gpuSignals.empty();
         for (auto& [registration, context] : builds) SubmitBuild(registration, std::move(context));
+		for (auto& [waiter, snapshot] : exactDispatches) {
+			if (!waiter.continuation) continue;
+			auto continuation = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
+				std::move(waiter.continuation));
+			const bool submitted = scheduler.Submit(scope, waiter.lane, waiter.domain,
+				"AsyncStateGraph::AwaitExact",
+				[continuation, snapshot](
+					const TaskContext& context) mutable {
+					if (!context.StopRequested()) (*continuation)(snapshot);
+				});
+			if (!submitted) (*continuation)(snapshot);
+		}
         for (const auto& callback : callbacks) {
             if (callback) for (const auto& snapshot : ready) callback(snapshot);
         }
@@ -1641,6 +1743,57 @@ ArtifactObservation AsyncStateGraph::ObserveKind(ArtifactKind kind,
 		} };
 }
 
+ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
+	ArtifactReadiness milestone, TaskLane lane, TaskDomain domain,
+	std::function<void(const ArtifactSnapshot&)> continuation) {
+	if (!handle.version || !continuation ||
+		m_impl->shuttingDown.load(std::memory_order_acquire)) return {};
+	ArtifactSnapshot snapshot;
+	std::uint64_t subscription = 0;
+	bool dispatchNow = false;
+	{
+		std::lock_guard lock(m_impl->mutex);
+		snapshot = m_impl->SnapshotExactLocked(handle.version);
+		const bool terminal = snapshot.readiness == ArtifactReadiness::Failed ||
+			snapshot.readiness == ArtifactReadiness::Cancelled ||
+			snapshot.readiness == ArtifactReadiness::Superseded;
+		dispatchNow = terminal || ArtifactReachedMilestone(snapshot.readiness, milestone);
+		if (!dispatchNow) {
+			subscription = ++m_impl->nextExactWaiter;
+			m_impl->exactWaiters[{ handle.version.address, handle.version.revision }].push_back({
+				subscription, handle.version, milestone, lane, domain,
+					std::move(continuation), std::move(handle.lease) });
+		}
+	}
+	if (dispatchNow) {
+		auto callback = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
+			std::move(continuation));
+		const bool submitted = m_impl->scheduler.Submit(m_impl->scope, lane, domain,
+			"AsyncStateGraph::AwaitExactReady",
+			[callback, snapshot](const TaskContext& context) {
+				if (!context.StopRequested()) (*callback)(snapshot);
+			});
+		if (!submitted) (*callback)(snapshot);
+		return { 0, std::move(snapshot), {} };
+	}
+	auto weak = std::weak_ptr<Impl>(m_impl);
+	return { subscription, std::move(snapshot), [weak, subscription, version = handle.version] {
+		if (subscription == 0) return;
+		if (const auto graph = weak.lock()) {
+			std::lock_guard lock(graph->mutex);
+			const Impl::VersionKey key{ version.address, version.revision };
+			const auto found = graph->exactWaiters.find(key);
+			if (found == graph->exactWaiters.end()) return;
+			std::erase_if(found->second,
+				[subscription](const Impl::ExactWaiter& waiter) {
+					return waiter.subscription == subscription;
+				});
+			if (found->second.empty()) graph->exactWaiters.erase(found);
+			graph->ScheduleDrain();
+		}
+	} };
+}
+
 ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactKey key) const {
     std::lock_guard lock(m_impl->mutex);
     const auto found = m_impl->nodes.find(key);
@@ -1649,40 +1802,7 @@ ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactKey key) const {
 
 ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactVersionID version) const {
     std::lock_guard lock(m_impl->mutex);
-    const auto archived = m_impl->versions.find({ version.address, version.revision });
-    if (archived != m_impl->versions.end() &&
-        archived->second.generation == version.generation) {
-        auto snapshot = archived->second;
-        snapshot.lease = m_impl->AcquireVersionLease(
-            Impl::VersionKey{ version.address, version.revision });
-        return snapshot;
-    }
-    const auto current = m_impl->nodes.find(version.address);
-    if (current != m_impl->nodes.end()) {
-        if (current->second.producedRevision == version.revision) {
-            auto snapshot = m_impl->MakeSnapshot(current->second);
-            if (snapshot.generation == version.generation) return snapshot;
-        }
-        if (current->second.desiredRevision == version.revision &&
-            m_impl->VersionGeneration(version.address, version.revision) == version.generation) {
-            // Handles are resolvable from the instant Request returns, before a
-            // producer has emitted a payload. The mutable address cursor may
-            // describe this exact immutable version while it is blocked,
-            // queued, or preparing; payload publication still occurs only via
-            // StoreVersion after completion.
-            return { version.address, version.revision, version.generation,
-                current->second.state, current->second.payload,
-                current->second.gpuSubmissions, current->second.lease };
-        }
-        const auto successor = std::ranges::find(
-            current->second.successors, version.revision, &Impl::RequestedVersion::revision);
-        if (successor != current->second.successors.end() &&
-            m_impl->VersionGeneration(version.address, version.revision) == version.generation) {
-            return { version.address, version.revision, version.generation,
-                ArtifactReadiness::Blocked, {}, {}, successor->lease };
-        }
-    }
-    return { version.address, version.revision, version.generation };
+	return m_impl->SnapshotExactLocked(version);
 }
 
 ArtifactDiagnostic AsyncStateGraph::Diagnose(ArtifactKey key) const {
@@ -1772,6 +1892,7 @@ void AsyncStateGraph::Shutdown() {
     ArtifactKey discardedSignal;
     while (m_impl->gpuSignals.try_pop(discardedSignal)) {}
     m_impl->readyCallbacks.clear();
+	m_impl->exactWaiters.clear();
 }
 
 } // namespace br::render

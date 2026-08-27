@@ -738,6 +738,31 @@ MaterialManager::ApplyMaterialUsageBatch(
 	return result;
 }
 
+bool MaterialManager::ApplyMaterialRowArtifact(const br::render::MaterialRowArtifact& row) {
+	std::lock_guard mutationLock(m_materialMutationMutex);
+	const auto expected = m_materialRowSourceRevisions.find(row.materialID);
+	if (expected == m_materialRowSourceRevisions.end() || expected->second != row.sourceRevision) return false;
+	const auto slot = m_materialIDSlotMapping.find(row.materialID);
+	if (slot == m_materialIDSlotMapping.end() || slot->second != row.materialSlot ||
+		row.materialSlot >= m_materialUsageCounts.size() || m_materialUsageCounts[row.materialSlot] == 0u) return false;
+	if (row.materialSlot >= m_materialUploadSignatures.size())
+		m_materialUploadSignatures.resize(static_cast<std::size_t>(row.materialSlot) + 1u);
+	auto& signature = m_materialUploadSignatures[row.materialSlot];
+	signature.materialData = row.base;
+	signature.evalData = row.evaluation;
+	signature.openPBRData = row.openPbr;
+	signature.textureBindings.clear();
+	signature.preparedTextureBindings = row.selectedBindings;
+	for (const auto& binding : row.selectedBindings) if (binding) {
+		signature.textureBindings.push_back({ binding->streamingTextureID,
+			binding->bindingRevision, binding->imageDescriptorIndex, binding->samplerDescriptorIndex });
+	}
+	signature.valid = true;
+	JournalMaterialRow(row.materialSlot);
+	ScheduleGpuVisibleSnapshotCommit(true);
+	return true;
+}
+
 void MaterialManager::UpdateMaterialDataBuffer(Material& material) {
 	std::lock_guard mutationLock(m_materialMutationMutex);
 	FlushDirtyMaterial(material);

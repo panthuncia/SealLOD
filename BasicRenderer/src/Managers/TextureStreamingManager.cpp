@@ -162,6 +162,10 @@ void TextureStreamingManager::SetRendererStateRequestService(
 	br::render::RendererStateRequestService* service)
 {
 	m_graphBindingObservation.Reset();
+	{
+		std::lock_guard lock(m_graphBindingAwaiterMutex);
+		m_graphBindingAwaiters.clear();
+	}
 	m_rendererStateRequests = service;
 	{
 		std::lock_guard lock(m_graphBindingStateMutex);
@@ -1043,7 +1047,7 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 		return;
 	}
 	if (m_materialTextureTransfers) {
-		m_materialTextureTransfers->EnsureShaderReady(change.newImage);
+		change.transfer = m_materialTextureTransfers->EnsureShaderReady(change.newImage);
 	}
 	if (MaterialTextureStreamingTransitionLoggingEnabled()) {
 		const auto pending = texture.GetPendingDebugInfo();
@@ -1059,9 +1063,52 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 			ownersIt->second.size(),
 			pending.label);
 	}
-	// Producers publish immutable observations without holding a lock needed by
-	// the render thread. Duplicate observations are folded after detachment in
-	// DrainPendingBindingChanges, where they cannot stall upload producers.
+	// The streaming worker owns immutable binding requests. The render thread is
+	// only handed a compatibility-adoption record after the exact graph version
+	// reaches Submitted. This removes Request/Snapshot/requeue polling from the
+	// frame loop while retaining the current PublishPreparedImage boundary.
+	if (m_rendererStateRequests && change.transfer && change.transfer->gpuSubmissions) {
+		auto input = std::make_shared<br::render::TextureBindingBuildInput>();
+		input->streamingTextureID = change.streamingTextureID;
+		input->bindingRevision = change.bindingRevision;
+		input->streamingStateRevision = change.streamingStateRevision;
+		input->samplerDescriptorIndex = texture.SamplerDescriptorIndex();
+		input->image = change.newImage;
+		input->gpuSubmissions = change.transfer->gpuSubmissions;
+		const br::render::ArtifactAddress address{
+			br::render::ArtifactKind::TextureBinding, change.streamingTextureID, 0 };
+		const auto request = m_rendererStateRequests->Request(
+			address, change.bindingRevision, {},
+			br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
+				std::move(input)),
+			(change.bindingRevision << 1u) ^ change.streamingStateRevision ^
+				change.streamingTextureID ^ 0x54455842494e44ull);
+		if (request) {
+			change.graphRequested = true;
+			change.waitingForGraphWake = true;
+			change.graphVersion = request.version;
+			auto pending = std::make_shared<PendingBindingChange>(std::move(change));
+			const auto pendingTextureID = pending->streamingTextureID;
+			auto awaiter = m_rendererStateRequests->AwaitExact(request.Handle(),
+				br::render::ArtifactReadiness::UploadSubmitted,
+				TaskLane::Streaming, TaskDomain::TextureProcessing,
+				[this, pending](const br::render::ArtifactSnapshot& snapshot) mutable {
+					if (m_workerQuit.load(std::memory_order_acquire)) return;
+					pending->waitingForGraphWake = false;
+					pending->graphReady = br::render::ArtifactReachedMilestone(
+						snapshot.readiness, br::render::ArtifactReadiness::UploadSubmitted);
+					m_pendingBindingChanges.push(std::move(*pending));
+				});
+			if (awaiter.subscription != 0) {
+				std::lock_guard lock(m_graphBindingAwaiterMutex);
+				m_graphBindingAwaiters.insert_or_assign(
+					pendingTextureID, std::move(awaiter));
+			}
+			return;
+		}
+	}
+	// Transitional recovery for request-service shutdown or a rejected recipe.
+	// This is not the normal path and retains the known-correct reconciliation.
 	m_pendingBindingChanges.push(std::move(change));
 }
 
@@ -1098,7 +1145,16 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		// Retaining the superseded request bit here stranded the replacement.
 		previous.graphRequested = change.graphRequested;
 		previous.waitingForGraphWake = change.waitingForGraphWake;
+		previous.graphReady = change.graphReady;
 		previous.graphVersion = change.graphVersion;
+		previous.transfer = std::move(change.transfer);
+	}
+	{
+		std::lock_guard lock(m_graphBindingAwaiterMutex);
+		for (const auto& change : coalesced) {
+			if (!change.graphReady) continue;
+			m_graphBindingAwaiters.erase(change.streamingTextureID);
+		}
 	}
 	// Copy only observations which this detached batch can consume.  The old
 	// whole-map copy made the render thread walk every historical texture while
@@ -1165,7 +1221,10 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		std::shared_ptr<const br::render::GpuSubmissionSet> transferSubmission;
 		{
 			BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::TransferState");
-			if (m_materialTextureTransfers && change.newImage &&
+			if (change.graphReady && change.transfer) {
+				transferSubmission = change.transfer->gpuSubmissions;
+			}
+			else if (m_materialTextureTransfers && change.newImage &&
 				!m_materialTextureTransfers->IsShaderReady(change.newImage)) {
 				transferSubmission = m_materialTextureTransfers->ShaderReadySubmission(change.newImage);
 				if (!transferSubmission && !m_materialTextureTransfers->HasFailed(change.newImage)) {
@@ -1224,7 +1283,12 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 					continue;
 				}
 			}
-			const auto graphSnapshot = change.graphVersion
+			const auto graphSnapshot = change.graphReady
+				? br::render::ArtifactSnapshot{
+					change.graphVersion.address, change.graphVersion.revision,
+					change.graphVersion.generation,
+					br::render::ArtifactReadiness::UploadSubmitted }
+				: change.graphVersion
 				? m_rendererStateRequests->Snapshot(change.graphVersion)
 				: br::render::ArtifactSnapshot{};
 			if (graphSnapshot.readiness == br::render::ArtifactReadiness::Failed ||
@@ -1356,12 +1420,6 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		static_cast<std::int64_t>(waitingForGraphCount));
 	basic_telemetry::AddCounter("SARP.TextureStreaming.GraphBindingFailures",
 		static_cast<std::uint64_t>(graphFailureCount));
-	// Kick recording only after readiness queries and adoptions are complete, so
-	// the render thread never contends with the worker's transfer-state lock.
-	{
-		BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::PumpTransfers");
-		if (m_materialTextureTransfers) m_materialTextureTransfers->Pump();
-	}
 	return adopted;
 }
 
