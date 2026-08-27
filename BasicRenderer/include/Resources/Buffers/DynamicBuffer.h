@@ -158,6 +158,9 @@ public:
     }
 
     void EnableVersionedGraphJournal();
+	void SetVersionedGraphMutationCallback(std::function<void()> callback) {
+		m_versionedGraphMutationCallback = std::move(callback);
+	}
 	void SetVersionedGraphExclusive(bool exclusive);
     br::render::VersionedGpuBufferJournal::Capture CaptureVersionedGraphState() const;
     std::vector<std::byte> CaptureCpuShadowBytes() const;
@@ -281,6 +284,7 @@ private:
     size_t m_requestedResizeCapacity = 0;
     bool m_pendingResizeValid = false;
     std::unique_ptr<br::render::VersionedGpuBufferJournal> m_versionedGraphJournal;
+	std::function<void()> m_versionedGraphMutationCallback;
 	std::atomic_bool m_versionedGraphExclusive{ false };
 };
 

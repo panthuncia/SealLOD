@@ -117,12 +117,17 @@ void MaterialTextureTransferService::Initialize()
 		rhi::Failed(m_device.CreateTimeline(m_timeline, 0, "MaterialTextureTransfers"))) {
 		throw std::runtime_error("failed to initialize material texture transfer service");
 	}
+	m_taskScope = TaskSchedulerManager::GetInstance().CreateScope("MaterialTextureTransferService");
+	m_shuttingDown.store(false, std::memory_order_release);
 	m_initialized = true;
 }
 
 void MaterialTextureTransferService::Shutdown()
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::Shutdown");
+	m_shuttingDown.store(true, std::memory_order_release);
+	if (m_taskScope.Valid()) m_taskScope.CancelAndWait();
+	m_pumpScheduled.store(false, std::memory_order_release);
 	uint64_t waitValue = 0;
 	{
 		std::scoped_lock lock(m_mutex);
@@ -230,6 +235,24 @@ void MaterialTextureTransferService::ReapCompletedLocked()
 void MaterialTextureTransferService::Pump()
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::Pump");
+	if (m_shuttingDown.load(std::memory_order_acquire)) return;
+	bool expected = false;
+	if (!m_pumpScheduled.compare_exchange_strong(
+		expected, true, std::memory_order_acq_rel)) return;
+	if (!m_taskScope.Valid() || !TaskSchedulerManager::GetInstance().Submit(
+		m_taskScope, TaskLane::Streaming, TaskDomain::TextureProcessing,
+		"MaterialTextureTransferService::PumpWorker",
+		[this](const br::TaskContext& context) {
+			if (!context.StopRequested()) PumpWorker();
+			m_pumpScheduled.store(false, std::memory_order_release);
+		})) {
+		m_pumpScheduled.store(false, std::memory_order_release);
+	}
+}
+
+void MaterialTextureTransferService::PumpWorker()
+{
+	BT_ZONE_SCOPE("MaterialTextureTransferService::PumpWorker");
 	std::scoped_lock lock(m_mutex);
 	if (!m_initialized) return;
 	ReapCompletedLocked();
@@ -403,7 +426,8 @@ void MaterialTextureTransferService::Pump()
 bool MaterialTextureTransferService::IsShaderReady(const std::shared_ptr<PixelBuffer>& image) const
 {
 	if (!image) return false;
-	std::scoped_lock lock(m_mutex);
+	std::unique_lock lock(m_mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return false;
 	const auto it = m_records.find(image->GetGlobalResourceID());
 	return it != m_records.end() && it->second.state == State::Ready;
 }
@@ -411,7 +435,8 @@ bool MaterialTextureTransferService::IsShaderReady(const std::shared_ptr<PixelBu
 bool MaterialTextureTransferService::HasFailed(const std::shared_ptr<PixelBuffer>& image) const
 {
 	if (!image) return true;
-	std::scoped_lock lock(m_mutex);
+	std::unique_lock lock(m_mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return false;
 	const auto it = m_records.find(image->GetGlobalResourceID());
 	return it != m_records.end() && it->second.state == State::Failed;
 }

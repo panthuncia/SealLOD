@@ -22,6 +22,7 @@
 #include <limits>
 
 #include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Telemetry.h>
 
 namespace {
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
@@ -1011,7 +1012,6 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 
 std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 {
-	if (m_materialTextureTransfers) m_materialTextureTransfers->Pump();
 	std::vector<PendingBindingChange> changes;
 	{
 		std::lock_guard lock(m_pendingBindingChangeMutex);
@@ -1039,6 +1039,8 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 	}
 	std::size_t adopted = 0;
 	std::vector<PendingBindingChange> waitingForGpu;
+	std::size_t waitingForGraphCount = 0;
+	std::size_t graphFailureCount = 0;
 	for (auto& change : coalesced) {
 		if (m_materialTextureTransfers && change.newImage &&
 			!m_materialTextureTransfers->IsShaderReady(change.newImage)) {
@@ -1069,11 +1071,24 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
 						std::move(input)));
 			}
-			// Upload completion owns image adoption. Requiring graph publication here
-			// creates a cycle: the material artifact depends on this binding while its
-			// immutable row cannot be rebuilt with the new descriptor until adoption.
-			// Adoption invalidates the material root; the manifest then closes over the
-			// already-requested binding artifact.
+			const auto diagnostic = m_rendererStateRequests->Diagnose(bindingKey);
+			if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
+				diagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
+				++graphFailureCount;
+				if (change.texture) {
+					(void)change.texture->RejectPreparedImage(
+						change.bindingRevision, change.newImage);
+					EnqueueTextureUploadAdvance(change.texture, "graph_binding_failed");
+				}
+				continue;
+			}
+			if (!change.graphRequested ||
+				diagnostic.artifact.revision != change.bindingRevision ||
+				diagnostic.artifact.readiness < br::render::ArtifactReadiness::GpuReady) {
+				waitingForGpu.push_back(std::move(change));
+				++waitingForGraphCount;
+				continue;
+			}
 		}
 		const auto adoptionStart = std::chrono::steady_clock::now();
 		std::shared_ptr<PixelBuffer> replacedPublishedImage;
@@ -1174,6 +1189,15 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 	const std::size_t refreshed = RefreshDirtyLiveBindings();
 	TracyPlot("TextureStreaming.MainThreadAdoptions", static_cast<int64_t>(adopted));
 	TracyPlot("TextureStreaming.MainThreadBindingRefreshes", static_cast<int64_t>(refreshed));
+	TracyPlot("TextureStreaming.GraphBindingWaits", static_cast<int64_t>(waitingForGraphCount));
+	TracyPlot("TextureStreaming.GraphBindingFailures", static_cast<int64_t>(graphFailureCount));
+	basic_telemetry::SetGauge("SARP.TextureStreaming.GraphBindingWaits",
+		static_cast<std::int64_t>(waitingForGraphCount));
+	basic_telemetry::AddCounter("SARP.TextureStreaming.GraphBindingFailures",
+		static_cast<std::uint64_t>(graphFailureCount));
+	// Kick recording only after readiness queries and adoptions are complete, so
+	// the render thread never contends with the worker's transfer-state lock.
+	if (m_materialTextureTransfers) m_materialTextureTransfers->Pump();
 	return adopted;
 }
 

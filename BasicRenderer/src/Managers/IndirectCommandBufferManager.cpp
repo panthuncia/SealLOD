@@ -144,12 +144,19 @@ void IndirectCommandBufferManager::PublishDesiredState(
         std::lock_guard lock(m_desiredMutex);
         const auto objectBufferRevision =
             objectBufferRequirement ? objectBufferRequirement->minimumRevision : 0u;
+        // Materials are a startup readiness gate, not part of the indirect
+        // artifact's content identity. Texture fallback upgrades can publish
+        // many material revisions without changing any active draw entry,
+        // view, capacity, or draw-record extent. Treating each one as an
+        // indirect mutation repeatedly rebuilt and replaced the complete
+        // visibility state while streaming was settling.
+        const bool materialBecameReady = m_lastMaterialRevision == 0 && materialRevision != 0;
         if (m_lastObjectBufferRevision != objectBufferRevision ||
-			m_lastMaterialRevision != materialRevision ||
+            materialBecameReady ||
             m_lastResidentDrawRecordCount != residentDrawRecordCount) {
             m_lastObjectBufferRevision = objectBufferRevision;
             m_objectBufferRequirement = objectBufferRequirement;
-			m_lastMaterialRevision = materialRevision;
+			if (materialBecameReady) m_lastMaterialRevision = materialRevision;
             m_lastResidentDrawRecordCount = residentDrawRecordCount;
             ++m_desiredMutationRevision;
             changed = true;

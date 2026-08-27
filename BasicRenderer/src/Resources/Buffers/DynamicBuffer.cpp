@@ -208,6 +208,7 @@ bool DynamicBuffer::ExtendTrackedCapacityLocked(size_t newCapacity) {
 		std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
 		if (m_versionedGraphJournal) {
 			m_versionedGraphJournal->RequestCapacity(m_capacity / m_elementSize);
+			if (m_versionedGraphMutationCallback) m_versionedGraphMutationCallback();
 		}
 	}
     const size_t trackedFreeSize = m_capacity - newBlockOffset;
@@ -994,6 +995,7 @@ void DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t o
 			offset / m_elementSize,
 			std::span<const std::byte>(reinterpret_cast<const std::byte*>(data), size),
 			(offset + size) / m_elementSize);
+		if (m_versionedGraphMutationCallback) m_versionedGraphMutationCallback();
 	}
 }
 
@@ -1251,6 +1253,7 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
 		std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
 		if (m_versionedGraphJournal) {
 			m_versionedGraphJournal->RequestCapacity(m_capacity / m_elementSize);
+			if (m_versionedGraphMutationCallback) m_versionedGraphMutationCallback();
 		}
 	}
 

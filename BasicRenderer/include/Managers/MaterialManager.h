@@ -13,6 +13,7 @@
 #include "Render/IndirectCommand.h"
 #include "Render/MaterialCompileFlagsSlotRegistry.h"
 #include "Render/MaterialStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/RasterBucketFlags.h"
 #include "Resources/Resolvers/PublishedStateResourceResolver.h"
 
@@ -59,22 +60,7 @@ public:
 
 	void UpdateMaterialDataBuffer(Material& material);
 	void MarkMaterialDirty(Material& material);
-	void UpdateOpenPBRMaterialDataBuffer(unsigned int materialSlot, const PerMaterialOpenPBRCB& data) {
-		if (m_perMaterialOpenPBRDataBuffer) {
-			m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, data);
-		}
-		if (materialSlot >= m_materialUploadSignatures.size()) {
-			m_materialUploadSignatures.resize(static_cast<std::size_t>(materialSlot) + 1u);
-		}
-		auto& signature = m_materialUploadSignatures[materialSlot];
-		if (signature.valid &&
-			std::memcmp(&signature.openPBRData, &data, sizeof(data)) == 0) {
-			return;
-		}
-		signature.openPBRData = data;
-		signature.valid = true;
-		++m_materialRowsRevision;
-	}
+	void UpdateOpenPBRMaterialDataBuffer(unsigned int materialSlot, const PerMaterialOpenPBRCB& data);
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
 	std::vector<ResourceIdentifier> GetSupportedKeys() override;
@@ -143,6 +129,34 @@ private:
 		bool valid = false;
 	};
 	std::vector<MaterialGpuUploadSignature> m_materialUploadSignatures;
+	struct RetainedTextureBindingKey {
+		std::uint32_t streamingTextureID = 0;
+		std::uint64_t bindingRevision = 0;
+		std::uint32_t imageDescriptorIndex = 0;
+		std::uint32_t samplerDescriptorIndex = 0;
+		bool operator==(const RetainedTextureBindingKey&) const = default;
+	};
+	struct RetainedTextureBindingKeyHasher {
+		std::size_t operator()(const RetainedTextureBindingKey& key) const noexcept {
+			std::size_t value = key.streamingTextureID;
+			value ^= static_cast<std::size_t>(key.bindingRevision) + 0x9e3779b9u + (value << 6u) + (value >> 2u);
+			value ^= key.imageDescriptorIndex + 0x9e3779b9u + (value << 6u) + (value >> 2u);
+			value ^= key.samplerDescriptorIndex + 0x9e3779b9u + (value << 6u) + (value >> 2u);
+			return value;
+		}
+	};
+	struct RetainedTextureBindingEntry {
+		br::render::MaterialTextureBindingDependencyDTO dependency;
+		std::shared_ptr<const br::render::PublishedTextureBinding> prepared;
+		std::uint32_t references = 0;
+	};
+	std::vector<std::vector<RetainedTextureBindingKey>> m_retainedTextureBindingsBySlot;
+	std::unordered_map<RetainedTextureBindingKey, RetainedTextureBindingEntry,
+		RetainedTextureBindingKeyHasher> m_retainedTextureBindings;
+	void JournalMaterialRow(unsigned int materialSlot);
+	br::render::VersionedGpuBufferJournal m_materialBaseJournal{ sizeof(PerMaterialCB) };
+	br::render::VersionedGpuBufferJournal m_materialEvalJournal{ sizeof(PerMaterialEvalCB) };
+	br::render::VersionedGpuBufferJournal m_materialOpenPbrJournal{ sizeof(PerMaterialOpenPBRCB) };
 	unsigned int m_materialBufferCapacity = 0u;
 
 	static constexpr unsigned int kBufferGrowthSize = 100;

@@ -94,8 +94,28 @@ void VersionedGpuBufferJournal::RequestCapacity(std::uint64_t capacity) {
 
 VersionedGpuBufferJournal::Capture VersionedGpuBufferJournal::CaptureDesired() const {
     std::lock_guard lock(m_mutex);
+    std::vector<VersionedGpuBufferWrite> sealed;
+    sealed.reserve(m_writes.size());
+    for (const auto& write : m_writes) {
+        if (!write.bytes || write.bytes->empty()) {
+            sealed.push_back(write);
+            continue;
+        }
+        if (!sealed.empty() && sealed.back().bytes &&
+            sealed.back().elementOffset + sealed.back().bytes->size() / m_elementStride ==
+                write.elementOffset) {
+            auto bytes = std::const_pointer_cast<std::vector<std::byte>>(sealed.back().bytes);
+            bytes->insert(bytes->end(), write.bytes->begin(), write.bytes->end());
+            // The merged range closes every sequence through the later write.
+            sealed.back().sequence = write.sequence;
+            continue;
+        }
+        auto bytes = std::make_shared<std::vector<std::byte>>(
+            write.bytes->begin(), write.bytes->end());
+        sealed.push_back({ write.sequence, write.elementOffset, std::move(bytes) });
+    }
     return Capture{ m_writeSequence, m_elementCount, m_capacity,
-        m_previous, m_writes, m_previous ? std::vector<std::byte>{} : m_initialBytes };
+        m_previous, std::move(sealed), m_previous ? std::vector<std::byte>{} : m_initialBytes };
 }
 
 void VersionedGpuBufferJournal::Acknowledge(

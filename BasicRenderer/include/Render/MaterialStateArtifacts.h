@@ -34,6 +34,8 @@ struct MaterialTextureBindingDependencyDTO {
 
 struct MaterialStateBuildInput {
     std::uint64_t sourceFingerprint = 0;
+    std::uint64_t materialRowsRevision = 0;
+    std::uint64_t materialRowCount = 0;
     std::uint32_t slotsUsed = 0;
     std::vector<MaterialCompileFlagEntryDTO> activeCompileFlags;
 	std::vector<MaterialTextureBindingDependencyDTO> textureBindings;

@@ -186,6 +186,52 @@ int main() {
     Check(stampedBuildCount.load(std::memory_order_relaxed) == 2);
     Check(graph.Stats().staleCompletions != 0);
 
+    // Replacing a queued request can replace its dependency closure. The queue
+    // consumer must revalidate that current closure instead of building with a
+    // partial dependency snapshot validated by the earlier request.
+    const ArtifactKey queuedDependency{ ArtifactKind::Generic, 301, 0 };
+    const ArtifactKey addedDependency{ ArtifactKind::Generic, 302, 0 };
+    const ArtifactKey queuedRoot{ ArtifactKind::TerrainState, 303, 0 };
+    Check(graph.Request(queuedDependency, 1));
+    graph.WaitIdle();
+    std::atomic_bool holdDrainStarted{ false };
+    std::atomic_bool releaseHeldDrain{ false };
+    auto holdDrainScope = scheduler.CreateScope("QueuedClosureReplacementBarrier");
+    Check(scheduler.Submit(holdDrainScope, TaskLane::Streaming, TaskDomain::RendererState,
+        "QueuedClosureReplacementBarrier", [&](const br::TaskContext&) {
+            holdDrainStarted.store(true, std::memory_order_release);
+            while (!releaseHeldDrain.load(std::memory_order_acquire)) std::this_thread::yield();
+        }));
+    const auto holdDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!holdDrainStarted.load(std::memory_order_acquire) &&
+        std::chrono::steady_clock::now() < holdDeadline) std::this_thread::yield();
+    Check(holdDrainStarted.load(std::memory_order_acquire));
+    std::atomic_uint queuedRootBuilds{ 0 };
+    graph.RegisterProducer(ArtifactKind::TerrainState, {
+        TaskLane::Streaming, TaskDomain::General, "QueuedClosureReplacementProducer",
+        [&queuedRootBuilds](const ArtifactBuildContext& context) {
+            ++queuedRootBuilds;
+            Check(context.dependencies.size() == 2);
+            return ArtifactBuildResult::Ready(Payload(context.revision));
+        }
+    });
+    Check(graph.Request(queuedRoot, 1, {
+        { queuedDependency, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf }
+    }));
+    Check(graph.Request(queuedRoot, 2, {
+        { queuedDependency, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf },
+        { addedDependency, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf }
+    }));
+    releaseHeldDrain.store(true, std::memory_order_release);
+    holdDrainScope.Wait();
+    graph.WaitIdle();
+    Check(queuedRootBuilds.load(std::memory_order_acquire) == 0);
+    Check(graph.Snapshot(queuedRoot).readiness == ArtifactReadiness::Blocked);
+    Check(graph.Request(addedDependency, 1));
+    graph.WaitIdle();
+    Check(queuedRootBuilds.load(std::memory_order_acquire) == 1);
+    Check(graph.Snapshot(queuedRoot).readiness == ArtifactReadiness::GpuReady);
+
     graph.RegisterTypedProducer<Value, Value>(ArtifactKind::ActiveDrawList,
         TaskLane::Streaming, TaskDomain::General, "TypedProducer",
         [](const ArtifactBuildContext&, std::shared_ptr<const Value> input) {

@@ -722,6 +722,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 if (found == nodes.end()) continue;
                 auto& node = found->second;
                 if (node.state != ArtifactReadiness::Queued || node.buildInFlight) continue;
+                // A newer request may replace a queued node's dependency set before
+                // this queue entry is consumed. Revalidate the current closure here;
+                // QueueNode's earlier check only applies to the request that queued it.
+                if (!DependenciesSatisfied(node)) {
+                    SetState(node, ArtifactReadiness::Blocked);
+                    continue;
+                }
                 const auto producer = producers.find(node.key.kind);
                 if (producer == producers.end() || !producer->second.producer) {
                     node.error = "no producer registered";

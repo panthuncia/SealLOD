@@ -7,10 +7,12 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <atomic>
 
 #include <rhi.h>
 
 #include "Factories/TextureFactory.h"
+#include "Managers/Singletons/TaskSchedulerManager.h"
 
 namespace org { class PixelBuffer; }
 using org::PixelBuffer;
@@ -35,8 +37,8 @@ public:
 		std::wstring outputFile,
 		std::function<void()> callback);
 
-	// Called on the renderer thread once per frame.  Completed batches are
-	// published first, then newly queued work is submitted as one graphics batch.
+	// O(1) render-thread kick. Recording, submission, and completion publication
+	// run in the service task scope.
 	void Pump();
 	bool IsShaderReady(const std::shared_ptr<PixelBuffer>& image) const;
 	bool HasFailed(const std::shared_ptr<PixelBuffer>& image) const;
@@ -80,6 +82,7 @@ private:
 	static void SaveReadbackToDds(InFlightBatch::ReadbackCompletion completion);
 
 	void ReapCompletedLocked();
+	void PumpWorker();
 	static rhi::TextureBarrier MakeWholeTextureBarrier(
 		const PixelBuffer& image,
 		rhi::ResourceAccessType beforeAccess,
@@ -98,5 +101,8 @@ private:
 	std::vector<ReadbackRequest> m_pendingReadbacks;
 	std::vector<InFlightBatch> m_inFlight;
 	std::unordered_map<uint64_t, Record> m_records;
+	br::TaskScope m_taskScope;
+	std::atomic_bool m_pumpScheduled{ false };
+	std::atomic_bool m_shuttingDown{ false };
 	bool m_initialized = false;
 };

@@ -268,6 +268,9 @@ ObjectManager::ObjectManager() {
 ObjectManager::~ObjectManager() {
 	StopActiveDrawSetCompactionWorker();
 	StopDeferredRetireWorker();
+	for (auto& binding : m_graphBufferBindings) {
+		if (binding.buffer) binding.buffer->SetVersionedGraphMutationCallback({});
+	}
 	for (auto& [_, buffer] : m_activeDrawSetIndices) {
 		if (buffer) buffer->SetActiveMutationCallback({});
 	}
@@ -298,6 +301,9 @@ void ObjectManager::SetRendererStateServices(
 	const auto source = br::render::PublishedStateSource::ProcessSource();
 	for (const auto& [identifier, buffer, variant, stride] : definitions) {
 		buffer->EnableVersionedGraphJournal();
+		buffer->SetVersionedGraphMutationCallback([this] {
+			m_objectBufferGraphDirty.store(true, std::memory_order_release);
+		});
 		GraphBufferBinding binding{};
 		binding.identifier = identifier;
 		binding.buffer = buffer;
@@ -326,6 +332,9 @@ void ObjectManager::SetRendererStateServices(
 
 std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	if (!m_rendererStateRequests || !m_uploadService || m_graphBufferBindings.empty()) return 0;
+	if (!m_objectBufferGraphDirty.exchange(false, std::memory_order_acq_rel)) {
+		return m_objectBufferStateRevision;
+	}
 
 	auto rootInput = std::make_shared<br::render::ObjectBufferStateBuildInput>();
 	std::vector<br::render::ArtifactRequirement> requirements;
@@ -1013,6 +1022,7 @@ std::uint32_t ObjectManager::ActivateDrawRecordCPU(std::uint32_t drawRecordIndex
 	}
 	m_drawRecordVisibilityGenerations[drawRecordIndex] = generation;
 	++m_drawRecordVisibilityRevision;
+	m_objectBufferGraphDirty.store(true, std::memory_order_release);
 	return generation;
 }
 
@@ -1124,6 +1134,7 @@ void ObjectManager::TombstoneDrawRecord(std::uint32_t drawRecordIndex) {
 	}
 	const auto generation = AdvanceDrawRecordVisibilityGenerationCPU(drawRecordIndex);
 	++m_drawRecordVisibilityRevision;
+	m_objectBufferGraphDirty.store(true, std::memory_order_release);
 	m_drawRecordVisibilityGenerationSidecar->StageRange(
 		drawRecordIndex,
 		std::span<const std::uint32_t>(&generation, 1u));
@@ -1148,6 +1159,7 @@ void ObjectManager::TombstoneDrawRecords(std::span<const std::uint32_t> drawReco
 		return;
 	}
 	++m_drawRecordVisibilityRevision;
+	m_objectBufferGraphDirty.store(true, std::memory_order_release);
 	TracyPlot("ObjectManager.TombstoneDrawRecords.Valid", static_cast<int64_t>(sortedIndices.size()));
 
 	std::sort(sortedIndices.begin(), sortedIndices.end());

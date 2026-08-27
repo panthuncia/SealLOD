@@ -38,7 +38,9 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
             const auto fragment = dependency.payload.Get<RendererStateFragmentArtifact>();
             const auto version = fragment
                 ? fragment->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
-            if (version && version->resource && version->elementStride == expectedStride) return version;
+            if (version && version->resource && version->elementStride == expectedStride &&
+                version->writeSequence == input->materialRowsRevision &&
+                version->elementCount == input->materialRowCount) return version;
         }
         return std::shared_ptr<const PublishedGpuBufferVersion>{};
     };
@@ -46,7 +48,12 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     state->evalTable = resolveTable(input->evalTableKey, sizeof(PerMaterialEvalCB));
     state->openPbrTable = resolveTable(input->openPbrTableKey, sizeof(PerMaterialOpenPBRCB));
     if (!state->baseTable || !state->evalTable || !state->openPbrTable) {
-        return ArtifactBuildResult::Failure("material table dependency missing or has incompatible ABI");
+        // Dependencies are minimum-revision requirements. During rapid material
+        // streaming an older root build can therefore be scheduled after its
+        // table nodes have already advanced. Publishing that mixed closure maps
+        // draw material slots to unrelated rows. Yield to the coalesced successor
+        // rather than treating this expected race as a terminal graph failure.
+        return ArtifactBuildResult::Retry(std::chrono::milliseconds(1));
     }
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::Materials;

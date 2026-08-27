@@ -609,6 +609,7 @@ private:
 	std::uint64_t m_objectBufferStateRevision = 0;
 	std::atomic<std::uint64_t> m_activeObjectBufferStateRevision{ 0 };
 	std::uint64_t m_objectBufferFingerprint = 0;
+	std::atomic_bool m_objectBufferGraphDirty{ true };
 	std::uint32_t m_objectBufferDiagnosticTicks = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
 	std::uint64_t m_visibilityGenerationSubmittedRevision = 0;
