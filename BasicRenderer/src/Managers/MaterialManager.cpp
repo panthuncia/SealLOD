@@ -494,6 +494,7 @@ MaterialTextureStreamingStats MaterialManager::GetMaterialTextureStreamingStats(
 }
 
 void MaterialManager::MarkMaterialDirty(Material& material) {
+	std::lock_guard mutationLock(m_materialMutationMutex);
 	const uint32_t materialID = material.GetMaterialID();
 	if (m_dirtyMaterialIDSet.insert(materialID).second) {
 		m_dirtyMaterialIDs.push_back(materialID);
@@ -692,6 +693,7 @@ MaterialManager::ApplyMaterialUsageBatch(
 }
 
 void MaterialManager::UpdateMaterialDataBuffer(Material& material) {
+	std::lock_guard mutationLock(m_materialMutationMutex);
 	FlushDirtyMaterial(material);
 }
 
