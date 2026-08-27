@@ -42,6 +42,8 @@ public:
 	void ReleaseRasterBucket(MaterialRasterFlags rasterFlags);
 
 	unsigned int IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory = nullptr, unsigned int count = 1u);
+	std::shared_ptr<const br::render::PublishedMaterialUsageBatch> ApplyMaterialUsageBatch(
+		const br::render::MaterialUsageBatchBuildInput& input);
 	void DecrementMaterialUsageCount(const Material& material);
 	void InitializeTextureStreaming(TextureFactory& textureFactory, uint32_t framesInFlight);
 	void ShutdownTextureStreaming();
@@ -118,6 +120,7 @@ private:
 
 	unsigned int m_materialSlotsUsed = 0;
 	std::vector<unsigned int> m_freeMaterialSlots;
+	mutable std::recursive_mutex m_materialMutationMutex;
 	std::vector<unsigned int> m_materialUsageCounts = { };
 	std::unordered_map <unsigned int, unsigned int> m_materialIDSlotMapping;
 	struct MaterialGpuUploadSignature {

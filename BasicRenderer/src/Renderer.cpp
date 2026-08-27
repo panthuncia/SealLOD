@@ -804,6 +804,7 @@ void Renderer::Initialize(
         m_pReadbackManager->RequestReadback(std::move(texture), std::move(outputFile), std::move(callback), cubemap);
     });
     m_pMaterialManager = MaterialManager::CreateUnique();
+	br::render::RegisterMaterialUsageBatchProducer(*m_asyncStateGraph, *m_pMaterialManager);
     m_pMaterialManager->SetRendererStateServices(
         m_rendererStateRequests.get(),
         currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr);
@@ -3075,15 +3076,6 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("CommitPublishedRendererState", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState");
         try {
-            // Upload completion callbacks are the normal wakeup path.  Poll once
-            // per frame as a recovery path so a callback lost to a subscription
-            // race or upload-service callback replacement cannot strand an
-            // UploadSubmitted artifact forever.  In particular, a stranded object
-            // buffer revision leaves static visibility on an arbitrary partial
-            // startup snapshot even after its GPU timeline has completed.
-            if (m_asyncStateGraph) {
-                m_asyncStateGraph->PumpGpuCompletions();
-            }
             if (m_rendererStatePublisher) {
                 auto commit = m_rendererStatePublisher->Commit(m_frameIndex);
                 m_context.publishedRendererState = commit.state;
@@ -3263,7 +3255,7 @@ void Renderer::Update(float elapsedSeconds) {
                                     << " slot=" << materialState->activeCompileFlagSlots[index] << '\n';
                             }
                         }
-                        const auto requestTable = [readbackService, &path](
+                        const auto requestTable = [readbackService, &path, published](
                             const char* label,
                             const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& table) {
                             if (!table || !table->resource || !table->cpuShadow) return;
@@ -3271,6 +3263,56 @@ void Renderer::Update(float elapsedSeconds) {
                             tablePath += std::filesystem::path(fmt::format(".{}.bin", label));
                             const auto expected = table->cpuShadow;
                             const auto resourceID = table->resource->GetGlobalResourceID();
+                            const br::render::ArtifactSnapshot* tableArtifact = nullptr;
+                            for (const auto& dependency : published->materials.dependencyClosure) {
+                                const auto root = dependency.payload
+                                    .Get<br::render::RendererStateFragmentArtifact>();
+                                const auto dependencyTable = root
+                                    ? root->fragment.payload
+                                        .Get<br::render::PublishedGpuBufferVersion>() : nullptr;
+                                if (dependencyTable == table) {
+                                    tableArtifact = &dependency;
+                                    break;
+                                }
+                            }
+                            auto tableMetadataPath = tablePath;
+                            tableMetadataPath += L".meta.txt";
+                            std::ofstream tableMetadata(tableMetadataPath, std::ios::trunc);
+                            if (tableMetadata) {
+                                tableMetadata << "manifest_epoch=" << published->epoch << '\n';
+                                tableMetadata << "manifest_material_revision="
+                                    << published->materials.revision << '\n';
+                                tableMetadata << "manifest_material_root_kind="
+                                    << static_cast<std::uint32_t>(
+                                        published->materials.publicationRoot.kind) << '\n';
+                                tableMetadata << "manifest_material_root_primary="
+                                    << published->materials.publicationRoot.primaryID << '\n';
+                                tableMetadata << "manifest_material_root_variant="
+                                    << published->materials.publicationRoot.variantID << '\n';
+                                tableMetadata << "buffer_revision=" << table->revision << '\n';
+                                tableMetadata << "buffer_write_sequence="
+                                    << table->writeSequence << '\n';
+                                tableMetadata << "buffer_content_version="
+                                    << table->contentVersion << '\n';
+                                tableMetadata << "buffer_backing_generation="
+                                    << (table->backing ? table->backing->backingGeneration : 0u) << '\n';
+                                tableMetadata << "resource_id=" << resourceID << '\n';
+                                if (tableArtifact) {
+                                    tableMetadata << "artifact_kind="
+                                        << static_cast<std::uint32_t>(tableArtifact->key.kind) << '\n';
+                                    tableMetadata << "artifact_primary="
+                                        << tableArtifact->key.primaryID << '\n';
+                                    tableMetadata << "artifact_variant="
+                                        << tableArtifact->key.variantID << '\n';
+                                    tableMetadata << "artifact_revision="
+                                        << tableArtifact->revision << '\n';
+                                    tableMetadata << "artifact_generation="
+                                        << tableArtifact->generation << '\n';
+                                    tableMetadata << "artifact_readiness="
+                                        << static_cast<std::uint32_t>(
+                                            tableArtifact->readiness) << '\n';
+                                }
+                            }
                             readbackService->RequestReadbackCapture(
                                 "MenuRenderPass", table->resource.get(), RangeSpec{},
                                 [tablePath, expected, resourceID, label](ReadbackCaptureResult&& result) {
@@ -3333,7 +3375,8 @@ void Renderer::Update(float elapsedSeconds) {
                         const br::render::PublishedStateFragment& fragment,
                         bool activeListsOnly = false,
                         bool visibilityGenerationFirst = false) {
-                        const auto captureVersion = [&](const auto& version) {
+                        const auto captureVersion = [&](const auto& version,
+                            const br::render::ArtifactSnapshot& artifact) {
                             // Do not consume the one-shot validation request on the
                             // empty startup publication. Static admission fills
                             // these journals asynchronously after renderer startup.
@@ -3345,6 +3388,62 @@ void Renderer::Update(float elapsedSeconds) {
                             const auto expected = version->cpuShadow;
                             const auto resourceID = version->resource->GetGlobalResourceID();
                             const auto revision = version->revision;
+                            auto metadataPath = capturePath;
+                            metadataPath += L".meta.txt";
+                            std::ofstream metadata(metadataPath, std::ios::trunc);
+                            if (metadata) {
+                                metadata << "manifest_epoch=" << published->epoch << '\n';
+                                metadata << "fragment=" << fragmentName << '\n';
+                                metadata << "fragment_revision=" << fragment.revision << '\n';
+                                metadata << "fragment_root_kind="
+                                    << static_cast<std::uint32_t>(fragment.publicationRoot.kind) << '\n';
+                                metadata << "fragment_root_primary="
+                                    << fragment.publicationRoot.primaryID << '\n';
+                                metadata << "fragment_root_variant="
+                                    << fragment.publicationRoot.variantID << '\n';
+                                metadata << "artifact_kind="
+                                    << static_cast<std::uint32_t>(artifact.key.kind) << '\n';
+                                metadata << "artifact_primary=" << artifact.key.primaryID << '\n';
+                                metadata << "artifact_variant=" << artifact.key.variantID << '\n';
+                                metadata << "artifact_revision=" << artifact.revision << '\n';
+                                metadata << "artifact_generation=" << artifact.generation << '\n';
+                                metadata << "artifact_readiness="
+                                    << static_cast<std::uint32_t>(artifact.readiness) << '\n';
+                                metadata << "buffer_revision=" << version->revision << '\n';
+                                metadata << "buffer_write_sequence=" << version->writeSequence << '\n';
+                                metadata << "buffer_content_version=" << version->contentVersion << '\n';
+                                metadata << "buffer_backing_generation="
+                                    << (version->backing ? version->backing->backingGeneration : 0u) << '\n';
+                                metadata << "resource_id=" << resourceID << '\n';
+                                metadata << "submission_count="
+                                    << (artifact.gpuSubmissions
+                                        ? artifact.gpuSubmissions->submissions.size() : 0u) << '\n';
+                                if (artifact.gpuSubmissions) {
+                                    for (std::size_t submissionIndex = 0;
+                                        submissionIndex < artifact.gpuSubmissions->submissions.size();
+                                        ++submissionIndex) {
+                                        metadata << "submission[" << submissionIndex << "].value="
+                                            << artifact.gpuSubmissions->submissions[submissionIndex]
+                                                .TimelineValue() << '\n';
+                                    }
+                                }
+                                for (std::size_t manifestIndex = 0;
+                                    manifestIndex < br::render::kPublishedFragmentCount;
+                                    ++manifestIndex) {
+                                    const auto kind = static_cast<br::render::PublishedFragmentKind>(
+                                        manifestIndex);
+                                    const auto& manifestFragment = published->Fragment(kind);
+                                    metadata << "manifest_fragment[" << manifestIndex << "].revision="
+                                        << manifestFragment.revision << '\n';
+                                    metadata << "manifest_fragment[" << manifestIndex << "].root_kind="
+                                        << static_cast<std::uint32_t>(
+                                            manifestFragment.publicationRoot.kind) << '\n';
+                                    metadata << "manifest_fragment[" << manifestIndex << "].root_primary="
+                                        << manifestFragment.publicationRoot.primaryID << '\n';
+                                    metadata << "manifest_fragment[" << manifestIndex << "].root_variant="
+                                        << manifestFragment.publicationRoot.variantID << '\n';
+                                }
+                            }
                             readbackService->RequestReadbackCapture(
                                 "MenuRenderPass", version->resource.get(), RangeSpec{},
                                 [capturePath, expected, resourceID, revision, fragmentName]
@@ -3387,8 +3486,11 @@ void Renderer::Update(float elapsedSeconds) {
                                         capturePath.string());
                                 });
                         };
+                        const br::render::ArtifactSnapshot fragmentArtifact{
+                            fragment.publicationRoot, fragment.revision, 0,
+                            br::render::ArtifactReadiness::Published, fragment.payload };
                         captureVersion(fragment.payload
-                            .Get<br::render::PublishedGpuBufferVersion>());
+                            .Get<br::render::PublishedGpuBufferVersion>(), fragmentArtifact);
                         if (visibilityGenerationFirst) {
                             for (const auto& dependency : fragment.dependencyClosure) {
                                 if (dependency.key.kind != br::render::ArtifactKind::BufferVersion ||
@@ -3399,7 +3501,7 @@ void Renderer::Update(float elapsedSeconds) {
                                 captureVersion(dependencyRoot
                                     ? dependencyRoot->fragment.payload
                                         .Get<br::render::PublishedGpuBufferVersion>()
-                                    : nullptr);
+                                    : nullptr, dependency);
                             }
                         }
                         for (const auto& dependency : fragment.dependencyClosure) {
@@ -3416,12 +3518,9 @@ void Renderer::Update(float elapsedSeconds) {
                             captureVersion(dependencyRoot
                                 ? dependencyRoot->fragment.payload
                                     .Get<br::render::PublishedGpuBufferVersion>()
-                                : nullptr);
+                                : nullptr, dependency);
                         }
                     };
-                    const auto visibilityGenerations = m_pObjectManager
-                        ? m_pObjectManager->GetDrawRecordVisibilityGenerations()
-                        : std::span<const std::uint32_t>{};
                     const auto publishedVisibilityReady = published &&
                         std::ranges::any_of(published->drawRecords.dependencyClosure,
                             [](const br::render::ArtifactSnapshot& dependency) {
@@ -3440,7 +3539,7 @@ void Renderer::Update(float elapsedSeconds) {
                     // and other startup rows exist. Static admission initializes
                     // the generation table; this is also the signal that the
                     // captured active lists can validate real static eligibility.
-                    if (publishedVisibilityReady && !visibilityGenerations.empty()) {
+                    if (publishedVisibilityReady) {
                         captureFragment("draw-records", published->drawRecords, false, true);
                         captureFragment("active-lists", published->activeDrawLists);
                         // Indirect publication retains the exact active-list and
@@ -3449,62 +3548,6 @@ void Renderer::Update(float elapsedSeconds) {
                         // when the catalog-only active-list fragment has no local
                         // payload.
                         captureFragment("indirect-closure", published->indirectWorkloads, true);
-
-                        // Active-list entries are accepted by the culling shader
-                        // only when their generation matches this sidecar.  It is
-                        // still on the legacy upload path, so validate the other
-                        // half of that ABI explicitly while the cutover is in
-                        // progress; byte-correct graph buffers alone cannot prove
-                        // that any static draw is eligible.
-                        if (m_pObjectManager) {
-                            const auto& sidecar =
-                                m_pObjectManager->GetDrawRecordVisibilityGenerationBuffer();
-                            const auto generations = visibilityGenerations;
-                            if (sidecar && !generations.empty()) {
-                                auto expected = std::make_shared<std::vector<std::byte>>(
-                                    generations.size_bytes());
-                                std::memcpy(expected->data(), generations.data(),
-                                    generations.size_bytes());
-                                auto capturePath = basePath;
-                                capturePath += std::filesystem::path(fmt::format(
-                                    ".visibility-generations.{}.bin", captureIndex++));
-                                const auto resourceID = sidecar->GetGlobalResourceID();
-                                readbackService->RequestReadbackCapture(
-                                    "MenuRenderPass", sidecar.get(), RangeSpec{},
-                                    [capturePath, expected, resourceID]
-                                    (ReadbackCaptureResult&& result) {
-                                        std::ofstream output(capturePath,
-                                            std::ios::binary | std::ios::trunc);
-                                        if (output && !result.data.empty()) {
-                                            output.write(
-                                                reinterpret_cast<const char*>(result.data.data()),
-                                                static_cast<std::streamsize>(result.data.size()));
-                                        }
-                                        auto expectedPath = capturePath;
-                                        expectedPath += L".expected";
-                                        std::ofstream expectedOutput(expectedPath,
-                                            std::ios::binary | std::ios::trunc);
-                                        if (expectedOutput && !expected->empty()) {
-                                            expectedOutput.write(
-                                                reinterpret_cast<const char*>(expected->data()),
-                                                static_cast<std::streamsize>(expected->size()));
-                                        }
-                                        const auto comparedBytes =
-                                            (std::min)(result.data.size(), expected->size());
-                                        const bool exactPrefix = result.data.size() >= expected->size() &&
-                                            std::equal(expected->begin(), expected->end(),
-                                                result.data.begin());
-                                        basic_telemetry::Record(
-                                            exactPrefix
-                                                ? "SARP.GraphReadback.VisibilityGeneration.Match"
-                                                : "SARP.GraphReadback.VisibilityGeneration.Mismatch", 1u);
-                                        spdlog::info(
-                                            "Visibility-generation GPU readback: resource={} gpuBytes={} expectedBytes={} exactPrefix={} output='{}'.",
-                                            resourceID, result.data.size(), expected->size(), exactPrefix,
-                                            capturePath.string());
-                                    });
-                            }
-                        }
                         objectBufferReadbackRequested = captureIndex != 0;
                         basic_telemetry::SetGauge(
                             "SARP.GraphReadback.ObjectBuffer.Requested",

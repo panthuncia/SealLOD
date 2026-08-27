@@ -200,19 +200,26 @@ std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferShadow(
 
 namespace {
 
-std::shared_ptr<const GpuDependencyToken> TokenForTicket(
+std::shared_ptr<const GpuSubmissionSet> TokenForTicket(
     const std::shared_ptr<org::TrackedUploadTicket>& ticket) {
     if (!ticket) return {};
-    auto token = std::make_shared<GpuDependencyToken>();
+    auto token = std::make_shared<GpuSubmissionSet>();
+    GpuQueueSubmission submission;
+    {
+        std::lock_guard lock(ticket->timelineMutex);
+        submission.timelineOwner = ticket->timelineOwner;
+        submission.value = ticket->timelineValue;
+    }
     token->isComplete = [ticket] { return ticket->Complete(); };
-    token->currentTimelineOwner = [ticket] {
+    submission.currentTimelineOwner = [ticket] {
         std::lock_guard lock(ticket->timelineMutex);
         return ticket->timelineOwner;
     };
-    token->currentValue = [ticket] {
+    submission.currentValue = [ticket] {
         std::lock_guard lock(ticket->timelineMutex);
         return ticket->timelineValue;
     };
+	token->submissions.push_back(std::move(submission));
 	token->describe = [ticket] {
 		const auto state = ticket->state.load(std::memory_order_acquire);
 		std::lock_guard lock(ticket->timelineMutex);
@@ -233,14 +240,32 @@ std::shared_ptr<const GpuDependencyToken> TokenForTicket(
     return token;
 }
 
-std::shared_ptr<const GpuDependencyToken> TokenForTickets(
+std::shared_ptr<const GpuSubmissionSet> TokenForTickets(
     std::vector<std::shared_ptr<org::TrackedUploadTicket>> tickets) {
     std::erase(tickets, nullptr);
     if (tickets.empty()) return {};
     if (tickets.size() == 1) return TokenForTicket(tickets.front());
-    auto token = std::make_shared<GpuDependencyToken>();
+    auto token = std::make_shared<GpuSubmissionSet>();
     auto shared = std::make_shared<const std::vector<std::shared_ptr<org::TrackedUploadTicket>>>(
         std::move(tickets));
+    token->submissions.reserve(shared->size());
+    for (const auto& ticket : *shared) {
+        GpuQueueSubmission submission;
+        {
+            std::lock_guard lock(ticket->timelineMutex);
+            submission.timelineOwner = ticket->timelineOwner;
+            submission.value = ticket->timelineValue;
+        }
+        submission.currentTimelineOwner = [ticket] {
+            std::lock_guard lock(ticket->timelineMutex);
+            return ticket->timelineOwner;
+        };
+        submission.currentValue = [ticket] {
+            std::lock_guard lock(ticket->timelineMutex);
+            return ticket->timelineValue;
+        };
+        token->submissions.push_back(std::move(submission));
+    }
     token->isComplete = [shared] {
         return std::ranges::all_of(*shared, [](const auto& ticket) { return ticket->Complete(); });
     };

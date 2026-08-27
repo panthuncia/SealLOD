@@ -98,7 +98,7 @@ void RendererStateRequestService::RequestManifest() {
         ++m_manifestRevision;
     }
     (void)m_graph.Request({ ArtifactKind::FrameManifest, 0, 0 }, m_manifestRevision, {},
-        ArtifactPayload::Make<ManifestInput>(std::move(input)));
+        ArtifactPayload::Make<ManifestInput>(std::move(input)), m_manifestRevision);
 }
 
 ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBuildContext& context) {
@@ -223,9 +223,46 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
     }
     if (!coherent(*state)) return ArtifactBuildResult::Failure("manifest dependency closure changed during build");
     state->resourceCatalog = std::move(catalog);
+    auto patch = std::make_shared<PublishedStatePatch>();
+    patch->sourceEpoch = input->baseEpoch;
+    std::uint64_t selectedMask = 0;
+    for (std::size_t index = 0; index < selected.size(); ++index) {
+        if (!selected[index]) continue;
+        const auto kind = static_cast<PublishedFragmentKind>(index);
+        const auto artifact = selected[index]->payload.Get<RendererStateFragmentArtifact>();
+        auto fragment = artifact->fragment;
+        fragment.publicationRoot = selected[index]->key;
+        patch->fragments[index] = std::move(fragment);
+        selectedMask |= PublishedFragmentMask(kind);
+        patch->catalogOwnerMask |= artifact->catalogOwnerMask != 0
+            ? artifact->catalogOwnerMask : PublishedFragmentMask(kind);
+        patch->catalogEntries.insert(patch->catalogEntries.end(),
+            artifact->catalogEntries.begin(), artifact->catalogEntries.end());
+    }
+    // Only unchanged fragments whose exact closure mentions a replaced slot
+    // constrain rebasing. Completely independent fragments may advance while
+    // this manifest is being built.
+    if (input->base) {
+        for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+            const auto kind = static_cast<PublishedFragmentKind>(index);
+            if ((selectedMask & PublishedFragmentMask(kind)) != 0) continue;
+            const auto& fragment = input->base->Fragment(kind);
+            const bool observesReplacement = std::ranges::any_of(
+                fragment.dependencyClosure, [&](const ArtifactSnapshot& dependency) {
+                    const auto root = dependency.payload.Get<RendererStateFragmentArtifact>();
+                    return root && root->publishRoot &&
+                        (selectedMask & PublishedFragmentMask(root->kind)) != 0;
+                });
+            if (observesReplacement) {
+                patch->preconditions.push_back(
+                    { kind, fragment.publicationRoot, fragment.revision });
+            }
+        }
+    }
     auto manifest = std::make_shared<FrameManifestPayload>();
     manifest->baseEpoch = input->baseEpoch;
     manifest->state = std::move(state);
+    manifest->patch = std::move(patch);
     return ArtifactBuildResult::Ready(ArtifactPayload::Make<FrameManifestPayload>(std::move(manifest)));
 }
 

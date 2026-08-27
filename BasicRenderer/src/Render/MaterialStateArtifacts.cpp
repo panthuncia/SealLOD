@@ -5,6 +5,7 @@
 #include "Render/TextureBindingArtifacts.h"
 #include "Resources/GloballyIndexedResource.h"
 #include "Resources/PixelBuffer.h"
+#include "Managers/MaterialManager.h"
 
 #include <unordered_map>
 
@@ -87,6 +88,26 @@ void RegisterMaterialStateProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::MaterialTable, {
         TaskLane::Streaming, TaskDomain::TextureProcessing,
         "MaterialStateArtifact::Build", BuildMaterialState });
+}
+
+void RegisterMaterialUsageBatchProducer(AsyncStateGraph& graph, MaterialManager& manager) {
+    graph.RegisterProducer(ArtifactKind::MaterialUsageBatch, {
+        TaskLane::Streaming, TaskDomain::TextureProcessing,
+        "MaterialStateArtifact::AdmitUsageBatch",
+        [&manager](const ArtifactBuildContext& context) {
+            const auto input = context.input.Get<MaterialUsageBatchBuildInput>();
+            if (!input) return ArtifactBuildResult::Failure(
+                "material usage batch immutable input missing");
+            if (context.stopRequested && context.stopRequested()) {
+                return ArtifactBuildResult::Cancelled();
+            }
+            auto result = manager.ApplyMaterialUsageBatch(*input);
+            return result
+                ? ArtifactBuildResult::Ready(
+                    ArtifactPayload::Make<PublishedMaterialUsageBatch>(std::move(result)))
+                : ArtifactBuildResult::Failure("material usage batch admission failed");
+        }
+    });
 }
 
 } // namespace br::render

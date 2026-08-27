@@ -21,6 +21,17 @@ public:
     bool Invalidate(ArtifactKey key, std::uint64_t revision);
     void Cancel(ArtifactKey key);
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;
+    [[nodiscard]] AsyncStateGraphStats Stats() const { return m_graph.Stats(); }
+    [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const {
+        return m_graph.Outstanding(kind);
+    }
+    [[nodiscard]] std::uint64_t SubscribeReady(
+        std::function<void(const ArtifactSnapshot&)> callback) {
+        return m_graph.AddReadyCallback(std::move(callback));
+    }
+    void UnsubscribeReady(std::uint64_t subscription) {
+        m_graph.RemoveReadyCallback(subscription);
+    }
     void Stop();
 
     // Scheduler-boundary callback. Public so Renderer can wire it without

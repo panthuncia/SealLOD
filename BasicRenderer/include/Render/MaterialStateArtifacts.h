@@ -9,6 +9,9 @@
 #include "Materials/TechniqueDescriptor.h"
 #include "ShaderBuffers.h"
 
+class Material;
+class MaterialManager;
+class TextureFactory;
 
 namespace br::render {
 
@@ -58,6 +61,23 @@ struct PublishedMaterialState {
     std::vector<std::shared_ptr<const PublishedTextureBinding>> textureBindings;
 };
 
+struct MaterialUsageBatchEntry {
+    std::shared_ptr<Material> material;
+    std::uint32_t count = 0;
+};
+
+struct MaterialUsageBatchBuildInput {
+    std::uint64_t sourceFingerprint = 0;
+    TextureFactory* textureFactory = nullptr;
+    std::vector<MaterialUsageBatchEntry> entries;
+};
+
+struct PublishedMaterialUsageBatch {
+    std::uint64_t sourceFingerprint = 0;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> materialSlots;
+};
+
 void RegisterMaterialStateProducer(AsyncStateGraph& graph);
+void RegisterMaterialUsageBatchProducer(AsyncStateGraph& graph, MaterialManager& manager);
 
 } // namespace br::render

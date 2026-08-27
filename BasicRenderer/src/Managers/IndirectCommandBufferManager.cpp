@@ -246,12 +246,14 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
     input->workloads.reserve(snapshot.requestedCounts.size());
 
     std::vector<br::render::ArtifactRequirement> requirements;
-    // Do not publish graph-backed visibility against the empty startup
-    // material fragment. The current publisher cannot yet retain a rapidly
-    // advancing material root in every indirect closure without starving the
-    // independently publishable material fragment, so active-material
-    // readiness is an ordering gate here rather than a graph dependency.
     if (snapshot.activeMaterialRevision == 0) return;
+    requirements.push_back({
+        { br::render::ArtifactKind::MaterialTable, 0, 0 },
+        snapshot.activeMaterialRevision,
+        br::render::ArtifactReadiness::UploadSubmitted,
+        br::render::DependencyPolicy::AllOf,
+        0,
+        br::render::DependencyInvalidationPolicy::ReadyGate });
     if (br::render::GraphActive(br::render::kObjectBufferGraphMigrationMode) &&
         !snapshot.objectBufferRequirement) return;
     if (snapshot.objectBufferRequirement) requirements.push_back(*snapshot.objectBufferRequirement);
@@ -263,9 +265,12 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
             br::render::ViewLifetimeArtifact{ viewID, lifetimeRevision });
         (void)m_rendererStateRequests->Request(lifetimeKey, lifetimeRevision, {},
             br::render::ArtifactPayload::Make<br::render::ViewLifetimeArtifact>(
-                std::move(lifetime)));
+                std::move(lifetime)),
+            (viewID << 1u) ^ lifetimeRevision ^ 0x564945574c494645ull);
         requirements.push_back({
-            lifetimeKey, lifetimeRevision, br::render::ArtifactReadiness::GpuReady });
+            lifetimeKey, lifetimeRevision, br::render::ArtifactReadiness::GpuReady,
+            br::render::DependencyPolicy::AllOf, 0,
+            br::render::DependencyInvalidationPolicy::ReadyGate });
     }
 
     std::uint64_t sourceEntryCount = 0;
@@ -338,9 +343,13 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
         const auto activeRevision = (std::max<std::uint64_t>)(journal.revision, 1u);
         (void)m_rendererStateRequests->Request(dto.activeListArtifactKey, activeRevision, {},
             br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
-                std::move(activeInput)));
+                std::move(activeInput)),
+            (activeRevision << 1u) ^ idFound->second ^ 0x414354495645ull);
         requirements.push_back({
-            dto.activeListArtifactKey, activeRevision, br::render::ArtifactReadiness::GpuReady });
+            dto.activeListArtifactKey, activeRevision,
+            br::render::ArtifactReadiness::UploadSubmitted,
+            br::render::DependencyPolicy::AllOf, 0,
+            br::render::DependencyInvalidationPolicy::ExactSnapshot });
 
         const auto safeCount = static_cast<unsigned int>((std::min<std::uint64_t>)({
             requestedCount, entries.size(), dto.residentDrawRecordCount }));
@@ -375,9 +384,13 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
                 (void)m_rendererStateRequests->Request(
                     argumentKey, argumentRevision, {},
                     br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
-                        std::move(argumentInput)));
+                        std::move(argumentInput)),
+                    (argumentRevision << 1u) ^ idFound->second ^ viewID ^ 0x415247554d454e54ull);
                 requirements.push_back({
-                    argumentKey, argumentRevision, br::render::ArtifactReadiness::GpuReady });
+                    argumentKey, argumentRevision,
+                    br::render::ArtifactReadiness::UploadSubmitted,
+                    br::render::DependencyPolicy::AllOf, 0,
+                    br::render::DependencyInvalidationPolicy::ExactSnapshot });
                 dto.argumentArtifacts.push_back({ viewID, argumentKey });
             }
         }

@@ -24,6 +24,7 @@ enum class ArtifactKind : std::uint16_t {
     TextureBinding,
     Material,
     MaterialTable,
+    MaterialUsageBatch,
     Mesh,
     MeshTable,
     DrawRecordPage,
@@ -62,7 +63,17 @@ enum class ArtifactReadiness : std::uint8_t {
     Failed,
 };
 
+// How a requirement participates in dependency selection.
 enum class DependencyPolicy : std::uint8_t { AllOf, AnyOf, Optional, FallbackAllowed };
+
+// How a dependency changing after it has been selected affects its consumer.
+// Latest preserves the original graph behaviour and is therefore the default.
+enum class DependencyInvalidationPolicy : std::uint8_t {
+    ExactSnapshot,
+    Latest,
+    ReadyGate,
+    LifetimeHold,
+};
 
 struct ArtifactRequirement {
     ArtifactKey key;
@@ -71,6 +82,8 @@ struct ArtifactRequirement {
     DependencyPolicy policy = DependencyPolicy::AllOf;
     // Non-zero AnyOf requirements sharing a group form one alternative set.
     std::uint32_t alternativeGroup = 0;
+    DependencyInvalidationPolicy invalidation = DependencyInvalidationPolicy::Latest;
+    auto operator<=>(const ArtifactRequirement&) const = default;
 };
 
 struct HandleRequirement {
@@ -116,28 +129,39 @@ struct ArtifactSnapshot {
     std::uint64_t generation = 0;
     ArtifactReadiness readiness = ArtifactReadiness::Missing;
     ArtifactPayload payload;
-    std::shared_ptr<const struct GpuDependencyToken> gpuDependency;
+    std::shared_ptr<const struct GpuSubmissionSet> gpuSubmissions;
 };
 
-struct GpuDependencyToken {
-    // Kept opaque in v1 so producers can retain timeline ownership without the
-    // state graph depending on a particular RHI backend. Future ORG publication
-    // may propagate the same token as an external queue wait.
+struct GpuQueueSubmission {
     std::shared_ptr<const void> timelineOwner;
     std::uint64_t value = 0;
-    std::function<bool()> isComplete;
     std::function<std::shared_ptr<const void>()> currentTimelineOwner;
     std::function<std::uint64_t()> currentValue;
-    std::function<std::string()> describe;
-    std::function<void(std::function<void()>)> subscribe;
-    std::function<bool()> cancel;
 
-    [[nodiscard]] bool Complete() const { return !isComplete || isComplete(); }
     [[nodiscard]] std::shared_ptr<const void> TimelineOwner() const {
         return currentTimelineOwner ? currentTimelineOwner() : timelineOwner;
     }
     [[nodiscard]] std::uint64_t TimelineValue() const {
         return currentValue ? currentValue() : value;
+    }
+};
+
+struct GpuSubmissionSet {
+    // Queue timeline/value pairs are intentionally backend-opaque. Published
+    // manifests can forward these to ORG without waiting on the CPU.
+    std::vector<GpuQueueSubmission> submissions;
+    std::function<bool()> isComplete;
+    std::function<std::string()> describe;
+    std::function<void(std::function<void()>)> subscribe;
+    std::function<bool()> cancel;
+
+    [[nodiscard]] bool Complete() const { return !isComplete || isComplete(); }
+    [[nodiscard]] std::uint64_t MaximumTimelineValue() const {
+        std::uint64_t result = 0;
+        for (const auto& submission : submissions) {
+            result = (std::max)(result, submission.TimelineValue());
+        }
+        return result;
     }
 	[[nodiscard]] std::string Describe() const { return describe ? describe() : std::string{}; }
     [[nodiscard]] bool Cancel() const { return cancel && cancel(); }
@@ -150,7 +174,7 @@ struct ArtifactHandle {
     std::uint64_t generation = 0;
     ArtifactReadiness readiness = ArtifactReadiness::Missing;
     std::shared_ptr<const T> payload;
-    std::shared_ptr<const GpuDependencyToken> gpuDependency;
+    std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return static_cast<bool>(payload);
@@ -160,10 +184,10 @@ struct ArtifactHandle {
 template <class T>
 [[nodiscard]] ArtifactHandle<T> MakeArtifactHandle(const ArtifactSnapshot& snapshot) {
     return { snapshot.key, snapshot.revision, snapshot.generation, snapshot.readiness,
-        snapshot.payload.Get<T>(), snapshot.gpuDependency };
+        snapshot.payload.Get<T>(), snapshot.gpuSubmissions };
 }
 
-std::shared_ptr<const GpuDependencyToken> MakeGpuDependencyToken(
+std::shared_ptr<const GpuSubmissionSet> MakeGpuSubmissionSet(
     const std::shared_ptr<org::TrackedUploadTicket>& ticket);
 
 struct ArtifactBuildContext {
@@ -191,6 +215,7 @@ enum class ArtifactRequestStatus : std::uint8_t {
     AlreadyDesired,
     StaleRevision,
     ConflictingRevision,
+    MissingFingerprint,
     TypeMismatch,
     ShuttingDown,
 };
@@ -210,12 +235,12 @@ struct ArtifactBuildResult {
     ArtifactPayload payload;
     ArtifactPayload checkpoint;
     std::vector<ArtifactRequirement> requirements;
-    std::shared_ptr<const GpuDependencyToken> gpuDependency;
+    std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
     std::chrono::steady_clock::duration retryDelay{};
     std::string error;
 
     static ArtifactBuildResult Ready(ArtifactPayload payload,
-        std::shared_ptr<const GpuDependencyToken> gpuDependency = {});
+        std::shared_ptr<const GpuSubmissionSet> gpuSubmissions = {});
     static ArtifactBuildResult Needs(std::vector<ArtifactRequirement> requirements,
         ArtifactPayload checkpoint = {});
     static ArtifactBuildResult Retry(std::chrono::steady_clock::duration delay,
@@ -304,10 +329,14 @@ public:
     void MarkPublished(ArtifactKey key, std::uint64_t revision);
     void PumpGpuCompletions();
     void SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback);
+    [[nodiscard]] std::uint64_t AddReadyCallback(
+        std::function<void(const ArtifactSnapshot&)> callback);
+    void RemoveReadyCallback(std::uint64_t subscription);
 
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactKey key) const;
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;
     [[nodiscard]] AsyncStateGraphStats Stats() const;
+    [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const;
     void WaitIdle() const;
     void Shutdown();
 

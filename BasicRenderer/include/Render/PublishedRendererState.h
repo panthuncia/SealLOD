@@ -113,9 +113,25 @@ struct RendererStateCandidate {
     std::shared_ptr<const PublishedRendererState> state;
 };
 
+struct PublishedFragmentPrecondition {
+    PublishedFragmentKind kind = PublishedFragmentKind::Geometry;
+    ArtifactKey publicationRoot{};
+    std::uint64_t revision = 0;
+};
+
+struct PublishedStatePatch {
+    std::uint64_t sourceEpoch = 0;
+    std::array<std::optional<PublishedStateFragment>, kPublishedFragmentCount> fragments;
+    std::vector<PublishedFragmentPrecondition> preconditions;
+    std::uint64_t catalogOwnerMask = 0;
+    std::vector<std::pair<PublishedResourceKey,
+        std::shared_ptr<const PublishedResourceCatalog::ResourceList>>> catalogEntries;
+};
+
 struct FrameManifestPayload {
     std::uint64_t baseEpoch = 0;
     std::shared_ptr<const PublishedRendererState> state;
+    std::shared_ptr<const PublishedStatePatch> patch;
 };
 
 struct RendererStatePublisherStats {
@@ -123,6 +139,8 @@ struct RendererStatePublisherStats {
     std::uint64_t committed = 0;
     std::uint64_t replacedCandidates = 0;
     std::uint64_t rejectedBaseEpoch = 0;
+    std::uint64_t rebasedPatches = 0;
+    std::uint64_t rejectedPatchPreconditions = 0;
     std::uint64_t commitMicros = 0;
     std::size_t retainedFrameStates = 0;
 };
@@ -147,6 +165,7 @@ public:
 
     void Bootstrap(std::shared_ptr<const PublishedRendererState> fallback, std::size_t framesInFlight);
     bool PublishCandidate(RendererStateCandidate candidate);
+    bool PublishPatch(PublishedStatePatch patch);
     bool PublishArtifact(const ArtifactSnapshot& artifact);
 
     // Must be called after the frame slot fence has completed. This releases
@@ -164,6 +183,7 @@ public:
 private:
     mutable std::mutex m_mutex;
     RendererStateCandidate m_candidate;
+    std::vector<PublishedStatePatch> m_patches;
     std::shared_ptr<const PublishedRendererState> m_active;
     std::vector<std::shared_ptr<const PublishedRendererState>> m_frameStates;
     RendererStatePublisherStats m_stats;

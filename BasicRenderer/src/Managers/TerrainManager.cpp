@@ -1084,7 +1084,8 @@ void TerrainManager::RequestGraphState()
 		input->bytes.resize(values.size() * sizeof(Value));
 		if (!values.empty()) std::memcpy(input->bytes.data(), values.data(), input->bytes.size());
 		return requests->Request(key, m_terrainRowsRevision, {},
-			br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)));
+			br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)),
+			(m_terrainRowsRevision << 8u) ^ key.variantID);
 	};
 	const std::vector<TerrainSetGPU> sets{ m_desiredSet };
 	(void)requestBuffer(keys[0], "Published::Terrain::Sets", sets);
@@ -1113,19 +1114,25 @@ void TerrainManager::RequestGraphState()
 	std::vector<br::render::ArtifactRequirement> requirements;
 	requirements.reserve(keys.size() + bindings.size());
 	for (const auto& key : keys) {
-		requirements.push_back({ key, m_terrainRowsRevision, br::render::ArtifactReadiness::GpuReady });
+		requirements.push_back({ key, m_terrainRowsRevision,
+			br::render::ArtifactReadiness::UploadSubmitted,
+			br::render::DependencyPolicy::AllOf, 0,
+			br::render::DependencyInvalidationPolicy::ExactSnapshot });
 	}
 	for (const auto& [textureID, binding] : bindings) {
 		input->textureBindings.push_back(binding);
 		requirements.push_back({
 			{ br::render::ArtifactKind::TextureBinding, textureID, 0 },
-			binding.bindingRevision, br::render::ArtifactReadiness::GpuReady });
+			binding.bindingRevision, br::render::ArtifactReadiness::GpuReady,
+			br::render::DependencyPolicy::AllOf, 0,
+			br::render::DependencyInvalidationPolicy::LifetimeHold });
 	}
 	const auto stateRevision = input->stateRevision;
 	(void)requests->Request(
 		{ br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration },
 		stateRevision, std::move(requirements),
-		br::render::ArtifactPayload::Make<br::render::TerrainStateBuildInput>(std::move(input)));
+		br::render::ArtifactPayload::Make<br::render::TerrainStateBuildInput>(std::move(input)),
+		(stateRevision << 1u) ^ m_terrainGeneration ^ m_terrainRowsRevision ^ 0x5445525241494eull);
 	m_terrainGraphDirty = false;
 	m_terrainGraphRequestPending = true;
 	m_terrainGraphStableFrames = 0;
@@ -1147,14 +1154,7 @@ void TerrainManager::ProcessPendingUpdates()
 	}
 	if (!m_terrainGraphRequestPending && m_terrainGraphDirty &&
 		m_readyInitialBindingCount == m_initialBindingReady.size()) {
-		const auto source = br::render::PublishedStateSource::ProcessSource();
-		const auto published = source ? source->Load() : nullptr;
-		// Initial terrain uploads are deliberately sequenced after the first
-		// indirect workload. Both are multi-buffer copy transactions; allowing
-		// terrain to race initial scene publication can indefinitely supersede the
-		// workload which makes already-imported static draws visible.
-		if (published && published->indirectWorkloads.revision != 0 &&
-			++m_terrainGraphStableFrames >= 30u) RequestGraphState();
+		RequestGraphState();
 	}
 }
 

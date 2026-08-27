@@ -116,6 +116,7 @@ void RendererStatePublisher::Bootstrap(std::shared_ptr<const PublishedRendererSt
     std::size_t framesInFlight) {
     std::lock_guard lock(m_mutex);
     m_candidate = {};
+    m_patches.clear();
     m_active = fallback ? std::move(fallback) : std::make_shared<PublishedRendererState>();
     m_source->Store(m_active);
     m_frameStates.assign(framesInFlight, {});
@@ -137,14 +138,35 @@ bool RendererStatePublisher::PublishCandidate(RendererStateCandidate candidate) 
     return true;
 }
 
+bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
+    const bool hasFragment = std::ranges::any_of(patch.fragments,
+        [](const auto& fragment) { return fragment.has_value(); });
+    if (!hasFragment) return false;
+    std::lock_guard lock(m_mutex);
+    ++m_stats.candidates;
+    // A newer patch for the same fragment supersedes pending work for that
+    // fragment, while disjoint patches remain independently commit-able.
+    std::erase_if(m_patches, [&](const PublishedStatePatch& pending) {
+        for (std::size_t index = 0; index < patch.fragments.size(); ++index) {
+            if (patch.fragments[index] && pending.fragments[index]) return true;
+        }
+        return false;
+    });
+    m_patches.push_back(std::move(patch));
+    return true;
+}
+
 bool RendererStatePublisher::PublishArtifact(const ArtifactSnapshot& artifact) {
     if (!artifact.payload.Valid() ||
-        (artifact.readiness != ArtifactReadiness::GpuReady && artifact.readiness != ArtifactReadiness::Published)) {
+        (artifact.readiness != ArtifactReadiness::UploadSubmitted &&
+         artifact.readiness != ArtifactReadiness::GpuReady &&
+         artifact.readiness != ArtifactReadiness::Published)) {
         return false;
     }
     if (artifact.key.kind != ArtifactKind::FrameManifest) return false;
     const auto manifest = artifact.payload.Get<FrameManifestPayload>();
     if (!manifest || !manifest->state) return false;
+    if (manifest->patch) return PublishPatch(*manifest->patch);
     const auto baseEpoch = manifest->baseEpoch;
     auto state = std::make_shared<PublishedRendererState>(*manifest->state);
     state->epoch = baseEpoch + 1u;
@@ -200,6 +222,56 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         }
         m_candidate.baseEpoch = 0;
     }
+    if (!m_patches.empty()) {
+        auto patched = m_active ? std::make_shared<PublishedRendererState>(*m_active)
+                                : std::make_shared<PublishedRendererState>();
+        bool changed = false;
+        for (const auto& patch : m_patches) {
+            const bool preconditionsSatisfied = std::ranges::all_of(
+                patch.preconditions, [&](const PublishedFragmentPrecondition& precondition) {
+                    const auto& active = patched->Fragment(precondition.kind);
+                    return active.publicationRoot == precondition.publicationRoot &&
+                        active.revision == precondition.revision;
+                });
+            if (!preconditionsSatisfied) {
+                ++m_stats.rejectedPatchPreconditions;
+                result.rejectedCallback = m_candidateRejected;
+                result.rejectedEpoch = patched->epoch;
+                continue;
+            }
+            if (patch.sourceEpoch != patched->epoch) ++m_stats.rebasedPatches;
+            for (std::size_t index = 0; index < patch.fragments.size(); ++index) {
+                if (patch.fragments[index]) {
+                    patched->Fragment(static_cast<PublishedFragmentKind>(index)) =
+                        *patch.fragments[index];
+                    changed = true;
+                }
+            }
+            auto catalog = patched->resourceCatalog
+                ? std::make_shared<PublishedResourceCatalog>(*patched->resourceCatalog)
+                : std::make_shared<PublishedResourceCatalog>();
+            for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
+                if ((patch.catalogOwnerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
+                    catalog->contentVersions.erase(entry->first);
+                    entry = catalog->entries.erase(entry);
+                } else ++entry;
+            }
+            for (const auto& [key, resources] : patch.catalogEntries) {
+                catalog->entries[key] = resources;
+                catalog->contentVersions[key] =
+                    patched->Fragment(key.owner).revision;
+            }
+            patched->resourceCatalog = std::move(catalog);
+        }
+        m_patches.clear();
+        if (changed) {
+            patched->epoch = (m_active ? m_active->epoch : 0u) + 1u;
+            if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
+            m_active = std::move(patched);
+            result.committed = true;
+            ++m_stats.committed;
+        }
+    }
     m_frameStates[frameSlot] = m_active;
     if (m_active) ++m_stats.retainedFrameStates;
     m_stats.commitMicros = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -227,6 +299,7 @@ void RendererStatePublisher::ReleaseFrameSlot(std::size_t frameSlot) {
 void RendererStatePublisher::DiscardCandidate() {
     std::unique_lock lock(m_mutex);
     auto retired = std::move(m_candidate.state);
+    m_patches.clear();
     m_candidate.baseEpoch = 0;
     lock.unlock();
     retired.reset();

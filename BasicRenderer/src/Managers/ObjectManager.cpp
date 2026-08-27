@@ -359,14 +359,17 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 			input->writes = capture.writes;
 			input->bytes = capture.initialBytes;
 			if (m_rendererStateRequests->Request(binding.key, revision, {},
-				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)))) {
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)),
+				(revision << 8u) ^ binding.catalogVariant)) {
 				binding.submittedRevision = revision;
 			}
 		}
 		rootInput->buffers.push_back({ binding.key, revision,
 			binding.elementStride, binding.catalogVariant });
 		requirements.push_back({ binding.key, revision,
-			br::render::ArtifactReadiness::GpuReady });
+			br::render::ArtifactReadiness::UploadSubmitted,
+			br::render::DependencyPolicy::AllOf, 0,
+			br::render::DependencyInvalidationPolicy::ExactSnapshot });
 	}
 	// The culling shader consumes generation[N] together with draw-record N and
 	// each active-list entry. Publish that sidecar in the same DrawRecords root;
@@ -405,21 +408,25 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 		}
 		if (m_rendererStateRequests->Request(visibilityKey, visibilityRevision, {},
 			br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
-				std::move(input)))) {
+				std::move(input)),
+			(visibilityRevision << 8u) ^ br::render::kObjectVisibilityGenerationVariant)) {
 			m_visibilityGenerationSubmittedRevision = visibilityRevision;
 		}
 	}
 	rootInput->buffers.push_back({ visibilityKey, visibilityRevision,
 		sizeof(std::uint32_t), br::render::kObjectVisibilityGenerationVariant });
 	requirements.push_back({ visibilityKey, visibilityRevision,
-		br::render::ArtifactReadiness::GpuReady });
+		br::render::ArtifactReadiness::UploadSubmitted,
+		br::render::DependencyPolicy::AllOf, 0,
+		br::render::DependencyInvalidationPolicy::ExactSnapshot });
 	if (fingerprint != m_objectBufferFingerprint) {
 		m_objectBufferFingerprint = fingerprint;
 		++m_objectBufferStateRevision;
 		(void)m_rendererStateRequests->Request(
 			{ br::render::ArtifactKind::DrawRecordPage, 0, 0 },
 			m_objectBufferStateRevision, std::move(requirements),
-			br::render::ArtifactPayload::Make<br::render::ObjectBufferStateBuildInput>(std::move(rootInput)));
+			br::render::ArtifactPayload::Make<br::render::ObjectBufferStateBuildInput>(std::move(rootInput)),
+			fingerprint == 0 ? 1u : fingerprint);
 		m_objectBufferDiagnosticTicks = 0;
 	} else if (++m_objectBufferDiagnosticTicks >= 120u) {
 		m_objectBufferDiagnosticTicks = 0;
@@ -452,7 +459,9 @@ std::optional<br::render::ArtifactRequirement> ObjectManager::DesiredBufferState
 	if (m_objectBufferStateRevision == 0) return std::nullopt;
 	return br::render::ArtifactRequirement{
 		{ br::render::ArtifactKind::DrawRecordPage, 0, 0 },
-		m_objectBufferStateRevision, br::render::ArtifactReadiness::GpuReady };
+		m_objectBufferStateRevision, br::render::ArtifactReadiness::UploadSubmitted,
+		br::render::DependencyPolicy::AllOf, 0,
+		br::render::DependencyInvalidationPolicy::ExactSnapshot };
 }
 
 void ObjectManager::AcknowledgePublishedBufferState(

@@ -1069,7 +1069,9 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 				change.graphRequested = m_rendererStateRequests->Request(
 					bindingKey, change.bindingRevision, {},
 					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
-						std::move(input)));
+						std::move(input)),
+					(change.bindingRevision << 1u) ^ change.streamingStateRevision ^
+						change.streamingTextureID ^ 0x54455842494e44ull);
 			}
 			const auto diagnostic = m_rendererStateRequests->Diagnose(bindingKey);
 			if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||

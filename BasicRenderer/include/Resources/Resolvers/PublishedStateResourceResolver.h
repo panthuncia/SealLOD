@@ -53,6 +53,34 @@ public:
         return (entryVersion << 2u) ^ (fallbackGeneration << 1u) ^ selectionGeneration;
     }
 
+    std::vector<org::ExternalTimelinePoint> GetExternalTimelineWaits() const override {
+        std::vector<org::ExternalTimelinePoint> waits;
+        if (m_selection && !m_selection->publishedEnabled.load(std::memory_order_acquire)) return waits;
+        const auto state = m_source ? m_source->Load() : nullptr;
+        if (!state) return waits;
+        const auto appendFragment = [&](const br::render::PublishedStateFragment& fragment) {
+            for (const auto& dependency : fragment.dependencyClosure) {
+                if (!dependency.gpuSubmissions || dependency.gpuSubmissions->Complete()) continue;
+                for (const auto& submission : dependency.gpuSubmissions->submissions) {
+                    const auto owner = std::static_pointer_cast<const rhi::TimelinePtr>(
+                        submission.TimelineOwner());
+                    if (!owner || !*owner) continue;
+                    waits.push_back({ owner->Get(), submission.TimelineValue() });
+                }
+            }
+        };
+        if (m_exact) {
+            appendFragment(state->Fragment(m_key.owner));
+        } else if (m_query.owner) {
+            appendFragment(state->Fragment(*m_query.owner));
+        } else {
+            for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
+                appendFragment(state->Fragment(static_cast<br::render::PublishedFragmentKind>(index)));
+            }
+        }
+        return waits;
+    }
+
     void SetPublishedEnabled(bool enabled) noexcept {
         if (!m_selection) return;
         const bool previous = m_selection->publishedEnabled.exchange(enabled, std::memory_order_acq_rel);
