@@ -531,7 +531,7 @@ private:
 		br::render::ArtifactKey key;
 		std::uint64_t catalogVariant = 0;
 		std::uint32_t elementStride = 0;
-		std::uint64_t submittedRevision = 0;
+		br::render::ArtifactVersionID submittedVersion{};
 		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
 	};
 
@@ -607,12 +607,13 @@ private:
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	org::runtime::IUploadService* m_uploadService = nullptr;
 	std::uint64_t m_objectBufferStateRevision = 0;
+	br::render::ArtifactVersionID m_objectBufferStateVersion{};
 	std::atomic<std::uint64_t> m_activeObjectBufferStateRevision{ 0 };
 	std::uint64_t m_objectBufferFingerprint = 0;
 	std::atomic_bool m_objectBufferGraphDirty{ true };
 	std::uint32_t m_objectBufferDiagnosticTicks = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
-	std::uint64_t m_visibilityGenerationSubmittedRevision = 0;
+	br::render::ArtifactVersionID m_visibilityGenerationSubmittedVersion{};
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_visibilityGenerationBackingPool;
 	std::shared_ptr<const br::render::PublishedGpuBufferVersion> m_visibilityGenerationPrevious;
 	std::uint64_t m_nextStaticImportTransactionID = 1;

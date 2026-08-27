@@ -269,13 +269,9 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
 
     std::vector<br::render::ArtifactRequirement> requirements;
     if (snapshot.activeMaterialRevision == 0) return;
-    requirements.push_back({
-        { br::render::ArtifactKind::MaterialTable, 0, 0 },
-        snapshot.activeMaterialRevision,
-        br::render::ArtifactReadiness::UploadSubmitted,
-        br::render::DependencyPolicy::AllOf,
-        0,
-        br::render::DependencyInvalidationPolicy::ReadyGate });
+    requirements.push_back(br::render::ReadyGate(
+        br::render::ArtifactAddress{ br::render::ArtifactKind::MaterialTable, 0, 0 },
+        br::render::ArtifactReadiness::UploadSubmitted));
     if (br::render::GraphActive(br::render::kObjectBufferGraphMigrationMode) &&
         !snapshot.objectBufferRequirement) return;
     if (snapshot.objectBufferRequirement) requirements.push_back(*snapshot.objectBufferRequirement);
@@ -285,14 +281,14 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
             br::render::ArtifactKind::ViewLifetime, viewID, 0 };
         auto lifetime = std::make_shared<br::render::ViewLifetimeArtifact>(
             br::render::ViewLifetimeArtifact{ viewID, lifetimeRevision });
-        (void)m_rendererStateRequests->Request(lifetimeKey, lifetimeRevision, {},
+        const auto lifetimeRequest = m_rendererStateRequests->Request(
+            lifetimeKey, lifetimeRevision, {},
             br::render::ArtifactPayload::Make<br::render::ViewLifetimeArtifact>(
                 std::move(lifetime)),
             (viewID << 1u) ^ lifetimeRevision ^ 0x564945574c494645ull);
-        requirements.push_back({
-            lifetimeKey, lifetimeRevision, br::render::ArtifactReadiness::GpuReady,
-            br::render::DependencyPolicy::AllOf, 0,
-            br::render::DependencyInvalidationPolicy::ReadyGate });
+        if (!lifetimeRequest) return;
+        requirements.push_back(br::render::ReadyGate(
+            lifetimeRequest.version, br::render::ArtifactReadiness::GpuReady));
     }
 
     std::uint64_t sourceEntryCount = 0;
@@ -363,15 +359,14 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
             std::memcpy(activeInput->bytes.data(), entries.data(), activeInput->bytes.size());
         }
         const auto activeRevision = (std::max<std::uint64_t>)(journal.revision, 1u);
-        (void)m_rendererStateRequests->Request(dto.activeListArtifactKey, activeRevision, {},
+        const auto activeListRequest = m_rendererStateRequests->Request(
+            dto.activeListArtifactKey, activeRevision, {},
             br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
                 std::move(activeInput)),
             (activeRevision << 1u) ^ idFound->second ^ 0x414354495645ull);
-        requirements.push_back({
-            dto.activeListArtifactKey, activeRevision,
-            br::render::ArtifactReadiness::UploadSubmitted,
-            br::render::DependencyPolicy::AllOf, 0,
-            br::render::DependencyInvalidationPolicy::ExactSnapshot });
+        if (!activeListRequest) return;
+        requirements.push_back(br::render::Exact(
+            activeListRequest.version, br::render::ArtifactReadiness::UploadSubmitted));
 
         const auto safeCount = static_cast<unsigned int>((std::min<std::uint64_t>)({
             requestedCount, entries.size(), dto.residentDrawRecordCount }));
@@ -403,16 +398,14 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
                     static_cast<std::uint64_t>(key.compileFlags) |
                     (static_cast<std::uint64_t>(key.skinnedShadowCaster) << 62u) |
                     (static_cast<std::uint64_t>(key.clodOnly) << 63u);
-                (void)m_rendererStateRequests->Request(
+                const auto argumentRequest = m_rendererStateRequests->Request(
                     argumentKey, argumentRevision, {},
                     br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
                         std::move(argumentInput)),
                     (argumentRevision << 1u) ^ idFound->second ^ viewID ^ 0x415247554d454e54ull);
-                requirements.push_back({
-                    argumentKey, argumentRevision,
-                    br::render::ArtifactReadiness::UploadSubmitted,
-                    br::render::DependencyPolicy::AllOf, 0,
-                    br::render::DependencyInvalidationPolicy::ExactSnapshot });
+                if (!argumentRequest) return;
+                requirements.push_back(br::render::Exact(
+                    argumentRequest.version, br::render::ArtifactReadiness::UploadSubmitted));
                 dto.argumentArtifacts.push_back({ viewID, argumentKey });
             }
         }

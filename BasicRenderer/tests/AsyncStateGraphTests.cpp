@@ -311,6 +311,21 @@ int main() {
     graph.WaitIdle();
     Check(graph.Snapshot(gateConsumer).payload.Get<Value>()->value == 2);
 
+    const ArtifactKey addressGateDependency{ ArtifactKind::Generic, 1308, 0 };
+    const ArtifactKey addressGateConsumer{ ArtifactKind::Generic, 1309, 0 };
+    Check(graph.Request(addressGateDependency, 1));
+    graph.WaitIdle();
+    Check(graph.Request(addressGateDependency, 2));
+    graph.WaitIdle();
+    Check(graph.Request(addressGateConsumer, 1, {
+        ReadyGate(addressGateDependency, ArtifactReadiness::GpuReady)
+    }));
+    graph.WaitIdle();
+    Check(graph.Snapshot(addressGateConsumer).payload.Get<Value>()->value == 3);
+    Check(graph.Request(addressGateDependency, 3));
+    graph.WaitIdle();
+    Check(graph.Snapshot(addressGateConsumer).revision == 1);
+
     // A completed Latest consumer advances by creating a new immutable version.
     // The old exact handle must retain its original dependency closure.
     const ArtifactKey latestDependency{ ArtifactKind::Generic, 311, 0 };
@@ -478,17 +493,21 @@ int main() {
     staticB->drawRecordCount = 13;
     staticB->activeEntryCount = 26;
     staticB->placementCount = 10;
-    Check(graph.Request(staticTransactionA, 1, {},
-        ArtifactPayload::Make<StaticTransactionBuildInput>(std::move(staticA)), 1001));
-    Check(graph.Request(staticTransactionB, 1, {},
-        ArtifactPayload::Make<StaticTransactionBuildInput>(std::move(staticB)), 1002));
+    const auto staticVersionA = graph.Request(staticTransactionA, 1, {},
+        ArtifactPayload::Make<StaticTransactionBuildInput>(std::move(staticA)), 1001);
+    const auto staticVersionB = graph.Request(staticTransactionB, 1, {},
+        ArtifactPayload::Make<StaticTransactionBuildInput>(std::move(staticB)), 1002);
+    Check(staticVersionA);
+    Check(staticVersionB);
     auto staticSceneInput = std::make_shared<StaticSceneBuildInput>();
     staticSceneInput->sourceFingerprint = 9001;
     staticSceneInput->publishRoot = true;
     staticSceneInput->desiredPlacementCount = 15;
     staticSceneInput->materializedPlacementCount = 15;
-    staticSceneInput->transactionKeys = { staticTransactionB, staticTransactionA };
-    staticSceneInput->activeGroupIDs = { 10001, 10002, 10003, 10004, 10005 };
+    staticSceneInput->groupOwners = {
+        { 10001, staticVersionA.version }, { 10002, staticVersionA.version },
+        { 10003, staticVersionB.version }, { 10004, staticVersionB.version },
+        { 10005, staticVersionB.version } };
     Check(graph.Request(staticScene, 1, {
         { staticTransactionA, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf },
         { staticTransactionB, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf },
@@ -507,6 +526,47 @@ int main() {
         staticPublished->desiredPlacementCount == 15 &&
         staticPublished->materializedPlacementCount == 15 &&
         staticPublished->placementSetDigest != 0);
+
+    // A transaction can remain in the closure for one live group after another
+    // of its groups is removed and re-added by a newer transaction. The exact
+    // group-owner edge must select the successor rather than treating both
+    // immutable transaction histories as competing owners.
+    const ArtifactKey staticTransactionC{ ArtifactKind::StaticTransaction, 105, 7 };
+    auto staticC = std::make_shared<StaticTransactionBuildInput>();
+    staticC->transactionID = 105;
+    staticC->streamGeneration = 8;
+    staticC->sourceFingerprint = 1005;
+    staticC->groups = { { 10001, 7, 14, 2 } };
+    staticC->groupCount = 1;
+    staticC->drawRecordCount = 7;
+    staticC->activeEntryCount = 14;
+    staticC->placementCount = 2;
+    const auto staticVersionC = graph.Request(staticTransactionC, 1, {},
+        ArtifactPayload::Make<StaticTransactionBuildInput>(std::move(staticC)), 1005);
+    Check(staticVersionC);
+    auto supersededGroupScene = std::make_shared<StaticSceneBuildInput>();
+    supersededGroupScene->sourceFingerprint = 9002;
+    supersededGroupScene->publishRoot = true;
+    supersededGroupScene->desiredPlacementCount = 5;
+    supersededGroupScene->materializedPlacementCount = 5;
+    supersededGroupScene->groupOwners = {
+        { 10001, staticVersionC.version }, { 10002, staticVersionA.version } };
+    Check(graph.Request(staticScene, 2, {
+        Exact(staticVersionA.version, ArtifactReadiness::GpuReady),
+        Exact(staticVersionC.version, ArtifactReadiness::GpuReady),
+    }, ArtifactPayload::Make<StaticSceneBuildInput>(std::move(supersededGroupScene)), 9002));
+    graph.WaitIdle();
+    const auto supersededRoot = graph.Snapshot(staticScene)
+        .payload.Get<RendererStateFragmentArtifact>();
+    const auto supersededPublished = supersededRoot
+        ? supersededRoot->fragment.payload.Get<PublishedStaticSceneState>() : nullptr;
+    Check(supersededPublished && supersededPublished->groupCount == 2 &&
+        supersededPublished->publishedPlacementCount == 5);
+    Check(supersededPublished && std::ranges::all_of(
+        supersededPublished->transactions,
+        [](const PublishedStaticTransaction& transaction) {
+            return transaction.groups.size() == 1;
+        }));
 
     const ArtifactKey mismatchedTransaction{ ArtifactKind::StaticTransaction, 103, 7 };
     auto mismatchedInput = std::make_shared<StaticTransactionBuildInput>();

@@ -38,14 +38,21 @@ struct PublishedStaticTransaction {
     std::vector<ArtifactSnapshot> dependencyClosure;
 };
 
+struct StaticSceneGroupOwner {
+    std::uint64_t groupID = 0;
+    ArtifactVersionID transaction;
+};
+
 struct StaticSceneBuildInput {
     std::uint64_t sourceFingerprint = 0;
     bool publishRoot = false;
     std::uint64_t desiredPlacementCount = 0;
     std::uint64_t materializedPlacementCount = 0;
     std::uint64_t retiredPlacementCount = 0;
-    std::vector<ArtifactKey> transactionKeys;
-    std::vector<std::uint64_t> activeGroupIDs;
+    // This is the authoritative membership edge. A transaction may remain in
+    // the closure for its other groups after one group is superseded by a
+    // newer transaction, so a bare set of transaction addresses is ambiguous.
+    std::vector<StaticSceneGroupOwner> groupOwners;
 };
 
 struct PublishedStaticSceneState {

@@ -1,6 +1,7 @@
 #include "Render/StaticStateArtifacts.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "Render/PublishedRendererState.h"
@@ -48,11 +49,23 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     const auto input = context.input.Get<StaticSceneBuildInput>();
     if (!input) return ArtifactBuildResult::Failure("static scene immutable input missing");
 
-    std::unordered_set<ArtifactKey, ArtifactKey::Hasher> expected;
-    expected.reserve(input->transactionKeys.size());
-    for (const auto key : input->transactionKeys) {
-        if (key.kind != ArtifactKind::StaticTransaction || !expected.insert(key).second) {
-            return ArtifactBuildResult::Failure("static scene transaction set is invalid");
+    std::unordered_map<std::uint64_t, ArtifactVersionID> owners;
+    std::unordered_map<ArtifactKey, ArtifactVersionID, ArtifactKey::Hasher> expected;
+    owners.reserve(input->groupOwners.size());
+    expected.reserve(input->groupOwners.size());
+    for (const auto& owner : input->groupOwners) {
+        if (owner.groupID == 0 || owner.transaction.address.kind != ArtifactKind::StaticTransaction ||
+            !owner.transaction) {
+            return ArtifactBuildResult::Failure("static scene group owner is invalid");
+        }
+        if (!owners.emplace(owner.groupID, owner.transaction).second) {
+            return ArtifactBuildResult::Failure("static scene contains duplicate active groups");
+        }
+        const auto [versionIt, inserted] = expected.emplace(
+            owner.transaction.address, owner.transaction);
+        if (!inserted && versionIt->second != owner.transaction) {
+            return ArtifactBuildResult::Failure(
+                "static scene selects multiple versions of one transaction");
         }
     }
     if (context.dependencies.size() != expected.size()) {
@@ -65,11 +78,12 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     scene->desiredPlacementCount = input->desiredPlacementCount;
     scene->materializedPlacementCount = input->materializedPlacementCount;
     scene->retiredPlacementCount = input->retiredPlacementCount;
-    scene->activeGroupIDs = input->activeGroupIDs;
-    std::ranges::sort(scene->activeGroupIDs);
-    if (std::ranges::adjacent_find(scene->activeGroupIDs) != scene->activeGroupIDs.end()) {
-        return ArtifactBuildResult::Failure("static scene contains duplicate active groups");
+    scene->activeGroupIDs.reserve(owners.size());
+    for (const auto& [groupID, owner] : owners) {
+        (void)owner;
+        scene->activeGroupIDs.push_back(groupID);
     }
+    std::ranges::sort(scene->activeGroupIDs);
     std::unordered_set<std::uint64_t> activeGroups(
         scene->activeGroupIDs.begin(), scene->activeGroupIDs.end());
     const auto desiredActiveGroups = activeGroups;
@@ -77,26 +91,39 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     materializedActiveGroups.reserve(activeGroups.size());
     scene->transactions.reserve(context.dependencies.size());
     for (const auto& dependency : context.dependencies) {
-        if (!expected.contains(dependency.key)) {
+        const auto expectedVersion = expected.find(dependency.key);
+        if (expectedVersion == expected.end() || expectedVersion->second != dependency.Version()) {
             return ArtifactBuildResult::Failure("static scene contains an unexpected transaction");
         }
         const auto transaction = dependency.payload.Get<PublishedStaticTransaction>();
         if (!transaction || transaction->transactionID != dependency.key.primaryID) {
             return ArtifactBuildResult::Failure("static scene transaction payload mismatch");
         }
+        auto selectedTransaction = *transaction;
+        selectedTransaction.groups.clear();
+        selectedTransaction.groupCount = 0;
+        selectedTransaction.drawRecordCount = 0;
+        selectedTransaction.activeEntryCount = 0;
+        selectedTransaction.placementCount = 0;
         for (const auto& group : transaction->groups) {
-            if (!desiredActiveGroups.contains(group.groupID)) continue;
+            const auto owner = owners.find(group.groupID);
+            if (owner == owners.end() || owner->second != dependency.Version()) continue;
             if (!materializedActiveGroups.insert(group.groupID).second) {
                 return ArtifactBuildResult::Failure(
                     "static scene active group is owned by multiple transactions");
             }
             activeGroups.erase(group.groupID);
+            selectedTransaction.groups.push_back(group);
+            ++selectedTransaction.groupCount;
+            selectedTransaction.drawRecordCount += group.drawRecordCount;
+            selectedTransaction.activeEntryCount += group.activeEntryCount;
+            selectedTransaction.placementCount += group.placementCount;
             ++scene->groupCount;
             scene->drawRecordCount += group.drawRecordCount;
             scene->activeEntryCount += group.activeEntryCount;
             scene->publishedPlacementCount += group.placementCount;
         }
-        scene->transactions.push_back(*transaction);
+        scene->transactions.push_back(std::move(selectedTransaction));
     }
     if (!activeGroups.empty()) {
         return ArtifactBuildResult::Failure("static scene active group closure is incomplete");

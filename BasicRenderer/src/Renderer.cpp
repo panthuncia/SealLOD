@@ -9,6 +9,7 @@
 #include <atlbase.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
@@ -3465,7 +3466,22 @@ void Renderer::Update(float elapsedSeconds) {
         // each published graph artifact. This is deliberately opt-in because a
         // radius-10 scene contains many active-list resources.
         static bool objectBufferReadbackRequested = false;
-        if (!objectBufferReadbackRequested && m_totalFramesRendered >= 120u && currentRenderGraph) {
+        static const std::uint64_t objectBufferReadbackMinFrame = [] {
+            wchar_t* value = nullptr;
+            size_t valueLength = 0;
+            std::uint64_t result = 120u;
+            if (_wdupenv_s(&value, &valueLength,
+                    L"SARP_OBJECT_BUFFER_READBACK_MIN_FRAME") == 0 &&
+                value != nullptr && value[0] != L'\0') {
+                wchar_t* end = nullptr;
+                const auto parsed = std::wcstoull(value, &end, 10);
+                if (end != value && parsed != 0u) result = parsed;
+            }
+            std::free(value);
+            return result;
+        }();
+        if (!objectBufferReadbackRequested &&
+            m_totalFramesRendered >= objectBufferReadbackMinFrame && currentRenderGraph) {
             wchar_t* outputPath = nullptr;
             size_t outputPathLength = 0;
             if (_wdupenv_s(&outputPath, &outputPathLength,

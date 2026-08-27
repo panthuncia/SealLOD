@@ -141,6 +141,16 @@ struct ArtifactRequirement {
         DependencyInvalidationPolicy::ReadyGate, version.generation, version.lease };
 }
 
+// Address-level readiness latch. It selects whichever immutable version of the
+// address currently satisfies the milestone and deliberately does not retain or
+// invalidate on later versions. Use the handle overload when one exact version
+// is the gate.
+[[nodiscard]] inline ArtifactRequirement ReadyGate(ArtifactAddress address,
+    ArtifactReadiness readiness = ArtifactReadiness::CpuReady) {
+    return { address, 0, readiness, DependencyPolicy::AllOf, 0,
+        DependencyInvalidationPolicy::ReadyGate };
+}
+
 [[nodiscard]] inline ArtifactRequirement LifetimeHold(ArtifactVersionID version) {
     return { version.address, version.revision, ArtifactReadiness::CpuReady,
         DependencyPolicy::Optional, 0, DependencyInvalidationPolicy::LifetimeHold,
