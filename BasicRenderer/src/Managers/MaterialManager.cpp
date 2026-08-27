@@ -1118,15 +1118,16 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 					m_rendererStateRequests) {
 					const auto address = br::render::ArtifactAddress{
 						br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 };
-					const auto observation = m_rendererStateRequests->ObserveWithSnapshot(address,
+					auto observation = m_rendererStateRequests->ObserveWithSnapshot(address,
 						[this, streamingTextureID](std::uint64_t,
 							const br::render::ArtifactSnapshot&) {
 							m_graphTextureWakeups.push(streamingTextureID);
 						});
-					m_graphTextureSubscriptions.emplace(streamingTextureID, observation.subscription);
 					if (observation.snapshot.readiness != br::render::ArtifactReadiness::Missing) {
 						m_graphTextureWakeups.push(streamingTextureID);
 					}
+					m_graphTextureSubscriptions.emplace(
+						streamingTextureID, std::move(observation));
 				}
 			}
 		}
@@ -1156,7 +1157,6 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 			m_graphTextureMaterials.erase(materials);
 			const auto subscription = m_graphTextureSubscriptions.find(textureID);
 			if (subscription != m_graphTextureSubscriptions.end()) {
-				if (m_rendererStateRequests) m_rendererStateRequests->UnsubscribeReady(subscription->second);
 				m_graphTextureSubscriptions.erase(subscription);
 			}
 		}
@@ -1348,7 +1348,7 @@ void MaterialManager::JournalMaterialRow(unsigned int materialSlot) {
 	const auto evalRevision = m_materialEvalJournal.AppendWrite(materialSlot, asBytes(eval), count);
 	const auto openPbrRevision = m_materialOpenPbrJournal.AppendWrite(materialSlot, asBytes(openPbr), count);
 	assert(revision == evalRevision && revision == openPbrRevision);
-	m_materialRowsRevision = revision;
+	m_materialRowsRevision.store(revision, std::memory_order_release);
 }
 
 void MaterialManager::UpdateOpenPBRMaterialDataBuffer(
@@ -1534,7 +1534,7 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			mix(static_cast<std::uint64_t>(entry.flags));
 			mix(entry.slot);
 		}
-		mix(m_materialRowsRevision);
+		mix(m_materialRowsRevision.load(std::memory_order_acquire));
 		if (fingerprint != m_pendingMaterialStateFingerprint) {
 			m_pendingMaterialStateFingerprint = fingerprint;
 			m_materialStateStableFrames = 0;
@@ -1559,19 +1559,34 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				spdlog::error("Material graph publication skipped: upload service unavailable");
 				return m_materialStateRevision;
 			}
+			auto baseCapture = m_materialBaseJournal.CaptureDesired();
+			auto evalCapture = m_materialEvalJournal.CaptureDesired();
+			auto openPbrCapture = m_materialOpenPbrJournal.CaptureDesired();
+			const auto rowsRevision = baseCapture.writeSequence;
+			// The three tables form one material version. Worker admission may
+			// append a row between these individually locked captures; defer that
+			// sample instead of submitting different bytes under one revision.
+			if (rowsRevision == 0 || evalCapture.writeSequence != rowsRevision ||
+				openPbrCapture.writeSequence != rowsRevision ||
+				m_materialRowsRevision.load(std::memory_order_acquire) != rowsRevision) {
+				m_materialStateFingerprint = 0;
+				m_materialStateDirtyFrames = 4;
+				basic_telemetry::AddCounter("SARP.Material.GraphCaptureRaceDeferred");
+				return m_materialStateRevision;
+			}
 			const auto baseRequest = m_materialBufferFamilies[0]->RequestCapture(
-				*m_rendererStateRequests, *m_uploadService, m_materialRowsRevision,
-				m_materialBaseJournal.CaptureDesired());
+				*m_rendererStateRequests, *m_uploadService, rowsRevision,
+				std::move(baseCapture));
 			const auto evalRequest = m_materialBufferFamilies[1]->RequestCapture(
-				*m_rendererStateRequests, *m_uploadService, m_materialRowsRevision,
-				m_materialEvalJournal.CaptureDesired());
+				*m_rendererStateRequests, *m_uploadService, rowsRevision,
+				std::move(evalCapture));
 			const auto openPbrRequest = m_materialBufferFamilies[2]->RequestCapture(
-				*m_rendererStateRequests, *m_uploadService, m_materialRowsRevision,
-				m_materialOpenPbrJournal.CaptureDesired());
+				*m_rendererStateRequests, *m_uploadService, rowsRevision,
+				std::move(openPbrCapture));
 			if (!baseRequest || !evalRequest || !openPbrRequest) {
 				spdlog::error(
 					"Material graph table request rejected: rows={} base={} eval={} openPbr={}",
-					m_materialRowsRevision,
+					rowsRevision,
 					static_cast<unsigned>(baseRequest.status),
 					static_cast<unsigned>(evalRequest.status),
 					static_cast<unsigned>(openPbrRequest.status));
@@ -1581,7 +1596,7 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			}
 			auto input = std::make_shared<br::render::MaterialStateBuildInput>();
 			input->sourceFingerprint = fingerprint;
-			input->materialRowsRevision = m_materialRowsRevision;
+			input->materialRowsRevision = rowsRevision;
 			input->materialRowCount = m_materialSlotsUsed;
 			// Texture mip residency is owned by TextureStreamingManager. The descriptor
 			// indices captured in the material rows already name usable coarse-mip
@@ -1635,7 +1650,7 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				br::render::ArtifactPayload::Make<br::render::MaterialStateBuildInput>(std::move(input)),
 				fingerprint == 0 ? 1u : fingerprint);
 			if (materialRequest) {
-				m_materialStateVersion = materialRequest.version;
+				m_materialStateHandle = materialRequest.Handle();
 			}
 		}
 	}

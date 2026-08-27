@@ -182,11 +182,85 @@ int main() {
     graph.WaitIdle();
     Check(graph.Snapshot(leasedV1.version).payload.Get<Value>() != nullptr);
     const auto reclaimedBeforeLeaseRelease = graph.Stats().reclaimedVersions;
-    leasedV1.version.lease.reset();
+    leasedV1.lease.reset();
     Check(graph.Request({ ArtifactKind::Generic, 897, 0 }, 1));
     graph.WaitIdle();
     Check(graph.Stats().reclaimedVersions > reclaimedBeforeLeaseRelease);
     Check(graph.Snapshot(expiredLeaseID).readiness == ArtifactReadiness::Missing);
+
+    // A permanent request signature is a conflict-detection tombstone, not an
+    // owner. In particular, copying an Exact requirement into that signature
+    // must not pin the dependency after the live recipe and handles advance.
+    const ArtifactKey signatureDependency{ ArtifactKind::Generic, 895, 0 };
+    const ArtifactKey signatureConsumer{ ArtifactKind::Generic, 896, 0 };
+    auto signatureDependencyV1 = graph.Request(signatureDependency, 1, {}, Payload(1), 1);
+    Check(signatureDependencyV1);
+    graph.WaitIdle();
+    const auto signatureDependencyV1ID = signatureDependencyV1.version;
+    auto signatureConsumerV1 = graph.Request(signatureConsumer, 1,
+        { Exact(signatureDependencyV1.version, ArtifactReadiness::GpuReady) }, Payload(1), 1);
+    Check(signatureConsumerV1);
+    graph.WaitIdle();
+    Check(graph.Request(signatureConsumer, 2, {}, Payload(2), 2));
+    Check(graph.Request(signatureDependency, 2, {}, Payload(2), 2));
+    signatureDependencyV1.lease.reset();
+    signatureConsumerV1.lease.reset();
+    graph.WaitIdle();
+    Check(graph.Snapshot(signatureDependencyV1ID).readiness == ArtifactReadiness::Missing);
+
+    // A live exact consumer owns its dependency even after every caller-side
+    // handle has been dropped and the dependency address advances. The pin is
+    // held by the graph recipe, not by a copied requirement or signature.
+    const ArtifactKey pinnedDependency{ ArtifactKind::Generic, 892, 0 };
+    const ArtifactKey pinnedConsumer{ ArtifactKind::Generic, 893, 0 };
+    auto pinnedDependencyV1 = graph.Request(pinnedDependency, 1, {}, Payload(7), 7);
+    Check(pinnedDependencyV1);
+    graph.WaitIdle();
+    const auto pinnedDependencyV1ID = pinnedDependencyV1.version;
+    auto pinnedConsumerV1 = graph.Request(pinnedConsumer, 1,
+        { Exact(pinnedDependencyV1.version, ArtifactReadiness::GpuReady) }, Payload(1), 1);
+    Check(pinnedConsumerV1);
+    pinnedDependencyV1.lease.reset();
+    pinnedConsumerV1.lease.reset();
+    Check(graph.Request(pinnedDependency, 2, {}, Payload(8), 8));
+    graph.WaitIdle();
+    Check(graph.Snapshot(pinnedDependencyV1ID).payload.Get<Value>() != nullptr);
+    Check(graph.Snapshot(pinnedConsumer).payload.Get<Value>() != nullptr);
+
+    // Work queued outside the graph must carry one strong handle across the
+    // handoff into an Exact edge. Advancing the producer address while that
+    // work waits must not reclaim the captured predecessor.
+    const ArtifactKey handoffDependency{ ArtifactKind::Generic, 890, 0 };
+    const ArtifactKey handoffConsumer{ ArtifactKind::Generic, 891, 0 };
+    auto handoffV1 = graph.Request(handoffDependency, 1, {}, Payload(11), 11);
+    Check(handoffV1);
+    graph.WaitIdle();
+    auto queuedHandoff = handoffV1.Handle();
+    handoffV1.lease.reset();
+    Check(graph.Request(handoffDependency, 2, {}, Payload(12), 12));
+    graph.WaitIdle();
+    Check(graph.Snapshot(queuedHandoff.version).payload.Get<Value>() != nullptr);
+    auto handoffConsumerV1 = graph.Request(handoffConsumer, 1,
+        { Exact(queuedHandoff, ArtifactReadiness::GpuReady) }, Payload(1), 1);
+    Check(handoffConsumerV1);
+    queuedHandoff = {};
+    graph.WaitIdle();
+    Check(graph.Snapshot(handoffConsumerV1.version).payload.Get<Value>() != nullptr);
+
+    // Release closes desired state, not the signature tombstone. Repeating an
+    // identical request must recreate a live node instead of returning a
+    // false AlreadyDesired result for an address that no longer exists.
+    const ArtifactKey reusableAddress{ ArtifactKind::Generic, 894, 0 };
+    auto reusableV1 = graph.Request(reusableAddress, 1, {}, Payload(1), 0x771u);
+    Check(reusableV1);
+    graph.WaitIdle();
+    reusableV1.lease.reset();
+    graph.Release(reusableAddress);
+    graph.WaitIdle();
+    auto recreatedV1 = graph.Request(reusableAddress, 1, {}, Payload(1), 0x771u);
+    Check(recreatedV1 && recreatedV1.status == ArtifactRequestStatus::Accepted);
+    graph.WaitIdle();
+    Check(graph.Snapshot(recreatedV1.version).payload.Get<Value>() != nullptr);
 
     std::atomic_uint readySubscriberA{ 0 };
     std::atomic_uint readySubscriberB{ 0 };
@@ -289,7 +363,7 @@ int main() {
     Check(graph.Snapshot(lateExactConsumer).payload.Get<Value>()->value == 2);
 
     std::atomic_uint64_t observedSequence{ 0 };
-    const auto observation = graph.ObserveWithSnapshot(exactDependency,
+    auto observation = graph.ObserveWithSnapshot(exactDependency,
         [&](std::uint64_t sequence, const ArtifactSnapshot&) {
             observedSequence.store(sequence, std::memory_order_release);
         });
@@ -298,7 +372,7 @@ int main() {
     Check(graph.Request(exactDependency, 3));
     graph.WaitIdle();
     Check(observedSequence.load(std::memory_order_acquire) != 0);
-    graph.RemoveReadyCallback(observation.subscription);
+    observation.Reset();
 
     const ArtifactKey gateDependency{ ArtifactKind::Generic, 306, 0 };
     const ArtifactKey gateConsumer{ ArtifactKind::Generic, 307, 0 };
@@ -325,6 +399,26 @@ int main() {
     Check(graph.Request(addressGateDependency, 3));
     graph.WaitIdle();
     Check(graph.Snapshot(addressGateConsumer).revision == 1);
+
+    // A ReadyGate that has observed a ready version is level-triggered and
+    // exact thereafter. A newer desired dependency may block indefinitely
+    // without revoking the earlier milestone from a newly requested consumer.
+    const ArtifactKey advancingGateDependency{ ArtifactKind::Generic, 1310, 0 };
+    const ArtifactKey missingGateBlocker{ ArtifactKind::Generic, 1311, 0 };
+    const ArtifactKey advancingGateConsumer{ ArtifactKind::Generic, 1312, 0 };
+    Check(graph.Request(advancingGateDependency, 1));
+    graph.WaitIdle();
+    Check(graph.Request(advancingGateDependency, 2, {
+        Exact(ArtifactVersionID{ missingGateBlocker, 1, 0 }, ArtifactReadiness::GpuReady)
+    }));
+    Check(graph.Request(advancingGateConsumer, 1, {
+        ReadyGate(advancingGateDependency, ArtifactReadiness::GpuReady)
+    }));
+    graph.WaitIdle();
+    const auto latchedGateResult = graph.Snapshot(advancingGateConsumer);
+    Check(latchedGateResult.readiness == ArtifactReadiness::GpuReady);
+    Check(latchedGateResult.payload.Get<Value>() &&
+        latchedGateResult.payload.Get<Value>()->value == 2);
 
     // A completed Latest consumer advances by creating a new immutable version.
     // The old exact handle must retain its original dependency closure.
@@ -958,6 +1052,16 @@ int main() {
     Check(manifestState->epoch == 1);
     Check(manifestState->materials.revision == 7);
     Check(manifestState->materials.payload.Get<Value>()->value == 77);
+    Check(manifestState->materials.publicationBundle != nullptr);
+    Check(manifestState->publicationBundle != nullptr);
+    Check(manifestState->materials.publicationBundle->root ==
+        manifestState->materials.publicationRoot);
+    Check(std::ranges::contains(manifestState->publicationBundle->versions,
+        manifestState->materials.publicationRoot));
+    graph.MarkPublished(manifestState->publicationBundle->versions);
+    graph.WaitIdle();
+    Check(graph.Snapshot(manifestState->materials.publicationRoot).readiness ==
+        ArtifactReadiness::Published);
     manifestCommit.RunDeferred();
     requestService.Stop();
 

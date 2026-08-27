@@ -39,6 +39,26 @@ VersionedGpuBufferBackingPool::~VersionedGpuBufferBackingPool() {
     EmitBackingPoolTelemetry();
 }
 
+void VersionedGpuBufferBackingPool::Retire(std::uint64_t backingGeneration) noexcept {
+    if (backingGeneration == 0) return;
+    std::lock_guard lock(m_mutex);
+    const auto found = std::ranges::find_if(m_backings, [&](const auto& backing) {
+        return backing && backing->backingGeneration == backingGeneration;
+    });
+    if (found == m_backings.end()) return;
+    const auto byteCapacity = (*found)->byteCapacity;
+    m_backings.erase(found);
+    g_pooledBackingCount.fetch_sub(1, std::memory_order_relaxed);
+    g_pooledBackingBytes.fetch_sub(byteCapacity, std::memory_order_relaxed);
+    basic_telemetry::AddCounter("SARP.VersionedBuffer.PooledBackingRetired");
+    EmitBackingPoolTelemetry();
+}
+
+PublishedGpuBufferVersion::~PublishedGpuBufferVersion() {
+    if (!backing) return;
+    if (const auto pool = backingPool.lock()) pool->Retire(backing->backingGeneration);
+}
+
 std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     std::uint64_t capacityClass, std::uint32_t elementStride,
     bool unorderedAccess, bool indirectArguments, std::string_view debugName,
@@ -245,6 +265,17 @@ ArtifactRequestResult VersionedBufferFamily::RequestCapture(
     if (revision == 0 || capture.writeSequence != revision) {
         return { ArtifactRequestStatus::ConflictingRevision, 0, {} };
     }
+    // A journal sequence names its semantic desired image. Acknowledge may
+    // subsequently compact the same image from a full replay into
+    // previous+delta form, but that representation change must not mint a new
+    // fingerprint for the already-requested immutable version.
+    std::lock_guard familyLock(m_mutex);
+    if (revision == m_lastJournalRevision && m_lastJournalHandle) {
+        return { ArtifactRequestStatus::AlreadyDesired,
+            m_lastJournalHandle.version.generation,
+            m_lastJournalHandle.version,
+            m_lastJournalHandle.lease };
+    }
     auto input = std::make_shared<VersionedGpuBufferBuildInput>();
     input->uploadService = &uploads;
     input->debugName = m_config.debugName;
@@ -275,8 +306,13 @@ ArtifactRequestResult VersionedBufferFamily::RequestCapture(
         if (write.bytes) hashBytes(*write.bytes);
     }
     if (fingerprint == 0) fingerprint = 1;
-    return requests.Request(m_config.address, revision, {},
+    auto result = requests.Request(m_config.address, revision, {},
         ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint);
+    if (result) {
+        m_lastJournalRevision = revision;
+        m_lastJournalHandle = result.Handle();
+    }
+    return result;
 }
 
 void VersionedBufferFamily::Acknowledge(
@@ -518,6 +554,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     version->revisionMode = mode;
     version->contentVersion = context.revision;
     version->backing = std::move(backing);
+    version->backingPool = pool;
     version->resource = resource;
     version->cpuShadow = std::move(shadow);
 

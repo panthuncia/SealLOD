@@ -6,6 +6,19 @@
 #include <BasicTelemetry/Telemetry.h>
 
 namespace br::render {
+
+void ArtifactLeaseSet::Add(const ArtifactLease& lease) {
+    if (!lease) return;
+    const auto identity = lease.Token().get();
+    if (std::ranges::any_of(m_leases, [identity](const ArtifactLease& value) {
+        return value.Token().get() == identity;
+    })) return;
+    m_leases.push_back(lease);
+}
+
+void ArtifactLeaseSet::Merge(const ArtifactLeaseSet& other) {
+    for (const auto& lease : other.m_leases) Add(lease);
+}
 namespace {
 std::mutex g_processSourceMutex;
 std::weak_ptr<PublishedStateSource> g_processSource;
@@ -300,6 +313,29 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         }
         m_patches.clear();
         if (changed) {
+            auto manifestBundle = std::make_shared<PublicationBundle>();
+            for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+                const auto& fragment = patched->Fragment(
+                    static_cast<PublishedFragmentKind>(index));
+                if (!fragment.publicationBundle) continue;
+                manifestBundle->versions.insert(manifestBundle->versions.end(),
+                    fragment.publicationBundle->versions.begin(),
+                    fragment.publicationBundle->versions.end());
+                manifestBundle->leases.Merge(fragment.publicationBundle->leases);
+                for (const auto& submissions : fragment.publicationBundle->gpuSubmissions) {
+                    if (submissions && !std::ranges::contains(
+                        manifestBundle->gpuSubmissions, submissions)) {
+                        manifestBundle->gpuSubmissions.push_back(submissions);
+                    }
+                }
+                manifestBundle->resourceHolds.insert(manifestBundle->resourceHolds.end(),
+                    fragment.publicationBundle->resourceHolds.begin(),
+                    fragment.publicationBundle->resourceHolds.end());
+            }
+            std::ranges::sort(manifestBundle->versions);
+            manifestBundle->versions.erase(std::unique(manifestBundle->versions.begin(),
+                manifestBundle->versions.end()), manifestBundle->versions.end());
+            patched->publicationBundle = std::move(manifestBundle);
             patched->epoch = (m_active ? m_active->epoch : 0u) + 1u;
             if (patched->resourceCatalog) {
                 auto stampedCatalog = std::make_shared<PublishedResourceCatalog>(

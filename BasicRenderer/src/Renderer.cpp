@@ -3096,16 +3096,8 @@ void Renderer::Update(float elapsedSeconds) {
                                 objectManager->AcknowledgePublishedBufferState(committedState);
                             }
                             if (stateGraph && committedState) {
-                                for (std::size_t slot = 0; slot < br::render::kPublishedFragmentCount; ++slot) {
-                                    const auto& fragment = committedState->Fragment(
-                                        static_cast<br::render::PublishedFragmentKind>(slot));
-                                    if (fragment.revision != 0 &&
-                                        fragment.publicationRoot.address.kind != br::render::ArtifactKind::Generic) {
-                                        stateGraph->MarkPublished(fragment.publicationRoot);
-                                    }
-                                    for (const auto& artifact : fragment.dependencyClosure) {
-                                        stateGraph->MarkPublished(artifact.key, artifact.revision);
-                                    }
+                                if (const auto& bundle = committedState->publicationBundle) {
+                                    stateGraph->MarkPublished(bundle->versions);
                                 }
                             }
                             commit.RunDeferred();
@@ -3237,8 +3229,8 @@ void Renderer::Update(float elapsedSeconds) {
                 std::free(outputPath);
                 outputPath = nullptr;
                 if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
-                    const auto source = br::render::PublishedStateSource::ProcessSource();
-                    const auto published = source ? source->Load() : nullptr;
+                    const auto lease = m_context.publishedManifestLease;
+                    const auto published = lease ? lease->state : nullptr;
                     const auto materialState = published
                         ? published->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
                     if (materialState && materialState->baseTable && materialState->evalTable &&
@@ -3248,6 +3240,8 @@ void Renderer::Update(float elapsedSeconds) {
                         std::ofstream metadata(metadataPath, std::ios::trunc);
                         if (metadata) {
                             metadata << "epoch=" << published->epoch << '\n';
+                            metadata << "lease_sequence=" << lease->sequence << '\n';
+                            metadata << "lease_frame_slot=" << lease->frameSlot << '\n';
                             metadata << "revision=" << published->materials.revision << '\n';
                             metadata << "compile_flag_slots=" << materialState->compileFlagSlotsUsed << '\n';
                             metadata << "active_compile_flags=" << materialState->activeCompileFlags.size() << '\n';
@@ -3371,9 +3365,8 @@ void Renderer::Update(float elapsedSeconds) {
                 outputPath != nullptr && outputPath[0] != L'\0') {
                 const std::filesystem::path basePath(outputPath);
                 if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
-                    const auto source = br::render::PublishedStateSource::ProcessSource();
-                    const auto published = source ? source->Load() : nullptr;
-                    const auto lease = source ? source->LoadLease() : nullptr;
+                    const auto lease = m_context.publishedManifestLease;
+                    const auto published = lease ? lease->state : nullptr;
                     const auto terrain = published
                         ? published->terrain.payload.Get<br::render::PublishedTerrainState>() : nullptr;
                     if (terrain && !terrain->textureBindings.empty()) {
@@ -3489,8 +3482,8 @@ void Renderer::Update(float elapsedSeconds) {
                 outputPath != nullptr && outputPath[0] != L'\0') {
                 const std::filesystem::path basePath(outputPath);
                 if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
-                    const auto source = br::render::PublishedStateSource::ProcessSource();
-                    const auto published = source ? source->Load() : nullptr;
+                    const auto lease = m_context.publishedManifestLease;
+                    const auto published = lease ? lease->state : nullptr;
                     std::size_t captureIndex = 0;
                     const auto captureFragment = [&](const char* fragmentName,
                         const br::render::PublishedStateFragment& fragment,
@@ -3514,6 +3507,8 @@ void Renderer::Update(float elapsedSeconds) {
                             std::ofstream metadata(metadataPath, std::ios::trunc);
                             if (metadata) {
                                 metadata << "manifest_epoch=" << published->epoch << '\n';
+                                metadata << "lease_sequence=" << lease->sequence << '\n';
+                                metadata << "lease_frame_slot=" << lease->frameSlot << '\n';
                                 metadata << "fragment=" << fragmentName << '\n';
                                 metadata << "fragment_revision=" << fragment.revision << '\n';
                                 metadata << "fragment_root_kind="

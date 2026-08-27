@@ -580,6 +580,10 @@ void TextureStreamingManager::ApplyUnregisterCommand(uint64_t bindingID)
 			}
 			std::erase(m_dirtyTextureStreamingIDs, streamingTextureID);
 			std::erase(m_texturesNeedingUploadAdvance, streamingTextureID);
+			if (m_rendererStateRequests) {
+				m_rendererStateRequests->Release({
+					br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 });
+			}
 		}
 	}
 }
@@ -1075,6 +1079,24 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 	std::size_t waitingForGraphCount = 0;
 	std::size_t graphFailureCount = 0;
 	for (auto& change : coalesced) {
+		// Unregistration and upload completion are independent queues. A change
+		// captured before the last owner disappeared must not recreate the graph
+		// address after ApplyUnregisterCommand released it.
+		bool hasLiveOwner = false;
+		{
+			std::lock_guard lock(m_liveBindingMutex);
+			const auto owners = m_liveBindingIDsByStreamingTextureID.find(
+				change.streamingTextureID);
+			hasLiveOwner = owners != m_liveBindingIDsByStreamingTextureID.end() &&
+				!owners->second.empty();
+		}
+		if (!hasLiveOwner) {
+			if (m_rendererStateRequests) {
+				m_rendererStateRequests->Release({ br::render::ArtifactKind::TextureBinding,
+					change.streamingTextureID, 0 });
+			}
+			continue;
+		}
 		std::shared_ptr<const br::render::GpuSubmissionSet> transferSubmission;
 		if (m_materialTextureTransfers && change.newImage &&
 			!m_materialTextureTransfers->IsShaderReady(change.newImage)) {

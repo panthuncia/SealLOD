@@ -20,6 +20,7 @@ public:
         std::uint64_t inputFingerprint = 0);
     bool Invalidate(ArtifactKey key, std::uint64_t revision);
     void Cancel(ArtifactKey key);
+    void Release(ArtifactKey key) { m_graph.Release(key); }
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactAddress address) const {
         return m_graph.Snapshot(address);

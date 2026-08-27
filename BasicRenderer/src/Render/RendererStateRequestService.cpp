@@ -150,6 +150,33 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         }
         return true;
     };
+    const auto makeBundle = [](const ArtifactSnapshot& root) {
+        auto bundle = std::make_shared<PublicationBundle>();
+        bundle->root = root.Version();
+        const auto append = [&](auto&& self, const ArtifactSnapshot& snapshot) -> bool {
+            if (!snapshot.Version() || !ArtifactReachedMilestone(
+                snapshot.readiness, ArtifactReadiness::UploadSubmitted)) return false;
+            if (std::ranges::any_of(bundle->versions, [&](const ArtifactVersionID& value) {
+                return value == snapshot.Version();
+            })) return true;
+            bundle->versions.push_back(snapshot.Version());
+            bundle->leases.Add(snapshot.lease);
+            if (snapshot.gpuSubmissions && !std::ranges::contains(
+                bundle->gpuSubmissions, snapshot.gpuSubmissions)) {
+                bundle->gpuSubmissions.push_back(snapshot.gpuSubmissions);
+            }
+            const auto fragment = snapshot.payload.Get<RendererStateFragmentArtifact>();
+            if (!fragment) return true;
+            bundle->resourceHolds.insert(bundle->resourceHolds.end(),
+                fragment->fragment.resourceHolds.begin(),
+                fragment->fragment.resourceHolds.end());
+            for (const auto& dependency : fragment->fragment.dependencyClosure) {
+                if (!self(self, dependency)) return false;
+            }
+            return true;
+        };
+        return append(append, root) ? bundle : std::shared_ptr<PublicationBundle>{};
+    };
     const auto materialize = [&](const Selection& selection) {
         auto candidate = input->base ? *input->base : PublishedRendererState{};
         for (std::size_t index = 0; index < selection.size(); ++index) {
@@ -157,6 +184,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             const auto artifact = selection[index]->payload.Get<RendererStateFragmentArtifact>();
             auto fragment = artifact->fragment;
             fragment.publicationRoot = selection[index]->Version();
+            fragment.publicationBundle = makeBundle(*selection[index]);
             candidate.Fragment(static_cast<PublishedFragmentKind>(index)) = std::move(fragment);
         }
         return candidate;
@@ -200,6 +228,28 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
     if (bestScore.first == 0) return ArtifactBuildResult::Cancelled();
 
     auto state = std::make_shared<PublishedRendererState>(materialize(selected));
+    auto manifestBundle = std::make_shared<PublicationBundle>();
+    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+        const auto& fragment = state->Fragment(static_cast<PublishedFragmentKind>(index));
+        if (!fragment.publicationBundle) continue;
+        manifestBundle->versions.insert(manifestBundle->versions.end(),
+            fragment.publicationBundle->versions.begin(),
+            fragment.publicationBundle->versions.end());
+        manifestBundle->leases.Merge(fragment.publicationBundle->leases);
+        for (const auto& submissions : fragment.publicationBundle->gpuSubmissions) {
+            if (submissions && !std::ranges::contains(
+                manifestBundle->gpuSubmissions, submissions)) {
+                manifestBundle->gpuSubmissions.push_back(submissions);
+            }
+        }
+        manifestBundle->resourceHolds.insert(manifestBundle->resourceHolds.end(),
+            fragment.publicationBundle->resourceHolds.begin(),
+            fragment.publicationBundle->resourceHolds.end());
+    }
+    std::ranges::sort(manifestBundle->versions);
+    manifestBundle->versions.erase(std::unique(manifestBundle->versions.begin(),
+        manifestBundle->versions.end()), manifestBundle->versions.end());
+    state->publicationBundle = std::move(manifestBundle);
     auto catalog = state->resourceCatalog
         ? std::make_shared<PublishedResourceCatalog>(*state->resourceCatalog)
         : std::make_shared<PublishedResourceCatalog>();
@@ -225,11 +275,9 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             selection.contentVersion = root.revision;
             selection.sourceArtifact = root.Version();
             selection.lifetimeHolds = artifact->fragment.resourceHolds;
-            if (root.gpuSubmissions) selection.gpuSubmissions.push_back(root.gpuSubmissions);
-            for (const auto& dependency : artifact->fragment.dependencyClosure) {
-                if (dependency.gpuSubmissions) {
-                    selection.gpuSubmissions.push_back(dependency.gpuSubmissions);
-                }
+            selection.publicationBundle = state->Fragment(artifact->kind).publicationBundle;
+            if (selection.publicationBundle) {
+                selection.gpuSubmissions = selection.publicationBundle->gpuSubmissions;
             }
             catalog->selections.insert_or_assign(key, std::move(selection));
         }
@@ -245,6 +293,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         const auto artifact = selected[index]->payload.Get<RendererStateFragmentArtifact>();
         auto fragment = artifact->fragment;
         fragment.publicationRoot = selected[index]->Version();
+        fragment.publicationBundle = makeBundle(*selected[index]);
         patch->fragments[index] = std::move(fragment);
         selectedMask |= PublishedFragmentMask(kind);
         patch->catalogOwnerMask |= artifact->catalogOwnerMask != 0
@@ -257,13 +306,9 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             selection.contentVersion = selected[index]->revision;
             selection.sourceArtifact = selected[index]->Version();
             selection.lifetimeHolds = artifact->fragment.resourceHolds;
-            if (selected[index]->gpuSubmissions) {
-                selection.gpuSubmissions.push_back(selected[index]->gpuSubmissions);
-            }
-            for (const auto& dependency : artifact->fragment.dependencyClosure) {
-                if (dependency.gpuSubmissions) {
-                    selection.gpuSubmissions.push_back(dependency.gpuSubmissions);
-                }
+            selection.publicationBundle = patch->fragments[index]->publicationBundle;
+            if (selection.publicationBundle) {
+                selection.gpuSubmissions = selection.publicationBundle->gpuSubmissions;
             }
             patch->catalogSelections.emplace_back(key, std::move(selection));
         }

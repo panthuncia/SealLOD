@@ -17,6 +17,23 @@ namespace org { class Resource; }
 
 namespace br::render {
 
+class ArtifactLeaseSet {
+public:
+    void Add(const ArtifactLease& lease);
+    void Merge(const ArtifactLeaseSet& other);
+    [[nodiscard]] std::size_t Size() const noexcept { return m_leases.size(); }
+private:
+    std::vector<ArtifactLease> m_leases;
+};
+
+struct PublicationBundle {
+    ArtifactVersionID root;
+    std::vector<ArtifactVersionID> versions;
+    std::vector<std::shared_ptr<const GpuSubmissionSet>> gpuSubmissions;
+    std::vector<std::shared_ptr<const void>> resourceHolds;
+    ArtifactLeaseSet leases;
+};
+
 enum class PublishedResourceUsage : std::uint8_t {
     ShaderResource, UnorderedAccess, IndirectArguments, CopySource, CopyDestination, ActiveDrawList
 };
@@ -59,6 +76,7 @@ struct PublishedResourceSelection {
     std::vector<std::shared_ptr<const GpuSubmissionSet>> gpuSubmissions;
     std::vector<std::shared_ptr<const void>> lifetimeHolds;
     std::uint64_t manifestEpoch = 0;
+    std::shared_ptr<const PublicationBundle> publicationBundle;
 };
 
 struct PublishedResourceCatalog {
@@ -84,6 +102,7 @@ struct PublishedStateFragment {
     // The graph artifact whose payload became this manifest fragment. Frame
     // commit acknowledges both this root and its dependency closure.
     ArtifactVersionID publicationRoot{};
+    std::shared_ptr<const PublicationBundle> publicationBundle;
     ArtifactPayload payload;
     std::vector<ArtifactSnapshot> dependencyClosure;
     std::vector<std::shared_ptr<const void>> resourceHolds;
@@ -108,6 +127,7 @@ struct PublishedRendererState {
     PublishedStateFragment activeDrawLists;
     PublishedStateFragment indirectWorkloads;
     std::shared_ptr<const PublishedResourceCatalog> resourceCatalog;
+    std::shared_ptr<const PublicationBundle> publicationBundle;
 
     [[nodiscard]] PublishedStateFragment& Fragment(PublishedFragmentKind kind);
     [[nodiscard]] const PublishedStateFragment& Fragment(PublishedFragmentKind kind) const;

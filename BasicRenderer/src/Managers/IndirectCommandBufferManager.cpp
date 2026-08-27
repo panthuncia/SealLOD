@@ -53,10 +53,19 @@ void IndirectCommandBufferManager::CreateBuffersForView(uint64_t viewID) {
 }
 
 void IndirectCommandBufferManager::UnregisterBuffers(uint64_t viewID) {
+    std::vector<br::render::ArtifactAddress> retiredAddresses;
     {
         std::lock_guard lock(m_desiredMutex);
         if (m_viewIDs.erase(viewID) == 0) return;
+        retiredAddresses.push_back({ br::render::ArtifactKind::ViewLifetime, viewID, 0 });
+        retiredAddresses.reserve(m_workloadIDs.size() + 1u);
+        for (const auto& [_, workloadID] : m_workloadIDs) {
+            retiredAddresses.push_back({ br::render::ArtifactKind::BufferVersion, workloadID, viewID });
+        }
         ++m_desiredMutationRevision;
+    }
+    if (m_rendererStateRequests) {
+        for (const auto& address : retiredAddresses) m_rendererStateRequests->Release(address);
     }
     ScheduleDesiredBuild();
 }
@@ -377,7 +386,13 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
         dto.minimumCapacity = capacity;
         if (safeCount != 0u) {
             for (const auto viewID : input->viewIDs) {
+				// A view ID may be destroyed and later reused. Capacity alone is
+				// therefore not a version identity: after Release it could match a
+				// signature tombstone and return AlreadyDesired without recreating the
+				// address node. Include the monotonic view lifetime incarnation.
+				const auto lifetimeRevision = snapshot.viewLifetimeRevisions.at(viewID);
 				const auto argumentRevision =
+					(lifetimeRevision << 32u) |
 					(std::max<std::uint64_t>)(capacity, 1u);
                 const br::render::ArtifactKey argumentKey{
 					br::render::ArtifactKind::BufferVersion, idFound->second, viewID };

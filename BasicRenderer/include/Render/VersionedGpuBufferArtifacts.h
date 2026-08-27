@@ -40,6 +40,7 @@ public:
         std::uint64_t capacityClass, std::uint32_t elementStride,
         bool unorderedAccess, bool indirectArguments, std::string_view debugName,
         bool& expanded);
+    void Retire(std::uint64_t backingGeneration) noexcept;
 private:
     std::mutex m_mutex;
     std::vector<std::shared_ptr<BufferBackingArtifact>> m_backings;
@@ -72,6 +73,7 @@ struct VersionedGpuBufferBuildInput {
 };
 
 struct PublishedGpuBufferVersion {
+    ~PublishedGpuBufferVersion();
     std::uint64_t revision = 0;
     std::uint64_t writeSequence = 0;
     std::uint64_t elementCount = 0;
@@ -80,6 +82,7 @@ struct PublishedGpuBufferVersion {
     BufferRevisionMode revisionMode = BufferRevisionMode::Replace;
     std::uint64_t contentVersion = 0;
     std::shared_ptr<BufferBackingArtifact> backing;
+    std::weak_ptr<VersionedGpuBufferBackingPool> backingPool;
     std::shared_ptr<org::GloballyIndexedResource> resource;
     std::shared_ptr<const std::vector<std::byte>> cpuShadow;
 };
@@ -156,6 +159,8 @@ private:
     std::shared_ptr<VersionedGpuBufferBackingPool> m_backingPool;
     std::mutex m_mutex;
     std::shared_ptr<const PublishedGpuBufferVersion> m_previous;
+    std::uint64_t m_lastJournalRevision = 0;
+    ArtifactVersionHandle m_lastJournalHandle;
 };
 
 // Pure replay step shared by the producer and deterministic journal tests.

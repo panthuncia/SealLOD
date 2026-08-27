@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <typeindex>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 #include <array>
@@ -58,15 +60,40 @@ struct ArtifactVersionID {
     std::uint64_t revision = 0;
     // Assigned once by the graph. It is never reused and detects stale/ABA handles.
     std::uint64_t generation = 0;
-    // Owning lifetime pin for this immutable version. Identity comparisons do
-    // not include the pin itself.
-    std::shared_ptr<const void> lease;
-    bool operator==(const ArtifactVersionID& other) const noexcept {
-        return address == other.address && revision == other.revision && generation == other.generation;
-    }
+    auto operator<=>(const ArtifactVersionID&) const = default;
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return revision != 0 && generation != 0;
+    }
+};
+
+// Explicit ownership of an immutable artifact version. Identity values and
+// dependency descriptions are deliberately non-owning so copying them into
+// diagnostics, signatures, or tombstones cannot retain GPU resources.
+class ArtifactLease {
+public:
+    ArtifactLease() = default;
+    explicit ArtifactLease(std::shared_ptr<const void> token) : m_token(std::move(token)) {}
+
+    void reset() noexcept { m_token.reset(); }
+    [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(m_token); }
+    [[nodiscard]] long use_count() const noexcept { return m_token.use_count(); }
+    [[nodiscard]] const std::shared_ptr<const void>& Token() const noexcept { return m_token; }
+
+private:
+    std::shared_ptr<const void> m_token;
+};
+
+// Strong, untyped reference to one immutable version. Use this for queued
+// orchestration work that has not yet installed a graph dependency. Pure
+// ArtifactVersionID values are appropriate only for diagnostics and metadata
+// whose enclosing graph recipe or publication bundle already owns the pin.
+struct ArtifactVersionHandle {
+    ArtifactVersionID version;
+    ArtifactLease lease;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return static_cast<bool>(version) && static_cast<bool>(lease);
     }
 };
 
@@ -110,7 +137,6 @@ struct ArtifactRequirement {
     // Non-zero for handle-based requirements. This prevents an exact revision
     // from accidentally binding to a different internal incarnation (ABA).
     std::uint64_t requiredGeneration = 0;
-    std::shared_ptr<const void> versionLease;
     bool operator==(const ArtifactRequirement& other) const noexcept {
         return key == other.key && minimumRevision == other.minimumRevision &&
             requiredReadiness == other.requiredReadiness && policy == other.policy &&
@@ -124,7 +150,14 @@ struct ArtifactRequirement {
     DependencyPolicy policy = DependencyPolicy::AllOf,
     std::uint32_t alternativeGroup = 0) {
     return { version.address, version.revision, readiness, policy, alternativeGroup,
-        DependencyInvalidationPolicy::ExactSnapshot, version.generation, version.lease };
+        DependencyInvalidationPolicy::ExactSnapshot, version.generation };
+}
+
+[[nodiscard]] inline ArtifactRequirement Exact(const ArtifactVersionHandle& handle,
+    ArtifactReadiness readiness = ArtifactReadiness::CpuReady,
+    DependencyPolicy policy = DependencyPolicy::AllOf,
+    std::uint32_t alternativeGroup = 0) {
+    return Exact(handle.version, readiness, policy, alternativeGroup);
 }
 
 [[nodiscard]] inline ArtifactRequirement Latest(ArtifactAddress address,
@@ -138,7 +171,7 @@ struct ArtifactRequirement {
 [[nodiscard]] inline ArtifactRequirement ReadyGate(ArtifactVersionID version,
     ArtifactReadiness readiness = ArtifactReadiness::CpuReady) {
     return { version.address, version.revision, readiness, DependencyPolicy::AllOf, 0,
-        DependencyInvalidationPolicy::ReadyGate, version.generation, version.lease };
+        DependencyInvalidationPolicy::ReadyGate, version.generation };
 }
 
 // Address-level readiness latch. It selects whichever immutable version of the
@@ -154,7 +187,7 @@ struct ArtifactRequirement {
 [[nodiscard]] inline ArtifactRequirement LifetimeHold(ArtifactVersionID version) {
     return { version.address, version.revision, ArtifactReadiness::CpuReady,
         DependencyPolicy::Optional, 0, DependencyInvalidationPolicy::LifetimeHold,
-        version.generation, version.lease };
+        version.generation };
 }
 
 struct HandleRequirement {
@@ -201,10 +234,10 @@ struct ArtifactSnapshot {
     ArtifactReadiness readiness = ArtifactReadiness::Missing;
     ArtifactPayload payload;
     std::shared_ptr<const struct GpuSubmissionSet> gpuSubmissions;
-    std::shared_ptr<const void> versionLease;
+    ArtifactLease lease;
 
     [[nodiscard]] ArtifactVersionID Version() const noexcept {
-        return { key, revision, generation, versionLease };
+        return { key, revision, generation };
     }
 };
 
@@ -253,21 +286,21 @@ struct ArtifactHandle {
     ArtifactReadiness readiness = ArtifactReadiness::Missing;
     std::shared_ptr<const T> payload;
     std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
-    std::shared_ptr<const void> versionLease;
+    ArtifactLease lease;
 
     [[nodiscard]] explicit operator bool() const noexcept {
         return static_cast<bool>(payload);
     }
 
     [[nodiscard]] ArtifactVersionID Version() const noexcept {
-        return { key, revision, generation, versionLease };
+        return { key, revision, generation };
     }
 };
 
 template <class T>
 [[nodiscard]] ArtifactHandle<T> MakeArtifactHandle(const ArtifactSnapshot& snapshot) {
     return { snapshot.key, snapshot.revision, snapshot.generation, snapshot.readiness,
-        snapshot.payload.Get<T>(), snapshot.gpuSubmissions, snapshot.versionLease };
+        snapshot.payload.Get<T>(), snapshot.gpuSubmissions, snapshot.lease };
 }
 
 std::shared_ptr<const GpuSubmissionSet> MakeGpuSubmissionSet(
@@ -307,16 +340,52 @@ struct ArtifactRequestResult {
     ArtifactRequestStatus status = ArtifactRequestStatus::ShuttingDown;
     std::uint64_t generation = 0;
     ArtifactVersionID version;
+    ArtifactLease lease;
     constexpr operator bool() const noexcept {
         return status == ArtifactRequestStatus::Accepted ||
             status == ArtifactRequestStatus::AlreadyDesired;
     }
+    [[nodiscard]] ArtifactVersionHandle Handle() const {
+        return { version, lease };
+    }
 };
 
-struct ArtifactObservation {
+class ArtifactObservation {
+public:
+    ArtifactObservation() = default;
+    ArtifactObservation(std::uint64_t subscriptionValue, std::uint64_t sequenceValue,
+        ArtifactSnapshot snapshotValue, std::function<void()> unsubscribeValue)
+        : subscription(subscriptionValue), sequence(sequenceValue),
+          snapshot(std::move(snapshotValue)), m_unsubscribe(std::move(unsubscribeValue)) {}
+    ~ArtifactObservation() { Reset(); }
+    ArtifactObservation(const ArtifactObservation&) = delete;
+    ArtifactObservation& operator=(const ArtifactObservation&) = delete;
+    ArtifactObservation(ArtifactObservation&& other) noexcept
+        : subscription(std::exchange(other.subscription, 0)),
+          sequence(other.sequence), snapshot(std::move(other.snapshot)),
+          m_unsubscribe(std::move(other.m_unsubscribe)) {}
+    ArtifactObservation& operator=(ArtifactObservation&& other) noexcept {
+        if (this == &other) return *this;
+        Reset();
+        subscription = std::exchange(other.subscription, 0);
+        sequence = other.sequence;
+        snapshot = std::move(other.snapshot);
+        m_unsubscribe = std::move(other.m_unsubscribe);
+        return *this;
+    }
+    void Reset() noexcept {
+        if (!m_unsubscribe) return;
+        auto unsubscribe = std::move(m_unsubscribe);
+        subscription = 0;
+        unsubscribe();
+    }
+
     std::uint64_t subscription = 0;
     std::uint64_t sequence = 0;
     ArtifactSnapshot snapshot;
+
+private:
+    std::function<void()> m_unsubscribe;
 };
 
 struct ArtifactBuildResult {
@@ -375,6 +444,10 @@ struct AsyncStateGraphStats {
     std::uint64_t gpuWaitMicros = 0;
     std::uint64_t archivedVersions = 0;
     std::uint64_t reclaimedVersions = 0;
+    std::uint64_t externallyLeasedVersions = 0;
+    std::uint64_t desiredVersions = 0;
+    std::uint64_t recipePinnedVersions = 0;
+    std::uint64_t unclassifiedRetainedVersions = 0;
     std::array<std::uint64_t, static_cast<std::size_t>(ArtifactReadiness::Failed) + 1u> stateCounts{};
 };
 
@@ -420,6 +493,7 @@ public:
     void Release(ArtifactKey key);
     void MarkPublished(ArtifactKey key, std::uint64_t revision);
     void MarkPublished(ArtifactVersionID version);
+    void MarkPublished(std::span<const ArtifactVersionID> versions);
     void PumpGpuCompletions();
     void SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback);
     [[nodiscard]] std::uint64_t AddReadyCallback(

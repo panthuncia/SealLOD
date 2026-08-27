@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <chrono>
@@ -74,7 +75,12 @@ public:
 
 	std::uint64_t CommitGpuVisibleSnapshot(bool forceGraphSnapshot = false);
 	std::uint64_t DesiredPublishedStateRevision() const noexcept { return m_materialStateRevision; }
-	br::render::ArtifactVersionID DesiredPublishedStateVersion() const noexcept { return m_materialStateVersion; }
+	br::render::ArtifactVersionID DesiredPublishedStateVersion() const noexcept {
+		return m_materialStateHandle.version;
+	}
+	br::render::ArtifactVersionHandle DesiredPublishedStateHandle() const {
+		return m_materialStateHandle;
+	}
 	bool TryActivatePublishedMaterialState();
 	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
 		org::runtime::IUploadService* uploads) {
@@ -120,7 +126,7 @@ private:
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
 	std::unordered_map<uint32_t, std::vector<uint32_t>> m_materialTextureStreamingTextureIDs;
 	std::unordered_map<uint32_t, std::unordered_set<uint32_t>> m_graphTextureMaterials;
-	std::unordered_map<uint32_t, std::uint64_t> m_graphTextureSubscriptions;
+	std::unordered_map<uint32_t, br::render::ArtifactObservation> m_graphTextureSubscriptions;
 	tbb::concurrent_queue<uint32_t> m_graphTextureWakeups;
 	bool m_textureStreamingFeedbackSuppressed = false;
 	MaterialCompileFlagsSlotRegistry m_compileFlagsRegistry;
@@ -201,7 +207,7 @@ private:
 	RequestTextureReadbackFn m_requestTextureReadback;
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	org::runtime::IUploadService* m_uploadService = nullptr;
-	std::uint64_t m_materialRowsRevision = 1;
+	std::atomic_uint64_t m_materialRowsRevision{ 1 };
 	bool m_materialGraphActive = false;
 	std::uint64_t m_activeMaterialPublishedRevision = 0;
 	std::uint64_t m_observedMaterialPublishedRevision = 0;
@@ -211,7 +217,7 @@ private:
 	std::uint32_t m_materialStateStableFrames = 0;
 	std::uint32_t m_materialStateDirtyFrames = 0;
 	std::uint64_t m_materialStateRevision = 0;
-	br::render::ArtifactVersionID m_materialStateVersion{};
+	br::render::ArtifactVersionHandle m_materialStateHandle{};
 	std::uint64_t m_materialStateValidatedRevision = 0;
 	std::unordered_map<std::uint64_t, std::uint64_t> m_materialStateExpectedFingerprints;
 	std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 3> m_materialBufferFamilies;
