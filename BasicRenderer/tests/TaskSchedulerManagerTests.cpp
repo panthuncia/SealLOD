@@ -1,10 +1,12 @@
 #include "Managers/Singletons/TaskSchedulerManager.h"
+#include "Managers/SerializedTaskPump.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -15,6 +17,53 @@ void Check(bool condition) {
 }
 
 int main() {
+    // Deterministically exercise the handoff that boolean scheduled flags get
+    // wrong: a notification arriving while the consumer is finishing must be
+    // consumed by that worker, not require another scheduler submission.
+    {
+        std::mutex tasksMutex;
+        std::vector<br::SerializedTaskPump::Task> tasks;
+        std::atomic<int> drains{0};
+        br::SerializedTaskPump pump;
+        pump.Configure(
+            [&](br::SerializedTaskPump::Task task) {
+                std::lock_guard lock(tasksMutex);
+                tasks.push_back(std::move(task));
+                return true;
+            },
+            [&] {
+                const int pass = drains.fetch_add(1, std::memory_order_acq_rel);
+                if (pass == 0) Check(pump.Notify());
+            });
+        Check(pump.Notify());
+        br::SerializedTaskPump::Task task;
+        {
+            std::lock_guard lock(tasksMutex);
+            Check(tasks.size() == 1);
+            task = std::move(tasks.front());
+            tasks.clear();
+        }
+        task();
+        Check(drains.load(std::memory_order_acquire) == 2);
+        Check(pump.IsIdle());
+        std::lock_guard lock(tasksMutex);
+        Check(tasks.empty());
+    }
+
+    // Scheduler rejection closes the pump and reports failure exactly once;
+    // subsequent producers cannot leave silently stranded work behind.
+    {
+        std::atomic<int> rejected{0};
+        br::SerializedTaskPump pump;
+        pump.Configure(
+            [](br::SerializedTaskPump::Task) { return false; },
+            [] {},
+            [&] { rejected.fetch_add(1, std::memory_order_relaxed); });
+        Check(!pump.Notify());
+        Check(!pump.Notify());
+        Check(rejected.load(std::memory_order_relaxed) == 1);
+    }
+
     auto& scheduler = TaskSchedulerManager::GetInstance();
     TaskSchedulerManager::Config config{};
     config.workerCount = 2;
@@ -28,6 +77,39 @@ int main() {
     Check(scheduler.BlockingThreadCount() == 1);
     Check(scheduler.DomainConcurrency(TaskDomain::StaticImport) == 1);
     Check(scheduler.DomainConcurrency(TaskDomain::ShaderCompile) == 1);
+
+    {
+        auto scope = scheduler.CreateScope("serialized-pump-stress");
+        std::atomic<int> pending{0};
+        std::atomic<int> consumed{0};
+        br::SerializedTaskPump pump;
+        pump.Configure(
+            [&](br::SerializedTaskPump::Task task) {
+                return scheduler.Submit(scope, TaskLane::Streaming, TaskDomain::General,
+                    "serialized-pump", [task = std::move(task)](const br::TaskContext& context) mutable {
+                        if (!context.StopRequested()) task();
+                    });
+            },
+            [&] { consumed.fetch_add(pending.exchange(0, std::memory_order_acq_rel)); });
+        constexpr int producerCount = 8;
+        constexpr int notificationsPerProducer = 2000;
+        std::vector<std::thread> producers;
+        for (int producer = 0; producer < producerCount; ++producer) {
+            producers.emplace_back([&] {
+                for (int notification = 0; notification < notificationsPerProducer; ++notification) {
+                    pending.fetch_add(1, std::memory_order_release);
+                    Check(pump.Notify());
+                }
+            });
+        }
+        for (auto& producer : producers) producer.join();
+        scope.Wait();
+        Check(pump.IsIdle());
+        Check(pending.load(std::memory_order_acquire) == 0);
+        Check(consumed.load(std::memory_order_acquire) ==
+            producerCount * notificationsPerProducer);
+        pump.Stop();
+    }
 
     {
         auto scope = scheduler.CreateScope("basic");

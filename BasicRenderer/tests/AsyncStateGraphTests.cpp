@@ -11,6 +11,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <source_location>
 #include <thread>
@@ -1218,6 +1220,39 @@ int main() {
     ecsScope.Wait();
     Check(rejectedWorkerAccess.load(std::memory_order_acquire));
     ecs.Cleanup();
+
+    const auto traceDirectory = std::filesystem::temp_directory_path() /
+        ("sarp_async_graph_trace_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    graph.StartTrace({ .maximumEvents = 10'000 });
+    Check(graph.TraceActive());
+    Check(static_cast<bool>(graph.Request(
+        { ArtifactKind::MaterialTable, 101, 0 }, 8, {}, Payload(88), 88)));
+    graph.WaitIdle();
+    const auto traceReport = graph.StopTraceAndWriteReport(traceDirectory);
+    Check(!graph.TraceActive());
+    Check(traceReport.capturedEvents != 0 && traceReport.droppedEvents == 0);
+    Check(std::filesystem::exists(traceReport.eventsCsv));
+    Check(std::filesystem::exists(traceReport.chromeTraceJson));
+    Check(std::filesystem::exists(traceReport.summaryMarkdown));
+    const auto readFile = [](const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    const auto eventsCsv = readFile(traceReport.eventsCsv);
+    Check(eventsCsv.contains("RequestAccepted"));
+    Check(eventsCsv.contains("BuildCompleted"));
+    Check(eventsCsv.contains("StateChanged"));
+    Check(readFile(traceReport.chromeTraceJson).contains("\"traceEvents\""));
+    Check(readFile(traceReport.summaryMarkdown).contains("Producer timing by artifact kind"));
+
+    graph.StartTrace({ .maximumEvents = 2 });
+    Check(static_cast<bool>(graph.Request(
+        { ArtifactKind::MaterialTable, 102, 0 }, 9, {}, Payload(99), 99)));
+    graph.WaitIdle();
+    const auto boundedTrace = graph.StopTraceAndWriteReport(traceDirectory / "bounded");
+    Check(boundedTrace.capturedEvents == 2);
+    Check(boundedTrace.droppedEvents != 0);
 
     graph.Shutdown();
     scheduler.Cleanup();

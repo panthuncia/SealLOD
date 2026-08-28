@@ -492,6 +492,23 @@ Renderer::~Renderer() {
     org::runtime::SetActiveUploadPolicyService(nullptr);
 }
 
+void Renderer::StartAsyncStateGraphTrace(br::render::AsyncStateGraphTraceConfig config) {
+    m_pendingAsyncStateGraphTrace = config;
+    if (m_asyncStateGraph) m_asyncStateGraph->StartTrace(config);
+}
+
+bool Renderer::AsyncStateGraphTraceActive() const {
+    return m_asyncStateGraph && m_asyncStateGraph->TraceActive();
+}
+
+br::render::AsyncStateGraphTraceReport Renderer::StopAsyncStateGraphTraceAndWriteReport(
+    const std::filesystem::path& outputDirectory) {
+    m_pendingAsyncStateGraphTrace.reset();
+    return m_asyncStateGraph
+        ? m_asyncStateGraph->StopTraceAndWriteReport(outputDirectory)
+        : br::render::AsyncStateGraphTraceReport{};
+}
+
 void Renderer::Initialize(
     HWND hwnd,
     UINT x_res,
@@ -734,6 +751,9 @@ void Renderer::Initialize(
         "RendererStateCommitCleanup");
     m_asyncStateGraph = std::make_unique<br::render::AsyncStateGraph>(
         TaskSchedulerManager::GetInstance(), "RendererStateGraph");
+    if (m_pendingAsyncStateGraphTrace) {
+        m_asyncStateGraph->StartTrace(*m_pendingAsyncStateGraphTrace);
+    }
     m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight);
     br::render::PublishedStateSource::SetProcessSource(m_rendererStatePublisher->ResourceSource());
     m_rendererStateRequests = std::make_unique<br::render::RendererStateRequestService>(

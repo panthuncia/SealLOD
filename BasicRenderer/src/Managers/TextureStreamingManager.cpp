@@ -225,6 +225,16 @@ void TextureStreamingManager::Initialize(TextureFactory& textureFactory, uint32_
 	m_workerQuit.store(false, std::memory_order_release);
 	m_lastProcessedReadbackFence = 0;
 	m_taskScope = TaskSchedulerManager::GetInstance().CreateScope("TextureStreamingManager");
+	m_commandPump.Configure(
+		[this](br::SerializedTaskPump::Task task) {
+			return TaskSchedulerManager::GetInstance().Submit(
+				m_taskScope, TaskLane::Streaming, TaskDomain::TextureProcessing,
+				"TextureStreamingManager::Drain",
+				[task = std::move(task)](const br::TaskContext& context) mutable {
+					if (!context.StopRequested()) task();
+				});
+		},
+		[this] { Drain(); });
 }
 
 void TextureStreamingManager::Shutdown()
@@ -233,13 +243,13 @@ void TextureStreamingManager::Shutdown()
 		return;
 	}
 	m_workerQuit.store(true, std::memory_order_release);
+	m_commandPump.Stop();
 	m_graphBindingObservation.Reset();
 	{
 		std::lock_guard lock(m_graphBindingStateMutex);
 		m_observedGraphBindingStates.clear();
 	}
 	if (m_taskScope.Valid()) m_taskScope.CancelAndWait();
-	m_drainScheduled.store(false, std::memory_order_release);
 	if (m_textureFactory) m_textureFactory->SetMaterialTextureTransferService(nullptr);
 	if (m_materialTextureTransfers) m_materialTextureTransfers->Shutdown();
 	m_materialTextureTransfers.reset();
@@ -302,16 +312,10 @@ void TextureStreamingManager::EnqueueTextureMetadataRefresh(
 void TextureStreamingManager::ScheduleDrain()
 {
 	if (m_workerQuit.load(std::memory_order_acquire) || !m_taskScope.Valid()) return;
-	bool expected = false;
-	if (!m_drainScheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
-	if (!TaskSchedulerManager::GetInstance().Submit(m_taskScope, TaskLane::Streaming,
-		TaskDomain::TextureProcessing, "TextureStreamingManager::Drain",
-		[this](const br::TaskContext& context) { Drain(context); })) {
-		m_drainScheduled.store(false, std::memory_order_release);
-	}
+	(void)m_commandPump.Notify();
 }
 
-void TextureStreamingManager::Drain(const br::TaskContext& context)
+void TextureStreamingManager::Drain()
 {
 	ZoneScopedN("TextureStreamingWorker::Drain");
 	std::deque<WorkerCommand> commands;
@@ -323,7 +327,7 @@ void TextureStreamingManager::Drain(const br::TaskContext& context)
 			m_workerCommands.pop_front();
 		}
 	}
-	if (!context.StopRequested()) PollCompletedReadbackSlots(m_lastProcessedReadbackFence);
+	if (!m_workerQuit.load(std::memory_order_acquire)) PollCompletedReadbackSlots(m_lastProcessedReadbackFence);
 
 		uint64_t newestFrame = 0;
 		for (auto& command : commands) {
@@ -351,8 +355,7 @@ void TextureStreamingManager::Drain(const br::TaskContext& context)
 		std::lock_guard lock(m_workerCommandMutex);
 		hasMore = !m_workerCommands.empty();
 	}
-	m_drainScheduled.store(false, std::memory_order_release);
-	if (hasMore && !context.StopRequested()) ScheduleDrain();
+	if (hasMore && !m_workerQuit.load(std::memory_order_acquire)) ScheduleDrain();
 }
 
 void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessedFence)

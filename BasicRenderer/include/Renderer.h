@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <functional>
+#include <filesystem>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -176,6 +177,10 @@ public:
     RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
     const RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
     bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
+    void StartAsyncStateGraphTrace(br::render::AsyncStateGraphTraceConfig config = {});
+    [[nodiscard]] bool AsyncStateGraphTraceActive() const;
+    br::render::AsyncStateGraphTraceReport StopAsyncStateGraphTraceAndWriteReport(
+        const std::filesystem::path& outputDirectory);
     void SetProducerPersistentState(std::shared_ptr<ProducerPersistentState> state) {
         if (m_isInitialized) throw std::logic_error("producer persistent state must be set before initialization");
         m_producerPersistentState = state ? std::move(state) : std::make_shared<ProducerPersistentState>();
@@ -264,6 +269,7 @@ private:
     std::unique_ptr<TextureFactory> m_pTextureFactory = nullptr;
     std::unique_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
     std::unique_ptr<br::render::AsyncStateGraph> m_asyncStateGraph;
+    std::optional<br::render::AsyncStateGraphTraceConfig> m_pendingAsyncStateGraphTrace;
     std::unique_ptr<br::render::RendererStatePublisher> m_rendererStatePublisher;
     std::unique_ptr<br::render::RendererStateRequestService> m_rendererStateRequests;
     TaskScope m_rendererStateCommitScope;

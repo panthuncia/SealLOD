@@ -13,6 +13,7 @@
 
 #include "Factories/TextureFactory.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
+#include "Managers/SerializedTaskPump.h"
 
 namespace org { class PixelBuffer; }
 using org::PixelBuffer;
@@ -105,7 +106,8 @@ private:
 	static void PublishTransferState(const std::shared_ptr<TransferState>& transfer,
 		State state, std::uint64_t fenceValue = 0, std::string error = {});
 
-	void ReapCompletedLocked();
+	void ReapCompleted();
+	void RejectPendingWork();
 	void PumpWorker();
 	static rhi::TextureBarrier MakeWholeTextureBarrier(
 		const PixelBuffer& image,
@@ -126,8 +128,7 @@ private:
 	std::vector<InFlightBatch> m_inFlight;
 	std::unordered_map<uint64_t, Record> m_records;
 	br::TaskScope m_taskScope;
-	std::atomic_bool m_pumpScheduled{ false };
-	std::atomic_uint64_t m_workGeneration{ 0 };
+	br::SerializedTaskPump m_pump;
 	std::atomic_bool m_shuttingDown{ false };
 	bool m_initialized = false;
 };

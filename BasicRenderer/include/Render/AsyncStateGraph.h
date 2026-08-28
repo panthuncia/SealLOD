@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -499,6 +500,21 @@ struct AsyncStateGraphStats {
     std::array<std::uint64_t, static_cast<std::size_t>(ArtifactReadiness::Failed) + 1u> stateCounts{};
 };
 
+struct AsyncStateGraphTraceConfig {
+    std::size_t maximumEvents = 1'000'000;
+    bool includeDependencyEvents = true;
+    bool includeRetentionEvents = true;
+};
+
+struct AsyncStateGraphTraceReport {
+    std::filesystem::path eventsCsv;
+    std::filesystem::path chromeTraceJson;
+    std::filesystem::path summaryMarkdown;
+    std::uint64_t capturedEvents = 0;
+    std::uint64_t droppedEvents = 0;
+    std::chrono::microseconds elapsed{};
+};
+
 class AsyncStateGraph {
 public:
     explicit AsyncStateGraph(TaskSchedulerManager& scheduler, std::string_view name = "RendererStateGraph");
@@ -563,6 +579,9 @@ public:
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;
     [[nodiscard]] AsyncStateGraphStats Stats() const;
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const;
+    void StartTrace(AsyncStateGraphTraceConfig config = {});
+    [[nodiscard]] bool TraceActive() const;
+    AsyncStateGraphTraceReport StopTraceAndWriteReport(const std::filesystem::path& outputDirectory);
     void WaitIdle() const;
     void Shutdown();
 

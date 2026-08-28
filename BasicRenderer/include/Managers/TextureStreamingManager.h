@@ -21,6 +21,7 @@
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/Texture.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
+#include "Managers/SerializedTaskPump.h"
 
 class TextureFactory;
 namespace br::render {
@@ -148,7 +149,7 @@ public:
 private:
 	TextureStreamingManager();
 	void ScheduleDrain();
-	void Drain(const br::TaskContext& context);
+	void Drain();
 
 	struct TextureBindingOwner {
 		uint64_t bindingID = 0;
@@ -254,7 +255,7 @@ private:
 	TaskScope m_taskScope;
 	std::mutex m_workerCommandMutex;
 	std::deque<WorkerCommand> m_workerCommands;
-	std::atomic<bool> m_drainScheduled{false};
+	br::SerializedTaskPump m_commandPump;
 	std::atomic<bool> m_workerQuit{false};
 	uint64_t m_lastProcessedReadbackFence = 0;
 	std::atomic<bool> m_initialized{false};
