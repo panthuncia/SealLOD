@@ -1041,6 +1041,10 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool 
         target.executionMicros = source.executionMicros;
         target.maxExecutionMicros = source.maxExecutionMicros;
         target.highWatermark = source.highWatermark;
+        target.concurrency = TaskSchedulerManager::GetInstance().DomainConcurrency(
+            static_cast<TaskDomain>(index));
+        target.maxQueueWaitTask = source.maxQueueWaitTask;
+        target.maxExecutionTask = source.maxExecutionTask;
     }
     snapshot.ioTasks = taskStats.ioQueued + taskStats.ioActive;
     snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;

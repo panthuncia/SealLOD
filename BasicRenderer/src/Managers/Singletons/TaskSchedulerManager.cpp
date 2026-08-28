@@ -359,7 +359,14 @@ void TaskSchedulerManager::Initialize(Config config) {
     state.domains[static_cast<std::size_t>(TaskDomain::StaticImport)].limit = staticLimit;
     state.domains[static_cast<std::size_t>(TaskDomain::RendererState)].limit = 1u;
     state.domains[static_cast<std::size_t>(TaskDomain::AssetImport)].limit = std::min(4u, m_workerCount);
-    state.domains[static_cast<std::size_t>(TaskDomain::TextureProcessing)].limit = std::min(2u, m_workerCount);
+    // Texture decode/reload work is the dominant CPU queue during scene import.
+    // A fixed limit of two left large machines mostly idle and made queue-drain
+    // time proportional to a tuning constant. Scale conservatively with the
+    // available worker pool while retaining headroom for graph and renderer
+    // control work and bounding concurrent decode memory.
+    const auto textureLimit = (std::min)(8u, (m_workerCount + 3u) / 4u);
+    state.domains[static_cast<std::size_t>(TaskDomain::TextureProcessing)].limit =
+        (std::min)(m_workerCount, (std::max)(1u, textureLimit));
     state.domains[static_cast<std::size_t>(TaskDomain::ShaderCompile)].limit = shaderLimit;
     state.domains[static_cast<std::size_t>(TaskDomain::Cleanup)].limit = std::max(1u, m_workerCount - 1u);
     state.domains[static_cast<std::size_t>(TaskDomain::GraphControl)].limit = 1u;
@@ -509,9 +516,15 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
                 auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task.domain)];
                 --runtime.active; runtime.stats.active = runtime.active;
                 runtime.stats.queueWaitMicros += queuedUs;
-                runtime.stats.maxQueueWaitMicros = std::max(runtime.stats.maxQueueWaitMicros, queuedUs);
+                if (queuedUs > runtime.stats.maxQueueWaitMicros) {
+                    runtime.stats.maxQueueWaitMicros = queuedUs;
+                    runtime.stats.maxQueueWaitTask = task.name;
+                }
                 runtime.stats.executionMicros += elapsedUs;
-                runtime.stats.maxExecutionMicros = std::max(runtime.stats.maxExecutionMicros, elapsedUs);
+                if (elapsedUs > runtime.stats.maxExecutionMicros) {
+                    runtime.stats.maxExecutionMicros = elapsedUs;
+                    runtime.stats.maxExecutionTask = task.name;
+                }
                 if (cancelled) ++runtime.stats.cancelled; else if (error) ++runtime.stats.failed; else ++runtime.stats.completed;
                 if (task.lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros) ++runtime.stats.longTasks;
             }

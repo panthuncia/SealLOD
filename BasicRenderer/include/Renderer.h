@@ -96,6 +96,9 @@ public:
             uint64_t queueWaitMicros = 0, maxQueueWaitMicros = 0;
             uint64_t executionMicros = 0, maxExecutionMicros = 0;
             uint64_t highWatermark = 0;
+            uint32_t concurrency = 0;
+            std::string maxQueueWaitTask;
+            std::string maxExecutionTask;
         };
         bool sceneTaskInFlight = false;
         bool hasCommittedSceneSnapshot = false;

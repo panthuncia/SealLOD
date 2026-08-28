@@ -1995,14 +1995,20 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 if (found == nodes.end() ||
                     (found->second.state != ArtifactReadiness::CpuReady &&
                      found->second.state != ArtifactReadiness::UploadSubmitted) ||
-                    !found->second.waitingGpuSubmissions) continue;
-				if (selectedGpuKeys.insert(recoveryKey).second) {
+					!found->second.waitingGpuSubmissions) {
+					if (std::chrono::steady_clock::now() - started >= maxDuration) break;
+					continue;
+				}
+                if (selectedGpuKeys.insert(recoveryKey).second) {
 					signalledGpu.push_back({ recoveryKey, found->second.generation,
 						found->second.waitingGpuSubmissions, std::chrono::steady_clock::now() });
 				}
                 gpuRecovery.push_back(recoveryKey);
-				if (!signalledGpu.empty() &&
-					std::chrono::steady_clock::now() - started >= maxDuration) break;
+				// Stale recovery entries are work too. Conditioning the deadline on
+				// finding a live signal allowed a large stale deque to be scanned in
+				// full while holding the graph mutex, producing multi-second global
+				// admission stalls during streaming flight paths.
+				if (std::chrono::steady_clock::now() - started >= maxDuration) break;
             }
         }
         // Complete() may synchronously notify ticket subscribers. Never call

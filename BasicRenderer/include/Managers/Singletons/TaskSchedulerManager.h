@@ -68,6 +68,8 @@ public:
         std::uint64_t queueWaitMicros = 0, maxQueueWaitMicros = 0;
         std::uint64_t executionMicros = 0, maxExecutionMicros = 0;
         std::uint64_t highWatermark = 0, longTasks = 0;
+        std::string maxQueueWaitTask;
+        std::string maxExecutionTask;
     };
     struct QueueStats {
         DomainStats domains[static_cast<std::size_t>(TaskDomain::Count)]{};
