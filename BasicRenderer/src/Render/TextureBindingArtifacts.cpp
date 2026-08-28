@@ -1,6 +1,7 @@
 #include "Render/TextureBindingArtifacts.h"
 
 #include "Resources/Texture.h"
+#include "Managers/MaterialTextureTransferService.h"
 
 namespace br::render {
 namespace {
@@ -24,9 +25,11 @@ ArtifactBuildResult BuildTextureBinding(const ArtifactBuildContext& context) {
     binding->imageDescriptorIndex = srv.slot.index;
     binding->samplerDescriptorIndex = input->samplerDescriptorIndex;
     binding->image = input->image;
+	binding->transfer = input->transfer;
+    binding->streamingMetadata = input->streamingMetadata;
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<PublishedTextureBinding>(std::move(binding)),
-        input->gpuSubmissions);
+		input->transfer ? input->transfer->gpuSubmissions : input->gpuSubmissions);
 }
 
 } // namespace

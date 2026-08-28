@@ -246,6 +246,28 @@ ArtifactRequestResult VersionedBufferFamily::RequestSnapshot(
         ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint);
 }
 
+ArtifactRequestResult VersionedBufferFamily::RequestContentSnapshot(
+    RendererStateRequestService& requests, org::runtime::IUploadService& uploads,
+    std::span<const std::byte> bytes, std::uint64_t elementCount,
+    std::uint64_t capacity) {
+    std::uint64_t contentFingerprint = 1469598103934665603ull;
+    for (const auto value : bytes) {
+        contentFingerprint ^= static_cast<std::uint8_t>(value);
+        contentFingerprint *= 1099511628211ull;
+    }
+    contentFingerprint ^= elementCount + (capacity << 1u);
+    std::uint64_t contentRevision = 0;
+    {
+        std::lock_guard lock(m_mutex);
+        const auto [found, inserted] = m_contentRevisions.try_emplace(
+            contentFingerprint, 0u);
+        if (inserted) found->second = ++m_nextContentRevision;
+        contentRevision = found->second;
+    }
+    return RequestSnapshot(requests, uploads, contentRevision, bytes,
+        elementCount, capacity);
+}
+
 ArtifactRequestResult VersionedBufferFamily::RequestCapture(
     RendererStateRequestService& requests, org::runtime::IUploadService& uploads,
     std::uint64_t revision, VersionedGpuBufferJournal::Capture capture) {

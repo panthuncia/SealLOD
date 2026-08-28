@@ -167,7 +167,7 @@ public:
     void SetSceneRenderOverlapEnabled(bool enabled);
     void IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snapshot);
     ObjectManager::Stats GetObjectManagerStats() const;
-    SamplingReadinessSnapshot GetSamplingReadinessSnapshot() const;
+    SamplingReadinessSnapshot GetSamplingReadinessSnapshot(bool includeExpensiveDiagnostics = true) const;
     void SetDeterministicSamplingMode(bool enabled);
     bool GetDeterministicSamplingMode() const { return m_deterministicSamplingMode; }
     ManagerInterface& GetManagerInterface() { return m_managerInterface; }

@@ -103,8 +103,12 @@ void MaterialTextureTransferService::RequestReadback(
 	std::function<void()> callback)
 {
 	if (!image) return;
-	std::scoped_lock lock(m_mutex);
-	m_pendingReadbacks.push_back({image, std::move(outputFile), std::move(callback)});
+	{
+		std::scoped_lock lock(m_mutex);
+		m_pendingReadbacks.push_back({image, std::move(outputFile), std::move(callback)});
+		m_workGeneration.fetch_add(1, std::memory_order_release);
+	}
+	Pump();
 }
 
 void MaterialTextureTransferService::Initialize()
@@ -240,6 +244,7 @@ MaterialTextureTransferService::EnqueueUpload(
 		artifact = EnsureTransferRecordLocked(image);
 		if (!existed) {
 			m_pending.push_back({image, std::move(description), std::move(initialData), true});
+			m_workGeneration.fetch_add(1, std::memory_order_release);
 			BT_PLOT("MaterialTextureTransfer.Pending", static_cast<int64_t>(m_pending.size()));
 		}
 	}
@@ -258,7 +263,10 @@ MaterialTextureTransferService::EnsureShaderReady(const std::shared_ptr<PixelBuf
 		std::scoped_lock lock(m_mutex);
 		const bool existed = m_records.contains(image->GetGlobalResourceID());
 		artifact = EnsureTransferRecordLocked(image);
-		if (!existed) m_pending.push_back({image, image->GetDescription(), {}, false});
+		if (!existed) {
+			m_pending.push_back({image, image->GetDescription(), {}, false});
+			m_workGeneration.fetch_add(1, std::memory_order_release);
+		}
 	}
 	Pump();
 	return artifact;
@@ -334,8 +342,13 @@ void MaterialTextureTransferService::Pump()
 		m_taskScope, TaskLane::Streaming, TaskDomain::TextureProcessing,
 		"MaterialTextureTransferService::PumpWorker",
 		[this](const br::TaskContext& context) {
+			const auto observedGeneration = m_workGeneration.load(std::memory_order_acquire);
 			if (!context.StopRequested()) PumpWorker();
 			m_pumpScheduled.store(false, std::memory_order_release);
+			if (!context.StopRequested() &&
+				m_workGeneration.load(std::memory_order_acquire) != observedGeneration) {
+				Pump();
+			}
 		})) {
 		m_pumpScheduled.store(false, std::memory_order_release);
 	}
@@ -344,25 +357,36 @@ void MaterialTextureTransferService::Pump()
 void MaterialTextureTransferService::PumpWorker()
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::PumpWorker");
-	std::scoped_lock lock(m_mutex);
-	if (!m_initialized) return;
-	ReapCompletedLocked();
-	if (m_pending.empty() && m_pendingReadbacks.empty()) return;
-
 	std::vector<Request> requests;
-	requests.swap(m_pending);
 	std::vector<ReadbackRequest> readbacks;
-	readbacks.swap(m_pendingReadbacks);
+	{
+		BT_ZONE_SCOPE("MaterialTextureTransferService::PumpWorker::Detach");
+		std::scoped_lock lock(m_mutex);
+		if (!m_initialized) return;
+		ReapCompletedLocked();
+		if (m_pending.empty() && m_pendingReadbacks.empty()) return;
+		requests.swap(m_pending);
+		readbacks.swap(m_pendingReadbacks);
+	}
+	// Staging allocation, command recording and queue submission are deliberately
+	// outside m_mutex. EnsureShaderReady only needs the record table and must not
+	// queue behind an unrelated upload batch.
+	auto failTransfer = [this](const std::shared_ptr<PixelBuffer>& image, std::string error) {
+		if (!image) return;
+		std::shared_ptr<TransferState> transfer;
+		{
+			std::scoped_lock lock(m_mutex);
+			auto& record = m_records[image->GetGlobalResourceID()];
+			record.state = State::Failed;
+			transfer = record.transferState;
+		}
+		PublishTransferState(transfer, State::Failed, 0, std::move(error));
+	};
 	InFlightBatch batch{};
 	if (rhi::Failed(m_device.CreateCommandAllocator(rhi::QueueKind::Graphics, batch.allocator)) ||
 		rhi::Failed(m_device.CreateCommandList(rhi::QueueKind::Graphics, batch.allocator.Get(), batch.commandList))) {
 		for (const auto& request : requests) {
-			if (request.image) {
-				auto& record = m_records[request.image->GetGlobalResourceID()];
-				record.state = State::Failed;
-				PublishTransferState(record.transferState, State::Failed, 0,
-					"failed to create transfer command list");
-			}
+			failTransfer(request.image, "failed to create transfer command list");
 		}
 		spdlog::error("MaterialTextureTransferService: failed to create graphics command list");
 		return;
@@ -436,9 +460,7 @@ void MaterialTextureTransferService::PumpWorker()
 			batch.images.push_back(request.image);
 		}
 		catch (const std::exception& ex) {
-			auto& record = m_records[request.image->GetGlobalResourceID()];
-			record.state = State::Failed;
-			PublishTransferState(record.transferState, State::Failed, 0, ex.what());
+			failTransfer(request.image, ex.what());
 			spdlog::error("Material texture transfer recording failed for '{}' id={}: {}",
 				request.image->GetName(), request.image->GetGlobalResourceID(), ex.what());
 		}
@@ -446,9 +468,14 @@ void MaterialTextureTransferService::PumpWorker()
 
 	for (auto& request : readbacks) {
 		if (!request.image || !request.image->HasValidBackingResource()) continue;
-		const auto record = m_records.find(request.image->GetGlobalResourceID());
-		if (record == m_records.end() || record->second.state != State::Ready) {
-			m_pendingReadbacks.push_back(std::move(request));
+		bool ready = false;
+		{
+			std::scoped_lock lock(m_mutex);
+			const auto record = m_records.find(request.image->GetGlobalResourceID());
+			ready = record != m_records.end() && record->second.state == State::Ready;
+			if (!ready) m_pendingReadbacks.push_back(std::move(request));
+		}
+		if (!ready) {
 			continue;
 		}
 		const uint32_t mipLevels = request.image->GetMipLevels();
@@ -500,40 +527,45 @@ void MaterialTextureTransferService::PumpWorker()
 
 	if (batch.images.empty() && batch.readbacks.empty()) return;
 	batch.commandList->End();
+	{
+		std::scoped_lock lock(m_mutex);
+		batch.fenceValue = ++m_nextFenceValue;
+	}
 	auto commandList = batch.commandList.Get();
 	if (rhi::Failed(m_graphicsQueue.Submit({&commandList, 1}))) {
 		for (const auto& image : batch.images) {
-			auto& record = m_records[image->GetGlobalResourceID()];
-			record.state = State::Failed;
-			PublishTransferState(record.transferState, State::Failed, 0,
-				"graphics submission failed");
+			failTransfer(image, "graphics submission failed");
 		}
 		spdlog::error("MaterialTextureTransferService: graphics submission failed");
 		return;
 	}
-	batch.fenceValue = ++m_nextFenceValue;
 	if (!m_timeline || !*m_timeline ||
 		rhi::Failed(m_graphicsQueue.Signal({(*m_timeline)->GetHandle(), batch.fenceValue}))) {
 		// Submission already transferred ownership to the queue.  Keep every
 		// allocation alive and force completion before marking the ticket failed.
 		(void)m_device.WaitIdle();
 		for (const auto& image : batch.images) {
-			auto& record = m_records[image->GetGlobalResourceID()];
-			record.state = State::Failed;
-			PublishTransferState(record.transferState, State::Failed, 0,
-				"completion signal failed");
+			failTransfer(image, "completion signal failed");
 		}
 		spdlog::error("MaterialTextureTransferService: completion signal failed; graphics queue was drained safely");
 		return;
 	}
-	for (const auto& image : batch.images) {
-		auto& record = m_records[image->GetGlobalResourceID()];
-		record.state = State::InFlight;
-		record.fenceValue = batch.fenceValue;
-		PublishTransferState(record.transferState, State::InFlight, batch.fenceValue);
+	const auto submittedFenceValue = batch.fenceValue;
+	std::vector<std::shared_ptr<TransferState>> submittedTransfers;
+	{
+		std::scoped_lock lock(m_mutex);
+		for (const auto& image : batch.images) {
+			auto& record = m_records[image->GetGlobalResourceID()];
+			record.state = State::InFlight;
+			record.fenceValue = batch.fenceValue;
+			submittedTransfers.push_back(record.transferState);
+		}
+		m_inFlight.push_back(std::move(batch));
 	}
-	BT_PLOT("MaterialTextureTransfer.Submitted", static_cast<int64_t>(batch.images.size()));
-	m_inFlight.push_back(std::move(batch));
+	for (const auto& transfer : submittedTransfers) {
+		PublishTransferState(transfer, State::InFlight, submittedFenceValue);
+	}
+	BT_PLOT("MaterialTextureTransfer.Submitted", static_cast<int64_t>(submittedTransfers.size()));
 }
 
 bool MaterialTextureTransferService::IsShaderReady(const std::shared_ptr<PixelBuffer>& image) const

@@ -114,10 +114,12 @@ ArtifactBuildResult BuildMaterialRow(const ArtifactBuildContext& context,
             ApplyBinding(*row, target.target, *found->second);
         }
     }
-    if (!manager.ApplyMaterialRowArtifact(*row)) {
-        return ArtifactBuildResult::Cancelled();
-    }
-    return ArtifactBuildResult::Ready(ArtifactPayload::Make<MaterialRowArtifact>(std::move(row)));
+    auto result = ArtifactBuildResult::Ready(
+        ArtifactPayload::Make<MaterialRowArtifact>(row));
+    result.onAccepted = [&manager, row](const ArtifactSnapshot&) {
+        (void)manager.ApplyMaterialRowArtifact(*row);
+    };
+    return result;
 }
 
 ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
@@ -157,6 +159,29 @@ ArtifactBuildResult BuildMaterialState(const ArtifactBuildContext& context) {
     state->evalTable = resolveTable(input->evalTableKey, sizeof(PerMaterialEvalCB));
     state->openPbrTable = resolveTable(input->openPbrTableKey, sizeof(PerMaterialOpenPBRCB));
     if (!state->baseTable || !state->evalTable || !state->openPbrTable) {
+        basic_telemetry::SetGauge("SARP.Material.RootRetry.ExpectedWriteSequence",
+            static_cast<std::int64_t>(input->materialRowsRevision));
+        basic_telemetry::SetGauge("SARP.Material.RootRetry.ExpectedRowCount",
+            static_cast<std::int64_t>(input->materialRowCount));
+        const auto reportCandidate = [&](const ArtifactKey& key, std::string_view table) {
+            for (const auto& dependency : context.dependencies) {
+                if (dependency.key != key) continue;
+                const auto fragment = dependency.payload.Get<RendererStateFragmentArtifact>();
+                const auto version = fragment
+                    ? fragment->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
+                if (!version) continue;
+                basic_telemetry::SetGauge(std::string("SARP.Material.RootRetry.") +
+                    std::string(table) + ".WriteSequence",
+                    static_cast<std::int64_t>(version->writeSequence));
+                basic_telemetry::SetGauge(std::string("SARP.Material.RootRetry.") +
+                    std::string(table) + ".RowCount",
+                    static_cast<std::int64_t>(version->elementCount));
+            }
+        };
+        reportCandidate(input->baseTableKey, "Base");
+        reportCandidate(input->evalTableKey, "Eval");
+        reportCandidate(input->openPbrTableKey, "OpenPbr");
+        basic_telemetry::AddCounter("SARP.Material.RootRetry.Count");
         // Dependencies are minimum-revision requirements. During rapid material
         // streaming an older root build can therefore be scheduled after its
         // table nodes have already advanced. Publishing that mixed closure maps

@@ -441,6 +441,9 @@ struct ArtifactBuildResult {
     std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
     std::chrono::steady_clock::duration retryDelay{};
     std::string error;
+	// Runs outside the graph mutex only after this exact producer result has
+	// passed generation/dependency validation and become an immutable version.
+	std::function<void(const ArtifactSnapshot&)> onAccepted;
 
     static ArtifactBuildResult Ready(ArtifactPayload payload,
         std::shared_ptr<const GpuSubmissionSet> gpuSubmissions = {});

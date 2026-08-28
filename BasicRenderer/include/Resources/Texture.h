@@ -295,10 +295,19 @@ public:
     struct PublishedBindingSnapshot {
         std::shared_ptr<PixelBuffer> image;
         uint64_t bindingRevision = 0;
+        TextureStreamingState streamingState{};
     };
     PublishedBindingSnapshot GetPublishedBindingSnapshot() const {
         std::scoped_lock lock(m_uploadAdvanceMutex);
-        return {m_publishedImage, m_publishedBindingRevision};
+        return {m_publishedImage, m_publishedBindingRevision, m_publishedStreamingState};
+    }
+    struct PreparedBindingSnapshot {
+        std::shared_ptr<PixelBuffer> image;
+        TextureStreamingState streamingState{};
+    };
+    PreparedBindingSnapshot GetPreparedBindingSnapshot() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return {m_image, m_streamingState};
     }
     std::shared_ptr<PixelBuffer> ImagePtr() const {
         return GetPublishedBindingSnapshot().image;
@@ -450,6 +459,7 @@ private:
     std::shared_ptr<PixelBuffer> m_image;
     std::shared_ptr<PixelBuffer> m_publishedImage;
     uint64_t m_publishedBindingRevision = 0;
+    TextureStreamingState m_publishedStreamingState{};
     std::shared_ptr<Sampler> m_sampler;
     TextureFileMeta m_meta;
 	std::shared_ptr<TextureProcessingJobHandle> m_processingHandle;

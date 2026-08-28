@@ -127,6 +127,7 @@ private:
 	std::unordered_map<uint64_t, Record> m_records;
 	br::TaskScope m_taskScope;
 	std::atomic_bool m_pumpScheduled{ false };
+	std::atomic_uint64_t m_workGeneration{ 0 };
 	std::atomic_bool m_shuttingDown{ false };
 	bool m_initialized = false;
 };

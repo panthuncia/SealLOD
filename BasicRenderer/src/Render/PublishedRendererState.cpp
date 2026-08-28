@@ -4,6 +4,7 @@
 
 #include <spdlog/spdlog.h>
 #include <BasicTelemetry/Telemetry.h>
+#include <BasicTelemetry/Tracy.h>
 
 namespace br::render {
 
@@ -243,15 +244,18 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
     const auto started = std::chrono::steady_clock::now();
     RendererStateCommitResult result;
     std::lock_guard lock(m_mutex);
+    BT_ZONE_SCOPE("RendererStatePublisher::Commit::Locked");
     if (frameSlot >= m_frameStates.size()) {
         result.state = m_active;
         return result;
     }
     if (m_frameStates[frameSlot]) {
+        BT_ZONE_SCOPE("RendererStatePublisher::Commit::RetireFrameSlot");
         result.retiredStates[result.retiredStateCount++] = std::move(m_frameStates[frameSlot]);
         if (m_stats.retainedFrameStates) --m_stats.retainedFrameStates;
     }
     if (m_candidate.state) {
+        BT_ZONE_SCOPE("RendererStatePublisher::Commit::Candidate");
         const auto activeEpoch = m_active ? m_active->epoch : 0u;
         if (m_candidate.baseEpoch == activeEpoch) {
             if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
@@ -268,10 +272,18 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         m_candidate.baseEpoch = 0;
     }
     if (!m_patches.empty()) {
+        BT_ZONE_SCOPE("RendererStatePublisher::Commit::ApplyPatches");
         auto patched = m_active ? std::make_shared<PublishedRendererState>(*m_active)
                                 : std::make_shared<PublishedRendererState>();
+        // A commit applies a batch of fragment patches to one candidate
+        // manifest. Clone the catalog once for that batch. Cloning it for
+        // every patch made commit O(patches * catalog size) during streaming.
+        auto catalog = patched->resourceCatalog
+            ? std::make_shared<PublishedResourceCatalog>(*patched->resourceCatalog)
+            : std::make_shared<PublishedResourceCatalog>();
         bool changed = false;
         for (const auto& patch : m_patches) {
+            BT_ZONE_SCOPE("RendererStatePublisher::Commit::ApplyOnePatch");
             const bool preconditionsSatisfied = std::ranges::all_of(
                 patch.preconditions, [&](const PublishedFragmentPrecondition& precondition) {
                     const auto& active = patched->Fragment(precondition.kind);
@@ -291,15 +303,15 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
                     changed = true;
                 }
             }
-            auto catalog = patched->resourceCatalog
-                ? std::make_shared<PublishedResourceCatalog>(*patched->resourceCatalog)
-                : std::make_shared<PublishedResourceCatalog>();
-            for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
-                if ((patch.catalogOwnerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
-                    catalog->contentVersions.erase(entry->first);
-                    catalog->selections.erase(entry->first);
-                    entry = catalog->entries.erase(entry);
-                } else ++entry;
+            {
+                BT_ZONE_SCOPE("RendererStatePublisher::Commit::FilterCatalog");
+                for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
+                    if ((patch.catalogOwnerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
+                        catalog->contentVersions.erase(entry->first);
+                        catalog->selections.erase(entry->first);
+                        entry = catalog->entries.erase(entry);
+                    } else ++entry;
+                }
             }
             for (const auto& [key, resources] : patch.catalogEntries) {
                 catalog->entries[key] = resources;
@@ -309,10 +321,10 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
             for (const auto& [key, selection] : patch.catalogSelections) {
                 catalog->selections.insert_or_assign(key, selection);
             }
-            patched->resourceCatalog = std::move(catalog);
         }
         m_patches.clear();
         if (changed) {
+            BT_ZONE_SCOPE("RendererStatePublisher::Commit::BuildManifestBundle");
             auto manifestBundle = std::make_shared<PublicationBundle>();
             for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
                 const auto& fragment = patched->Fragment(
@@ -337,14 +349,13 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
                 manifestBundle->versions.end()), manifestBundle->versions.end());
             patched->publicationBundle = std::move(manifestBundle);
             patched->epoch = (m_active ? m_active->epoch : 0u) + 1u;
-            if (patched->resourceCatalog) {
-                auto stampedCatalog = std::make_shared<PublishedResourceCatalog>(
-                    *patched->resourceCatalog);
-                for (auto& [_, selection] : stampedCatalog->selections) {
+            {
+                BT_ZONE_SCOPE("RendererStatePublisher::Commit::StampCatalog");
+                for (auto& [_, selection] : catalog->selections) {
                     selection.manifestEpoch = patched->epoch;
                 }
-                patched->resourceCatalog = std::move(stampedCatalog);
             }
+            patched->resourceCatalog = std::move(catalog);
             if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
             m_active = std::move(patched);
             result.committed = true;
@@ -361,8 +372,11 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
     basic_telemetry::SetGauge("SARP.RendererStatePublisher.RetainedFrameStates",
         static_cast<std::int64_t>(m_stats.retainedFrameStates));
     result.state = m_active;
-    m_source->Store(result.state);
-    result.lease = m_source->AcquireLease(frameSlot, result.state);
+    {
+        BT_ZONE_SCOPE("RendererStatePublisher::Commit::PublishSourceAndLease");
+        m_source->Store(result.state);
+        result.lease = m_source->AcquireLease(frameSlot, result.state);
+    }
     return result;
 }
 

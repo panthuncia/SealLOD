@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include "Render/AsyncStateGraph.h"
 #include "Render/PublishedRendererState.h"
@@ -148,6 +149,10 @@ public:
         org::runtime::IUploadService& uploads, std::uint64_t revision,
         std::span<const std::byte> bytes, std::uint64_t elementCount,
         std::uint64_t capacity = 0);
+    [[nodiscard]] ArtifactRequestResult RequestContentSnapshot(
+        RendererStateRequestService& requests, org::runtime::IUploadService& uploads,
+        std::span<const std::byte> bytes, std::uint64_t elementCount,
+        std::uint64_t capacity = 0);
     [[nodiscard]] ArtifactRequestResult RequestCapture(RendererStateRequestService& requests,
         org::runtime::IUploadService& uploads, std::uint64_t revision,
         VersionedGpuBufferJournal::Capture capture);
@@ -161,6 +166,8 @@ private:
     std::shared_ptr<const PublishedGpuBufferVersion> m_previous;
     std::uint64_t m_lastJournalRevision = 0;
     ArtifactVersionHandle m_lastJournalHandle;
+    std::unordered_map<std::uint64_t, std::uint64_t> m_contentRevisions;
+    std::uint64_t m_nextContentRevision = 0;
 };
 
 // Pure replay step shared by the producer and deterministic journal tests.

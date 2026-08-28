@@ -1080,6 +1080,21 @@ void TerrainManager::ProcessPendingUpdates()
 			static_cast<std::int64_t>(diagnostic.artifact.readiness));
 		basic_telemetry::SetGauge("SARP.Terrain.GraphBlockers",
 			static_cast<std::int64_t>(diagnostic.blockers.size()));
+		if (!diagnostic.blockers.empty()) {
+			const auto& blocker = diagnostic.blockers.front();
+			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Kind",
+				static_cast<std::int64_t>(blocker.key.kind));
+			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Primary",
+				static_cast<std::int64_t>(blocker.key.primaryID));
+			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Variant",
+				static_cast<std::int64_t>(blocker.key.variantID));
+			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Revision",
+				static_cast<std::int64_t>(blocker.minimumRevision));
+			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Generation",
+				static_cast<std::int64_t>(blocker.requiredGeneration));
+			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Readiness",
+				static_cast<std::int64_t>(blocker.requiredReadiness));
+		}
 		if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
 			diagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
 			spdlog::error("TerrainManager: graph state revision={} failed: {} {}",

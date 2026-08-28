@@ -171,7 +171,7 @@ int main() {
 	// Exact milestone waits are level-triggered and keyed by immutable version.
 	// Registration before completion and registration after completion both
 	// dispatch exactly once without an address-wide callback scan.
-	const ArtifactKey awaitedKey{ ArtifactKind::Generic, 894, 0 };
+	const ArtifactKey awaitedKey{ ArtifactKind::Generic, 881, 0 };
 	auto awaited = graph.Request(awaitedKey, 1, {}, Payload(41), 41);
 	Check(awaited);
 	std::atomic_uint32_t awaitedCallbacks{ 0 };
@@ -197,8 +197,8 @@ int main() {
 
 	// Dropping the RAII registration before a blocked version advances prevents
 	// dispatch and releases its waiter pin.
-	const ArtifactKey awaitDependency{ ArtifactKind::Generic, 892, 0 };
-	const ArtifactKey cancelledAwaitKey{ ArtifactKind::Generic, 893, 0 };
+	const ArtifactKey awaitDependency{ ArtifactKind::Generic, 879, 0 };
+	const ArtifactKey cancelledAwaitKey{ ArtifactKind::Generic, 880, 0 };
 	const ArtifactVersionID futureDependency{ awaitDependency, 1, 1 };
 	auto cancelledAwait = graph.Request(cancelledAwaitKey, 1,
 		{ Exact(futureDependency, ArtifactReadiness::GpuReady) }, Payload(1), 1);
@@ -214,6 +214,30 @@ int main() {
 	Check(graph.Request(awaitDependency, 1, {}, Payload(1), 1));
 	graph.WaitIdle();
 	Check(!cancelledAwaitCalled.load(std::memory_order_acquire));
+
+	// Dependency-driven Latest rebuilds preserve the caller's logical source
+	// revision and mint only a new immutable generation. They must not consume
+	// revision 2 and make the caller's next source mutation stale.
+	const ArtifactKey generationDependency{ ArtifactKind::Generic, 877, 0 };
+	const ArtifactKey generationConsumer{ ArtifactKind::Generic, 878, 0 };
+	auto latestDependencyV1 = graph.Request(generationDependency, 1, {}, Payload(10), 10);
+	Check(latestDependencyV1);
+	graph.WaitIdle();
+	auto latestConsumerV1 = graph.Request(generationConsumer, 1,
+		{ Latest(generationDependency, ArtifactReadiness::GpuReady) }, Payload(1), 11);
+	Check(latestConsumerV1);
+	graph.WaitIdle();
+	const auto firstLatestGeneration = graph.Snapshot(generationConsumer).generation;
+	Check(graph.Request(generationDependency, 2, {}, Payload(20), 20));
+	graph.WaitIdle();
+	const auto rebuiltLatest = graph.Snapshot(generationConsumer);
+	Check(rebuiltLatest.revision == 1);
+	Check(rebuiltLatest.generation != firstLatestGeneration);
+	Check(graph.Snapshot(latestConsumerV1.version).generation == firstLatestGeneration);
+	Check(graph.Request(generationConsumer, 2,
+		{ Latest(generationDependency, ArtifactReadiness::GpuReady) }, Payload(2), 12));
+	graph.WaitIdle();
+	Check(graph.Snapshot(generationConsumer).revision == 2);
 
     // Returned version IDs own their archive entry until the last copied lease
     // is released. Once superseded and unreferenced, the payload is reclaimed
@@ -258,8 +282,8 @@ int main() {
     // A live exact consumer owns its dependency even after every caller-side
     // handle has been dropped and the dependency address advances. The pin is
     // held by the graph recipe, not by a copied requirement or signature.
-    const ArtifactKey pinnedDependency{ ArtifactKind::Generic, 892, 0 };
-    const ArtifactKey pinnedConsumer{ ArtifactKind::Generic, 893, 0 };
+    const ArtifactKey pinnedDependency{ ArtifactKind::Generic, 883, 0 };
+    const ArtifactKey pinnedConsumer{ ArtifactKind::Generic, 884, 0 };
     auto pinnedDependencyV1 = graph.Request(pinnedDependency, 1, {}, Payload(7), 7);
     Check(pinnedDependencyV1);
     graph.WaitIdle();
@@ -501,8 +525,9 @@ int main() {
     Check(graph.Request(latestDependency, 2));
     graph.WaitIdle();
     const auto latestV2 = graph.Snapshot(latestConsumer);
-    Check(latestV2.revision == 2);
-    Check(latestV2.payload.Get<Value>() && latestV2.payload.Get<Value>()->value == 4);
+    Check(latestV2.revision == 1);
+    Check(latestV2.generation != latestV1.generation);
+    Check(latestV2.payload.Get<Value>() && latestV2.payload.Get<Value>()->value == 3);
     const auto retainedLatestV1 = graph.Snapshot(latestV1Request.version);
     Check(retainedLatestV1.payload.Get<Value>() && retainedLatestV1.payload.Get<Value>()->value == 2);
     Check(graph.Request(gateDependency, 2));

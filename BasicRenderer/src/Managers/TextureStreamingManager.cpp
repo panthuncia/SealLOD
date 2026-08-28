@@ -85,6 +85,23 @@ namespace {
 		return info;
 	}
 
+	TextureStreamingGPUInfo BuildTextureStreamingGPUInfo(
+		const TextureStreamingState& state, uint32_t fullWidth, uint32_t fullHeight) {
+		TextureStreamingGPUInfo info{};
+		if (state.eligible) info.flags |= kTextureStreamingFlagEligible;
+		if (state.enabled) info.flags |= kTextureStreamingFlagEnabled;
+		info.totalMipCount = state.residency.totalMipCount;
+		info.residentTopMip = state.residency.residentTopMip;
+		info.residentMipCount = state.residency.residentMipCount;
+		info.fullWidth = fullWidth;
+		info.fullHeight = fullHeight;
+		info.requestedTopMip = state.requestedTopMip;
+		info.pendingTopMip = state.pendingTopMip;
+		info.bindingRevisionLo = static_cast<uint32_t>(state.bindingRevision & 0xffffffffull);
+		info.bindingRevisionHi = static_cast<uint32_t>(state.bindingRevision >> 32u);
+		return info;
+	}
+
 	struct MaterialTextureStreamingReadbackInputs {
 		std::shared_ptr<Resource> source;
 		RG_DEFINE_PASS_INPUTS(MaterialTextureStreamingReadbackInputs, &MaterialTextureStreamingReadbackInputs::source);
@@ -271,6 +288,17 @@ void TextureStreamingManager::EnqueueTextureUploadAdvance(
 	QueueCommand(std::move(command));
 }
 
+void TextureStreamingManager::EnqueueTextureMetadataRefresh(
+	const std::shared_ptr<TextureAsset>& texture, const char* reason)
+{
+	WorkerCommand command{};
+	command.kind = WorkerCommand::Kind::MarkDirty;
+	command.texture = texture;
+	command.needsUploadAdvance = false;
+	command.reason = reason ? reason : "binding_published";
+	QueueCommand(std::move(command));
+}
+
 void TextureStreamingManager::ScheduleDrain()
 {
 	if (m_workerQuit.load(std::memory_order_acquire) || !m_taskScope.Valid()) return;
@@ -410,7 +438,10 @@ uint64_t TextureStreamingManager::RegisterTextureBinding(
 	}
 	ZoneValue(streamingTextureID);
 	const uint64_t bindingID = m_nextBindingID.fetch_add(1u, std::memory_order_relaxed);
-	{
+	// Graph-native material and terrain registrations carry streaming policy but
+	// no compatibility callback. Do not create a main-thread adoption owner for
+	// them; this makes owner cost independent of material sharing fan-out.
+	if (onBindingChanged) {
 		std::lock_guard lock(m_liveBindingMutex);
 		m_liveBindingsByID.emplace(bindingID, MainThreadBindingOwner{
 			.streamingTextureID = streamingTextureID,
@@ -504,6 +535,8 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 				input->streamingStateRevision = texture->GetStreamingStateRevision();
 				input->samplerDescriptorIndex = texture->SamplerDescriptorIndex();
 				input->image = published.image;
+				input->streamingMetadata = BuildTextureStreamingGPUInfo(
+					published.streamingState, texture->GetFullMip0Width(), texture->GetFullMip0Height());
 				const auto fingerprint =
 					(published.bindingRevision << 1u) ^ input->streamingStateRevision ^
 					streamingTextureID ^ 0x54455842494e44ull;
@@ -620,6 +653,10 @@ void TextureStreamingManager::ApplyUnregisterCommand(uint64_t bindingID)
 			if (m_rendererStateRequests) {
 				m_rendererStateRequests->Release({
 					br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 });
+			}
+			{
+				std::scoped_lock mailboxLock(m_bindingMailboxMutex);
+				m_dirtyBindingMailboxes.erase(streamingTextureID);
 			}
 		}
 	}
@@ -1019,6 +1056,20 @@ void TextureStreamingManager::NotifyBindingChanged(TextureAsset& texture)
 	QueueBindingChanged(texture, {});
 }
 
+void TextureStreamingManager::FinishBindingMailboxRequest(
+	uint32_t streamingTextureID, const std::shared_ptr<TextureAsset>& texture)
+{
+	bool hasSuccessor = false;
+	{
+		std::scoped_lock lock(m_bindingMailboxMutex);
+		m_activeBindingMailboxRequests.erase(streamingTextureID);
+		hasSuccessor = m_dirtyBindingMailboxes.erase(streamingTextureID) != 0;
+	}
+	if (hasSuccessor && texture && !m_workerQuit.load(std::memory_order_acquire)) {
+		EnqueueTextureUploadAdvance(texture, "binding_mailbox_successor");
+	}
+}
+
 void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::shared_ptr<PixelBuffer> previousImage)
 {
 	ZoneScopedN("TextureStreamingManager::QueueBindingChanged");
@@ -1036,15 +1087,26 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 
 	PendingBindingChange change{};
 	change.streamingTextureID = streamingTextureID;
-	change.bindingRevision = texture.GetBindingRevision();
-	change.streamingStateRevision = texture.GetStreamingStateRevision();
+	const auto prepared = texture.GetPreparedBindingSnapshot();
+	change.bindingRevision = prepared.streamingState.bindingRevision;
+	change.streamingStateRevision = prepared.streamingState.stateRevision;
 	change.queuedAt = std::chrono::steady_clock::now();
 	change.texture = m_streamingTexturesByID[streamingTextureID].lock();
 	change.previousImage = std::move(previousImage);
-	change.newImage = texture.PreparedImagePtr();
-	change.metadata = BuildTextureStreamingGPUInfo(texture);
+	change.newImage = prepared.image;
+	change.metadata = BuildTextureStreamingGPUInfo(
+		prepared.streamingState, texture.GetFullMip0Width(), texture.GetFullMip0Height());
 	if (!change.newImage) {
 		return;
+	}
+	{
+		std::scoped_lock lock(m_bindingMailboxMutex);
+		if (m_activeBindingMailboxRequests.contains(streamingTextureID)) {
+			m_dirtyBindingMailboxes.insert(streamingTextureID);
+			basic_telemetry::AddCounter("SARP.TextureStreaming.BindingMailboxCoalesced");
+			return;
+		}
+		m_activeBindingMailboxRequests.insert(streamingTextureID);
 	}
 	if (m_materialTextureTransfers) {
 		change.transfer = m_materialTextureTransfers->EnsureShaderReady(change.newImage);
@@ -1074,7 +1136,9 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 		input->streamingStateRevision = change.streamingStateRevision;
 		input->samplerDescriptorIndex = texture.SamplerDescriptorIndex();
 		input->image = change.newImage;
+		input->transfer = change.transfer;
 		input->gpuSubmissions = change.transfer->gpuSubmissions;
+		input->streamingMetadata = change.metadata;
 		const br::render::ArtifactAddress address{
 			br::render::ArtifactKind::TextureBinding, change.streamingTextureID, 0 };
 		const auto request = m_rendererStateRequests->Request(
@@ -1093,11 +1157,38 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 				br::render::ArtifactReadiness::UploadSubmitted,
 				TaskLane::Streaming, TaskDomain::TextureProcessing,
 				[this, pending](const br::render::ArtifactSnapshot& snapshot) mutable {
-					if (m_workerQuit.load(std::memory_order_acquire)) return;
+					if (m_workerQuit.load(std::memory_order_acquire)) {
+						FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
+						return;
+					}
 					pending->waitingForGraphWake = false;
 					pending->graphReady = br::render::ArtifactReachedMilestone(
 						snapshot.readiness, br::render::ArtifactReadiness::UploadSubmitted);
-					m_pendingBindingChanges.push(std::move(*pending));
+					if (!pending->graphReady) {
+						if (pending->texture) {
+							(void)pending->texture->RejectPreparedImage(
+								pending->bindingRevision, pending->newImage);
+							EnqueueTextureUploadAdvance(pending->texture, "graph_binding_failed");
+						}
+						FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
+						return;
+					}
+					std::shared_ptr<PixelBuffer> replaced;
+					if (!pending->texture || !pending->texture->PublishPreparedImage(
+						pending->bindingRevision, pending->newImage, &replaced)) {
+						if (pending->texture) {
+							EnqueueTextureUploadAdvance(pending->texture, "stale_binding_publish");
+						}
+						FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
+						return;
+					}
+					EnqueueTextureMetadataRefresh(pending->texture, "graph_binding_published");
+					// Graph and manifest leases retain any still-consumed generation. The
+					// displaced compatibility snapshot can enter deferred retirement now.
+					if (replaced && replaced != pending->newImage) {
+						DescriptorHeapManager::GetInstance().RetireResource(std::move(replaced));
+					}
+					FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
 				});
 			if (awaiter.subscription != 0) {
 				std::lock_guard lock(m_graphBindingAwaiterMutex);
@@ -1107,9 +1198,13 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 			return;
 		}
 	}
-	// Transitional recovery for request-service shutdown or a rejected recipe.
-	// This is not the normal path and retains the known-correct reconciliation.
-	m_pendingBindingChanges.push(std::move(change));
+	// A binding without a graph request cannot become renderer-visible. Keep the
+	// previous published version and retry preparation unless shutdown is active.
+	if (change.texture && !m_workerQuit.load(std::memory_order_acquire)) {
+		(void)change.texture->RejectPreparedImage(change.bindingRevision, change.newImage);
+		EnqueueTextureUploadAdvance(change.texture, "graph_binding_request_unavailable");
+	}
+	FinishBindingMailboxRequest(streamingTextureID, change.texture);
 }
 
 std::size_t TextureStreamingManager::DrainPendingBindingChanges()
@@ -1253,7 +1348,9 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 				input->samplerDescriptorIndex = change.texture
 					? change.texture->SamplerDescriptorIndex() : 0u;
 				input->image = change.newImage;
+				input->transfer = change.transfer;
 				input->gpuSubmissions = transferSubmission;
+				input->streamingMetadata = change.metadata;
 				const auto request = m_rendererStateRequests->Request(
 					bindingKey, change.bindingRevision, {},
 					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
@@ -1454,8 +1551,16 @@ bool TextureStreamingManager::RequestStreamingTextureReadback(
 {
 	const auto found = m_streamingTexturesByID.find(streamingTextureID);
 	const auto texture = found != m_streamingTexturesByID.end() ? found->second.lock() : nullptr;
+	std::shared_ptr<PixelBuffer> selectedImage;
+	if (m_rendererStateRequests) {
+		const auto graphBinding = m_rendererStateRequests->Snapshot(br::render::ArtifactAddress{
+			br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 })
+			.payload.Get<br::render::PublishedTextureBinding>();
+		if (graphBinding) selectedImage = graphBinding->image;
+	}
+	if (!selectedImage && texture) selectedImage = texture->GetPublishedBindingSnapshot().image;
 	return texture && RequestExternalMaterialTextureReadback(
-		texture->GetPublishedBindingSnapshot().image,
+		selectedImage,
 		std::move(outputFile), std::move(callback));
 }
 
@@ -1810,6 +1915,15 @@ MaterialTextureStreamingStats TextureStreamingManager::GetTextureStreamingStats(
 		}
 	}
 	return stats;
+}
+
+MaterialTextureStreamingReadinessStats TextureStreamingManager::GetTextureStreamingReadinessStats() const
+{
+	std::lock_guard statsLock(m_statsMutex);
+	return {
+		.fullResolutionResidentTextureCount = m_publishedStats.fullResolutionResidentTextureCount,
+		.pendingReloadTextureCount = m_publishedStats.pendingReloadTextureCount,
+	};
 }
 
 MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStats() const

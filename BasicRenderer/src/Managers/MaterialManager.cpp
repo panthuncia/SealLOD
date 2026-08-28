@@ -370,6 +370,35 @@ namespace {
 		return textures;
 	}
 
+	std::vector<br::render::MaterialRowTextureTarget> CollectMaterialRowTextureTargets(
+		const Material& material, const MaterialDescription& desc) {
+		std::vector<br::render::MaterialRowTextureTarget> result;
+		const auto excludedHeight = material.IsObjectReyesAtlasHeightMaterial()
+			? material.GetHeightMapTexture() : nullptr;
+		const auto append = [&](const TextureAndConstant& source,
+			br::render::MaterialTextureTarget target) {
+			if (!source.texture || source.texture == excludedHeight) return;
+			const auto id = source.texture->GetStreamingTextureID();
+			if (id) result.push_back({ { br::render::ArtifactKind::TextureBinding, id, 0 }, target });
+		};
+		append(desc.baseColor, br::render::MaterialTextureTarget::BaseColor);
+		append(desc.normal, br::render::MaterialTextureTarget::Normal);
+		append(desc.metallic, br::render::MaterialTextureTarget::Metallic);
+		append(desc.roughness, br::render::MaterialTextureTarget::Roughness);
+		append(desc.emissive, br::render::MaterialTextureTarget::Emissive);
+		append(desc.aoMap, br::render::MaterialTextureTarget::AmbientOcclusion);
+		append(desc.heightMapFromBaseColorAlpha && !desc.heightMap.texture ? desc.baseColor : desc.heightMap,
+			br::render::MaterialTextureTarget::Height);
+		append(desc.opacity, br::render::MaterialTextureTarget::Opacity);
+		append(desc.openPBRTextures.coatColor, br::render::MaterialTextureTarget::CoatColor);
+		append(desc.openPBRTextures.coatWeight, br::render::MaterialTextureTarget::CoatWeight);
+		append(desc.openPBRTextures.coatRoughness, br::render::MaterialTextureTarget::CoatRoughness);
+		append(desc.openPBRTextures.fuzzColor, br::render::MaterialTextureTarget::FuzzColor);
+		append(desc.openPBRTextures.fuzzWeight, br::render::MaterialTextureTarget::FuzzWeight);
+		append(desc.openPBRTextures.fuzzRoughness, br::render::MaterialTextureTarget::FuzzRoughness);
+		return result;
+	}
+
 	template <typename T>
 	bool BytewiseEqual(const T& lhs, const T& rhs) {
 		return std::memcmp(&lhs, &rhs, sizeof(T)) == 0;
@@ -534,23 +563,8 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 			BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming::EnqueueFrameTick");
 			m_textureStreamingManager->EnqueueFrameTick(frameIndex);
 		}
-		{
-			BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming::AdoptBindings");
-			m_textureStreamingManager->DrainPendingBindingChanges();
-		}
-	}
-	uint32_t changedTextureID = 0;
-	std::unordered_set<uint32_t> changedTextures;
-	{
-		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::ReconcileGraphTextureChanges");
-		while (m_graphTextureWakeups.try_pop(changedTextureID)) changedTextures.insert(changedTextureID);
-		for (const auto textureID : changedTextures) {
-			const auto observed = m_graphTextureMaterials.find(textureID);
-			if (observed == m_graphTextureMaterials.end()) continue;
-			for (const auto materialID : observed->second) {
-				if (m_dirtyMaterialIDSet.insert(materialID).second) m_dirtyMaterialIDs.push_back(materialID);
-			}
-		}
+		// Binding publication is completed by the exact graph-version continuation
+		// on the streaming lane. The render thread never reconciles texture versions.
 	}
 	static bool debugTextureReadbackRequested = false;
 	if (!debugTextureReadbackRequested && frameIndex >= 120u && m_textureStreamingManager) {
@@ -619,10 +633,6 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 			FlushDirtyMaterial(*materialIt->second, nullptr);
 			++dirtyMaterialsFlushed;
 		}
-	}
-	if (m_textureStreamingManager) {
-		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::RetirePatchedBindings");
-		m_textureStreamingManager->RetirePatchedBindingResources();
 	}
 	const auto dirtyMaterialEnd = std::chrono::steady_clock::now();
 
@@ -704,6 +714,12 @@ unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, Te
 	return materialSlot;
 }
 
+MaterialTextureStreamingReadinessStats MaterialManager::GetMaterialTextureStreamingReadinessStats() const {
+	return m_textureStreamingManager
+		? m_textureStreamingManager->GetTextureStreamingReadinessStats()
+		: MaterialTextureStreamingReadinessStats{};
+}
+
 std::shared_ptr<const br::render::PublishedMaterialUsageBatch>
 MaterialManager::ApplyMaterialUsageBatch(
 	const br::render::MaterialUsageBatchBuildInput& input) {
@@ -741,10 +757,23 @@ MaterialManager::ApplyMaterialUsageBatch(
 bool MaterialManager::ApplyMaterialRowArtifact(const br::render::MaterialRowArtifact& row) {
 	std::lock_guard mutationLock(m_materialMutationMutex);
 	const auto expected = m_materialRowSourceRevisions.find(row.materialID);
-	if (expected == m_materialRowSourceRevisions.end() || expected->second != row.sourceRevision) return false;
+	if (expected == m_materialRowSourceRevisions.end()) {
+		basic_telemetry::AddCounter("SARP.Material.RowApplyRejected.MissingSource");
+		return false;
+	}
+	if (expected->second != row.sourceRevision) {
+		basic_telemetry::AddCounter("SARP.Material.RowApplyRejected.StaleSource");
+		return false;
+	}
 	const auto slot = m_materialIDSlotMapping.find(row.materialID);
-	if (slot == m_materialIDSlotMapping.end() || slot->second != row.materialSlot ||
-		row.materialSlot >= m_materialUsageCounts.size() || m_materialUsageCounts[row.materialSlot] == 0u) return false;
+	if (slot == m_materialIDSlotMapping.end() || slot->second != row.materialSlot) {
+		basic_telemetry::AddCounter("SARP.Material.RowApplyRejected.SlotMismatch");
+		return false;
+	}
+	if (row.materialSlot >= m_materialUsageCounts.size() || m_materialUsageCounts[row.materialSlot] == 0u) {
+		basic_telemetry::AddCounter("SARP.Material.RowApplyRejected.NotLive");
+		return false;
+	}
 	if (row.materialSlot >= m_materialUploadSignatures.size())
 		m_materialUploadSignatures.resize(static_cast<std::size_t>(row.materialSlot) + 1u);
 	auto& signature = m_materialUploadSignatures[row.materialSlot];
@@ -754,11 +783,30 @@ bool MaterialManager::ApplyMaterialRowArtifact(const br::render::MaterialRowArti
 	signature.textureBindings.clear();
 	signature.preparedTextureBindings = row.selectedBindings;
 	for (const auto& binding : row.selectedBindings) if (binding) {
+		const auto& dimensions = binding->image->GetDescription().imageDimensions;
+		if (!dimensions.empty()) {
+			const auto& metadata = binding->streamingMetadata;
+			const auto expectedWidth = (std::max)(1u, metadata.fullWidth >> metadata.residentTopMip);
+			const auto expectedHeight = (std::max)(1u, metadata.fullHeight >> metadata.residentTopMip);
+			if (metadata.fullWidth != 0u && metadata.fullHeight != 0u &&
+				(dimensions.front().width != expectedWidth || dimensions.front().height != expectedHeight)) {
+				basic_telemetry::AddCounter("SARP.Material.RowBindingShapeMismatch");
+			}
+			if (metadata.residentTopMip > metadata.requestedTopMip) {
+				basic_telemetry::AddCounter("SARP.Material.RowBindingAwaitingUpgrade");
+			}
+		}
+		if (binding->imageDescriptorIndex != binding->image->GetSRVInfo(0).slot.index) {
+			basic_telemetry::AddCounter("SARP.Material.RowBindingDescriptorMismatch");
+		}
 		signature.textureBindings.push_back({ binding->streamingTextureID,
 			binding->bindingRevision, binding->imageDescriptorIndex, binding->samplerDescriptorIndex });
 	}
 	signature.valid = true;
 	JournalMaterialRow(row.materialSlot);
+	basic_telemetry::AddCounter("SARP.Material.RowApplyAccepted");
+	basic_telemetry::SetGauge("SARP.Material.RowApplyAccepted.MaxSlot",
+		static_cast<std::int64_t>(row.materialSlot));
 	ScheduleGpuVisibleSnapshotCommit(true);
 	return true;
 }
@@ -814,35 +862,6 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 	}
 
 	auto& signature = m_materialUploadSignatures[materialSlot];
-	std::vector<br::render::MaterialTextureBindingDependencyDTO> currentTextureBindings;
-	std::vector<std::shared_ptr<const br::render::PublishedTextureBinding>> currentPreparedBindings;
-	for (const auto& texture : CollectMaterialTextureAssets(material)) {
-		if (!texture || texture->GetStreamingTextureID() == 0u) continue;
-		const auto binding = texture->GetPublishedBindingSnapshot();
-		if (!binding.image || binding.bindingRevision == 0u ||
-			!binding.image->HasValidBackingResource()) continue;
-		const br::render::MaterialTextureBindingDependencyDTO dependency{
-			texture->GetStreamingTextureID(), binding.bindingRevision,
-			binding.image->GetSRVInfo(0).slot.index,
-			texture->SamplerDescriptorIndex() };
-		currentTextureBindings.push_back(dependency);
-		auto prepared = std::make_shared<br::render::PublishedTextureBinding>();
-		prepared->streamingTextureID = dependency.streamingTextureID;
-		prepared->bindingRevision = dependency.bindingRevision;
-		prepared->imageDescriptorIndex = dependency.imageDescriptorIndex;
-		prepared->samplerDescriptorIndex = dependency.samplerDescriptorIndex;
-		prepared->image = binding.image;
-		currentPreparedBindings.push_back(std::move(prepared));
-	}
-	const auto sameBinding = [](const auto& left, const auto& right) {
-		return left.streamingTextureID == right.streamingTextureID &&
-			left.bindingRevision == right.bindingRevision &&
-			left.imageDescriptorIndex == right.imageDescriptorIndex &&
-			left.samplerDescriptorIndex == right.samplerDescriptorIndex;
-	};
-	const bool textureBindingChanged = signature.textureBindings.size() !=
-		currentTextureBindings.size() || !std::ranges::equal(
-			signature.textureBindings, currentTextureBindings, sameBinding);
 	bool dataChanged = false;
 	{
 		ZoneScopedN("MaterialManager::FlushDirtyMaterial::CompareUploadSignature");
@@ -959,6 +978,47 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		descForAtlasDebug.heightMap.sourcePath.find("object_reyes_atlas_height") != std::string::npos ||
 		descForAtlasDebug.heightMap.uvSetName == "__object_reyes_atlas_height" ||
 		materialData.objectSurfaceSamplingMode == static_cast<std::uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
+	if ((dataChanged || textureAssetsChanged) && m_rendererStateRequests) {
+		auto input = std::make_shared<br::render::MaterialRowInput>();
+		input->materialID = material.GetMaterialID();
+		input->materialSlot = materialSlot;
+		input->sourceRevision = ++m_materialRowSourceRevisions[input->materialID];
+		input->base = materialData;
+		input->evaluation = evalData;
+		input->openPbr = openPBRData;
+		input->textureTargets = CollectMaterialRowTextureTargets(material, descForAtlasDebug);
+		std::vector<br::render::ArtifactRequirement> requirements;
+		std::unordered_set<br::render::ArtifactAddress,
+			br::render::ArtifactAddress::Hasher> uniqueBindings;
+		for (const auto& target : input->textureTargets) if (uniqueBindings.insert(target.bindingAddress).second) {
+			requirements.push_back(br::render::Latest(target.bindingAddress,
+				br::render::ArtifactReadiness::UploadSubmitted,
+				br::render::DependencyPolicy::Optional));
+		}
+		std::uint64_t fingerprint = 1469598103934665603ull;
+		const auto mix = [&fingerprint](const auto& value) {
+			for (const auto byte : std::as_bytes(std::span(&value, 1))) {
+				fingerprint ^= static_cast<std::uint8_t>(byte);
+				fingerprint *= 1099511628211ull;
+			}
+		};
+		mix(input->base); mix(input->evaluation); mix(input->openPbr);
+		fingerprint ^= input->sourceRevision;
+		if (!fingerprint) fingerprint = 1;
+		const auto materialID = input->materialID;
+		const auto sourceRevision = input->sourceRevision;
+		auto payload = br::render::ArtifactPayload::Make<br::render::MaterialRowInput>(std::move(input));
+		const bool graphRowRequested = static_cast<bool>(m_rendererStateRequests->Request(
+			{ br::render::ArtifactKind::Material, materialID, 0 }, sourceRevision,
+			std::move(requirements), std::move(payload), fingerprint));
+		if (!graphRowRequested) {
+			basic_telemetry::AddCounter("SARP.Material.RowRequestRejected");
+		} else {
+			basic_telemetry::AddCounter("SARP.Material.RowRequestAccepted");
+			basic_telemetry::SetGauge("SARP.Material.RowRequestAccepted.MaxSlot",
+				static_cast<std::int64_t>(materialSlot));
+		}
+	}
 	if (isObjectReyesAtlasHeightMaterial && (dataChanged || refreshedTextures)) {
 		static std::atomic<std::uint32_t> loggedAtlasPublications{ 0 };
 		const auto logIndex = loggedAtlasPublications.fetch_add(1, std::memory_order_relaxed);
@@ -988,7 +1048,7 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 				static_cast<std::uint32_t>(material.Technique().rasterFlags));
 		}
 	}
-	if (dataChanged || textureBindingChanged) {
+	if (dataChanged || textureAssetsChanged) {
 		if constexpr (!br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
 			if (dataChanged) {
 				ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadLegacyShadowAuthority");
@@ -1038,19 +1098,9 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 					materialData.objectSurfaceTexelDensity);
 			}
 		}
-		{
-			ZoneScopedN("MaterialManager::FlushDirtyMaterial::StoreUploadSignature");
-			signature.materialData = materialData;
-			signature.evalData = evalData;
-			signature.openPBRData = openPBRData;
-			signature.textureBindings = std::move(currentTextureBindings);
-			signature.preparedTextureBindings = std::move(currentPreparedBindings);
-			signature.valid = true;
-			JournalMaterialRow(materialSlot);
-		}
 	}
 
-	if (dataChanged || textureBindingChanged || refreshedTextures) {
+	if (dataChanged || textureAssetsChanged || refreshedTextures) {
 		ZoneScopedN("MaterialManager::FlushDirtyMaterial::RefreshTextureUsage");
 		RefreshMaterialTextureUsage(material);
 	}
@@ -1153,23 +1203,6 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 			if (bindingID != 0u) {
 				bindingIDs.push_back(bindingID);
 				streamingTextureIDs.push_back(streamingTextureID);
-				auto& materials = m_graphTextureMaterials[streamingTextureID];
-				materials.insert(materialID);
-				if (!m_graphTextureSubscriptions.contains(streamingTextureID) &&
-					m_rendererStateRequests) {
-					const auto address = br::render::ArtifactAddress{
-						br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 };
-					auto observation = m_rendererStateRequests->ObserveWithSnapshot(address,
-						[this, streamingTextureID](std::uint64_t,
-							const br::render::ArtifactSnapshot&) {
-							m_graphTextureWakeups.push(streamingTextureID);
-						});
-					if (observation.snapshot.readiness != br::render::ArtifactReadiness::Missing) {
-						m_graphTextureWakeups.push(streamingTextureID);
-					}
-					m_graphTextureSubscriptions.emplace(
-						streamingTextureID, std::move(observation));
-				}
 			}
 		}
 		TracyPlot("MaterialManager.RegisteredBindingCountForMaterial", static_cast<int64_t>(bindingIDs.size()));
@@ -1188,21 +1221,6 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 		ZoneScopedN("MaterialManager::TrackMaterialTextureAssets::UnregisterBindings");
 		m_textureStreamingManager->UnregisterTextureBindings(trackedIt->second);
 	}
-	const auto textureIDs = m_materialTextureStreamingTextureIDs.find(materialID);
-	if (textureIDs != m_materialTextureStreamingTextureIDs.end()) {
-		for (const auto textureID : textureIDs->second) {
-			auto materials = m_graphTextureMaterials.find(textureID);
-			if (materials == m_graphTextureMaterials.end()) continue;
-			materials->second.erase(materialID);
-			if (!materials->second.empty()) continue;
-			m_graphTextureMaterials.erase(materials);
-			const auto subscription = m_graphTextureSubscriptions.find(textureID);
-			if (subscription != m_graphTextureSubscriptions.end()) {
-				m_graphTextureSubscriptions.erase(subscription);
-			}
-		}
-	}
-
 	m_materialTextureStreamingBindingIDs.erase(trackedIt);
 	m_materialTextureStreamingTextureIDs.erase(materialID);
 }
@@ -1614,10 +1632,16 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			const auto rowsRevision = baseCapture.writeSequence;
 			// The three tables form one material version. Worker admission may
 			// append a row between these individually locked captures; defer that
-			// sample instead of submitting different bytes under one revision.
+			// sample instead of submitting different bytes under one revision. Slot
+			// allocation can also run ahead of immutable row completion; requesting a
+			// root for that partial extent creates a permanently obsolete retrying
+			// version that prevents its successor from owning the address.
 			if (rowsRevision == 0 || evalCapture.writeSequence != rowsRevision ||
 				openPbrCapture.writeSequence != rowsRevision ||
-				m_materialRowsRevision.load(std::memory_order_acquire) != rowsRevision) {
+				m_materialRowsRevision.load(std::memory_order_acquire) != rowsRevision ||
+				baseCapture.elementCount != m_materialSlotsUsed ||
+				evalCapture.elementCount != m_materialSlotsUsed ||
+				openPbrCapture.elementCount != m_materialSlotsUsed) {
 				m_materialStateFingerprint = 0;
 				m_materialStateDirtyFrames = 4;
 				basic_telemetry::AddCounter("SARP.Material.GraphCaptureRaceDeferred");

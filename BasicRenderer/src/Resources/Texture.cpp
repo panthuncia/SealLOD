@@ -2419,6 +2419,7 @@ bool TextureAsset::PublishPreparedImage(
 	}
 	m_publishedImage = image;
 	m_publishedBindingRevision = bindingRevision;
+	m_publishedStreamingState = m_streamingState;
 	return true;
 }
 

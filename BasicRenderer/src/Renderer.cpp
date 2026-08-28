@@ -805,6 +805,7 @@ void Renderer::Initialize(
         m_pReadbackManager->RequestReadback(std::move(texture), std::move(outputFile), std::move(callback), cubemap);
     });
     m_pMaterialManager = MaterialManager::CreateUnique();
+	br::render::RegisterMaterialRowProducer(*m_asyncStateGraph, *m_pMaterialManager);
 	br::render::RegisterMaterialUsageBatchProducer(*m_asyncStateGraph, *m_pMaterialManager);
     m_pMaterialManager->SetRendererStateServices(
         m_rendererStateRequests.get(),
@@ -924,7 +925,7 @@ ObjectManager::Stats Renderer::GetObjectManagerStats() const {
     return m_pObjectManager ? m_pObjectManager->GetStats() : ObjectManager::Stats{};
 }
 
-Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() const {
+Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool includeExpensiveDiagnostics) const {
     SamplingReadinessSnapshot snapshot;
     const auto sceneStatus = GetSceneOverlapStatus();
     snapshot.sceneTaskInFlight = sceneStatus.taskInFlight;
@@ -932,7 +933,12 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
     snapshot.committedSceneSnapshotSequence = sceneStatus.committedSnapshotSequence;
     snapshot.pendingSceneSnapshotSequence = sceneStatus.pendingSnapshotSequence;
 
-    if (m_pMaterialManager) {
+    if (m_pMaterialManager && !includeExpensiveDiagnostics) {
+        const auto textureStats = m_pMaterialManager->GetMaterialTextureStreamingReadinessStats();
+        snapshot.pendingTextureReloads = textureStats.pendingReloadTextureCount;
+        snapshot.fullResolutionTextures = textureStats.fullResolutionResidentTextureCount;
+    }
+    else if (m_pMaterialManager) {
         const auto textureStats = m_pMaterialManager->GetMaterialTextureStreamingStats();
         snapshot.pendingTextureReloads = textureStats.pendingReloadTextureCount;
         snapshot.fullResolutionTextures = textureStats.fullResolutionResidentTextureCount;
@@ -1005,18 +1011,20 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
     snapshot.ioTasks = taskStats.ioQueued + taskStats.ioActive;
     snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;
     snapshot.shaderCompileTasks = taskStats.shaderCompileQueued + taskStats.shaderCompileActive;
-    const auto deferredReleaseStats = DescriptorHeapManager::GetInstance().GetDeferredReleaseStats();
-    snapshot.deferredGpuReleaseCount = deferredReleaseStats.releaseCount;
-    snapshot.deferredGpuReleaseResourceCount = deferredReleaseStats.resourceCount;
-    snapshot.blockedGpuReleaseCount = deferredReleaseStats.blockedReleaseCount;
-    snapshot.invalidGpuReleaseTimelineCount = deferredReleaseStats.invalidTimelineCount;
-    snapshot.deviceErrorGpuReleaseTimelineCount = deferredReleaseStats.deviceErrorTimelineCount;
-    snapshot.incompleteGpuReleaseTimelineCount = deferredReleaseStats.incompleteTimelineCount;
-    snapshot.deferredGpuReleaseResourceIDs = std::move(deferredReleaseStats.resourceIDs);
-    const auto deletionStats = DeletionManager::GetInstance().GetStats();
-    snapshot.deletionQueueObjectCount = deletionStats.objectCount;
-    snapshot.deletionQueueAllocationCount = deletionStats.allocationCount;
-    snapshot.deletionQueueTrackedAllocationCount = deletionStats.trackedAllocationCount;
+    if (includeExpensiveDiagnostics) {
+        const auto deferredReleaseStats = DescriptorHeapManager::GetInstance().GetDeferredReleaseStats();
+        snapshot.deferredGpuReleaseCount = deferredReleaseStats.releaseCount;
+        snapshot.deferredGpuReleaseResourceCount = deferredReleaseStats.resourceCount;
+        snapshot.blockedGpuReleaseCount = deferredReleaseStats.blockedReleaseCount;
+        snapshot.invalidGpuReleaseTimelineCount = deferredReleaseStats.invalidTimelineCount;
+        snapshot.deviceErrorGpuReleaseTimelineCount = deferredReleaseStats.deviceErrorTimelineCount;
+        snapshot.incompleteGpuReleaseTimelineCount = deferredReleaseStats.incompleteTimelineCount;
+        snapshot.deferredGpuReleaseResourceIDs = std::move(deferredReleaseStats.resourceIDs);
+        const auto deletionStats = DeletionManager::GetInstance().GetStats();
+        snapshot.deletionQueueObjectCount = deletionStats.objectCount;
+        snapshot.deletionQueueAllocationCount = deletionStats.allocationCount;
+        snapshot.deletionQueueTrackedAllocationCount = deletionStats.trackedAllocationCount;
+    }
     if (m_pObjectManager) {
         const auto objectStats = m_pObjectManager->GetStats();
         snapshot.deferredRetireQueueDepth = objectStats.deferredRetireQueueDepth;
@@ -3078,10 +3086,17 @@ void Renderer::Update(float elapsedSeconds) {
         BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState");
         try {
             if (m_rendererStatePublisher) {
-                auto commit = m_rendererStatePublisher->Commit(m_frameIndex);
+                auto commit = [&] {
+                    BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::PublisherCommit");
+                    return m_rendererStatePublisher->Commit(m_frameIndex);
+                }();
+                {
+                    BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::InstallFrameLease");
                 m_context.publishedRendererState = commit.state;
                 m_context.publishedManifestLease = commit.lease;
+                }
                 if (commit.HasDeferredWork()) {
+                    BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::ScheduleDeferredCommit");
                     auto* objectManager = commit.committed ? m_pObjectManager.get() : nullptr;
                     auto committedState = commit.committed ? commit.state : nullptr;
                     auto* stateGraph = m_asyncStateGraph.get();
@@ -3115,9 +3130,11 @@ void Renderer::Update(float elapsedSeconds) {
             throw;
         }
 		if (m_pMaterialManager) {
+			BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::ActivateMaterials");
 			(void)m_pMaterialManager->TryActivatePublishedMaterialState();
 		}
 		if (m_pTerrainManager) {
+			BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::ActivateTerrain");
 			(void)m_pTerrainManager->TryActivatePublishedTerrainState();
 		}
     });

@@ -8,7 +8,6 @@
 #include <cstring>
 #include <unordered_set>
 
-#include <tbb/concurrent_queue.h>
 
 #include "Materials/Material.h"
 #include "Managers/TextureStreamingManager.h"
@@ -58,6 +57,7 @@ public:
 	std::shared_ptr<CopyPass> CreateTextureStreamingFeedbackReadbackPass();
 	void SetTextureStreamingFeedbackSuppressed(bool suppressed) { m_textureStreamingFeedbackSuppressed = suppressed; }
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
+	MaterialTextureStreamingReadinessStats GetMaterialTextureStreamingReadinessStats() const;
 	void RegisterStreamingTexture(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
 	TextureStreamingManager* GetTextureStreamingManager() const { return m_textureStreamingManager.get(); }
 	using RequestTextureReadbackFn =
@@ -132,9 +132,6 @@ private:
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
 	std::unordered_map<uint32_t, std::vector<uint32_t>> m_materialTextureStreamingTextureIDs;
 	std::unordered_map<uint32_t, std::uint64_t> m_materialRowSourceRevisions;
-	std::unordered_map<uint32_t, std::unordered_set<uint32_t>> m_graphTextureMaterials;
-	std::unordered_map<uint32_t, br::render::ArtifactObservation> m_graphTextureSubscriptions;
-	tbb::concurrent_queue<uint32_t> m_graphTextureWakeups;
 	bool m_textureStreamingFeedbackSuppressed = false;
 	MaterialCompileFlagsSlotRegistry m_compileFlagsRegistry;
 

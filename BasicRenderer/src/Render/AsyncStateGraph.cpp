@@ -158,8 +158,24 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         };
     };
 
+    struct StoredVersionKey {
+        ArtifactKey address;
+        std::uint64_t revision = 0;
+        std::uint64_t generation = 0;
+        auto operator<=>(const StoredVersionKey&) const = default;
+        struct Hasher {
+            std::size_t operator()(const StoredVersionKey& value) const noexcept {
+                auto hash = VersionKey::Hasher{}({ value.address, value.revision });
+                hash ^= std::hash<std::uint64_t>{}(value.generation) + 0x9e3779b9u +
+                    (hash << 6u) + (hash >> 2u);
+                return hash;
+            }
+        };
+    };
+
     struct RequestedVersion {
         std::uint64_t revision = 0;
+        std::uint64_t generation = 0;
         std::uint64_t fingerprint = 0;
         ArtifactPayload input;
         std::vector<ArtifactRequirement> requirements;
@@ -178,6 +194,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::uint64_t latestRequestedRevision = 0;
         std::uint64_t producedRevision = 0;
         std::uint64_t generation = 0;
+        std::uint64_t versionGeneration = 0;
         std::uint64_t requestFingerprint = 0;
         ArtifactLease lease;
         ArtifactReadiness state = ArtifactReadiness::Missing;
@@ -221,10 +238,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::unordered_map<ArtifactKey, Node, ArtifactKey::Hasher> nodes;
     // Completed versions are immutable. The mutable address slot above is only
     // the desired/build cursor; ExactSnapshot never resolves through that cursor.
-    std::unordered_map<VersionKey, ArtifactSnapshot, VersionKey::Hasher> versions;
+    std::unordered_map<StoredVersionKey, ArtifactSnapshot, StoredVersionKey::Hasher> versions;
     std::unordered_map<VersionKey, std::uint64_t, VersionKey::Hasher> versionGenerations;
     std::unordered_map<VersionKey, VersionSignature, VersionKey::Hasher> versionSignatures;
-    mutable std::unordered_map<VersionKey, std::weak_ptr<const void>, VersionKey::Hasher> versionLeases;
+    mutable std::unordered_map<StoredVersionKey, std::weak_ptr<const void>, StoredVersionKey::Hasher> versionLeases;
     std::uint64_t nextVersionGeneration = 0;
     std::uint64_t reclaimedVersions = 0;
     std::unordered_map<ArtifactKey, std::unordered_set<ArtifactKey, ArtifactKey::Hasher>, ArtifactKey::Hasher> waiters;
@@ -244,7 +261,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 		std::function<void(const ArtifactSnapshot&)> continuation;
 		ArtifactLease lease;
 	};
-	std::unordered_map<VersionKey, std::vector<ExactWaiter>, VersionKey::Hasher> exactWaiters;
+	std::unordered_map<StoredVersionKey, std::vector<ExactWaiter>, StoredVersionKey::Hasher> exactWaiters;
 	std::uint64_t nextExactWaiter = 0;
     AsyncStateGraphStats stats;
     std::atomic_bool drainScheduled{ false };
@@ -266,11 +283,11 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
     ArtifactSnapshot MakeSnapshot(const Node& node) const {
         return { node.key, node.producedRevision,
-            VersionGeneration(node.key, node.producedRevision), node.state, node.payload,
+            node.versionGeneration, node.state, node.payload,
             node.gpuSubmissions, node.lease };
     }
 
-    ArtifactLease AcquireVersionLease(const VersionKey& version) const {
+    ArtifactLease AcquireVersionLease(const StoredVersionKey& version) const {
         if (const auto found = versionLeases.find(version); found != versionLeases.end()) {
             if (auto lease = found->second.lock()) return ArtifactLease{ std::move(lease) };
         }
@@ -285,28 +302,32 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     }
 
 	ArtifactSnapshot SnapshotExactLocked(ArtifactVersionID version) const {
-		const auto archived = versions.find({ version.address, version.revision });
-		if (archived != versions.end() && archived->second.generation == version.generation) {
+		const auto archived = versions.find({ version.address, version.revision, version.generation });
+		if (archived != versions.end()) {
 			auto snapshot = archived->second;
-			snapshot.lease = AcquireVersionLease({ version.address, version.revision });
+			snapshot.lease = AcquireVersionLease({ version.address, version.revision, version.generation });
 			return snapshot;
 		}
 		const auto current = nodes.find(version.address);
 		if (current == nodes.end()) return { version.address, version.revision, version.generation };
-		if (current->second.producedRevision == version.revision) {
+		if (current->second.producedRevision == version.revision &&
+			current->second.versionGeneration == version.generation) {
 			auto snapshot = MakeSnapshot(current->second);
 			if (snapshot.generation == version.generation) return snapshot;
 		}
 		if (current->second.desiredRevision == version.revision &&
-			VersionGeneration(version.address, version.revision) == version.generation) {
+			current->second.versionGeneration == version.generation) {
 			return { version.address, version.revision, version.generation,
 				current->second.state, current->second.payload,
 				current->second.gpuSubmissions, current->second.lease };
 		}
-		const auto successor = std::ranges::find(
-			current->second.successors, version.revision, &RequestedVersion::revision);
+		const auto successor = std::ranges::find_if(current->second.successors,
+			[&](const RequestedVersion& candidate) {
+				return candidate.revision == version.revision &&
+					candidate.generation == version.generation;
+			});
 		if (successor != current->second.successors.end() &&
-			VersionGeneration(version.address, version.revision) == version.generation) {
+			successor->generation == version.generation) {
 			return { version.address, version.revision, version.generation,
 				ArtifactReadiness::Blocked, {}, {}, successor->lease };
 		}
@@ -319,17 +340,18 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         // The archive is storage, not a lifetime owner. Desired nodes,
         // requirements, returned handles, manifests and frame leases own pins.
         snapshot.lease.reset();
-        versions.insert_or_assign(VersionKey{ node.key, node.producedRevision }, std::move(snapshot));
+        versions.insert_or_assign(StoredVersionKey{ node.key, node.producedRevision,
+            node.versionGeneration }, std::move(snapshot));
     }
 
-    bool RecipeReferences(const VersionKey& version,
+    bool RecipeReferences(const StoredVersionKey& version,
         const std::vector<ArtifactRequirement>& requirements) const {
         return std::ranges::any_of(requirements, [&](const ArtifactRequirement& requirement) {
             return requirement.key == version.address &&
                 requirement.minimumRevision == version.revision &&
                 requirement.invalidation != DependencyInvalidationPolicy::Latest &&
                 (requirement.requiredGeneration == 0 ||
-                 requirement.requiredGeneration == VersionGeneration(version.address, version.revision));
+                 requirement.requiredGeneration == version.generation);
         });
     }
 
@@ -341,12 +363,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         // different consumer did not retain its dependency. Permanent
         // signature leases happened to hide that error until those leases were
         // correctly removed.
-        std::unordered_set<VersionKey, VersionKey::Hasher> dependencyPins;
+        std::unordered_set<StoredVersionKey, StoredVersionKey::Hasher> dependencyPins;
         const auto collectPins = [&](const std::vector<ArtifactRequirement>& requirements) {
             for (const auto& requirement : requirements) {
                 if (requirement.minimumRevision == 0 ||
                     requirement.invalidation == DependencyInvalidationPolicy::Latest) continue;
-                dependencyPins.insert({ requirement.key, requirement.minimumRevision });
+                if (requirement.requiredGeneration != 0) dependencyPins.insert({
+                    requirement.key, requirement.minimumRevision, requirement.requiredGeneration });
             }
         };
         for (const auto& [_, node] : nodes) {
@@ -360,10 +383,14 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 (lease != versionLeases.end() && !lease->second.expired());
             if (const auto current = nodes.find(version->first.address); current != nodes.end()) {
                 const auto& node = current->second;
-                referenced = referenced || node.desiredRevision == version->first.revision ||
-                    node.producedRevision == version->first.revision ||
+                referenced = referenced ||
+                    (node.desiredRevision == version->first.revision &&
+                     node.versionGeneration == version->first.generation) ||
+                    (node.producedRevision == version->first.revision &&
+                     node.versionGeneration == version->first.generation) ||
                     std::ranges::any_of(node.successors, [&](const RequestedVersion& successor) {
-                        return successor.revision == version->first.revision;
+                        return successor.revision == version->first.revision &&
+                            successor.generation == version->first.generation;
                     });
             }
             if (referenced) {
@@ -384,15 +411,23 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             requirement.invalidation == DependencyInvalidationPolicy::LifetimeHold ||
             (requirement.invalidation == DependencyInvalidationPolicy::ReadyGate &&
              requirement.minimumRevision != 0)) {
-            const auto exact = versions.find({ requirement.key, requirement.minimumRevision });
-            if (exact != versions.end() && (requirement.requiredGeneration == 0 ||
-                exact->second.generation == requirement.requiredGeneration)) return &exact->second;
+            if (requirement.requiredGeneration != 0) {
+                const auto exact = versions.find({ requirement.key, requirement.minimumRevision,
+                    requirement.requiredGeneration });
+                if (exact != versions.end()) return &exact->second;
+            } else {
+                const ArtifactSnapshot* newest = nullptr;
+                for (const auto& [key, snapshot] : versions) {
+                    if (key.address == requirement.key && key.revision == requirement.minimumRevision &&
+                        (!newest || snapshot.generation > newest->generation)) newest = &snapshot;
+                }
+                if (newest) return newest;
+            }
             const auto current = nodes.find(requirement.key);
             if (current != nodes.end() &&
                 current->second.producedRevision == requirement.minimumRevision &&
                 (requirement.requiredGeneration == 0 ||
-                    VersionGeneration(requirement.key, requirement.minimumRevision) ==
-                        requirement.requiredGeneration)) {
+                    current->second.versionGeneration == requirement.requiredGeneration)) {
                 static thread_local ArtifactSnapshot selected;
                 selected = MakeSnapshot(current->second);
                 return &selected;
@@ -597,7 +632,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             if (selected && Satisfies(selected->readiness, requirement.requiredReadiness)) {
                 auto snapshot = *selected;
                 snapshot.lease = AcquireVersionLease(
-                    VersionKey{ snapshot.key, snapshot.revision });
+                    StoredVersionKey{ snapshot.key, snapshot.revision, snapshot.generation });
                 result.push_back(std::move(snapshot));
                 if (alternative) selectedGroups.insert(groupIdentity);
             }
@@ -639,6 +674,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         auto successor = std::move(node.successors.front());
         node.successors.pop_front();
         node.desiredRevision = successor.revision;
+        node.versionGeneration = successor.generation;
         node.requestFingerprint = successor.fingerprint;
         node.lease = std::move(successor.lease);
         node.requirements = std::move(successor.requirements);
@@ -656,7 +692,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         node.buildAttempted = false;
         node.error.clear();
         node.retryAt.reset();
-        ++node.generation;
+        node.generation = successor.generation;
         InstallWaiterEdges(node);
         SetState(node, ArtifactReadiness::Missing);
         if (const auto cycle = DetectCycle(node); !cycle.empty()) FailCycle(cycle);
@@ -673,15 +709,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         // A Latest edge describes a derived address, not permission to mutate
         // its completed version. Mint an internal successor so exact handles,
         // manifests, and in-flight frame leases retain the old closure.
-        const auto revision = (std::max)(node.latestRequestedRevision,
-            node.desiredRevision) + 1u;
+        const auto revision = node.desiredRevision;
         if (!node.successors.empty()) {
             node.latestSuccessorNeeded = false;
             return PromoteSuccessor(node);
         }
-        const VersionKey versionKey{ node.key, revision };
         const auto generation = ++nextVersionGeneration;
-        versionGenerations.emplace(versionKey, generation);
         std::uint64_t fingerprint = node.requestFingerprint;
         HashRequestValue(fingerprint, revision);
         for (const auto& requirement : node.requestedRequirements) {
@@ -692,11 +725,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             HashRequestValue(fingerprint, selected->generation);
         }
         if (fingerprint == 0) fingerprint = 1;
-        versionSignatures.emplace(versionKey, VersionSignature{
-            fingerprint, node.input.Type(), node.requestedRequirements });
-        node.latestRequestedRevision = revision;
-        node.successors.push_back({ revision, fingerprint, node.input,
-            node.requestedRequirements, AcquireVersionLease(versionKey) });
+        node.successors.push_back({ revision, generation, fingerprint, node.input,
+            node.requestedRequirements, AcquireVersionLease({ node.key, revision, generation }) });
         node.latestSuccessorNeeded = false;
         ++stats.requests;
         return PromoteSuccessor(node);
@@ -738,8 +768,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     [&](const ArtifactSnapshot& dependency) {
                         return dependency.key == key &&
                             dependency.revision == current->second.producedRevision &&
-                            dependency.generation == VersionGeneration(
-                                current->second.key, current->second.producedRevision);
+                            dependency.generation == current->second.versionGeneration;
                     });
             const bool completedConsumer =
                 node.state == ArtifactReadiness::GpuReady ||
@@ -783,16 +812,28 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
     bool DependenciesStillMatch(const Completion& completion) const {
         for (const auto& dependency : completion.dependencies) {
-            const auto requirement = std::ranges::find_if(
-                nodes.at(completion.key).requirements,
-                [&](const ArtifactRequirement& value) { return value.key == dependency.key; });
-            if (requirement != nodes.at(completion.key).requirements.end()) continue;
-            const auto found = nodes.find(dependency.key);
-            if (found == nodes.end()) return false;
-            const auto& current = found->second;
-            if (VersionGeneration(current.key, current.producedRevision) != dependency.generation ||
-                current.producedRevision != dependency.revision ||
-                !Satisfies(current.state, dependency.readiness)) return false;
+            // A build owns the exact dependency closure captured in its context.
+            // Advancing a Latest address requests a successor; it must not make
+            // the already-running immutable version stale.  Only disappearance
+            // or regression of the captured version invalidates its completion.
+            bool foundCaptured = false;
+            ArtifactReadiness capturedReadiness = ArtifactReadiness::Missing;
+            const auto active = nodes.find(dependency.key);
+            if (active != nodes.end() &&
+                active->second.producedRevision == dependency.revision &&
+                active->second.versionGeneration == dependency.generation) {
+                foundCaptured = true;
+                capturedReadiness = active->second.state;
+            }
+            if (!foundCaptured) {
+                const auto archived = versions.find(StoredVersionKey{
+                    dependency.key, dependency.revision, dependency.generation });
+                if (archived != versions.end()) {
+                    foundCaptured = true;
+                    capturedReadiness = archived->second.readiness;
+                }
+            }
+            if (!foundCaptured || !Satisfies(capturedReadiness, dependency.readiness)) return false;
         }
         return true;
     }
@@ -851,7 +892,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
     }
 
-    void ApplyCompletion(Completion completion, std::vector<ArtifactSnapshot>& ready) {
+    void ApplyCompletion(Completion completion, std::vector<ArtifactSnapshot>& ready,
+        std::vector<std::pair<std::function<void(const ArtifactSnapshot&)>, ArtifactSnapshot>>& accepted) {
         const auto found = nodes.find(completion.key);
         if (found == nodes.end()) return;
         auto& node = found->second;
@@ -891,6 +933,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             node.producedRevision = completion.revision;
             node.published = false;
             node.gpuSubmissions = std::move(result.gpuSubmissions);
+            if (result.onAccepted) accepted.emplace_back(
+                std::move(result.onAccepted), MakeSnapshot(node));
             if (node.gpuSubmissions && !node.gpuSubmissions->Submitted()) {
                 node.waitingGpuSubmissions = node.gpuSubmissions;
                 SetState(node, ArtifactReadiness::CpuReady);
@@ -1004,6 +1048,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         const auto started = std::chrono::steady_clock::now();
         std::size_t transitions = 0;
         std::vector<PendingGpuSignal> signalledGpu;
+        std::vector<std::pair<std::function<void(const ArtifactSnapshot&)>, ArtifactSnapshot>> accepted;
         {
             std::lock_guard lock(mutex);
             ArtifactKey key;
@@ -1135,7 +1180,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 auto completion = std::move(completions.front());
                 completions.pop_front();
                 const auto completedKey = completion.key;
-                ApplyCompletion(std::move(completion), ready);
+                ApplyCompletion(std::move(completion), ready, accepted);
                 const auto completed = nodes.find(completedKey);
                 if (completed != nodes.end() && !completed->second.desired &&
                     !completed->second.buildInFlight) {
@@ -1187,7 +1232,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 builds.emplace_back(producer->second, std::move(context));
             }
 			for (const auto& snapshot : ready) {
-				const VersionKey versionKey{ snapshot.key, snapshot.revision };
+				const StoredVersionKey versionKey{
+					snapshot.key, snapshot.revision, snapshot.generation };
 				const auto found = exactWaiters.find(versionKey);
 				if (found == exactWaiters.end()) continue;
 				auto& registered = found->second;
@@ -1244,12 +1290,14 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                             static_cast<std::uint64_t>(fanout->second.size()));
                     }
                 }
-                std::unordered_set<VersionKey, VersionKey::Hasher> dependencyPins;
+                std::unordered_set<StoredVersionKey, StoredVersionKey::Hasher> dependencyPins;
                 const auto collectPins = [&](const std::vector<ArtifactRequirement>& requirements) {
                     for (const auto& requirement : requirements) {
                         if (requirement.minimumRevision == 0 ||
                             requirement.invalidation == DependencyInvalidationPolicy::Latest) continue;
-                        dependencyPins.insert({ requirement.key, requirement.minimumRevision });
+                        if (requirement.requiredGeneration != 0) dependencyPins.insert({
+                            requirement.key, requirement.minimumRevision,
+                            requirement.requiredGeneration });
                     }
                 };
                 for (const auto& [_, node] : nodes) {
@@ -1272,8 +1320,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     bool recipe = false;
                     if (const auto current = nodes.find(versionKey.address); current != nodes.end()) {
                         const auto& node = current->second;
-                        desired = node.desiredRevision == versionKey.revision ||
-                            node.producedRevision == versionKey.revision;
+                        desired = (node.desiredRevision == versionKey.revision &&
+                            node.versionGeneration == versionKey.generation) ||
+                            (node.producedRevision == versionKey.revision &&
+                             node.versionGeneration == versionKey.generation);
                     }
                     recipe = dependencyPins.contains(versionKey);
                     externallyLeasedVersions += external;
@@ -1333,6 +1383,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         drainScheduled.store(false, std::memory_order_release);
         hasImmediateWork = hasImmediateWork || !gpuSignals.empty();
         for (auto& [registration, context] : builds) SubmitBuild(registration, std::move(context));
+		for (auto& [action, snapshot] : accepted) if (action) action(snapshot);
 		for (auto& [waiter, snapshot] : exactDispatches) {
 			if (!waiter.continuation) continue;
 			auto continuation = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
@@ -1391,7 +1442,6 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
             versionGeneration = m_impl->versionGenerations.emplace(
                 requestedVersion, ++m_impl->nextVersionGeneration).first;
         }
-        const auto versionLease = m_impl->AcquireVersionLease(requestedVersion);
         auto& node = m_impl->nodes[key];
         node.key = key;
         node.desired = true;
@@ -1401,7 +1451,7 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
                 knownSignature->second.inputType != input.Type() ||
                 knownSignature->second.requirements != requirements) {
                 return { ArtifactRequestStatus::ConflictingRevision, node.generation,
-                    { key, desiredRevision, versionGeneration->second }, versionLease };
+                    { key, desiredRevision, versionGeneration->second } };
             }
             const bool stillDesired = node.desired && (
                 node.desiredRevision == desiredRevision ||
@@ -1410,9 +1460,11 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
                 }));
             if (!stillDesired && desiredRevision < node.latestRequestedRevision) {
                 return { ArtifactRequestStatus::StaleRevision, node.generation,
-                    { key, desiredRevision, versionGeneration->second }, versionLease };
+                    { key, desiredRevision, versionGeneration->second } };
             }
             if (stillDesired) {
+                auto versionLease = m_impl->AcquireVersionLease({ key, desiredRevision,
+                    versionGeneration->second });
                 return { ArtifactRequestStatus::AlreadyDesired, node.generation,
                     { key, desiredRevision, versionGeneration->second }, versionLease };
             }
@@ -1421,14 +1473,22 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
             // recreate desired state rather than pretending that the version
             // is still desired. Preserve the immutable generation while an
             // archived copy exists; otherwise assign a new ABA generation.
-            if (!m_impl->versions.contains(requestedVersion)) {
+            const bool archived = std::ranges::any_of(m_impl->versions,
+                [&](const auto& entry) {
+                    return entry.first.address == key &&
+                        entry.first.revision == desiredRevision &&
+                        entry.first.generation == versionGeneration->second;
+                });
+            if (!archived) {
                 versionGeneration->second = ++m_impl->nextVersionGeneration;
             }
         }
         else if (node.latestRequestedRevision != 0 && desiredRevision < node.latestRequestedRevision) {
             return { ArtifactRequestStatus::StaleRevision, node.generation,
-                { key, desiredRevision, versionGeneration->second }, versionLease };
+                { key, desiredRevision, versionGeneration->second } };
         }
+        auto versionLease = m_impl->AcquireVersionLease({ key, desiredRevision,
+            versionGeneration->second });
         if (knownSignature == m_impl->versionSignatures.end()) {
             m_impl->versionSignatures.emplace(requestedVersion, Impl::VersionSignature{
                 requestFingerprint, input.Type(), requirements });
@@ -1442,7 +1502,7 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
             (node.state == ArtifactReadiness::GpuReady ||
              node.state == ArtifactReadiness::Published);
         if (activeVersionExists && !activeVersionFinished) {
-            node.successors.push_back({ desiredRevision, requestFingerprint,
+            node.successors.push_back({ desiredRevision, versionGeneration->second, requestFingerprint,
                 std::move(input), std::move(requirements), versionLease });
             if (node.state == ArtifactReadiness::UploadSubmitted && !node.buildInFlight) {
                 m_impl->PromoteSuccessor(node);
@@ -1459,6 +1519,8 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
         m_impl->StoreVersion(node);
         m_impl->RemoveWaiterEdges(node);
         node.desiredRevision = desiredRevision;
+        node.versionGeneration = versionGeneration->second;
+        node.generation = versionGeneration->second;
         node.requestFingerprint = requestFingerprint;
         node.lease = versionLease;
         node.requirements = std::move(requirements);
@@ -1601,11 +1663,12 @@ void AsyncStateGraph::Release(ArtifactKey key) {
 
 void AsyncStateGraph::MarkPublished(ArtifactKey key, std::uint64_t revision) {
     std::lock_guard lock(m_impl->mutex);
-    if (auto archived = m_impl->versions.find({ key, revision });
-        archived != m_impl->versions.end() &&
-        (archived->second.readiness == ArtifactReadiness::GpuReady ||
-         archived->second.readiness == ArtifactReadiness::Published)) {
-        archived->second.readiness = ArtifactReadiness::Published;
+    for (auto& [stored, archived] : m_impl->versions) {
+        if (stored.address == key && stored.revision == revision &&
+            (archived.readiness == ArtifactReadiness::GpuReady ||
+             archived.readiness == ArtifactReadiness::Published)) {
+            archived.readiness = ArtifactReadiness::Published;
+        }
     }
     const auto found = m_impl->nodes.find(key);
     if (found != m_impl->nodes.end() && found->second.producedRevision == revision &&
@@ -1633,7 +1696,8 @@ void AsyncStateGraph::MarkPublished(std::span<const ArtifactVersionID> versions)
     std::lock_guard lock(m_impl->mutex);
     for (const auto& version : versions) {
         if (!version) continue;
-        if (auto archived = m_impl->versions.find({ version.address, version.revision });
+        if (auto archived = m_impl->versions.find({ version.address, version.revision,
+                version.generation });
             archived != m_impl->versions.end() &&
             archived->second.generation == version.generation &&
             (archived->second.readiness == ArtifactReadiness::UploadSubmitted ||
@@ -1644,7 +1708,7 @@ void AsyncStateGraph::MarkPublished(std::span<const ArtifactVersionID> versions)
         const auto found = m_impl->nodes.find(version.address);
         if (found == m_impl->nodes.end() ||
             found->second.producedRevision != version.revision ||
-            m_impl->VersionGeneration(version.address, version.revision) != version.generation)
+            found->second.versionGeneration != version.generation)
             continue;
         auto& node = found->second;
         if (node.state != ArtifactReadiness::UploadSubmitted &&
@@ -1760,7 +1824,8 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 		dispatchNow = terminal || ArtifactReachedMilestone(snapshot.readiness, milestone);
 		if (!dispatchNow) {
 			subscription = ++m_impl->nextExactWaiter;
-			m_impl->exactWaiters[{ handle.version.address, handle.version.revision }].push_back({
+			m_impl->exactWaiters[{ handle.version.address, handle.version.revision,
+				handle.version.generation }].push_back({
 				subscription, handle.version, milestone, lane, domain,
 					std::move(continuation), std::move(handle.lease) });
 		}
@@ -1781,7 +1846,8 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 		if (subscription == 0) return;
 		if (const auto graph = weak.lock()) {
 			std::lock_guard lock(graph->mutex);
-			const Impl::VersionKey key{ version.address, version.revision };
+			const Impl::StoredVersionKey key{
+				version.address, version.revision, version.generation };
 			const auto found = graph->exactWaiters.find(key);
 			if (found == graph->exactWaiters.end()) return;
 			std::erase_if(found->second,

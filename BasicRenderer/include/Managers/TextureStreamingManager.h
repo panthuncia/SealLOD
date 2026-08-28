@@ -91,6 +91,11 @@ struct MaterialTextureStreamingStats {
 	std::vector<MaterialTextureStreamingRecord> largestResidentTextures = {};
 };
 
+struct MaterialTextureStreamingReadinessStats {
+	uint32_t fullResolutionResidentTextureCount = 0;
+	uint32_t pendingReloadTextureCount = 0;
+};
+
 struct TextureStreamingBindingOptions {
 	bool seedCurrentBinding = true;
 	bool alphaTested = false;
@@ -133,6 +138,7 @@ public:
 
 	std::shared_ptr<CopyPass> CreateTextureStreamingFeedbackReadbackPass();
 	MaterialTextureStreamingStats GetTextureStreamingStats(const std::vector<std::shared_ptr<Resource>>& activeTextureResources) const;
+	MaterialTextureStreamingReadinessStats GetTextureStreamingReadinessStats() const;
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
 	std::vector<ResourceIdentifier> GetSupportedKeys() override;
@@ -187,7 +193,9 @@ private:
 	void ApplyRegisterCommand(WorkerCommand&& command);
 	void ApplyUnregisterCommand(uint64_t bindingID);
 	void QueueBindingChanged(TextureAsset& texture, std::shared_ptr<PixelBuffer> previousImage);
+	void FinishBindingMailboxRequest(uint32_t streamingTextureID, const std::shared_ptr<TextureAsset>& texture);
 	void QueueCommand(WorkerCommand&& command);
+	void EnqueueTextureMetadataRefresh(const std::shared_ptr<TextureAsset>& texture, const char* reason);
 	void MarkLiveTextureBindingsDirty(uint32_t streamingTextureID);
 	std::size_t RefreshDirtyLiveBindings();
 	void PollCompletedReadbackSlots(uint64_t& lastProcessedFence);
@@ -239,6 +247,9 @@ private:
 	std::unordered_map<uint32_t, ObservedGraphBindingState> m_observedGraphBindingStates;
 	std::mutex m_graphBindingAwaiterMutex;
 	std::unordered_map<uint32_t, br::render::ArtifactAwaiter> m_graphBindingAwaiters;
+	std::mutex m_bindingMailboxMutex;
+	std::unordered_set<uint32_t> m_activeBindingMailboxRequests;
+	std::unordered_set<uint32_t> m_dirtyBindingMailboxes;
 	std::unique_ptr<MaterialTextureTransferService> m_materialTextureTransfers;
 	TaskScope m_taskScope;
 	std::mutex m_workerCommandMutex;
