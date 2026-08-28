@@ -153,6 +153,31 @@ const PublishedStateFragment& PublishedRendererState::Fragment(PublishedFragment
     return const_cast<PublishedRendererState*>(this)->Fragment(kind);
 }
 
+bool IsMonotonicFragmentSuccessor(const PublishedStateFragment& active,
+    const PublishedStateFragment& successor) noexcept {
+    if (!active.publicationRoot || !successor.publicationRoot) return true;
+    if (active.publicationRoot.address != successor.publicationRoot.address) return true;
+    return successor.publicationRoot.revision >= active.publicationRoot.revision &&
+        successor.revision >= active.revision;
+}
+
+namespace {
+bool AllowsRollback(ManifestPublicationPolicy policy, const std::string& reason) noexcept {
+    return policy == ManifestPublicationPolicy::ExplicitRollback && !reason.empty();
+}
+
+bool IsMonotonicStateSuccessor(const PublishedRendererState& active,
+    const PublishedRendererState& successor) noexcept {
+    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+        const auto kind = static_cast<PublishedFragmentKind>(index);
+        if (!IsMonotonicFragmentSuccessor(active.Fragment(kind), successor.Fragment(kind))) {
+            return false;
+        }
+    }
+    return true;
+}
+}
+
 RendererStatePublisher::RendererStatePublisher(std::size_t framesInFlight) {
     auto fallback = std::make_shared<PublishedRendererState>();
     Bootstrap(std::move(fallback), framesInFlight);
@@ -171,6 +196,9 @@ void RendererStatePublisher::Bootstrap(std::shared_ptr<const PublishedRendererSt
 
 bool RendererStatePublisher::PublishCandidate(RendererStateCandidate candidate) {
     if (!candidate.state || candidate.state->epoch <= candidate.baseEpoch) return false;
+    if (candidate.policy == ManifestPublicationPolicy::ExplicitRollback && candidate.reason.empty()) {
+        return false;
+    }
     std::unique_lock lock(m_mutex);
     ++m_stats.candidates;
     if (m_candidate.state) {
@@ -189,6 +217,22 @@ bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
         [](const auto& fragment) { return fragment.has_value(); });
     if (!hasFragment) return false;
     std::lock_guard lock(m_mutex);
+    if (patch.policy == ManifestPublicationPolicy::ExplicitRollback && patch.reason.empty()) {
+        return false;
+    }
+    if (patch.policy == ManifestPublicationPolicy::MonotonicSuccessor) {
+        for (const auto& pending : m_patches) {
+            for (std::size_t index = 0; index < patch.fragments.size(); ++index) {
+                if (patch.fragments[index] && pending.fragments[index] &&
+                    !IsMonotonicFragmentSuccessor(*pending.fragments[index], *patch.fragments[index])) {
+                    ++m_stats.rejectedFragmentRegressions;
+                    basic_telemetry::AddCounter(
+                        "SARP.RendererStatePublisher.FragmentRegressionRejections");
+                    return false;
+                }
+            }
+        }
+    }
     ++m_stats.candidates;
     // A newer patch for the same fragment supersedes pending work for that
     // fragment, while disjoint patches remain independently commit-able.
@@ -211,8 +255,9 @@ bool RendererStatePublisher::PublishArtifact(const ArtifactSnapshot& artifact) {
     }
     if (artifact.key.kind != ArtifactKind::FrameManifest) return false;
     const auto manifest = artifact.payload.Get<FrameManifestPayload>();
-    if (!manifest || !manifest->state) return false;
+    if (!manifest) return false;
     if (manifest->patch) return PublishPatch(*manifest->patch);
+    if (!manifest->state) return false;
     const auto baseEpoch = manifest->baseEpoch;
     auto state = std::make_shared<PublishedRendererState>(*manifest->state);
     state->epoch = baseEpoch + 1u;
@@ -257,13 +302,17 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
     if (m_candidate.state) {
         BT_ZONE_SCOPE("RendererStatePublisher::Commit::Candidate");
         const auto activeEpoch = m_active ? m_active->epoch : 0u;
-        if (m_candidate.baseEpoch == activeEpoch) {
+        const bool rollback = AllowsRollback(m_candidate.policy, m_candidate.reason);
+        const bool monotonic = !m_active || IsMonotonicStateSuccessor(*m_active, *m_candidate.state);
+        if (m_candidate.baseEpoch == activeEpoch && (monotonic || rollback)) {
             if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
             m_active = std::move(m_candidate.state);
             result.committed = true;
             ++m_stats.committed;
+            if (rollback && !monotonic) ++m_stats.explicitRollbacks;
         } else {
-            ++m_stats.rejectedBaseEpoch;
+            if (m_candidate.baseEpoch != activeEpoch) ++m_stats.rejectedBaseEpoch;
+            else ++m_stats.rejectedFragmentRegressions;
             basic_telemetry::AddCounter("SARP.RendererStatePublisher.CandidateRejections");
             result.rejectedCallback = m_candidateRejected;
             result.rejectedEpoch = activeEpoch;
@@ -295,6 +344,25 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
                 result.rejectedEpoch = patched->epoch;
                 continue;
             }
+            const bool rollback = AllowsRollback(patch.policy, patch.reason);
+            bool monotonic = true;
+            for (std::size_t index = 0; index < patch.fragments.size(); ++index) {
+                if (patch.fragments[index] && !IsMonotonicFragmentSuccessor(
+                    patched->Fragment(static_cast<PublishedFragmentKind>(index)),
+                    *patch.fragments[index])) {
+                    monotonic = false;
+                    break;
+                }
+            }
+            if (!monotonic && !rollback) {
+                ++m_stats.rejectedFragmentRegressions;
+                basic_telemetry::AddCounter(
+                    "SARP.RendererStatePublisher.FragmentRegressionRejections");
+                result.rejectedCallback = m_candidateRejected;
+                result.rejectedEpoch = patched->epoch;
+                continue;
+            }
+            if (!monotonic) ++m_stats.explicitRollbacks;
             if (patch.sourceEpoch != patched->epoch) ++m_stats.rebasedPatches;
             for (std::size_t index = 0; index < patch.fragments.size(); ++index) {
                 if (patch.fragments[index]) {

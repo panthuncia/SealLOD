@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <random>
 #include <source_location>
 #include <thread>
 
@@ -30,6 +31,17 @@ void Check(bool condition,
 struct Value { std::uint64_t value = 0; };
 ArtifactPayload Payload(std::uint64_t value) {
     return ArtifactPayload::Make(std::make_shared<const Value>(Value{ value }));
+}
+
+ArtifactSnapshot FragmentSnapshot(PublishedFragmentKind kind, ArtifactAddress address,
+    std::uint64_t revision, std::uint64_t generation,
+    std::vector<ArtifactSnapshot> dependencies = {}) {
+    auto artifact = std::make_shared<RendererStateFragmentArtifact>();
+    artifact->kind = kind;
+    artifact->fragment.revision = revision;
+    artifact->fragment.dependencyClosure = std::move(dependencies);
+    return { address, revision, generation, ArtifactReadiness::UploadSubmitted,
+        ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(artifact)) };
 }
 }
 
@@ -800,7 +812,11 @@ int main() {
     graph.WaitIdle();
     const auto closedRoot = graph.Snapshot(staticScene)
         .payload.Get<RendererStateFragmentArtifact>();
-    Check(closedRoot && closedRoot->fragment.dependencyClosure.size() == 5);
+    Check(closedRoot && closedRoot->fragment.dependencyClosure.size() == 2);
+    Check(std::ranges::all_of(closedRoot->fragment.dependencyClosure,
+        [](const ArtifactSnapshot& dependency) {
+            return dependency.key.kind == ArtifactKind::StaticTransaction;
+        }));
 
     const ArtifactKey mismatchedTransaction{ ArtifactKind::StaticTransaction, 103, 7 };
     auto mismatchedInput = std::make_shared<StaticTransactionBuildInput>();
@@ -1165,6 +1181,93 @@ int main() {
     Check(patchPublisher.Stats().rejectedPatchPreconditions == 1);
     rejectedPatchCommit.RunDeferred();
 
+    // Ordinary publication is monotonic per fragment family even when
+    // completions arrive in arbitrary order. Each frame lease remains an
+    // immutable snapshot while later commits independently advance slots.
+    RendererStatePublisher monotonicPublisher(3);
+    struct FragmentArrival {
+        PublishedFragmentKind kind;
+        std::uint64_t revision;
+    };
+    std::vector<FragmentArrival> arrivals;
+    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+        for (std::uint64_t revision = 1; revision <= 12; ++revision) {
+            arrivals.push_back({ static_cast<PublishedFragmentKind>(index), revision });
+        }
+    }
+    std::mt19937 random{ 0x5A17u };
+    std::ranges::shuffle(arrivals, random);
+    std::array<std::uint64_t, kPublishedFragmentCount> committedRevisions{};
+    std::shared_ptr<const PublishedManifestLease> capturedLease;
+    PublishedStateFragment capturedGeometry;
+    for (std::size_t arrivalIndex = 0; arrivalIndex < arrivals.size(); ++arrivalIndex) {
+        const auto [kind, revision] = arrivals[arrivalIndex];
+        const auto kindIndex = static_cast<std::size_t>(kind);
+        PublishedStatePatch patch;
+        patch.sourceEpoch = monotonicPublisher.ActiveEpoch();
+        PublishedStateFragment fragment;
+        fragment.revision = revision;
+        fragment.publicationRoot = { { static_cast<ArtifactKind>(
+            static_cast<std::uint16_t>(ArtifactKind::MaterialTable) + kindIndex),
+            9000u + kindIndex, 0 }, revision, 10000u + arrivalIndex };
+        patch.fragments[kindIndex] = fragment;
+        Check(monotonicPublisher.PublishPatch(std::move(patch)));
+        auto commit = monotonicPublisher.Commit(arrivalIndex % 3u);
+        const auto& committed = commit.state->Fragment(kind);
+        Check(committed.revision >= committedRevisions[kindIndex]);
+        committedRevisions[kindIndex] = committed.revision;
+        if (!capturedLease && kind == PublishedFragmentKind::Geometry && commit.committed) {
+            capturedLease = commit.lease;
+            capturedGeometry = committed;
+        }
+        if (capturedLease) {
+            Check(capturedLease->state->geometry.publicationRoot ==
+                capturedGeometry.publicationRoot);
+        }
+        commit.RunDeferred();
+    }
+    Check(monotonicPublisher.Stats().rejectedFragmentRegressions != 0);
+
+    // The production regression sequence must never allow revision 7 to
+    // replace already-visible revision 10 for the same static-scene address.
+    RendererStatePublisher geometrySequencePublisher(2);
+    const ArtifactAddress geometryAddress{ ArtifactKind::StaticScene, 9100, 0 };
+    for (const std::uint64_t revision : { 5u, 6u, 7u, 9u, 10u }) {
+        PublishedStatePatch patch;
+        PublishedStateFragment fragment;
+        fragment.revision = revision;
+        fragment.publicationRoot = { geometryAddress, revision, 20000u + revision };
+        patch.fragments[static_cast<std::size_t>(PublishedFragmentKind::Geometry)] = fragment;
+        Check(geometrySequencePublisher.PublishPatch(std::move(patch)));
+        auto commit = geometrySequencePublisher.Commit(revision % 2u);
+        Check(commit.committed && commit.state->geometry.revision == revision);
+        commit.RunDeferred();
+    }
+    const auto revision10Lease = geometrySequencePublisher.Commit(0).lease;
+    PublishedStatePatch regressingGeometry;
+    PublishedStateFragment revision7Geometry;
+    revision7Geometry.revision = 7;
+    revision7Geometry.publicationRoot = { geometryAddress, 7, 30007 };
+    regressingGeometry.fragments[static_cast<std::size_t>(PublishedFragmentKind::Geometry)] =
+        revision7Geometry;
+    Check(geometrySequencePublisher.PublishPatch(regressingGeometry));
+    auto rejectedGeometryRegression = geometrySequencePublisher.Commit(1);
+    Check(!rejectedGeometryRegression.committed);
+    Check(rejectedGeometryRegression.state->geometry.revision == 10);
+    Check(revision10Lease->state->geometry.revision == 10);
+    rejectedGeometryRegression.RunDeferred();
+
+    // Rollback is deliberately a separate, reason-bearing operation.
+    regressingGeometry.policy = ManifestPublicationPolicy::ExplicitRollback;
+    Check(!geometrySequencePublisher.PublishPatch(regressingGeometry));
+    regressingGeometry.reason = "test-only recovery rollback";
+    Check(geometrySequencePublisher.PublishPatch(regressingGeometry));
+    auto explicitRollback = geometrySequencePublisher.Commit(0);
+    Check(explicitRollback.committed && explicitRollback.state->geometry.revision == 7);
+    Check(geometrySequencePublisher.Stats().explicitRollbacks == 1);
+    Check(revision10Lease->state->geometry.revision == 10);
+    explicitRollback.RunDeferred();
+
     RendererStatePublisher manifestPublisher(2);
     RendererStateRequestService requestService(graph, manifestPublisher);
     graph.SetReadyCallback([&requestService](const ArtifactSnapshot& artifact) {
@@ -1203,6 +1306,39 @@ int main() {
     Check(graph.Snapshot(manifestState->materials.publicationRoot).readiness ==
         ArtifactReadiness::Published);
     manifestCommit.RunDeferred();
+
+    // Reproduce the selector failure: geometry 10 is visible, then a newer
+    // material closure arrives whose exact dependency is geometry 7. The old
+    // two-fragment score used to beat the one-fragment geometry-10 closure.
+    const ArtifactAddress selectorGeometryAddress{ ArtifactKind::StaticScene, 9200, 0 };
+    const auto geometry10 = FragmentSnapshot(PublishedFragmentKind::Geometry,
+        selectorGeometryAddress, 10, 40010);
+    requestService.OnArtifactReady(geometry10);
+    graph.WaitIdle();
+    auto geometry10Commit = manifestPublisher.Commit(1);
+    Check(geometry10Commit.committed && geometry10Commit.state->geometry.revision == 10);
+    geometry10Commit.RunDeferred();
+
+    const auto geometry7 = FragmentSnapshot(PublishedFragmentKind::Geometry,
+        selectorGeometryAddress, 7, 40007);
+    const auto materialDependingOnGeometry7 = FragmentSnapshot(PublishedFragmentKind::Materials,
+        { ArtifactKind::MaterialTable, 9201, 0 }, 100, 40100, { geometry7 });
+    requestService.OnArtifactReady(materialDependingOnGeometry7);
+    graph.WaitIdle();
+    auto oldClosureCommit = manifestPublisher.Commit(0);
+    Check(oldClosureCommit.state->geometry.revision == 10);
+    Check(oldClosureCommit.state->geometry.publicationRoot == geometry10.Version());
+    oldClosureCommit.RunDeferred();
+
+    const auto materialDependingOnGeometry10 = FragmentSnapshot(PublishedFragmentKind::Materials,
+        { ArtifactKind::MaterialTable, 9201, 0 }, 101, 40101, { geometry10 });
+    requestService.OnArtifactReady(materialDependingOnGeometry10);
+    graph.WaitIdle();
+    auto coherentSuccessorCommit = manifestPublisher.Commit(1);
+    Check(coherentSuccessorCommit.committed);
+    Check(coherentSuccessorCommit.state->geometry.revision == 10);
+    Check(coherentSuccessorCommit.state->materials.revision == 101);
+    coherentSuccessorCommit.RunDeferred();
     requestService.Stop();
 
     auto& ecs = RendererECSManager::GetInstance();
@@ -1233,6 +1369,7 @@ int main() {
     Check(!graph.TraceActive());
     Check(traceReport.capturedEvents != 0 && traceReport.droppedEvents == 0);
     Check(std::filesystem::exists(traceReport.eventsCsv));
+    Check(std::filesystem::exists(traceReport.staticGroupCsv));
     Check(std::filesystem::exists(traceReport.chromeTraceJson));
     Check(std::filesystem::exists(traceReport.summaryMarkdown));
     const auto readFile = [](const std::filesystem::path& path) {

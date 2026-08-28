@@ -1,6 +1,7 @@
 #include "Render/RendererStateRequestService.h"
 
 #include <algorithm>
+#include <tuple>
 
 namespace br::render {
 
@@ -45,18 +46,21 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
         if (index >= m_roots.size()) return;
         auto& roots = m_roots[index];
         const auto existing = std::ranges::find_if(roots, [&](const ArtifactSnapshot& value) {
-            return value.key == artifact.key && value.revision == artifact.revision;
+            return value.Version() == artifact.Version();
         });
         if (existing != roots.end()) *existing = artifact;
         else roots.push_back(artifact);
 
         const auto active = m_publisher.Active();
         const auto& activeFragment = active ? active->Fragment(fragment->kind) : PublishedStateFragment{};
-        const auto newest = std::ranges::max_element(roots, {}, &ArtifactSnapshot::revision);
-        const auto newestKey = newest != roots.end() ? newest->key : ArtifactKey{};
-        const auto newestRevision = newest != roots.end() ? newest->revision : 0u;
+        const auto newest = std::ranges::max_element(roots, [](const ArtifactSnapshot& left,
+            const ArtifactSnapshot& right) {
+            return std::tie(left.revision, left.generation) <
+                std::tie(right.revision, right.generation);
+        });
+        const auto newestVersion = newest != roots.end() ? newest->Version() : ArtifactVersionID{};
         std::erase_if(roots, [&](const ArtifactSnapshot& value) {
-            const bool isNewest = value.key == newestKey && value.revision == newestRevision;
+            const bool isNewest = value.Version() == newestVersion;
             const bool isActive = active && value.Version() == activeFragment.publicationRoot;
             return !isNewest && !isActive;
         });
@@ -77,7 +81,7 @@ void RendererStateRequestService::RequestManifest() {
         input->roots.reserve(m_roots.size() * 2u);
         const auto appendRoot = [&input](const ArtifactSnapshot& root) {
             const auto duplicate = std::ranges::any_of(input->roots, [&](const ArtifactSnapshot& value) {
-                return value.key == root.key && value.revision == root.revision;
+                return value.Version() == root.Version();
             });
             if (!duplicate) input->roots.push_back(root);
         };
@@ -123,7 +127,22 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
 
     using Selection = std::array<std::optional<ArtifactSnapshot>, kPublishedFragmentCount>;
     const auto sameArtifact = [](const ArtifactSnapshot& left, const ArtifactSnapshot& right) {
-        return left.key == right.key && left.revision == right.revision;
+        return left.Version() == right.Version();
+    };
+    const auto publicationReady = [](auto&& self, const ArtifactSnapshot& root,
+        std::vector<ArtifactVersionID>& visited) -> bool {
+        const auto requiredReadiness = root.gpuSubmissions
+            ? ArtifactReadiness::UploadSubmitted : ArtifactReadiness::CpuReady;
+        if (!root.Version() || !ArtifactReachedMilestone(
+            root.readiness, requiredReadiness)) return false;
+        if (std::ranges::contains(visited, root.Version())) return true;
+        visited.push_back(root.Version());
+        const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
+        if (!artifact) return true;
+        return std::ranges::all_of(artifact->fragment.dependencyClosure,
+            [&](const ArtifactSnapshot& dependency) {
+                return self(self, dependency, visited);
+            });
     };
     const auto addClosure = [&](auto&& self, const ArtifactSnapshot& root, Selection& selection) -> bool {
         const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
@@ -154,8 +173,10 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         auto bundle = std::make_shared<PublicationBundle>();
         bundle->root = root.Version();
         const auto append = [&](auto&& self, const ArtifactSnapshot& snapshot) -> bool {
+            const auto requiredReadiness = snapshot.gpuSubmissions
+                ? ArtifactReadiness::UploadSubmitted : ArtifactReadiness::CpuReady;
             if (!snapshot.Version() || !ArtifactReachedMilestone(
-                snapshot.readiness, ArtifactReadiness::UploadSubmitted)) return false;
+                snapshot.readiness, requiredReadiness)) return false;
             if (std::ranges::any_of(bundle->versions, [&](const ArtifactVersionID& value) {
                 return value == snapshot.Version();
             })) return true;
@@ -177,22 +198,37 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         };
         return append(append, root) ? bundle : std::shared_ptr<PublicationBundle>{};
     };
-    const auto materialize = [&](const Selection& selection) {
+    const auto materialize = [&](const Selection& selection, bool buildBundles) {
         auto candidate = input->base ? *input->base : PublishedRendererState{};
         for (std::size_t index = 0; index < selection.size(); ++index) {
             if (!selection[index]) continue;
             const auto artifact = selection[index]->payload.Get<RendererStateFragmentArtifact>();
             auto fragment = artifact->fragment;
             fragment.publicationRoot = selection[index]->Version();
-            fragment.publicationBundle = makeBundle(*selection[index]);
+            if (buildBundles) fragment.publicationBundle = makeBundle(*selection[index]);
             candidate.Fragment(static_cast<PublishedFragmentKind>(index)) = std::move(fragment);
         }
         return candidate;
+    };
+    const auto monotonicSuccessor = [&](const Selection& selection) {
+        if (!input->base) return true;
+        for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+            if (!selection[index]) continue;
+            const auto kind = static_cast<PublishedFragmentKind>(index);
+            const auto artifact = selection[index]->payload.Get<RendererStateFragmentArtifact>();
+            auto successor = artifact->fragment;
+            successor.publicationRoot = selection[index]->Version();
+            if (!IsMonotonicFragmentSuccessor(
+                input->base->Fragment(kind), successor)) return false;
+        }
+        return true;
     };
 
     std::vector<Selection> closures;
     closures.reserve(input->roots.size());
     for (const auto& root : input->roots) {
+        std::vector<ArtifactVersionID> visited;
+        if (!publicationReady(publicationReady, root, visited)) continue;
         Selection closure;
         if (addClosure(addClosure, root, closure)) closures.push_back(std::move(closure));
     }
@@ -205,12 +241,32 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         }
         return result;
     };
+    const auto candidateScore = [&](const Selection& selection) {
+        std::size_t advancingFragments = 0;
+        std::uint64_t advancement = 0;
+        const auto [fragmentCount, revisionSum] = closureScore(selection);
+        for (std::size_t index = 0; index < selection.size(); ++index) {
+            if (!selection[index]) continue;
+            const auto kind = static_cast<PublishedFragmentKind>(index);
+            const auto activeRoot = input->base
+                ? input->base->Fragment(kind).publicationRoot : ArtifactVersionID{};
+            if (activeRoot == selection[index]->Version()) continue;
+            ++advancingFragments;
+            if (activeRoot.address == selection[index]->key &&
+                selection[index]->revision >= activeRoot.revision) {
+                advancement += selection[index]->revision - activeRoot.revision;
+            } else {
+                advancement += selection[index]->revision;
+            }
+        }
+        return std::tuple{ advancingFragments, advancement, fragmentCount, revisionSum };
+    };
     std::ranges::sort(closures, [&](const Selection& left, const Selection& right) {
         return closureScore(left) > closureScore(right);
     });
 
     Selection selected;
-    std::pair<std::size_t, std::uint64_t> bestScore{};
+    std::optional<decltype(candidateScore(selected))> bestScore;
     for (std::size_t seed = 0; seed < closures.size(); ++seed) {
         auto trial = closures[seed];
         for (std::size_t index = 0; index < closures.size(); ++index) {
@@ -218,78 +274,24 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             auto merged = trial;
             if (merge(merged, closures[index])) trial = std::move(merged);
         }
-        const auto candidate = materialize(trial);
-        const auto score = closureScore(trial);
-        if (coherent(candidate) && score > bestScore) {
+        const auto score = candidateScore(trial);
+        if ((bestScore && score <= *bestScore) || !monotonicSuccessor(trial)) continue;
+        const auto candidate = materialize(trial, false);
+        if (coherent(candidate)) {
             bestScore = score;
             selected = std::move(trial);
         }
     }
-    if (bestScore.first == 0) return ArtifactBuildResult::Cancelled();
+    if (!bestScore) return ArtifactBuildResult::Cancelled();
 
-    auto state = std::make_shared<PublishedRendererState>(materialize(selected));
-    auto manifestBundle = std::make_shared<PublicationBundle>();
-    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
-        const auto& fragment = state->Fragment(static_cast<PublishedFragmentKind>(index));
-        if (!fragment.publicationBundle) continue;
-        manifestBundle->versions.insert(manifestBundle->versions.end(),
-            fragment.publicationBundle->versions.begin(),
-            fragment.publicationBundle->versions.end());
-        manifestBundle->leases.Merge(fragment.publicationBundle->leases);
-        for (const auto& submissions : fragment.publicationBundle->gpuSubmissions) {
-            if (submissions && !std::ranges::contains(
-                manifestBundle->gpuSubmissions, submissions)) {
-                manifestBundle->gpuSubmissions.push_back(submissions);
-            }
-        }
-        manifestBundle->resourceHolds.insert(manifestBundle->resourceHolds.end(),
-            fragment.publicationBundle->resourceHolds.begin(),
-            fragment.publicationBundle->resourceHolds.end());
-    }
-    std::ranges::sort(manifestBundle->versions);
-    manifestBundle->versions.erase(std::unique(manifestBundle->versions.begin(),
-        manifestBundle->versions.end()), manifestBundle->versions.end());
-    state->publicationBundle = std::move(manifestBundle);
-    auto catalog = state->resourceCatalog
-        ? std::make_shared<PublishedResourceCatalog>(*state->resourceCatalog)
-        : std::make_shared<PublishedResourceCatalog>();
-    for (std::size_t index = 0; index < selected.size(); ++index) {
-        if (!selected[index]) continue;
-        const auto& root = *selected[index];
-        const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
-        if (!artifact) return ArtifactBuildResult::Failure("manifest root payload type mismatch");
-        const auto ownerMask = artifact->catalogOwnerMask != 0
-            ? artifact->catalogOwnerMask : PublishedFragmentMask(artifact->kind);
-        for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
-            if ((ownerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
-                catalog->contentVersions.erase(entry->first);
-                catalog->selections.erase(entry->first);
-                entry = catalog->entries.erase(entry);
-            } else ++entry;
-        }
-        for (const auto& [key, resources] : artifact->catalogEntries) {
-            catalog->entries[key] = resources;
-            catalog->contentVersions[key] = root.revision;
-            PublishedResourceSelection selection;
-            selection.resources = resources;
-            selection.contentVersion = root.revision;
-            selection.sourceArtifact = root.Version();
-            selection.lifetimeHolds = artifact->fragment.resourceHolds;
-            selection.publicationBundle = state->Fragment(artifact->kind).publicationBundle;
-            if (selection.publicationBundle) {
-                selection.gpuSubmissions = selection.publicationBundle->gpuSubmissions;
-            }
-            catalog->selections.insert_or_assign(key, std::move(selection));
-        }
-    }
-    if (!coherent(*state)) return ArtifactBuildResult::Failure("manifest dependency closure changed during build");
-    state->resourceCatalog = std::move(catalog);
     auto patch = std::make_shared<PublishedStatePatch>();
     patch->sourceEpoch = input->baseEpoch;
     std::uint64_t selectedMask = 0;
     for (std::size_t index = 0; index < selected.size(); ++index) {
         if (!selected[index]) continue;
         const auto kind = static_cast<PublishedFragmentKind>(index);
+        if (input->base && input->base->Fragment(kind).publicationRoot ==
+            selected[index]->Version()) continue;
         const auto artifact = selected[index]->payload.Get<RendererStateFragmentArtifact>();
         auto fragment = artifact->fragment;
         fragment.publicationRoot = selected[index]->Version();
@@ -334,7 +336,6 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
     }
     auto manifest = std::make_shared<FrameManifestPayload>();
     manifest->baseEpoch = input->baseEpoch;
-    manifest->state = std::move(state);
     manifest->patch = std::move(patch);
     return ArtifactBuildResult::Ready(ArtifactPayload::Make<FrameManifestPayload>(std::move(manifest)));
 }

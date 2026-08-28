@@ -3110,6 +3110,25 @@ void Renderer::Update(float elapsedSeconds) {
                     BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::PublisherCommit");
                     return m_rendererStatePublisher->Commit(m_frameIndex);
                 }();
+				if (m_asyncStateGraph && m_asyncStateGraph->TraceActive()) {
+					m_asyncStateGraph->TraceEvent(
+						commit.committed ? "ManifestCommitAccepted" : "ManifestCommitUnchanged",
+						{ br::render::ArtifactKind::FrameManifest, 0, 0 },
+						commit.state ? commit.state->epoch : 0, 0,
+						std::format("frame_slot={}", m_frameIndex));
+					if (commit.committed && commit.state) {
+						for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
+							const auto& fragment = commit.state->Fragment(
+								static_cast<br::render::PublishedFragmentKind>(index));
+							if (!fragment.publicationRoot) continue;
+							m_asyncStateGraph->TraceEvent("ManifestFragmentCommitted",
+								fragment.publicationRoot.address, fragment.publicationRoot.revision,
+								fragment.publicationRoot.generation,
+								std::format("epoch={} frame_slot={} fragment={}",
+									commit.state->epoch, m_frameIndex, index));
+						}
+					}
+				}
                 {
                     BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::InstallFrameLease");
                 m_context.publishedRendererState = commit.state;

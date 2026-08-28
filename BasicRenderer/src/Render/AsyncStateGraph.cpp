@@ -19,6 +19,7 @@
 #include <BasicTelemetry/Telemetry.h>
 
 #include "Render/Runtime/StreamingUploadTypes.h"
+#include "Render/StaticStateArtifacts.h"
 #include "Managers/SerializedTaskPump.h"
 
 namespace br::render {
@@ -43,7 +44,7 @@ std::string_view KindName(ArtifactKind kind) {
     static constexpr std::string_view names[]{ "Generic", "TextureBinding", "Material",
         "MaterialTable", "MaterialUsageBatch", "Mesh", "MeshTable", "DrawRecordPage",
         "ActiveDrawList", "ViewLifetime", "IndirectWorkload", "StaticTransaction",
-        "StaticScene", "TerrainState", "BufferVersion", "FrameManifest" };
+        "StaticScene", "TerrainState", "BufferVersion", "FrameManifest", "StaticGroup" };
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(names) ? names[index] : "Unknown";
 }
@@ -167,6 +168,7 @@ public:
         std::filesystem::create_directories(directory);
         AsyncStateGraphTraceReport report;
         report.eventsCsv = directory / "async_state_graph_events.csv";
+        report.staticGroupCsv = directory / "async_state_graph_static_groups.csv";
         report.chromeTraceJson = directory / "async_state_graph_trace.json";
         report.summaryMarkdown = directory / "async_state_graph_summary.md";
         report.capturedEvents = events.size();
@@ -213,7 +215,30 @@ public:
         std::map<unsigned, Aggregate> stateResidence;
         std::map<std::pair<unsigned, unsigned>, std::uint64_t> blockerEdges;
         using TraceVersion = std::tuple<unsigned, std::uint64_t, std::uint64_t, std::uint64_t>;
+        using TraceAddressRevision = std::tuple<unsigned, std::uint64_t, std::uint64_t, std::uint64_t>;
+        struct GroupStages {
+            std::int64_t discovered = -1;
+            std::int64_t workerSubmitted = -1;
+            std::int64_t prepared = -1;
+            std::int64_t bridgeApplied = -1;
+            std::uint64_t sourceGeneration = 0;
+        };
+        struct GroupJourney {
+            std::uint64_t groupID = 0;
+            GroupStages stages;
+            TraceVersion transaction{};
+            std::int64_t linked = -1;
+            std::string detail;
+        };
         std::map<TraceVersion, std::pair<ArtifactReadiness, std::int64_t>> lastState;
+        std::map<TraceVersion, std::map<ArtifactReadiness, std::int64_t>> stateTimes;
+        std::map<TraceVersion, std::int64_t> manifestCommitTimes;
+        std::map<ArtifactKey, std::uint64_t> lastCommittedRevision;
+        std::vector<std::tuple<const GraphTraceEvent*, std::uint64_t>> fragmentRegressions;
+        std::map<TraceVersion, const GraphTraceEvent*> submittedBuilds;
+        std::map<std::uint64_t, GroupStages> currentGroupStages;
+        std::map<TraceAddressRevision, std::vector<TraceVersion>> transactionScenes;
+        std::vector<GroupJourney> groupJourneys;
         std::vector<const GraphTraceEvent*> slowBuilds;
         for (const auto& event : events) {
             auto& aggregate = byEvent[event.event];
@@ -227,9 +252,26 @@ public:
                 kind.maximum = (std::max)(kind.maximum, event.durationMicros);
                 slowBuilds.push_back(&event);
             }
+            if (event.event == "BuildSubmitted") {
+                submittedBuilds[{ static_cast<unsigned>(event.key.kind), event.key.primaryID,
+                    event.revision, event.generation }] = &event;
+            } else if (event.event == "BuildStarted" || event.event == "BuildRejected") {
+                submittedBuilds.erase({ static_cast<unsigned>(event.key.kind), event.key.primaryID,
+                    event.revision, event.generation });
+            }
+            if (event.event == "ManifestFragmentCommitted") {
+                manifestCommitTimes.try_emplace({ static_cast<unsigned>(event.key.kind),
+                    event.key.primaryID, event.revision, event.generation }, event.timestampMicros);
+                auto& previous = lastCommittedRevision[event.key];
+                if (previous != 0 && event.revision < previous) {
+                    fragmentRegressions.emplace_back(&event, previous);
+                }
+                previous = (std::max)(previous, event.revision);
+            }
             if (event.event == "StateChanged") {
                 const TraceVersion version{ static_cast<unsigned>(event.key.kind),
                     event.key.primaryID, event.revision, event.generation };
+                stateTimes[version].try_emplace(event.readiness, event.timestampMicros);
                 if (const auto previous = lastState.find(version); previous != lastState.end()) {
                     const auto duration = event.timestampMicros - previous->second.second;
                     auto& state = stateResidence[static_cast<unsigned>(previous->second.first)];
@@ -238,12 +280,121 @@ public:
                     state.maximum = (std::max)(state.maximum, duration);
                 }
                 lastState[version] = { event.readiness, event.timestampMicros };
+            } else if (event.event == "VersionReclaimed") {
+                lastState.erase({ static_cast<unsigned>(event.key.kind), event.key.primaryID,
+                    event.revision, event.generation });
             }
             if (event.event == "DependencyBlocked") {
                 ++blockerEdges[{ static_cast<unsigned>(event.key.kind),
                     static_cast<unsigned>(event.related.kind) }];
             }
+            if (event.key.kind == ArtifactKind::StaticGroup) {
+                auto& stages = currentGroupStages[event.key.primaryID];
+                stages.sourceGeneration = event.revision;
+                if (event.event == "StaticGroupDiscovered") stages.discovered = event.timestampMicros;
+                else if (event.event == "StaticGroupWorkerSubmitted") stages.workerSubmitted = event.timestampMicros;
+                else if (event.event == "StaticGroupPrepared") stages.prepared = event.timestampMicros;
+                else if (event.event == "StaticGroupBridgeApplied") stages.bridgeApplied = event.timestampMicros;
+            } else if (event.event == "StaticGroupTransactionLinked" &&
+                event.related.kind == ArtifactKind::StaticGroup) {
+                groupJourneys.push_back({ event.related.primaryID,
+                    currentGroupStages[event.related.primaryID],
+                    { static_cast<unsigned>(event.key.kind), event.key.primaryID,
+                        event.revision, event.generation }, event.timestampMicros, event.detail });
+            } else if (event.event == "DependencyDeclared" &&
+                event.key.kind == ArtifactKind::StaticScene &&
+                event.related.kind == ArtifactKind::StaticTransaction) {
+                transactionScenes[{ static_cast<unsigned>(event.related.kind),
+                    event.related.primaryID, event.related.variantID, event.relatedRevision }]
+                    .push_back({ static_cast<unsigned>(event.key.kind), event.key.primaryID,
+                        event.revision, event.generation });
+            }
         }
+        for (const auto& [_, state] : lastState) {
+            const auto duration = report.elapsed.count() - state.second;
+            auto& residence = stateResidence[static_cast<unsigned>(state.first)];
+            ++residence.count;
+            residence.total += duration;
+            residence.maximum = (std::max)(residence.maximum, duration);
+        }
+
+        std::ofstream groups(report.staticGroupCsv, std::ios::trunc);
+        groups << "group_id,source_generation,transaction_id,transaction_revision,transaction_generation,"
+            "discovered_us,worker_submitted_us,prepared_us,bridge_applied_us,graph_linked_us,"
+            "transaction_cpu_ready_us,transaction_submitted_us,transaction_gpu_ready_us,"
+            "transaction_published_us,static_scene_published_us,source_to_bridge_us,"
+            "bridge_to_graph_us,graph_to_scene_published_us,end_to_end_us,detail\n";
+        std::vector<std::int64_t> endToEndLatencies;
+        std::vector<std::int64_t> graphLatencies;
+        std::vector<std::int64_t> discoveryToWorkerLatencies;
+        std::vector<std::int64_t> workerToPreparedLatencies;
+        std::vector<std::int64_t> preparedToBridgeLatencies;
+        std::vector<std::int64_t> linkToTransactionReadyLatencies;
+        std::uint64_t completeGroupJourneys = 0;
+        const auto timeFor = [&stateTimes](const TraceVersion& version, ArtifactReadiness readiness) {
+            const auto versionIt = stateTimes.find(version);
+            if (versionIt == stateTimes.end()) return std::int64_t{ -1 };
+            const auto stateIt = versionIt->second.find(readiness);
+            return stateIt == versionIt->second.end() ? std::int64_t{ -1 } : stateIt->second;
+        };
+        for (const auto& journey : groupJourneys) {
+            const auto cpuReady = timeFor(journey.transaction, ArtifactReadiness::CpuReady);
+            const auto submitted = timeFor(journey.transaction, ArtifactReadiness::UploadSubmitted);
+            const auto gpuReady = timeFor(journey.transaction, ArtifactReadiness::GpuReady);
+            const auto transactionPublished = timeFor(journey.transaction, ArtifactReadiness::Published);
+            const TraceAddressRevision transactionAddress{
+                std::get<0>(journey.transaction), std::get<1>(journey.transaction), 0,
+                std::get<2>(journey.transaction) };
+            std::int64_t scenePublished = -1;
+            if (const auto found = transactionScenes.find(transactionAddress);
+                found != transactionScenes.end()) {
+                for (const auto& scene : found->second) {
+                    const auto committed = manifestCommitTimes.find(scene);
+                    const auto published = committed != manifestCommitTimes.end()
+                        ? committed->second : timeFor(scene, ArtifactReadiness::Published);
+                    if (published >= journey.linked &&
+                        (scenePublished < 0 || published < scenePublished)) scenePublished = published;
+                }
+            }
+            const auto sourceToBridge = journey.stages.discovered >= 0 && journey.stages.bridgeApplied >= 0
+                ? journey.stages.bridgeApplied - journey.stages.discovered : -1;
+            const auto bridgeToGraph = journey.stages.bridgeApplied >= 0
+                ? journey.linked - journey.stages.bridgeApplied : -1;
+            const auto graphToScene = scenePublished >= 0 ? scenePublished - journey.linked : -1;
+            const auto endToEnd = journey.stages.discovered >= 0 && scenePublished >= 0
+                ? scenePublished - journey.stages.discovered : -1;
+            if (journey.stages.discovered >= 0 && journey.stages.workerSubmitted >= 0)
+                discoveryToWorkerLatencies.push_back(
+                    journey.stages.workerSubmitted - journey.stages.discovered);
+            if (journey.stages.workerSubmitted >= 0 && journey.stages.prepared >= 0)
+                workerToPreparedLatencies.push_back(
+                    journey.stages.prepared - journey.stages.workerSubmitted);
+            if (journey.stages.prepared >= 0 && journey.stages.bridgeApplied >= 0)
+                preparedToBridgeLatencies.push_back(
+                    journey.stages.bridgeApplied - journey.stages.prepared);
+            if (gpuReady >= journey.linked)
+                linkToTransactionReadyLatencies.push_back(gpuReady - journey.linked);
+            if (graphToScene >= 0) graphLatencies.push_back(graphToScene);
+            if (endToEnd >= 0) {
+                endToEndLatencies.push_back(endToEnd);
+                ++completeGroupJourneys;
+            }
+            groups << journey.groupID << ',' << journey.stages.sourceGeneration << ','
+                << std::get<1>(journey.transaction) << ',' << std::get<2>(journey.transaction) << ','
+                << std::get<3>(journey.transaction) << ',' << journey.stages.discovered << ','
+                << journey.stages.workerSubmitted << ',' << journey.stages.prepared << ','
+                << journey.stages.bridgeApplied << ',' << journey.linked << ',' << cpuReady << ','
+                << submitted << ',' << gpuReady << ',' << transactionPublished << ','
+                << scenePublished << ',' << sourceToBridge << ',' << bridgeToGraph << ','
+                << graphToScene << ',' << endToEnd << ',' << CsvField(journey.detail) << '\n';
+        }
+        const auto percentile = [](std::vector<std::int64_t> values, double fraction) {
+            if (values.empty()) return std::int64_t{ -1 };
+            std::ranges::sort(values);
+            const auto index = (std::min)(values.size() - 1,
+                static_cast<std::size_t>(fraction * static_cast<double>(values.size() - 1)));
+            return values[index];
+        };
         std::ranges::sort(slowBuilds, std::greater{}, [](const GraphTraceEvent* event) {
             return event->durationMicros;
         });
@@ -268,7 +419,8 @@ public:
                 << " | " << aggregate.maximum << " |\n";
         }
         summary << "\n## State residence\n\n"
-            << "| Readiness | Completed intervals | Total (us) | Maximum (us) |\n"
+            << "Open intervals are charged through trace stop.\n\n"
+            << "| Readiness | Intervals | Total (us) | Maximum (us) |\n"
             << "|---:|---:|---:|---:|\n";
         for (const auto& [state, aggregate] : stateResidence) {
             summary << "| " << ReadinessName(static_cast<ArtifactReadiness>(state)) << " | "
@@ -281,6 +433,75 @@ public:
         for (const auto& [edge, count] : blockerEdges) {
             summary << "| " << KindName(static_cast<ArtifactKind>(edge.first)) << " | "
                 << KindName(static_cast<ArtifactKind>(edge.second)) << " | " << count << " |\n";
+        }
+        summary << "\n## Static group end-to-end latency\n\n"
+            << "- Linked group versions: " << groupJourneys.size() << "\n"
+            << "- Complete discovery-to-static-scene-publication journeys: "
+            << completeGroupJourneys << "\n"
+            << "- Graph link-to-static-scene publication p50/p95/p99/max: "
+            << percentile(graphLatencies, 0.50) << " / " << percentile(graphLatencies, 0.95)
+            << " / " << percentile(graphLatencies, 0.99) << " / "
+            << percentile(graphLatencies, 1.0) << " us\n"
+            << "- Discovery-to-static-scene publication p50/p95/p99/max: "
+            << percentile(endToEndLatencies, 0.50) << " / " << percentile(endToEndLatencies, 0.95)
+            << " / " << percentile(endToEndLatencies, 0.99) << " / "
+            << percentile(endToEndLatencies, 1.0) << " us\n";
+        const auto writeStage = [&summary, &percentile](std::string_view label,
+            const std::vector<std::int64_t>& values) {
+            summary << "- " << label << " count/p50/p95/p99/max: " << values.size() << " / "
+                << percentile(values, 0.50) << " / " << percentile(values, 0.95) << " / "
+                << percentile(values, 0.99) << " / " << percentile(values, 1.0) << " us\n";
+        };
+        writeStage("Discovery-to-worker-submit", discoveryToWorkerLatencies);
+        writeStage("Worker-submit-to-prepared", workerToPreparedLatencies);
+        writeStage("Prepared-to-bridge-apply", preparedToBridgeLatencies);
+        writeStage("Graph-link-to-transaction-GPU-ready", linkToTransactionReadyLatencies);
+
+        summary << "\n## Manifest fragment regressions\n\n"
+            << "- Regression events: " << fragmentRegressions.size() << "\n\n"
+            << "| Timestamp (us) | Artifact | Previous revision | Selected revision | Generation | Detail |\n"
+            << "|---:|---|---:|---:|---:|---|\n";
+        for (std::size_t index = 0;
+            index < (std::min<std::size_t>)(fragmentRegressions.size(), 25); ++index) {
+            const auto& [event, previous] = fragmentRegressions[index];
+            summary << "| " << event->timestampMicros << " | " << KindName(event->key.kind)
+                << ':' << event->key.primaryID << ':' << event->key.variantID << " | "
+                << previous << " | " << event->revision << " | " << event->generation
+                << " | " << event->detail << " |\n";
+        }
+
+        summary << "\n## Scheduled producers not started at trace stop\n\n"
+            << "| Artifact | Revision | Generation | Queue age (us) | Task |\n"
+            << "|---|---:|---:|---:|---|\n";
+        std::vector<const GraphTraceEvent*> pendingBuilds;
+        for (const auto& [_, event] : submittedBuilds) pendingBuilds.push_back(event);
+        std::ranges::sort(pendingBuilds, {}, &GraphTraceEvent::timestampMicros);
+        for (std::size_t index = 0; index < (std::min<std::size_t>)(pendingBuilds.size(), 25); ++index) {
+            const auto& event = *pendingBuilds[index];
+            summary << "| " << KindName(event.key.kind) << ':' << event.key.primaryID << ':'
+                << event.key.variantID << " | " << event.revision << " | " << event.generation
+                << " | " << report.elapsed.count() - event.timestampMicros << " | "
+                << event.detail << " |\n";
+        }
+        summary << "\n## Oldest unresolved artifact versions\n\n"
+            << "| Artifact | Revision | Generation | State | State age (us) |\n"
+            << "|---|---:|---:|---|---:|\n";
+        std::vector<std::pair<TraceVersion, std::pair<ArtifactReadiness, std::int64_t>>> unresolved;
+        for (const auto& state : lastState) {
+            if (state.second.first == ArtifactReadiness::GpuReady ||
+                state.second.first == ArtifactReadiness::Published ||
+                state.second.first == ArtifactReadiness::Superseded ||
+                state.second.first == ArtifactReadiness::Cancelled ||
+                state.second.first == ArtifactReadiness::Failed) continue;
+            unresolved.push_back(state);
+        }
+        std::ranges::sort(unresolved, {}, [](const auto& value) { return value.second.second; });
+        for (std::size_t index = 0; index < (std::min<std::size_t>)(unresolved.size(), 25); ++index) {
+            const auto& [version, state] = unresolved[index];
+            summary << "| " << KindName(static_cast<ArtifactKind>(std::get<0>(version))) << ':'
+                << std::get<1>(version) << " | " << std::get<2>(version) << " | "
+                << std::get<3>(version) << " | " << ReadinessName(state.first) << " | "
+                << report.elapsed.count() - state.second << " |\n";
         }
         summary << "\n## Slowest producers\n\n"
             << "| Artifact | Revision | Generation | Duration (us) | Detail |\n"
@@ -1158,6 +1379,14 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         if (auto session = trace.load(std::memory_order_acquire)) {
             session->Record("BuildSubmitted", key, revision, generation,
                 ArtifactReadiness::Preparing, 0, registration.taskName);
+			if (session->Config().includeDependencyEvents) {
+				for (const auto& dependency : context.dependencies) {
+					session->Record("BuildDependencyResolved", key, revision, generation,
+						dependency.readiness, 0,
+						std::format("dependency_generation={}", dependency.generation),
+						dependency.key, dependency.revision);
+				}
+			}
         }
         const bool submitted = scheduler.Submit(scope, registration.lane, registration.domain,
             registration.taskName.empty() ? "AsyncStateGraph::Build" : registration.taskName,
@@ -1365,7 +1594,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             std::uint64_t generation = 0;
             std::shared_ptr<const GpuSubmissionSet> token;
         };
-        constexpr std::size_t maxTransitions = 128;
+        constexpr std::size_t maxGpuSignals = 32;
+        constexpr std::size_t maxCompletions = 64;
+        constexpr std::size_t maxPendingBuilds = 64;
         constexpr auto maxDuration = std::chrono::milliseconds(2);
         const auto started = std::chrono::steady_clock::now();
         if (auto session = trace.load(std::memory_order_acquire)) {
@@ -1377,8 +1608,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         {
             std::lock_guard lock(mutex);
             ArtifactKey key;
-            while (gpuSignals.try_pop(key) && transitions++ < maxTransitions &&
+            std::size_t gpuSignalCount = 0;
+            while (gpuSignalCount++ < maxGpuSignals && gpuSignals.try_pop(key) &&
                 std::chrono::steady_clock::now() - started < maxDuration) {
+				++transitions;
                 const auto found = nodes.find(key);
                 if (found != nodes.end() &&
                     (found->second.state == ArtifactReadiness::CpuReady ||
@@ -1500,8 +1733,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     retryDelay = retryDelay ? (std::min)(*retryDelay, remaining) : remaining;
                 }
             }
-            while (!completions.empty() && transitions++ < maxTransitions &&
-                std::chrono::steady_clock::now() - started < maxDuration) {
+            std::size_t completionCount = 0;
+            while (!completions.empty() && completionCount++ < maxCompletions) {
+				++transitions;
                 auto completion = std::move(completions.front());
                 completions.pop_front();
                 const auto completedKey = completion.key;
@@ -1515,8 +1749,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     }
                 }
             }
-            while (!pending.empty() && transitions++ < maxTransitions &&
-                std::chrono::steady_clock::now() - started < maxDuration) {
+            std::size_t pendingBuildCount = 0;
+            while (!pending.empty() && pendingBuildCount++ < maxPendingBuilds) {
+				++transitions;
                 const auto key = pending.front();
                 pending.pop_front();
                 auto found = nodes.find(key);
@@ -1596,9 +1831,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             }
             ReclaimUnreferencedVersions();
             if (basic_telemetry::Enabled()) {
-                std::array<std::uint64_t, static_cast<std::size_t>(ArtifactKind::FrameManifest) + 1u>
+                std::array<std::uint64_t, static_cast<std::size_t>(ArtifactKind::StaticGroup) + 1u>
                     kindCounts{};
-                std::array<std::uint64_t, static_cast<std::size_t>(ArtifactKind::FrameManifest) + 1u>
+                std::array<std::uint64_t, static_cast<std::size_t>(ArtifactKind::StaticGroup) + 1u>
                     archivedKindCounts{};
                 std::uint64_t maxBlockerAgeMicros = 0;
                 std::uint64_t maxFanout = 0;
@@ -1783,6 +2018,46 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
             versionGeneration = m_impl->versionGenerations.emplace(
                 requestedVersion, ++m_impl->nextVersionGeneration).first;
         }
+        const auto traceAcceptedRequest = [&] {
+            auto session = m_impl->trace.load(std::memory_order_acquire);
+            if (!session) return;
+            for (const auto& requirement : requirements) {
+                if (!session->Config().includeDependencyEvents) break;
+                session->Record("DependencyDeclared", key, desiredRevision,
+                    versionGeneration->second, requirement.requiredReadiness, 0,
+                    std::format("policy={} invalidation={} alternative_group={} generation={}",
+                        static_cast<unsigned>(requirement.policy),
+                        static_cast<unsigned>(requirement.invalidation),
+                        requirement.alternativeGroup, requirement.requiredGeneration),
+                    requirement.key, requirement.minimumRevision);
+            }
+            if (key.kind == ArtifactKind::StaticTransaction) {
+                if (const auto transaction = input.Get<StaticTransactionBuildInput>()) {
+                    session->Record("StaticTransactionContents", key, desiredRevision,
+                        versionGeneration->second, ArtifactReadiness::Missing, 0,
+                        std::format("groups={} placements={} draws={} active={} stream_generation={}",
+                            transaction->groupCount, transaction->placementCount,
+                            transaction->drawRecordCount, transaction->activeEntryCount,
+                            transaction->streamGeneration));
+                    for (const auto& group : transaction->groups) {
+                        session->Record("StaticGroupTransactionLinked", key, desiredRevision,
+                            versionGeneration->second, ArtifactReadiness::Missing, 0,
+                            std::format("placements={} draws={} active={}", group.placementCount,
+                                group.drawRecordCount, group.activeEntryCount),
+                            { ArtifactKind::StaticGroup, group.groupID, 0 },
+                            transaction->streamGeneration);
+                    }
+                }
+            } else if (key.kind == ArtifactKind::StaticScene) {
+                if (const auto scene = input.Get<StaticSceneBuildInput>()) {
+                    session->Record("StaticSceneContents", key, desiredRevision,
+                        versionGeneration->second, ArtifactReadiness::Missing, 0,
+                        std::format("groups={} desired_placements={} materialized_placements={} retired_placements={}",
+                            scene->groupOwners.size(), scene->desiredPlacementCount,
+                            scene->materializedPlacementCount, scene->retiredPlacementCount));
+                }
+            }
+        };
         auto& node = m_impl->nodes[key];
         node.key = key;
         node.desired = true;
@@ -1851,6 +2126,7 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
             (node.state == ArtifactReadiness::GpuReady ||
              node.state == ArtifactReadiness::Published);
         if (activeVersionExists && !activeVersionFinished) {
+            traceAcceptedRequest();
             node.successors.push_back({ desiredRevision, versionGeneration->second, requestFingerprint,
                 std::move(input), std::move(requirements), versionLease });
             if (node.state == ArtifactReadiness::UploadSubmitted && !node.buildInFlight) {
@@ -1870,6 +2146,7 @@ ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t de
         }
 
         m_impl->StoreVersion(node);
+        traceAcceptedRequest();
         m_impl->RemoveWaiterEdges(node);
         node.desiredRevision = desiredRevision;
         node.versionGeneration = versionGeneration->second;
@@ -2342,6 +2619,15 @@ AsyncStateGraphTraceReport AsyncStateGraph::StopTraceAndWriteReport(
     if (!session) return report;
     session->Record("TraceStopped", {});
     return session->Write(outputDirectory);
+}
+
+void AsyncStateGraph::TraceEvent(std::string_view event, ArtifactAddress address,
+    std::uint64_t revision, std::uint64_t generation, std::string detail,
+    ArtifactAddress related, std::uint64_t relatedRevision) {
+    if (auto session = m_impl->trace.load(std::memory_order_acquire)) {
+        session->Record(std::string(event), address, revision, generation,
+            ArtifactReadiness::Missing, 0, std::move(detail), related, relatedRevision);
+    }
 }
 
 void AsyncStateGraph::WaitIdle() const {

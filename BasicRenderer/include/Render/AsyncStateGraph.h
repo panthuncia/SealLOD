@@ -39,6 +39,7 @@ enum class ArtifactKind : std::uint16_t {
     TerrainState,
     BufferVersion,
     FrameManifest,
+    StaticGroup,
 };
 
 struct ArtifactAddress {
@@ -508,6 +509,7 @@ struct AsyncStateGraphTraceConfig {
 
 struct AsyncStateGraphTraceReport {
     std::filesystem::path eventsCsv;
+    std::filesystem::path staticGroupCsv;
     std::filesystem::path chromeTraceJson;
     std::filesystem::path summaryMarkdown;
     std::uint64_t capturedEvents = 0;
@@ -582,6 +584,10 @@ public:
     void StartTrace(AsyncStateGraphTraceConfig config = {});
     [[nodiscard]] bool TraceActive() const;
     AsyncStateGraphTraceReport StopTraceAndWriteReport(const std::filesystem::path& outputDirectory);
+    void TraceEvent(std::string_view event, ArtifactAddress address,
+        std::uint64_t revision = 0, std::uint64_t generation = 0,
+        std::string detail = {}, ArtifactAddress related = {},
+        std::uint64_t relatedRevision = 0);
     void WaitIdle() const;
     void Shutdown();
 

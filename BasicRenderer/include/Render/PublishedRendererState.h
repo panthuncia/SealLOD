@@ -133,6 +133,17 @@ struct PublishedRendererState {
     [[nodiscard]] const PublishedStateFragment& Fragment(PublishedFragmentKind kind) const;
 };
 
+// Ordinary publication may advance independently within each fragment slot,
+// but it may not move backwards within one logical artifact address. Revisions
+// from different addresses are intentionally incomparable.
+[[nodiscard]] bool IsMonotonicFragmentSuccessor(const PublishedStateFragment& active,
+    const PublishedStateFragment& successor) noexcept;
+
+enum class ManifestPublicationPolicy : std::uint8_t {
+    MonotonicSuccessor,
+    ExplicitRollback,
+};
+
 // Immutable ownership token for the renderer state selected after a frame
 // slot's fence completes.  Render-graph resource resolution must retain this
 // token rather than independently reloading the process publication source.
@@ -164,6 +175,8 @@ private:
 struct RendererStateCandidate {
     std::uint64_t baseEpoch = 0;
     std::shared_ptr<const PublishedRendererState> state;
+    ManifestPublicationPolicy policy = ManifestPublicationPolicy::MonotonicSuccessor;
+    std::string reason;
 };
 
 struct PublishedFragmentPrecondition {
@@ -179,10 +192,14 @@ struct PublishedStatePatch {
     std::vector<std::pair<PublishedResourceKey,
         std::shared_ptr<const PublishedResourceCatalog::ResourceList>>> catalogEntries;
     std::vector<std::pair<PublishedResourceKey, PublishedResourceSelection>> catalogSelections;
+    ManifestPublicationPolicy policy = ManifestPublicationPolicy::MonotonicSuccessor;
+    std::string reason;
 };
 
 struct FrameManifestPayload {
     std::uint64_t baseEpoch = 0;
+    // Patch manifests are authoritative without materializing a duplicate full
+    // state. Legacy whole-state candidates populate state and leave patch null.
     std::shared_ptr<const PublishedRendererState> state;
     std::shared_ptr<const PublishedStatePatch> patch;
 };
@@ -194,6 +211,8 @@ struct RendererStatePublisherStats {
     std::uint64_t rejectedBaseEpoch = 0;
     std::uint64_t rebasedPatches = 0;
     std::uint64_t rejectedPatchPreconditions = 0;
+    std::uint64_t rejectedFragmentRegressions = 0;
+    std::uint64_t explicitRollbacks = 0;
     std::uint64_t commitMicros = 0;
     std::size_t retainedFrameStates = 0;
 };

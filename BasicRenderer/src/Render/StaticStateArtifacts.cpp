@@ -181,7 +181,16 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     root->kind = PublishedFragmentKind::Geometry;
     root->publishRoot = input->publishRoot;
     root->fragment.revision = context.revision;
-    root->fragment.dependencyClosure = context.dependencies;
+    // Resource roots are one-time ReadyGate admission dependencies. They prove
+    // that this membership cut has a schedulable resource closure, but they do
+    // not become exact manifest coupling: materials, draw records, and indirect
+    // workloads advance independently and recombine with geometry at manifest
+    // selection. Transaction versions remain the authoritative exact closure.
+    std::ranges::copy_if(context.dependencies,
+        std::back_inserter(root->fragment.dependencyClosure),
+        [](const ArtifactSnapshot& dependency) {
+            return dependency.key.kind == ArtifactKind::StaticTransaction;
+        });
     root->fragment.payload = ArtifactPayload::Make<PublishedStaticSceneState>(std::move(scene));
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(root)));

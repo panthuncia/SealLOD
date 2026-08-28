@@ -46,6 +46,14 @@ public:
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const {
         return m_graph.Outstanding(kind);
     }
+    [[nodiscard]] bool TraceActive() const { return m_graph.TraceActive(); }
+    void TraceEvent(std::string_view event, ArtifactAddress address,
+        std::uint64_t revision = 0, std::uint64_t generation = 0,
+        std::string detail = {}, ArtifactAddress related = {},
+        std::uint64_t relatedRevision = 0) {
+        m_graph.TraceEvent(event, address, revision, generation, std::move(detail),
+            related, relatedRevision);
+    }
     [[nodiscard]] std::uint64_t SubscribeReady(
         std::function<void(const ArtifactSnapshot&)> callback) {
         return m_graph.AddReadyCallback(std::move(callback));
