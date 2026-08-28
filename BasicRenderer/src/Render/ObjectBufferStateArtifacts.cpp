@@ -60,7 +60,7 @@ ArtifactBuildResult BuildObjectBufferState(const ArtifactBuildContext& context) 
 
 void RegisterObjectBufferStateProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::DrawRecordPage, {
-        TaskLane::Streaming, TaskDomain::RendererState,
+        TaskLane::FrameCritical, TaskDomain::RendererState,
         "ObjectBufferStateArtifact::Build", BuildObjectBufferState });
 }
 

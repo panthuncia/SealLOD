@@ -116,9 +116,10 @@ ArtifactBuildResult BuildMaterialRow(const ArtifactBuildContext& context,
     }
     auto result = ArtifactBuildResult::Ready(
         ArtifactPayload::Make<MaterialRowArtifact>(row));
-    result.onAccepted = [&manager, row](const ArtifactSnapshot&) {
-        (void)manager.ApplyMaterialRowArtifact(*row);
-    };
+    result.acceptance = { TaskLane::Streaming, TaskDomain::RendererState,
+        [&manager, row](const ArtifactSnapshot&) {
+            (void)manager.ApplyMaterialRowArtifact(*row);
+        } };
     return result;
 }
 

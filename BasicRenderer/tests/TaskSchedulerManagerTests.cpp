@@ -77,6 +77,69 @@ int main() {
     Check(scheduler.BlockingThreadCount() == 1);
     Check(scheduler.DomainConcurrency(TaskDomain::StaticImport) == 1);
     Check(scheduler.DomainConcurrency(TaskDomain::ShaderCompile) == 1);
+    Check(scheduler.DomainConcurrency(TaskDomain::GraphControl) == 1);
+    Check(scheduler.DomainConcurrency(TaskDomain::GraphPublication) == 1);
+	Check(scheduler.DomainConcurrency(TaskDomain::StaticImportControl) == 1);
+
+    {
+        auto producerScope = scheduler.CreateScope("renderer-state-saturation");
+        auto isolatedScope = scheduler.CreateScope("graph-domain-isolation");
+        std::atomic<bool> producerStarted{ false };
+        std::atomic<bool> releaseProducer{ false };
+        std::atomic<bool> controlStarted{ false };
+        std::atomic<bool> publicationStarted{ false };
+        Check(scheduler.Submit(producerScope, TaskLane::Streaming, TaskDomain::RendererState,
+            "held-renderer-state-producer", [&](const br::TaskContext&) {
+                producerStarted.store(true, std::memory_order_release);
+                while (!releaseProducer.load(std::memory_order_acquire)) std::this_thread::yield();
+            }));
+        while (!producerStarted.load(std::memory_order_acquire)) std::this_thread::yield();
+        const auto submittedAt = std::chrono::steady_clock::now();
+        Check(scheduler.Submit(isolatedScope, TaskLane::Streaming, TaskDomain::GraphControl,
+            "isolated-graph-control", [&](const br::TaskContext&) {
+                controlStarted.store(true, std::memory_order_release);
+            }));
+        Check(scheduler.Submit(isolatedScope, TaskLane::Streaming, TaskDomain::GraphPublication,
+            "isolated-graph-publication", [&](const br::TaskContext&) {
+                publicationStarted.store(true, std::memory_order_release);
+            }));
+        const auto deadline = submittedAt + 100ms;
+        while ((!controlStarted.load(std::memory_order_acquire) ||
+                !publicationStarted.load(std::memory_order_acquire)) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        releaseProducer.store(true, std::memory_order_release);
+        producerScope.Wait();
+        isolatedScope.Wait();
+        Check(controlStarted.load(std::memory_order_acquire));
+        Check(publicationStarted.load(std::memory_order_acquire));
+    }
+
+	{
+		auto workerScope = scheduler.CreateScope("static-import-worker-saturation");
+		auto controlScope = scheduler.CreateScope("static-import-control-isolation");
+		std::atomic<bool> workerStarted{ false };
+		std::atomic<bool> releaseWorker{ false };
+		std::atomic<bool> controlStarted{ false };
+		Check(scheduler.Submit(workerScope, TaskLane::Streaming, TaskDomain::StaticImport,
+			"held-static-import-worker", [&](const br::TaskContext&) {
+				workerStarted.store(true, std::memory_order_release);
+				while (!releaseWorker.load(std::memory_order_acquire)) std::this_thread::yield();
+			}));
+		while (!workerStarted.load(std::memory_order_acquire)) std::this_thread::yield();
+		Check(scheduler.Submit(controlScope, TaskLane::Streaming, TaskDomain::StaticImportControl,
+			"isolated-static-import-control", [&](const br::TaskContext&) {
+				controlStarted.store(true, std::memory_order_release);
+			}));
+		const auto deadline = std::chrono::steady_clock::now() + 100ms;
+		while (!controlStarted.load(std::memory_order_acquire) &&
+			std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+		releaseWorker.store(true, std::memory_order_release);
+		workerScope.Wait();
+		controlScope.Wait();
+		Check(controlStarted.load(std::memory_order_acquire));
+	}
 
     {
         auto scope = scheduler.CreateScope("serialized-pump-stress");

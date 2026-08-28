@@ -178,6 +178,73 @@ bool IsMonotonicStateSuccessor(const PublishedRendererState& active,
 }
 }
 
+std::shared_ptr<const PublishedRendererState> MaterializePublishedState(
+    const std::shared_ptr<const PublishedRendererState>& base,
+    const PublishedStatePatch& patch, std::uint64_t targetEpoch) {
+    auto state = base ? std::make_shared<PublishedRendererState>(*base)
+                      : std::make_shared<PublishedRendererState>();
+    const bool preconditionsSatisfied = std::ranges::all_of(
+        patch.preconditions, [&](const PublishedFragmentPrecondition& precondition) {
+            return state->Fragment(precondition.kind).publicationRoot == precondition.publicationRoot;
+        });
+    if (!preconditionsSatisfied) return {};
+
+    const bool rollback = AllowsRollback(patch.policy, patch.reason);
+    for (std::size_t index = 0; index < patch.fragments.size(); ++index) {
+        if (!patch.fragments[index]) continue;
+        const auto kind = static_cast<PublishedFragmentKind>(index);
+        if (!rollback && !IsMonotonicFragmentSuccessor(
+            state->Fragment(kind), *patch.fragments[index])) return {};
+        state->Fragment(kind) = *patch.fragments[index];
+    }
+
+    auto catalog = state->resourceCatalog
+        ? std::make_shared<PublishedResourceCatalog>(*state->resourceCatalog)
+        : std::make_shared<PublishedResourceCatalog>();
+    for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
+        if ((patch.catalogOwnerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
+            catalog->contentVersions.erase(entry->first);
+            catalog->selections.erase(entry->first);
+            entry = catalog->entries.erase(entry);
+        } else {
+            ++entry;
+        }
+    }
+    for (const auto& [key, resources] : patch.catalogEntries) {
+        catalog->entries[key] = resources;
+        catalog->contentVersions[key] = state->Fragment(key.owner).revision;
+    }
+    for (const auto& [key, selection] : patch.catalogSelections) {
+        catalog->selections.insert_or_assign(key, selection);
+    }
+
+    auto manifestBundle = std::make_shared<PublicationBundle>();
+    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+        const auto& fragment = state->Fragment(static_cast<PublishedFragmentKind>(index));
+        if (!fragment.publicationBundle) continue;
+        manifestBundle->versions.insert(manifestBundle->versions.end(),
+            fragment.publicationBundle->versions.begin(), fragment.publicationBundle->versions.end());
+        manifestBundle->leases.Merge(fragment.publicationBundle->leases);
+        for (const auto& submissions : fragment.publicationBundle->gpuSubmissions) {
+            if (submissions && !std::ranges::contains(
+                manifestBundle->gpuSubmissions, submissions)) {
+                manifestBundle->gpuSubmissions.push_back(submissions);
+            }
+        }
+        manifestBundle->resourceHolds.insert(manifestBundle->resourceHolds.end(),
+            fragment.publicationBundle->resourceHolds.begin(),
+            fragment.publicationBundle->resourceHolds.end());
+    }
+    std::ranges::sort(manifestBundle->versions);
+    manifestBundle->versions.erase(std::unique(manifestBundle->versions.begin(),
+        manifestBundle->versions.end()), manifestBundle->versions.end());
+    state->epoch = targetEpoch;
+    for (auto& [_, selection] : catalog->selections) selection.manifestEpoch = targetEpoch;
+    state->resourceCatalog = std::move(catalog);
+    state->publicationBundle = std::move(manifestBundle);
+    return state;
+}
+
 RendererStatePublisher::RendererStatePublisher(std::size_t framesInFlight) {
     auto fallback = std::make_shared<PublishedRendererState>();
     Bootstrap(std::move(fallback), framesInFlight);
@@ -259,8 +326,12 @@ bool RendererStatePublisher::PublishArtifact(const ArtifactSnapshot& artifact) {
     if (manifest->patch) return PublishPatch(*manifest->patch);
     if (!manifest->state) return false;
     const auto baseEpoch = manifest->baseEpoch;
-    auto state = std::make_shared<PublishedRendererState>(*manifest->state);
-    state->epoch = baseEpoch + 1u;
+    auto state = manifest->state;
+    if (state->epoch != baseEpoch + 1u) {
+        auto corrected = std::make_shared<PublishedRendererState>(*state);
+        corrected->epoch = baseEpoch + 1u;
+        state = std::move(corrected);
+    }
     std::unique_lock lock(m_mutex);
     ++m_stats.candidates;
     if (m_candidate.state) ++m_stats.replacedCandidates;

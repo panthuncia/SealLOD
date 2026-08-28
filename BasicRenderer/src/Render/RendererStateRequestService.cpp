@@ -9,7 +9,7 @@ RendererStateRequestService::RendererStateRequestService(
     AsyncStateGraph& graph, RendererStatePublisher& publisher)
     : m_graph(graph), m_publisher(publisher) {
     m_graph.RegisterProducer(ArtifactKind::FrameManifest, {
-        TaskLane::Streaming, TaskDomain::RendererState,
+        TaskLane::Streaming, TaskDomain::GraphPublication,
         "RendererStateRequestService::BuildManifest", &RendererStateRequestService::BuildManifest });
 }
 
@@ -102,7 +102,7 @@ void RendererStateRequestService::RequestManifest() {
         }
         ++m_manifestRevision;
     }
-    (void)m_graph.Request({ ArtifactKind::FrameManifest, 0, 0 }, m_manifestRevision, {},
+    (void)m_graph.SubmitLatestIntent({ ArtifactKind::FrameManifest, 0, 0 }, m_manifestRevision, {},
         ArtifactPayload::Make<ManifestInput>(std::move(input)), m_manifestRevision);
 }
 
@@ -336,7 +336,8 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
     }
     auto manifest = std::make_shared<FrameManifestPayload>();
     manifest->baseEpoch = input->baseEpoch;
-    manifest->patch = std::move(patch);
+    manifest->state = MaterializePublishedState(input->base, *patch, input->baseEpoch + 1u);
+    if (!manifest->state) return ArtifactBuildResult::Cancelled();
     return ArtifactBuildResult::Ready(ArtifactPayload::Make<FrameManifestPayload>(std::move(manifest)));
 }
 

@@ -1028,6 +1028,20 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool 
         snapshot.pendingDirectStorageUploads = clodStats.pendingDirectStorageUploads;
     }
     const auto taskStats = TaskSchedulerManager::GetInstance().GetQueueStats();
+    snapshot.schedulerWorkerCount = TaskSchedulerManager::GetInstance().WorkerCount();
+    static_assert(static_cast<std::size_t>(TaskDomain::Count) == 10);
+    for (std::size_t index = 0; index < snapshot.schedulerDomains.size(); ++index) {
+        const auto& source = taskStats.domains[index];
+        auto& target = snapshot.schedulerDomains[index];
+        target.queued = source.queued;
+        target.active = source.active;
+        target.completed = source.completed;
+        target.queueWaitMicros = source.queueWaitMicros;
+        target.maxQueueWaitMicros = source.maxQueueWaitMicros;
+        target.executionMicros = source.executionMicros;
+        target.maxExecutionMicros = source.maxExecutionMicros;
+        target.highWatermark = source.highWatermark;
+    }
     snapshot.ioTasks = taskStats.ioQueued + taskStats.ioActive;
     snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;
     snapshot.shaderCompileTasks = taskStats.shaderCompileQueued + taskStats.shaderCompileActive;

@@ -461,7 +461,9 @@ public:
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
 	void PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames);
 	std::uint64_t MakeDeferredRetireFrame() const;
-	std::vector<ActiveDrawSetCompactionPublishResult> PublishActiveDrawSetCompactionResults(std::size_t maxResults = 1);
+	// maxResults == 0 is work-conserving: admit and publish every item that is
+	// currently available. A nonzero value remains for explicit diagnostic use.
+	std::vector<ActiveDrawSetCompactionPublishResult> PublishActiveDrawSetCompactionResults(std::size_t maxResults = 0);
 	std::vector<ActiveDrawSetDebugStats> SnapshotActiveDrawSetDebugStats() const;
 
 	org::runtime::BulkWriteHandle BeginPerObjectBulkWrite();

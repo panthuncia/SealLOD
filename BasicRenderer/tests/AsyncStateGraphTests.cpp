@@ -1,4 +1,5 @@
 #include "Render/AsyncStateGraph.h"
+#include "Render/CapacityProvider.h"
 #include "Render/PublishedRendererState.h"
 #include "Render/RendererStateRequestService.h"
 #include "Managers/Singletons/RendererECSManager.h"
@@ -153,6 +154,8 @@ int main() {
     config.reserveRenderCpu = false;
     scheduler.Initialize(config);
     Check(scheduler.DomainConcurrency(TaskDomain::RendererState) == 1);
+    Check(scheduler.DomainConcurrency(TaskDomain::GraphControl) == 1);
+    Check(scheduler.DomainConcurrency(TaskDomain::GraphPublication) == 1);
 
     AsyncStateGraph graph(scheduler, "AsyncStateGraphTests");
     RegisterStaticStateProducers(graph);
@@ -571,7 +574,7 @@ int main() {
     std::atomic_bool holdDrainStarted{ false };
     std::atomic_bool releaseHeldDrain{ false };
     auto holdDrainScope = scheduler.CreateScope("QueuedClosureReplacementBarrier");
-    Check(scheduler.Submit(holdDrainScope, TaskLane::Streaming, TaskDomain::RendererState,
+    Check(scheduler.Submit(holdDrainScope, TaskLane::Streaming, TaskDomain::GraphControl,
         "QueuedClosureReplacementBarrier", [&](const br::TaskContext&) {
             holdDrainStarted.store(true, std::memory_order_release);
             while (!releaseHeldDrain.load(std::memory_order_acquire)) std::this_thread::yield();
@@ -1390,6 +1393,161 @@ int main() {
     const auto boundedTrace = graph.StopTraceAndWriteReport(traceDirectory / "bounded");
     Check(boundedTrace.capturedEvents == 2);
     Check(boundedTrace.droppedEvents != 0);
+
+    {
+        AsyncStateGraph latestGraph(scheduler, "LatestIntentTests");
+        std::atomic_bool firstStarted{ false };
+        std::atomic_bool releaseFirst{ false };
+        latestGraph.RegisterProducer(ArtifactKind::Generic, {
+            TaskLane::Streaming, TaskDomain::GraphPublication, "LatestIntentProducer",
+            [&](const ArtifactBuildContext& context) {
+                if (context.revision == 1) {
+                    firstStarted.store(true, std::memory_order_release);
+                    while (!releaseFirst.load(std::memory_order_acquire)) std::this_thread::yield();
+                }
+                return ArtifactBuildResult::Ready(Payload(context.revision));
+            } });
+        const ArtifactKey latestKey{ ArtifactKind::Generic, 0xf001, 0 };
+        Check(latestGraph.SubmitLatestIntent(latestKey, 1, {}, Payload(1), 1) ==
+            ArtifactRequestStatus::Accepted);
+        while (!firstStarted.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (std::uint64_t revision = 2; revision <= 100; ++revision) {
+            Check(latestGraph.SubmitLatestIntent(latestKey, revision, {}, Payload(revision), revision) ==
+                ArtifactRequestStatus::Accepted);
+        }
+        releaseFirst.store(true, std::memory_order_release);
+        latestGraph.WaitIdle();
+        Check(latestGraph.Snapshot(latestKey).revision == 100);
+        Check(latestGraph.Stats().coalescedIntents == 98);
+        std::vector<ArtifactRequest> batch;
+        batch.push_back({ { ArtifactKind::Generic, 0xf002, 0 }, 1, {}, Payload(11), 11 });
+        batch.push_back({ { ArtifactKind::Generic, 0xf003, 0 }, 1, {}, Payload(12), 12 });
+        const auto batchResults = latestGraph.RequestBatch(std::move(batch));
+        Check(batchResults.size() == 2);
+        Check(static_cast<bool>(batchResults[0]));
+        Check(static_cast<bool>(batchResults[1]));
+        latestGraph.WaitIdle();
+        Check(latestGraph.Snapshot(ArtifactKey{ ArtifactKind::Generic, 0xf002, 0 }).revision == 1);
+        Check(latestGraph.Snapshot(ArtifactKey{ ArtifactKind::Generic, 0xf003, 0 }).revision == 1);
+        latestGraph.Shutdown();
+    }
+
+    {
+        AsyncStateGraph eventGraph(scheduler, "SuspensionAcceptanceTests");
+        std::atomic_uint32_t earlyAttempts{ 0 };
+        std::atomic_uint32_t lateAttempts{ 0 };
+        eventGraph.RegisterProducer(ArtifactKind::Generic, {
+            TaskLane::Streaming, TaskDomain::GraphPublication, "SuspendingProducer",
+            [&](const ArtifactBuildContext& context) {
+                auto& attempts = context.key.primaryID == 0xf101 ? earlyAttempts : lateAttempts;
+                if (attempts.fetch_add(1, std::memory_order_acq_rel) == 0) {
+                    return ArtifactBuildResult::Suspend(ArtifactSuspension::External(
+                        context.key.primaryID == 0xf101 ? 0xa101 : 0xa102,
+                        "test external operation"));
+                }
+                return ArtifactBuildResult::Ready(Payload(context.revision));
+            } });
+
+        // The notification may race ahead of suspension registration.
+        eventGraph.NotifySuspensionSatisfied(0xa101);
+        const ArtifactKey earlyKey{ ArtifactKind::Generic, 0xf101, 0 };
+        Check(static_cast<bool>(eventGraph.Request(earlyKey, 1, {}, Payload(1), 1)));
+        eventGraph.WaitIdle();
+        Check(earlyAttempts.load(std::memory_order_acquire) == 2);
+        Check(eventGraph.Snapshot(earlyKey).readiness == ArtifactReadiness::GpuReady);
+
+        const ArtifactKey lateKey{ ArtifactKind::Generic, 0xf102, 0 };
+        Check(static_cast<bool>(eventGraph.Request(lateKey, 1, {}, Payload(1), 1)));
+        while (lateAttempts.load(std::memory_order_acquire) != 1) std::this_thread::yield();
+        while (eventGraph.Snapshot(lateKey).readiness != ArtifactReadiness::Blocked)
+            std::this_thread::yield();
+        eventGraph.NotifySuspensionSatisfied(0xa102);
+        eventGraph.WaitIdle();
+        Check(lateAttempts.load(std::memory_order_acquire) == 2);
+        Check(eventGraph.Snapshot(lateKey).readiness == ArtifactReadiness::GpuReady);
+        eventGraph.Shutdown();
+    }
+
+    {
+        AsyncStateGraph acceptanceGraph(scheduler, "AcceptanceOrderingTests");
+        std::atomic_bool acceptanceStarted{ false };
+        std::atomic_bool releaseAcceptance{ false };
+        acceptanceGraph.RegisterProducer(ArtifactKind::Generic, {
+            TaskLane::Streaming, TaskDomain::GraphPublication, "AcceptanceProducer",
+            [&](const ArtifactBuildContext& context) {
+                auto result = ArtifactBuildResult::Ready(Payload(context.revision));
+                result.acceptance = { TaskLane::Streaming, TaskDomain::RendererState,
+                    [&](const ArtifactSnapshot&) {
+                        acceptanceStarted.store(true, std::memory_order_release);
+                        while (!releaseAcceptance.load(std::memory_order_acquire))
+                            std::this_thread::yield();
+                    } };
+                return result;
+            } });
+        const ArtifactKey acceptanceKey{ ArtifactKind::Generic, 0xf201, 0 };
+        Check(static_cast<bool>(acceptanceGraph.Request(
+            acceptanceKey, 1, {}, Payload(1), 1)));
+        while (!acceptanceStarted.load(std::memory_order_acquire)) std::this_thread::yield();
+        // Readiness cannot escape GraphControl before the exact acceptance
+        // acknowledgement has returned from RendererState.
+        Check(acceptanceGraph.Snapshot(acceptanceKey).readiness ==
+            ArtifactReadiness::Preparing);
+        releaseAcceptance.store(true, std::memory_order_release);
+        acceptanceGraph.WaitIdle();
+        Check(acceptanceGraph.Snapshot(acceptanceKey).readiness == ArtifactReadiness::GpuReady);
+        acceptanceGraph.Shutdown();
+    }
+
+    {
+        CapacityProvider capacity(scheduler, "CapacityProviderTests", 1,
+            TaskLane::Streaming, TaskDomain::GraphControl);
+        std::mutex leaseMutex;
+        CapacityLease blocker;
+        std::atomic_bool blockerGranted{ false };
+        Check(capacity.AcquireAsync({ 1, 0, 0, 1,
+            { { ArtifactKind::Generic, 0xfc00, 0 }, 1, 1 } },
+            [&](CapacityLease lease) {
+                std::lock_guard lock(leaseMutex);
+                blocker = std::move(lease);
+                blockerGranted.store(true, std::memory_order_release);
+            }));
+        while (!blockerGranted.load(std::memory_order_acquire)) std::this_thread::yield();
+
+        std::mutex orderMutex;
+        std::vector<std::uint64_t> order;
+        const auto enqueue = [&](std::uint64_t sequence, std::int32_t priority) {
+            Check(capacity.AcquireAsync({ 1, priority, sequence, 1,
+                { { ArtifactKind::Generic, 0xfc00 + sequence, 0 }, 1, sequence } },
+                [&, sequence](CapacityLease lease) {
+                    lease.Reset();
+                    {
+                        std::lock_guard lock(orderMutex);
+                        order.push_back(sequence);
+                    }
+                }));
+        };
+        enqueue(3, 0);
+        enqueue(2, 1);
+        enqueue(1, 1);
+        Check(capacity.Pending() == 3);
+        {
+            std::lock_guard lock(leaseMutex);
+            blocker.Reset();
+        }
+        for (;;) {
+            {
+                std::lock_guard lock(orderMutex);
+                if (order.size() == 3) break;
+            }
+            std::this_thread::yield();
+        }
+        {
+            std::lock_guard lock(orderMutex);
+            Check((order == std::vector<std::uint64_t>{ 1, 2, 3 }));
+        }
+        Check(capacity.Available() == 1);
+        capacity.Shutdown();
+    }
 
     graph.Shutdown();
     scheduler.Cleanup();

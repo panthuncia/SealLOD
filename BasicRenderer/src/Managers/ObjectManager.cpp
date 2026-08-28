@@ -768,7 +768,8 @@ void ObjectManager::MaybeQueueActiveDrawSetCompaction(
 
 void ObjectManager::PumpActiveDrawSetCompactionRequests(std::size_t maxRequests) {
 	if (maxRequests == 0) {
-		return;
+		std::lock_guard lock(m_activeDrawSetCompactionMutex);
+		maxRequests = m_activeDrawSetCompactionRequests.size();
 	}
 
 	std::vector<ActiveDrawSetCompactionJob> jobs;
@@ -831,18 +832,17 @@ void ObjectManager::PumpActiveDrawSetCompactionRequests(std::size_t maxRequests)
 
 std::vector<ObjectManager::ActiveDrawSetCompactionPublishResult> ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults) {
 	std::vector<ActiveDrawSetCompactionPublishResult> published;
-	if (maxResults == 0) {
-		return published;
-	}
-
 	PumpActiveDrawSetCompactionRequests(maxResults);
 
 	std::vector<ActiveDrawSetCompactionResult> results;
-	results.reserve(maxResults);
-	published.reserve(maxResults);
 	{
 		std::lock_guard lock(m_activeDrawSetCompactionMutex);
-		while (!m_activeDrawSetCompactionResults.empty() && results.size() < maxResults) {
+		const auto available = maxResults == 0
+			? m_activeDrawSetCompactionResults.size()
+			: (std::min)(maxResults, m_activeDrawSetCompactionResults.size());
+		results.reserve(available);
+		published.reserve(available);
+		while (!m_activeDrawSetCompactionResults.empty() && results.size() < available) {
 			results.push_back(std::move(m_activeDrawSetCompactionResults.front()));
 			m_activeDrawSetCompactionResults.pop_front();
 		}

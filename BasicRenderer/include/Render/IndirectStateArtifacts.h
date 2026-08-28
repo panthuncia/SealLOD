@@ -47,6 +47,9 @@ struct IndirectStateBuildInput {
     std::uint32_t incrementSize = 1000;
     std::vector<std::uint64_t> viewIDs;
     std::vector<IndirectWorkloadInputDTO> workloads;
+    // Bridges the interval between dependency request and consumer
+    // materialization. Exact version IDs are identity, not ownership.
+    std::vector<ArtifactLease> dependencyLeases;
 };
 
 struct PublishedIndirectWorkload {
@@ -60,6 +63,10 @@ struct PublishedIndirectWorkload {
 };
 
 struct PublishedIndirectState {
+    // Exact visibility-generation sidecar selected with the active-list
+    // closure. Culling must not fetch this from an independently advancing
+    // DrawRecords catalog slot or generations can be compared across cuts.
+    std::shared_ptr<org::GloballyIndexedResource> visibilityGenerations;
     std::vector<PublishedIndirectWorkload> workloads;
 
     [[nodiscard]] std::vector<const PublishedIndirectWorkload*> Find(

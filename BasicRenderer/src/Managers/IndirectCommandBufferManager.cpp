@@ -255,6 +255,13 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
     input->workloads.reserve(snapshot.requestedCounts.size());
 
     std::vector<br::render::ArtifactRequirement> requirements;
+    // Exact dependency IDs do not themselves own lifetime. Keep every request
+    // handle alive until the indirect root has synchronously installed its
+    // recipe pins. Without this bridge lease, a fast buffer producer can reach
+    // GPU-ready and be reclaimed while this loop is still assembling the rest
+    // of the workload closure, permanently blocking the eventual consumer on
+    // a generation that no longer exists.
+    std::vector<br::render::ArtifactVersionHandle> dependencyHandles;
     if (snapshot.activeMaterialRevision == 0) return;
     requirements.push_back(br::render::ReadyGate(
         br::render::ArtifactAddress{ br::render::ArtifactKind::MaterialTable, 0, 0 },
@@ -276,6 +283,7 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
         if (!lifetimeRequest) return;
         requirements.push_back(br::render::ReadyGate(
             lifetimeRequest.version, br::render::ArtifactReadiness::GpuReady));
+        dependencyHandles.push_back(lifetimeRequest.Handle());
     }
 
     std::uint64_t sourceEntryCount = 0;
@@ -354,6 +362,7 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
         if (!activeListRequest) return;
         requirements.push_back(br::render::Exact(
             activeListRequest.version, br::render::ArtifactReadiness::UploadSubmitted));
+        dependencyHandles.push_back(activeListRequest.Handle());
 
         const auto safeCount = static_cast<unsigned int>((std::min<std::uint64_t>)({
             requestedCount, entries.size(), dto.residentDrawRecordCount }));
@@ -399,10 +408,16 @@ void IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
                 if (!argumentRequest) return;
                 requirements.push_back(br::render::Exact(
                     argumentRequest.version, br::render::ArtifactReadiness::UploadSubmitted));
+                dependencyHandles.push_back(argumentRequest.Handle());
                 dto.argumentArtifacts.push_back({ viewID, argumentKey });
             }
         }
         input->workloads.push_back(std::move(dto));
+    }
+
+    input->dependencyLeases.reserve(dependencyHandles.size());
+    for (const auto& handle : dependencyHandles) {
+        input->dependencyLeases.push_back(handle.lease);
     }
 
     {

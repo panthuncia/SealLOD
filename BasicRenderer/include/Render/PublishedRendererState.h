@@ -196,6 +196,13 @@ struct PublishedStatePatch {
     std::string reason;
 };
 
+// Materializes and validates a complete immutable successor. This is intended
+// for GraphPublication producers so render-thread Commit only selects a ready
+// state and captures its frame lease.
+[[nodiscard]] std::shared_ptr<const PublishedRendererState> MaterializePublishedState(
+    const std::shared_ptr<const PublishedRendererState>& base,
+    const PublishedStatePatch& patch, std::uint64_t targetEpoch);
+
 struct FrameManifestPayload {
     std::uint64_t baseEpoch = 0;
     // Patch manifests are authoritative without materializing a duplicate full

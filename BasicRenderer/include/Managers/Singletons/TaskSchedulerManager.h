@@ -18,7 +18,11 @@ namespace br {
 
 enum class TaskLane : std::uint8_t { FrameCritical, Streaming, Background, Count };
 enum class TaskDomain : std::uint8_t {
-    General, RendererState, StaticImport, AssetImport, TextureProcessing, ShaderCompile, Cleanup, Count
+    General, RendererState, StaticImport, AssetImport, TextureProcessing, ShaderCompile, Cleanup,
+    // Keep graph topology transitions and manifest assembly out of the
+    // single-slot RendererState producer queue. Appended to preserve the
+    // numeric identity of existing telemetry domains.
+	GraphControl, GraphPublication, StaticImportControl, Count
 };
 
 class TaskScope {
@@ -61,7 +65,9 @@ public:
     };
     struct DomainStats {
         std::uint64_t queued = 0, active = 0, completed = 0, cancelled = 0, failed = 0;
-        std::uint64_t queueWaitMicros = 0, executionMicros = 0, highWatermark = 0, longTasks = 0;
+        std::uint64_t queueWaitMicros = 0, maxQueueWaitMicros = 0;
+        std::uint64_t executionMicros = 0, maxExecutionMicros = 0;
+        std::uint64_t highWatermark = 0, longTasks = 0;
     };
     struct QueueStats {
         DomainStats domains[static_cast<std::size_t>(TaskDomain::Count)]{};

@@ -79,6 +79,9 @@ const char* DomainName(TaskDomain domain) {
     case TaskDomain::TextureProcessing: return "TextureProcessing";
     case TaskDomain::ShaderCompile: return "ShaderCompile";
     case TaskDomain::Cleanup: return "Cleanup";
+    case TaskDomain::GraphControl: return "GraphControl";
+    case TaskDomain::GraphPublication: return "GraphPublication";
+	case TaskDomain::StaticImportControl: return "StaticImportControl";
     default: return "Unknown";
     }
 }
@@ -208,10 +211,17 @@ struct TaskSchedulerManager::RuntimeState {
         }
     };
     struct DomainRuntime {
-        std::deque<PendingTask> queue;
+        std::array<std::deque<PendingTask>, static_cast<std::size_t>(TaskLane::Count)> queues;
         std::uint32_t active{};
         std::uint32_t limit{ 1 };
+        std::uint32_t consecutiveFrameCritical{};
         DomainStats stats;
+
+        [[nodiscard]] std::size_t Queued() const noexcept {
+            std::size_t result = 0;
+            for (const auto& queue : queues) result += queue.size();
+            return result;
+        }
     };
     struct BlockingTask {
         std::shared_ptr<TaskScope::State> scope;
@@ -286,7 +296,10 @@ void TaskSchedulerManager::InitializeForPlugin(std::uint32_t workerCount) {
     Config config;
     config.workerCount = std::max(1u, workerCount);
     config.blockingThreadCount = 1;
-    config.staticConcurrency = 1;
+	// Static import workers are explicitly written as bounded parallel drains.
+	// Keep their serialized coordinator in StaticImportControl instead of
+	// collapsing preparation/materialization throughput to one worker.
+	config.staticConcurrency = 0;
     config.shaderConcurrency = 1;
     config.reserveRenderCpu = false;
     Initialize(config);
@@ -349,6 +362,9 @@ void TaskSchedulerManager::Initialize(Config config) {
     state.domains[static_cast<std::size_t>(TaskDomain::TextureProcessing)].limit = std::min(2u, m_workerCount);
     state.domains[static_cast<std::size_t>(TaskDomain::ShaderCompile)].limit = shaderLimit;
     state.domains[static_cast<std::size_t>(TaskDomain::Cleanup)].limit = std::max(1u, m_workerCount - 1u);
+    state.domains[static_cast<std::size_t>(TaskDomain::GraphControl)].limit = 1u;
+    state.domains[static_cast<std::size_t>(TaskDomain::GraphPublication)].limit = 1u;
+	state.domains[static_cast<std::size_t>(TaskDomain::StaticImportControl)].limit = 1u;
 
     state.timerThread = std::thread([this] {
         TracyCSetThreadName("Task Timer"); ApplyCpuSets(m_runtimeState->workerCpuSets);
@@ -420,9 +436,10 @@ bool TaskSchedulerManager::Submit(const TaskScope& scope, TaskLane lane, TaskDom
     {
         std::lock_guard lock(m_runtimeState->taskMutex);
         auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(domain)];
-        runtime.queue.push_back({ scope.m_state, lane, domain, std::string(name), std::move(body), std::chrono::steady_clock::now() });
-        runtime.stats.queued = runtime.queue.size();
-        runtime.stats.highWatermark = std::max(runtime.stats.highWatermark, static_cast<std::uint64_t>(runtime.queue.size()));
+        runtime.queues[static_cast<std::size_t>(lane)].push_back(
+            { scope.m_state, lane, domain, std::string(name), std::move(body), std::chrono::steady_clock::now() });
+        runtime.stats.queued = runtime.Queued();
+        runtime.stats.highWatermark = std::max(runtime.stats.highWatermark, runtime.stats.queued);
     }
     DispatchDomain(domain);
     return true;
@@ -438,10 +455,34 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
     {
         std::lock_guard lock(m_runtimeState->taskMutex);
         auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(domain)];
-        while (runtime.active < runtime.limit && !runtime.queue.empty()) {
-            launch.push_back(std::move(runtime.queue.front())); runtime.queue.pop_front(); ++runtime.active;
+        while (runtime.active < runtime.limit && runtime.Queued() != 0) {
+            // Graph-critical state producers must not sit behind a scene-load flood
+            // of ordinary renderer mutations.  Bound the priority burst so lower
+            // lanes still make deterministic progress under sustained critical work.
+            constexpr std::uint32_t kMaximumCriticalBurst = 8;
+            const auto critical = static_cast<std::size_t>(TaskLane::FrameCritical);
+            const auto streaming = static_cast<std::size_t>(TaskLane::Streaming);
+            const auto background = static_cast<std::size_t>(TaskLane::Background);
+            std::size_t selected = background;
+            if (!runtime.queues[critical].empty() &&
+                (runtime.consecutiveFrameCritical < kMaximumCriticalBurst ||
+                    (runtime.queues[streaming].empty() && runtime.queues[background].empty()))) {
+                selected = critical;
+                ++runtime.consecutiveFrameCritical;
+            } else if (!runtime.queues[streaming].empty()) {
+                selected = streaming;
+                runtime.consecutiveFrameCritical = 0;
+            } else if (!runtime.queues[background].empty()) {
+                selected = background;
+                runtime.consecutiveFrameCritical = 0;
+            } else {
+                selected = critical;
+                ++runtime.consecutiveFrameCritical;
+            }
+            auto& queue = runtime.queues[selected];
+            launch.push_back(std::move(queue.front())); queue.pop_front(); ++runtime.active;
         }
-        runtime.stats.queued = runtime.queue.size(); runtime.stats.active = runtime.active;
+        runtime.stats.queued = runtime.Queued(); runtime.stats.active = runtime.active;
     }
     for (auto& task : launch) {
         SelectArena(*m_runtimeState, task.lane).enqueue([this, task = std::move(task)]() {
@@ -467,7 +508,10 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
                 std::lock_guard lock(m_runtimeState->taskMutex);
                 auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task.domain)];
                 --runtime.active; runtime.stats.active = runtime.active;
-                runtime.stats.queueWaitMicros += queuedUs; runtime.stats.executionMicros += elapsedUs;
+                runtime.stats.queueWaitMicros += queuedUs;
+                runtime.stats.maxQueueWaitMicros = std::max(runtime.stats.maxQueueWaitMicros, queuedUs);
+                runtime.stats.executionMicros += elapsedUs;
+                runtime.stats.maxExecutionMicros = std::max(runtime.stats.maxExecutionMicros, elapsedUs);
                 if (cancelled) ++runtime.stats.cancelled; else if (error) ++runtime.stats.failed; else ++runtime.stats.completed;
                 if (task.lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros) ++runtime.stats.longTasks;
             }

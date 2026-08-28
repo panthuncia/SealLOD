@@ -822,9 +822,7 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
 				ObjectCullRecord record{};
 				record.viewDataIndex = cameraBufferIndex;
 				record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
-				auto visibilityGenerations =
-					context.objectManager->GetPublishedDrawRecordVisibilityGenerationBuffer(
-						context.publishedRendererState);
+				auto visibilityGenerations = published->visibilityGenerations;
 				if (!visibilityGenerations) {
 					visibilityGenerations = context.objectManager
 						->GetDrawRecordVisibilityGenerationBuffer();

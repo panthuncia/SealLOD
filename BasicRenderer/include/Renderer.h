@@ -14,6 +14,7 @@
 #include <functional>
 #include <filesystem>
 #include <optional>
+#include <array>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -90,6 +91,12 @@ private:
 class Renderer {
 public:
     struct SamplingReadinessSnapshot {
+        struct SchedulerDomainSnapshot {
+            uint64_t queued = 0, active = 0, completed = 0;
+            uint64_t queueWaitMicros = 0, maxQueueWaitMicros = 0;
+            uint64_t executionMicros = 0, maxExecutionMicros = 0;
+            uint64_t highWatermark = 0;
+        };
         bool sceneTaskInFlight = false;
         bool hasCommittedSceneSnapshot = false;
         uint64_t committedSceneSnapshotSequence = 0;
@@ -143,6 +150,8 @@ public:
         uint32_t ioTasks = 0;
         uint32_t backgroundTasks = 0;
         uint32_t shaderCompileTasks = 0;
+        uint32_t schedulerWorkerCount = 0;
+        std::array<SchedulerDomainSnapshot, 10> schedulerDomains{};
         uint64_t deferredRetireQueueDepth = 0;
         uint64_t drawRecordsAllocated = 0;
     };

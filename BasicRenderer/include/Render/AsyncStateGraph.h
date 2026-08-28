@@ -268,6 +268,10 @@ struct GpuSubmissionSet {
     std::function<std::string()> describe;
     std::function<void(std::function<void()>)> subscribe;
     std::function<bool()> cancel;
+    // True only when the backend guarantees a notification for every state
+    // transition. Callback-less or best-effort adapters remain on the single
+    // graph recovery path during broker migration.
+    bool completionNotificationsAreAuthoritative = false;
 
     [[nodiscard]] bool Submitted() const { return !isSubmitted || isSubmitted(); }
     [[nodiscard]] bool Complete() const { return !isComplete || isComplete(); }
@@ -358,6 +362,14 @@ struct ArtifactRequestResult {
     }
 };
 
+struct ArtifactRequest {
+    ArtifactKey key;
+    std::uint64_t desiredRevision = 0;
+    std::vector<ArtifactRequirement> requirements;
+    ArtifactPayload input;
+    std::uint64_t requestFingerprint = 0;
+};
+
 class ArtifactObservation {
 public:
     ArtifactObservation() = default;
@@ -434,17 +446,57 @@ private:
     std::function<void()> m_cancel;
 };
 
+enum class ArtifactSuspensionKind : std::uint8_t {
+    ExactDependency,
+    Capacity,
+    ExternalOperation,
+    TransientRetry
+};
+
+// A level-triggered reason why a producer cannot make progress.  identity is
+// supplied by the provider and must identify one immutable operation/grant.
+// Notifications may arrive before the producer returns Suspend(); the graph
+// latches them and reconciles the exact artifact generation when registered.
+struct ArtifactSuspension {
+    ArtifactSuspensionKind kind = ArtifactSuspensionKind::ExternalOperation;
+    std::uint64_t identity = 0;
+    ArtifactVersionID dependency;
+    ArtifactReadiness milestone = ArtifactReadiness::GpuReady;
+    std::chrono::steady_clock::time_point deadline{};
+    std::uint32_t maximumAttempts = 0;
+    std::string reason;
+
+    static ArtifactSuspension Exact(ArtifactVersionID dependency,
+        ArtifactReadiness milestone);
+    static ArtifactSuspension Capacity(std::uint64_t identity, std::string reason = {});
+    static ArtifactSuspension External(std::uint64_t identity, std::string reason = {});
+    static ArtifactSuspension Transient(std::uint64_t identity,
+        std::chrono::steady_clock::time_point deadline, std::uint32_t maximumAttempts,
+        std::string reason);
+};
+
+struct ArtifactAcceptanceRegistration {
+    TaskLane lane = TaskLane::Streaming;
+    TaskDomain domain = TaskDomain::RendererState;
+    std::function<void(const ArtifactSnapshot&)> action;
+};
+
 struct ArtifactBuildResult {
-    enum class Outcome : std::uint8_t { Ready, NeedsDependencies, RetryAfter, Failed, Cancelled };
+    enum class Outcome : std::uint8_t {
+        Ready, NeedsDependencies, RetryAfter, Failed, Cancelled, Suspended
+    };
     Outcome outcome = Outcome::Failed;
     ArtifactPayload payload;
     ArtifactPayload checkpoint;
     std::vector<ArtifactRequirement> requirements;
     std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
     std::chrono::steady_clock::duration retryDelay{};
+    std::optional<ArtifactSuspension> suspension;
     std::string error;
+	ArtifactAcceptanceRegistration acceptance;
 	// Runs outside the graph mutex only after this exact producer result has
-	// passed generation/dependency validation and become an immutable version.
+	// passed generation/dependency validation. Deprecated compatibility adapter;
+	// new producers should register acceptance with an explicit lane/domain.
 	std::function<void(const ArtifactSnapshot&)> onAccepted;
 
     static ArtifactBuildResult Ready(ArtifactPayload payload,
@@ -452,6 +504,8 @@ struct ArtifactBuildResult {
     static ArtifactBuildResult Needs(std::vector<ArtifactRequirement> requirements,
         ArtifactPayload checkpoint = {});
     static ArtifactBuildResult Retry(std::chrono::steady_clock::duration delay,
+        ArtifactPayload checkpoint = {});
+    static ArtifactBuildResult Suspend(ArtifactSuspension suspension,
         ArtifactPayload checkpoint = {});
     static ArtifactBuildResult Failure(std::string error);
     static ArtifactBuildResult Cancelled();
@@ -491,6 +545,15 @@ struct AsyncStateGraphStats {
     std::uint64_t queueWaitMicros = 0;
     std::uint64_t buildMicros = 0;
     std::uint64_t gpuWaitMicros = 0;
+    std::uint64_t controlQueueWaitMicros = 0;
+    std::uint64_t maxControlQueueWaitMicros = 0;
+    std::uint64_t completionApplyMicros = 0;
+    std::uint64_t maxCompletionApplyMicros = 0;
+    std::uint64_t gpuApplyMicros = 0;
+    std::uint64_t maxGpuApplyMicros = 0;
+    std::uint64_t dependencyEvaluations = 0;
+    std::uint64_t coalescedIntents = 0;
+    std::uint64_t reclaimCandidates = 0;
     std::uint64_t archivedVersions = 0;
     std::uint64_t reclaimedVersions = 0;
     std::uint64_t externallyLeasedVersions = 0;
@@ -501,8 +564,15 @@ struct AsyncStateGraphStats {
     std::array<std::uint64_t, static_cast<std::size_t>(ArtifactReadiness::Failed) + 1u> stateCounts{};
 };
 
+enum class AsyncStateGraphTraceDetail : std::uint8_t {
+	Summary,
+	Lifecycle,
+	FullDependencies
+};
+
 struct AsyncStateGraphTraceConfig {
     std::size_t maximumEvents = 1'000'000;
+	AsyncStateGraphTraceDetail detail = AsyncStateGraphTraceDetail::Lifecycle;
     bool includeDependencyEvents = true;
     bool includeRetentionEvents = true;
 };
@@ -551,6 +621,13 @@ public:
     ArtifactRequestResult Request(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
         std::uint64_t requestFingerprint = 0);
+    // Derived latest-value intent. Intermediate successors that were submitted
+    // through this API and have not started may be replaced; exact Request
+    // versions are never coalesced.
+    ArtifactRequestStatus SubmitLatestIntent(ArtifactKey key, std::uint64_t desiredRevision,
+        std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
+        std::uint64_t requestFingerprint = 0);
+    std::vector<ArtifactRequestResult> RequestBatch(std::vector<ArtifactRequest> requests);
     ArtifactRequestResult RequestExpressions(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<DependencyExpression> dependencies, ArtifactPayload input = {},
         std::uint64_t requestFingerprint = 0);
@@ -561,6 +638,7 @@ public:
     void MarkPublished(ArtifactVersionID version);
     void MarkPublished(std::span<const ArtifactVersionID> versions);
     void PumpGpuCompletions();
+    void NotifySuspensionSatisfied(std::uint64_t identity);
     void SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback);
     [[nodiscard]] std::uint64_t AddReadyCallback(
         std::function<void(const ArtifactSnapshot&)> callback);
@@ -592,6 +670,9 @@ public:
     void Shutdown();
 
 private:
+    ArtifactRequestResult RequestInternal(ArtifactKey key, std::uint64_t desiredRevision,
+        std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
+        std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex = false);
     struct Impl;
     std::shared_ptr<Impl> m_impl;
 };

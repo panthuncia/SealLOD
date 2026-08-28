@@ -5,6 +5,7 @@
 #include <ranges>
 
 #include "Render/IndirectCommand.h"
+#include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/PublishedRendererState.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Resources/GloballyIndexedResource.h"
@@ -53,6 +54,36 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
 			dependency.key.kind == ArtifactKind::ViewLifetime) continue;
 		root->fragment.dependencyClosure.push_back(dependency);
 	}
+
+    if (input->materializeResources) {
+        const auto drawRecords = std::ranges::find_if(context.dependencies,
+            [](const ArtifactSnapshot& dependency) {
+                return dependency.key.kind == ArtifactKind::DrawRecordPage;
+            });
+        const auto drawRoot = drawRecords != context.dependencies.end()
+            ? drawRecords->payload.Get<RendererStateFragmentArtifact>() : nullptr;
+        if (!drawRoot) {
+            return ArtifactBuildResult::Failure(
+                "indirect workload exact draw-record dependency missing");
+        }
+        const auto visibility = std::ranges::find_if(drawRoot->catalogEntries,
+            [](const auto& entry) {
+                return entry.first.owner == PublishedFragmentKind::DrawRecords &&
+                    entry.first.usage == PublishedResourceUsage::ShaderResource &&
+                    entry.first.variant == kObjectVisibilityGenerationVariant;
+            });
+        if (visibility == drawRoot->catalogEntries.end() || !visibility->second ||
+            visibility->second->empty()) {
+            return ArtifactBuildResult::Failure(
+                "indirect workload visibility-generation dependency missing");
+        }
+        state->visibilityGenerations = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
+            visibility->second->front());
+        if (!state->visibilityGenerations) {
+            return ArtifactBuildResult::Failure(
+                "indirect workload visibility-generation dependency type mismatch");
+        }
+    }
 
     for (const auto& workload : input->workloads) {
         const auto logicalCount = static_cast<std::uint64_t>(workload.activeEntries.size());
@@ -148,10 +179,10 @@ std::vector<const PublishedIndirectWorkload*> PublishedIndirectState::Find(
 
 void RegisterIndirectStateProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::ViewLifetime, {
-        TaskLane::Streaming, TaskDomain::RendererState,
+        TaskLane::FrameCritical, TaskDomain::RendererState,
         "ViewLifetimeArtifact::Build", BuildViewLifetime });
     graph.RegisterProducer(ArtifactKind::IndirectWorkload, {
-        TaskLane::Streaming, TaskDomain::RendererState,
+        TaskLane::FrameCritical, TaskDomain::RendererState,
         "IndirectStateArtifact::Build", BuildIndirectState });
 }
 

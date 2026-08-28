@@ -585,7 +585,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
 
 void RegisterVersionedGpuBufferProducer(AsyncStateGraph& graph) {
     const ArtifactProducerRegistration registration{
-        TaskLane::Streaming, TaskDomain::RendererState,
+        TaskLane::FrameCritical, TaskDomain::RendererState,
         "VersionedGpuBufferArtifact::Build", BuildVersionedGpuBuffer };
     graph.RegisterProducer(ArtifactKind::BufferVersion, registration);
     graph.RegisterProducer(ArtifactKind::ActiveDrawList, registration);
