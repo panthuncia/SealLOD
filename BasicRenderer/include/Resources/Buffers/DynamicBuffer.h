@@ -158,6 +158,7 @@ public:
     }
 
     void EnableVersionedGraphJournal();
+	bool RequestVersionedGraphCapacityBytes(size_t absoluteCapacity);
 	void SetVersionedGraphMutationCallback(std::function<void()> callback) {
 		m_versionedGraphMutationCallback = std::move(callback);
 	}

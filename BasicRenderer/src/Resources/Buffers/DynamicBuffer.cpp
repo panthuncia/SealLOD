@@ -639,12 +639,8 @@ bool DynamicBuffer::TryAllocateRangesBatch(
     }
 
     size_t totalCount = 0;
-    for (const auto count : counts) {
-        totalCount += count;
-    }
-    if (totalCount == 0) {
-        return true;
-    }
+    for (const auto count : counts) totalCount += count;
+    if (totalCount == 0) return true;
 
     if (resizePublishMode == ReadyResizePublishMode::PublishIfReady &&
         PublishReadyAsyncResizeLocked(false)) {
@@ -654,37 +650,20 @@ bool DynamicBuffer::TryAllocateRangesBatch(
 
     const size_t totalSize = totalCount * elementSize;
     auto freeIt = m_freeBlocks.lower_bound({ totalSize, 0 });
-    if (freeIt == m_freeBlocks.end()) {
-        return false;
-    }
-
+    if (freeIt == m_freeBlocks.end()) return false;
     const size_t blockOffset = freeIt->second;
     m_freeBlocks.erase(freeIt);
     auto blockIt = m_blocksByOffset.find(blockOffset);
     const size_t blockSize = blockIt != m_blocksByOffset.end() ? blockIt->second.size : totalSize;
-    if (blockIt != m_blocksByOffset.end()) {
-        m_blocksByOffset.erase(blockIt);
-    }
-
+    if (blockIt != m_blocksByOffset.end()) m_blocksByOffset.erase(blockIt);
     size_t cursor = blockOffset;
     for (size_t i = 0; i < counts.size(); ++i) {
-        const size_t count = counts[i];
-        if (count == 0) {
-            continue;
-        }
-
-        const size_t size = count * elementSize;
+        if (counts[i] == 0) continue;
+        const size_t size = counts[i] * elementSize;
         m_blocksByOffset[cursor] = { cursor, size, false };
-        ranges[i] = PagedAllocation{
-            cursor,
-            size,
-            size,
-            elementSize,
-            count
-        };
+        ranges[i] = PagedAllocation{ cursor, size, size, elementSize, counts[i] };
         cursor += size;
     }
-
     if (blockSize > totalSize) {
         const size_t remainingOffset = blockOffset + totalSize;
         const size_t remainingSize = blockSize - totalSize;
@@ -1014,6 +993,16 @@ void DynamicBuffer::EnableVersionedGraphJournal() {
 		populatedBytes / m_elementSize,
 		m_capacity / m_elementSize);
 	m_versionedGraphJournal = std::move(journal);
+}
+
+bool DynamicBuffer::RequestVersionedGraphCapacityBytes(size_t absoluteCapacity) {
+	if (absoluteCapacity == 0 ||
+		!m_versionedGraphExclusive.load(std::memory_order_acquire)) {
+		return false;
+	}
+	std::lock_guard lock(m_allocationMutex);
+	return ExtendTrackedCapacityLocked(DynamicBuffer::AlignBufferCapacity(
+		(std::max)(absoluteCapacity, m_capacity), m_byteAddress));
 }
 
 void DynamicBuffer::SetVersionedGraphExclusive(bool exclusive) {

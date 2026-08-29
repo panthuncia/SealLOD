@@ -416,6 +416,12 @@ public:
 	void PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan);
 	void RequestStaticImportPacketResources(const StaticImportPacketPlan& plan);
 	void RequestStaticImportTransactionResources(const StaticImportBuildBatch& build);
+	// Supplies a workload-derived upper bound before static transactions begin
+	// consuming the persistent graph-owned object buffers. This changes only
+	// backing capacity; logical row counts and immutable version identity remain
+	// driven by committed writes.
+	void RequestStaticImportGraphCapacityHint(
+		std::uint64_t transformRows, std::uint64_t drawRecords);
 	StaticImportResourceProbe CreateStaticImportResourceProbe() const;
 	StaticImportResourceProbeStatus ProbeStaticImportTransactionResources(
 		StaticImportBuildBatch& build,

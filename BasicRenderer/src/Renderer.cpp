@@ -31,6 +31,7 @@
 #include "Managers/Singletons/ResourceManager.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Render/RenderContext.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 #include "Telemetry/NvPerfIntegration.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Render/PassBuilders.h"
@@ -1045,6 +1046,28 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool 
             static_cast<TaskDomain>(index));
         target.maxQueueWaitTask = source.maxQueueWaitTask;
         target.maxExecutionTask = source.maxExecutionTask;
+    }
+    {
+        const auto source = br::render::GetVersionedGpuBufferBuildDiagnostics();
+        auto& target = snapshot.gpuBufferBuild;
+        target.active = source.active;
+        target.phase = br::render::VersionedGpuBufferBuildPhaseName(source.phase);
+        target.artifactKind = static_cast<std::uint32_t>(source.key.kind);
+        target.artifactPrimary = source.key.primaryID;
+        target.artifactVariant = source.key.variantID;
+        target.revision = source.revision;
+        target.generation = source.generation;
+        target.phaseElapsedMicros = source.phaseElapsedMicros;
+        target.buildElapsedMicros = source.buildElapsedMicros;
+        target.elementCount = source.elementCount;
+        target.capacity = source.capacity;
+        target.byteCount = source.byteCount;
+        target.writeCount = source.writeCount;
+        target.debugName = source.debugName;
+        for (std::size_t index = 0; index < target.maxPhaseMicros.size(); ++index) {
+            target.maxPhaseMicros[index] = source.maxPhaseMicros[index];
+            target.phaseCompletions[index] = source.phaseCompletions[index];
+        }
     }
     snapshot.ioTasks = taskStats.ioQueued + taskStats.ioActive;
     snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;

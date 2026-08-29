@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -26,6 +27,26 @@ enum class BufferRevisionMode : std::uint8_t {
     Patch,
     Replace,
 };
+
+enum class VersionedGpuBufferBuildPhase : std::uint8_t {
+    Idle, ReplayShadow, SelectBacking, ScanBackingPool, ReclaimBacking,
+    MaterializeResource, QueueUpload, AssembleResult, Count
+};
+
+struct VersionedGpuBufferBuildDiagnostics {
+    bool active = false;
+    VersionedGpuBufferBuildPhase phase = VersionedGpuBufferBuildPhase::Idle;
+    ArtifactKey key{};
+    std::uint64_t revision = 0, generation = 0;
+    std::uint64_t phaseElapsedMicros = 0, buildElapsedMicros = 0;
+    std::uint64_t elementCount = 0, capacity = 0, byteCount = 0, writeCount = 0;
+    std::string debugName;
+    std::array<std::uint64_t, static_cast<std::size_t>(VersionedGpuBufferBuildPhase::Count)> maxPhaseMicros{};
+    std::array<std::uint64_t, static_cast<std::size_t>(VersionedGpuBufferBuildPhase::Count)> phaseCompletions{};
+};
+
+[[nodiscard]] VersionedGpuBufferBuildDiagnostics GetVersionedGpuBufferBuildDiagnostics();
+[[nodiscard]] const char* VersionedGpuBufferBuildPhaseName(VersionedGpuBufferBuildPhase phase) noexcept;
 
 struct BufferBackingArtifact {
     std::shared_ptr<org::GloballyIndexedResource> resource;

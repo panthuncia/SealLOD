@@ -1692,7 +1692,9 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 	};
 	std::vector<PendingTextureSample> pendingSamples;
 	pendingSamples.reserve(8);
-	for (const uint32_t streamingTextureID : texturesToAdvance) {
+	constexpr auto cooperativePhaseBudget = std::chrono::milliseconds(2);
+	for (std::size_t textureIndex = 0; textureIndex < texturesToAdvance.size(); ++textureIndex) {
+		const uint32_t streamingTextureID = texturesToAdvance[textureIndex];
 		++uploadAdvanceVisited;
 		auto it = m_streamingTexturesByID.find(streamingTextureID);
 		if (it == m_streamingTexturesByID.end()) {
@@ -1766,6 +1768,12 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 				});
 			}
 		}
+		if (std::chrono::steady_clock::now() - uploadStart >= cooperativePhaseBudget) {
+			deferredTextureIDs.insert(deferredTextureIDs.end(),
+				texturesToAdvance.begin() + static_cast<std::ptrdiff_t>(textureIndex + 1u),
+				texturesToAdvance.end());
+			break;
+		}
 	}
 	for (uint32_t streamingTextureID : deferredTextureIDs) {
 		if (m_texturesNeedingUploadAdvanceSet.insert(streamingTextureID).second) {
@@ -1781,7 +1789,9 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 	std::size_t dirtyTextureMetadataVisited = 0;
 	std::size_t dirtyTextureMetadataAlive = 0;
 	std::size_t dirtyTextureMetadataUpdated = 0;
-	for (const uint32_t streamingTextureID : dirtyTextureIDs) {
+	std::vector<uint32_t> deferredDirtyTextureIDs;
+	for (std::size_t textureIndex = 0; textureIndex < dirtyTextureIDs.size(); ++textureIndex) {
+		const uint32_t streamingTextureID = dirtyTextureIDs[textureIndex];
 		++dirtyTextureMetadataVisited;
 		auto it = m_streamingTexturesByID.find(streamingTextureID);
 		if (it == m_streamingTexturesByID.end()) {
@@ -1806,6 +1816,16 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 			currentUploadedRevision->second != previousRevision) {
 			++dirtyTextureMetadataUpdated;
 		}
+		if (std::chrono::steady_clock::now() - dirtyTextureStart >= cooperativePhaseBudget) {
+			deferredDirtyTextureIDs.insert(deferredDirtyTextureIDs.end(),
+				dirtyTextureIDs.begin() + static_cast<std::ptrdiff_t>(textureIndex + 1u),
+				dirtyTextureIDs.end());
+			break;
+		}
+	}
+	for (const uint32_t streamingTextureID : deferredDirtyTextureIDs) {
+		if (m_dirtyTextureStreamingIDSet.insert(streamingTextureID).second)
+			m_dirtyTextureStreamingIDs.push_back(streamingTextureID);
 	}
 	const auto dirtyTextureEnd = std::chrono::steady_clock::now();
 

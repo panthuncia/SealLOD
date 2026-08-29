@@ -98,6 +98,142 @@ struct GraphTraceEvent {
     std::string detail;
 };
 
+enum class GraphMutexPhase : std::uint8_t {
+    AcceptanceScheduleFailure, AcceptanceDequeue, AcceptanceCompletionEnqueue,
+    AcceptanceDispatchEnqueue, DelayedDrainState, ProducerCompletionEnqueue,
+    DrainGpuCollect, DrainApply, RegisterProducer, Request, RequestBatch,
+    CancelLookup, CancelApply, Invalidate, MarkPublishedRevision,
+    MarkPublishedVersions, GpuCompletionScan, SuspensionSatisfied,
+    ReadyCallbackSet, ReadyCallbackAdd, ReadyCallbackRemove,
+    ObservationRegister, ObservationRemove, ExactWaiterRegister, ExactWaiterRemove,
+    Snapshot, Diagnose, Stats, Outstanding, WaitIdle, RecoveryResume, Shutdown, Count
+};
+
+constexpr std::string_view GraphMutexPhaseName(GraphMutexPhase phase) {
+    switch (phase) {
+    case GraphMutexPhase::AcceptanceScheduleFailure: return "AcceptanceScheduleFailure";
+    case GraphMutexPhase::AcceptanceDequeue: return "AcceptanceDequeue";
+    case GraphMutexPhase::AcceptanceCompletionEnqueue: return "AcceptanceCompletionEnqueue";
+    case GraphMutexPhase::AcceptanceDispatchEnqueue: return "AcceptanceDispatchEnqueue";
+    case GraphMutexPhase::DelayedDrainState: return "DelayedDrainState";
+    case GraphMutexPhase::ProducerCompletionEnqueue: return "ProducerCompletionEnqueue";
+    case GraphMutexPhase::DrainGpuCollect: return "DrainGpuCollect";
+    case GraphMutexPhase::DrainApply: return "DrainApply";
+    case GraphMutexPhase::RegisterProducer: return "RegisterProducer";
+    case GraphMutexPhase::Request: return "Request";
+    case GraphMutexPhase::RequestBatch: return "RequestBatch";
+    case GraphMutexPhase::CancelLookup: return "CancelLookup";
+    case GraphMutexPhase::CancelApply: return "CancelApply";
+    case GraphMutexPhase::Invalidate: return "Invalidate";
+    case GraphMutexPhase::MarkPublishedRevision: return "MarkPublishedRevision";
+    case GraphMutexPhase::MarkPublishedVersions: return "MarkPublishedVersions";
+    case GraphMutexPhase::GpuCompletionScan: return "GpuCompletionScan";
+    case GraphMutexPhase::SuspensionSatisfied: return "SuspensionSatisfied";
+    case GraphMutexPhase::ReadyCallbackSet: return "ReadyCallbackSet";
+    case GraphMutexPhase::ReadyCallbackAdd: return "ReadyCallbackAdd";
+    case GraphMutexPhase::ReadyCallbackRemove: return "ReadyCallbackRemove";
+    case GraphMutexPhase::ObservationRegister: return "ObservationRegister";
+    case GraphMutexPhase::ObservationRemove: return "ObservationRemove";
+    case GraphMutexPhase::ExactWaiterRegister: return "ExactWaiterRegister";
+    case GraphMutexPhase::ExactWaiterRemove: return "ExactWaiterRemove";
+    case GraphMutexPhase::Snapshot: return "Snapshot";
+    case GraphMutexPhase::Diagnose: return "Diagnose";
+    case GraphMutexPhase::Stats: return "Stats";
+    case GraphMutexPhase::Outstanding: return "Outstanding";
+    case GraphMutexPhase::WaitIdle: return "WaitIdle";
+    case GraphMutexPhase::RecoveryResume: return "RecoveryResume";
+    case GraphMutexPhase::Shutdown: return "Shutdown";
+    case GraphMutexPhase::Count: break;
+    }
+    return "Unknown";
+}
+
+struct GraphMutexCounts {
+    std::uint64_t nodes = 0;
+    std::uint64_t versions = 0;
+    std::uint64_t pending = 0;
+    std::uint64_t completions = 0;
+    std::uint64_t gpuRecovery = 0;
+    std::uint64_t waiters = 0;
+};
+
+struct GraphMutexAggregate {
+    std::uint64_t count = 0;
+    std::uint64_t totalWaitMicros = 0;
+    std::uint64_t maximumWaitMicros = 0;
+    std::uint64_t totalHoldMicros = 0;
+    std::uint64_t maximumHoldMicros = 0;
+    GraphMutexCounts maximumWaitCounts;
+    GraphMutexCounts maximumHoldCounts;
+};
+
+struct AtomicGraphMutexAggregate {
+    std::atomic_uint64_t count{ 0 };
+    std::atomic_uint64_t totalWaitMicros{ 0 };
+    std::atomic_uint64_t maximumWaitMicros{ 0 };
+    std::atomic_uint64_t totalHoldMicros{ 0 };
+    std::atomic_uint64_t maximumHoldMicros{ 0 };
+    std::array<std::atomic_uint64_t, 6> maximumWaitCounts{};
+    std::array<std::atomic_uint64_t, 6> maximumHoldCounts{};
+    std::atomic_uint64_t maximumWaitCountsFor{ 0 };
+    std::atomic_uint64_t maximumHoldCountsFor{ 0 };
+
+    static void StoreCounts(std::array<std::atomic_uint64_t, 6>& destination,
+        const GraphMutexCounts& source) {
+        destination[0].store(source.nodes, std::memory_order_relaxed);
+        destination[1].store(source.versions, std::memory_order_relaxed);
+        destination[2].store(source.pending, std::memory_order_relaxed);
+        destination[3].store(source.completions, std::memory_order_relaxed);
+        destination[4].store(source.gpuRecovery, std::memory_order_relaxed);
+        destination[5].store(source.waiters, std::memory_order_relaxed);
+    }
+
+    static GraphMutexCounts LoadCounts(
+        const std::array<std::atomic_uint64_t, 6>& source) {
+        return { source[0].load(std::memory_order_relaxed),
+            source[1].load(std::memory_order_relaxed),
+            source[2].load(std::memory_order_relaxed),
+            source[3].load(std::memory_order_relaxed),
+            source[4].load(std::memory_order_relaxed),
+            source[5].load(std::memory_order_relaxed) };
+    }
+
+    void Record(std::uint64_t waitMicros, std::uint64_t holdMicros,
+        const GraphMutexCounts& counts) {
+        count.fetch_add(1, std::memory_order_relaxed);
+        totalWaitMicros.fetch_add(waitMicros, std::memory_order_relaxed);
+        totalHoldMicros.fetch_add(holdMicros, std::memory_order_relaxed);
+        auto maximumWait = maximumWaitMicros.load(std::memory_order_relaxed);
+        while (waitMicros > maximumWait && !maximumWaitMicros.compare_exchange_weak(
+            maximumWait, waitMicros, std::memory_order_relaxed)) {}
+        if (waitMicros > maximumWait) {
+            StoreCounts(maximumWaitCounts, counts);
+            maximumWaitCountsFor.store(waitMicros, std::memory_order_release);
+        }
+        auto maximumHold = maximumHoldMicros.load(std::memory_order_relaxed);
+        while (holdMicros > maximumHold && !maximumHoldMicros.compare_exchange_weak(
+            maximumHold, holdMicros, std::memory_order_relaxed)) {}
+        if (holdMicros > maximumHold) {
+            StoreCounts(maximumHoldCounts, counts);
+            maximumHoldCountsFor.store(holdMicros, std::memory_order_release);
+        }
+    }
+
+    [[nodiscard]] GraphMutexAggregate Snapshot() const {
+        GraphMutexAggregate result;
+        result.count = count.load(std::memory_order_relaxed);
+        result.totalWaitMicros = totalWaitMicros.load(std::memory_order_relaxed);
+        result.maximumWaitMicros = maximumWaitMicros.load(std::memory_order_relaxed);
+        result.totalHoldMicros = totalHoldMicros.load(std::memory_order_relaxed);
+        result.maximumHoldMicros = maximumHoldMicros.load(std::memory_order_relaxed);
+        if (maximumWaitCountsFor.load(std::memory_order_acquire) == result.maximumWaitMicros)
+            result.maximumWaitCounts = LoadCounts(maximumWaitCounts);
+        if (maximumHoldCountsFor.load(std::memory_order_acquire) == result.maximumHoldMicros)
+            result.maximumHoldCounts = LoadCounts(maximumHoldCounts);
+        return result;
+    }
+};
+
 std::string CsvField(std::string_view value) {
     std::string result = "\"";
     for (const char character : value) {
@@ -127,14 +263,16 @@ std::string JsonString(std::string_view value) {
 class GraphTraceSession {
 public:
     explicit GraphTraceSession(AsyncStateGraphTraceConfig config)
-        : m_config(config), m_started(std::chrono::steady_clock::now()) {
-        m_events.reserve((std::min<std::size_t>)(config.maximumEvents, 65536));
-    }
+        : m_config(config), m_started(std::chrono::steady_clock::now()) {}
 
     void Record(std::string event, ArtifactKey key = {}, std::uint64_t revision = 0,
         std::uint64_t generation = 0, ArtifactReadiness readiness = ArtifactReadiness::Missing,
         std::int64_t durationMicros = 0, std::string detail = {}, ArtifactKey related = {},
         std::uint64_t relatedRevision = 0) {
+        if (m_saturated.load(std::memory_order_acquire)) {
+            m_dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         GraphTraceEvent record;
         record.sequence = m_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
         record.timestampMicros = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -150,21 +288,52 @@ public:
         record.durationMicros = durationMicros;
         record.detail = std::move(detail);
         std::lock_guard lock(m_mutex);
-        if (m_events.size() >= m_config.maximumEvents) {
-            ++m_dropped;
+        if (m_eventCount >= m_config.maximumEvents) {
+            m_saturated.store(true, std::memory_order_release);
+            m_dropped.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        m_events.push_back(std::move(record));
+        constexpr std::size_t chunkCapacity = 16'384;
+        if (m_eventChunks.empty() || m_eventChunks.back().size() == chunkCapacity) {
+            m_eventChunks.emplace_back();
+            m_eventChunks.back().reserve((std::min)(chunkCapacity,
+                m_config.maximumEvents - m_eventCount));
+        }
+        m_eventChunks.back().push_back(std::move(record));
+        ++m_eventCount;
+        if (m_eventCount == m_config.maximumEvents)
+            m_saturated.store(true, std::memory_order_release);
+    }
+
+    void RecordMutex(GraphMutexPhase phase, std::uint64_t waitMicros,
+        std::uint64_t holdMicros, const GraphMutexCounts& counts) {
+        m_mutexAggregates[static_cast<std::size_t>(phase)].Record(
+            waitMicros, holdMicros, counts);
+        constexpr std::uint64_t slowSampleMicros = 2'000;
+        if (waitMicros < slowSampleMicros && holdMicros < slowSampleMicros) return;
+        Record("GraphMutex", {}, 0, 0, ArtifactReadiness::Missing,
+            static_cast<std::int64_t>(waitMicros + holdMicros),
+            std::format("phase={} wait_us={} hold_us={} nodes={} versions={} pending={} "
+                "completions={} gpu_recovery={} waiters={}",
+                GraphMutexPhaseName(phase), waitMicros, holdMicros,
+                counts.nodes, counts.versions, counts.pending,
+                counts.completions, counts.gpuRecovery, counts.waiters));
     }
 
     AsyncStateGraphTraceReport Write(const std::filesystem::path& directory) {
         std::vector<GraphTraceEvent> events;
         std::uint64_t dropped = 0;
+        std::array<GraphMutexAggregate,
+            static_cast<std::size_t>(GraphMutexPhase::Count)> mutexAggregates;
         {
             std::lock_guard lock(m_mutex);
-            events = m_events;
-            dropped = m_dropped;
+            events.reserve(m_eventCount);
+            for (const auto& chunk : m_eventChunks)
+                events.insert(events.end(), chunk.begin(), chunk.end());
+            dropped = m_dropped.load(std::memory_order_relaxed);
         }
+        for (std::size_t index = 0; index < mutexAggregates.size(); ++index)
+            mutexAggregates[index] = m_mutexAggregates[index].Snapshot();
         std::ranges::sort(events, {}, &GraphTraceEvent::sequence);
         std::filesystem::create_directories(directory);
         AsyncStateGraphTraceReport report;
@@ -433,6 +602,28 @@ public:
             summary << "| " << name << " | " << aggregate.count << " | " << aggregate.total
                 << " | " << aggregate.maximum << " |\n";
         }
+        summary << "\n## Graph mutex timing\n\n"
+            << "Wait and hold maxima include graph sizes sampled while the lock was owned. "
+               "Slow samples (wait or hold >= 2,000 us) are also emitted as GraphMutex events.\n\n"
+            << "| Phase | Count | Total wait (us) | Max wait (us) | Total hold (us) | Max hold (us) | "
+               "Max-wait nodes/versions/pending/completions/GPU recovery/waiters | "
+               "Max-hold nodes/versions/pending/completions/GPU recovery/waiters |\n"
+            << "|---|---:|---:|---:|---:|---:|---|---|\n";
+        for (std::size_t index = 0; index < mutexAggregates.size(); ++index) {
+            const auto& aggregate = mutexAggregates[index];
+            if (aggregate.count == 0) continue;
+            const auto& wait = aggregate.maximumWaitCounts;
+            const auto& hold = aggregate.maximumHoldCounts;
+            summary << "| " << GraphMutexPhaseName(static_cast<GraphMutexPhase>(index))
+                << " | " << aggregate.count << " | " << aggregate.totalWaitMicros
+                << " | " << aggregate.maximumWaitMicros << " | "
+                << aggregate.totalHoldMicros << " | " << aggregate.maximumHoldMicros
+                << " | " << wait.nodes << '/' << wait.versions << '/' << wait.pending
+                << '/' << wait.completions << '/' << wait.gpuRecovery << '/' << wait.waiters
+                << " | " << hold.nodes << '/' << hold.versions << '/' << hold.pending
+                << '/' << hold.completions << '/' << hold.gpuRecovery << '/' << hold.waiters
+                << " |\n";
+        }
         summary << "\n## Producer timing by artifact kind\n\n"
             << "| Kind | Builds | Total (us) | Average (us) | Maximum (us) |\n"
             << "|---:|---:|---:|---:|---:|\n";
@@ -551,8 +742,15 @@ private:
     std::chrono::steady_clock::time_point m_started;
     std::atomic_uint64_t m_sequence{0};
     std::mutex m_mutex;
-    std::vector<GraphTraceEvent> m_events;
-    std::uint64_t m_dropped = 0;
+    // Coarse chunks avoid whole-trace relocation, a million-event upfront
+    // commit, and the per-few-events heap churn of std::deque. The report pays
+    // the one-time contiguous copy only after capture has stopped.
+    std::vector<std::vector<GraphTraceEvent>> m_eventChunks;
+    std::size_t m_eventCount = 0;
+    std::atomic_bool m_saturated{ false };
+    std::atomic_uint64_t m_dropped{ 0 };
+    std::array<AtomicGraphMutexAggregate,
+        static_cast<std::size_t>(GraphMutexPhase::Count)> m_mutexAggregates{};
 };
 
 } // namespace
@@ -849,8 +1047,52 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::atomic_bool delayedDrainScheduled{ false };
     std::atomic_bool shuttingDown{ false };
     std::atomic_bool pauseGpuRecovery{ false };
-	std::chrono::steady_clock::time_point nextDiagnosticSnapshot{};
+    std::chrono::steady_clock::time_point nextDiagnosticSnapshot{};
     std::atomic<std::shared_ptr<GraphTraceSession>> trace;
+
+    class TimedMutexLock {
+    public:
+        TimedMutexLock(Impl& owner, GraphMutexPhase phase, bool acquire = true)
+            : m_owner(&owner), m_phase(phase), m_lock(owner.mutex, std::defer_lock) {
+            if (!acquire) return;
+            m_waitStarted = std::chrono::steady_clock::now();
+            m_lock.lock();
+            m_acquired = std::chrono::steady_clock::now();
+        }
+        ~TimedMutexLock() { Unlock(); }
+        TimedMutexLock(const TimedMutexLock&) = delete;
+        TimedMutexLock& operator=(const TimedMutexLock&) = delete;
+
+        void Unlock() {
+            if (!m_lock.owns_lock()) return;
+            const auto released = std::chrono::steady_clock::now();
+            const GraphMutexCounts counts{
+                m_owner->nodes.size(), m_owner->versions.size(), m_owner->pending.size(),
+                m_owner->completions.size(), m_owner->gpuRecovery.size(),
+                m_owner->exactWaiters.size() };
+            m_lock.unlock();
+            const auto waitMicros = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    m_acquired - m_waitStarted).count());
+            const auto holdMicros = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    released - m_acquired).count());
+            if (auto session = m_owner->trace.load(std::memory_order_acquire)) {
+                session->RecordMutex(m_phase, waitMicros, holdMicros, counts);
+            }
+        }
+
+    private:
+        Impl* m_owner;
+        GraphMutexPhase m_phase;
+        std::chrono::steady_clock::time_point m_waitStarted;
+        std::unique_lock<std::mutex> m_lock;
+        std::chrono::steady_clock::time_point m_acquired;
+    };
+
+    [[nodiscard]] TimedMutexLock LockMutex(GraphMutexPhase phase) {
+        return TimedMutexLock(*this, phase);
+    }
 
     Impl(TaskSchedulerManager& schedulerIn, std::string_view name)
         : scheduler(schedulerIn), scope(schedulerIn.CreateScope(name)) {}
@@ -868,7 +1110,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             [weak, index](const TaskContext& context) {
                 if (auto self = weak.lock()) self->DrainAcceptanceMailbox(index, context);
             })) return;
-        std::lock_guard lock(mutex);
+        auto lock = LockMutex(GraphMutexPhase::AcceptanceScheduleFailure);
         auto& mailbox = acceptanceMailboxes[index];
         while (!mailbox.empty()) {
             auto item = std::move(mailbox.front());
@@ -885,11 +1127,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     void DrainAcceptanceMailbox(std::size_t index, const TaskContext& context) {
         constexpr auto yieldDuration = std::chrono::milliseconds(2);
         const auto started = std::chrono::steady_clock::now();
+        std::size_t appliedCount = 0;
+        std::uint64_t mutationDurationNs = 0;
         bool hasMore = false;
         do {
             AcceptanceDispatch item;
             {
-                std::lock_guard lock(mutex);
+                auto lock = LockMutex(GraphMutexPhase::AcceptanceDequeue);
                 auto& mailbox = acceptanceMailboxes[index];
                 if (mailbox.empty()) {
                     acceptanceMailboxScheduled[index] = false;
@@ -901,6 +1145,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             bool succeeded = !context.StopRequested();
             std::string error;
             if (succeeded) {
+                const auto mutationStarted = std::chrono::steady_clock::now();
                 try { item.registration.action(item.snapshot); }
                 catch (const std::exception& exception) {
                     succeeded = false;
@@ -909,11 +1154,15 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     succeeded = false;
                     error = "acceptance action threw an unknown exception";
                 }
+                mutationDurationNs += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - mutationStarted).count());
             } else error = "acceptance cancelled during graph shutdown";
+            ++appliedCount;
             if (!succeeded) item.completion.result = ArtifactBuildResult::Failure(std::move(error));
             item.completion.queuedAt = std::chrono::steady_clock::now();
             {
-                std::lock_guard lock(mutex);
+                auto lock = LockMutex(GraphMutexPhase::AcceptanceCompletionEnqueue);
                 completions.push_back(std::move(item.completion));
                 hasMore = !acceptanceMailboxes[index].empty();
             }
@@ -923,9 +1172,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     succeeded ? ArtifactReadiness::Preparing : ArtifactReadiness::Failed);
             }
         } while (hasMore && std::chrono::steady_clock::now() - started < yieldDuration);
+        basic_telemetry::Record("SARP.AsyncStateGraph.AcceptanceBatchSize", appliedCount);
+        basic_telemetry::Record("SARP.AsyncStateGraph.AcceptanceMutationDurationNs",
+            mutationDurationNs);
         ScheduleDrain();
         {
-            std::lock_guard lock(mutex);
+            auto lock = LockMutex(GraphMutexPhase::AcceptanceDequeue);
             hasMore = !acceptanceMailboxes[index].empty();
             if (!hasMore) acceptanceMailboxScheduled[index] = false;
         }
@@ -935,7 +1187,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     void EnqueueAcceptances(std::vector<AcceptanceDispatch> dispatches) {
         std::vector<std::size_t> schedule;
         {
-            std::lock_guard lock(mutex);
+            auto lock = LockMutex(GraphMutexPhase::AcceptanceDispatchEnqueue);
             for (auto& dispatch : dispatches) {
                 const auto index = AcceptanceMailboxIndex(
                     dispatch.registration.lane, dispatch.registration.domain);
@@ -966,7 +1218,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                                 std::chrono::duration_cast<std::chrono::microseconds>(
                                     std::chrono::steady_clock::now() - submittedAt).count());
                             {
-                                std::lock_guard lock(self->mutex);
+                                auto lock = self->LockMutex(GraphMutexPhase::DelayedDrainState);
                                 self->stats.controlQueueWaitMicros += wait;
                                 self->stats.maxControlQueueWaitMicros = (std::max)(
                                     self->stats.maxControlQueueWaitMicros, wait);
@@ -1420,8 +1672,23 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         if (node.producedRevision == node.desiredRevision &&
             (node.state == ArtifactReadiness::GpuReady ||
              node.state == ArtifactReadiness::Published)) return;
+        const auto latchStarted = std::chrono::steady_clock::now();
         LatchReadyGates(node);
-        if (!DependenciesSatisfied(node)) {
+        const auto latchDone = std::chrono::steady_clock::now();
+        const bool dependenciesSatisfied = DependenciesSatisfied(node);
+        const auto dependenciesDone = std::chrono::steady_clock::now();
+        const auto recordQueuePhase = [&](std::string_view phase,
+            std::chrono::steady_clock::time_point begin,
+            std::chrono::steady_clock::time_point end) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+            if (elapsed < 2'000) return;
+            if (auto session = trace.load(std::memory_order_acquire))
+                session->Record("QueueNodePhase", node.key, node.desiredRevision,
+                    node.versionGeneration, node.state, elapsed, std::string(phase));
+        };
+        recordQueuePhase("latch_ready_gates", latchStarted, latchDone);
+        recordQueuePhase("dependencies_satisfied", latchDone, dependenciesDone);
+        if (!dependenciesSatisfied) {
             const bool newlyBlocked = node.state != ArtifactReadiness::Blocked;
             SetState(node, ArtifactReadiness::Blocked);
             if (auto session = trace.load(std::memory_order_acquire);
@@ -1694,7 +1961,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                             registration.taskName));
                 }
                 {
-                    std::lock_guard lock(self->mutex);
+                    auto lock = self->LockMutex(GraphMutexPhase::DelayedDrainState);
                     self->completions.push_back({ key, revision, generation,
                         std::move(dependencyStamp), std::move(result) });
                 }
@@ -1706,7 +1973,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     ArtifactReadiness::Failed);
             }
             {
-                std::lock_guard lock(mutex);
+                auto lock = LockMutex(GraphMutexPhase::ProducerCompletionEnqueue);
                 completions.push_back({ key, revision, generation, std::move(dependencyStamp),
                     ArtifactBuildResult::Failure("scheduler rejected producer") });
             }
@@ -1964,7 +2231,18 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::vector<std::pair<std::function<void(const ArtifactSnapshot&)>, ArtifactSnapshot>> accepted;
         std::vector<AcceptanceDispatch> acceptanceDispatches;
         {
-            std::lock_guard lock(mutex);
+            auto lock = LockMutex(GraphMutexPhase::DrainGpuCollect);
+			auto gpuCollectPhaseStarted = std::chrono::steady_clock::now();
+			const auto recordGpuCollectPhase = [&](std::string_view phase) {
+				const auto now = std::chrono::steady_clock::now();
+				const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+					now - gpuCollectPhaseStarted).count();
+				gpuCollectPhaseStarted = now;
+				if (elapsed < 2'000) return;
+				if (auto session = trace.load(std::memory_order_acquire))
+					session->Record("DrainGpuCollectPhase", {}, 0, 0,
+						ArtifactReadiness::Missing, elapsed, std::string(phase));
+			};
 			GpuSignal notification;
 			std::unordered_set<ArtifactKey, ArtifactKey::Hasher> selectedGpuKeys;
 			while (gpuSignals.try_pop(notification)) {
@@ -1981,6 +2259,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				// Each non-empty class receives service before the time slice can end.
 				if (std::chrono::steady_clock::now() - started >= maxDuration) break;
             }
+			recordGpuCollectPhase("notification_queue");
             // Submission notifications are wakeups, not ownership-transfer events:
             // a ticket commonly notifies while its timeline is still incomplete.
             // Keep every submitted node in this rotating level-triggered set until
@@ -2010,6 +2289,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				// admission stalls during streaming flight paths.
 				if (std::chrono::steady_clock::now() - started >= maxDuration) break;
             }
+			recordGpuCollectPhase("recovery_queue");
         }
         // Complete() may synchronously notify ticket subscribers. Never call
         // it while holding the graph mutex; subscribers are allowed to queue
@@ -2040,7 +2320,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::optional<std::chrono::steady_clock::duration> retryDelay;
         bool hasImmediateWork = false;
         {
-            std::lock_guard lock(mutex);
+            auto lock = LockMutex(GraphMutexPhase::DrainApply);
             const auto now = std::chrono::steady_clock::now();
             for (const auto& evaluation : evaluatedGpu) {
                 const auto& signal = evaluation.signal;
@@ -2380,7 +2660,7 @@ AsyncStateGraph::AsyncStateGraph(TaskSchedulerManager& scheduler, std::string_vi
 AsyncStateGraph::~AsyncStateGraph() { Shutdown(); }
 
 void AsyncStateGraph::RegisterProducer(ArtifactKind kind, ArtifactProducerRegistration registration) {
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::RegisterProducer);
     m_impl->producers[kind] = std::move(registration);
 }
 
@@ -2405,13 +2685,13 @@ std::vector<ArtifactRequestResult> AsyncStateGraph::RequestBatch(
     std::vector<ArtifactRequest> requests) {
     std::vector<ArtifactRequestResult> results;
     results.reserve(requests.size());
-    std::unique_lock batchLock(m_impl->mutex);
+    auto batchLock = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
     for (auto& request : requests) {
         results.push_back(RequestInternal(request.key, request.desiredRevision,
             std::move(request.requirements), std::move(request.input),
             request.requestFingerprint, false, true));
     }
-    batchLock.unlock();
+    batchLock.Unlock();
     m_impl->ScheduleDrain();
     return results;
 }
@@ -2429,8 +2709,18 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
     }
     ArtifactRequestResult result;
     {
-        std::unique_lock lock(m_impl->mutex, std::defer_lock);
-        if (!callerOwnsMutex) lock.lock();
+        Impl::TimedMutexLock lock(*m_impl, GraphMutexPhase::Request, !callerOwnsMutex);
+        auto requestPhaseStarted = std::chrono::steady_clock::now();
+        const auto recordRequestPhase = [&](std::string_view phase) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                now - requestPhaseStarted).count();
+            requestPhaseStarted = now;
+            if (elapsed < 2'000) return;
+            if (auto session = m_impl->trace.load(std::memory_order_acquire))
+                session->Record("RequestPhase", key, desiredRevision, 0,
+                    ArtifactReadiness::Missing, elapsed, std::string(phase));
+        };
         const auto producer = m_impl->producers.find(key.kind);
         if (producer != m_impl->producers.end() &&
             producer->second.inputType != std::type_index(typeid(void)) &&
@@ -2490,6 +2780,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             }
         };
         auto& node = m_impl->nodes[key];
+        recordRequestPhase("validate_and_lookup");
         node.key = key;
         node.desired = true;
         const auto knownSignature = m_impl->versionSignatures.find(requestedVersion);
@@ -2584,6 +2875,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
 
         m_impl->StoreVersion(node);
         traceAcceptedRequest();
+        recordRequestPhase("store_and_trace_request");
         m_impl->RemoveWaiterEdges(node);
         node.desiredRevision = desiredRevision;
         node.versionGeneration = versionGeneration->second;
@@ -2603,8 +2895,11 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
         node.gpuSubmissions.reset();
         node.retryAt.reset();
         m_impl->SetState(node, ArtifactReadiness::Missing);
+        recordRequestPhase("reset_version_state");
         m_impl->InstallWaiterEdges(node);
+        recordRequestPhase("install_waiter_edges");
         const auto cycle = m_impl->DetectCycle(node);
+        recordRequestPhase("detect_cycle");
         if (!cycle.empty()) {
             m_impl->FailCycle(cycle);
         } else {
@@ -2612,6 +2907,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             m_impl->SupersedeDependents(key, visited);
             m_impl->QueueNode(node);
         }
+        recordRequestPhase("queue_and_supersede");
         result = { ArtifactRequestStatus::Accepted, node.generation,
             { key, desiredRevision, versionGeneration->second }, versionLease };
         if (auto session = m_impl->trace.load(std::memory_order_acquire)) {
@@ -2661,7 +2957,7 @@ bool AsyncStateGraph::Invalidate(ArtifactKey key, std::uint64_t desiredRevision)
     bool foundNode = false;
     std::uint64_t requestFingerprint = 0;
     {
-        std::lock_guard lock(m_impl->mutex);
+        auto lock = m_impl->LockMutex(GraphMutexPhase::Invalidate);
         const auto found = m_impl->nodes.find(key);
         foundNode = found != m_impl->nodes.end();
         if (foundNode) {
@@ -2688,7 +2984,7 @@ void AsyncStateGraph::Cancel(ArtifactKey key) {
         session->Record("Cancelled", key);
     }
     {
-        std::lock_guard lock(m_impl->mutex);
+        auto lock = m_impl->LockMutex(GraphMutexPhase::CancelApply);
         const auto found = m_impl->nodes.find(key);
         if (found == m_impl->nodes.end()) return;
         ++found->second.generation;
@@ -2714,7 +3010,7 @@ void AsyncStateGraph::Release(ArtifactKey key) {
         session->Record("Released", key);
     }
     {
-        std::lock_guard lock(m_impl->mutex);
+        auto lock = m_impl->LockMutex(GraphMutexPhase::CancelApply);
         const auto found = m_impl->nodes.find(key);
         if (found == m_impl->nodes.end()) return;
         auto& node = found->second;
@@ -2745,7 +3041,7 @@ void AsyncStateGraph::MarkPublished(ArtifactKey key, std::uint64_t revision) {
     if (auto session = m_impl->trace.load(std::memory_order_acquire)) {
         session->Record("Published", key, revision, 0, ArtifactReadiness::Published);
     }
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::MarkPublishedRevision);
     for (auto& [stored, archived] : m_impl->versions) {
         if (stored.address == key && stored.revision == revision &&
             (archived.readiness == ArtifactReadiness::GpuReady ||
@@ -2776,7 +3072,7 @@ void AsyncStateGraph::MarkPublished(ArtifactVersionID version) {
 
 void AsyncStateGraph::MarkPublished(std::span<const ArtifactVersionID> versions) {
     if (versions.empty()) return;
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::MarkPublishedVersions);
     for (const auto& version : versions) {
         if (!version) continue;
         if (auto archived = m_impl->versions.find({ version.address, version.revision,
@@ -2810,7 +3106,7 @@ void AsyncStateGraph::MarkPublished(std::span<const ArtifactVersionID> versions)
 void AsyncStateGraph::PumpGpuCompletions() {
     std::vector<ArtifactKey> pending;
     {
-        std::lock_guard lock(m_impl->mutex);
+        auto lock = m_impl->LockMutex(GraphMutexPhase::GpuCompletionScan);
         pending.reserve(m_impl->nodes.size());
         for (const auto& [key, node] : m_impl->nodes) {
             if ((node.state == ArtifactReadiness::CpuReady ||
@@ -2827,7 +3123,7 @@ void AsyncStateGraph::PumpGpuCompletions() {
 void AsyncStateGraph::NotifySuspensionSatisfied(std::uint64_t identity) {
     if (identity == 0) return;
     {
-        std::lock_guard lock(m_impl->mutex);
+        auto lock = m_impl->LockMutex(GraphMutexPhase::SuspensionSatisfied);
         const auto registered = m_impl->suspendedByIdentity.find(identity);
         if (registered == m_impl->suspendedByIdentity.end()) {
             // Level-triggered handshake: completion is retained if it races
@@ -2855,7 +3151,7 @@ void AsyncStateGraph::NotifySuspensionSatisfied(std::uint64_t identity) {
 }
 
 void AsyncStateGraph::SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback) {
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::ReadyCallbackSet);
     if (callback) m_impl->readyCallbacks.insert_or_assign(0, std::move(callback));
     else m_impl->readyCallbacks.erase(0);
 }
@@ -2863,7 +3159,7 @@ void AsyncStateGraph::SetReadyCallback(std::function<void(const ArtifactSnapshot
 std::uint64_t AsyncStateGraph::AddReadyCallback(
     std::function<void(const ArtifactSnapshot&)> callback) {
     if (!callback) return 0;
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::ReadyCallbackAdd);
     const auto subscription = ++m_impl->nextReadyCallback;
     m_impl->readyCallbacks.emplace(subscription, std::move(callback));
     return subscription;
@@ -2871,7 +3167,7 @@ std::uint64_t AsyncStateGraph::AddReadyCallback(
 
 void AsyncStateGraph::RemoveReadyCallback(std::uint64_t subscription) {
     if (subscription == 0) return;
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::ReadyCallbackRemove);
     m_impl->readyCallbacks.erase(subscription);
 }
 
@@ -2897,8 +3193,9 @@ ArtifactObservation AsyncStateGraph::ObserveWithSnapshot(ArtifactKey address,
         [weak, subscription] {
             if (subscription == 0) return;
             if (const auto graph = weak.lock()) {
-                std::lock_guard lock(graph->mutex);
+                auto lock = graph->LockMutex(GraphMutexPhase::ObservationRemove);
                 graph->readyCallbacks.erase(subscription);
+                lock.Unlock();
                 if (auto session = graph->trace.load(std::memory_order_acquire)) {
                     session->Record("ObservationCancelled", {}, 0, 0,
                         ArtifactReadiness::Missing, 0,
@@ -2927,8 +3224,9 @@ ArtifactObservation AsyncStateGraph::ObserveKind(ArtifactKind kind,
 		[weak, subscription] {
 			if (subscription == 0) return;
 			if (const auto graph = weak.lock()) {
-				std::lock_guard lock(graph->mutex);
+				auto lock = graph->LockMutex(GraphMutexPhase::ObservationRemove);
 				graph->readyCallbacks.erase(subscription);
+				lock.Unlock();
 				if (auto session = graph->trace.load(std::memory_order_acquire)) {
 					session->Record("ObservationCancelled", {}, 0, 0,
 						ArtifactReadiness::Missing, 0,
@@ -2948,7 +3246,7 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 	std::uint64_t subscription = 0;
 	bool dispatchNow = false;
 	{
-		std::lock_guard lock(m_impl->mutex);
+		auto lock = m_impl->LockMutex(GraphMutexPhase::ExactWaiterRegister);
 		snapshot = m_impl->SnapshotExactLocked(handle.version);
 		const bool terminal = snapshot.readiness == ArtifactReadiness::Failed ||
 			snapshot.readiness == ArtifactReadiness::Cancelled ||
@@ -2988,7 +3286,7 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 	return { subscription, std::move(snapshot), [weak, subscription, version = handle.version] {
 		if (subscription == 0) return;
 		if (const auto graph = weak.lock()) {
-			std::lock_guard lock(graph->mutex);
+			auto lock = graph->LockMutex(GraphMutexPhase::ExactWaiterRemove);
 			const Impl::StoredVersionKey key{
 				version.address, version.revision, version.generation };
 			const auto found = graph->exactWaiters.find(key);
@@ -2998,6 +3296,7 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 					return waiter.subscription == subscription;
 				});
 			if (found->second.empty()) graph->exactWaiters.erase(found);
+			lock.Unlock();
 			if (auto session = graph->trace.load(std::memory_order_acquire)) {
 				session->Record("ExactWaitCancelled", version.address,
 					version.revision, version.generation, ArtifactReadiness::Missing,
@@ -3009,18 +3308,29 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 }
 
 ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactKey key) const {
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::Snapshot);
     const auto found = m_impl->nodes.find(key);
     return found == m_impl->nodes.end() ? ArtifactSnapshot{ key } : m_impl->MakeSnapshot(found->second);
 }
 
 ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactVersionID version) const {
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::Snapshot);
 	return m_impl->SnapshotExactLocked(version);
 }
 
 ArtifactDiagnostic AsyncStateGraph::Diagnose(ArtifactKey key) const {
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::Diagnose);
+    auto phaseStarted = std::chrono::steady_clock::now();
+    const auto recordPhase = [&](std::string_view phase) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            now - phaseStarted).count();
+        phaseStarted = now;
+        if (elapsed < 2'000) return;
+        if (auto session = m_impl->trace.load(std::memory_order_acquire))
+            session->Record("DiagnosePhase", key, 0, 0, ArtifactReadiness::Missing,
+                elapsed, std::string(phase));
+    };
     ArtifactDiagnostic result;
     const auto found = m_impl->nodes.find(key);
     if (found == m_impl->nodes.end()) { result.artifact.key = key; return result; }
@@ -3034,13 +3344,15 @@ ArtifactDiagnostic AsyncStateGraph::Diagnose(ArtifactKey key) const {
         if (!m_impl->RequirementSatisfied(requirement) && requirement.policy != DependencyPolicy::Optional)
             result.blockers.push_back(requirement);
     }
+    recordPhase("collect_direct_blockers");
     std::unordered_set<ArtifactKey, ArtifactKey::Hasher> visited;
     m_impl->AppendBlockerChain(key, visited, result.blockerChain);
+    recordPhase("append_blocker_chain");
     return result;
 }
 
 AsyncStateGraphStats AsyncStateGraph::Stats() const {
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::Stats);
     auto result = m_impl->stats;
     result.archivedVersions = m_impl->versions.size();
     result.reclaimedVersions = m_impl->reclaimedVersions;
@@ -3053,7 +3365,7 @@ AsyncStateGraphStats AsyncStateGraph::Stats() const {
 }
 
 std::uint64_t AsyncStateGraph::Outstanding(ArtifactKind kind) const {
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::Outstanding);
     return static_cast<std::uint64_t>(std::ranges::count_if(
         m_impl->nodes, [&](const auto& entry) {
             const auto& node = entry.second;
@@ -3108,7 +3420,7 @@ void AsyncStateGraph::WaitIdle() const {
 		m_impl->scope.Wait();
 		std::optional<std::chrono::steady_clock::duration> retryDelay;
 		{
-			std::lock_guard lock(m_impl->mutex);
+			auto lock = m_impl->LockMutex(GraphMutexPhase::WaitIdle);
 			const auto now = std::chrono::steady_clock::now();
 			for (const auto& [_, node] : m_impl->nodes) {
 				if (!node.retryAt) continue;
@@ -3125,7 +3437,7 @@ void AsyncStateGraph::WaitIdle() const {
     m_impl->pauseGpuRecovery.store(false, std::memory_order_release);
     bool resumeRecovery = false;
     {
-        std::lock_guard lock(m_impl->mutex);
+        auto lock = m_impl->LockMutex(GraphMutexPhase::RecoveryResume);
         resumeRecovery = !m_impl->gpuRecovery.empty();
     }
     if (resumeRecovery) m_impl->ScheduleDrain();
@@ -3143,7 +3455,7 @@ void AsyncStateGraph::Shutdown() {
     } catch (...) {
         spdlog::error("AsyncStateGraph shutdown observed unknown task failure");
     }
-    std::lock_guard lock(m_impl->mutex);
+    auto lock = m_impl->LockMutex(GraphMutexPhase::Shutdown);
     for (auto& [_, node] : m_impl->nodes) {
         if (node.waitingGpuSubmissions) (void)node.waitingGpuSubmissions->Cancel();
     }

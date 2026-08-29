@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "Render/Runtime/IUploadService.h"
+#include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/RendererStateRequestService.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Resource.h"
@@ -16,6 +17,55 @@
 
 namespace br::render {
 namespace {
+struct BuildDiagnosticState {
+    std::mutex mutex;
+    VersionedGpuBufferBuildDiagnostics snapshot;
+    std::chrono::steady_clock::time_point buildBegin{};
+    std::chrono::steady_clock::time_point phaseBegin{};
+};
+
+BuildDiagnosticState g_buildDiagnostics;
+
+void EnterBuildPhase(VersionedGpuBufferBuildPhase phase) {
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard lock(g_buildDiagnostics.mutex);
+    auto& state = g_buildDiagnostics;
+    if (state.snapshot.active && state.snapshot.phase != VersionedGpuBufferBuildPhase::Idle) {
+        const auto index = static_cast<std::size_t>(state.snapshot.phase);
+        const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            now - state.phaseBegin).count());
+        state.snapshot.maxPhaseMicros[index] = (std::max)(state.snapshot.maxPhaseMicros[index], elapsed);
+        ++state.snapshot.phaseCompletions[index];
+    }
+    state.snapshot.phase = phase;
+    state.phaseBegin = now;
+}
+
+class BuildDiagnosticScope {
+public:
+    BuildDiagnosticScope(const ArtifactBuildContext& context, const VersionedGpuBufferBuildInput& input) {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lock(g_buildDiagnostics.mutex);
+        auto& state = g_buildDiagnostics;
+        state.snapshot.active = true;
+        state.snapshot.phase = VersionedGpuBufferBuildPhase::Idle;
+        state.snapshot.key = context.key;
+        state.snapshot.revision = context.revision;
+        state.snapshot.generation = context.generation;
+        state.snapshot.elementCount = input.elementCount;
+        state.snapshot.capacity = input.capacity;
+        state.snapshot.byteCount = input.elementCount * input.elementStride;
+        state.snapshot.writeCount = input.writes.size();
+        state.snapshot.debugName = input.debugName;
+        state.buildBegin = state.phaseBegin = now;
+    }
+    ~BuildDiagnosticScope() {
+        EnterBuildPhase(VersionedGpuBufferBuildPhase::Idle);
+        std::lock_guard lock(g_buildDiagnostics.mutex);
+        g_buildDiagnostics.snapshot.active = false;
+    }
+};
+
 std::atomic_uint64_t g_pooledBackingCount{ 0 };
 std::atomic_uint64_t g_pooledBackingBytes{ 0 };
 
@@ -26,6 +76,81 @@ void EmitBackingPoolTelemetry() {
     basic_telemetry::SetGauge("SARP.VersionedBuffer.PooledBackingBytes",
         static_cast<std::int64_t>(g_pooledBackingBytes.load(std::memory_order_relaxed)));
 }
+
+struct ObjectBufferMetricNames {
+    const char* appendOnly;
+    const char* replace;
+    const char* patchExpansion;
+    const char* allocatedBytes;
+    const char* capacityElements;
+    const char* logicalElements;
+};
+
+const ObjectBufferMetricNames* ObjectBufferMetrics(const VersionedGpuBufferBuildInput& input) {
+    if (!std::string_view(input.debugName).starts_with("Published::")) return nullptr;
+    static constexpr ObjectBufferMetricNames perObject{
+        "SARP.VersionedBuffer.Object.PerObject.AppendOnly",
+        "SARP.VersionedBuffer.Object.PerObject.Replace",
+        "SARP.VersionedBuffer.Object.PerObject.PatchBackingExpansion",
+        "SARP.VersionedBuffer.Object.PerObject.AllocatedBackingBytes",
+        "SARP.VersionedBuffer.Object.PerObject.BackingCapacityElements",
+        "SARP.VersionedBuffer.Object.PerObject.LogicalElementCount" };
+    static constexpr ObjectBufferMetricNames transforms{
+        "SARP.VersionedBuffer.Object.Transform.AppendOnly",
+        "SARP.VersionedBuffer.Object.Transform.Replace",
+        "SARP.VersionedBuffer.Object.Transform.PatchBackingExpansion",
+        "SARP.VersionedBuffer.Object.Transform.AllocatedBackingBytes",
+        "SARP.VersionedBuffer.Object.Transform.BackingCapacityElements",
+        "SARP.VersionedBuffer.Object.Transform.LogicalElementCount" };
+    static constexpr ObjectBufferMetricNames drawRecords{
+        "SARP.VersionedBuffer.Object.DrawRecord.AppendOnly",
+        "SARP.VersionedBuffer.Object.DrawRecord.Replace",
+        "SARP.VersionedBuffer.Object.DrawRecord.PatchBackingExpansion",
+        "SARP.VersionedBuffer.Object.DrawRecord.AllocatedBackingBytes",
+        "SARP.VersionedBuffer.Object.DrawRecord.BackingCapacityElements",
+        "SARP.VersionedBuffer.Object.DrawRecord.LogicalElementCount" };
+    static constexpr ObjectBufferMetricNames normals{
+        "SARP.VersionedBuffer.Object.NormalMatrix.AppendOnly",
+        "SARP.VersionedBuffer.Object.NormalMatrix.Replace",
+        "SARP.VersionedBuffer.Object.NormalMatrix.PatchBackingExpansion",
+        "SARP.VersionedBuffer.Object.NormalMatrix.AllocatedBackingBytes",
+        "SARP.VersionedBuffer.Object.NormalMatrix.BackingCapacityElements",
+        "SARP.VersionedBuffer.Object.NormalMatrix.LogicalElementCount" };
+    switch (input.catalogVariant) {
+    case kObjectPerObjectVariant: return &perObject;
+    case kObjectInstanceTransformVariant: return &transforms;
+    case kObjectDrawRecordVariant: return &drawRecords;
+    case kObjectNormalMatrixVariant: return &normals;
+    default: return nullptr;
+    }
+}
+}
+
+const char* VersionedGpuBufferBuildPhaseName(VersionedGpuBufferBuildPhase phase) noexcept {
+    switch (phase) {
+    case VersionedGpuBufferBuildPhase::Idle: return "Idle";
+    case VersionedGpuBufferBuildPhase::ReplayShadow: return "ReplayShadow";
+    case VersionedGpuBufferBuildPhase::SelectBacking: return "SelectBacking";
+    case VersionedGpuBufferBuildPhase::ScanBackingPool: return "ScanBackingPool";
+    case VersionedGpuBufferBuildPhase::ReclaimBacking: return "ReclaimBacking";
+    case VersionedGpuBufferBuildPhase::MaterializeResource: return "MaterializeResource";
+    case VersionedGpuBufferBuildPhase::QueueUpload: return "QueueUpload";
+    case VersionedGpuBufferBuildPhase::AssembleResult: return "AssembleResult";
+    default: return "Unknown";
+    }
+}
+
+VersionedGpuBufferBuildDiagnostics GetVersionedGpuBufferBuildDiagnostics() {
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard lock(g_buildDiagnostics.mutex);
+    auto result = g_buildDiagnostics.snapshot;
+    if (result.active) {
+        result.phaseElapsedMicros = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            now - g_buildDiagnostics.phaseBegin).count());
+        result.buildElapsedMicros = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            now - g_buildDiagnostics.buildBegin).count());
+    }
+    return result;
 }
 
 VersionedGpuBufferBackingPool::~VersionedGpuBufferBackingPool() {
@@ -63,6 +188,7 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     std::uint64_t capacityClass, std::uint32_t elementStride,
     bool unorderedAccess, bool indirectArguments, std::string_view debugName,
     bool& expanded) {
+    EnterBuildPhase(VersionedGpuBufferBuildPhase::ScanBackingPool);
     std::lock_guard lock(m_mutex);
     // The pool is the only owner allowed to recycle a backing. A published
     // catalog can retain the Resource independently of its backing artifact,
@@ -79,11 +205,13 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
             continue;
         }
         if (idle) {
+            EnterBuildPhase(VersionedGpuBufferBuildPhase::ReclaimBacking);
             g_pooledBackingCount.fetch_sub(1, std::memory_order_relaxed);
             g_pooledBackingBytes.fetch_sub(
                 backing->byteCapacity, std::memory_order_relaxed);
             it = m_backings.erase(it);
             basic_telemetry::AddCounter("SARP.VersionedBuffer.PooledBackingReclaimed");
+            EnterBuildPhase(VersionedGpuBufferBuildPhase::ScanBackingPool);
             continue;
         }
         ++it;
@@ -95,6 +223,7 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
             return reusable;
     }
     Resource::ScopedECSRegistrationSuppression suppressECS;
+    EnterBuildPhase(VersionedGpuBufferBuildPhase::MaterializeResource);
     auto resource = CreateIndexedStructuredBuffer(
         static_cast<std::uint32_t>((std::max<std::uint64_t>)(capacityClass, 1u)),
         elementStride, unorderedAccess, indirectArguments);
@@ -496,10 +625,13 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     if (!input || !input->uploadService || input->elementStride == 0u) {
         return ArtifactBuildResult::Failure("versioned buffer input/upload service/stride missing");
     }
+    BuildDiagnosticScope diagnosticScope(context, *input);
+    EnterBuildPhase(VersionedGpuBufferBuildPhase::ReplayShadow);
     std::string replayError;
     auto shadow = ReplayVersionedGpuBufferShadow(*input, replayError);
     if (!shadow) return ArtifactBuildResult::Failure(std::move(replayError));
 
+    EnterBuildPhase(VersionedGpuBufferBuildPhase::SelectBacking);
     const bool fitsBacking = input->previous && input->previous->resource &&
         input->capacity <= input->previous->capacity;
     const bool appendOnly = fitsBacking && input->bytes.empty() &&
@@ -512,6 +644,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     std::shared_ptr<BufferBackingArtifact> backing;
     bool backingExpanded = false;
     if (appendOnly) {
+		basic_telemetry::AddCounter("SARP.VersionedBuffer.AppendOnly");
         backing = input->previous->backing;
         if (!backing) {
             backing = std::make_shared<BufferBackingArtifact>();
@@ -526,12 +659,32 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
             backingExpanded);
     }
     auto resource = backing->resource;
+	basic_telemetry::Record("SARP.VersionedBuffer.RequestedCapacityElements", input->capacity);
+	basic_telemetry::Record("SARP.VersionedBuffer.BackingCapacityElements", backing->capacityClass);
+	basic_telemetry::Record("SARP.VersionedBuffer.LogicalElementCount", input->elementCount);
+	if (backingExpanded) {
+		basic_telemetry::Record("SARP.VersionedBuffer.AllocatedBackingBytes",
+			backing->byteCapacity);
+	}
     basic_telemetry::AddCounter(mode == BufferRevisionMode::Patch
         ? "SARP.VersionedBuffer.Patch" : "SARP.VersionedBuffer.Replace");
     if (mode == BufferRevisionMode::Patch && backingExpanded) {
         basic_telemetry::AddCounter("SARP.VersionedBuffer.PatchBackingExpansion");
     }
+    if (const auto* metrics = ObjectBufferMetrics(*input)) {
+        basic_telemetry::Record(metrics->capacityElements, backing->capacityClass);
+        basic_telemetry::Record(metrics->logicalElements, input->elementCount);
+        if (appendOnly) basic_telemetry::AddCounter(metrics->appendOnly);
+        if (mode == BufferRevisionMode::Replace) basic_telemetry::AddCounter(metrics->replace);
+        if (mode == BufferRevisionMode::Patch && backingExpanded) {
+            basic_telemetry::AddCounter(metrics->patchExpansion);
+        }
+        if (backingExpanded) {
+            basic_telemetry::Record(metrics->allocatedBytes, backing->byteCapacity);
+        }
+    }
 
+    EnterBuildPhase(VersionedGpuBufferBuildPhase::QueueUpload);
     std::vector<std::shared_ptr<org::TrackedUploadTicket>> tickets;
     // Indirect argument buffers are transient UAV outputs. The culling pass
     // writes every command in the published logical range before ExecuteIndirect
@@ -554,6 +707,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
         basic_telemetry::AddCounter("SARP.VersionedBuffer.TransientInitializationSkipped");
     }
 
+    EnterBuildPhase(VersionedGpuBufferBuildPhase::AssembleResult);
     auto version = std::make_shared<PublishedGpuBufferVersion>();
     version->revision = context.revision;
     version->writeSequence = input->writeSequence;

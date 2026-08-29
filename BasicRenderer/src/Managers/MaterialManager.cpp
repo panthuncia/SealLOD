@@ -804,10 +804,16 @@ bool MaterialManager::ApplyMaterialRowArtifact(const br::render::MaterialRowArti
 	}
 	signature.valid = true;
 	JournalMaterialRow(row.materialSlot);
+	++m_materialRowsAppliedSinceGraphSnapshot;
 	basic_telemetry::AddCounter("SARP.Material.RowApplyAccepted");
 	basic_telemetry::SetGauge("SARP.Material.RowApplyAccepted.MaxSlot",
 		static_cast<std::int64_t>(row.materialSlot));
-	ScheduleGpuVisibleSnapshotCommit(true);
+	// Row acceptance only dirties the aggregate material snapshot. Forcing a
+	// graph request here caused the single RendererState lane to alternate a
+	// partial table commit with each cooperative acceptance-mailbox slice during
+	// bulk import. The commit's bounded quiet-window still guarantees progress,
+	// while allowing rows from several slices to share one immutable snapshot.
+	ScheduleGpuVisibleSnapshotCommit(false);
 	return true;
 }
 
@@ -1501,8 +1507,22 @@ bool MaterialManager::RequestExternalMaterialTextureReadback(
 }
 
 std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot) {
+	const auto commitStarted = std::chrono::steady_clock::now();
+	struct CommitDurationRecorder {
+		std::chrono::steady_clock::time_point started;
+		~CommitDurationRecorder() {
+			basic_telemetry::Record("SARP.Material.SnapshotCommitDurationNs",
+				static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now() - started).count()));
+		}
+	} durationRecorder{ commitStarted };
+	basic_telemetry::AddCounter("SARP.Material.SnapshotCommitAttempts");
+	if (forceGraphSnapshot) basic_telemetry::AddCounter("SARP.Material.SnapshotCommitForcedAttempts");
 	std::unique_lock mutationLock(m_materialMutationMutex, std::try_to_lock);
-	if (!mutationLock.owns_lock()) return m_materialStateRevision;
+	if (!mutationLock.owns_lock()) {
+		basic_telemetry::AddCounter("SARP.Material.SnapshotCommitMutationLockBusy");
+		return m_materialStateRevision;
+	}
 	BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot");
 	const unsigned int compileFlagsSlotsUsed = m_compileFlagsRegistry.GetSlotsUsed();
 	if (m_materialPixelCountBuffer && compileFlagsSlotsUsed > m_materialPixelCountBuffer->Capacity()) {
@@ -1620,6 +1640,7 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 		if (fingerprint != m_materialStateFingerprint &&
 			(forceGraphSnapshot || m_materialStateStableFrames >= 4u ||
 				m_materialStateDirtyFrames >= 4u)) {
+			basic_telemetry::AddCounter("SARP.Material.GraphSnapshotAttempts");
 			m_materialStateFingerprint = fingerprint;
 			m_materialStateDirtyFrames = 0;
 			if (!m_uploadService) {
@@ -1724,6 +1745,10 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				fingerprint == 0 ? 1u : fingerprint);
 			if (materialRequest) {
 				m_materialStateHandle = materialRequest.Handle();
+				basic_telemetry::AddCounter("SARP.Material.GraphSnapshotRequests");
+				basic_telemetry::Record("SARP.Material.RowsAppliedPerGraphSnapshot",
+					m_materialRowsAppliedSinceGraphSnapshot);
+				m_materialRowsAppliedSinceGraphSnapshot = 0;
 			}
 		}
 	}

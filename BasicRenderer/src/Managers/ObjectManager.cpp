@@ -26,6 +26,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <cmath>
 #include <limits>
@@ -274,6 +275,31 @@ ObjectManager::~ObjectManager() {
 	for (auto& [_, buffer] : m_activeDrawSetIndices) {
 		if (buffer) buffer->SetActiveMutationCallback({});
 	}
+}
+
+size_t CapacityHintBytes(size_t rows, size_t stride, size_t minimumHeadroomBytes) {
+	if (rows == 0 || stride == 0) {
+		return 0;
+	}
+	const auto proportionalHeadroomRows = rows / 4u;
+	const auto minimumHeadroomRows = minimumHeadroomBytes / stride +
+		(minimumHeadroomBytes % stride != 0 ? 1u : 0u);
+	const auto headroomRows = (std::max)(proportionalHeadroomRows, minimumHeadroomRows);
+	if (rows > (std::numeric_limits<size_t>::max)() - headroomRows) {
+		return (std::numeric_limits<size_t>::max)();
+	}
+	const auto hintedRows = rows + headroomRows;
+	const auto maximumPowerOfTwo = size_t{ 1 } <<
+		((std::numeric_limits<size_t>::digits) - 1u);
+	const auto capacityRows = hintedRows > maximumPowerOfTwo
+		? hintedRows : std::bit_ceil(hintedRows);
+	if (capacityRows > (std::numeric_limits<size_t>::max)() / stride) {
+		return (std::numeric_limits<size_t>::max)();
+	}
+	// Quantize exactly once in element space. The builder's element-space
+	// bit_ceil is then idempotent, avoiding both incremental journal revisions
+	// and byte-space/element-space double rounding.
+	return capacityRows * stride;
 }
 
 void ObjectManager::StartDeferredRetireWorker() {
@@ -771,7 +797,6 @@ void ObjectManager::PumpActiveDrawSetCompactionRequests(std::size_t maxRequests)
 		std::lock_guard lock(m_activeDrawSetCompactionMutex);
 		maxRequests = m_activeDrawSetCompactionRequests.size();
 	}
-
 	std::vector<ActiveDrawSetCompactionJob> jobs;
 	jobs.reserve(maxRequests);
 	for (std::size_t i = 0; i < maxRequests; ++i) {
@@ -1653,40 +1678,23 @@ ObjectManager::StaticImportResourceProbeStatus ObjectManager::ProbeStaticImportT
 		const std::size_t perObjectBytes = transformRows * sizeof(PerObjectCB);
 		const std::size_t instanceTransformBytes = transformRows * sizeof(PerInstanceTransformCB);
 		const std::size_t instanceDrawRecordBytes = drawRecordRows * sizeof(InstanceDrawRecordCB);
-
-		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(
-				probe.normalMatrix,
-				normalMatrixBytes)) {
+		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(probe.normalMatrix, normalMatrixBytes)) {
 			return StaticImportResourceProbeStatus::PendingNormalMatrix;
 		}
-		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(
-				probe.perObject,
-				perObjectBytes)) {
+		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(probe.perObject, perObjectBytes)) {
 			return StaticImportResourceProbeStatus::PendingPerObject;
 		}
-		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(
-				probe.instanceTransform,
-				instanceTransformBytes)) {
+		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(probe.instanceTransform, instanceTransformBytes)) {
 			return StaticImportResourceProbeStatus::PendingInstanceTransform;
 		}
-		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(
-				probe.instanceDrawRecord,
-				instanceDrawRecordBytes)) {
+		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(probe.instanceDrawRecord, instanceDrawRecordBytes)) {
 			return StaticImportResourceProbeStatus::PendingDrawRecord;
 		}
 
-		const bool consumedNormalMatrix = DynamicBuffer::TryConsumeAllocationProbeBytes(
-			probe.normalMatrix,
-			normalMatrixBytes);
-		const bool consumedPerObject = DynamicBuffer::TryConsumeAllocationProbeBytes(
-			probe.perObject,
-			perObjectBytes);
-		const bool consumedInstanceTransform = DynamicBuffer::TryConsumeAllocationProbeBytes(
-			probe.instanceTransform,
-			instanceTransformBytes);
-		const bool consumedInstanceDrawRecord = DynamicBuffer::TryConsumeAllocationProbeBytes(
-			probe.instanceDrawRecord,
-			instanceDrawRecordBytes);
+		const bool consumedNormalMatrix = DynamicBuffer::TryConsumeAllocationProbeBytes(probe.normalMatrix, normalMatrixBytes);
+		const bool consumedPerObject = DynamicBuffer::TryConsumeAllocationProbeBytes(probe.perObject, perObjectBytes);
+		const bool consumedInstanceTransform = DynamicBuffer::TryConsumeAllocationProbeBytes(probe.instanceTransform, instanceTransformBytes);
+		const bool consumedInstanceDrawRecord = DynamicBuffer::TryConsumeAllocationProbeBytes(probe.instanceDrawRecord, instanceDrawRecordBytes);
 		assert(consumedNormalMatrix);
 		assert(consumedPerObject);
 		assert(consumedInstanceTransform);
@@ -2230,6 +2238,56 @@ void ObjectManager::FreeSkinnedAssemblyPlacement(std::uint32_t placementIndex) {
 	m_freeSkinnedAssemblyPlacementIndices.push_back(placementIndex);
 }
 
+void ObjectManager::RequestStaticImportGraphCapacityHint(
+	std::uint64_t transformRows, std::uint64_t drawRecords) {
+	ZoneScopedN("ObjectManager::RequestStaticImportGraphCapacityHint");
+	const auto clampedRows = [](std::uint64_t value) {
+		return static_cast<size_t>((std::min<std::uint64_t>)(
+			value, (std::numeric_limits<size_t>::max)()));
+	};
+	const auto transforms = clampedRows(transformRows);
+	const auto records = clampedRows(drawRecords);
+	const auto perObjectBytes = CapacityHintBytes(
+		transforms, sizeof(PerObjectCB), 512ull * 1024ull);
+	const auto instanceTransformBytes = CapacityHintBytes(
+		transforms, sizeof(PerInstanceTransformCB), 512ull * 1024ull);
+	const auto normalMatrixBytes = CapacityHintBytes(
+		transforms, sizeof(DirectX::XMFLOAT4X4), 512ull * 1024ull);
+	const auto drawRecordBytes = CapacityHintBytes(
+		records, sizeof(InstanceDrawRecordCB), 1024ull * 1024ull);
+	bool capacityAdvanced = false;
+	if (perObjectBytes != 0) {
+		capacityAdvanced = m_perObjectBuffers->RequestVersionedGraphCapacityBytes(perObjectBytes);
+	}
+	if (instanceTransformBytes != 0) {
+		capacityAdvanced = m_perInstanceTransformBuffers->RequestVersionedGraphCapacityBytes(
+			instanceTransformBytes) || capacityAdvanced;
+	}
+	if (normalMatrixBytes != 0) {
+		capacityAdvanced = m_normalMatrixBuffer->RequestVersionedGraphCapacityBytes(
+			normalMatrixBytes) || capacityAdvanced;
+	}
+	if (drawRecordBytes != 0) {
+		capacityAdvanced = m_instanceDrawRecordBuffers->RequestVersionedGraphCapacityBytes(
+			drawRecordBytes) || capacityAdvanced;
+	}
+	if (capacityAdvanced) {
+		basic_telemetry::AddCounter("SARP.ObjectBuffer.StaticCapacityHintUpdates");
+	}
+	basic_telemetry::AddCounter("SARP.ObjectBuffer.StaticCapacityHintSamples");
+	basic_telemetry::SetGauge("SARP.ObjectBuffer.StaticCapacityHintTransformRows",
+		static_cast<std::int64_t>((std::min<std::uint64_t>)(
+			transformRows, (std::numeric_limits<std::int64_t>::max)())));
+	basic_telemetry::SetGauge("SARP.ObjectBuffer.StaticCapacityHintDrawRecords",
+		static_cast<std::int64_t>((std::min<std::uint64_t>)(
+			drawRecords, (std::numeric_limits<std::int64_t>::max)())));
+	basic_telemetry::SetGauge("SARP.ObjectBuffer.StaticCapacityHintBytes",
+		static_cast<std::int64_t>((std::min<std::uint64_t>)(
+			static_cast<std::uint64_t>(perObjectBytes) + instanceTransformBytes +
+				normalMatrixBytes + drawRecordBytes,
+			(static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())))));
+}
+
 void ObjectManager::StageStaticImportTransactionUploads(
 	MaterializedStaticImportTransaction& transaction,
 	bool includeDrawRecords)
@@ -2237,38 +2295,28 @@ void ObjectManager::StageStaticImportTransactionUploads(
 	ZoneScopedN("ObjectManager::StageStaticImportTransactionUploads");
 	const auto firstValidRange = [](const std::vector<DynamicBuffer::PagedAllocation>& ranges)
 		-> const DynamicBuffer::PagedAllocation* {
-		for (const auto& range : ranges) {
-			if (range.IsValid()) return &range;
-		}
+		for (const auto& range : ranges) if (range.IsValid()) return &range;
 		return nullptr;
 	};
 
 	if (!transaction.transformRowsStaged) {
 		if (!transaction.normalRows.empty()) {
-			if (const auto* range = firstValidRange(transaction.reservation.normalMatrixRanges)) {
-				m_normalMatrixBuffer->StageWriteRange(transaction.normalRows.data(),
-					transaction.normalRows.size() * sizeof(DirectX::XMFLOAT4X4), range->offset);
-			}
+			if (const auto* range = firstValidRange(transaction.reservation.normalMatrixRanges))
+				m_normalMatrixBuffer->StageWriteRange(transaction.normalRows.data(), transaction.normalRows.size() * sizeof(DirectX::XMFLOAT4X4), range->offset);
 		}
 		if (!transaction.perObjectRows.empty()) {
-			if (const auto* range = firstValidRange(transaction.reservation.perObjectRanges)) {
-				m_perObjectBuffers->StageWriteRange(transaction.perObjectRows.data(),
-					transaction.perObjectRows.size() * sizeof(PerObjectCB), range->offset);
-			}
-			if (const auto* range = firstValidRange(transaction.reservation.instanceTransformRanges)) {
-				m_perInstanceTransformBuffers->StageWriteRange(transaction.perObjectRows.data(),
-					transaction.perObjectRows.size() * sizeof(PerInstanceTransformCB), range->offset);
-			}
+			if (const auto* range = firstValidRange(transaction.reservation.perObjectRanges))
+				m_perObjectBuffers->StageWriteRange(transaction.perObjectRows.data(), transaction.perObjectRows.size() * sizeof(PerObjectCB), range->offset);
+			if (const auto* range = firstValidRange(transaction.reservation.instanceTransformRanges))
+				m_perInstanceTransformBuffers->StageWriteRange(transaction.perObjectRows.data(), transaction.perObjectRows.size() * sizeof(PerInstanceTransformCB), range->offset);
 		}
 		transaction.transformRowsStaged = true;
 	}
 
 	if (includeDrawRecords && !transaction.drawRecordRowsStaged) {
 		if (!transaction.drawRecordRows.empty()) {
-			if (const auto* range = firstValidRange(transaction.reservation.instanceDrawRecordRanges)) {
-				m_instanceDrawRecordBuffers->StageWriteRange(transaction.drawRecordRows.data(),
-					transaction.drawRecordRows.size() * sizeof(InstanceDrawRecordCB), range->offset);
-			}
+			if (const auto* range = firstValidRange(transaction.reservation.instanceDrawRecordRanges))
+				m_instanceDrawRecordBuffers->StageWriteRange(transaction.drawRecordRows.data(), transaction.drawRecordRows.size() * sizeof(InstanceDrawRecordCB), range->offset);
 		}
 		transaction.drawRecordRowsStaged = true;
 	}

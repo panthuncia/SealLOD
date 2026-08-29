@@ -116,6 +116,7 @@ private:
 	TaskScope m_snapshotCommitScope;
 	std::atomic_bool m_snapshotCommitScheduled{ false };
 	std::atomic_bool m_forceSnapshotCommit{ false };
+	std::uint64_t m_materialRowsAppliedSinceGraphSnapshot = 0;
 	void UpdateMaterialTextureUsage(const Material& material, int delta);
 	void RefreshMaterialTextureUsage(const Material& material);
 	void TrackMaterialTextureAssets(const Material& material, int delta);
