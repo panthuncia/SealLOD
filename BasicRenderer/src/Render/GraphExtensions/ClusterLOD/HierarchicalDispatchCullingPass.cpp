@@ -697,7 +697,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] =
             m_workGraphTelemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
-        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodWorkGraphCounterCount;
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodWorkGraphTelemetryBufferCount;
         commandList.PushConstants(
             rhi::ShaderStage::Compute,
             0,
@@ -705,7 +705,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             0,
             NumMiscUintRootConstants,
             clearRootConstants);
-        commandList.Dispatch((CLodWorkGraphCounterCount + 63u) / 64u, 1u, 1u);
+        commandList.Dispatch((CLodWorkGraphTelemetryBufferCount + 63u) / 64u, 1u, 1u);
 
         rhi::BufferBarrier telemetryBarrier{};
         telemetryBarrier.buffer = m_workGraphTelemetryBuffer->GetAPIResource().GetHandle();
@@ -1792,7 +1792,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
 
     if (IsCLodWorkGraphTelemetryEnabled()) {
         ZoneScopedN("HierarchicalDispatchCullingPass::UploadTelemetryReset");
-        m_zeroTelemetryScratch.assign(CLodWorkGraphCounterCount, 0u);
+        m_zeroTelemetryScratch.assign(CLodWorkGraphTelemetryBufferCount, 0u);
         BUFFER_UPLOAD(
             m_zeroTelemetryScratch.data(),
             static_cast<uint32_t>(m_zeroTelemetryScratch.size() * sizeof(uint32_t)),

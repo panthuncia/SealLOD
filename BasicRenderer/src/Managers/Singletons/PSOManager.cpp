@@ -2195,6 +2195,9 @@ void PSOManager::PrecompileShaderArtifact(const ShaderVariantRequest& request)
     auto defines = GetRasterShaderDefines(normalized.materialRasterFlags);
     switch (normalized.kind) {
     case ShaderVariantKind::ClusterLODRaster:
+		if (normalized.singleView) {
+			defines.push_back({ L"CLOD_RASTER_SINGLE_VIEW", L"1" });
+		}
         shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
         shaderInfo.pixelShader = { L"shaders/ClusterLOD/visibilityOutput.hlsl", L"VisibilityBufferPSMain", L"ps_6_6" };
         break;

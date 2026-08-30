@@ -38,6 +38,7 @@ Meshlet LoadMeshletFromSlab(uint slabDescriptorIndex, uint meshletByteAddr)
 
 struct MeshletSetup
 {
+    uint drawRecordIndex;
     uint viewID; // Which view this meshlet is being rendered for (for CLod path)
     uint shadowClipmapIndex;
     uint virtualShadowPayload;

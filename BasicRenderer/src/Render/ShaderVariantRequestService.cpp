@@ -19,6 +19,7 @@ struct ShaderVariantRequestHash {
 		combine(static_cast<std::uint64_t>(request.materialRasterFlags));
 		combine(static_cast<std::uint32_t>(request.rasterOutputKind));
 		combine(request.wireframe ? 1u : 0u);
+		combine(request.singleView ? 1u : 0u);
 		return seed;
 	}
 };
@@ -34,7 +35,8 @@ bool ShaderVariantRequestService::RequestShaderVariant(const ShaderVariantReques
 	case ShaderVariantKind::MaterialEvaluation:
 		return psoManager.TryGetMaterialEvalPSO(normalized.materialCompileFlags) != nullptr;
 	case ShaderVariantKind::ClusterLODRaster:
-		return psoManager.TryGetClusterLODRasterPSO(normalized.materialRasterFlags, normalized.wireframe) != nullptr;
+		return psoManager.TryGetClusterLODRasterPSO(
+			normalized.materialRasterFlags, normalized.wireframe, normalized.singleView) != nullptr;
 	case ShaderVariantKind::ClusterLODVirtualShadowRaster:
 		return psoManager.TryGetClusterLODVirtualShadowRasterPSO(normalized.materialRasterFlags, normalized.wireframe) != nullptr;
 	case ShaderVariantKind::ClusterLODVirtualShadowReyesRaster:

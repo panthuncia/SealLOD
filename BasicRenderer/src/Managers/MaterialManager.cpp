@@ -33,6 +33,21 @@ namespace {
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
 	constexpr bool kEnableMaterialStateGraph = true;
 
+	bool RasterBucketDiagnosticsEnabled() {
+		static const bool enabled = [] {
+			char* value = nullptr;
+			size_t valueLength = 0;
+			if (_dupenv_s(&value, &valueLength, "SARP_RASTER_BUCKET_DIAGNOSTICS") != 0 || value == nullptr) {
+				std::free(value);
+				return false;
+			}
+			const std::string text(value);
+			std::free(value);
+			return !text.empty() && text != "0" && text != "false" && text != "FALSE";
+		}();
+		return enabled;
+	}
+
 	const std::string& MaterialTextureTraceFilter() {
 		static const std::string filter = [] {
 			char* value = nullptr;
@@ -1721,9 +1736,11 @@ unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlag
 		m_rasterBucketUsageCounts[slot] += count;
 		return slot;
 	}
+	bool reusedSlot = false;
 	if (!m_freeRasterBuckets.empty()) {
 		slot = m_freeRasterBuckets.back();
 		m_freeRasterBuckets.pop_back();
+		reusedSlot = true;
 		m_bucketToRasterFlagMapping[slot] = rasterFlags;
 		m_rasterBucketUsageCounts[slot] = count;
 	}
@@ -1734,6 +1751,15 @@ unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlag
 	}
 
 	m_rasterFlagToBucketMapping[static_cast<uint32_t>(rasterFlags)] = slot;
+	if (RasterBucketDiagnosticsEnabled()) {
+		spdlog::info(
+			"Raster bucket mapping acquired: slot={} flags=0x{:X} count={} reused={} bucketsUsed={}",
+			slot,
+			static_cast<uint32_t>(rasterFlags),
+			count,
+			reusedSlot,
+			m_rasterBucketsUsed);
+	}
 	return slot;
 }
 
@@ -1756,6 +1782,13 @@ void MaterialManager::ReleaseRasterBucket(MaterialRasterFlags rasterFlags) {
 	}
 
 	m_rasterFlagToBucketMapping.erase(it);
+	if (RasterBucketDiagnosticsEnabled()) {
+		spdlog::info(
+			"Raster bucket mapping released: slot={} flags=0x{:X} bucketsUsed={}",
+			slot,
+			static_cast<uint32_t>(rasterFlags),
+			m_rasterBucketsUsed);
+	}
 	m_bucketToRasterFlagMapping[slot] = MaterialRasterFlagsNone;
 	m_freeRasterBuckets.push_back(slot);
 

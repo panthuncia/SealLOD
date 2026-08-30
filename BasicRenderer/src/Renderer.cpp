@@ -3813,6 +3813,20 @@ void Renderer::Update(float elapsedSeconds) {
                             br::render::ArtifactReadiness::Published, fragment.payload };
                         captureVersion(fragment.payload
                             .Get<br::render::PublishedGpuBufferVersion>(), fragmentArtifact);
+						const auto objectBufferState = fragment.payload
+							.Get<br::render::PublishedObjectBufferState>();
+						if (objectBufferState) {
+							for (const auto& version : objectBufferState->versions) {
+								captureVersion(version, fragmentArtifact);
+							}
+						}
+						const auto indirectState = fragment.payload
+							.Get<br::render::PublishedIndirectState>();
+						if (indirectState) {
+							for (const auto& activeList : indirectState->activeListVersions) {
+								captureVersion(activeList.version, fragmentArtifact);
+							}
+						}
                         if (visibilityGenerationFirst) {
                             for (const auto& dependency : fragment.dependencyClosure) {
                                 if (dependency.key.kind != br::render::ArtifactKind::BufferVersion ||
@@ -3857,11 +3871,15 @@ void Renderer::Update(float elapsedSeconds) {
                                 return version && version->cpuShadow &&
                                     !version->cpuShadow->empty();
                             });
+					auto* objectManager = m_managerInterface.GetObjectManager();
+					const bool directVisibilityReady = objectManager &&
+						!objectManager->GetDrawRecordVisibilityGenerations().empty() &&
+						objectManager->GetDrawRecordVisibilityGenerationBuffer();
                     // Do not consume the one-shot validation while only terrain
                     // and other startup rows exist. Static admission initializes
                     // the generation table; this is also the signal that the
                     // captured active lists can validate real static eligibility.
-                    if (publishedVisibilityReady) {
+					if (publishedVisibilityReady || directVisibilityReady) {
                         captureFragment("draw-records", published->drawRecords, false, true);
                         captureFragment("active-lists", published->activeDrawLists);
                         // Indirect publication retains the exact active-list and
@@ -3870,6 +3888,92 @@ void Renderer::Update(float elapsedSeconds) {
                         // when the catalog-only active-list fragment has no local
                         // payload.
                         captureFragment("indirect-closure", published->indirectWorkloads, true);
+						if (!publishedVisibilityReady && directVisibilityReady) {
+							const auto generations = objectManager->GetDrawRecordVisibilityGenerations();
+							auto expected = std::make_shared<std::vector<std::byte>>(
+								generations.size_bytes());
+							std::memcpy(expected->data(), generations.data(), generations.size_bytes());
+							auto generationResource = objectManager->GetDrawRecordVisibilityGenerationBuffer();
+							auto capturePath = basePath;
+							capturePath += L".visibility-generation-direct.bin";
+							readbackService->RequestReadbackCapture(
+								"CLodOpaque::HierarchicalCullingPass1", generationResource.get(), RangeSpec{},
+								[capturePath, expected](ReadbackCaptureResult&& result) {
+									std::ofstream output(capturePath, std::ios::binary | std::ios::trunc);
+									if (output && !result.data.empty()) {
+										output.write(reinterpret_cast<const char*>(result.data.data()),
+											static_cast<std::streamsize>(result.data.size()));
+									}
+									auto expectedPath = capturePath;
+									expectedPath += L".expected";
+									std::ofstream expectedOutput(expectedPath,
+										std::ios::binary | std::ios::trunc);
+									if (expectedOutput && !expected->empty()) {
+										expectedOutput.write(
+											reinterpret_cast<const char*>(expected->data()),
+											static_cast<std::streamsize>(expected->size()));
+									}
+									const auto compared = (std::min)(result.data.size(), expected->size());
+									const auto mismatch = std::mismatch(
+										result.data.begin(), result.data.begin() + compared,
+										expected->begin()).first - result.data.begin();
+									const bool match = result.data.size() >= expected->size() &&
+										static_cast<std::size_t>(mismatch) == compared;
+									spdlog::info(
+										"Direct visibility-generation GPU readback: gpuBytes={} expectedBytes={} exactPrefix={} firstMismatch={} output='{}'.",
+										result.data.size(), expected->size(), match,
+										static_cast<std::size_t>(mismatch) == compared
+											? UINT64_MAX : static_cast<std::size_t>(mismatch),
+										capturePath.string());
+								});
+							++captureIndex;
+						}
+						if (auto* meshManager = m_managerInterface.GetMeshManager()) {
+							const std::array<std::pair<const char*, ResourceIdentifier>, 2> meshInputs{{
+								{ "per-mesh-instance", ResourceIdentifier{ Builtin::PerMeshInstanceBuffer } },
+								{ "per-mesh", ResourceIdentifier{ Builtin::PerMeshBuffer } },
+							}};
+							for (const auto& [label, identifier] : meshInputs) {
+								auto resource = meshManager->ProvideResource(identifier);
+								auto dynamicBuffer = std::dynamic_pointer_cast<DynamicBuffer>(resource);
+								if (!resource || !dynamicBuffer) continue;
+								auto expected = std::make_shared<std::vector<std::byte>>(
+									dynamicBuffer->CaptureCpuShadowBytes());
+								if (expected->empty()) continue;
+								auto capturePath = basePath;
+								capturePath += std::filesystem::path(fmt::format(".{}.bin", label));
+								readbackService->RequestReadbackCapture(
+									"CLodOpaque::HierarchicalCullingPass1", resource.get(), RangeSpec{},
+									[capturePath, expected, label](ReadbackCaptureResult&& result) {
+										std::ofstream output(capturePath, std::ios::binary | std::ios::trunc);
+										if (output && !result.data.empty()) {
+											output.write(reinterpret_cast<const char*>(result.data.data()),
+												static_cast<std::streamsize>(result.data.size()));
+										}
+										auto expectedPath = capturePath;
+										expectedPath += L".expected";
+										std::ofstream expectedOutput(expectedPath,
+											std::ios::binary | std::ios::trunc);
+										if (expectedOutput) {
+											expectedOutput.write(reinterpret_cast<const char*>(expected->data()),
+												static_cast<std::streamsize>(expected->size()));
+										}
+										const auto compared = (std::min)(result.data.size(), expected->size());
+										const auto mismatch = std::mismatch(
+											result.data.begin(), result.data.begin() + compared,
+											expected->begin()).first - result.data.begin();
+										const bool match = result.data.size() >= expected->size() &&
+											static_cast<std::size_t>(mismatch) == compared;
+										spdlog::info(
+											"Culling input GPU readback: buffer={} gpuBytes={} expectedBytes={} exactPrefix={} firstMismatch={} output='{}'.",
+											label, result.data.size(), expected->size(), match,
+											static_cast<std::size_t>(mismatch) == compared
+												? UINT64_MAX : static_cast<std::size_t>(mismatch),
+											capturePath.string());
+									});
+								++captureIndex;
+							}
+						}
                         objectBufferReadbackRequested = captureIndex != 0;
                         basic_telemetry::SetGauge(
                             "SARP.GraphReadback.ObjectBuffer.Requested",
@@ -4180,6 +4284,44 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                     requestedFrame,
                     result.data.size());
                 return;
+            }
+
+            if (const char* drawStatusPath = std::getenv("SARP_CLOD_DRAW_STATUS_READBACK_PATH");
+                drawStatusPath && *drawStatusPath) {
+                const size_t fullTelemetryBytes = sizeof(uint32_t) *
+                    static_cast<size_t>(CLodWorkGraphTelemetryBufferCount);
+                if (result.data.size() >= fullTelemetryBytes) {
+                    std::filesystem::path outputPath(drawStatusPath);
+                    if (outputPath.has_parent_path()) {
+                        std::error_code createError;
+                        std::filesystem::create_directories(outputPath.parent_path(), createError);
+                    }
+                    outputPath += ".frame-" + std::to_string(requestedFrame) + ".bin";
+                    std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+                    output.write(
+                        reinterpret_cast<const char*>(result.data.data()),
+                        static_cast<std::streamsize>(fullTelemetryBytes));
+                    if (output) {
+                        spdlog::info(
+                            "SARP CLOD per-draw status readback: frame={} path='{}' bytes={} base={} capacity={}",
+                            requestedFrame,
+                            outputPath.string(),
+                            fullTelemetryBytes,
+                            CLodDrawStatusBase,
+                            CLodDrawStatusCapacity);
+                    } else {
+                        spdlog::warn(
+                            "SARP CLOD per-draw status readback: frame={} failed to write '{}'.",
+                            requestedFrame,
+                            outputPath.string());
+                    }
+                } else {
+                    spdlog::warn(
+                        "SARP CLOD per-draw status readback: frame={} payload too small for status region ({} < {}).",
+                        requestedFrame,
+                        result.data.size(),
+                        fullTelemetryBytes);
+                }
             }
 
             CLodWorkGraphTelemetryCounters decoded{};

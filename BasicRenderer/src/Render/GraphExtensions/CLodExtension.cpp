@@ -779,7 +779,7 @@ void CLodExtension::InitializeCoreResources()
         .add<VisibleClustersCounterTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    m_workGraphTelemetryBuffer = CreateAliasedUnmaterializedStructuredBuffer(CLodWorkGraphCounterCount, sizeof(uint32_t), true, false, false, false);
+    m_workGraphTelemetryBuffer = CreateAliasedUnmaterializedStructuredBuffer(CLodWorkGraphTelemetryBufferCount, sizeof(uint32_t), true, false, false, false);
     m_workGraphTelemetryBuffer->SetName(MakeVariantResourceName(traits, "Work Graph Telemetry Buffer"));
     m_workGraphTelemetryBuffer->GetECSEntity()
         .set<Components::Resource>({ m_workGraphTelemetryBuffer })

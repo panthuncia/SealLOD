@@ -394,6 +394,46 @@ float3x3 cotangent_frame_from_derivs(
     return float3x3(T * invmax, B * invmax, N);
 }
 
+float4 SampleAlphaTestMaterialTexture2DGrad(
+    uint directTextureDescriptorIndex,
+    SamplerState samplerState,
+    uint streamingTextureID,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    uint resolvedTextureDescriptorIndex = directTextureDescriptorIndex;
+    TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
+    bool hasStreamingInfo = streamingTextureID != 0u;
+    if (hasStreamingInfo)
+    {
+        streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
+        if (streamingInfo.imageDescriptorIndex != 0xffffffffu)
+        {
+            resolvedTextureDescriptorIndex = streamingInfo.imageDescriptorIndex;
+        }
+    }
+
+    Texture2D<float4> texture = ResourceDescriptorHeap[
+        NonUniformResourceIndex(resolvedTextureDescriptorIndex)];
+    if (hasStreamingInfo)
+    {
+        uint width;
+        uint height;
+        uint mipCount;
+        texture.GetDimensions(0u, width, height, mipCount);
+        const float2 texelScale = ResolveTextureStreamingTexelScale(
+            streamingInfo, width, height);
+        RecordTextureStreamingFeedback(
+            streamingInfo,
+            streamingTextureID,
+            dUVdx * texelScale,
+            dUVdy * texelScale);
+    }
+
+    return texture.SampleGrad(samplerState, uv, dUVdx, dUVdy);
+}
+
 void TestAlpha(in float2 texcoords, in uint materialDataIndex)
 {
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
@@ -406,9 +446,14 @@ void TestAlpha(in float2 texcoords, in uint materialDataIndex)
 
     if (materialFlags & MATERIAL_BASE_COLOR_TEXTURE)
     {
-        Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
         SamplerState baseColorSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
-        float4 sampledColor = baseColorTexture.SampleGrad(baseColorSamplerState, texcoords, dTexcoordsDx, dTexcoordsDy);
+        float4 sampledColor = SampleAlphaTestMaterialTexture2DGrad(
+            materialInfo.baseColorTextureIndex,
+            baseColorSamplerState,
+            materialInfo.baseColorStreamingTextureID,
+            texcoords,
+            dTexcoordsDx,
+            dTexcoordsDy);
 #if defined(PSO_ALPHA_TEST) || defined (PSO_BLEND)
         if (baseColor.a * sampledColor.a < materialInfo.alphaCutoff){
             discard;
@@ -418,9 +463,14 @@ void TestAlpha(in float2 texcoords, in uint materialDataIndex)
     
     if (materialFlags & MATERIAL_OPACITY_TEXTURE)
     {
-        Texture2D<float4> opacityTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.opacityTextureIndex)];
         SamplerState opacitySamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.opacitySamplerIndex)];
-        float4 opacitySample = opacityTexture.SampleGrad(opacitySamplerState, texcoords, dTexcoordsDx, dTexcoordsDy);
+        float4 opacitySample = SampleAlphaTestMaterialTexture2DGrad(
+            materialInfo.opacityTextureIndex,
+            opacitySamplerState,
+            materialInfo.opacityStreamingTextureID,
+            texcoords,
+            dTexcoordsDx,
+            dTexcoordsDy);
         float opacity = opacitySample.a;
         baseColor.a *= opacity;
         if (baseColor.a < materialInfo.alphaCutoff)
