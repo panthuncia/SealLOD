@@ -116,6 +116,8 @@ struct ShaderInfoBundle {
     bool warningsAsErrors = true;
 };
 
+struct ShaderVariantRequest;
+
 struct ShaderBundle {
     Microsoft::WRL::ComPtr<ID3DBlob> vertexShader;
     Microsoft::WRL::ComPtr<ID3DBlob> pixelShader;
@@ -265,6 +267,7 @@ public:
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle, BackendInstanceId backendInstance);
 	void PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags materialCompileFlags);
+	void PrecompileShaderArtifact(const ShaderVariantRequest& request);
 	ShaderLibraryBundle CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines = {});
 
     void GetPreprocessedBlob(

@@ -1607,6 +1607,7 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 	if (!waitingForGpu.empty()) {
 		for (auto& change : waitingForGpu) m_pendingBindingChanges.push(std::move(change));
 	}
+	FlushPendingTextureImageTableMetadata();
 	PublishTextureImageTable();
 	std::size_t refreshed = 0;
 	{
@@ -1660,7 +1661,12 @@ void TextureStreamingManager::PublishTextureImageTable()
 	input->holdChunks = m_textureImageHoldChunks;
 	const auto root = m_rendererStateRequests->SubmitLatest({
 		{ br::render::ArtifactKind::TextureImageTable, 0, 0 }, m_textureImageTableEpoch,
-		{ br::render::Exact(buffer.version, br::render::ArtifactReadiness::UploadSubmitted) },
+		// The image table is consumed through a published external SRV, outside
+		// the upload graph that owns the copy submission.  Publishing at
+		// UploadSubmitted exposes a newly reused backing before its copy fence has
+		// completed; shaders then observe the previous table contents.  Require
+		// GPU completion before the resolver can select this backing.
+		{ br::render::Exact(buffer.version, br::render::ArtifactReadiness::GpuReady) },
 		br::render::ArtifactPayload::Make<br::render::TextureImageTableBuildInput>(std::move(input)),
 		m_textureImageTableEpoch ^ 0x544558494d475442ull });
 	if (root) {
@@ -1833,7 +1839,69 @@ bool TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_p
 		m_activeTextureStreamingFeedbackIDs.push_back(streamingTextureID);
 	}
 	}
+	// Stable IDs become visible to material and terrain rows before their first
+	// image is necessarily available. Publish that state to the immutable image
+	// table as well: an absent image is represented by UINT32_MAX and causes the
+	// shader to use the row's direct descriptor fallback. Leaving a sparse row
+	// unwritten zero-initialized imageDescriptorIndex, which incorrectly selects
+	// descriptor 0 and lets RVT generation cache black pages.
+	QueueTextureImageTableMetadata(texture);
 	return true;
+}
+
+void TextureStreamingManager::QueueTextureImageTableMetadata(
+	const std::shared_ptr<TextureAsset>& texture)
+{
+	if (!texture || texture->GetStreamingTextureID() == 0u) return;
+	std::lock_guard lock(m_pendingTextureImageTableMetadataMutex);
+	if (m_pendingTextureImageTableMetadataIDs.insert(
+		texture->GetStreamingTextureID()).second) {
+		m_pendingTextureImageTableMetadata.push_back(texture);
+	}
+}
+
+void TextureStreamingManager::FlushPendingTextureImageTableMetadata()
+{
+	std::vector<std::weak_ptr<TextureAsset>> pending;
+	{
+		std::lock_guard lock(m_pendingTextureImageTableMetadataMutex);
+		pending.swap(m_pendingTextureImageTableMetadata);
+		m_pendingTextureImageTableMetadataIDs.clear();
+	}
+	if (pending.empty()) return;
+
+	std::lock_guard publicationLock(m_gpuMetadataPublicationMutex);
+	for (const auto& weakTexture : pending) {
+		const auto texture = weakTexture.lock();
+		if (!texture) continue;
+		const std::uint32_t streamingTextureID = texture->GetStreamingTextureID();
+		if (streamingTextureID == 0u) continue;
+
+		const TextureStreamingGPUInfo metadata = BuildTextureStreamingGPUInfo(*texture);
+		const auto desiredExtent = (std::max)(m_textureImageTableLogicalExtent,
+			static_cast<std::uint64_t>(streamingTextureID) + 1u);
+		m_textureImageTableJournal.RequestCapacity(desiredExtent);
+		m_textureImageTableEpoch = m_textureImageTableJournal.AppendWrite(
+			streamingTextureID,
+			std::as_bytes(std::span{ &metadata, std::size_t{ 1 } }),
+			desiredExtent);
+		m_textureImageTableLogicalExtent = desiredExtent;
+
+		const std::size_t chunkIndex = streamingTextureID /
+			br::render::kTextureImageHoldChunkSize;
+		const std::size_t entryIndex = streamingTextureID %
+			br::render::kTextureImageHoldChunkSize;
+		if (m_textureImageHoldChunks.size() <= chunkIndex) {
+			m_textureImageHoldChunks.resize(chunkIndex + 1u);
+		}
+		auto chunk = m_textureImageHoldChunks[chunkIndex]
+			? std::make_shared<br::render::TextureImageHoldChunk>(
+				*m_textureImageHoldChunks[chunkIndex])
+			: std::make_shared<br::render::TextureImageHoldChunk>();
+		chunk->images[entryIndex] = texture->ImagePtr();
+		m_textureImageHoldChunks[chunkIndex] = std::move(chunk);
+		m_textureImageTableDirty = true;
+	}
 }
 
 void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, TextureFactory& textureFactory)

@@ -16,6 +16,7 @@
 #include "Materials/TechniqueDescriptor.h"
 #include "brslHelpers.h"
 #include "Render/ShaderAPI.h"
+#include "Render/ShaderVariantRequestService.h"
 
 #pragma comment(lib, "dxcompiler.lib")
 
@@ -24,7 +25,7 @@
 namespace {
     // Bump this whenever the shader compiler argument set changes in a way that affects
     // the generated shader bytecode container, especially debug payload availability.
-    constexpr uint64_t kShaderCompilerArgumentFingerprint = 5u;
+    constexpr uint64_t kShaderCompilerArgumentFingerprint = 6u;
 
     // Live optimization jobs must observe source edits immediately. The ordinary
     // runtime path still uses the artifact cache; only the worker servicing an
@@ -135,6 +136,50 @@ uint64_t HashBytesStable(const void* data, size_t size)
 uint64_t HashStringStable(std::string_view value)
 {
     return HashBytesStable(value.data(), value.size());
+}
+
+uint64_t HashFileContentStable(const std::filesystem::path& path)
+{
+    constexpr uint64_t kOffset = 14695981039346656037ull;
+    constexpr uint64_t kPrime = 1099511628211ull;
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return 0;
+    }
+
+    uint64_t hash = kOffset;
+    uint64_t size = 0;
+    std::array<char, 64 * 1024> buffer{};
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = input.gcount();
+        for (std::streamsize index = 0; index < count; ++index) {
+            hash ^= static_cast<uint8_t>(buffer[static_cast<size_t>(index)]);
+            hash *= kPrime;
+        }
+        size += static_cast<uint64_t>(count);
+    }
+    hash ^= size;
+    hash *= kPrime;
+    return hash;
+}
+
+uint64_t ComputeLoadedDxcompilerIdentityHash()
+{
+    wchar_t modulePath[MAX_PATH] = {};
+    HMODULE dxcompilerModule = GetModuleHandleW(L"dxcompiler.dll");
+    if (dxcompilerModule == nullptr ||
+        GetModuleFileNameW(dxcompilerModule, modulePath, MAX_PATH) == 0) {
+        spdlog::warn("Unable to identify loaded dxcompiler.dll for shader cache fingerprinting.");
+        return 0;
+    }
+
+    // The offline preprocessor and the deployed renderer load byte-identical
+    // copies of DXC from different directories.  Paths and copy timestamps are
+    // deployment properties, not compiler identities, and made every offline
+    // artifact unreachable at runtime.  Hash the compiler binary once instead.
+    return HashFileContentStable(std::filesystem::path(modulePath));
 }
 
 uint64_t HashPreprocessedBuffer(const DxcBuffer& buffer)
@@ -271,22 +316,8 @@ uint64_t ComputeShaderCacheBuildConfigHash(shadercache::BinaryFormat binaryForma
 #endif
     util::hash_combine_u64(seed, 1u); // warnings-as-errors is always enabled in the current DXC path
 
-    wchar_t modulePath[MAX_PATH] = {};
-    HMODULE dxcompilerModule = GetModuleHandleW(L"dxcompiler.dll");
-    if (dxcompilerModule != nullptr && GetModuleFileNameW(dxcompilerModule, modulePath, MAX_PATH) > 0) {
-        const std::filesystem::path path(modulePath);
-        util::hash_combine_u64(seed, HashStringStable(NormalizePathUtf8(path)));
-
-        std::error_code ec;
-        const auto fileSize = std::filesystem::file_size(path, ec);
-        if (!ec) {
-            util::hash_combine_u64(seed, fileSize);
-        }
-        const auto lastWrite = std::filesystem::last_write_time(path, ec);
-        if (!ec) {
-            util::hash_combine_u64(seed, lastWrite.time_since_epoch().count());
-        }
-    }
+    static const uint64_t compilerIdentityHash = ComputeLoadedDxcompilerIdentityHash();
+    util::hash_combine_u64(seed, compilerIdentityHash);
 
     return seed;
 }
@@ -2149,6 +2180,71 @@ void PSOManager::PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags mater
     shaderInfo.defines = std::move(shaderDefines);
     // Offline preprocessing has no DeviceManager device, so its runtime backend
     // is intentionally Null. Produce the default renderer-host artifacts.
+    CompileShadersForBackend(shaderInfo, rhi::Backend::D3D12);
+}
+
+void PSOManager::PrecompileShaderArtifact(const ShaderVariantRequest& request)
+{
+    const ShaderVariantRequest normalized = NormalizeShaderVariantRequest(request);
+    if (normalized.kind == ShaderVariantKind::MaterialEvaluation) {
+        PrecompileMaterialEvalShaderArtifact(normalized.materialCompileFlags);
+        return;
+    }
+
+    ShaderInfoBundle shaderInfo;
+    auto defines = GetRasterShaderDefines(normalized.materialRasterFlags);
+    switch (normalized.kind) {
+    case ShaderVariantKind::ClusterLODRaster:
+        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.pixelShader = { L"shaders/ClusterLOD/visibilityOutput.hlsl", L"VisibilityBufferPSMain", L"ps_6_6" };
+        break;
+    case ShaderVariantKind::ClusterLODVirtualShadowRaster:
+        defines.push_back({ L"CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
+        defines.push_back({ L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" });
+        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.pixelShader = { L"shaders/ClusterLOD/VirtualShadowOutput.hlsl", L"VirtualShadowBufferPSMain", L"ps_6_6" };
+        break;
+    case ShaderVariantKind::ClusterLODVirtualShadowReyesRaster:
+        defines.push_back({ L"CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
+        defines.push_back({ L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" });
+        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODReyesVirtualShadowMSMain", L"ms_6_6" };
+        shaderInfo.pixelShader = { L"shaders/ClusterLOD/VirtualShadowOutput.hlsl", L"VirtualShadowBufferPSMain", L"ps_6_6" };
+        break;
+    case ShaderVariantKind::ClusterLODDeepVisibilityRaster:
+        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.pixelShader = { L"shaders/ClusterLOD/DeepVisibilityOutput.hlsl", L"DeepVisibilityBufferPSMain", L"ps_6_6" };
+        break;
+    case ShaderVariantKind::ClusterLODAVBOITOccupancy:
+    case ShaderVariantKind::ClusterLODAVBOITRaster:
+        defines.insert(defines.begin(), DxcDefine{ L"CLOD_AVBOIT_REYES_SEPARATE_BATCH", L"1" });
+        defines.insert(defines.begin(), DxcDefine{ L"CLOD_AVBOIT_FORWARD_TRANSPARENT", L"1" });
+        if (normalized.kind == ShaderVariantKind::ClusterLODAVBOITOccupancy) {
+            defines.push_back({ L"CLOD_AVBOIT_VBOIT_OCCUPANCY_ONLY", L"1" });
+        }
+        defines.push_back({ L"CLOD_AVBOIT_LOW_RES_RASTER", L"1" });
+        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.pixelShader = { L"shaders/ClusterLOD/AVBOITCapture.hlsl", L"AVBOITCapturePSMain", L"ps_6_6" };
+        break;
+    case ShaderVariantKind::ClusterLODAVBOITShade: {
+        auto lightingDefines = GetShaderDefines(0, MaterialCompileNone);
+        defines.insert(defines.end(), lightingDefines.begin(), lightingDefines.end());
+        defines.insert(defines.begin(), DxcDefine{ L"CLOD_AVBOIT_REYES_SEPARATE_BATCH", L"1" });
+        defines.insert(defines.begin(), DxcDefine{ L"CLOD_AVBOIT_FORWARD_TRANSPARENT", L"1" });
+        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.pixelShader = { L"shaders/ClusterLOD/AVBOITShade.hlsl", L"AVBOITShadePSMain", L"ps_6_6" };
+        break;
+    }
+    case ShaderVariantKind::ClusterLODSoftwareRaster:
+        if (normalized.rasterOutputKind == CLodRasterOutputKind::VirtualShadow) {
+            defines.push_back({ L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
+            defines.push_back({ L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" });
+        }
+        shaderInfo.computeShader = { L"Shaders/ClusterLOD/softwareRaster.hlsl", L"SWRasterIndirectCSMain", L"cs_6_6" };
+        break;
+    case ShaderVariantKind::MaterialEvaluation:
+        std::unreachable();
+    }
+    shaderInfo.defines = std::move(defines);
     CompileShadersForBackend(shaderInfo, rhi::Backend::D3D12);
 }
 

@@ -608,7 +608,7 @@ float4 SampleStreamingMaterialTexture2DGrad(
 		TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
 		if (currentBinding.imageDescriptorIndex != 0xffffffffu)
 		{
-			Texture2D<float4> currentTexture = ResourceDescriptorHeap[currentBinding.imageDescriptorIndex];
+			Texture2D<float4> currentTexture = ResourceDescriptorHeap[NonUniformResourceIndex(currentBinding.imageDescriptorIndex)];
 			uint currentWidth;
 			uint currentHeight;
 			uint currentMipCount;
@@ -732,7 +732,7 @@ float SampleStreamingMaterialTexture2DGrad(
 		TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
 		if (currentBinding.imageDescriptorIndex != 0xffffffffu)
 		{
-			Texture2D<float> currentTexture = ResourceDescriptorHeap[currentBinding.imageDescriptorIndex];
+			Texture2D<float> currentTexture = ResourceDescriptorHeap[NonUniformResourceIndex(currentBinding.imageDescriptorIndex)];
 			uint currentWidth;
 			uint currentHeight;
 			uint currentMipCount;
@@ -1101,7 +1101,7 @@ float4 ObjectSurfaceSampleTriplanar4(
         TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
         if (currentBinding.imageDescriptorIndex != 0xffffffffu)
         {
-            Texture2D<float4> currentTexture = ResourceDescriptorHeap[currentBinding.imageDescriptorIndex];
+            Texture2D<float4> currentTexture = ResourceDescriptorHeap[NonUniformResourceIndex(currentBinding.imageDescriptorIndex)];
             RecordObjectSurfaceTriplanarTextureAccess(currentTexture, streamingTextureID,
                 xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
             float4 currentResult = ObjectSurfaceSampleStochastic4NoFeedback(
@@ -1150,7 +1150,7 @@ float ObjectSurfaceSampleTriplanarHeight(
         TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
         if (currentBinding.imageDescriptorIndex != 0xffffffffu)
         {
-            Texture2D<float> currentTexture = ResourceDescriptorHeap[currentBinding.imageDescriptorIndex];
+            Texture2D<float> currentTexture = ResourceDescriptorHeap[NonUniformResourceIndex(currentBinding.imageDescriptorIndex)];
             RecordObjectSurfaceTriplanarTextureAccess(currentTexture, streamingTextureID,
                 xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
             float currentResult = ObjectSurfaceSampleStochastic1NoFeedback(

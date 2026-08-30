@@ -1206,15 +1206,19 @@ std::vector<ResourceIdentifier> MaterialManager::GetSupportedResolverKeys() {
 	for (auto const& [key, _] : m_resolvers) {
 		keys.push_back(key);
 	}
+	if (m_textureStreamingManager) {
+		auto streamingKeys = m_textureStreamingManager->GetSupportedResolverKeys();
+		keys.insert(keys.end(), streamingKeys.begin(), streamingKeys.end());
+	}
 	return keys;
 }
 
 std::shared_ptr<IResourceResolver> MaterialManager::ProvideResolver(ResourceIdentifier const& key) {
 	auto it = m_resolvers.find(key);
-	if (it == m_resolvers.end()) {
-		return nullptr;
+	if (it != m_resolvers.end()) {
+		return it->second;
 	}
-	return it->second;
+	return m_textureStreamingManager ? m_textureStreamingManager->ProvideResolver(key) : nullptr;
 }
 
 // TODO: C++26 will allow optional references

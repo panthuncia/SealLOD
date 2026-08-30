@@ -3488,9 +3488,13 @@ void Renderer::Update(float elapsedSeconds) {
 							const auto readbackAnchor = textureStreaming
 								? textureStreaming->PublishedImageTableReadbackAnchorForDiagnostics()
 								: std::shared_ptr<Resource>{};
+                            // Request the resolver-selected published backing directly.  The
+                            // logical bootstrap resource is only the resolver fallback; passing
+                            // it to the readback service captures that stale backing rather than
+                            // the resource whose descriptor is selected for this pass.
                             requestTable("texture-images", textureImages->table,
-								readbackAnchor ? readbackAnchor.get() :
-									(boundTextureTable ? boundTextureTable.get() : nullptr));
+								boundTextureTable ? boundTextureTable.get() :
+									(readbackAnchor ? readbackAnchor.get() : nullptr));
                         }
 
                         const auto requestTexture = [readbackService, &path](

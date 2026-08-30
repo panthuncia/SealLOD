@@ -541,89 +541,90 @@ void Material::RefreshTextureBindings() {
     };
 
     if (m_baseColorTexture != nullptr) {
+        m_materialData.baseColorSamplerIndex = m_baseColorTexture->SamplerDescriptorIndex();
+        m_materialData.baseColorStreamingTextureID = textureStreamingEnabled ? m_baseColorTexture->GetStreamingTextureID() : 0u;
+        m_materialData.baseColorChannels = RgbaChannelsOrDefault(m_baseColorChannels);
+        m_materialData.baseColorUvSetIndex = m_baseColorUvSetIndex;
         auto image = m_baseColorTexture->ImagePtr();
         if (image) {
             m_materialData.baseColorTextureIndex = image->GetSRVInfo(0).slot.index;
-            m_materialData.baseColorSamplerIndex = m_baseColorTexture->SamplerDescriptorIndex();
-            m_materialData.baseColorStreamingTextureID = textureStreamingEnabled ? m_baseColorTexture->GetStreamingTextureID() : 0u;
-            m_materialData.baseColorChannels = RgbaChannelsOrDefault(m_baseColorChannels);
-            m_materialData.baseColorUvSetIndex = m_baseColorUvSetIndex;
             annotateMaterialTexture(m_baseColorTexture, "BaseColorTexture");
         }
     }
     if (m_normalTexture != nullptr) {
-        auto image = m_normalTexture->ImagePtr();
-        if (image) {
-            const auto normalFormat = m_normalTexture->Format();
-            if (NormalTextureNeedsReconstructedZ(normalFormat)) {
-                if (!HasReconstructedZChannels(m_normalChannels)) {
-                    spdlog::warn(
-                        "Material '{}' normal texture '{}' uses {} but requested channels ({},{},{}); forcing reconstructed-Z channels (0,1,4).",
-                        m_name,
-                        !m_normalSourcePath.empty() ? m_normalSourcePath : m_normalTexture->Meta().filePath,
-                        NormalTextureFormatName(normalFormat),
-                        m_normalChannels.size() > 0u ? m_normalChannels[0] : 0u,
-                        m_normalChannels.size() > 1u ? m_normalChannels[1] : 0u,
-                        m_normalChannels.size() > 2u ? m_normalChannels[2] : 0u);
-                }
-                m_normalChannels = { 0u, 1u, 4u };
-            }
-            else if (IsDxt5Format(normalFormat) && RequestsRgbNormalChannels(m_normalChannels)) {
+        m_materialData.normalSamplerIndex = m_normalTexture->SamplerDescriptorIndex();
+        m_materialData.normalStreamingTextureID = textureStreamingEnabled ? m_normalTexture->GetStreamingTextureID() : 0u;
+        m_materialData.normalChannels = RgbChannelsOrDefault(m_normalChannels);
+        m_materialData.normalUvSetIndex = m_normalUvSetIndex;
+        const auto normalFormat = m_normalTexture->Format();
+        if (NormalTextureNeedsReconstructedZ(normalFormat)) {
+            if (!HasReconstructedZChannels(m_normalChannels)) {
                 spdlog::warn(
-                    "Material '{}' normal texture '{}' uses {} but requested RGB channels (0,1,2); DXT5 normal maps usually need an explicit packed-channel convention.",
+                    "Material '{}' normal texture '{}' uses {} but requested channels ({},{},{}); forcing reconstructed-Z channels (0,1,4).",
                     m_name,
                     !m_normalSourcePath.empty() ? m_normalSourcePath : m_normalTexture->Meta().filePath,
-                    NormalTextureFormatName(normalFormat));
+                    NormalTextureFormatName(normalFormat),
+                    m_normalChannels.size() > 0u ? m_normalChannels[0] : 0u,
+                    m_normalChannels.size() > 1u ? m_normalChannels[1] : 0u,
+                    m_normalChannels.size() > 2u ? m_normalChannels[2] : 0u);
             }
-            m_materialData.normalTextureIndex = image->GetSRVInfo(0).slot.index;
-            m_materialData.normalSamplerIndex = m_normalTexture->SamplerDescriptorIndex();
-            m_materialData.normalStreamingTextureID = textureStreamingEnabled ? m_normalTexture->GetStreamingTextureID() : 0u;
+            m_normalChannels = { 0u, 1u, 4u };
             m_materialData.normalChannels = RgbChannelsOrDefault(m_normalChannels);
-            m_materialData.normalUvSetIndex = m_normalUvSetIndex;
+        }
+        else if (IsDxt5Format(normalFormat) && RequestsRgbNormalChannels(m_normalChannels)) {
+            spdlog::warn(
+                "Material '{}' normal texture '{}' uses {} but requested RGB channels (0,1,2); DXT5 normal maps usually need an explicit packed-channel convention.",
+                m_name,
+                !m_normalSourcePath.empty() ? m_normalSourcePath : m_normalTexture->Meta().filePath,
+                NormalTextureFormatName(normalFormat));
+        }
+        auto image = m_normalTexture->ImagePtr();
+        if (image) {
+            m_materialData.normalTextureIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_normalTexture, "NormalTexture");
         }
     }
     if (m_aoMap != nullptr) {
+        m_materialData.aoSamplerIndex = m_aoMap->SamplerDescriptorIndex();
+        m_materialData.aoStreamingTextureID = textureStreamingEnabled ? m_aoMap->GetStreamingTextureID() : 0u;
+        m_materialData.aoChannel = FirstChannelOrDefault(m_aoChannel, 0u);
+        m_materialData.aoUvSetIndex = m_aoUvSetIndex;
         auto image = m_aoMap->ImagePtr();
         if (image) {
             m_materialData.aoMapIndex = image->GetSRVInfo(0).slot.index;
-            m_materialData.aoSamplerIndex = m_aoMap->SamplerDescriptorIndex();
-            m_materialData.aoStreamingTextureID = textureStreamingEnabled ? m_aoMap->GetStreamingTextureID() : 0u;
-            m_materialData.aoChannel = FirstChannelOrDefault(m_aoChannel, 0u);
-            m_materialData.aoUvSetIndex = m_aoUvSetIndex;
             annotateMaterialTexture(m_aoMap, "AOMap");
         }
     }
     if (m_heightMap != nullptr) {
+        m_materialData.heightSamplerIndex = m_heightMap->SamplerDescriptorIndex();
+        m_materialData.heightStreamingTextureID = textureStreamingEnabled ? m_heightMap->GetStreamingTextureID() : 0u;
+        m_materialData.heightChannel = FirstChannelOrDefault(m_heightChannel, 0u);
+        m_materialData.heightUvSetIndex = m_heightUvSetIndex;
         auto image = m_heightMap->ImagePtr();
         if (image) {
             m_materialData.heightMapIndex = image->GetSRVInfo(0).slot.index;
-            m_materialData.heightSamplerIndex = m_heightMap->SamplerDescriptorIndex();
-            m_materialData.heightStreamingTextureID = textureStreamingEnabled ? m_heightMap->GetStreamingTextureID() : 0u;
-            m_materialData.heightChannel = FirstChannelOrDefault(m_heightChannel, 0u);
-            m_materialData.heightUvSetIndex = m_heightUvSetIndex;
             annotateMaterialTexture(m_heightMap, "HeightMap");
         }
     }
     if (m_metallicTexture != nullptr) {
+        m_materialData.metallicSamplerIndex = m_metallicTexture->SamplerDescriptorIndex();
+        m_materialData.metallicStreamingTextureID = textureStreamingEnabled ? m_metallicTexture->GetStreamingTextureID() : 0u;
+        m_materialData.metallicChannel = FirstChannelOrDefault(m_metallicChannel, 0u);
+        m_materialData.metallicUvSetIndex = m_metallicUvSetIndex;
         auto image = m_metallicTexture->ImagePtr();
         if (image) {
             m_materialData.metallicTextureIndex = image->GetSRVInfo(0).slot.index;
-            m_materialData.metallicSamplerIndex = m_metallicTexture->SamplerDescriptorIndex();
-            m_materialData.metallicStreamingTextureID = textureStreamingEnabled ? m_metallicTexture->GetStreamingTextureID() : 0u;
-            m_materialData.metallicChannel = FirstChannelOrDefault(m_metallicChannel, 0u);
-            m_materialData.metallicUvSetIndex = m_metallicUvSetIndex;
             annotateMaterialTexture(m_metallicTexture, "MetallicTexture");
         }
     }
     if (m_roughnessTexture != nullptr) {
+        m_materialData.roughnessSamplerIndex = m_roughnessTexture->SamplerDescriptorIndex();
+        m_materialData.roughnessStreamingTextureID = textureStreamingEnabled ? m_roughnessTexture->GetStreamingTextureID() : 0u;
+        m_materialData.roughnessChannel = FirstChannelOrDefault(m_roughnessChannel, 0u);
+        m_materialData.roughnessUvSetIndex = m_roughnessUvSetIndex;
         auto image = m_roughnessTexture->ImagePtr();
         if (image) {
             m_materialData.roughnessTextureIndex = image->GetSRVInfo(0).slot.index;
-            m_materialData.roughnessSamplerIndex = m_roughnessTexture->SamplerDescriptorIndex();
-            m_materialData.roughnessStreamingTextureID = textureStreamingEnabled ? m_roughnessTexture->GetStreamingTextureID() : 0u;
-            m_materialData.roughnessChannel = FirstChannelOrDefault(m_roughnessChannel, 0u);
-            m_materialData.roughnessUvSetIndex = m_roughnessUvSetIndex;
             annotateMaterialTexture(m_roughnessTexture, "RoughnessTexture");
         }
     }
@@ -634,24 +635,24 @@ void Material::RefreshTextureBindings() {
     }
 
     if (m_emissiveTexture != nullptr) {
+        m_materialData.emissiveSamplerIndex = m_emissiveTexture->SamplerDescriptorIndex();
+        m_materialData.emissiveStreamingTextureID = textureStreamingEnabled ? m_emissiveTexture->GetStreamingTextureID() : 0u;
+        m_materialData.emissiveChannels = RgbChannelsOrDefault(m_emissiveChannels);
+        m_materialData.emissiveUvSetIndex = m_emissiveUvSetIndex;
         auto image = m_emissiveTexture->ImagePtr();
         if (image) {
             m_materialData.emissiveTextureIndex = image->GetSRVInfo(0).slot.index;
-            m_materialData.emissiveSamplerIndex = m_emissiveTexture->SamplerDescriptorIndex();
-            m_materialData.emissiveStreamingTextureID = textureStreamingEnabled ? m_emissiveTexture->GetStreamingTextureID() : 0u;
-            m_materialData.emissiveChannels = RgbChannelsOrDefault(m_emissiveChannels);
-            m_materialData.emissiveUvSetIndex = m_emissiveUvSetIndex;
             annotateMaterialTexture(m_emissiveTexture, "EmissiveTexture");
         }
     }
 
     if (m_opacityTexture != nullptr) {
+        m_materialData.opacitySamplerIndex = m_opacityTexture->SamplerDescriptorIndex();
+        m_materialData.opacityStreamingTextureID = textureStreamingEnabled ? m_opacityTexture->GetStreamingTextureID() : 0u;
+        m_materialData.opacityUvSetIndex = m_opacityUvSetIndex;
         auto image = m_opacityTexture->ImagePtr();
         if (image) {
             m_materialData.opacityTextureIndex = image->GetSRVInfo(0).slot.index;
-            m_materialData.opacitySamplerIndex = m_opacityTexture->SamplerDescriptorIndex();
-            m_materialData.opacityStreamingTextureID = textureStreamingEnabled ? m_opacityTexture->GetStreamingTextureID() : 0u;
-            m_materialData.opacityUvSetIndex = m_opacityUvSetIndex;
             annotateMaterialTexture(m_opacityTexture, "OpacityTexture");
         }
     }

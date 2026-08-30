@@ -2306,6 +2306,14 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     materialInputs.semanticFamily = materialInfo.semanticFamily;
     materialInputs.surfaceFlags = materialInfo.surfaceFlags;
     materialInputs.diagnosticReason = materialInfo.diagnosticReason;
+    // Temporary GPU correlation: record the image descriptor obtained by the
+    // shader's stable-ID table lookup.  The surface record already retains the
+    // exact material row, which supplies the corresponding stable texture ID.
+    if (materialInfo.baseColorStreamingTextureID != 0u)
+    {
+        materialInputs.diagnosticReason =
+            LoadTextureStreamingInfo(materialInfo.baseColorStreamingTextureID).imageDescriptorIndex;
+    }
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     sample.materialInfo = (MaterialInfo)0;
 #else

@@ -337,6 +337,11 @@ namespace {
             return false;
         }
 
+		// Terrain source textures can disappear behind RVT hits for long periods,
+		// so ordinary material feedback is not a reliable residency signal for
+		// them. Keep their complete mip chains resident while the RVT transition is
+		// being validated; stable IDs still provide descriptor publication.
+		texture->SetMipStreamingSuppressed(true);
         texture->SetGenerateMipmaps(generateMipmaps);
         if (textureFactory) {
             if (materialManager) {

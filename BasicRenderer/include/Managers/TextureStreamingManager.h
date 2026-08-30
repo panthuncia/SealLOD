@@ -224,6 +224,8 @@ private:
 	void NotifyBindingChanged(TextureAsset& texture);
 	void TrackTexture(const std::shared_ptr<TextureAsset>& texture);
 	void RecordTextureDirtyReason(const char* reason);
+	void QueueTextureImageTableMetadata(const std::shared_ptr<TextureAsset>& texture);
+	void FlushPendingTextureImageTableMetadata();
 	void PublishTextureImageTable();
 	MaterialTextureStreamingStats BuildTextureStreamingStats() const;
 
@@ -233,6 +235,9 @@ private:
 	br::render::VersionedGpuBufferJournal m_textureImageTableJournal{ sizeof(TextureStreamingGPUInfo) };
 	std::shared_ptr<br::render::VersionedBufferFamily> m_textureImageTableFamily;
 	std::vector<std::shared_ptr<const br::render::TextureImageHoldChunk>> m_textureImageHoldChunks;
+	std::mutex m_pendingTextureImageTableMetadataMutex;
+	std::vector<std::weak_ptr<TextureAsset>> m_pendingTextureImageTableMetadata;
+	std::unordered_set<std::uint32_t> m_pendingTextureImageTableMetadataIDs;
 	std::uint64_t m_textureImageTableEpoch = 0;
 	std::uint64_t m_textureImageTableLogicalExtent = 1;
 	bool m_textureImageTableDirty = false;
