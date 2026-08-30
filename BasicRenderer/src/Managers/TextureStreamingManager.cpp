@@ -1742,26 +1742,6 @@ bool TextureStreamingManager::RequestExternalMaterialTextureReadback(
 	return true;
 }
 
-bool TextureStreamingManager::RequestStreamingTextureReadback(
-	uint32_t streamingTextureID,
-	std::wstring outputFile,
-	std::function<void()> callback)
-{
-	const auto found = m_streamingTexturesByID.find(streamingTextureID);
-	const auto texture = found != m_streamingTexturesByID.end() ? found->second.lock() : nullptr;
-	std::shared_ptr<PixelBuffer> selectedImage;
-	if (m_rendererStateRequests) {
-		const auto graphBinding = m_rendererStateRequests->Snapshot(br::render::ArtifactAddress{
-			br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 })
-			.payload.Get<br::render::PublishedTextureBinding>();
-		if (graphBinding) selectedImage = graphBinding->image;
-	}
-	if (!selectedImage && texture) selectedImage = texture->GetPublishedBindingSnapshot().image;
-	return texture && RequestExternalMaterialTextureReadback(
-		selectedImage,
-		std::move(outputFile), std::move(callback));
-}
-
 void TextureStreamingManager::FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture)
 {
 	ZoneScopedN("TextureStreamingManager::FlushDirtyTextureMetadata");

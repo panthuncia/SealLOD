@@ -1091,11 +1091,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     class TimedMutexLock {
     public:
         TimedMutexLock(Impl& owner, GraphMutexPhase phase, bool acquire = true)
-            : m_owner(&owner), m_phase(phase), m_lock(owner.mutex, std::defer_lock) {
+            : m_owner(&owner), m_phase(phase), m_lock(owner.mutex, std::defer_lock),
+              m_trace(acquire ? owner.trace.load(std::memory_order_acquire) : nullptr) {
             if (!acquire) return;
-            m_waitStarted = std::chrono::steady_clock::now();
+            if (m_trace) m_waitStarted = std::chrono::steady_clock::now();
             m_lock.lock();
-            m_acquired = std::chrono::steady_clock::now();
+            if (m_trace) m_acquired = std::chrono::steady_clock::now();
         }
         ~TimedMutexLock() { Unlock(); }
         TimedMutexLock(const TimedMutexLock&) = delete;
@@ -1103,6 +1104,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
         void Unlock() {
             if (!m_lock.owns_lock()) return;
+            if (!m_trace) {
+                m_lock.unlock();
+                return;
+            }
             const auto released = std::chrono::steady_clock::now();
             const GraphMutexCounts counts{
                 m_owner->nodes.size(), m_owner->versions.size(), m_owner->pending.size(),
@@ -1115,9 +1120,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             const auto holdMicros = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     released - m_acquired).count());
-            if (auto session = m_owner->trace.load(std::memory_order_acquire)) {
-                session->RecordMutex(m_phase, waitMicros, holdMicros, counts);
-            }
+            m_trace->RecordMutex(m_phase, waitMicros, holdMicros, counts);
         }
 
     private:
@@ -1126,6 +1129,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::chrono::steady_clock::time_point m_waitStarted;
         std::unique_lock<std::mutex> m_lock;
         std::chrono::steady_clock::time_point m_acquired;
+        std::shared_ptr<GraphTraceSession> m_trace;
     };
 
     [[nodiscard]] TimedMutexLock LockMutex(GraphMutexPhase phase) {
@@ -1810,19 +1814,23 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         if (node.producedRevision == node.desiredRevision &&
             (node.state == ArtifactReadiness::GpuReady ||
              node.state == ArtifactReadiness::Published)) return;
-        const auto latchStarted = std::chrono::steady_clock::now();
+        const auto phaseTrace = trace.load(std::memory_order_acquire);
+        const auto latchStarted = phaseTrace
+            ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         LatchReadyGates(node);
-        const auto latchDone = std::chrono::steady_clock::now();
+        const auto latchDone = phaseTrace
+            ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const bool dependenciesSatisfied = DependenciesSatisfied(node);
-        const auto dependenciesDone = std::chrono::steady_clock::now();
+        const auto dependenciesDone = phaseTrace
+            ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto recordQueuePhase = [&](std::string_view phase,
             std::chrono::steady_clock::time_point begin,
             std::chrono::steady_clock::time_point end) {
+            if (!phaseTrace) return;
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
             if (elapsed < 2'000) return;
-            if (auto session = trace.load(std::memory_order_acquire))
-                session->Record("QueueNodePhase", node.key, node.desiredRevision,
-                    node.versionGeneration, node.state, elapsed, std::string(phase));
+            phaseTrace->Record("QueueNodePhase", node.key, node.desiredRevision,
+                node.versionGeneration, node.state, elapsed, std::string(phase));
         };
         recordQueuePhase("latch_ready_gates", latchStarted, latchDone);
         recordQueuePhase("dependencies_satisfied", latchDone, dependenciesDone);
@@ -2400,25 +2408,25 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         };
         constexpr auto maxDuration = std::chrono::milliseconds(2);
         const auto started = std::chrono::steady_clock::now();
-        if (auto session = trace.load(std::memory_order_acquire)) {
-            session->Record("DrainStarted");
-        }
+        const auto drainTrace = trace.load(std::memory_order_acquire);
+        if (drainTrace) drainTrace->Record("DrainStarted");
         std::size_t transitions = 0;
         std::vector<PendingGpuSignal> signalledGpu;
         std::vector<std::pair<std::function<void(const ArtifactSnapshot&)>, ArtifactSnapshot>> accepted;
         std::vector<AcceptanceDispatch> acceptanceDispatches;
         {
             auto lock = LockMutex(GraphMutexPhase::DrainGpuCollect);
-			auto gpuCollectPhaseStarted = std::chrono::steady_clock::now();
+			auto gpuCollectPhaseStarted = drainTrace
+				? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 			const auto recordGpuCollectPhase = [&](std::string_view phase) {
+				if (!drainTrace) return;
 				const auto now = std::chrono::steady_clock::now();
 				const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
 					now - gpuCollectPhaseStarted).count();
 				gpuCollectPhaseStarted = now;
 				if (elapsed < 2'000) return;
-				if (auto session = trace.load(std::memory_order_acquire))
-					session->Record("DrainGpuCollectPhase", {}, 0, 0,
-						ArtifactReadiness::Missing, elapsed, std::string(phase));
+				drainTrace->Record("DrainGpuCollectPhase", {}, 0, 0,
+					ArtifactReadiness::Missing, elapsed, std::string(phase));
 			};
 			GpuSignal notification;
 			std::unordered_set<ArtifactKey, ArtifactKey::Hasher> selectedGpuKeys;
@@ -2851,10 +2859,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 			// capacity waiters that may now reuse an unpublished backing.
 			NotifyVersionedGpuBufferFrameRetirement();
 		}
-        if (auto session = trace.load(std::memory_order_acquire)) {
+        if (drainTrace) {
             const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - started).count();
-            session->Record("DrainCompleted", {}, 0, 0, ArtifactReadiness::Missing,
+            drainTrace->Record("DrainCompleted", {}, 0, 0, ArtifactReadiness::Missing,
                 duration, std::format("transitions={} builds={} ready={} gpuSignals={}",
                     transitions, builds.size(), ready.size(), signalledGpu.size()));
         }
@@ -2931,8 +2939,9 @@ std::vector<ArtifactRequestResult> AsyncStateGraph::RequestBatch(
 ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uint64_t desiredRevision,
     std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
     std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex) {
-    if (auto session = m_impl->trace.load(std::memory_order_acquire)) {
-        session->Record("RequestReceived", key, desiredRevision, 0,
+    const auto requestTrace = m_impl->trace.load(std::memory_order_acquire);
+    if (requestTrace) {
+        requestTrace->Record("RequestReceived", key, desiredRevision, 0,
             ArtifactReadiness::Missing, 0,
             std::format("dependencies={} fingerprint={}", requirements.size(), requestFingerprint));
     }
@@ -2942,16 +2951,17 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
     ArtifactRequestResult result;
     {
         Impl::TimedMutexLock lock(*m_impl, GraphMutexPhase::Request, !callerOwnsMutex);
-        auto requestPhaseStarted = std::chrono::steady_clock::now();
+        auto requestPhaseStarted = requestTrace
+            ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto recordRequestPhase = [&](std::string_view phase) {
+            if (!requestTrace) return;
             const auto now = std::chrono::steady_clock::now();
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                 now - requestPhaseStarted).count();
             requestPhaseStarted = now;
             if (elapsed < 2'000) return;
-            if (auto session = m_impl->trace.load(std::memory_order_acquire))
-                session->Record("RequestPhase", key, desiredRevision, 0,
-                    ArtifactReadiness::Missing, elapsed, std::string(phase));
+            requestTrace->Record("RequestPhase", key, desiredRevision, 0,
+                ArtifactReadiness::Missing, elapsed, std::string(phase));
         };
         const auto producer = m_impl->producers.find(key.kind);
         if (producer != m_impl->producers.end() &&
@@ -2977,11 +2987,10 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                 requestedVersion, ++m_impl->nextVersionGeneration).first;
         }
         const auto traceAcceptedRequest = [&] {
-            auto session = m_impl->trace.load(std::memory_order_acquire);
-            if (!session) return;
+            if (!requestTrace) return;
             for (const auto& requirement : requirements) {
-                if (!session->Config().includeDependencyEvents) break;
-                session->Record("DependencyDeclared", key, desiredRevision,
+                if (!requestTrace->Config().includeDependencyEvents) break;
+                requestTrace->Record("DependencyDeclared", key, desiredRevision,
                     versionGeneration->second, requirement.requiredReadiness, 0,
                     std::format("policy={} invalidation={} alternative_group={} generation={}",
                         static_cast<unsigned>(requirement.policy),
@@ -2991,14 +3000,14 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             }
             if (key.kind == ArtifactKind::StaticTransaction) {
                 if (const auto transaction = input.Get<StaticTransactionBuildInput>()) {
-                    session->Record("StaticTransactionContents", key, desiredRevision,
+                    requestTrace->Record("StaticTransactionContents", key, desiredRevision,
                         versionGeneration->second, ArtifactReadiness::Missing, 0,
                         std::format("groups={} placements={} draws={} active={} stream_generation={}",
                             transaction->groupCount, transaction->placementCount,
                             transaction->drawRecordCount, transaction->activeEntryCount,
                             transaction->streamGeneration));
                     for (const auto& group : transaction->groups) {
-                        session->Record("StaticGroupTransactionLinked", key, desiredRevision,
+                        requestTrace->Record("StaticGroupTransactionLinked", key, desiredRevision,
                             versionGeneration->second, ArtifactReadiness::Missing, 0,
                             std::format("placements={} draws={} active={}", group.placementCount,
                                 group.drawRecordCount, group.activeEntryCount),
@@ -3008,7 +3017,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                 }
             } else if (key.kind == ArtifactKind::StaticScene) {
                 if (const auto scene = input.Get<StaticSceneBuildInput>()) {
-                    session->Record("StaticSceneContents", key, desiredRevision,
+                    requestTrace->Record("StaticSceneContents", key, desiredRevision,
                         versionGeneration->second, ArtifactReadiness::Missing, 0,
                         std::format("groups={} desired_placements={} materialized_placements={} retired_placements={}",
                             scene->groupOwners.size(), scene->desiredPlacementCount,
@@ -3025,8 +3034,8 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             if (knownSignature->second.fingerprint != requestFingerprint ||
                 knownSignature->second.inputType != input.Type() ||
                 knownSignature->second.requirements != requirements) {
-                if (auto session = m_impl->trace.load(std::memory_order_acquire)) {
-                    session->Record("RequestConflict", key, desiredRevision,
+                if (requestTrace) {
+                    requestTrace->Record("RequestConflict", key, desiredRevision,
                         versionGeneration->second, node.state);
                 }
                 return { ArtifactRequestStatus::ConflictingRevision, node.generation,
@@ -3044,8 +3053,8 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             if (stillDesired) {
                 auto versionLease = m_impl->AcquireVersionLease({ key, desiredRevision,
                     versionGeneration->second });
-                if (auto session = m_impl->trace.load(std::memory_order_acquire)) {
-                    session->Record("RequestAlreadyDesired", key, desiredRevision,
+                if (requestTrace) {
+                    requestTrace->Record("RequestAlreadyDesired", key, desiredRevision,
                         versionGeneration->second, node.state);
                 }
                 return { ArtifactRequestStatus::AlreadyDesired, node.generation,
@@ -3132,8 +3141,8 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             m_impl->SupersedeDependents(key, visited);
             result = { ArtifactRequestStatus::Accepted, node.generation,
                 { key, desiredRevision, versionGeneration->second }, versionLease };
-            if (auto session = m_impl->trace.load(std::memory_order_acquire)) {
-                session->Record("SuccessorQueued", key, desiredRevision,
+            if (requestTrace) {
+                requestTrace->Record("SuccessorQueued", key, desiredRevision,
                     versionGeneration->second, node.state);
             }
             // The active immutable version retains its own input and closure.
@@ -3180,8 +3189,8 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
         recordRequestPhase("queue_and_supersede");
         result = { ArtifactRequestStatus::Accepted, node.generation,
             { key, desiredRevision, versionGeneration->second }, versionLease };
-        if (auto session = m_impl->trace.load(std::memory_order_acquire)) {
-            session->Record("RequestAccepted", key, desiredRevision,
+        if (requestTrace) {
+            requestTrace->Record("RequestAccepted", key, desiredRevision,
                 versionGeneration->second, node.state);
         }
     }
@@ -3620,16 +3629,18 @@ ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactVersionID version) const {
 
 ArtifactDiagnostic AsyncStateGraph::Diagnose(ArtifactKey key) const {
     auto lock = m_impl->LockMutex(GraphMutexPhase::Diagnose);
-    auto phaseStarted = std::chrono::steady_clock::now();
+    const auto diagnoseTrace = m_impl->trace.load(std::memory_order_acquire);
+    auto phaseStarted = diagnoseTrace
+        ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto recordPhase = [&](std::string_view phase) {
+        if (!diagnoseTrace) return;
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             now - phaseStarted).count();
         phaseStarted = now;
         if (elapsed < 2'000) return;
-        if (auto session = m_impl->trace.load(std::memory_order_acquire))
-            session->Record("DiagnosePhase", key, 0, 0, ArtifactReadiness::Missing,
-                elapsed, std::string(phase));
+        diagnoseTrace->Record("DiagnosePhase", key, 0, 0, ArtifactReadiness::Missing,
+            elapsed, std::string(phase));
     };
     ArtifactDiagnostic result;
     const auto found = m_impl->nodes.find(key);

@@ -100,23 +100,6 @@ public:
             std::string maxQueueWaitTask;
             std::string maxExecutionTask;
         };
-        struct GpuBufferBuildSnapshot {
-            bool active = false;
-            std::string phase;
-            uint32_t artifactKind = 0;
-            uint64_t artifactPrimary = 0, artifactVariant = 0;
-            uint64_t revision = 0, generation = 0;
-            uint64_t phaseElapsedMicros = 0, buildElapsedMicros = 0;
-            uint64_t elementCount = 0, capacity = 0, byteCount = 0, writeCount = 0;
-            uint64_t exhaustedCapacityClass = 0;
-            uint32_t exhaustedBackingCount = 0;
-            std::array<uint64_t, 8> exhaustedBackingGenerations{};
-            std::array<uint32_t, 8> exhaustedBackingReferences{};
-            std::array<uint32_t, 8> exhaustedResourceReferences{};
-            std::string debugName;
-            std::array<uint64_t, 8> maxPhaseMicros{};
-            std::array<uint64_t, 8> phaseCompletions{};
-        };
         bool sceneTaskInFlight = false;
         bool hasCommittedSceneSnapshot = false;
         uint64_t committedSceneSnapshotSequence = 0;
@@ -172,7 +155,6 @@ public:
         uint32_t shaderCompileTasks = 0;
         uint32_t schedulerWorkerCount = 0;
         std::array<SchedulerDomainSnapshot, 10> schedulerDomains{};
-        GpuBufferBuildSnapshot gpuBufferBuild;
         br::render::RendererStatePublisherStats rendererStatePublisher;
         uint64_t deferredRetireQueueDepth = 0;
         uint64_t drawRecordsAllocated = 0;

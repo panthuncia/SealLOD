@@ -29,25 +29,6 @@
 
 #define SW_CLUSTER_RASTER_THREADS 32
 
-static const uint WG_DRAW_STATUS_BASE = 279u;
-static const uint WG_DRAW_STATUS_CAPACITY = 100000u;
-static const uint WG_DRAW_STATUS_SW_RASTER_CONSUMED = 1u << 14;
-
-void SWRasterDrawStatusOr(uint drawRecordIndex, uint mask)
-{
-#if defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
-    const uint telemetryDescriptorIndex = CLOD_WG_TELEMETRY_DESCRIPTOR_INDEX;
-#else
-    const uint telemetryDescriptorIndex = CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX;
-#endif
-    if (telemetryDescriptorIndex == 0xFFFFFFFFu || drawRecordIndex >= WG_DRAW_STATUS_CAPACITY)
-    {
-        return;
-    }
-    RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[telemetryDescriptorIndex];
-    InterlockedOr(telemetryCounters[WG_DRAW_STATUS_BASE + drawRecordIndex], mask);
-}
-
 #ifndef CLOD_WG_SW_RASTER_THREADS
 #define CLOD_WG_SW_RASTER_THREADS SW_CLUSTER_RASTER_THREADS
 #endif
@@ -465,10 +446,6 @@ void SWRasterCluster(
 {
     const uint viewID = CLodVisibleClusterViewID(packedCluster);
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
-    if (GI == 0u && subGroup == 0u)
-    {
-        SWRasterDrawStatusOr(instanceID, WG_DRAW_STATUS_SW_RASTER_CONSUMED);
-    }
     const uint localMeshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
     const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
     const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);

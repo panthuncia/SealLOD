@@ -33,21 +33,6 @@ namespace {
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
 	constexpr bool kEnableMaterialStateGraph = true;
 
-	bool RasterBucketDiagnosticsEnabled() {
-		static const bool enabled = [] {
-			char* value = nullptr;
-			size_t valueLength = 0;
-			if (_dupenv_s(&value, &valueLength, "SARP_RASTER_BUCKET_DIAGNOSTICS") != 0 || value == nullptr) {
-				std::free(value);
-				return false;
-			}
-			const std::string text(value);
-			std::free(value);
-			return !text.empty() && text != "0" && text != "false" && text != "FALSE";
-		}();
-		return enabled;
-	}
-
 	const std::string& MaterialTextureTraceFilter() {
 		static const std::string filter = [] {
 			char* value = nullptr;
@@ -534,24 +519,6 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 		// versions. Drain all ready candidates as one cooperative batch. The drain
 		// never waits: candidates whose transfer has not completed stay coalesced.
 		(void)m_textureStreamingManager->DrainPendingBindingChanges();
-	}
-	static bool debugTextureReadbackRequested = false;
-	if (!debugTextureReadbackRequested && frameIndex >= 120u && m_textureStreamingManager) {
-		char* idValue = nullptr;
-		size_t idLength = 0;
-		wchar_t* pathValue = nullptr;
-		size_t pathLength = 0;
-		if (_dupenv_s(&idValue, &idLength, "SARP_TEXTURE_READBACK_STREAMING_ID") == 0 && idValue &&
-			_wdupenv_s(&pathValue, &pathLength, L"SARP_TEXTURE_READBACK_PATH") == 0 && pathValue) {
-			char* end = nullptr;
-			const auto id = std::strtoul(idValue, &end, 10);
-			if (end != idValue && *end == '\0') {
-				debugTextureReadbackRequested = m_textureStreamingManager->RequestStreamingTextureReadback(
-					static_cast<uint32_t>(id), pathValue, {});
-			}
-		}
-		std::free(idValue);
-		std::free(pathValue);
 	}
 	const auto streamingEnd = std::chrono::steady_clock::now();
 	const auto& lateReadbackPath = MaterialTextureLateReadbackPath();
@@ -1462,20 +1429,6 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 					m_materialBufferFamilies[2]->Acknowledge(materialState->openPbrTable);
 					m_acknowledgedMaterialPublishedRevision = revision;
 				}
-				if (materialState->baseTable && materialState->evalTable && materialState->openPbrTable &&
-					published->materials.revision > m_observedMaterialPublishedRevision) {
-					m_observedMaterialPublishedRevision = published->materials.revision;
-					const auto resourceID = [](const auto& table) {
-						return table && table->resource ? table->resource->GetGlobalResourceID() : 0u;
-					};
-					spdlog::info(
-						"MaterialManager: graph-owned material table ready epoch={} revision={} rows(desired={} published={} slotsUsed={} capacity={}) resources(base={} eval={} openPbr={})",
-						published->epoch, published->materials.revision, m_materialSlotsUsed,
-						materialState->baseTable->elementCount, m_materialSlotsUsed,
-						materialState->baseTable->capacity,
-						resourceID(materialState->baseTable), resourceID(materialState->evalTable),
-						resourceID(materialState->openPbrTable));
-				}
 			}
 		}
 	}
@@ -1683,20 +1636,6 @@ bool MaterialManager::TryActivatePublishedMaterialState() {
 	}
 	m_materialGraphActive = true;
 	m_activeMaterialPublishedRevision = published->materials.revision;
-	const auto resolvedBase = m_materialTableResolvers[0]->Resolve();
-	const auto resolvedEval = m_materialTableResolvers[1]->Resolve();
-	const auto resolvedOpenPbr = m_materialTableResolvers[2]->Resolve();
-	spdlog::info(
-		"MaterialManager: activated graph-owned material tables epoch={} revision={} rows={} capacity={} compileFlagSlots={} activeCompileFlags={} resolved(base={} expected={} eval={} expected={} openPbr={} expected={})",
-		published->epoch, published->materials.revision, materialState->baseTable->elementCount,
-		materialState->baseTable->capacity, materialState->compileFlagSlotsUsed,
-		materialState->activeCompileFlags.size(),
-		resolvedBase.empty() ? 0u : resolvedBase.front()->GetGlobalResourceID(),
-		materialState->baseTable->resource->GetGlobalResourceID(),
-		resolvedEval.empty() ? 0u : resolvedEval.front()->GetGlobalResourceID(),
-		materialState->evalTable->resource->GetGlobalResourceID(),
-		resolvedOpenPbr.empty() ? 0u : resolvedOpenPbr.front()->GetGlobalResourceID(),
-		materialState->openPbrTable->resource->GetGlobalResourceID());
 	return true;
 }
 
@@ -1736,11 +1675,9 @@ unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlag
 		m_rasterBucketUsageCounts[slot] += count;
 		return slot;
 	}
-	bool reusedSlot = false;
 	if (!m_freeRasterBuckets.empty()) {
 		slot = m_freeRasterBuckets.back();
 		m_freeRasterBuckets.pop_back();
-		reusedSlot = true;
 		m_bucketToRasterFlagMapping[slot] = rasterFlags;
 		m_rasterBucketUsageCounts[slot] = count;
 	}
@@ -1751,15 +1688,6 @@ unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlag
 	}
 
 	m_rasterFlagToBucketMapping[static_cast<uint32_t>(rasterFlags)] = slot;
-	if (RasterBucketDiagnosticsEnabled()) {
-		spdlog::info(
-			"Raster bucket mapping acquired: slot={} flags=0x{:X} count={} reused={} bucketsUsed={}",
-			slot,
-			static_cast<uint32_t>(rasterFlags),
-			count,
-			reusedSlot,
-			m_rasterBucketsUsed);
-	}
 	return slot;
 }
 
@@ -1782,13 +1710,6 @@ void MaterialManager::ReleaseRasterBucket(MaterialRasterFlags rasterFlags) {
 	}
 
 	m_rasterFlagToBucketMapping.erase(it);
-	if (RasterBucketDiagnosticsEnabled()) {
-		spdlog::info(
-			"Raster bucket mapping released: slot={} flags=0x{:X} bucketsUsed={}",
-			slot,
-			static_cast<uint32_t>(rasterFlags),
-			m_rasterBucketsUsed);
-	}
 	m_bucketToRasterFlagMapping[slot] = MaterialRasterFlagsNone;
 	m_freeRasterBuckets.push_back(slot);
 

@@ -1075,33 +1075,12 @@ void TerrainManager::ProcessPendingUpdates()
 {
 	if (m_terrainGraphRequestPending && m_rendererStateRequests) {
 		auto* requests = static_cast<br::render::RendererStateRequestService*>(m_rendererStateRequests);
-		const auto diagnostic = requests->Diagnose(
-			{ br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration });
-		basic_telemetry::SetGauge("SARP.Terrain.GraphDesiredRevision",
-			static_cast<std::int64_t>(diagnostic.desiredRevision));
-		basic_telemetry::SetGauge("SARP.Terrain.GraphArtifactRevision",
-			static_cast<std::int64_t>(diagnostic.artifact.revision));
-		basic_telemetry::SetGauge("SARP.Terrain.GraphReadiness",
-			static_cast<std::int64_t>(diagnostic.artifact.readiness));
-		basic_telemetry::SetGauge("SARP.Terrain.GraphBlockers",
-			static_cast<std::int64_t>(diagnostic.blockers.size()));
-		if (!diagnostic.blockers.empty()) {
-			const auto& blocker = diagnostic.blockers.front();
-			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Kind",
-				static_cast<std::int64_t>(blocker.key.kind));
-			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Primary",
-				static_cast<std::int64_t>(blocker.key.primaryID));
-			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Variant",
-				static_cast<std::int64_t>(blocker.key.variantID));
-			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Revision",
-				static_cast<std::int64_t>(blocker.minimumRevision));
-			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Generation",
-				static_cast<std::int64_t>(blocker.requiredGeneration));
-			basic_telemetry::SetGauge("SARP.Terrain.GraphFirstBlocker.Readiness",
-				static_cast<std::int64_t>(blocker.requiredReadiness));
-		}
-		if (diagnostic.artifact.readiness == br::render::ArtifactReadiness::Failed ||
-			diagnostic.artifact.readiness == br::render::ArtifactReadiness::Cancelled) {
+		const br::render::ArtifactAddress address{
+			br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration };
+		const auto snapshot = requests->Snapshot(address);
+		if (snapshot.readiness == br::render::ArtifactReadiness::Failed ||
+			snapshot.readiness == br::render::ArtifactReadiness::Cancelled) {
+			const auto diagnostic = requests->Diagnose(address);
 			spdlog::error("TerrainManager: graph state revision={} failed: {} {}",
 				m_terrainStateRevision, diagnostic.error, diagnostic.blockerChain);
 			m_terrainGraphRequestPending = false;
@@ -1140,9 +1119,6 @@ bool TerrainManager::TryActivatePublishedTerrainState()
 	m_terrainGraphActive = true;
 	m_terrainStateRevision = (std::max)(m_terrainStateRevision, terrain->stateRevision);
 	m_activeTerrainPublishedRevision = terrain->stateRevision;
-	spdlog::info("TerrainManager: activated graph-owned terrain state epoch={} revision={} generation={} textureBindings={}",
-		published->epoch, terrain->stateRevision, terrain->terrainGeneration,
-		terrain->textureBindings.size());
 	return true;
 }
 

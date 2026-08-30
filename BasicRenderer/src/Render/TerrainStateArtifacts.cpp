@@ -17,7 +17,6 @@ namespace br::render {
 namespace {
 
 ArtifactBuildResult BuildTerrainState(const ArtifactBuildContext& context) {
-    basic_telemetry::SetGauge("SARP.Terrain.BuildStage", 1);
     basic_telemetry::AddCounter("SARP.Terrain.BuildAttempts");
     const auto input = context.input.Get<TerrainStateBuildInput>();
     if (!input || input->terrainGeneration != context.key.variantID ||
@@ -65,9 +64,6 @@ ArtifactBuildResult BuildTerrainState(const ArtifactBuildContext& context) {
             binding->streamingTextureID, binding->bindingRevision,
             binding->imageDescriptorIndex, binding->samplerDescriptorIndex };
     }
-    basic_telemetry::SetGauge("SARP.Terrain.BuildStage", 2);
-
-    basic_telemetry::SetGauge("SARP.Terrain.BuildStage", 3);
     // Latest texture edges can rebuild this immutable terrain recipe without
     // changing the source terrain revision.  The derived layer buffer must
     // therefore have its own monotonic content revision rather than reusing
@@ -75,7 +71,6 @@ ArtifactBuildResult BuildTerrainState(const ArtifactBuildContext& context) {
     const auto layerRequest = input->layerBufferFamily->RequestContentSnapshot(
         *input->requestService, *input->uploadService,
         std::as_bytes(std::span(layers)), layers.size());
-    basic_telemetry::SetGauge("SARP.Terrain.BuildStage", 4);
     if (!layerRequest) {
         return ArtifactBuildResult::Failure("terrain derived layer-buffer request rejected");
     }
@@ -88,7 +83,6 @@ ArtifactBuildResult BuildTerrainState(const ArtifactBuildContext& context) {
                     ArtifactReadiness::UploadSubmitted);
         });
     if (layerDependency == context.dependencies.end()) {
-        basic_telemetry::SetGauge("SARP.Terrain.BuildStage", 5);
         std::vector<ArtifactRequirement> requirements;
         requirements.reserve(bufferVersions.size() + input->textureTargets.size());
         for (const auto version : bufferVersions) {
@@ -103,7 +97,6 @@ ArtifactBuildResult BuildTerrainState(const ArtifactBuildContext& context) {
         }
         return ArtifactBuildResult::Needs(std::move(requirements));
     }
-    basic_telemetry::SetGauge("SARP.Terrain.BuildStage", 6);
 
     constexpr std::array<std::uint32_t, 6> expectedStrides{
         sizeof(TerrainSetGPU), sizeof(TerrainLayerGPU), sizeof(TerrainStochasticLayerGPU),
@@ -155,7 +148,6 @@ ArtifactBuildResult BuildTerrainState(const ArtifactBuildContext& context) {
         PublishedFragmentKind::Terrain, PublishedResourceUsage::ShaderResource,
         0, 0, kTerrainTextureGroupVariant }, std::move(textureResources));
     root->fragment.payload = ArtifactPayload::Make<PublishedTerrainState>(std::move(state));
-    basic_telemetry::SetGauge("SARP.Terrain.BuildStage", 7);
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(root)));
 }

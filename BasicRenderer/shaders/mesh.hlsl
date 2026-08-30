@@ -41,10 +41,6 @@ static const uint WG_COUNTER_RASTER_MESH_SHADER_SOURCE_GROUP_MISMATCH = 132u;
 static const uint WG_COUNTER_RASTER_MESH_SHADER_SKINNED_GROUPS = 264u;
 static const uint WG_COUNTER_RASTER_MESH_SHADER_SKINNED_OUTPUT_TRIANGLES = 266u;
 static const uint CLOD_SOURCE_GROUP_MISMATCH_DETAIL_CAPACITY = 1024u;
-static const uint WG_DRAW_STATUS_BASE = 279u;
-static const uint WG_DRAW_STATUS_CAPACITY = 100000u;
-static const uint WG_DRAW_STATUS_HW_RASTER_CONSUMED = 1u << 12;
-static const uint WG_DRAW_STATUS_HW_TRIANGLES_OUTPUT = 1u << 13;
 
 static const uint CLOD_RASTER_INIT_FAILURE_NONE = 0u;
 static const uint CLOD_RASTER_INIT_FAILURE_ZERO_PAGE_SLAB = 1u;
@@ -67,17 +63,6 @@ void CLodRasterTelemetryAdd(uint counterIndex, uint value)
     RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
     InterlockedAdd(telemetryCounters[counterIndex], value);
 #endif
-}
-
-void CLodRasterDrawStatusOr(uint drawRecordIndex, uint mask)
-{
-    if (CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX == CLOD_TELEMETRY_DISABLED_DESCRIPTOR ||
-        drawRecordIndex >= WG_DRAW_STATUS_CAPACITY)
-    {
-        return;
-    }
-    RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
-    InterlockedOr(telemetryCounters[WG_DRAW_STATUS_BASE + drawRecordIndex], mask);
 }
 
 #if CLOD_ENABLE_SOURCE_GROUP_VALIDATION
@@ -1519,9 +1504,6 @@ void ClusterLODBucketMSMain(
         if (linearizedID < count)
         {
             CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_IN_RANGE, 1u);
-            CLodRasterDrawStatusOr(
-                CLodVisibleClusterInstanceID(packedCluster),
-                WG_DRAW_STATUS_HW_RASTER_CONSUMED);
             if (!draw)
             {
                 CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED, 1u);
@@ -1632,12 +1614,6 @@ void ClusterLODBucketMSMain(
     if (uGroupThreadID == 0u && draw)
     {
         CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_OUTPUT_TRIANGLES, outputTriCount);
-        if (outputTriCount != 0u)
-        {
-            CLodRasterDrawStatusOr(
-                CLodVisibleClusterInstanceID(packedCluster),
-                WG_DRAW_STATUS_HW_TRIANGLES_OUTPUT);
-        }
 #if defined(PSO_SKINNED)
         CLodRasterTelemetryAdd(
             WG_COUNTER_RASTER_MESH_SHADER_SKINNED_OUTPUT_TRIANGLES,
@@ -1677,12 +1653,6 @@ void ClusterLODBucketMSMain(
     if (uGroupThreadID == 0u && draw)
     {
         CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_OUTPUT_TRIANGLES, outputTriCount);
-        if (outputTriCount != 0u)
-        {
-            CLodRasterDrawStatusOr(
-                CLodVisibleClusterInstanceID(packedCluster),
-                WG_DRAW_STATUS_HW_TRIANGLES_OUTPUT);
-        }
 #if defined(PSO_SKINNED)
         CLodRasterTelemetryAdd(
             WG_COUNTER_RASTER_MESH_SHADER_SKINNED_OUTPUT_TRIANGLES,

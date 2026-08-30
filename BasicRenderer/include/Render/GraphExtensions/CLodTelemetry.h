@@ -270,14 +270,8 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
 
 inline constexpr uint32_t CLodWorkGraphCounterCount =
     static_cast<uint32_t>(CLodWorkGraphCounterIndex::Count);
-// Diagnostic-only per-draw stage mask appended after the aggregate counters.
-// Draw record indices are currently bounded well below this capacity in the
-// static-scene benchmark. Keep the HLSL constants in workGraphCulling.hlsl,
-// mesh.hlsl, and softwareRaster.hlsl synchronized with these values.
-inline constexpr uint32_t CLodDrawStatusCapacity = 100000u;
-inline constexpr uint32_t CLodDrawStatusBase = CLodWorkGraphCounterCount;
 inline constexpr uint32_t CLodWorkGraphTelemetryBufferCount =
-    CLodDrawStatusBase + CLodDrawStatusCapacity;
+    CLodWorkGraphCounterCount;
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedGroups) == 264u);
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedOutputTriangles) == 266u);
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheEligibleClusters) == 267u);

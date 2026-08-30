@@ -1388,33 +1388,6 @@ void WGTelemetryAdd(uint counterIndex, uint value)
     InterlockedAdd(telemetryCounters[counterIndex], value);
 }
 
-// Diagnostic per-draw progress mask. These values mirror CLodTelemetry.h.
-static const uint WG_DRAW_STATUS_BASE = 279u;
-static const uint WG_DRAW_STATUS_CAPACITY = 100000u;
-static const uint WG_DRAW_STATUS_ACTIVE_GENERATION = 1u << 0;
-static const uint WG_DRAW_STATUS_OBJECT_EMITTED = 1u << 1;
-static const uint WG_DRAW_STATUS_TRAVERSE_CONSUMED = 1u << 2;
-static const uint WG_DRAW_STATUS_CLUSTER_RECORD = 1u << 3;
-static const uint WG_DRAW_STATUS_CLUSTER_CONTRIBUTES = 1u << 4;
-static const uint WG_DRAW_STATUS_HW_VISIBLE_STORED = 1u << 5;
-static const uint WG_DRAW_STATUS_REYES_VISIBLE_STORED = 1u << 6;
-static const uint WG_DRAW_STATUS_SW_VISIBLE_STORED = 1u << 7;
-static const uint WG_DRAW_STATUS_REYES_SEED = 1u << 8;
-static const uint WG_DRAW_STATUS_REYES_DICE = 1u << 9;
-static const uint WG_DRAW_STATUS_REYES_RASTER = 1u << 10;
-static const uint WG_DRAW_STATUS_PAGE_JOB_STORED = 1u << 11;
-
-void WGDrawStatusOr(uint drawRecordIndex, uint mask)
-{
-    if (!CLodWorkGraphTelemetryEnabled() || drawRecordIndex >= WG_DRAW_STATUS_CAPACITY)
-    {
-        return;
-    }
-
-    RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_WG_TELEMETRY_DESCRIPTOR_INDEX];
-    InterlockedOr(telemetryCounters[WG_DRAW_STATUS_BASE + drawRecordIndex], mask);
-}
-
 void CLodTelemetryTraverseWaveLaunch(bool slotActive)
 {
     if (!CLodWorkGraphTelemetryEnabled())
@@ -3065,9 +3038,6 @@ void WG_ObjectCull(
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_STALE_GENERATION, 1);
             entryVisible = false;
         }
-        if (entryVisible) {
-            WGDrawStatusOr(drawRecordIndex, WG_DRAW_STATUS_ACTIVE_GENERATION);
-        }
     }
 
     if (entryVisible) {
@@ -3189,7 +3159,6 @@ void WG_ObjectCull(
             outRecord.nodeIdPacked = PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u, 0u);
             outRecord.assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
             outCount = 1;
-            WGDrawStatusOr(drawRecordIndex, WG_DRAW_STATUS_OBJECT_EMITTED);
 
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_TRAVERSE_RECORDS, 1);
@@ -3262,7 +3231,6 @@ void WG_TraverseNodes(
 
     if (slotActive) {
         const TraverseNodeRecord rec = inRecs[slot];
-        WGDrawStatusOr(rec.instanceIndex, WG_DRAW_STATUS_TRAVERSE_CONSUMED);
         const bool parentAllowsRefine = (UnpackAllowRefine(rec.nodeIdPacked) != 0u);
         if (UnpackSourceTag(rec.nodeIdPacked) == CLOD_RECORD_SOURCE_REPLAY) {
             WGTelemetryAdd(WG_COUNTER_PHASE2_REPLAY_TRAVERSE_RECORDS_CONSUMED, 1);
@@ -4126,9 +4094,6 @@ void ClusterCullBody(
     }
 
     hasBucket = hasBucket && commonPageValid;
-    if (hasBucket) {
-        WGDrawStatusOr(b.instanceIndex, WG_DRAW_STATUS_CLUSTER_RECORD);
-    }
 
     // Telemetry (coalesced launch level)
     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_THREADS, 1);
@@ -4918,7 +4883,6 @@ void ClusterCullBody(
         bool isPageJob = false;
         if (contributes) {
             WGTelemetryAdd(WG_COUNTER_CLASSIFY_CONTRIBUTING, 1);
-            WGDrawStatusOr(b.instanceIndex, WG_DRAW_STATUS_CLUSTER_CONTRIBUTES);
         }
         const bool outputReyes =
 #if CLOD_WG_ENABLE_REYES_VISIBILITY
@@ -5069,7 +5033,6 @@ void ClusterCullBody(
                 }
 
                 if (hwLaneAvail != 0u) {
-                    WGDrawStatusOr(b.instanceIndex, WG_DRAW_STATUS_HW_VISIBLE_STORED);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
                     if (hwUsesVsmBlocks)
                     {
@@ -5147,7 +5110,6 @@ void ClusterCullBody(
                 }
 
                 if (outputReyes && (reyesRank < reyesAvail)) {
-                    WGDrawStatusOr(b.instanceIndex, WG_DRAW_STATUS_REYES_VISIBLE_STORED);
                     const uint reyesIndex = visibleClusterCapacity - 1u - (swWriteBase + reyesBase + reyesRank);
                     CLodStoreVisibleClusterForShadowLayer(
                         visibleClusters,
@@ -5202,7 +5164,6 @@ void ClusterCullBody(
                 }
 
                 if (outputSW && (swRank < swAvail)) {
-                    WGDrawStatusOr(b.instanceIndex, WG_DRAW_STATUS_SW_VISIBLE_STORED);
                     // Write visible cluster top-down from the end of the buffer.
                     const uint swIndex = visibleClusterCapacity - 1 - (swWriteBase + swBase + swRank);
                     CLodStoreVisibleClusterForShadowLayer(
@@ -5263,7 +5224,6 @@ void ClusterCullBody(
                     }
 
                     if (outputPageJob && (pjRank < pjAvail)) {
-                        WGDrawStatusOr(b.instanceIndex, WG_DRAW_STATUS_PAGE_JOB_STORED);
                         globallycoherent RWByteAddressBuffer pageJobVisibleClusters =
                             ResourceDescriptorHeap[descriptorPair.x];
                         RWStructuredBuffer<uint> pageJobVisibleClusterTransformIndices =
@@ -5306,7 +5266,6 @@ void ClusterCullBody(
                     }
 
                     if (outputPageJob && (pjRank < pjAvail)) {
-                        WGDrawStatusOr(b.instanceIndex, WG_DRAW_STATUS_PAGE_JOB_STORED);
                         const uint pjIndex = visibleClusterCapacity - 1 - (swWriteBase + pjBase + pjRank);
                         CLodStoreVisibleClusterForShadowLayer(
                             visibleClusters,
@@ -5794,7 +5753,6 @@ void WG_ReyesSeed(
         globallycoherent RWByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
         const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, visibleClusterIndex);
         instanceID = CLodVisibleClusterInstanceID(packedCluster);
-        WGDrawStatusOr(instanceID, WG_DRAW_STATUS_REYES_SEED);
         localMeshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
         viewID = CLodVisibleClusterViewID(packedCluster);
         const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
@@ -6127,7 +6085,6 @@ void WG_ReyesDice(
     diceQueueIndex = WaveReadLaneFirst(diceQueueIndex);
     const bool validDice = diceQueueIndex < CLOD_WG_REYES_DICE_QUEUE_CAPACITY && microTriangleCount != 0u;
     if (GI == 0u && validDice) {
-        WGDrawStatusOr(diceEntry.instanceID, WG_DRAW_STATUS_REYES_DICE);
     }
     GroupNodeOutputRecords<ReyesRasterBatchRecord> rasterOut =
         rasterOutput.GetGroupNodeOutputRecords(validDice ? rasterBatchCount : 0u);
@@ -6162,7 +6119,6 @@ void WG_ReyesRaster(
         return;
     }
     if (GI == 0u) {
-        WGDrawStatusOr(rec.diceEntry.instanceID, WG_DRAW_STATUS_REYES_RASTER);
     }
 
     StructuredBuffer<CLodReyesTessTableConfigEntry> tessTableConfigs = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX];

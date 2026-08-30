@@ -137,11 +137,6 @@ public:
 		const std::shared_ptr<PixelBuffer>& image,
 		std::wstring outputFile,
 		std::function<void()> callback);
-	bool RequestStreamingTextureReadback(
-		uint32_t streamingTextureID,
-		std::wstring outputFile,
-		std::function<void()> callback);
-
 	uint64_t RegisterTextureBinding(
 		const std::shared_ptr<TextureAsset>& texture,
 		BindingChangedCallback onBindingChanged,

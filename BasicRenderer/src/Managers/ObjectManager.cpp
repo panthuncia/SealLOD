@@ -555,7 +555,6 @@ void ObjectManager::AcknowledgePublishedBufferState(
 		return;
 	}
 
-	bool exactSnapshot = true;
 	for (std::size_t bindingIndex = 0; bindingIndex < m_graphBufferBindings.size(); ++bindingIndex) {
 		auto& binding = m_graphBufferBindings[bindingIndex];
 		const auto expected = std::ranges::find_if(state->buffers,
@@ -568,7 +567,6 @@ void ObjectManager::AcknowledgePublishedBufferState(
 		if (!version || version->revision != expected->revision) return;
 		const auto desired = binding.buffer->CaptureVersionedGraphState();
 		if (desired.writeSequence != version->writeSequence) {
-			exactSnapshot = false;
 			binding.buffer->AcknowledgeVersionedGraphState(version);
 			if (auto pool = version->backingPool.lock(); version->backing) {
 				pool->AcknowledgePublished(
@@ -612,8 +610,6 @@ void ObjectManager::AcknowledgePublishedBufferState(
 	m_activeObjectBufferStateRevision.store(published->drawRecords.revision, std::memory_order_release);
 	m_lastBufferStatePublicationRetirementEpoch =
 		br::render::VersionedGpuBufferFrameRetirementEpoch();
-	spdlog::info("Object buffer graph state acknowledged: epoch={} revision={} buffers={} exactLiveSnapshot={}",
-		published->epoch, published->drawRecords.revision, m_graphBufferBindings.size(), exactSnapshot);
 }
 
 void ObjectManager::StopDeferredRetireWorker() {
