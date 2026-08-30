@@ -6,7 +6,6 @@
 #include "Resources/DynamicResource.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/MaterialStateArtifacts.h"
-#include "Render/GraphMigrationMode.h"
 #include "Render/PublishedRendererState.h"
 #include "Render/RendererStateRequestService.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
@@ -32,10 +31,7 @@ namespace {
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
 	constexpr uint64_t kTextureStreamingIdleFramesBeforeCoarsen = 180u;
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
-	// Keep post-indirect graph cutovers dormant until static activation has a
-	// complete, visually validated dependency closure.
-	constexpr bool kEnableMaterialStateShadow =
-		br::render::GraphEnabled(br::render::kMaterialGraphMigrationMode);
+	constexpr bool kEnableMaterialStateGraph = true;
 
 	const std::string& MaterialTextureTraceFilter() {
 		static const std::string filter = [] {
@@ -370,35 +366,6 @@ namespace {
 		return textures;
 	}
 
-	std::vector<br::render::MaterialRowTextureTarget> CollectMaterialRowTextureTargets(
-		const Material& material, const MaterialDescription& desc) {
-		std::vector<br::render::MaterialRowTextureTarget> result;
-		const auto excludedHeight = material.IsObjectReyesAtlasHeightMaterial()
-			? material.GetHeightMapTexture() : nullptr;
-		const auto append = [&](const TextureAndConstant& source,
-			br::render::MaterialTextureTarget target) {
-			if (!source.texture || source.texture == excludedHeight) return;
-			const auto id = source.texture->GetStreamingTextureID();
-			if (id) result.push_back({ { br::render::ArtifactKind::TextureBinding, id, 0 }, target });
-		};
-		append(desc.baseColor, br::render::MaterialTextureTarget::BaseColor);
-		append(desc.normal, br::render::MaterialTextureTarget::Normal);
-		append(desc.metallic, br::render::MaterialTextureTarget::Metallic);
-		append(desc.roughness, br::render::MaterialTextureTarget::Roughness);
-		append(desc.emissive, br::render::MaterialTextureTarget::Emissive);
-		append(desc.aoMap, br::render::MaterialTextureTarget::AmbientOcclusion);
-		append(desc.heightMapFromBaseColorAlpha && !desc.heightMap.texture ? desc.baseColor : desc.heightMap,
-			br::render::MaterialTextureTarget::Height);
-		append(desc.opacity, br::render::MaterialTextureTarget::Opacity);
-		append(desc.openPBRTextures.coatColor, br::render::MaterialTextureTarget::CoatColor);
-		append(desc.openPBRTextures.coatWeight, br::render::MaterialTextureTarget::CoatWeight);
-		append(desc.openPBRTextures.coatRoughness, br::render::MaterialTextureTarget::CoatRoughness);
-		append(desc.openPBRTextures.fuzzColor, br::render::MaterialTextureTarget::FuzzColor);
-		append(desc.openPBRTextures.fuzzWeight, br::render::MaterialTextureTarget::FuzzWeight);
-		append(desc.openPBRTextures.fuzzRoughness, br::render::MaterialTextureTarget::FuzzRoughness);
-		return result;
-	}
-
 	template <typename T>
 	bool BytewiseEqual(const T& lhs, const T& rhs) {
 		return std::memcmp(&lhs, &rhs, sizeof(T)) == 0;
@@ -433,12 +400,6 @@ MaterialManager::MaterialManager() {
 			"Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB), false, false,
 			br::render::PublishedFragmentKind::Materials,
 			br::render::PublishedResourceUsage::ShaderResource, br::render::kMaterialOpenPbrTableVariant });
-	m_perMaterialDataBuffer = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(
-		m_materialBufferCapacity, "Builtin::PerMaterialDataBuffer", true);
-	m_perMaterialEvalDataBuffer = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(
-		m_materialBufferCapacity, "Builtin::PerMaterialEvalDataBuffer", true);
-	m_perMaterialOpenPBRDataBuffer = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(
-		m_materialBufferCapacity, "Builtin::PerMaterialOpenPBRDataBuffer", true);
 	auto startupBase = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(1, "StartupFallback::PerMaterialDataBuffer", true);
 	auto startupEval = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(1, "StartupFallback::PerMaterialEvalDataBuffer", true);
 	auto startupOpenPbr = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(1, "StartupFallback::PerMaterialOpenPBRDataBuffer", true);
@@ -446,9 +407,6 @@ MaterialManager::MaterialManager() {
 	org::memory::SetResourceUsageHint(*startupBase, "Material startup fallback");
 	org::memory::SetResourceUsageHint(*startupEval, "Material startup fallback");
 	org::memory::SetResourceUsageHint(*startupOpenPbr, "Material startup fallback");
-	org::memory::SetResourceUsageHint(*m_perMaterialDataBuffer, "Material buffers");
-	org::memory::SetResourceUsageHint(*m_perMaterialEvalDataBuffer, "Material buffers");
-	org::memory::SetResourceUsageHint(*m_perMaterialOpenPBRDataBuffer, "Material buffers");
 
 	// Visibility buffer resources
     m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialPixelCountBuffer", true);
@@ -497,15 +455,9 @@ MaterialManager::MaterialManager() {
 		makeMaterialResolver(br::render::kMaterialEvalTableVariant, m_materialStartupFallbacks[1]),
 		makeMaterialResolver(br::render::kMaterialOpenPbrTableVariant, m_materialStartupFallbacks[2])
 	};
-	if constexpr (br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
-		m_resolvers[Builtin::PerMaterialDataBuffer] = m_materialTableResolvers[0];
-		m_resolvers["Builtin::PerMaterialEvalDataBuffer"] = m_materialTableResolvers[1];
-		m_resolvers[Builtin::PerMaterialOpenPBRDataBuffer] = m_materialTableResolvers[2];
-	} else {
-		m_resources[Builtin::PerMaterialDataBuffer] = m_perMaterialDataBuffer;
-		m_resources["Builtin::PerMaterialEvalDataBuffer"] = m_perMaterialEvalDataBuffer;
-		m_resources[Builtin::PerMaterialOpenPBRDataBuffer] = m_perMaterialOpenPBRDataBuffer;
-	}
+	m_resolvers[Builtin::PerMaterialDataBuffer] = m_materialTableResolvers[0];
+	m_resolvers["Builtin::PerMaterialEvalDataBuffer"] = m_materialTableResolvers[1];
+	m_resolvers[Builtin::PerMaterialOpenPBRDataBuffer] = m_materialTableResolvers[2];
 
 	// Reserve built-in material bins up front so render-graph material evaluation buffers are
 	// fully sized before passes/materialization/upload steps touch them.
@@ -563,8 +515,10 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 			BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming::EnqueueFrameTick");
 			m_textureStreamingManager->EnqueueFrameTick(frameIndex);
 		}
-		// Binding publication is completed by the exact graph-version continuation
-		// on the streaming lane. The render thread never reconciles texture versions.
+		// Ordinary material bindings are latest-state candidates, not exact graph
+		// versions. Drain all ready candidates as one cooperative batch. The drain
+		// never waits: candidates whose transfer has not completed stay coalesced.
+		(void)m_textureStreamingManager->DrainPendingBindingChanges();
 	}
 	static bool debugTextureReadbackRequested = false;
 	if (!debugTextureReadbackRequested && frameIndex >= 120u && m_textureStreamingManager) {
@@ -780,28 +734,6 @@ bool MaterialManager::ApplyMaterialRowArtifact(const br::render::MaterialRowArti
 	signature.materialData = row.base;
 	signature.evalData = row.evaluation;
 	signature.openPBRData = row.openPbr;
-	signature.textureBindings.clear();
-	signature.preparedTextureBindings = row.selectedBindings;
-	for (const auto& binding : row.selectedBindings) if (binding) {
-		const auto& dimensions = binding->image->GetDescription().imageDimensions;
-		if (!dimensions.empty()) {
-			const auto& metadata = binding->streamingMetadata;
-			const auto expectedWidth = (std::max)(1u, metadata.fullWidth >> metadata.residentTopMip);
-			const auto expectedHeight = (std::max)(1u, metadata.fullHeight >> metadata.residentTopMip);
-			if (metadata.fullWidth != 0u && metadata.fullHeight != 0u &&
-				(dimensions.front().width != expectedWidth || dimensions.front().height != expectedHeight)) {
-				basic_telemetry::AddCounter("SARP.Material.RowBindingShapeMismatch");
-			}
-			if (metadata.residentTopMip > metadata.requestedTopMip) {
-				basic_telemetry::AddCounter("SARP.Material.RowBindingAwaitingUpgrade");
-			}
-		}
-		if (binding->imageDescriptorIndex != binding->image->GetSRVInfo(0).slot.index) {
-			basic_telemetry::AddCounter("SARP.Material.RowBindingDescriptorMismatch");
-		}
-		signature.textureBindings.push_back({ binding->streamingTextureID,
-			binding->bindingRevision, binding->imageDescriptorIndex, binding->samplerDescriptorIndex });
-	}
 	signature.valid = true;
 	JournalMaterialRow(row.materialSlot);
 	++m_materialRowsAppliedSinceGraphSnapshot;
@@ -992,15 +924,7 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		input->base = materialData;
 		input->evaluation = evalData;
 		input->openPbr = openPBRData;
-		input->textureTargets = CollectMaterialRowTextureTargets(material, descForAtlasDebug);
-		std::vector<br::render::ArtifactRequirement> requirements;
-		std::unordered_set<br::render::ArtifactAddress,
-			br::render::ArtifactAddress::Hasher> uniqueBindings;
-		for (const auto& target : input->textureTargets) if (uniqueBindings.insert(target.bindingAddress).second) {
-			requirements.push_back(br::render::Latest(target.bindingAddress,
-				br::render::ArtifactReadiness::UploadSubmitted,
-				br::render::DependencyPolicy::Optional));
-		}
+		std::vector<br::render::ArtifactRequirement> bindingRequirements;
 		std::uint64_t fingerprint = 1469598103934665603ull;
 		const auto mix = [&fingerprint](const auto& value) {
 			for (const auto byte : std::as_bytes(std::span(&value, 1))) {
@@ -1014,9 +938,9 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		const auto materialID = input->materialID;
 		const auto sourceRevision = input->sourceRevision;
 		auto payload = br::render::ArtifactPayload::Make<br::render::MaterialRowInput>(std::move(input));
-		const bool graphRowRequested = static_cast<bool>(m_rendererStateRequests->Request(
+		const bool graphRowRequested = static_cast<bool>(m_rendererStateRequests->SubmitLatest({
 			{ br::render::ArtifactKind::Material, materialID, 0 }, sourceRevision,
-			std::move(requirements), std::move(payload), fingerprint));
+			std::move(bindingRequirements), std::move(payload), fingerprint }));
 		if (!graphRowRequested) {
 			basic_telemetry::AddCounter("SARP.Material.RowRequestRejected");
 		} else {
@@ -1055,14 +979,6 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		}
 	}
 	if (dataChanged || textureAssetsChanged) {
-		if constexpr (!br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
-			if (dataChanged) {
-				ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadLegacyShadowAuthority");
-				m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
-				m_perMaterialEvalDataBuffer->UpdateAt(materialSlot, evalData);
-				m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, openPBRData);
-			}
-		}
 		if (materialData.geometricDisplacementEnabled != 0u &&
 			(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u) {
 			static std::atomic<std::uint32_t> loggedGeometricMaterials{ 0 };
@@ -1204,6 +1120,7 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 				{},
 				"material:" + std::to_string(materialID),
 				TextureStreamingBindingOptions{
+					.requiresExactGraphPublication = false,
 					.alphaTested = alphaTested,
 				});
 			if (bindingID != 0u) {
@@ -1330,11 +1247,6 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			}
 			m_materialUploadSignatures[slot].valid = false;
 		}
-		if constexpr (!br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
-			m_perMaterialDataBuffer->UpdateAt(slot, data.value_or(PerMaterialCB{}));
-			m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
-			m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
-		}
 	}
 	else {
 		ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot");
@@ -1349,11 +1261,6 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			m_materialUploadSignatures.resize(m_materialSlotsUsed);
 			m_materialUploadSignatures[slot].valid = false;
 		}
-		if constexpr (!br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
-			m_perMaterialDataBuffer->UpdateAt(slot, data.value_or(PerMaterialCB{}));
-			m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
-			m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
-		}
 	}
 	{
 		ZoneScopedN("MaterialManager::GetMaterialSlot::StoreMapping");
@@ -1365,38 +1272,6 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 void MaterialManager::JournalMaterialRow(unsigned int materialSlot) {
 	const auto valid = materialSlot < m_materialUploadSignatures.size() &&
 		m_materialUploadSignatures[materialSlot].valid;
-	if (materialSlot >= m_retainedTextureBindingsBySlot.size()) {
-		m_retainedTextureBindingsBySlot.resize(static_cast<std::size_t>(materialSlot) + 1u);
-	}
-	for (const auto& key : m_retainedTextureBindingsBySlot[materialSlot]) {
-		auto entry = m_retainedTextureBindings.find(key);
-		if (entry != m_retainedTextureBindings.end() && --entry->second.references == 0u) {
-			m_retainedTextureBindings.erase(entry);
-		}
-	}
-	auto& retainedForSlot = m_retainedTextureBindingsBySlot[materialSlot];
-	retainedForSlot.clear();
-	if (valid) {
-		const auto& signature = m_materialUploadSignatures[materialSlot];
-		const auto bindingCount = (std::min)(signature.textureBindings.size(),
-			signature.preparedTextureBindings.size());
-		retainedForSlot.reserve(bindingCount);
-		for (std::size_t index = 0; index < bindingCount; ++index) {
-			const auto& dependency = signature.textureBindings[index];
-			RetainedTextureBindingKey key{
-				dependency.streamingTextureID,
-				dependency.bindingRevision,
-				dependency.imageDescriptorIndex,
-				dependency.samplerDescriptorIndex };
-			retainedForSlot.push_back(key);
-			auto [entry, inserted] = m_retainedTextureBindings.try_emplace(key);
-			if (inserted) {
-				entry->second.dependency = dependency;
-				entry->second.prepared = signature.preparedTextureBindings[index];
-			}
-			++entry->second.references;
-		}
-	}
 	const auto base = valid ? m_materialUploadSignatures[materialSlot].materialData : PerMaterialCB{};
 	const auto eval = valid ? m_materialUploadSignatures[materialSlot].evalData : PerMaterialEvalCB{};
 	const auto openPbr = valid ? m_materialUploadSignatures[materialSlot].openPBRData : PerMaterialOpenPBRCB{};
@@ -1418,9 +1293,6 @@ void MaterialManager::JournalMaterialRow(unsigned int materialSlot) {
 
 void MaterialManager::UpdateOpenPBRMaterialDataBuffer(
 	unsigned int materialSlot, const PerMaterialOpenPBRCB& data) {
-	if constexpr (!br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
-		if (m_perMaterialOpenPBRDataBuffer) m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, data);
-	}
 	if (materialSlot >= m_materialUploadSignatures.size()) {
 		m_materialUploadSignatures.resize(static_cast<std::size_t>(materialSlot) + 1u);
 	}
@@ -1446,11 +1318,6 @@ void MaterialManager::EnsureMaterialBufferCapacity(unsigned int requiredSlots) {
 	}
 	TracyPlot("MaterialManager.MaterialBufferOldCapacity", static_cast<int64_t>(m_materialBufferCapacity));
 	TracyPlot("MaterialManager.MaterialBufferNewCapacity", static_cast<int64_t>(newCapacity));
-	if constexpr (!br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
-		m_perMaterialDataBuffer->Resize(newCapacity);
-		m_perMaterialEvalDataBuffer->Resize(newCapacity);
-		m_perMaterialOpenPBRDataBuffer->Resize(newCapacity);
-	}
 
 	m_materialBufferCapacity = newCapacity;
 }
@@ -1560,59 +1427,50 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 		activeCompileFlags = std::move(captured);
 	}
 
-	if constexpr (kEnableMaterialStateShadow) if (const auto source = br::render::PublishedStateSource::ProcessSource()) {
+	if constexpr (kEnableMaterialStateGraph) if (const auto source = br::render::PublishedStateSource::ProcessSource()) {
 		if (const auto published = source->Load()) {
-			if (const auto shadow = published->materials.payload.Get<br::render::PublishedMaterialState>()) {
+			if (const auto materialState = published->materials.payload.Get<br::render::PublishedMaterialState>()) {
 				const auto revision = published->materials.revision;
 				// Acknowledgement advances several journals and buffer-family retirement
 				// cursors. Replaying it every render update was both unnecessary and a
 				// sizeable host-thread cost while a material revision remained current.
 				if (revision > m_acknowledgedMaterialPublishedRevision) {
-					m_materialBaseJournal.Acknowledge(shadow->baseTable);
-					m_materialEvalJournal.Acknowledge(shadow->evalTable);
-					m_materialOpenPbrJournal.Acknowledge(shadow->openPbrTable);
-					m_materialBufferFamilies[0]->Acknowledge(shadow->baseTable);
-					m_materialBufferFamilies[1]->Acknowledge(shadow->evalTable);
-					m_materialBufferFamilies[2]->Acknowledge(shadow->openPbrTable);
+					m_materialBaseJournal.Acknowledge(materialState->baseTable);
+					m_materialEvalJournal.Acknowledge(materialState->evalTable);
+					m_materialOpenPbrJournal.Acknowledge(materialState->openPbrTable);
+					m_materialBufferFamilies[0]->Acknowledge(materialState->baseTable);
+					m_materialBufferFamilies[1]->Acknowledge(materialState->evalTable);
+					m_materialBufferFamilies[2]->Acknowledge(materialState->openPbrTable);
 					m_acknowledgedMaterialPublishedRevision = revision;
 				}
-				// Material tables remain shadow-only until static draw activation carries an
-				// exact material-table dependency.  Switching the resource wrappers here can
-				// otherwise expose an older (including startup-empty) table to newly activated
-				// draws, making valid geometry disappear.
-				if (shadow->baseTable && shadow->evalTable && shadow->openPbrTable &&
+				if (materialState->baseTable && materialState->evalTable && materialState->openPbrTable &&
 					published->materials.revision > m_observedMaterialPublishedRevision) {
 					m_observedMaterialPublishedRevision = published->materials.revision;
 					const auto resourceID = [](const auto& table) {
 						return table && table->resource ? table->resource->GetGlobalResourceID() : 0u;
 					};
 					spdlog::info(
-						"MaterialManager: graph-owned material table ready epoch={} revision={} rows(desired={} published={} slotsUsed={} capacity={}) retainedTextureBindings={} resources(base={} eval={} openPbr={})",
+						"MaterialManager: graph-owned material table ready epoch={} revision={} rows(desired={} published={} slotsUsed={} capacity={}) resources(base={} eval={} openPbr={})",
 						published->epoch, published->materials.revision, m_materialSlotsUsed,
-						shadow->baseTable->elementCount, m_materialSlotsUsed,
-						shadow->baseTable->capacity, m_retainedTextureBindings.size(),
-						resourceID(shadow->baseTable), resourceID(shadow->evalTable),
-						resourceID(shadow->openPbrTable));
-				}
-				if (revision > m_materialStateValidatedRevision) {
-					if (const auto expected = m_materialStateExpectedFingerprints.find(revision);
-						expected != m_materialStateExpectedFingerprints.end()) {
-						if (shadow->sourceFingerprint != expected->second) {
-							spdlog::error("Material state shadow mismatch: revision={} graphFingerprint={} expectedFingerprint={}",
-								revision, shadow->sourceFingerprint, expected->second);
-						}
-						m_materialStateValidatedRevision = revision;
-						for (auto it = m_materialStateExpectedFingerprints.begin();
-							it != m_materialStateExpectedFingerprints.end();) {
-							if (it->first <= revision) it = m_materialStateExpectedFingerprints.erase(it);
-							else ++it;
-						}
-					}
+						materialState->baseTable->elementCount, m_materialSlotsUsed,
+						materialState->baseTable->capacity,
+						resourceID(materialState->baseTable), resourceID(materialState->evalTable),
+						resourceID(materialState->openPbrTable));
 				}
 			}
 		}
 	}
-	if constexpr (kEnableMaterialStateShadow) if (m_rendererStateRequests) {
+	if constexpr (kEnableMaterialStateGraph) if (m_rendererStateRequests) {
+		// The three parameter tables and their MaterialTable root are one mutable
+		// publication epoch. Keep newer row mutations in the authoritative journals
+		// until the previously admitted root is render-visible and acknowledged.
+		// Admitting another root earlier retains another exact three-backing closure;
+		// under streaming churn that exhausts the bounded rings and strands the
+		// render-visible table at an early (often startup-only) row extent.
+		if (m_materialStateRevision > m_acknowledgedMaterialPublishedRevision) {
+			basic_telemetry::AddCounter("SARP.Material.GraphSnapshotMailboxCoalesced");
+			return 0;
+		}
 		std::uint64_t fingerprint = publishedSlots;
 		const auto mix = [&fingerprint](std::uint64_t value) {
 			fingerprint ^= value + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
@@ -1668,15 +1526,32 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				basic_telemetry::AddCounter("SARP.Material.GraphCaptureRaceDeferred");
 				return m_materialStateRevision;
 			}
-			const auto baseRequest = m_materialBufferFamilies[0]->RequestCapture(
-				*m_rendererStateRequests, *m_uploadService, rowsRevision,
-				std::move(baseCapture));
-			const auto evalRequest = m_materialBufferFamilies[1]->RequestCapture(
-				*m_rendererStateRequests, *m_uploadService, rowsRevision,
-				std::move(evalCapture));
-			const auto openPbrRequest = m_materialBufferFamilies[2]->RequestCapture(
-				*m_rendererStateRequests, *m_uploadService, rowsRevision,
-				std::move(openPbrCapture));
+			std::array<br::render::ArtifactRequestResult, 3> tableRequests{};
+			const bool reuseTableHandles = m_materialTableHandleRowsRevision == rowsRevision &&
+				std::ranges::all_of(m_materialTableHandles, [](const auto& handle) {
+					return static_cast<bool>(handle);
+				});
+			if (reuseTableHandles) {
+				for (std::size_t index = 0; index < tableRequests.size(); ++index) {
+					tableRequests[index].status = br::render::ArtifactRequestStatus::AlreadyDesired;
+					tableRequests[index].version = m_materialTableHandles[index].version;
+					tableRequests[index].lease = m_materialTableHandles[index].lease;
+				}
+				basic_telemetry::AddCounter("SARP.Material.GraphTableVersionsReused", 3);
+			} else {
+				tableRequests[0] = m_materialBufferFamilies[0]->RequestCapture(
+					*m_rendererStateRequests, *m_uploadService, rowsRevision,
+					std::move(baseCapture));
+				tableRequests[1] = m_materialBufferFamilies[1]->RequestCapture(
+					*m_rendererStateRequests, *m_uploadService, rowsRevision,
+					std::move(evalCapture));
+				tableRequests[2] = m_materialBufferFamilies[2]->RequestCapture(
+					*m_rendererStateRequests, *m_uploadService, rowsRevision,
+					std::move(openPbrCapture));
+			}
+			const auto& baseRequest = tableRequests[0];
+			const auto& evalRequest = tableRequests[1];
+			const auto& openPbrRequest = tableRequests[2];
 			if (!baseRequest || !evalRequest || !openPbrRequest) {
 				spdlog::error(
 					"Material graph table request rejected: rows={} base={} eval={} openPbr={}",
@@ -1688,6 +1563,11 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				m_materialStateDirtyFrames = 4;
 				return m_materialStateRevision;
 			}
+			if (!reuseTableHandles) {
+				m_materialTableHandleRowsRevision = rowsRevision;
+				for (std::size_t index = 0; index < tableRequests.size(); ++index)
+					m_materialTableHandles[index] = tableRequests[index].Handle();
+			}
 			auto input = std::make_shared<br::render::MaterialStateBuildInput>();
 			input->sourceFingerprint = fingerprint;
 			input->materialRowsRevision = rowsRevision;
@@ -1695,60 +1575,35 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			// Texture mip residency is owned by TextureStreamingManager. The descriptor
 			// indices captured in the material rows already name usable coarse-mip
 			// bindings and remain stable while streaming upgrades their contents. Do not
-			// make table publication wait for every texture's asynchronous graph shadow.
-			input->textureBindings.reserve(m_retainedTextureBindings.size());
-			input->preparedTextureBindings.reserve(m_retainedTextureBindings.size());
-			for (const auto& [key, retained] : m_retainedTextureBindings) {
-				(void)key;
-				input->textureBindings.push_back(retained.dependency);
-				input->preparedTextureBindings.push_back(retained.prepared);
-			}
+			// make table publication wait for every texture's asynchronous graph state.
 			input->slotsUsed = publishedSlots;
 			input->activeCompileFlags = activeCompileFlags;
 			input->baseTableKey = m_materialBufferFamilies[0]->Configuration().address;
 			input->evalTableKey = m_materialBufferFamilies[1]->Configuration().address;
 			input->openPbrTableKey = m_materialBufferFamilies[2]->Configuration().address;
 			const auto revision = ++m_materialStateRevision;
-			m_materialStateExpectedFingerprints[revision] = fingerprint;
 			std::vector<br::render::ArtifactRequirement> requirements{
 				br::render::Exact(baseRequest.version, br::render::ArtifactReadiness::UploadSubmitted),
 				br::render::Exact(evalRequest.version, br::render::ArtifactReadiness::UploadSubmitted),
 				br::render::Exact(openPbrRequest.version, br::render::ArtifactReadiness::UploadSubmitted)
 			};
-			std::size_t retainedGraphBindings = 0;
-			for (const auto& binding : input->textureBindings) {
-				const br::render::ArtifactKey bindingKey{
-					br::render::ArtifactKind::TextureBinding,
-					binding.streamingTextureID,
-					0 };
-				const auto diagnostic = m_rendererStateRequests->Diagnose(bindingKey);
-				// Builtin/startup fallbacks are deliberately represented by the
-				// immutable resource holds above.  Once a streaming binding has crossed
-				// the graph adoption boundary, retain its exact artifact revision in the
-				// material closure so descriptor lifetime follows frame-state lifetime.
-				if (diagnostic.artifact.revision != binding.bindingRevision ||
-					!br::render::ArtifactReachedMilestone(diagnostic.artifact.readiness,
-						br::render::ArtifactReadiness::GpuReady)) {
-					continue;
-				}
-				requirements.push_back({ bindingKey, binding.bindingRevision,
-					br::render::ArtifactReadiness::GpuReady,
-					br::render::DependencyPolicy::AllOf, 0,
-					br::render::DependencyInvalidationPolicy::LifetimeHold });
-				++retainedGraphBindings;
-			}
-			basic_telemetry::SetGauge("SARP.Material.GraphRetainedTextureBindings",
-				static_cast<std::int64_t>(retainedGraphBindings));
-			const auto materialRequest = m_rendererStateRequests->Request(
+			const auto materialRequest = m_rendererStateRequests->SubmitLatest({
 				{ br::render::ArtifactKind::MaterialTable, 0, 0 }, revision, requirements,
 				br::render::ArtifactPayload::Make<br::render::MaterialStateBuildInput>(std::move(input)),
-				fingerprint == 0 ? 1u : fingerprint);
+				fingerprint == 0 ? 1u : fingerprint });
 			if (materialRequest) {
 				m_materialStateHandle = materialRequest.Handle();
 				basic_telemetry::AddCounter("SARP.Material.GraphSnapshotRequests");
 				basic_telemetry::Record("SARP.Material.RowsAppliedPerGraphSnapshot",
 					m_materialRowsAppliedSinceGraphSnapshot);
 				m_materialRowsAppliedSinceGraphSnapshot = 0;
+			} else {
+				// Admission did not consume this desired state. Reopen the
+				// latest-wins mailbox; otherwise the committed fingerprint makes
+				// every later frame believe this unpublished snapshot is current.
+				m_materialStateFingerprint = 0;
+				m_materialStateDirtyFrames = 4;
+				basic_telemetry::AddCounter("SARP.Material.GraphSnapshotAdmissionRejected");
 			}
 		}
 	}
@@ -1764,7 +1619,7 @@ void MaterialManager::ScheduleGpuVisibleSnapshotCommit(bool forceGraphSnapshot) 
 		expected, true, std::memory_order_acq_rel)) return;
 	const bool submitted = m_snapshotCommitScope.Valid() &&
 		TaskSchedulerManager::GetInstance().Submit(
-			m_snapshotCommitScope, TaskLane::Streaming, TaskDomain::RendererState,
+			m_snapshotCommitScope, TaskLane::Streaming, TaskDomain::MaterialAcceptance,
 			"MaterialManager::CommitGpuVisibleSnapshot",
 			[this](const br::TaskContext& context) {
 				if (!context.StopRequested()) {
@@ -1784,9 +1639,6 @@ void MaterialManager::ScheduleGpuVisibleSnapshotCommit(bool forceGraphSnapshot) 
 }
 
 bool MaterialManager::TryActivatePublishedMaterialState() {
-	if constexpr (!br::render::GraphActive(br::render::kMaterialGraphMigrationMode)) {
-		return false;
-	}
 	const auto source = br::render::PublishedStateSource::ProcessSource();
 	const auto published = source ? source->Load() : nullptr;
 	const auto materialState = published

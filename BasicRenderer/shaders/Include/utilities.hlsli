@@ -603,6 +603,26 @@ float4 SampleStreamingMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
+	if (streamingTextureID != 0u)
+	{
+		TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
+		if (currentBinding.imageDescriptorIndex != 0xffffffffu)
+		{
+			Texture2D<float4> currentTexture = ResourceDescriptorHeap[currentBinding.imageDescriptorIndex];
+			uint currentWidth;
+			uint currentHeight;
+			uint currentMipCount;
+			currentTexture.GetDimensions(0u, currentWidth, currentHeight, currentMipCount);
+			const float2 currentTexelScale = ResolveTextureStreamingTexelScale(
+				currentBinding, currentWidth, currentHeight);
+			RecordTextureStreamingFeedback(currentBinding, streamingTextureID,
+				dUVdx * currentTexelScale, dUVdy * currentTexelScale);
+			if (ShouldTrackMaterialSelectedMipDebug())
+				RecordMaterialSelectedMipDebug(feedback, currentBinding, true,
+					currentWidth, currentHeight, currentMipCount, dUVdx, dUVdy);
+			return Sample2DGrad(currentTexture, samp, uv, dUVdx, dUVdy);
+		}
+	}
     uint width;
     uint height;
 	uint mipCount;
@@ -636,11 +656,12 @@ float4 SampleMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
-#if defined(PSO_TEXTURE_STREAMING)
+    // Stable texture IDs define how streamed material images are resolved;
+    // that is binding correctness, not a PSO specialization.  The direct
+    // descriptor is only the ID-zero/non-streamed fallback.  Conditioning
+    // this lookup on PSO_TEXTURE_STREAMING left otherwise valid material
+    // variants permanently sampling their bootstrap fallback descriptors.
     return SampleStreamingMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
-#else
-    return SampleResidentMaterialTexture2DGrad(tex, samp, uv, dUVdx, dUVdy, feedback);
-#endif
 }
 
 float4 SampleMaterialTexture2DGrad(
@@ -706,6 +727,26 @@ float SampleStreamingMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
+	if (streamingTextureID != 0u)
+	{
+		TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
+		if (currentBinding.imageDescriptorIndex != 0xffffffffu)
+		{
+			Texture2D<float> currentTexture = ResourceDescriptorHeap[currentBinding.imageDescriptorIndex];
+			uint currentWidth;
+			uint currentHeight;
+			uint currentMipCount;
+			currentTexture.GetDimensions(0u, currentWidth, currentHeight, currentMipCount);
+			const float2 currentTexelScale = ResolveTextureStreamingTexelScale(
+				currentBinding, currentWidth, currentHeight);
+			RecordTextureStreamingFeedback(currentBinding, streamingTextureID,
+				dUVdx * currentTexelScale, dUVdy * currentTexelScale);
+			if (ShouldTrackMaterialSelectedMipDebug())
+				RecordMaterialSelectedMipDebug(feedback, currentBinding, true,
+					currentWidth, currentHeight, currentMipCount, dUVdx, dUVdy);
+			return Sample2DGrad(currentTexture, samp, uv, dUVdx, dUVdy);
+		}
+	}
     uint width;
     uint height;
 	uint mipCount;
@@ -739,11 +780,9 @@ float SampleMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
-#if defined(PSO_TEXTURE_STREAMING)
+    // See the float4 overload above.  Stable-ID binding must not depend on a
+    // compile-time residency specialization.
     return SampleStreamingMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
-#else
-    return SampleResidentMaterialTexture2DGrad(tex, samp, uv, dUVdx, dUVdy, feedback);
-#endif
 }
 
 float SampleMaterialTexture2DGrad(
@@ -1057,7 +1096,25 @@ float4 ObjectSurfaceSampleTriplanar4(
     ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
     ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
     ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
-    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+    if (streamingTextureID != 0u)
+    {
+        TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
+        if (currentBinding.imageDescriptorIndex != 0xffffffffu)
+        {
+            Texture2D<float4> currentTexture = ResourceDescriptorHeap[currentBinding.imageDescriptorIndex];
+            RecordObjectSurfaceTriplanarTextureAccess(currentTexture, streamingTextureID,
+                xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+            float4 currentResult = ObjectSurfaceSampleStochastic4NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
+            currentResult += ObjectSurfaceSampleStochastic4NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
+            currentResult += ObjectSurfaceSampleStochastic4NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
+            return currentResult;
+        }
+    }
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID,
+        xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
     float4 result = ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
     result += ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
     result += ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
@@ -1088,7 +1145,25 @@ float ObjectSurfaceSampleTriplanarHeight(
     ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
     ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
     ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
-    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+    if (streamingTextureID != 0u)
+    {
+        TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
+        if (currentBinding.imageDescriptorIndex != 0xffffffffu)
+        {
+            Texture2D<float> currentTexture = ResourceDescriptorHeap[currentBinding.imageDescriptorIndex];
+            RecordObjectSurfaceTriplanarTextureAccess(currentTexture, streamingTextureID,
+                xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+            float currentResult = ObjectSurfaceSampleStochastic1NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
+            currentResult += ObjectSurfaceSampleStochastic1NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
+            currentResult += ObjectSurfaceSampleStochastic1NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
+            return currentResult;
+        }
+    }
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID,
+        xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
     float result = ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
     result += ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
     result += ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;

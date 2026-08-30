@@ -28,6 +28,9 @@ private:
 
 struct PublicationBundle {
     ArtifactVersionID root;
+    // Persistent ownership DAG. Each node owns only its artifact and shares
+    // unchanged dependency nodes with successor manifests.
+    std::vector<std::shared_ptr<const PublicationBundle>> parents;
     std::vector<ArtifactVersionID> versions;
     std::vector<std::shared_ptr<const GpuSubmissionSet>> gpuSubmissions;
     std::vector<std::shared_ptr<const void>> resourceHolds;
@@ -39,7 +42,7 @@ enum class PublishedResourceUsage : std::uint8_t {
 };
 
 enum class PublishedFragmentKind : std::uint8_t {
-    Materials, Terrain, Geometry, DrawRecords, ActiveDrawLists, IndirectWorkloads, Count
+    Materials, TextureImages, Terrain, Geometry, DrawRecords, ActiveDrawLists, IndirectWorkloads, Count
 };
 
 inline constexpr std::size_t kPublishedFragmentCount =
@@ -81,6 +84,18 @@ struct PublishedResourceSelection {
 
 struct PublishedResourceCatalog {
     using ResourceList = std::vector<std::shared_ptr<org::Resource>>;
+	struct OwnerShard {
+		std::unordered_map<PublishedResourceKey, std::shared_ptr<const ResourceList>,
+			PublishedResourceKey::Hasher> entries;
+		std::unordered_map<PublishedResourceKey, std::uint64_t,
+			PublishedResourceKey::Hasher> contentVersions;
+		std::unordered_map<PublishedResourceKey, PublishedResourceSelection,
+			PublishedResourceKey::Hasher> selections;
+	};
+	std::array<std::shared_ptr<const OwnerShard>, kPublishedFragmentCount> ownerShards{};
+
+	// Legacy construction surface retained for bootstrap callers. Published
+	// updates are normalized into ownerShards before becoming visible.
     std::unordered_map<PublishedResourceKey, std::shared_ptr<const ResourceList>,
         PublishedResourceKey::Hasher> entries;
     std::unordered_map<PublishedResourceKey, std::uint64_t,
@@ -99,10 +114,12 @@ struct PublishedResourceCatalog {
 
 struct PublishedStateFragment {
     std::uint64_t revision = 0;
-    // The graph artifact whose payload became this manifest fragment. Frame
-    // commit acknowledges both this root and its dependency closure.
+    // The graph artifact whose payload became this manifest fragment. The
+    // persistent publication bundle retains its dependency DAG and leases;
+    // frame commit therefore acknowledges only this root.
     ArtifactVersionID publicationRoot{};
     std::shared_ptr<const PublicationBundle> publicationBundle;
+    std::vector<std::pair<PublishedFragmentKind, ArtifactVersionID>> publicationDependencies;
     ArtifactPayload payload;
     std::vector<ArtifactSnapshot> dependencyClosure;
     std::vector<std::shared_ptr<const void>> resourceHolds;
@@ -121,6 +138,7 @@ struct RendererStateFragmentArtifact {
 struct PublishedRendererState {
     std::uint64_t epoch = 0;
     PublishedStateFragment materials;
+    PublishedStateFragment textureImages;
     PublishedStateFragment terrain;
     PublishedStateFragment geometry;
     PublishedStateFragment drawRecords;
@@ -166,6 +184,7 @@ public:
         std::size_t frameSlot, std::shared_ptr<const PublishedRendererState> state = {}) noexcept;
     [[nodiscard]] std::shared_ptr<const PublishedManifestLease> LoadLease() const noexcept;
     [[nodiscard]] std::uint64_t Epoch() const noexcept;
+    void Clear() noexcept;
 private:
     std::atomic<std::shared_ptr<const PublishedRendererState>> m_state;
     std::atomic<std::shared_ptr<const PublishedManifestLease>> m_lease;
@@ -221,6 +240,9 @@ struct RendererStatePublisherStats {
     std::uint64_t rejectedFragmentRegressions = 0;
     std::uint64_t explicitRollbacks = 0;
     std::uint64_t commitMicros = 0;
+    std::uint64_t commitP99Micros = 0;
+    std::uint64_t commitMaxMicros = 0;
+    std::uint64_t commitSamples = 0;
     std::size_t retainedFrameStates = 0;
 };
 
@@ -253,6 +275,9 @@ public:
     RendererStateCommitResult Commit(std::size_t frameSlot);
     void ReleaseFrameSlot(std::size_t frameSlot);
     void DiscardCandidate();
+    // Releases every published ownership root. Call only after producers are
+    // stopped and all frame fences have retired, before device allocator teardown.
+    void Shutdown();
 
     [[nodiscard]] std::shared_ptr<const PublishedRendererState> Active() const;
     [[nodiscard]] std::uint64_t ActiveEpoch() const;
@@ -267,6 +292,10 @@ private:
     std::shared_ptr<const PublishedRendererState> m_active;
     std::vector<std::shared_ptr<const PublishedRendererState>> m_frameStates;
     RendererStatePublisherStats m_stats;
+    static constexpr std::size_t kCommitLatencySampleCapacity = 4096;
+    std::array<std::uint64_t, kCommitLatencySampleCapacity> m_commitLatencySamples{};
+    std::size_t m_commitLatencySampleCursor = 0;
+    std::size_t m_commitLatencySampleCount = 0;
     std::shared_ptr<PublishedStateSource> m_source = std::make_shared<PublishedStateSource>();
     std::function<void(std::uint64_t)> m_candidateRejected;
 };

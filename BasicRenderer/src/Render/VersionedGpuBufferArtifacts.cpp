@@ -6,6 +6,7 @@
 #include <format>
 #include <limits>
 #include <mutex>
+#include <numeric>
 
 #include "Render/Runtime/IUploadService.h"
 #include "Render/ObjectBufferStateArtifacts.h"
@@ -17,26 +18,45 @@
 
 namespace br::render {
 namespace {
+std::mutex g_backingRetirementMutex;
+std::vector<std::weak_ptr<VersionedGpuBufferBackingPool>> g_backingRetirementWaiters;
+std::atomic_uint64_t g_nextBackingSuspensionIdentity{ 1 };
+std::atomic_uint64_t g_backingFrameRetirementEpoch{ 0 };
+
+void RegisterBackingRetirementWaiter(
+    const std::shared_ptr<VersionedGpuBufferBackingPool>& pool) {
+    if (!pool) return;
+    std::lock_guard lock(g_backingRetirementMutex);
+    g_backingRetirementWaiters.push_back(pool);
+}
+
 struct BuildDiagnosticState {
     std::mutex mutex;
     VersionedGpuBufferBuildDiagnostics snapshot;
+    std::uint64_t activeBuilds = 0;
     std::chrono::steady_clock::time_point buildBegin{};
     std::chrono::steady_clock::time_point phaseBegin{};
 };
 
 BuildDiagnosticState g_buildDiagnostics;
+thread_local VersionedGpuBufferBuildPhase g_threadBuildPhase =
+    VersionedGpuBufferBuildPhase::Idle;
+thread_local std::chrono::steady_clock::time_point g_threadPhaseBegin{};
 
 void EnterBuildPhase(VersionedGpuBufferBuildPhase phase) {
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard lock(g_buildDiagnostics.mutex);
     auto& state = g_buildDiagnostics;
-    if (state.snapshot.active && state.snapshot.phase != VersionedGpuBufferBuildPhase::Idle) {
-        const auto index = static_cast<std::size_t>(state.snapshot.phase);
+    if (g_threadBuildPhase != VersionedGpuBufferBuildPhase::Idle &&
+        g_threadPhaseBegin != std::chrono::steady_clock::time_point{}) {
+        const auto index = static_cast<std::size_t>(g_threadBuildPhase);
         const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-            now - state.phaseBegin).count());
+            now - g_threadPhaseBegin).count());
         state.snapshot.maxPhaseMicros[index] = (std::max)(state.snapshot.maxPhaseMicros[index], elapsed);
         ++state.snapshot.phaseCompletions[index];
     }
+    g_threadBuildPhase = phase;
+    g_threadPhaseBegin = now;
     state.snapshot.phase = phase;
     state.phaseBegin = now;
 }
@@ -47,6 +67,7 @@ public:
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard lock(g_buildDiagnostics.mutex);
         auto& state = g_buildDiagnostics;
+        ++state.activeBuilds;
         state.snapshot.active = true;
         state.snapshot.phase = VersionedGpuBufferBuildPhase::Idle;
         state.snapshot.key = context.key;
@@ -62,7 +83,11 @@ public:
     ~BuildDiagnosticScope() {
         EnterBuildPhase(VersionedGpuBufferBuildPhase::Idle);
         std::lock_guard lock(g_buildDiagnostics.mutex);
-        g_buildDiagnostics.snapshot.active = false;
+        if (g_buildDiagnostics.activeBuilds != 0) --g_buildDiagnostics.activeBuilds;
+        g_buildDiagnostics.snapshot.active = g_buildDiagnostics.activeBuilds != 0;
+        if (!g_buildDiagnostics.snapshot.active) {
+            g_buildDiagnostics.snapshot.phase = VersionedGpuBufferBuildPhase::Idle;
+        }
     }
 };
 
@@ -129,7 +154,7 @@ const ObjectBufferMetricNames* ObjectBufferMetrics(const VersionedGpuBufferBuild
 const char* VersionedGpuBufferBuildPhaseName(VersionedGpuBufferBuildPhase phase) noexcept {
     switch (phase) {
     case VersionedGpuBufferBuildPhase::Idle: return "Idle";
-    case VersionedGpuBufferBuildPhase::ReplayShadow: return "ReplayShadow";
+    case VersionedGpuBufferBuildPhase::ReplayAuthoritativeState: return "ReplayAuthoritativeState";
     case VersionedGpuBufferBuildPhase::SelectBacking: return "SelectBacking";
     case VersionedGpuBufferBuildPhase::ScanBackingPool: return "ScanBackingPool";
     case VersionedGpuBufferBuildPhase::ReclaimBacking: return "ReclaimBacking";
@@ -164,6 +189,58 @@ VersionedGpuBufferBackingPool::~VersionedGpuBufferBackingPool() {
     EmitBackingPoolTelemetry();
 }
 
+std::uint64_t VersionedGpuBufferBackingPool::SubscribeAvailability(
+    std::function<void(std::uint64_t)> callback) {
+    if (!callback) return 0;
+    auto identity = g_nextBackingSuspensionIdentity.fetch_add(1, std::memory_order_relaxed);
+    if (identity == 0) {
+        identity = g_nextBackingSuspensionIdentity.fetch_add(1, std::memory_order_relaxed);
+    }
+    bool registerPool = false;
+    {
+        std::lock_guard lock(m_mutex);
+        m_waiters.emplace_back(identity, std::move(callback));
+        registerPool = !m_registeredForRetirementWake;
+        m_registeredForRetirementWake = true;
+    }
+    if (registerPool) RegisterBackingRetirementWaiter(shared_from_this());
+    basic_telemetry::AddCounter("SARP.VersionedBuffer.BackingRetirementSuspensions");
+    return identity;
+}
+
+void VersionedGpuBufferBackingPool::NotifyAvailability() noexcept {
+    std::vector<std::pair<std::uint64_t, std::function<void(std::uint64_t)>>> waiters;
+    {
+        std::lock_guard lock(m_mutex);
+        waiters.swap(m_waiters);
+        m_registeredForRetirementWake = false;
+    }
+    for (auto& [identity, callback] : waiters) {
+        try { if (callback) callback(identity); }
+        catch (...) {}
+    }
+    if (!waiters.empty()) {
+        basic_telemetry::AddCounter(
+            "SARP.VersionedBuffer.BackingRetirementWakes", waiters.size());
+    }
+}
+
+void NotifyVersionedGpuBufferFrameRetirement() noexcept {
+	g_backingFrameRetirementEpoch.fetch_add(1, std::memory_order_release);
+    std::vector<std::weak_ptr<VersionedGpuBufferBackingPool>> waiting;
+    {
+        std::lock_guard lock(g_backingRetirementMutex);
+        waiting.swap(g_backingRetirementWaiters);
+    }
+    for (auto& weak : waiting) {
+        if (auto pool = weak.lock()) pool->NotifyAvailability();
+    }
+}
+
+std::uint64_t VersionedGpuBufferFrameRetirementEpoch() noexcept {
+	return g_backingFrameRetirementEpoch.load(std::memory_order_acquire);
+}
+
 void VersionedGpuBufferBackingPool::Retire(std::uint64_t backingGeneration) noexcept {
     if (backingGeneration == 0) return;
     std::lock_guard lock(m_mutex);
@@ -179,9 +256,42 @@ void VersionedGpuBufferBackingPool::Retire(std::uint64_t backingGeneration) noex
     EmitBackingPoolTelemetry();
 }
 
+void VersionedGpuBufferBackingPool::AcknowledgePublished(
+    std::uint64_t backingGeneration, std::uint32_t framesInFlight) noexcept {
+    if (backingGeneration == 0) return;
+    std::lock_guard lock(m_mutex);
+    const auto retirementEpoch = VersionedGpuBufferFrameRetirementEpoch();
+    // GPU safety starts when the old backing stops being the active published
+    // table, not when it first became active. A table may remain current for
+    // thousands of frames; using its original publication epoch allowed it to
+    // be rewritten immediately after replacement while older frame slots still
+    // referenced its descriptors.
+    if (m_activePublishedGeneration != 0 &&
+        m_activePublishedGeneration != backingGeneration) {
+        const auto previous = std::ranges::find_if(m_backings, [&](const auto& backing) {
+            return backing && backing->backingGeneration == m_activePublishedGeneration;
+        });
+        if (previous != m_backings.end()) {
+            (*previous)->lastPublishedRetirementEpoch = retirementEpoch;
+        }
+    }
+    m_activePublishedGeneration = backingGeneration;
+    m_framesInFlight = (std::max)(framesInFlight, 1u);
+    const auto found = std::ranges::find_if(m_backings, [&](const auto& backing) {
+        return backing && backing->backingGeneration == backingGeneration;
+    });
+    if (found != m_backings.end()) {
+        (*found)->wasPublished = true;
+        // This value is replaced with the actual retirement epoch when a
+        // successor becomes published.
+        (*found)->lastPublishedRetirementEpoch = retirementEpoch;
+    }
+}
+
 PublishedGpuBufferVersion::~PublishedGpuBufferVersion() {
-    if (!backing) return;
-    if (const auto pool = backingPool.lock()) pool->Retire(backing->backingGeneration);
+    // Pool wakeups are issued after the containing artifact or frame state has
+    // completed destruction. Calling graph continuations from this destructor
+    // can re-enter scheduling while sibling catalog holds are being torn down.
 }
 
 std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
@@ -190,15 +300,25 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     bool& expanded) {
     EnterBuildPhase(VersionedGpuBufferBuildPhase::ScanBackingPool);
     std::lock_guard lock(m_mutex);
-    // The pool is the only owner allowed to recycle a backing. A published
-    // catalog can retain the Resource independently of its backing artifact,
-    // so both ownership counts must be exclusive before reuse. Reclaim idle
-    // capacity classes eagerly; keeping every historical growth class made
-    // streaming traversal permanently retain their VRAM.
+    // The backing artifact is the explicit reuse lease. Render-graph and upload
+    // infrastructure can retain the Resource object after all semantic users
+    // have retired, so Resource::use_count is not a valid safety signal and
+    // permanently exhausted the ring. Every published version and catalog
+    // selection retains the backing artifact; pool-only ownership is therefore
+    // the authoritative indication that the allocation is safe to rewrite.
+    // Reclaim idle capacity classes eagerly; keeping every historical growth
+    // class made streaming traversal permanently retain their VRAM.
     std::shared_ptr<BufferBackingArtifact> reusable;
+    std::size_t matchingCapacityClass = 0;
     for (auto it = m_backings.begin(); it != m_backings.end();) {
         const auto& backing = *it;
-        const bool idle = backing && backing.use_count() == 1 && backing->resource.use_count() == 1;
+        if (backing && backing->capacityClass == capacityClass) ++matchingCapacityClass;
+        const auto retirementEpoch = VersionedGpuBufferFrameRetirementEpoch();
+        const bool publicationRetired = backing && backing->wasPublished &&
+            backing->backingGeneration != m_activePublishedGeneration &&
+            retirementEpoch >= backing->lastPublishedRetirementEpoch + m_framesInFlight;
+        const bool idle = backing &&
+            (backing.use_count() == 1 || publicationRetired);
         if (idle && backing->capacityClass == capacityClass && !reusable) {
             reusable = backing;
             ++it;
@@ -217,10 +337,47 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
         ++it;
     }
     if (reusable) {
-            expanded = false;
-            basic_telemetry::AddCounter("SARP.VersionedBuffer.PooledBackingReused");
-            EmitBackingPoolTelemetry();
-            return reusable;
+        expanded = false;
+        {
+            std::lock_guard diagnosticLock(g_buildDiagnostics.mutex);
+            g_buildDiagnostics.snapshot.exhaustedCapacityClass = 0;
+            g_buildDiagnostics.snapshot.exhaustedBackingCount = 0;
+        }
+        basic_telemetry::AddCounter("SARP.VersionedBuffer.PooledBackingReused");
+        EmitBackingPoolTelemetry();
+        return reusable;
+    }
+    // A full post-publication frame-slot rotation ensures the three frame
+    // leases no longer span several mutable epochs before the next build is
+    // admitted. At most frames-in-flight plus one unpublished successor are
+    // therefore distinct. Keep the bound explicit: exhaustion suspends and
+    // resumes from retirement rather than allocating past it.
+    const auto maximumBackingsPerCapacityClass =
+        static_cast<std::size_t>(m_framesInFlight) + 1u;
+    if (matchingCapacityClass >= maximumBackingsPerCapacityClass) {
+        {
+            std::lock_guard diagnosticLock(g_buildDiagnostics.mutex);
+            auto& snapshot = g_buildDiagnostics.snapshot;
+            snapshot.exhaustedCapacityClass = capacityClass;
+            snapshot.exhaustedBackingCount = 0;
+            snapshot.exhaustedBackingGenerations.fill(0);
+            snapshot.exhaustedBackingReferences.fill(0);
+            snapshot.exhaustedResourceReferences.fill(0);
+            for (const auto& candidate : m_backings) {
+                if (!candidate || candidate->capacityClass != capacityClass ||
+                    snapshot.exhaustedBackingCount >=
+                        snapshot.exhaustedBackingGenerations.size()) continue;
+                const auto index = snapshot.exhaustedBackingCount++;
+                snapshot.exhaustedBackingGenerations[index] = candidate->backingGeneration;
+                snapshot.exhaustedBackingReferences[index] =
+                    static_cast<std::uint32_t>(candidate.use_count());
+                snapshot.exhaustedResourceReferences[index] = candidate->resource
+                    ? static_cast<std::uint32_t>(candidate->resource.use_count()) : 0u;
+            }
+        }
+        expanded = false;
+        basic_telemetry::AddCounter("SARP.VersionedBuffer.BackingRingExhausted");
+        return {};
     }
     Resource::ScopedECSRegistrationSuppression suppressECS;
     EnterBuildPhase(VersionedGpuBufferBuildPhase::MaterializeResource);
@@ -237,6 +394,11 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     g_pooledBackingCount.fetch_add(1, std::memory_order_relaxed);
     g_pooledBackingBytes.fetch_add(capacityClass * elementStride, std::memory_order_relaxed);
     basic_telemetry::AddCounter("SARP.VersionedBuffer.PooledBackingAllocated");
+    {
+        std::lock_guard diagnosticLock(g_buildDiagnostics.mutex);
+        g_buildDiagnostics.snapshot.exhaustedCapacityClass = 0;
+        g_buildDiagnostics.snapshot.exhaustedBackingCount = 0;
+    }
     EmitBackingPoolTelemetry();
     expanded = true;
     return backing;
@@ -255,6 +417,7 @@ void VersionedGpuBufferJournal::Initialize(std::span<const std::byte> bytes,
     m_previous.reset();
     m_writes.clear();
     m_initialBytes.assign(bytes.begin(), bytes.end());
+	m_desiredBytes = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
     m_elementCount = elementCount;
     m_capacity = capacity;
     m_writeSequence = 1;
@@ -279,7 +442,37 @@ std::uint64_t VersionedGpuBufferJournal::AppendWrite(std::uint64_t elementOffset
     write.elementOffset = elementOffset;
     write.bytes = std::make_shared<const std::vector<std::byte>>(bytes.begin(), bytes.end());
     m_writes.push_back(std::move(write));
-    m_elementCount = (std::max)(m_elementCount, resultingElementCount);
+	if (!m_desiredBytes) m_desiredBytes = std::make_shared<std::vector<std::byte>>();
+	else if (m_desiredBytes.use_count() != 1)
+		m_desiredBytes = std::make_shared<std::vector<std::byte>>(*m_desiredBytes);
+	// resultingElementCount describes the extent reached by this mutation. Sparse
+	// allocator writes can target an older/lower range after a larger range has
+	// already established the journal's logical extent; never truncate the
+	// authoritative image in that case.
+	const auto logicalElementCount = (std::max)(m_elementCount, resultingElementCount);
+	const auto desiredSize = static_cast<std::size_t>(logicalElementCount * m_elementStride);
+	m_desiredBytes->resize(desiredSize);
+	std::copy(bytes.begin(), bytes.end(),
+		m_desiredBytes->begin() + static_cast<std::size_t>(elementOffset * m_elementStride));
+    m_elementCount = logicalElementCount;
+    return m_writeSequence;
+}
+
+std::uint64_t VersionedGpuBufferJournal::ReplaceImage(
+    std::span<const std::byte> bytes, std::uint64_t elementCount,
+    std::uint64_t capacity) {
+    if (m_elementStride == 0 || elementCount > capacity ||
+        bytes.size() != elementCount * m_elementStride) {
+        throw std::invalid_argument("invalid versioned GPU buffer replacement image");
+    }
+    std::lock_guard lock(m_mutex);
+    m_capacity = (std::max)(m_capacity, capacity);
+    m_elementCount = elementCount;
+    ++m_writeSequence;
+    m_desiredBytes = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
+    auto replacement = std::make_shared<const std::vector<std::byte>>(bytes.begin(), bytes.end());
+    m_writes.push_back(VersionedGpuBufferWrite{
+        m_writeSequence, 0u, std::move(replacement) });
     return m_writeSequence;
 }
 
@@ -302,9 +495,16 @@ VersionedGpuBufferJournal::Capture VersionedGpuBufferJournal::CaptureDesired() c
     // unpublished bytes and put multi-megabyte memcpy/insert work on callers
     // such as the render host. Replay is a graph producer operation and can
     // consume adjacent descriptors directly.
-    auto sealed = m_writes;
-    return Capture{ m_writeSequence, m_elementCount, m_capacity,
-        m_previous, std::move(sealed), m_previous ? std::vector<std::byte>{} : m_initialBytes };
+    Capture capture;
+	capture.writeSequence = m_writeSequence;
+	capture.elementCount = m_elementCount;
+	capture.capacity = m_capacity;
+	capture.previous = m_previous;
+	capture.writes = m_writes;
+	capture.initialBytes = m_previous ? std::vector<std::byte>{} : m_initialBytes;
+	capture.desiredBytes = m_desiredBytes;
+	capture.journalBaseSequence = m_previous ? m_previous->writeSequence : 0u;
+	return capture;
 }
 
 void VersionedGpuBufferJournal::Acknowledge(
@@ -371,8 +571,8 @@ ArtifactRequestResult VersionedBufferFamily::RequestSnapshot(
         fingerprint *= 1099511628211ull;
     }
     if (fingerprint == 0) fingerprint = 1;
-    return requests.Request(m_config.address, revision, {},
-        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint);
+    return requests.SubmitLatest({ m_config.address, revision, {},
+        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint });
 }
 
 ArtifactRequestResult VersionedBufferFamily::RequestContentSnapshot(
@@ -430,6 +630,8 @@ ArtifactRequestResult VersionedBufferFamily::RequestCapture(
     input->previous = std::move(capture.previous);
     input->writes = std::move(capture.writes);
     input->bytes = std::move(capture.initialBytes);
+	input->desiredBytes = std::move(capture.desiredBytes);
+	input->journalBaseSequence = capture.journalBaseSequence;
     std::uint64_t fingerprint = revision ^ (capture.elementCount << 1u) ^
         (capture.capacity << 7u) ^ (m_config.catalogVariant << 17u) ^ 0x5642464a4f5552ull;
     const auto hashBytes = [&fingerprint](std::span<const std::byte> values) {
@@ -444,8 +646,8 @@ ArtifactRequestResult VersionedBufferFamily::RequestCapture(
         if (write.bytes) hashBytes(*write.bytes);
     }
     if (fingerprint == 0) fingerprint = 1;
-    auto result = requests.Request(m_config.address, revision, {},
-        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint);
+    auto result = requests.SubmitLatest({ m_config.address, revision, {},
+        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint });
     if (result) {
         m_lastJournalRevision = revision;
         m_lastJournalHandle = result.Handle();
@@ -456,11 +658,14 @@ ArtifactRequestResult VersionedBufferFamily::RequestCapture(
 void VersionedBufferFamily::Acknowledge(
     std::shared_ptr<const PublishedGpuBufferVersion> version) {
     if (!version) return;
+    if (auto pool = version->backingPool.lock(); version->backing) {
+        pool->AcknowledgePublished(version->backing->backingGeneration, 3u);
+    }
     std::lock_guard lock(m_mutex);
     if (!m_previous || version->revision > m_previous->revision) m_previous = std::move(version);
 }
 
-std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferShadow(
+std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferAuthoritativeState(
     const VersionedGpuBufferBuildInput& input,
     std::string& error) {
     error.clear();
@@ -474,6 +679,13 @@ std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferShadow(
         return {};
     }
     const auto requiredBytes = static_cast<std::size_t>(input.elementCount * input.elementStride);
+	if (input.desiredBytes) {
+		if (input.desiredBytes->size() != requiredBytes) {
+			error = "versioned buffer desired image byte count does not match rows";
+			return {};
+		}
+		return input.desiredBytes;
+	}
     auto shadow = std::make_shared<std::vector<std::byte>>(requiredBytes);
     if (!input.bytes.empty()) {
         if (requiredBytes != input.bytes.size()) {
@@ -620,17 +832,14 @@ std::uint64_t ReplacementCapacity(const VersionedGpuBufferBuildInput& input) {
     return (std::max)(rounded, grown);
 }
 
-ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context) {
+ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
+    const std::function<void(std::uint64_t)>& notifySuspension) {
     const auto input = context.input.Get<VersionedGpuBufferBuildInput>();
     if (!input || !input->uploadService || input->elementStride == 0u) {
         return ArtifactBuildResult::Failure("versioned buffer input/upload service/stride missing");
     }
     BuildDiagnosticScope diagnosticScope(context, *input);
-    EnterBuildPhase(VersionedGpuBufferBuildPhase::ReplayShadow);
-    std::string replayError;
-    auto shadow = ReplayVersionedGpuBufferShadow(*input, replayError);
-    if (!shadow) return ArtifactBuildResult::Failure(std::move(replayError));
-
+    if (context.stopRequested && context.stopRequested()) return ArtifactBuildResult::Cancelled();
     EnterBuildPhase(VersionedGpuBufferBuildPhase::SelectBacking);
     const bool fitsBacking = input->previous && input->previous->resource &&
         input->capacity <= input->previous->capacity;
@@ -641,23 +850,34 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     const auto mode = fitsBacking ? BufferRevisionMode::Patch : BufferRevisionMode::Replace;
     auto pool = input->backingPool ? input->backingPool
                                    : std::make_shared<VersionedGpuBufferBackingPool>();
-    std::shared_ptr<BufferBackingArtifact> backing;
+    if (appendOnly) basic_telemetry::AddCounter("SARP.VersionedBuffer.AppendOnly");
+    const auto capacityClass = mode == BufferRevisionMode::Replace
+        ? ReplacementCapacity(*input) : input->previous->capacity;
     bool backingExpanded = false;
-    if (appendOnly) {
-		basic_telemetry::AddCounter("SARP.VersionedBuffer.AppendOnly");
-        backing = input->previous->backing;
-        if (!backing) {
-            backing = std::make_shared<BufferBackingArtifact>();
-            backing->resource = input->previous->resource;
-            backing->capacityClass = input->previous->capacity;
-        }
-    } else {
-        const auto capacityClass = mode == BufferRevisionMode::Replace
-            ? ReplacementCapacity(*input) : input->previous->capacity;
-        backing = pool->Acquire(capacityClass, input->elementStride,
-            input->unorderedAccess, input->indirectArguments, input->debugName,
-            backingExpanded);
+    auto backing = pool->Acquire(capacityClass, input->elementStride,
+        input->unorderedAccess, input->indirectArguments, input->debugName,
+        backingExpanded);
+    if (!backing) {
+        const auto identity = pool->SubscribeAvailability(
+            notifySuspension);
+        return ArtifactBuildResult::Suspend(ArtifactSuspension::Capacity(
+            identity, "versioned GPU buffer backing ring exhausted"));
     }
+    // Do not replay the CPU journal until a bounded backing-ring slot is
+    // available. Ring exhaustion is an expected transient state; replaying on
+    // every retry multiplied host work while waiting for frame retirement.
+    EnterBuildPhase(VersionedGpuBufferBuildPhase::ReplayAuthoritativeState);
+    std::string replayError;
+    auto shadow = ReplayVersionedGpuBufferAuthoritativeState(*input, replayError);
+    if (!shadow) return ArtifactBuildResult::Failure(std::move(replayError));
+	if (input->desiredBytes) {
+		basic_telemetry::AddCounter("SARP.VersionedBuffer.AuthoritativeStateReused");
+		basic_telemetry::Record("SARP.VersionedBuffer.BytesReplayed", 0);
+	} else {
+		basic_telemetry::Record("SARP.VersionedBuffer.BytesReplayed", shadow->size());
+	}
+    if (context.stopRequested && context.stopRequested()) return ArtifactBuildResult::Cancelled();
+
     auto resource = backing->resource;
 	basic_telemetry::Record("SARP.VersionedBuffer.RequestedCapacityElements", input->capacity);
 	basic_telemetry::Record("SARP.VersionedBuffer.BackingCapacityElements", backing->capacityClass);
@@ -693,19 +913,77 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     // otherwise serialize behind the tracked copy timeline during scene load.
     const bool needsInitialContent = !(input->unorderedAccess &&
         input->indirectArguments && input->bytes.empty() && input->writes.empty());
-    if (appendOnly) {
-        for (const auto& write : input->writes) {
-            if (!write.bytes || write.bytes->empty()) continue;
-            tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
-                write.bytes->data(), write.bytes->size(), resource,
-                write.elementOffset * input->elementStride));
+    std::uint64_t uploadedBytes = 0;
+    std::uint64_t dirtyRangeCount = 0;
+    if (needsInitialContent && !shadow->empty()) {
+        struct DirtyRange { std::size_t offset = 0, size = 0; };
+        std::vector<DirtyRange> dirtyRanges;
+        const auto previousBackingShadow = backing->cpuShadow;
+		const bool journalCoversBacking = !backingExpanded && input->desiredBytes &&
+			backing->contentEpoch >= input->journalBaseSequence &&
+			backing->contentEpoch <= input->writeSequence &&
+			previousBackingShadow && previousBackingShadow->size() == shadow->size();
+		if (journalCoversBacking) {
+			for (const auto& write : input->writes) {
+				if (write.sequence <= backing->contentEpoch || !write.bytes || write.bytes->empty()) continue;
+				dirtyRanges.push_back({
+					static_cast<std::size_t>(write.elementOffset * input->elementStride),
+					write.bytes->size() });
+			}
+			std::ranges::sort(dirtyRanges, {}, &DirtyRange::offset);
+			std::vector<DirtyRange> merged;
+			for (const auto& range : dirtyRanges) {
+				if (!merged.empty() && range.offset <= merged.back().offset + merged.back().size + 256u) {
+					const auto end = (std::max)(merged.back().offset + merged.back().size,
+						range.offset + range.size);
+					merged.back().size = end - merged.back().offset;
+				} else merged.push_back(range);
+			}
+			dirtyRanges = std::move(merged);
+			basic_telemetry::AddCounter("SARP.VersionedBuffer.BackingEpochJournalCatchup");
+		} else if (!backingExpanded && previousBackingShadow &&
+            previousBackingShadow->size() == shadow->size()) {
+            constexpr std::size_t mergeGapBytes = 256;
+            std::size_t cursor = 0;
+            while (cursor < shadow->size()) {
+                while (cursor < shadow->size() &&
+                    (*previousBackingShadow)[cursor] == (*shadow)[cursor]) ++cursor;
+                if (cursor == shadow->size()) break;
+                const auto begin = cursor++;
+                std::size_t lastDifference = begin;
+                while (cursor < shadow->size()) {
+                    if ((*previousBackingShadow)[cursor] != (*shadow)[cursor]) {
+                        lastDifference = cursor;
+                    } else if (cursor - lastDifference > mergeGapBytes) {
+                        break;
+                    }
+                    ++cursor;
+                }
+                dirtyRanges.push_back({ begin, lastDifference - begin + 1u });
+            }
+        } else {
+            dirtyRanges.push_back({ 0, shadow->size() });
         }
-    } else if (needsInitialContent && !shadow->empty()) {
-        tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
-            shadow->data(), shadow->size(), resource, 0));
+        const auto dirtyBytes = std::accumulate(dirtyRanges.begin(), dirtyRanges.end(),
+            std::size_t{ 0 }, [](std::size_t total, const DirtyRange& range) {
+                return total + range.size;
+            });
+        if (dirtyRanges.size() > 128u || dirtyBytes * 2u > shadow->size()) {
+            dirtyRanges.assign(1u, DirtyRange{ 0, shadow->size() });
+        }
+        for (const auto& range : dirtyRanges) {
+            tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
+                shadow->data() + range.offset, range.size, resource, range.offset));
+            uploadedBytes += range.size;
+        }
+        dirtyRangeCount = dirtyRanges.size();
     } else if (!needsInitialContent) {
         basic_telemetry::AddCounter("SARP.VersionedBuffer.TransientInitializationSkipped");
     }
+    basic_telemetry::Record("SARP.VersionedBuffer.BytesUploaded", uploadedBytes);
+    basic_telemetry::Record("SARP.VersionedBuffer.DirtyRanges", dirtyRangeCount);
+    backing->contentEpoch = input->writeSequence;
+    backing->cpuShadow = shadow;
 
     EnterBuildPhase(VersionedGpuBufferBuildPhase::AssembleResult);
     auto version = std::make_shared<PublishedGpuBufferVersion>();
@@ -716,6 +994,8 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     version->elementStride = input->elementStride;
     version->revisionMode = mode;
     version->contentVersion = context.revision;
+    version->contentEpoch = input->writeSequence;
+    version->backingEpoch = backing->backingGeneration;
     version->backing = std::move(backing);
     version->backingPool = pool;
     version->resource = resource;
@@ -726,6 +1006,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
     root->publishRoot = false;
     root->fragment.revision = context.revision;
     root->fragment.payload = ArtifactPayload::Make<PublishedGpuBufferVersion>(version);
+    root->fragment.resourceHolds.push_back(version->backing);
     auto resources = std::make_shared<PublishedResourceCatalog::ResourceList>();
     resources->push_back(resource);
     root->catalogEntries.emplace_back(PublishedResourceKey{
@@ -738,9 +1019,14 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context)
 } // namespace
 
 void RegisterVersionedGpuBufferProducer(AsyncStateGraph& graph) {
+    auto notifySuspension = graph.MakeSuspensionNotifier();
     const ArtifactProducerRegistration registration{
-        TaskLane::FrameCritical, TaskDomain::RendererState,
-        "VersionedGpuBufferArtifact::Build", BuildVersionedGpuBuffer };
+        TaskLane::FrameCritical, TaskDomain::GpuBufferBuild,
+        "VersionedGpuBufferArtifact::Build",
+        [notifySuspension = std::move(notifySuspension)](
+            const ArtifactBuildContext& context) {
+            return BuildVersionedGpuBuffer(context, notifySuspension);
+        } };
     graph.RegisterProducer(ArtifactKind::BufferVersion, registration);
     graph.RegisterProducer(ArtifactKind::ActiveDrawList, registration);
 }

@@ -1,10 +1,13 @@
 #include "Render/PublishedRendererState.h"
 
 #include <chrono>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 #include <BasicTelemetry/Telemetry.h>
 #include <BasicTelemetry/Tracy.h>
+
+#include "Render/VersionedGpuBufferArtifacts.h"
 
 namespace br::render {
 
@@ -23,6 +26,59 @@ void ArtifactLeaseSet::Merge(const ArtifactLeaseSet& other) {
 namespace {
 std::mutex g_processSourceMutex;
 std::weak_ptr<PublishedStateSource> g_processSource;
+
+std::shared_ptr<const PublishedResourceCatalog::OwnerShard> LegacyOwnerShard(
+	const std::shared_ptr<const PublishedResourceCatalog>& catalog,
+	PublishedFragmentKind owner) {
+	auto shard = std::make_shared<PublishedResourceCatalog::OwnerShard>();
+	if (!catalog) return shard;
+	for (const auto& [key, resources] : catalog->entries)
+		if (key.owner == owner) shard->entries.emplace(key, resources);
+	for (const auto& [key, version] : catalog->contentVersions)
+		if (key.owner == owner) shard->contentVersions.emplace(key, version);
+	for (const auto& [key, selection] : catalog->selections)
+		if (key.owner == owner) shard->selections.emplace(key, selection);
+	return shard;
+}
+
+std::shared_ptr<PublishedResourceCatalog> MakeCatalogUpdate(
+	const std::shared_ptr<const PublishedResourceCatalog>& base,
+	std::uint64_t replacedOwnerMask,
+	const std::vector<std::pair<PublishedResourceKey,
+		std::shared_ptr<const PublishedResourceCatalog::ResourceList>>>& entries,
+	const std::vector<std::pair<PublishedResourceKey, PublishedResourceSelection>>& selections,
+	const PublishedRendererState& state, std::uint64_t targetEpoch) {
+	auto result = std::make_shared<PublishedResourceCatalog>();
+	std::array<bool, kPublishedFragmentCount> changed{};
+	for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+		const auto owner = static_cast<PublishedFragmentKind>(index);
+		result->ownerShards[index] = base && base->ownerShards[index]
+			? base->ownerShards[index] : LegacyOwnerShard(base, owner);
+		changed[index] = (replacedOwnerMask & PublishedFragmentMask(owner)) != 0;
+	}
+	for (const auto& [key, _] : entries) changed[static_cast<std::size_t>(key.owner)] = true;
+	for (const auto& [key, _] : selections) changed[static_cast<std::size_t>(key.owner)] = true;
+	for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+		if (!changed[index]) continue;
+		const auto owner = static_cast<PublishedFragmentKind>(index);
+		auto shard = (replacedOwnerMask & PublishedFragmentMask(owner)) != 0
+			? std::make_shared<PublishedResourceCatalog::OwnerShard>()
+			: std::make_shared<PublishedResourceCatalog::OwnerShard>(*result->ownerShards[index]);
+		for (const auto& [key, resources] : entries) {
+			if (key.owner != owner) continue;
+			shard->entries.insert_or_assign(key, resources);
+			shard->contentVersions.insert_or_assign(key, state.Fragment(owner).revision);
+		}
+		for (const auto& [key, selection] : selections) {
+			if (key.owner != owner) continue;
+			auto stamped = selection;
+			stamped.manifestEpoch = targetEpoch;
+			shard->selections.insert_or_assign(key, std::move(stamped));
+		}
+		result->ownerShards[index] = std::move(shard);
+	}
+	return result;
+}
 }
 
 std::size_t PublishedResourceKey::Hasher::operator()(const PublishedResourceKey& key) const noexcept {
@@ -38,28 +94,50 @@ std::size_t PublishedResourceKey::Hasher::operator()(const PublishedResourceKey&
 std::shared_ptr<const PublishedResourceCatalog::ResourceList> PublishedResourceCatalog::Find(
     const PublishedResourceKey& key) const {
     const auto found = entries.find(key);
+	const auto& shard = ownerShards[static_cast<std::size_t>(key.owner)];
+	if (shard) {
+		const auto selected = shard->entries.find(key);
+		return selected == shard->entries.end() ? nullptr : selected->second;
+	}
     return found == entries.end() ? nullptr : found->second;
 }
 
 const PublishedResourceSelection* PublishedResourceCatalog::FindSelection(
     const PublishedResourceKey& key) const noexcept {
     const auto found = selections.find(key);
+	const auto& shard = ownerShards[static_cast<std::size_t>(key.owner)];
+	if (shard) {
+		const auto selected = shard->selections.find(key);
+		return selected == shard->selections.end() ? nullptr : &selected->second;
+	}
     return found == selections.end() ? nullptr : &found->second;
 }
 
 std::vector<const PublishedResourceSelection*> PublishedResourceCatalog::FindSelections(
     const PublishedResourceQuery& query) const {
     std::vector<const PublishedResourceSelection*> result;
-    result.reserve(selections.size());
-    for (const auto& [key, selection] : selections) {
-        if (query.Matches(key)) result.push_back(&selection);
-    }
+	for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+		if (query.owner && static_cast<std::size_t>(*query.owner) != index) continue;
+		if (const auto& shard = ownerShards[index]) {
+			for (const auto& [key, selection] : shard->selections)
+				if (query.Matches(key)) result.push_back(&selection);
+		} else {
+			for (const auto& [key, selection] : selections)
+				if (static_cast<std::size_t>(key.owner) == index && query.Matches(key))
+					result.push_back(&selection);
+		}
+	}
     return result;
 }
 
 std::uint64_t PublishedResourceCatalog::ContentVersion(
     const PublishedResourceKey& key) const noexcept {
     const auto found = contentVersions.find(key);
+	const auto& shard = ownerShards[static_cast<std::size_t>(key.owner)];
+	if (shard) {
+		const auto selected = shard->contentVersions.find(key);
+		return selected == shard->contentVersions.end() ? 0u : selected->second;
+	}
     return found == contentVersions.end() ? 0u : found->second;
 }
 
@@ -67,18 +145,23 @@ std::uint64_t PublishedResourceCatalog::ContentVersion(
     const PublishedResourceQuery& query) const noexcept {
     std::uint64_t version = 0;
     bool matched = false;
-    for (const auto& [key, entryVersion] : contentVersions) {
-        if (!query.Matches(key)) continue;
-        matched = true;
-        const auto keyHash = static_cast<std::uint64_t>(PublishedResourceKey::Hasher{}(key));
-        auto entryHash = keyHash ^ (entryVersion + 0x9e3779b97f4a7c15ull +
-            (keyHash << 6u) + (keyHash >> 2u));
-        entryHash ^= entryHash >> 30u;
-        entryHash *= 0xbf58476d1ce4e5b9ull;
-        entryHash ^= entryHash >> 27u;
-        entryHash *= 0x94d049bb133111ebull;
-        version ^= entryHash ^ (entryHash >> 31u);
-    }
+    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+		if (query.owner && static_cast<std::size_t>(*query.owner) != index) continue;
+		const auto& versions = ownerShards[index]
+			? ownerShards[index]->contentVersions : contentVersions;
+		for (const auto& [key, entryVersion] : versions) {
+			if (static_cast<std::size_t>(key.owner) != index || !query.Matches(key)) continue;
+			matched = true;
+			const auto keyHash = static_cast<std::uint64_t>(PublishedResourceKey::Hasher{}(key));
+			auto entryHash = keyHash ^ (entryVersion + 0x9e3779b97f4a7c15ull +
+				(keyHash << 6u) + (keyHash >> 2u));
+			entryHash ^= entryHash >> 30u;
+			entryHash *= 0xbf58476d1ce4e5b9ull;
+			entryHash ^= entryHash >> 27u;
+			entryHash *= 0x94d049bb133111ebull;
+			version ^= entryHash ^ (entryHash >> 31u);
+		}
+	}
     return matched ? version : 0u;
 }
 
@@ -93,10 +176,14 @@ bool PublishedResourceQuery::Matches(const PublishedResourceKey& key) const noex
 PublishedResourceCatalog::ResourceList PublishedResourceCatalog::FindAll(
     const PublishedResourceQuery& query) const {
     ResourceList result;
-    for (const auto& [key, resources] : entries) {
-        if (!query.Matches(key) || !resources) continue;
-        result.insert(result.end(), resources->begin(), resources->end());
-    }
+	for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+		if (query.owner && static_cast<std::size_t>(*query.owner) != index) continue;
+		const auto& ownerEntries = ownerShards[index] ? ownerShards[index]->entries : entries;
+		for (const auto& [key, resources] : ownerEntries) {
+			if (static_cast<std::size_t>(key.owner) != index || !query.Matches(key) || !resources) continue;
+			result.insert(result.end(), resources->begin(), resources->end());
+		}
+	}
     return result;
 }
 
@@ -136,9 +223,15 @@ std::shared_ptr<const PublishedManifestLease> PublishedStateSource::LoadLease() 
     return m_lease.load(std::memory_order_acquire);
 }
 
+void PublishedStateSource::Clear() noexcept {
+    m_lease.store({}, std::memory_order_release);
+    m_state.store({}, std::memory_order_release);
+}
+
 PublishedStateFragment& PublishedRendererState::Fragment(PublishedFragmentKind kind) {
     switch (kind) {
     case PublishedFragmentKind::Materials: return materials;
+    case PublishedFragmentKind::TextureImages: return textureImages;
     case PublishedFragmentKind::Terrain: return terrain;
     case PublishedFragmentKind::Geometry: return geometry;
     case PublishedFragmentKind::DrawRecords: return drawRecords;
@@ -176,6 +269,18 @@ bool IsMonotonicStateSuccessor(const PublishedRendererState& active,
     }
     return true;
 }
+
+std::shared_ptr<const PublicationBundle> BuildManifestOwnershipBundle(
+    const PublishedRendererState& state) {
+    auto manifest = std::make_shared<PublicationBundle>();
+    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
+        const auto& fragment = state.Fragment(static_cast<PublishedFragmentKind>(index));
+        if (fragment.publicationBundle) manifest->parents.push_back(fragment.publicationBundle);
+    }
+    basic_telemetry::Record("SARP.RendererStatePublisher.ManifestRootCount",
+        manifest->parents.size());
+    return manifest;
+}
 }
 
 std::shared_ptr<const PublishedRendererState> MaterializePublishedState(
@@ -198,50 +303,11 @@ std::shared_ptr<const PublishedRendererState> MaterializePublishedState(
         state->Fragment(kind) = *patch.fragments[index];
     }
 
-    auto catalog = state->resourceCatalog
-        ? std::make_shared<PublishedResourceCatalog>(*state->resourceCatalog)
-        : std::make_shared<PublishedResourceCatalog>();
-    for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
-        if ((patch.catalogOwnerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
-            catalog->contentVersions.erase(entry->first);
-            catalog->selections.erase(entry->first);
-            entry = catalog->entries.erase(entry);
-        } else {
-            ++entry;
-        }
-    }
-    for (const auto& [key, resources] : patch.catalogEntries) {
-        catalog->entries[key] = resources;
-        catalog->contentVersions[key] = state->Fragment(key.owner).revision;
-    }
-    for (const auto& [key, selection] : patch.catalogSelections) {
-        catalog->selections.insert_or_assign(key, selection);
-    }
-
-    auto manifestBundle = std::make_shared<PublicationBundle>();
-    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
-        const auto& fragment = state->Fragment(static_cast<PublishedFragmentKind>(index));
-        if (!fragment.publicationBundle) continue;
-        manifestBundle->versions.insert(manifestBundle->versions.end(),
-            fragment.publicationBundle->versions.begin(), fragment.publicationBundle->versions.end());
-        manifestBundle->leases.Merge(fragment.publicationBundle->leases);
-        for (const auto& submissions : fragment.publicationBundle->gpuSubmissions) {
-            if (submissions && !std::ranges::contains(
-                manifestBundle->gpuSubmissions, submissions)) {
-                manifestBundle->gpuSubmissions.push_back(submissions);
-            }
-        }
-        manifestBundle->resourceHolds.insert(manifestBundle->resourceHolds.end(),
-            fragment.publicationBundle->resourceHolds.begin(),
-            fragment.publicationBundle->resourceHolds.end());
-    }
-    std::ranges::sort(manifestBundle->versions);
-    manifestBundle->versions.erase(std::unique(manifestBundle->versions.begin(),
-        manifestBundle->versions.end()), manifestBundle->versions.end());
     state->epoch = targetEpoch;
-    for (auto& [_, selection] : catalog->selections) selection.manifestEpoch = targetEpoch;
-    state->resourceCatalog = std::move(catalog);
-    state->publicationBundle = std::move(manifestBundle);
+    state->resourceCatalog = MakeCatalogUpdate(state->resourceCatalog,
+		patch.catalogOwnerMask, patch.catalogEntries, patch.catalogSelections,
+		*state, targetEpoch);
+    state->publicationBundle = BuildManifestOwnershipBundle(*state);
     return state;
 }
 
@@ -259,6 +325,9 @@ void RendererStatePublisher::Bootstrap(std::shared_ptr<const PublishedRendererSt
     m_source->Store(m_active);
     m_frameStates.assign(framesInFlight, {});
     m_stats = {};
+    m_commitLatencySamples.fill(0);
+    m_commitLatencySampleCursor = 0;
+    m_commitLatencySampleCount = 0;
 }
 
 bool RendererStatePublisher::PublishCandidate(RendererStateCandidate candidate) {
@@ -354,6 +423,10 @@ void RendererStateCommitResult::RunDeferred() noexcept {
     }
     for (std::uint8_t index = 0; index < retiredStateCount; ++index) retiredStates[index].reset();
     retiredStateCount = 0;
+    // Commit is called only after this frame slot's fence completes. Notify
+    // bounded mutable-resource pools after the retired manifests have released
+    // their resource holds so suspended builds can retry without polling.
+    NotifyVersionedGpuBufferFrameRetirement();
 }
 
 RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) {
@@ -395,12 +468,10 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         BT_ZONE_SCOPE("RendererStatePublisher::Commit::ApplyPatches");
         auto patched = m_active ? std::make_shared<PublishedRendererState>(*m_active)
                                 : std::make_shared<PublishedRendererState>();
-        // A commit applies a batch of fragment patches to one candidate
-        // manifest. Clone the catalog once for that batch. Cloning it for
-        // every patch made commit O(patches * catalog size) during streaming.
-        auto catalog = patched->resourceCatalog
-            ? std::make_shared<PublishedResourceCatalog>(*patched->resourceCatalog)
-            : std::make_shared<PublishedResourceCatalog>();
+        // Catalog patches are persistent overlays. Commit work is proportional
+        // to changed entries rather than total renderer catalog size.
+		std::shared_ptr<const PublishedResourceCatalog> catalog = patched->resourceCatalog;
+		const auto targetEpoch = (m_active ? m_active->epoch : 0u) + 1u;
         bool changed = false;
         for (const auto& patch : m_patches) {
             BT_ZONE_SCOPE("RendererStatePublisher::Commit::ApplyOnePatch");
@@ -442,58 +513,14 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
                     changed = true;
                 }
             }
-            {
-                BT_ZONE_SCOPE("RendererStatePublisher::Commit::FilterCatalog");
-                for (auto entry = catalog->entries.begin(); entry != catalog->entries.end();) {
-                    if ((patch.catalogOwnerMask & PublishedFragmentMask(entry->first.owner)) != 0) {
-                        catalog->contentVersions.erase(entry->first);
-                        catalog->selections.erase(entry->first);
-                        entry = catalog->entries.erase(entry);
-                    } else ++entry;
-                }
-            }
-            for (const auto& [key, resources] : patch.catalogEntries) {
-                catalog->entries[key] = resources;
-                catalog->contentVersions[key] =
-                    patched->Fragment(key.owner).revision;
-            }
-            for (const auto& [key, selection] : patch.catalogSelections) {
-                catalog->selections.insert_or_assign(key, selection);
-            }
+			catalog = MakeCatalogUpdate(catalog, patch.catalogOwnerMask,
+				patch.catalogEntries, patch.catalogSelections, *patched, targetEpoch);
         }
         m_patches.clear();
         if (changed) {
             BT_ZONE_SCOPE("RendererStatePublisher::Commit::BuildManifestBundle");
-            auto manifestBundle = std::make_shared<PublicationBundle>();
-            for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
-                const auto& fragment = patched->Fragment(
-                    static_cast<PublishedFragmentKind>(index));
-                if (!fragment.publicationBundle) continue;
-                manifestBundle->versions.insert(manifestBundle->versions.end(),
-                    fragment.publicationBundle->versions.begin(),
-                    fragment.publicationBundle->versions.end());
-                manifestBundle->leases.Merge(fragment.publicationBundle->leases);
-                for (const auto& submissions : fragment.publicationBundle->gpuSubmissions) {
-                    if (submissions && !std::ranges::contains(
-                        manifestBundle->gpuSubmissions, submissions)) {
-                        manifestBundle->gpuSubmissions.push_back(submissions);
-                    }
-                }
-                manifestBundle->resourceHolds.insert(manifestBundle->resourceHolds.end(),
-                    fragment.publicationBundle->resourceHolds.begin(),
-                    fragment.publicationBundle->resourceHolds.end());
-            }
-            std::ranges::sort(manifestBundle->versions);
-            manifestBundle->versions.erase(std::unique(manifestBundle->versions.begin(),
-                manifestBundle->versions.end()), manifestBundle->versions.end());
-            patched->publicationBundle = std::move(manifestBundle);
-            patched->epoch = (m_active ? m_active->epoch : 0u) + 1u;
-            {
-                BT_ZONE_SCOPE("RendererStatePublisher::Commit::StampCatalog");
-                for (auto& [_, selection] : catalog->selections) {
-                    selection.manifestEpoch = patched->epoch;
-                }
-            }
+            patched->publicationBundle = BuildManifestOwnershipBundle(*patched);
+            patched->epoch = targetEpoch;
             patched->resourceCatalog = std::move(catalog);
             if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
             m_active = std::move(patched);
@@ -505,6 +532,13 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
     if (m_active) ++m_stats.retainedFrameStates;
     m_stats.commitMicros = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started).count());
+    m_commitLatencySamples[m_commitLatencySampleCursor] = m_stats.commitMicros;
+    m_commitLatencySampleCursor =
+        (m_commitLatencySampleCursor + 1u) % kCommitLatencySampleCapacity;
+    m_commitLatencySampleCount = (std::min)(
+        m_commitLatencySampleCount + 1u, kCommitLatencySampleCapacity);
+    m_stats.commitSamples = m_commitLatencySampleCount;
+    m_stats.commitMaxMicros = (std::max)(m_stats.commitMaxMicros, m_stats.commitMicros);
     basic_telemetry::Record("SARP.RendererStatePublisher.CommitDurationNs",
         static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - started).count()));
@@ -538,6 +572,33 @@ void RendererStatePublisher::DiscardCandidate() {
     retired.reset();
 }
 
+void RendererStatePublisher::Shutdown() {
+    RendererStateCandidate candidate;
+    std::vector<PublishedStatePatch> patches;
+    std::shared_ptr<const PublishedRendererState> active;
+    std::vector<std::shared_ptr<const PublishedRendererState>> frameStates;
+    std::shared_ptr<PublishedStateSource> source;
+    {
+        std::lock_guard lock(m_mutex);
+        candidate = std::move(m_candidate);
+        patches = std::move(m_patches);
+        active = std::move(m_active);
+        frameStates = std::move(m_frameStates);
+        source = m_source;
+        m_candidateRejected = {};
+        m_stats.retainedFrameStates = 0;
+    }
+    // PublishedStateSource owns both the latest state and its most recent
+    // frame lease. Clear those roots before destroying the moved ownership
+    // graph, and do all resource destruction outside the publisher mutex.
+    if (source) source->Clear();
+    candidate = {};
+    patches.clear();
+    active.reset();
+    frameStates.clear();
+    NotifyVersionedGpuBufferFrameRetirement();
+}
+
 std::shared_ptr<const PublishedRendererState> RendererStatePublisher::Active() const {
     std::lock_guard lock(m_mutex);
     return m_active;
@@ -550,7 +611,16 @@ std::uint64_t RendererStatePublisher::ActiveEpoch() const {
 
 RendererStatePublisherStats RendererStatePublisher::Stats() const {
     std::lock_guard lock(m_mutex);
-    return m_stats;
+    auto result = m_stats;
+    if (m_commitLatencySampleCount != 0u) {
+        std::vector<std::uint64_t> samples(
+            m_commitLatencySamples.begin(),
+            m_commitLatencySamples.begin() + m_commitLatencySampleCount);
+        const auto rank = ((samples.size() * 99u) + 99u) / 100u - 1u;
+        std::nth_element(samples.begin(), samples.begin() + rank, samples.end());
+        result.commitP99Micros = samples[rank];
+    }
+    return result;
 }
 
 } // namespace br::render

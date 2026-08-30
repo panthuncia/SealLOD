@@ -559,6 +559,8 @@ struct TextureStreamingGPUInfo {
     unsigned int pendingTopMip;
     unsigned int bindingRevisionLo;
     unsigned int bindingRevisionHi;
+	unsigned int imageDescriptorIndex;
+	unsigned int samplerDescriptorIndex;
 };
 
 struct LightInfo {

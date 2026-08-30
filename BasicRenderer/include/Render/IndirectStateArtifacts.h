@@ -16,6 +16,7 @@ class GloballyIndexedResource;
 namespace br::render {
 
 struct PublishedIndirectState;
+struct PublishedGpuBufferVersion;
 
 struct ActiveDrawEntryDTO {
     std::uint32_t drawRecordIndex = 0;
@@ -67,6 +68,12 @@ struct PublishedIndirectState {
     // closure. Culling must not fetch this from an independently advancing
     // DrawRecords catalog slot or generations can be compared across cuts.
     std::shared_ptr<org::GloballyIndexedResource> visibilityGenerations;
+    ArtifactVersionID drawRecordsRoot{};
+    struct ActiveListVersion {
+        std::uint64_t workloadID = 0;
+        std::shared_ptr<const PublishedGpuBufferVersion> version;
+    };
+    std::vector<ActiveListVersion> activeListVersions;
     std::vector<PublishedIndirectWorkload> workloads;
 
     [[nodiscard]] std::vector<const PublishedIndirectWorkload*> Find(

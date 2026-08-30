@@ -10,6 +10,7 @@
 #include "Scene/Components.h"
 #include "Materials/TechniqueDescriptor.h"
 #include "Render/IndirectStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Resources/Buffers/SortedUnsignedIntBuffer.h"
 
@@ -80,6 +81,8 @@ private:
         std::uint64_t revision = 0;
         std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>> base;
         std::vector<std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>>> appends;
+        std::shared_ptr<br::render::VersionedGpuBufferJournal> bufferJournal;
+        std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
     };
     struct DesiredSnapshot {
         std::uint64_t revision = 0;
@@ -91,6 +94,8 @@ private:
         std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> capacities;
         std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> workloadIDs;
         std::unordered_map<DrawWorkloadKey, ActiveJournal, DrawWorkloadKey::Hasher> activeJournals;
+        std::unordered_map<DrawWorkloadKey, br::render::VersionedGpuBufferJournal::Capture,
+            DrawWorkloadKey::Hasher> activeCaptures;
         std::unordered_set<std::uint64_t> viewIDs;
         std::unordered_map<std::uint64_t, std::uint64_t> viewLifetimeRevisions;
     };
@@ -110,6 +115,9 @@ private:
     TaskScope m_buildScope;
     std::atomic_bool m_buildScheduled{ false };
     std::atomic_bool m_stopping{ false };
+	std::atomic<std::uint64_t> m_admittedRootRevision{ 0 };
+	std::atomic<std::uint64_t> m_publishedRootRevision{ 0 };
+	std::atomic<std::uint64_t> m_lastAdmissionRetirementEpoch{ 0 };
     bool m_activeObserverInstalled = false;
     ObjectManager* m_observedObjectManager = nullptr;
     std::uint64_t m_desiredMutationRevision = 1;
@@ -118,13 +126,20 @@ private:
     std::optional<br::render::ArtifactRequirement> m_objectBufferRequirement;
     std::uint64_t m_lastMaterialRevision = 0;
     std::uint64_t m_lastResidentDrawRecordCount = 0;
+    struct SubmittedArtifact {
+        std::uint64_t revision = 0;
+        br::render::ArtifactVersionHandle handle;
+    };
+    std::mutex m_submissionCacheMutex;
+    std::unordered_map<br::render::ArtifactAddress, SubmittedArtifact,
+        br::render::ArtifactAddress::Hasher> m_submittedArtifacts;
 
     void OnActiveDrawSetMutation(const DrawWorkloadKey& workloadKey, bool replace,
         std::uint64_t revision,
         std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>> entries);
     void ScheduleDesiredBuild();
     void DrainDesiredBuild(const br::TaskContext& context);
-    void BuildDesiredState(DesiredSnapshot snapshot);
+    [[nodiscard]] bool BuildDesiredState(DesiredSnapshot snapshot);
     [[nodiscard]] DesiredSnapshot CaptureDesiredSnapshotLocked() const;
     void EnsureWorkloadRegistered(const DrawWorkloadKey& workloadKey);
 };

@@ -12,6 +12,7 @@
 #include "Render/RendererStateRequestService.h"
 #include "Render/RendererSettings.h"
 #include "Render/TextureBindingArtifacts.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 #include "Render/Runtime/IReadbackService.h"
 #include "RenderPasses/Base/CopyPass.h"
 #include "Resources/Buffers/Buffer.h"
@@ -82,6 +83,8 @@ namespace {
 		info.pendingTopMip = state.pendingTopMip;
 		info.bindingRevisionLo = static_cast<uint32_t>(state.bindingRevision & 0xffffffffull);
 		info.bindingRevisionHi = static_cast<uint32_t>(state.bindingRevision >> 32u);
+		info.imageDescriptorIndex = TextureSrvIndex(texture.ImagePtr());
+		info.samplerDescriptorIndex = texture.SamplerDescriptorIndex();
 		return info;
 	}
 
@@ -154,6 +157,18 @@ namespace {
 
 TextureStreamingManager::TextureStreamingManager()
 {
+	TextureStreamingGPUInfo fallback{};
+	m_textureImageTableJournal.Initialize(
+		std::as_bytes(std::span{ &fallback, std::size_t{ 1 } }), 1, 1);
+	m_textureImageTableFamily = std::make_shared<br::render::VersionedBufferFamily>(
+		br::render::VersionedBufferFamily::Config{
+			.address = { br::render::ArtifactKind::BufferVersion, 0,
+				br::render::kTextureImageTableBufferVariant },
+			.debugName = "PublishedTextureImageTable",
+			.elementStride = sizeof(TextureStreamingGPUInfo),
+			.catalogOwner = br::render::PublishedFragmentKind::TextureImages,
+			.catalogUsage = br::render::PublishedResourceUsage::ShaderResource,
+			.catalogVariant = br::render::kTextureImageTableBufferVariant });
 	m_textureStreamingMetadataBuffer = DynamicStructuredBuffer<TextureStreamingGPUInfo>::CreateShared(
 		1u,
 		"Builtin::Material::TextureStreamingMetadataBuffer",
@@ -167,6 +182,13 @@ TextureStreamingManager::TextureStreamingManager()
 	m_textureStreamingMetadataBuffer->UpdateAt(0u, TextureStreamingGPUInfo{});
 	m_textureStreamingFeedbackBuffer->UpdateAt(0u, kTextureStreamingFeedbackUnused);
 	m_resources[Builtin::Material::TextureStreamingMetadataBuffer] = m_textureStreamingMetadataBuffer;
+	m_textureImageTableResolver = std::make_shared<PublishedStateResourceResolver>(
+		br::render::PublishedStateSource::ProcessSource(),
+		br::render::PublishedResourceKey{
+			br::render::PublishedFragmentKind::TextureImages,
+			br::render::PublishedResourceUsage::ShaderResource, 0, 0,
+			br::render::kTextureImageTableBufferVariant },
+		m_textureStreamingMetadataBuffer, true);
 	m_resources[Builtin::Material::TextureStreamingFeedbackBuffer] = m_textureStreamingFeedbackBuffer;
 }
 
@@ -176,8 +198,9 @@ TextureStreamingManager::~TextureStreamingManager()
 }
 
 void TextureStreamingManager::SetRendererStateRequestService(
-	br::render::RendererStateRequestService* service)
+	br::render::RendererStateRequestService* service, org::runtime::IUploadService* uploads)
 {
+	m_uploadService = uploads;
 	m_graphBindingObservation.Reset();
 	{
 		std::lock_guard lock(m_graphBindingAwaiterMutex);
@@ -209,7 +232,7 @@ void TextureStreamingManager::SetRendererStateRequestService(
 
 void TextureStreamingManager::Initialize(TextureFactory& textureFactory, uint32_t framesInFlight)
 {
-	(void)framesInFlight;
+	m_framesInFlight = (std::max)(framesInFlight, 1u);
 	if (m_initialized.exchange(true, std::memory_order_acq_rel)) {
 		return;
 	}
@@ -480,6 +503,10 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 	});
 	auto& bindingIDs = m_bindingIDsByStreamingTextureID[streamingTextureID];
 	bindingIDs.push_back(command.bindingID);
+	{
+		std::lock_guard lock(m_liveBindingMutex);
+		++m_activeBindingOwnerCountsByStreamingTextureID[streamingTextureID];
+	}
 	const bool firstBindingOwner = bindingIDs.size() == 1u;
 	if (command.options.alphaTested) {
 		++m_alphaTestedBindingCountsByStreamingTextureID[streamingTextureID];
@@ -543,11 +570,11 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 				const auto fingerprint =
 					(published.bindingRevision << 1u) ^ input->streamingStateRevision ^
 					streamingTextureID ^ 0x54455842494e44ull;
-				const auto request = m_rendererStateRequests->Request(
+				const auto request = m_rendererStateRequests->SubmitLatest({
 					address,
 					published.bindingRevision, {},
 					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
-						std::move(input)), fingerprint);
+						std::move(input)), fingerprint });
 				if (!request) {
 					spdlog::error(
 						"TextureStreamingManager: failed to seed published graph binding textureID={} revision={} status={}",
@@ -599,6 +626,14 @@ void TextureStreamingManager::ApplyUnregisterCommand(uint64_t bindingID)
 	{
 		ZoneScopedN("TextureStreamingManager::UnregisterTextureBinding::EraseBinding");
 		m_bindingsByID.erase(bindingIt);
+	}
+	{
+		std::lock_guard lock(m_liveBindingMutex);
+		auto count = m_activeBindingOwnerCountsByStreamingTextureID.find(streamingTextureID);
+		if (count != m_activeBindingOwnerCountsByStreamingTextureID.end()) {
+			if (count->second <= 1u) m_activeBindingOwnerCountsByStreamingTextureID.erase(count);
+			else --count->second;
+		}
 	}
 	if (removedOptions.alphaTested) {
 		auto alphaCountIt = m_alphaTestedBindingCountsByStreamingTextureID.find(streamingTextureID);
@@ -1099,6 +1134,14 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 	change.newImage = prepared.image;
 	change.metadata = BuildTextureStreamingGPUInfo(
 		prepared.streamingState, texture.GetFullMip0Width(), texture.GetFullMip0Height());
+	change.metadata.imageDescriptorIndex = TextureSrvIndex(change.newImage);
+	change.metadata.samplerDescriptorIndex = texture.SamplerDescriptorIndex();
+	change.requiresExactGraphPublication = std::ranges::any_of(
+		ownersIt->second, [this](uint64_t bindingID) {
+			const auto owner = m_bindingsByID.find(bindingID);
+			return owner != m_bindingsByID.end() &&
+				owner->second.options.requiresExactGraphPublication;
+		});
 	if (!change.newImage) {
 		return;
 	}
@@ -1132,7 +1175,8 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 	// only handed a compatibility-adoption record after the exact graph version
 	// reaches Submitted. This removes Request/Snapshot/requeue polling from the
 	// frame loop while retaining the current PublishPreparedImage boundary.
-	if (m_rendererStateRequests && change.transfer && change.transfer->gpuSubmissions) {
+	if (change.requiresExactGraphPublication && m_rendererStateRequests &&
+		change.transfer && change.transfer->gpuSubmissions) {
 		auto input = std::make_shared<br::render::TextureBindingBuildInput>();
 		input->streamingTextureID = change.streamingTextureID;
 		input->bindingRevision = change.bindingRevision;
@@ -1144,12 +1188,12 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 		input->streamingMetadata = change.metadata;
 		const br::render::ArtifactAddress address{
 			br::render::ArtifactKind::TextureBinding, change.streamingTextureID, 0 };
-		const auto request = m_rendererStateRequests->Request(
+		const auto request = m_rendererStateRequests->SubmitLatest({
 			address, change.bindingRevision, {},
 			br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
 				std::move(input)),
 			(change.bindingRevision << 1u) ^ change.streamingStateRevision ^
-				change.streamingTextureID ^ 0x54455842494e44ull);
+				change.streamingTextureID ^ 0x54455842494e44ull });
 		if (request) {
 			change.graphRequested = true;
 			change.waitingForGraphWake = true;
@@ -1201,6 +1245,11 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 			return;
 		}
 	}
+	if (!change.requiresExactGraphPublication) {
+		m_pendingBindingChanges.push(std::move(change));
+		basic_telemetry::AddCounter("SARP.TextureStreaming.LatestBindingCandidatesSubmitted");
+		return;
+	}
 	// A binding without a graph request cannot become renderer-visible. Keep the
 	// previous published version and retry preparation unless shutdown is active.
 	if (change.texture && !m_workerQuit.load(std::memory_order_acquire)) {
@@ -1246,6 +1295,7 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		previous.graphReady = change.graphReady;
 		previous.graphVersion = change.graphVersion;
 		previous.transfer = std::move(change.transfer);
+		previous.requiresExactGraphPublication = change.requiresExactGraphPublication;
 	}
 	{
 		std::lock_guard lock(m_graphBindingAwaiterMutex);
@@ -1288,6 +1338,7 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 						change.bindingRevision, change.newImage);
 					EnqueueTextureUploadAdvance(change.texture, "graph_binding_failed");
 				}
+				FinishBindingMailboxRequest(change.streamingTextureID, change.texture);
 				continue;
 			}
 			if (!exactVersionObserved ||
@@ -1304,16 +1355,17 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		bool hasLiveOwner = false;
 		{
 			std::lock_guard lock(m_liveBindingMutex);
-			const auto owners = m_liveBindingIDsByStreamingTextureID.find(
+			const auto owners = m_activeBindingOwnerCountsByStreamingTextureID.find(
 				change.streamingTextureID);
-			hasLiveOwner = owners != m_liveBindingIDsByStreamingTextureID.end() &&
-				!owners->second.empty();
+			hasLiveOwner = owners != m_activeBindingOwnerCountsByStreamingTextureID.end() &&
+				owners->second != 0u;
 		}
 		if (!hasLiveOwner) {
 			if (m_rendererStateRequests) {
 				m_rendererStateRequests->Release({ br::render::ArtifactKind::TextureBinding,
 					change.streamingTextureID, 0 });
 			}
+			FinishBindingMailboxRequest(change.streamingTextureID, change.texture);
 			continue;
 		}
 		std::shared_ptr<const br::render::GpuSubmissionSet> transferSubmission;
@@ -1332,12 +1384,18 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 					(void)change.texture->RejectPreparedImage(change.bindingRevision, change.newImage);
 					EnqueueTextureUploadAdvance(change.texture, "external_transfer_failed");
 				}
-				if (!transferSubmission) continue;
+				if (!transferSubmission) {
+					if (m_materialTextureTransfers && change.newImage &&
+						m_materialTextureTransfers->HasFailed(change.newImage)) {
+						FinishBindingMailboxRequest(change.streamingTextureID, change.texture);
+					}
+					continue;
+				}
 			} else if (m_materialTextureTransfers && change.newImage) {
 				transferSubmission = m_materialTextureTransfers->ShaderReadySubmission(change.newImage);
 			}
 		}
-		if (m_rendererStateRequests) {
+		if (change.requiresExactGraphPublication && m_rendererStateRequests) {
 			BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::GraphRequest");
 			const br::render::ArtifactKey bindingKey{
 				br::render::ArtifactKind::TextureBinding,
@@ -1354,12 +1412,12 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 				input->transfer = change.transfer;
 				input->gpuSubmissions = transferSubmission;
 				input->streamingMetadata = change.metadata;
-				const auto request = m_rendererStateRequests->Request(
+				const auto request = m_rendererStateRequests->SubmitLatest({
 					bindingKey, change.bindingRevision, {},
 					br::render::ArtifactPayload::Make<br::render::TextureBindingBuildInput>(
 						std::move(input)),
 					(change.bindingRevision << 1u) ^ change.streamingStateRevision ^
-						change.streamingTextureID ^ 0x54455842494e44ull);
+						change.streamingTextureID ^ 0x54455842494e44ull });
 				change.graphRequested = static_cast<bool>(request);
 				change.graphVersion = request.version;
 				if (!change.graphRequested) {
@@ -1380,6 +1438,7 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 								std::move(change.newImage));
 						}
 					}
+					FinishBindingMailboxRequest(change.streamingTextureID, change.texture);
 					continue;
 				}
 			}
@@ -1399,6 +1458,7 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 						change.bindingRevision, change.newImage);
 					EnqueueTextureUploadAdvance(change.texture, "graph_binding_failed");
 				}
+				FinishBindingMailboxRequest(change.streamingTextureID, change.texture);
 				continue;
 			}
 			if (!change.graphRequested ||
@@ -1445,16 +1505,49 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 					DescriptorHeapManager::GetInstance().RetireResource(std::move(image));
 				}
 			}
+			FinishBindingMailboxRequest(change.streamingTextureID, change.texture);
 			continue;
 		}
 		const uint32_t oldSrv = TextureSrvIndex(replacedPublishedImage);
 		MarkLiveTextureBindingsDirty(change.streamingTextureID);
-		if (m_textureStreamingMetadataBuffer && change.texture) {
+		if (change.texture) {
 			std::lock_guard publicationLock(m_gpuMetadataPublicationMutex);
-			if (change.texture->GetStreamingStateRevision() == change.streamingStateRevision) {
+			// Publish the binding from the authoritative state after adoption.  State
+			// revisions can advance while an image upload is pending (for example from
+			// feedback/requested-mip changes) without superseding the adopted image.
+			// Gating this write on the queued state revision could therefore leave the
+			// stable streaming ID pointing at an older, subsequently retired SRV.
+			const auto publishedMetadata = BuildTextureStreamingGPUInfo(*change.texture);
+			// The mutable buffer is only a bootstrap fallback. Once a rendered
+			// image-table epoch exists, updating it duplicates uploads and can race
+			// the exact snapshot selected by the frame.
+			if (m_textureImageTableAcknowledgedEpoch.load(std::memory_order_acquire) == 0u &&
+				m_textureStreamingMetadataBuffer) {
 				(void)m_textureStreamingMetadataBuffer->TryEnsureCapacityForIndex(change.streamingTextureID);
-				(void)m_textureStreamingMetadataBuffer->TryUpdateAt(change.streamingTextureID, change.metadata);
+				(void)m_textureStreamingMetadataBuffer->TryUpdateAt(
+					change.streamingTextureID, publishedMetadata);
 			}
+			const auto desiredExtent = (std::max)(m_textureImageTableLogicalExtent,
+				static_cast<std::uint64_t>(change.streamingTextureID) + 1u);
+			m_textureImageTableJournal.RequestCapacity(desiredExtent);
+			const auto rowBytes = std::as_bytes(std::span{ &publishedMetadata, std::size_t{ 1 } });
+			m_textureImageTableEpoch = m_textureImageTableJournal.AppendWrite(
+				change.streamingTextureID, rowBytes, desiredExtent);
+			m_textureImageTableLogicalExtent = desiredExtent;
+			const std::size_t chunkIndex = change.streamingTextureID /
+				br::render::kTextureImageHoldChunkSize;
+			const std::size_t entryIndex = change.streamingTextureID %
+				br::render::kTextureImageHoldChunkSize;
+			if (m_textureImageHoldChunks.size() <= chunkIndex) {
+				m_textureImageHoldChunks.resize(chunkIndex + 1u);
+			}
+			auto chunk = m_textureImageHoldChunks[chunkIndex]
+				? std::make_shared<br::render::TextureImageHoldChunk>(
+					*m_textureImageHoldChunks[chunkIndex])
+				: std::make_shared<br::render::TextureImageHoldChunk>();
+			chunk->images[entryIndex] = change.newImage;
+			m_textureImageHoldChunks[chunkIndex] = std::move(chunk);
+			m_textureImageTableDirty = true;
 		}
 		// Retire the image atomically displaced by PublishPreparedImage.  The image
 		// captured by the worker is only a historical observation and can differ
@@ -1503,10 +1596,18 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 				change.supersededImages.size());
 		}
 		++adopted;
+		if (!change.requiresExactGraphPublication) {
+			basic_telemetry::AddCounter("SARP.TextureStreaming.LatestBindingCandidatesPublished");
+			basic_telemetry::Record("SARP.TextureStreaming.LatestBindingPublicationLatencyUs",
+				static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - change.queuedAt).count()));
+			FinishBindingMailboxRequest(change.streamingTextureID, change.texture);
+		}
 	}
 	if (!waitingForGpu.empty()) {
 		for (auto& change : waitingForGpu) m_pendingBindingChanges.push(std::move(change));
 	}
+	PublishTextureImageTable();
 	std::size_t refreshed = 0;
 	{
 		BT_ZONE_SCOPE("TextureStreamingManager::DrainPendingBindingChanges::RefreshOwners");
@@ -1521,6 +1622,94 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 	basic_telemetry::AddCounter("SARP.TextureStreaming.GraphBindingFailures",
 		static_cast<std::uint64_t>(graphFailureCount));
 	return adopted;
+}
+
+void TextureStreamingManager::PublishTextureImageTable()
+{
+	if (!m_textureImageTableDirty || !m_rendererStateRequests || !m_uploadService ||
+		!m_textureImageTableFamily || m_textureImageTableEpoch == 0) return;
+	if (m_textureImageTableHandle) {
+		const auto activeBuild = m_rendererStateRequests->Snapshot(m_textureImageTableHandle.version);
+		if (activeBuild.readiness != br::render::ArtifactReadiness::Failed &&
+			activeBuild.readiness != br::render::ArtifactReadiness::Cancelled &&
+			!br::render::ArtifactReachedMilestone(activeBuild.readiness,
+				br::render::ArtifactReadiness::UploadSubmitted)) {
+			basic_telemetry::AddCounter("SARP.TextureStreaming.ImageTableCandidatesCoalesced");
+			return;
+		}
+		const auto retirementEpoch = br::render::VersionedGpuBufferFrameRetirementEpoch();
+		if (retirementEpoch < m_lastTextureImageTableAdmissionRetirementEpoch +
+			m_framesInFlight) {
+			basic_telemetry::AddCounter("SARP.TextureStreaming.ImageTableRetirementPaced");
+			return;
+		}
+	}
+	auto capture = m_textureImageTableJournal.CaptureDesired();
+	const auto buffer = m_textureImageTableFamily->RequestCapture(
+		*m_rendererStateRequests, *m_uploadService, m_textureImageTableEpoch,
+		std::move(capture));
+	if (!buffer) {
+		basic_telemetry::AddCounter("SARP.TextureStreaming.ImageTableBufferRejected");
+		return;
+	}
+	auto input = std::make_shared<br::render::TextureImageTableBuildInput>();
+	input->contentEpoch = m_textureImageTableEpoch;
+	input->logicalExtent = m_textureImageTableLogicalExtent;
+	input->bufferKey = m_textureImageTableFamily->Configuration().address;
+	input->bufferFamily = m_textureImageTableFamily;
+	input->holdChunks = m_textureImageHoldChunks;
+	const auto root = m_rendererStateRequests->SubmitLatest({
+		{ br::render::ArtifactKind::TextureImageTable, 0, 0 }, m_textureImageTableEpoch,
+		{ br::render::Exact(buffer.version, br::render::ArtifactReadiness::UploadSubmitted) },
+		br::render::ArtifactPayload::Make<br::render::TextureImageTableBuildInput>(std::move(input)),
+		m_textureImageTableEpoch ^ 0x544558494d475442ull });
+	if (root) {
+		m_textureImageTableHandle = root.Handle();
+		m_lastTextureImageTableAdmissionRetirementEpoch =
+			br::render::VersionedGpuBufferFrameRetirementEpoch();
+		m_textureImageTableDirty = false;
+		basic_telemetry::AddCounter("SARP.TextureStreaming.ImageTableEpochSubmitted");
+		basic_telemetry::SetGauge("SARP.TextureStreaming.ImageTableDesiredEpoch",
+			static_cast<std::int64_t>(m_textureImageTableEpoch));
+		basic_telemetry::SetGauge("SARP.TextureStreaming.ImageTableLogicalExtent",
+			static_cast<std::int64_t>(m_textureImageTableLogicalExtent));
+	}
+}
+
+void TextureStreamingManager::AcknowledgePublishedImageTable(
+	const std::shared_ptr<const br::render::PublishedRendererState>& published)
+{
+	if (!published) return;
+	const auto table = published->textureImages.payload
+		.Get<br::render::PublishedTextureImageTable>();
+	if (!table || !table->table || table->contentEpoch == 0u) return;
+	auto acknowledged = m_textureImageTableAcknowledgedEpoch.load(std::memory_order_acquire);
+	while (table->contentEpoch > acknowledged) {
+		if (m_textureImageTableAcknowledgedEpoch.compare_exchange_weak(
+			acknowledged, table->contentEpoch, std::memory_order_acq_rel,
+			std::memory_order_acquire)) {
+			m_textureImageTableJournal.Acknowledge(table->table);
+			basic_telemetry::SetGauge("SARP.TextureStreaming.ImageTableAcknowledgedEpoch",
+				static_cast<std::int64_t>(table->contentEpoch));
+			basic_telemetry::AddCounter("SARP.TextureStreaming.ImageTableJournalAcknowledged");
+			return;
+		}
+	}
+}
+
+std::shared_ptr<Resource> TextureStreamingManager::ResolvePublishedImageTableResourceForDiagnostics() const
+{
+	if (!m_textureImageTableResolver) return {};
+	auto resources = m_textureImageTableResolver->Resolve();
+	return resources.empty() ? std::shared_ptr<Resource>{} : std::move(resources.front());
+}
+
+std::shared_ptr<Resource> TextureStreamingManager::PublishedImageTableReadbackAnchorForDiagnostics() const
+{
+	// Capture requests are attached while compiling the consumer pass, which
+	// references this logical resource. Its resolver selects the published
+	// backing that is actually bound for the pass.
+	return m_textureStreamingMetadataBuffer;
 }
 
 void TextureStreamingManager::RetirePatchedBindingResources()
@@ -1609,12 +1798,15 @@ bool TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_p
 	ZoneValue(streamingTextureID);
 	std::lock_guard publicationLock(m_gpuMetadataPublicationMutex);
 
-	if (!m_textureStreamingMetadataBuffer->TryEnsureCapacityForIndex(streamingTextureID) ||
+	const bool bootstrapMetadata =
+		m_textureImageTableAcknowledgedEpoch.load(std::memory_order_acquire) == 0u;
+	if ((bootstrapMetadata &&
+		!m_textureStreamingMetadataBuffer->TryEnsureCapacityForIndex(streamingTextureID)) ||
 		!m_textureStreamingFeedbackBuffer->TryEnsureCapacityForIndex(streamingTextureID)) {
 		return false;
 	}
 
-	{
+	if (bootstrapMetadata) {
 		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::UploadMetadata");
 		if (!m_textureStreamingMetadataBuffer->TryUpdateAt(streamingTextureID, BuildTextureStreamingGPUInfo(*texture))) {
 			return false;
@@ -2122,10 +2314,11 @@ std::vector<ResourceIdentifier> TextureStreamingManager::GetSupportedKeys()
 
 std::vector<ResourceIdentifier> TextureStreamingManager::GetSupportedResolverKeys()
 {
-	return {};
+	return { Builtin::Material::TextureStreamingMetadataBuffer };
 }
 
 std::shared_ptr<IResourceResolver> TextureStreamingManager::ProvideResolver(ResourceIdentifier const& key)
 {
+	if (key == Builtin::Material::TextureStreamingMetadataBuffer) return m_textureImageTableResolver;
 	return nullptr;
 }

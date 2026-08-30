@@ -2302,7 +2302,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         mul(cam.prevView, cam.prevUnjitteredProjection));
     materialInputs.sourceObjectId = uint2(obj.stableSceneIdLo, obj.stableSceneIdHi);
     materialInputs.sourceMaterialId = materialInfo.sourceMaterialId;
-    materialInputs.materialTableIndex = materialInfo.openPBRMaterialDataIndex;
+    materialInputs.materialTableIndex = md.materialDataIndex;
     materialInputs.semanticFamily = materialInfo.semanticFamily;
     materialInputs.surfaceFlags = materialInfo.surfaceFlags;
     materialInputs.diagnosticReason = materialInfo.diagnosticReason;

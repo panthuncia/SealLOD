@@ -54,6 +54,11 @@ public:
 	void ShutdownTextureStreaming();
 	void BeginTextureStreamingFeedbackFrame(uint64_t frameIndex);
 	void ProcessPendingMaterialUpdates(uint64_t frameIndex);
+	void AcknowledgePublishedTextureImageTable(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published) {
+		if (m_textureStreamingManager)
+			m_textureStreamingManager->AcknowledgePublishedImageTable(published);
+	}
 	std::shared_ptr<CopyPass> CreateTextureStreamingFeedbackReadbackPass();
 	void SetTextureStreamingFeedbackSuppressed(bool suppressed) { m_textureStreamingFeedbackSuppressed = suppressed; }
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
@@ -89,7 +94,7 @@ public:
 		org::runtime::IUploadService* uploads) {
 		m_rendererStateRequests = requests;
 		m_uploadService = uploads;
-		if (m_textureStreamingManager) m_textureStreamingManager->SetRendererStateRequestService(requests);
+		if (m_textureStreamingManager) m_textureStreamingManager->SetRendererStateRequestService(requests, uploads);
 	}
 	unsigned int GetRasterBucketCount() const { return m_rasterBucketsUsed; }
 	unsigned int GetRasterBucketForFlags(MaterialRasterFlags rasterFlags) const {
@@ -145,35 +150,9 @@ private:
 		PerMaterialCB materialData = {};
 		PerMaterialEvalCB evalData = {};
 		PerMaterialOpenPBRCB openPBRData = {};
-		std::vector<br::render::MaterialTextureBindingDependencyDTO> textureBindings;
-		std::vector<std::shared_ptr<const br::render::PublishedTextureBinding>> preparedTextureBindings;
 		bool valid = false;
 	};
 	std::vector<MaterialGpuUploadSignature> m_materialUploadSignatures;
-	struct RetainedTextureBindingKey {
-		std::uint32_t streamingTextureID = 0;
-		std::uint64_t bindingRevision = 0;
-		std::uint32_t imageDescriptorIndex = 0;
-		std::uint32_t samplerDescriptorIndex = 0;
-		bool operator==(const RetainedTextureBindingKey&) const = default;
-	};
-	struct RetainedTextureBindingKeyHasher {
-		std::size_t operator()(const RetainedTextureBindingKey& key) const noexcept {
-			std::size_t value = key.streamingTextureID;
-			value ^= static_cast<std::size_t>(key.bindingRevision) + 0x9e3779b9u + (value << 6u) + (value >> 2u);
-			value ^= key.imageDescriptorIndex + 0x9e3779b9u + (value << 6u) + (value >> 2u);
-			value ^= key.samplerDescriptorIndex + 0x9e3779b9u + (value << 6u) + (value >> 2u);
-			return value;
-		}
-	};
-	struct RetainedTextureBindingEntry {
-		br::render::MaterialTextureBindingDependencyDTO dependency;
-		std::shared_ptr<const br::render::PublishedTextureBinding> prepared;
-		std::uint32_t references = 0;
-	};
-	std::vector<std::vector<RetainedTextureBindingKey>> m_retainedTextureBindingsBySlot;
-	std::unordered_map<RetainedTextureBindingKey, RetainedTextureBindingEntry,
-		RetainedTextureBindingKeyHasher> m_retainedTextureBindings;
 	void JournalMaterialRow(unsigned int materialSlot);
 	br::render::VersionedGpuBufferJournal m_materialBaseJournal{ sizeof(PerMaterialCB) };
 	br::render::VersionedGpuBufferJournal m_materialEvalJournal{ sizeof(PerMaterialEvalCB) };
@@ -199,11 +178,6 @@ private:
 	std::shared_ptr<DynamicStructuredBuffer<uint32_t>> m_blockSumsBuffer;
 	std::shared_ptr<DynamicStructuredBuffer<uint32_t>> m_scannedBlockSumsBuffer;
 	std::shared_ptr<DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>> m_materialEvaluationCommandBuffer;
-	// Retained as the authoritative resources while material graph migration is
-	// in Shadow mode. Active cutover removes these only after parity validation.
-	std::shared_ptr<DynamicStructuredBuffer<PerMaterialCB>> m_perMaterialDataBuffer;
-	std::shared_ptr<DynamicStructuredBuffer<PerMaterialEvalCB>> m_perMaterialEvalDataBuffer;
-	std::shared_ptr<DynamicStructuredBuffer<PerMaterialOpenPBRCB>> m_perMaterialOpenPBRDataBuffer;
 
 	std::unique_ptr<TextureStreamingManager> m_textureStreamingManager;
 	std::vector<uint32_t> m_dirtyMaterialIDs;
@@ -224,9 +198,9 @@ private:
 	std::uint32_t m_materialStateDirtyFrames = 0;
 	std::uint64_t m_materialStateRevision = 0;
 	br::render::ArtifactVersionHandle m_materialStateHandle{};
-	std::uint64_t m_materialStateValidatedRevision = 0;
-	std::unordered_map<std::uint64_t, std::uint64_t> m_materialStateExpectedFingerprints;
 	std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 3> m_materialBufferFamilies;
+	std::uint64_t m_materialTableHandleRowsRevision = 0;
+	std::array<br::render::ArtifactVersionHandle, 3> m_materialTableHandles{};
 	std::unordered_set<uint64_t> m_traceReadbackResourceIDs;
 	std::weak_ptr<TextureAsset> m_traceBaseColorTexture;
 	bool m_traceLateReadbackRequested = false;

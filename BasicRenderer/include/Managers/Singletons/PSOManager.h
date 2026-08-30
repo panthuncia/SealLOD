@@ -461,7 +461,11 @@ private:
         const uint64_t generation = m_asyncPSOGeneration.load(std::memory_order_acquire);
         const std::string queueTaskName = taskName;
         TaskSchedulerManager::GetInstance().Submit(
-            TaskLane::Background,
+            // On-demand variants are explicit static/material publication
+            // dependencies. Background priority can starve the final variant
+            // behind the streaming work that is waiting for it, preventing
+            // scene quiescence even after every other queue has drained.
+            TaskLane::Streaming,
             TaskDomain::ShaderCompile,
             queueTaskName,
             [this,

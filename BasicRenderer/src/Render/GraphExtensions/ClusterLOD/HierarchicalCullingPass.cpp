@@ -26,6 +26,7 @@
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/RenderContext.h"
 #include "Render/IndirectStateArtifacts.h"
+#include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Resources/components.h"
@@ -316,6 +317,11 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
     constexpr std::uint64_t clodBit = 1ull << 63u;
     if (m_clodOnlyWorkloads) drawSetIndicesQuery.requiredVariantMask = clodBit;
     else drawSetIndicesQuery.forbiddenVariantMask = clodBit;
+    br::render::PublishedResourceQuery visibilityGenerationQuery{};
+    visibilityGenerationQuery.owner = br::render::PublishedFragmentKind::DrawRecords;
+    visibilityGenerationQuery.usage = br::render::PublishedResourceUsage::ShaderResource;
+    visibilityGenerationQuery.requiredVariantMask =
+        br::render::kObjectVisibilityGenerationVariant;
     builder->WithUnorderedAccess(
             m_scratchBuffer,
             m_visibleClustersBuffer,
@@ -370,7 +376,9 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
             m_workGraphComputePageJobDescriptorResourceId.c_str())
     		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithShaderResource(PublishedStateResourceResolver(
-            br::render::PublishedStateSource::ProcessSource(), drawSetIndicesQuery));
+            br::render::PublishedStateSource::ProcessSource(), drawSetIndicesQuery))
+        .WithShaderResource(PublishedStateResourceResolver(
+            br::render::PublishedStateSource::ProcessSource(), visibilityGenerationQuery));
 
     if (m_voxelRasterWorkCapacity != 0u) {
         builder->WithUnorderedAccess(

@@ -25,6 +25,7 @@
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/RenderContext.h"
 #include "Render/IndirectStateArtifacts.h"
+#include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Resources/components.h"
 #include "Resources/Resolvers/ECSResourceResolver.h"
@@ -469,6 +470,12 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
     if (m_clodOnlyWorkloads) drawSetIndicesQuery.requiredVariantMask = clodBit;
     else drawSetIndicesQuery.forbiddenVariantMask = clodBit;
 
+    br::render::PublishedResourceQuery visibilityGenerationQuery{};
+    visibilityGenerationQuery.owner = br::render::PublishedFragmentKind::DrawRecords;
+    visibilityGenerationQuery.usage = br::render::PublishedResourceUsage::ShaderResource;
+    visibilityGenerationQuery.requiredVariantMask =
+        br::render::kObjectVisibilityGenerationVariant;
+
     builder->WithUnorderedAccess(
             m_visibleClustersBuffer,
             m_visibleClusterTransformIndicesBuffer,
@@ -529,6 +536,8 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithShaderResource(PublishedStateResourceResolver(
             br::render::PublishedStateSource::ProcessSource(), drawSetIndicesQuery))
+        .WithShaderResource(PublishedStateResourceResolver(
+            br::render::PublishedStateSource::ProcessSource(), visibilityGenerationQuery))
         .WithInternalTransition(m_visibleClustersCounterBuffer, computeReadState)
         .WithInternalTransition(m_occlusionReplayStateBuffer, computeReadState)
         .WithInternalTransition(m_pureComputeCurrentNodeFrontierBuffer, computeReadState)

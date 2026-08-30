@@ -4,6 +4,7 @@
 #include <array>
 #include <mutex>
 #include <optional>
+#include <map>
 
 #include "Render/AsyncStateGraph.h"
 #include "Render/PublishedRendererState.h"
@@ -18,6 +19,11 @@ public:
     ArtifactRequestResult Request(ArtifactAddress address, std::uint64_t revision,
         std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
         std::uint64_t inputFingerprint = 0);
+    ArtifactRequestResult RequestExact(ArtifactAddress address, std::uint64_t revision,
+        std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
+        std::uint64_t inputFingerprint = 0);
+    ArtifactRequestResult SubmitLatest(ArtifactIntent intent);
+    std::vector<ArtifactRequestResult> SubmitLatestBatch(std::vector<ArtifactIntent> intents);
     bool Invalidate(ArtifactKey key, std::uint64_t revision);
     void Cancel(ArtifactKey key);
     void Release(ArtifactKey key) { m_graph.Release(key); }
@@ -67,12 +73,20 @@ public:
     // exposing graph producer registration to RendererHost.
     void OnArtifactReady(const ArtifactSnapshot& artifact);
     void OnCandidateRejected(std::uint64_t activeEpoch);
+    // Cheap level-triggered wake used once per frame. It only submits work when
+    // a retained ready root is newer than the active published fragment.
+    void RefreshPublication();
 
 private:
+    struct PublicationNodeCache {
+        std::mutex mutex;
+        std::map<ArtifactVersionID, std::weak_ptr<const PublicationBundle>> nodes;
+    };
     struct ManifestInput {
         std::uint64_t baseEpoch = 0;
         std::shared_ptr<const PublishedRendererState> base;
         std::vector<ArtifactSnapshot> roots;
+        std::shared_ptr<PublicationNodeCache> publicationNodes;
     };
     void RequestManifest();
     static ArtifactBuildResult BuildManifest(const ArtifactBuildContext& context);
@@ -85,6 +99,8 @@ private:
     // when interdependent slots complete out of order.
     std::array<std::vector<ArtifactSnapshot>, kPublishedFragmentCount> m_roots;
     std::uint64_t m_manifestRevision = 0;
+    std::shared_ptr<PublicationNodeCache> m_publicationNodes =
+        std::make_shared<PublicationNodeCache>();
     std::atomic_bool m_accepting{ true };
 };
 

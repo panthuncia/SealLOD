@@ -1,7 +1,11 @@
 #include "Render/RendererStateRequestService.h"
 
 #include <algorithm>
+#include <map>
 #include <tuple>
+#include <unordered_set>
+
+#include <BasicTelemetry/Telemetry.h>
 
 namespace br::render {
 
@@ -21,8 +25,36 @@ ArtifactRequestResult RendererStateRequestService::Request(ArtifactAddress key, 
     if (!m_accepting.load(std::memory_order_acquire)) {
         return { ArtifactRequestStatus::ShuttingDown, 0, {} };
     }
+    return RequestExact(key, revision, std::move(requirements), std::move(input), inputFingerprint);
+}
+
+ArtifactRequestResult RendererStateRequestService::RequestExact(ArtifactAddress key,
+    std::uint64_t revision, std::vector<ArtifactRequirement> requirements,
+    ArtifactPayload input, std::uint64_t inputFingerprint) {
+    if (!m_accepting.load(std::memory_order_acquire)) {
+        return { ArtifactRequestStatus::ShuttingDown, 0, {} };
+    }
     return m_graph.Request(key, revision, std::move(requirements), std::move(input),
         inputFingerprint);
+}
+
+ArtifactRequestResult RendererStateRequestService::SubmitLatest(ArtifactIntent intent) {
+    if (!m_accepting.load(std::memory_order_acquire)) {
+        return { ArtifactRequestStatus::ShuttingDown, 0, {} };
+    }
+    auto results = m_graph.SubmitLatestIntentBatch({ std::move(intent) });
+    return results.empty()
+        ? ArtifactRequestResult{ ArtifactRequestStatus::ShuttingDown, 0, {} }
+        : std::move(results.front());
+}
+
+std::vector<ArtifactRequestResult> RendererStateRequestService::SubmitLatestBatch(
+    std::vector<ArtifactIntent> intents) {
+    if (!m_accepting.load(std::memory_order_acquire)) {
+        return std::vector<ArtifactRequestResult>(intents.size(),
+            ArtifactRequestResult{ ArtifactRequestStatus::ShuttingDown, 0, {} });
+    }
+    return m_graph.SubmitLatestIntentBatch(std::move(intents));
 }
 
 bool RendererStateRequestService::Invalidate(ArtifactKey key, std::uint64_t revision) {
@@ -51,8 +83,6 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
         if (existing != roots.end()) *existing = artifact;
         else roots.push_back(artifact);
 
-        const auto active = m_publisher.Active();
-        const auto& activeFragment = active ? active->Fragment(fragment->kind) : PublishedStateFragment{};
         const auto newest = std::ranges::max_element(roots, [](const ArtifactSnapshot& left,
             const ArtifactSnapshot& right) {
             return std::tie(left.revision, left.generation) <
@@ -60,9 +90,11 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
         });
         const auto newestVersion = newest != roots.end() ? newest->Version() : ArtifactVersionID{};
         std::erase_if(roots, [&](const ArtifactSnapshot& value) {
-            const bool isNewest = value.Version() == newestVersion;
-            const bool isActive = active && value.Version() == activeFragment.publicationRoot;
-            return !isNewest && !isActive;
+			// The publisher, process source, and in-flight frame slots already own
+			// the active root. Retaining it here as well adds an extra exact closure
+			// beyond the bounded backing-ring model. Manifest inputs carry the active
+			// state as their base, so only the newest candidate root belongs here.
+            return value.Version() != newestVersion;
         });
     }
     RequestManifest();
@@ -72,12 +104,34 @@ void RendererStateRequestService::OnCandidateRejected(std::uint64_t) {
     if (m_accepting.load(std::memory_order_acquire)) RequestManifest();
 }
 
+void RendererStateRequestService::RefreshPublication() {
+    if (!m_accepting.load(std::memory_order_acquire)) return;
+    const auto active = m_publisher.Active();
+    bool needsManifest = false;
+    {
+        std::lock_guard lock(m_mutex);
+        for (std::size_t index = 0; index < m_roots.size() && !needsManifest; ++index) {
+            const auto activeRoot = active
+                ? active->Fragment(static_cast<PublishedFragmentKind>(index)).publicationRoot
+                : ArtifactVersionID{};
+            needsManifest = std::ranges::any_of(m_roots[index], [&](const auto& root) {
+                return root.Version() != activeRoot &&
+                    (!activeRoot || root.revision > activeRoot.revision ||
+                        (root.revision == activeRoot.revision &&
+                            root.generation > activeRoot.generation));
+            });
+        }
+    }
+    if (needsManifest) RequestManifest();
+}
+
 void RendererStateRequestService::RequestManifest() {
     auto input = std::make_shared<ManifestInput>();
     {
         std::lock_guard lock(m_mutex);
         input->base = m_publisher.Active();
         input->baseEpoch = input->base ? input->base->epoch : 0u;
+        input->publicationNodes = m_publicationNodes;
         input->roots.reserve(m_roots.size() * 2u);
         const auto appendRoot = [&input](const ArtifactSnapshot& root) {
             const auto duplicate = std::ranges::any_of(input->roots, [&](const ArtifactSnapshot& value) {
@@ -120,6 +174,9 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                 if (!root || !root->publishRoot) continue;
                 const auto& selected = candidate.Fragment(root->kind);
                 if (selected.publicationRoot != dependency.Version()) return false;
+            }
+            for (const auto& [dependencyKind, version] : fragment.publicationDependencies) {
+                if (candidate.Fragment(dependencyKind).publicationRoot != version) return false;
             }
         }
         return true;
@@ -169,34 +226,68 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         }
         return true;
     };
-    const auto makeBundle = [](const ArtifactSnapshot& root) {
-        auto bundle = std::make_shared<PublicationBundle>();
-        bundle->root = root.Version();
-        const auto append = [&](auto&& self, const ArtifactSnapshot& snapshot) -> bool {
+    const auto makeBundle = [&input](const ArtifactSnapshot& root) {
+        std::map<ArtifactVersionID, std::shared_ptr<const PublicationBundle>> nodes;
+        const auto buildNode = [&](auto&& self, const ArtifactSnapshot& snapshot)
+            -> std::shared_ptr<const PublicationBundle> {
             const auto requiredReadiness = snapshot.gpuSubmissions
                 ? ArtifactReadiness::UploadSubmitted : ArtifactReadiness::CpuReady;
             if (!snapshot.Version() || !ArtifactReachedMilestone(
-                snapshot.readiness, requiredReadiness)) return false;
-            if (std::ranges::any_of(bundle->versions, [&](const ArtifactVersionID& value) {
-                return value == snapshot.Version();
-            })) return true;
-            bundle->versions.push_back(snapshot.Version());
-            bundle->leases.Add(snapshot.lease);
-            if (snapshot.gpuSubmissions && !std::ranges::contains(
-                bundle->gpuSubmissions, snapshot.gpuSubmissions)) {
-                bundle->gpuSubmissions.push_back(snapshot.gpuSubmissions);
+                snapshot.readiness, requiredReadiness)) return {};
+            if (const auto found = nodes.find(snapshot.Version()); found != nodes.end()) {
+                return found->second;
             }
+            if (input->publicationNodes) {
+                std::lock_guard cacheLock(input->publicationNodes->mutex);
+                if (const auto found = input->publicationNodes->nodes.find(snapshot.Version());
+                    found != input->publicationNodes->nodes.end()) {
+                    if (auto cached = found->second.lock()) {
+                        nodes.emplace(snapshot.Version(), cached);
+                        basic_telemetry::AddCounter(
+                            "SARP.RendererStatePublisher.PublicationNodeCacheHits");
+                        return cached;
+                    }
+                    input->publicationNodes->nodes.erase(found);
+                }
+            }
+            auto node = std::make_shared<PublicationBundle>();
+            node->root = snapshot.Version();
+            node->versions.push_back(snapshot.Version());
+            node->leases.Add(snapshot.lease);
+            if (snapshot.gpuSubmissions) node->gpuSubmissions.push_back(snapshot.gpuSubmissions);
+            nodes.emplace(snapshot.Version(), node);
             const auto fragment = snapshot.payload.Get<RendererStateFragmentArtifact>();
-            if (!fragment) return true;
-            bundle->resourceHolds.insert(bundle->resourceHolds.end(),
+            if (!fragment) return node;
+            node->resourceHolds.insert(node->resourceHolds.end(),
                 fragment->fragment.resourceHolds.begin(),
                 fragment->fragment.resourceHolds.end());
             for (const auto& dependency : fragment->fragment.dependencyClosure) {
-                if (!self(self, dependency)) return false;
+                auto parent = self(self, dependency);
+                if (!parent) return {};
+                node->parents.push_back(std::move(parent));
             }
-            return true;
+            // Each node stores the submissions reachable from its own root.
+            // Successor manifests can therefore reuse the immutable node
+            // without traversing and rebuilding its entire dependency closure.
+            std::vector<std::shared_ptr<const GpuSubmissionSet>> submissions =
+                node->gpuSubmissions;
+            for (const auto& parent : node->parents) {
+                for (const auto& submission : parent->gpuSubmissions) {
+                    if (submission && !std::ranges::contains(submissions, submission))
+                        submissions.push_back(submission);
+                }
+            }
+            node->gpuSubmissions = std::move(submissions);
+            if (input->publicationNodes) {
+                std::lock_guard cacheLock(input->publicationNodes->mutex);
+                input->publicationNodes->nodes.insert_or_assign(snapshot.Version(), node);
+            }
+            return node;
         };
-        return append(append, root) ? bundle : std::shared_ptr<PublicationBundle>{};
+        auto bundle = buildNode(buildNode, root);
+        if (!bundle) return bundle;
+        basic_telemetry::Record("SARP.RendererStatePublisher.PublicationDagNodes", nodes.size());
+        return bundle;
     };
     const auto materialize = [&](const Selection& selection, bool buildBundles) {
         auto candidate = input->base ? *input->base : PublishedRendererState{};
@@ -296,6 +387,15 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         auto fragment = artifact->fragment;
         fragment.publicationRoot = selected[index]->Version();
         fragment.publicationBundle = makeBundle(*selected[index]);
+        if (kind == PublishedFragmentKind::IndirectWorkloads) {
+            for (const auto& dependency : fragment.dependencyClosure) {
+                const auto root = dependency.payload.Get<RendererStateFragmentArtifact>();
+                if (root && root->publishRoot) {
+                    fragment.publicationDependencies.emplace_back(root->kind, dependency.Version());
+                }
+            }
+            fragment.dependencyClosure.clear();
+        }
         patch->fragments[index] = std::move(fragment);
         selectedMask |= PublishedFragmentMask(kind);
         patch->catalogOwnerMask |= artifact->catalogOwnerMask != 0
@@ -328,7 +428,10 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                     const auto root = dependency.payload.Get<RendererStateFragmentArtifact>();
                     return root && root->publishRoot &&
                         (selectedMask & PublishedFragmentMask(root->kind)) != 0;
-                });
+                }) || std::ranges::any_of(fragment.publicationDependencies,
+                    [&](const auto& dependency) {
+                        return (selectedMask & PublishedFragmentMask(dependency.first)) != 0;
+                    });
             if (observesReplacement) {
                 patch->preconditions.push_back({ kind, fragment.publicationRoot });
             }

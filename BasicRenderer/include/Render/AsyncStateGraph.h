@@ -40,7 +40,10 @@ enum class ArtifactKind : std::uint16_t {
     BufferVersion,
     FrameManifest,
     StaticGroup,
+    TextureImageTable,
 };
+inline constexpr std::size_t kArtifactKindCount =
+    static_cast<std::size_t>(ArtifactKind::TextureImageTable) + 1u;
 
 struct ArtifactAddress {
     ArtifactKind kind = ArtifactKind::Generic;
@@ -167,6 +170,15 @@ struct ArtifactRequirement {
     DependencyPolicy policy = DependencyPolicy::AllOf,
     std::uint32_t alternativeGroup = 0) {
     return { address, 0, readiness, policy, alternativeGroup,
+        DependencyInvalidationPolicy::Latest };
+}
+
+[[nodiscard]] inline ArtifactRequirement LatestAtLeast(ArtifactAddress address,
+    std::uint64_t minimumRevision,
+    ArtifactReadiness readiness = ArtifactReadiness::CpuReady,
+    DependencyPolicy policy = DependencyPolicy::AllOf,
+    std::uint32_t alternativeGroup = 0) {
+    return { address, minimumRevision, readiness, policy, alternativeGroup,
         DependencyInvalidationPolicy::Latest };
 }
 
@@ -370,6 +382,10 @@ struct ArtifactRequest {
     std::uint64_t requestFingerprint = 0;
 };
 
+// A mutable desired-state update. Unlike an exact ArtifactRequest, newer
+// intents for the same address may replace queued work before it starts.
+using ArtifactIntent = ArtifactRequest;
+
 class ArtifactObservation {
 public:
     ArtifactObservation() = default;
@@ -553,6 +569,8 @@ struct AsyncStateGraphStats {
     std::uint64_t maxGpuApplyMicros = 0;
     std::uint64_t dependencyEvaluations = 0;
     std::uint64_t coalescedIntents = 0;
+    std::uint64_t intentBatches = 0;
+    std::uint64_t supersededBuilds = 0;
     std::uint64_t reclaimCandidates = 0;
     std::uint64_t archivedVersions = 0;
     std::uint64_t reclaimedVersions = 0;
@@ -561,6 +579,11 @@ struct AsyncStateGraphStats {
     std::uint64_t recipePinnedVersions = 0;
     std::uint64_t unclassifiedRetainedVersions = 0;
 	std::uint64_t exactWaiters = 0;
+    std::array<std::uint64_t, kArtifactKindCount> intentsByKind{};
+    std::array<std::uint64_t, kArtifactKindCount> coalescedByKind{};
+    std::array<std::uint64_t, kArtifactKindCount> buildsStartedByKind{};
+    std::array<std::uint64_t, kArtifactKindCount> buildsCompletedByKind{};
+    std::array<std::uint64_t, kArtifactKindCount> queueWaitMicrosByKind{};
     std::array<std::uint64_t, static_cast<std::size_t>(ArtifactReadiness::Failed) + 1u> stateCounts{};
 };
 
@@ -627,6 +650,8 @@ public:
     ArtifactRequestStatus SubmitLatestIntent(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<ArtifactRequirement> requirements = {}, ArtifactPayload input = {},
         std::uint64_t requestFingerprint = 0);
+    std::vector<ArtifactRequestResult> SubmitLatestIntentBatch(
+        std::vector<ArtifactIntent> intents);
     std::vector<ArtifactRequestResult> RequestBatch(std::vector<ArtifactRequest> requests);
     ArtifactRequestResult RequestExpressions(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<DependencyExpression> dependencies, ArtifactPayload input = {},
@@ -639,6 +664,7 @@ public:
     void MarkPublished(std::span<const ArtifactVersionID> versions);
     void PumpGpuCompletions();
     void NotifySuspensionSatisfied(std::uint64_t identity);
+    [[nodiscard]] std::function<void(std::uint64_t)> MakeSuspensionNotifier() const;
     void SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback);
     [[nodiscard]] std::uint64_t AddReadyCallback(
         std::function<void(const ArtifactSnapshot&)> callback);

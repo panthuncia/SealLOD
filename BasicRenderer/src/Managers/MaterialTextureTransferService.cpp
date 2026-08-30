@@ -70,7 +70,11 @@ void MaterialTextureTransferService::SaveReadbackToDds(InFlightBatch::ReadbackCo
 		const size_t rows = blockInfo.isCompressed
 			? (std::max)(size_t{1}, (destination->height + blockInfo.blockHeight - 1u) / blockInfo.blockHeight)
 			: destination->height;
-		const uint64_t sourceEnd = footprint.offset + static_cast<uint64_t>(footprint.rowPitch) * rows;
+		// D3D12's copyable-footprint size does not include unused row-pitch
+		// padding after the final row.  Validate the bytes that we actually
+		// copy rather than requiring a fully padded final row.
+		const uint64_t sourceEnd = footprint.offset +
+			static_cast<uint64_t>(footprint.rowPitch) * (rows - 1u) + destination->rowPitch;
 		if (footprint.rowPitch < destination->rowPitch || sourceEnd > completion.bufferSize) {
 			completion.buffer->GetAPIResource().Unmap(0, 0);
 			spdlog::error(

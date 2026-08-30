@@ -21,6 +21,7 @@
 
 #include "Render/Runtime/StreamingUploadTypes.h"
 #include "Render/StaticStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 #include "Managers/SerializedTaskPump.h"
 
 namespace br::render {
@@ -261,6 +262,10 @@ std::string JsonString(std::string_view value) {
 }
 
 class GraphTraceSession {
+    struct TraceShard {
+        std::vector<GraphTraceEvent> events;
+    };
+
 public:
     explicit GraphTraceSession(AsyncStateGraphTraceConfig config)
         : m_config(config), m_started(std::chrono::steady_clock::now()) {}
@@ -269,7 +274,23 @@ public:
         std::uint64_t generation = 0, ArtifactReadiness readiness = ArtifactReadiness::Missing,
         std::int64_t durationMicros = 0, std::string detail = {}, ArtifactKey related = {},
         std::uint64_t relatedRevision = 0) {
-        if (m_saturated.load(std::memory_order_acquire)) {
+        if (m_stopping.load(std::memory_order_acquire) ||
+            m_saturated.load(std::memory_order_acquire)) {
+            m_dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        m_activeWriters.fetch_add(1, std::memory_order_acq_rel);
+        struct WriterGuard {
+            std::atomic_uint32_t& writers;
+            ~WriterGuard() { writers.fetch_sub(1, std::memory_order_release); }
+        } writerGuard{ m_activeWriters };
+        if (m_stopping.load(std::memory_order_acquire)) {
+            m_dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        const auto eventIndex = m_eventCount.fetch_add(1, std::memory_order_acq_rel);
+        if (eventIndex >= m_config.maximumEvents) {
+            m_saturated.store(true, std::memory_order_release);
             m_dropped.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -287,21 +308,8 @@ public:
         record.readiness = readiness;
         record.durationMicros = durationMicros;
         record.detail = std::move(detail);
-        std::lock_guard lock(m_mutex);
-        if (m_eventCount >= m_config.maximumEvents) {
-            m_saturated.store(true, std::memory_order_release);
-            m_dropped.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-        constexpr std::size_t chunkCapacity = 16'384;
-        if (m_eventChunks.empty() || m_eventChunks.back().size() == chunkCapacity) {
-            m_eventChunks.emplace_back();
-            m_eventChunks.back().reserve((std::min)(chunkCapacity,
-                m_config.maximumEvents - m_eventCount));
-        }
-        m_eventChunks.back().push_back(std::move(record));
-        ++m_eventCount;
-        if (m_eventCount == m_config.maximumEvents)
+        ThreadShard()->events.push_back(std::move(record));
+        if (eventIndex + 1 == m_config.maximumEvents)
             m_saturated.store(true, std::memory_order_release);
     }
 
@@ -321,17 +329,22 @@ public:
     }
 
     AsyncStateGraphTraceReport Write(const std::filesystem::path& directory) {
+        m_stopping.store(true, std::memory_order_release);
+        while (m_activeWriters.load(std::memory_order_acquire) != 0) std::this_thread::yield();
         std::vector<GraphTraceEvent> events;
         std::uint64_t dropped = 0;
         std::array<GraphMutexAggregate,
             static_cast<std::size_t>(GraphMutexPhase::Count)> mutexAggregates;
+        std::vector<std::shared_ptr<TraceShard>> shards;
         {
-            std::lock_guard lock(m_mutex);
-            events.reserve(m_eventCount);
-            for (const auto& chunk : m_eventChunks)
-                events.insert(events.end(), chunk.begin(), chunk.end());
-            dropped = m_dropped.load(std::memory_order_relaxed);
+            std::lock_guard lock(m_shardsMutex);
+            shards = m_shards;
         }
+        events.reserve((std::min)(m_eventCount.load(std::memory_order_relaxed),
+            static_cast<std::uint64_t>(m_config.maximumEvents)));
+        for (const auto& shard : shards)
+            events.insert(events.end(), shard->events.begin(), shard->events.end());
+        dropped = m_dropped.load(std::memory_order_relaxed);
         for (std::size_t index = 0; index < mutexAggregates.size(); ++index)
             mutexAggregates[index] = m_mutexAggregates[index].Snapshot();
         std::ranges::sort(events, {}, &GraphTraceEvent::sequence);
@@ -738,15 +751,29 @@ public:
     const AsyncStateGraphTraceConfig& Config() const { return m_config; }
 
 private:
+    std::shared_ptr<TraceShard> ThreadShard() {
+        thread_local std::unordered_map<const GraphTraceSession*, std::weak_ptr<TraceShard>> cache;
+        if (const auto found = cache.find(this); found != cache.end()) {
+            if (auto shard = found->second.lock()) return shard;
+        }
+        auto shard = std::make_shared<TraceShard>();
+        shard->events.reserve(4'096);
+        {
+            std::lock_guard lock(m_shardsMutex);
+            m_shards.push_back(shard);
+        }
+        cache[this] = shard;
+        return shard;
+    }
+
     AsyncStateGraphTraceConfig m_config;
     std::chrono::steady_clock::time_point m_started;
     std::atomic_uint64_t m_sequence{0};
-    std::mutex m_mutex;
-    // Coarse chunks avoid whole-trace relocation, a million-event upfront
-    // commit, and the per-few-events heap churn of std::deque. The report pays
-    // the one-time contiguous copy only after capture has stopped.
-    std::vector<std::vector<GraphTraceEvent>> m_eventChunks;
-    std::size_t m_eventCount = 0;
+    std::mutex m_shardsMutex;
+    std::vector<std::shared_ptr<TraceShard>> m_shards;
+    std::atomic_uint64_t m_eventCount{ 0 };
+    std::atomic_uint32_t m_activeWriters{ 0 };
+    std::atomic_bool m_stopping{ false };
     std::atomic_bool m_saturated{ false };
     std::atomic_uint64_t m_dropped{ 0 };
     std::array<AtomicGraphMutexAggregate,
@@ -963,6 +990,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         bool terminalFailure = false;
         bool published = false;
         bool latestSuccessorNeeded = false;
+        // True when this logical version came from SubmitLatest and may be
+        // replaced as a whole. Its internal exact resource recipe must not pin
+        // obsolete mutable children against the next mailbox drain.
+        bool coalescibleIntent = false;
+        // Set when a coalescible successor makes the running build obsolete.
+        // Producers can test this without taking the graph mutex.
+        std::shared_ptr<std::atomic_bool> superseded = std::make_shared<std::atomic_bool>(false);
         std::chrono::steady_clock::time_point queuedAt{};
         std::chrono::steady_clock::time_point buildStartedAt{};
         std::chrono::steady_clock::time_point uploadSubmittedAt{};
@@ -1014,6 +1048,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::uint64_t nextVersionGeneration = 0;
     std::uint64_t reclaimedVersions = 0;
     std::unordered_map<ArtifactKey, std::unordered_set<ArtifactKey, ArtifactKey::Hasher>, ArtifactKey::Hasher> waiters;
+    // Exact immutable recipes pin versions by identity. Maintaining this index
+    // at recipe admission/replacement keeps supersession checks O(1) and avoids
+    // scanning the entire graph while holding its control mutex.
+    std::unordered_map<StoredVersionKey, std::uint32_t, StoredVersionKey::Hasher> exactRecipePins;
     std::unordered_map<ArtifactKind, ArtifactProducerRegistration> producers;
     std::deque<ArtifactKey> pending;
     std::deque<Completion> completions;
@@ -1325,12 +1363,70 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     bool RecipeReferences(const StoredVersionKey& version,
         const std::vector<ArtifactRequirement>& requirements) const {
         return std::ranges::any_of(requirements, [&](const ArtifactRequirement& requirement) {
-            return requirement.key == version.address &&
-                requirement.minimumRevision == version.revision &&
-                requirement.invalidation != DependencyInvalidationPolicy::Latest &&
+            if (requirement.key != version.address) return false;
+            if (requirement.invalidation == DependencyInvalidationPolicy::Latest) {
+                // LatestAtLeast is not an exact-version pin, but it must retain
+                // the ready version currently satisfying the dependency. If a
+                // newer desired revision blocks on capacity after this archive
+                // is reclaimed, the consumer and producer can otherwise wait
+                // on each other forever.
+                const auto* selected = SelectSnapshot(requirement);
+                return selected && selected->revision == version.revision &&
+                    selected->generation == version.generation;
+            }
+            return requirement.minimumRevision == version.revision &&
                 (requirement.requiredGeneration == 0 ||
                  requirement.requiredGeneration == version.generation);
         });
+    }
+
+    static bool PinsExactRecipe(const ArtifactKey& consumer, bool coalescible,
+        const ArtifactRequirement& requirement) {
+        if (requirement.minimumRevision == 0 ||
+            requirement.invalidation == DependencyInvalidationPolicy::Latest) return false;
+        // Most latest-wins consumers may replace their entire recipe. Active
+        // lists and references to them are content-bearing: their compacted
+        // indices must remain paired with the exact source generation.
+        return !coalescible || consumer.kind == ArtifactKind::ActiveDrawList ||
+            requirement.key.kind == ArtifactKind::ActiveDrawList;
+    }
+
+    void AdjustExactRecipePins(const ArtifactKey& consumer, bool coalescible,
+        const std::vector<ArtifactRequirement>& requirements, int delta) {
+        for (const auto& requirement : requirements) {
+            if (!PinsExactRecipe(consumer, coalescible, requirement)) continue;
+            const StoredVersionKey key{ requirement.key, requirement.minimumRevision,
+                requirement.requiredGeneration };
+            if (delta > 0) {
+                ++exactRecipePins[key];
+            } else if (const auto found = exactRecipePins.find(key);
+                found != exactRecipePins.end()) {
+                if (found->second <= 1) exactRecipePins.erase(found);
+                else --found->second;
+            }
+        }
+    }
+
+    void PinSuccessor(const Node& node, const RequestedVersion& successor) {
+        AdjustExactRecipePins(node.key, successor.coalescibleIntent,
+            successor.requirements, 1);
+    }
+
+    void UnpinSuccessor(const Node& node, const RequestedVersion& successor) {
+        AdjustExactRecipePins(node.key, successor.coalescibleIntent,
+            successor.requirements, -1);
+    }
+
+    void ClearSuccessors(Node& node) {
+        for (const auto& successor : node.successors) UnpinSuccessor(node, successor);
+        node.successors.clear();
+    }
+
+    bool HasExactDependent(const StoredVersionKey& version) const {
+        if (exactRecipePins.contains(version)) return true;
+        // Generation zero is a deliberate wildcard used by callers that pin
+        // an exact revision before its immutable generation is known.
+        return exactRecipePins.contains({ version.address, version.revision, 0 });
     }
 
 	void ReclaimUnreferencedVersions() {
@@ -1390,7 +1486,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				retentionTrace->Record("VersionReclaimed", reclaimed.address, reclaimed.revision,
                     reclaimed.generation);
             }
-        }
+		}
 		if (reclaimedInBatch != 0 && retentionTrace &&
 			retentionTrace->Config().includeRetentionEvents && !traceIndividualVersions) {
 			retentionTrace->Record("VersionsReclaimed", {}, 0, 0,
@@ -1437,15 +1533,52 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             }
             return nullptr;
         }
-        const auto current = nodes.find(requirement.key);
-        if (current == nodes.end() ||
-            current->second.producedRevision < requirement.minimumRevision) return nullptr;
-        static thread_local ArtifactSnapshot selected;
-        selected = MakeSnapshot(current->second);
-        return &selected;
+        // LatestAtLeast selects the newest *ready* immutable version, not
+        // necessarily the address's in-progress desired cursor. Advancing an
+        // address to a blocked successor must not make an already-satisfied
+        // minimum false for consumers that can safely use that ready version.
+        static thread_local ArtifactSnapshot currentSnapshot;
+        const ArtifactSnapshot* selected = nullptr;
+        if (const auto current = nodes.find(requirement.key); current != nodes.end() &&
+            current->second.producedRevision >= requirement.minimumRevision) {
+            currentSnapshot = MakeSnapshot(current->second);
+            if (Satisfies(currentSnapshot.readiness, requirement.requiredReadiness)) {
+                selected = &currentSnapshot;
+            }
+        }
+        if (const auto address = versionsByAddress.find(requirement.key);
+            address != versionsByAddress.end()) {
+            for (auto candidate = address->second.rbegin(); candidate != address->second.rend();
+                ++candidate) {
+                if (candidate->first.first < requirement.minimumRevision) break;
+                const auto archived = versions.find(candidate->second);
+                if (archived == versions.end() || !Satisfies(
+                    archived->second.readiness, requirement.requiredReadiness)) continue;
+                if (!selected || archived->second.revision > selected->revision ||
+                    (archived->second.revision == selected->revision &&
+                        archived->second.generation > selected->generation)) {
+                    selected = &archived->second;
+                }
+                // Reverse iteration is ordered by revision then generation, so
+                // the first satisfying archived version is the newest one.
+                break;
+            }
+        }
+        return selected;
     }
 
     void RemoveWaiterEdges(const Node& node) {
+        AdjustExactRecipePins(node.key, node.coalescibleIntent, node.requirements, -1);
+		// Latest requirements are deliberately not exact recipe pins, but the
+		// resolved snapshots still made their archived versions appear referenced
+		// during the first reclamation attempt. Once this consumer is replacing its
+		// dependency set, explicitly reconsider those old immutable versions.
+		for (const auto& dependency : node.resolvedDependencies) {
+			if (dependency.revision != 0 && dependency.generation != 0) {
+				reclaimQueue.push({ dependency.key, dependency.revision,
+					dependency.generation });
+			}
+		}
         const auto remove = [&](const ArtifactRequirement& requirement) {
 			if (requirement.minimumRevision != 0 &&
 				requirement.invalidation != DependencyInvalidationPolicy::Latest) {
@@ -1470,6 +1603,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     }
 
     void InstallWaiterEdges(const Node& node) {
+		AdjustExactRecipePins(node.key, node.coalescibleIntent, node.requirements, 1);
 		for (const auto& requirement : node.requirements) waiters[requirement.key].insert(node.key);
 		for (const auto& requirement : node.requestedRequirements)
 			waiters[requirement.key].insert(node.key);
@@ -1574,6 +1708,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             if (!selected) continue;
             requirement.minimumRevision = selected->revision;
             requirement.requiredGeneration = selected->generation;
+            if (PinsExactRecipe(node.key, node.coalescibleIntent, requirement)) {
+                ++exactRecipePins[{ requirement.key, requirement.minimumRevision,
+                    requirement.requiredGeneration }];
+            }
         }
     }
 
@@ -1726,6 +1864,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
         RemoveWaiterEdges(node);
         auto successor = std::move(node.successors.front());
+        UnpinSuccessor(node, successor);
         node.successors.pop_front();
         node.desiredRevision = successor.revision;
         node.versionGeneration = successor.generation;
@@ -1743,6 +1882,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         node.published = false;
         node.terminalFailure = false;
         node.latestSuccessorNeeded = false;
+        node.coalescibleIntent = successor.coalescibleIntent;
+        node.superseded = std::make_shared<std::atomic_bool>(false);
         node.buildAttempted = false;
         node.error.clear();
         node.retryAt.reset();
@@ -1780,7 +1921,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
         if (fingerprint == 0) fingerprint = 1;
         node.successors.push_back({ revision, generation, fingerprint, node.input,
-            node.requestedRequirements, AcquireVersionLease({ node.key, revision, generation }) });
+            node.requestedRequirements, AcquireVersionLease({ node.key, revision, generation }),
+            node.coalescibleIntent });
+        PinSuccessor(node, node.successors.back());
         node.latestSuccessorNeeded = false;
         ++stats.requests;
         return PromoteSuccessor(node);
@@ -1912,7 +2055,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         if (!submitted) delayedDrainScheduled.store(false, std::memory_order_release);
     }
 
-    void SubmitBuild(const ArtifactProducerRegistration& registration, ArtifactBuildContext context) {
+    void SubmitBuild(const ArtifactProducerRegistration& registration, ArtifactBuildContext context,
+        std::shared_ptr<const std::atomic_bool> superseded) {
         auto weak = weak_from_this();
         const auto key = context.key;
         const auto revision = context.revision;
@@ -1933,7 +2077,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         const bool submitted = scheduler.Submit(scope, registration.lane, registration.domain,
             registration.taskName.empty() ? "AsyncStateGraph::Build" : registration.taskName,
             [weak, registration, context = std::move(context), key, revision, generation,
-                dependencyStamp = std::move(dependencyStamp)](const TaskContext& cancellation) mutable {
+                dependencyStamp = std::move(dependencyStamp),
+                superseded = std::move(superseded)](const TaskContext& cancellation) mutable {
                 auto self = weak.lock();
                 if (!self) return;
                 const auto producerStarted = std::chrono::steady_clock::now();
@@ -1941,7 +2086,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     session->Record("BuildStarted", key, revision, generation,
                         ArtifactReadiness::Preparing, 0, registration.taskName);
                 }
-                context.stopRequested = [cancellation] { return cancellation.StopRequested(); };
+                context.stopRequested = [cancellation, superseded] {
+                    return cancellation.StopRequested() ||
+                        (superseded && superseded->load(std::memory_order_acquire));
+                };
                 ArtifactBuildResult result;
                 try {
                     result = cancellation.StopRequested()
@@ -2042,6 +2190,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
         node.buildInFlight = false;
         ++stats.buildsCompleted;
+        const auto completedKindIndex = static_cast<std::size_t>(completion.key.kind);
+        if (completedKindIndex < stats.buildsCompletedByKind.size())
+            ++stats.buildsCompletedByKind[completedKindIndex];
         if (node.buildStartedAt != std::chrono::steady_clock::time_point{}) {
             const auto buildDuration = std::chrono::steady_clock::now() - node.buildStartedAt;
             stats.buildMicros += static_cast<std::uint64_t>(
@@ -2063,7 +2214,33 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         case ArtifactBuildResult::Outcome::Ready:
             node.terminalFailure = false;
             node.payload = std::move(result.payload);
-            node.resolvedDependencies = completion.dependencies;
+			for (const auto& dependency : node.resolvedDependencies) {
+				if (dependency.revision != 0 && dependency.generation != 0) {
+					reclaimQueue.push({ dependency.key, dependency.revision,
+						dependency.generation });
+				}
+			}
+			node.resolvedDependencies = completion.dependencies;
+			std::erase_if(node.resolvedDependencies,
+				[&](const ArtifactSnapshot& dependency) {
+					return !std::ranges::any_of(node.requestedRequirements,
+						[&](const ArtifactRequirement& requirement) {
+							return requirement.key == dependency.key &&
+								requirement.invalidation ==
+									DependencyInvalidationPolicy::Latest;
+						});
+				});
+			// Build input is a recipe, not published lifetime ownership. Keeping it
+			// on every completed dependency-free node retained prior GPU backings;
+			// FrameManifest inputs additionally retained an entire previous renderer
+			// state. Only Latest recipes need the same input for automatic rebuilds.
+			if (!std::ranges::any_of(node.requestedRequirements,
+				[](const ArtifactRequirement& requirement) {
+					return requirement.invalidation ==
+						DependencyInvalidationPolicy::Latest;
+				})) {
+				node.input = {};
+			}
             node.checkpoint = {};
             node.retryAt.reset();
             node.suspension.reset();
@@ -2312,7 +2489,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 			evaluatedGpu.push_back({ std::move(signal), submitted, complete, failed,
 				failure });
         }
-        std::vector<std::pair<ArtifactProducerRegistration, ArtifactBuildContext>> builds;
+        struct PendingBuild {
+            ArtifactProducerRegistration registration;
+            ArtifactBuildContext context;
+            std::shared_ptr<const std::atomic_bool> superseded;
+        };
+        std::vector<PendingBuild> builds;
         std::vector<ArtifactSnapshot> ready;
         std::vector<std::function<void(const ArtifactSnapshot&)>> callbacks;
 		std::vector<std::pair<ExactWaiter, ArtifactSnapshot>> exactDispatches;
@@ -2452,15 +2634,23 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     const auto queueWait = node.buildStartedAt - node.queuedAt;
                     stats.queueWaitMicros += static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::microseconds>(queueWait).count());
+                    const auto queueKindIndex = static_cast<std::size_t>(node.key.kind);
+                    if (queueKindIndex < stats.queueWaitMicrosByKind.size()) {
+                        stats.queueWaitMicrosByKind[queueKindIndex] += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(queueWait).count());
+                    }
                     basic_telemetry::Record("SARP.AsyncStateGraph.QueueLatencyNs",
                         static_cast<std::uint64_t>(
                             std::chrono::duration_cast<std::chrono::nanoseconds>(queueWait).count()));
                 }
                 SetState(node, ArtifactReadiness::Preparing);
                 ++stats.buildsStarted;
+                const auto buildKindIndex = static_cast<std::size_t>(node.key.kind);
+                if (buildKindIndex < stats.buildsStartedByKind.size())
+                    ++stats.buildsStartedByKind[buildKindIndex];
                 ArtifactBuildContext context{ node.key, node.desiredRevision, node.generation,
                     DependencySnapshots(node), node.input, node.checkpoint, {} };
-                builds.emplace_back(producer->second, std::move(context));
+                builds.emplace_back(producer->second, std::move(context), node.superseded);
 				if (std::chrono::steady_clock::now() - started >= maxDuration) break;
             }
 			for (const auto& snapshot : ready) {
@@ -2609,6 +2799,21 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     basic_telemetry::SetGauge(
                         std::format("SARP.AsyncStateGraph.Kind.{}.ArchivedVersions", index),
                         static_cast<std::int64_t>(archivedKindCounts[index]));
+                    basic_telemetry::SetGauge(
+                        std::format("SARP.AsyncStateGraph.Kind.{}.Intents", index),
+                        static_cast<std::int64_t>(stats.intentsByKind[index]));
+                    basic_telemetry::SetGauge(
+                        std::format("SARP.AsyncStateGraph.Kind.{}.Coalesced", index),
+                        static_cast<std::int64_t>(stats.coalescedByKind[index]));
+                    basic_telemetry::SetGauge(
+                        std::format("SARP.AsyncStateGraph.Kind.{}.BuildsStarted", index),
+                        static_cast<std::int64_t>(stats.buildsStartedByKind[index]));
+                    basic_telemetry::SetGauge(
+                        std::format("SARP.AsyncStateGraph.Kind.{}.BuildsCompleted", index),
+                        static_cast<std::int64_t>(stats.buildsCompletedByKind[index]));
+                    basic_telemetry::SetGauge(
+                        std::format("SARP.AsyncStateGraph.Kind.{}.QueueWaitMicros", index),
+                        static_cast<std::int64_t>(stats.queueWaitMicrosByKind[index]));
                 }
             }
         }
@@ -2616,7 +2821,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         // If it arrives while this drain owns the consumer, the same worker
         // loops; otherwise the notifying producer schedules the successor.
         hasImmediateWork = hasImmediateWork || !gpuSignals.empty();
-        for (auto& [registration, context] : builds) SubmitBuild(registration, std::move(context));
+        for (auto& [registration, context, superseded] : builds)
+            SubmitBuild(registration, std::move(context), std::move(superseded));
         EnqueueAcceptances(std::move(acceptanceDispatches));
 		for (auto& [action, snapshot] : accepted) if (action) action(snapshot);
 		for (auto& [waiter, snapshot] : exactDispatches) {
@@ -2639,6 +2845,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         for (const auto& callback : callbacks) {
             if (callback) for (const auto& snapshot : ready) callback(snapshot);
         }
+		if (!retiredVersions.empty()) {
+			retiredVersions.clear();
+			// Artifact destruction is complete and no graph mutex is held. Wake
+			// capacity waiters that may now reuse an unpublished backing.
+			NotifyVersionedGpuBufferFrameRetirement();
+		}
         if (auto session = trace.load(std::memory_order_acquire)) {
             const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - started).count();
@@ -2679,6 +2891,26 @@ ArtifactRequestStatus AsyncStateGraph::SubmitLatestIntent(ArtifactKey key,
     }
     return RequestInternal(key, desiredRevision, std::move(requirements), std::move(input),
         requestFingerprint, true).status;
+}
+
+std::vector<ArtifactRequestResult> AsyncStateGraph::SubmitLatestIntentBatch(
+    std::vector<ArtifactIntent> intents) {
+    std::vector<ArtifactRequestResult> results;
+    results.reserve(intents.size());
+    auto batchLock = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
+    ++m_impl->stats.intentBatches;
+    for (auto& intent : intents) {
+        if (intent.key.kind == ArtifactKind::StaticTransaction) {
+            results.push_back({ ArtifactRequestStatus::TypeMismatch, 0, {} });
+            continue;
+        }
+        results.push_back(RequestInternal(intent.key, intent.desiredRevision,
+            std::move(intent.requirements), std::move(intent.input),
+            intent.requestFingerprint, true, true));
+    }
+    batchLock.Unlock();
+    m_impl->ScheduleDrain();
+    return results;
 }
 
 std::vector<ArtifactRequestResult> AsyncStateGraph::RequestBatch(
@@ -2732,6 +2964,11 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
         }
         if (requestFingerprint == 0) {
             requestFingerprint = CanonicalRequestFingerprint(key, desiredRevision, requirements);
+        }
+        if (coalescibleIntent) {
+            const auto kindIndex = static_cast<std::size_t>(key.kind);
+            if (kindIndex < m_impl->stats.intentsByKind.size())
+                ++m_impl->stats.intentsByKind[kindIndex];
         }
         const Impl::VersionKey requestedVersion{ key, desiredRevision };
         auto versionGeneration = m_impl->versionGenerations.find(requestedVersion);
@@ -2850,14 +3087,45 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
         if (activeVersionExists && !activeVersionFinished) {
             traceAcceptedRequest();
             if (coalescibleIntent) {
+                const Impl::StoredVersionKey activeVersion{
+                    key, node.desiredRevision, node.versionGeneration };
+                // Latest-wins cancellation is only legal while no immutable
+                // transaction has pinned this exact generation. Once pinned,
+                // finish it and coalesce only the queued successors; otherwise
+                // exact consumers can be stranded on a Superseded version that
+                // never had a chance to materialize.
+                if (!m_impl->HasExactDependent(activeVersion) && node.superseded &&
+                    !node.superseded->exchange(true, std::memory_order_acq_rel))
+                    ++m_impl->stats.supersededBuilds;
                 while (!node.successors.empty() && node.successors.back().coalescibleIntent) {
+                    const auto& candidate = node.successors.back();
+                    const Impl::StoredVersionKey candidateVersion{
+                        key, candidate.revision, candidate.generation };
+                    if (m_impl->HasExactDependent(candidateVersion)) break;
+                    m_impl->UnpinSuccessor(node, node.successors.back());
                     node.successors.pop_back();
                     ++m_impl->stats.coalescedIntents;
+                    const auto kindIndex = static_cast<std::size_t>(key.kind);
+                    if (kindIndex < m_impl->stats.coalescedByKind.size())
+                        ++m_impl->stats.coalescedByKind[kindIndex];
                 }
             }
             node.successors.push_back({ desiredRevision, versionGeneration->second, requestFingerprint,
                 std::move(input), std::move(requirements), versionLease, coalescibleIntent });
-            if (node.state == ArtifactReadiness::UploadSubmitted && !node.buildInFlight) {
+            m_impl->PinSuccessor(node, node.successors.back());
+            const Impl::StoredVersionKey activeVersion{
+                key, node.desiredRevision, node.versionGeneration };
+            const bool obsoleteBeforeBuild = coalescibleIntent && !node.buildInFlight &&
+                !m_impl->HasExactDependent(activeVersion) &&
+                (node.state == ArtifactReadiness::Missing ||
+                 node.state == ArtifactReadiness::Blocked ||
+                 node.state == ArtifactReadiness::Queued);
+            // A blocked latest-wins version cannot reach UploadSubmitted to
+            // trigger the normal successor handoff. If nobody pins it, replace
+            // it immediately; otherwise a superseded exact dependency can
+            // strand the address forever while newer mailbox state accumulates.
+            if (obsoleteBeforeBuild ||
+                (node.state == ArtifactReadiness::UploadSubmitted && !node.buildInFlight)) {
                 m_impl->PromoteSuccessor(node);
             }
             std::unordered_set<ArtifactKey, ArtifactKey::Hasher> visited;
@@ -2890,6 +3158,8 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
         node.resolvedDependencies.clear();
         node.terminalFailure = false;
         node.latestSuccessorNeeded = false;
+        node.coalescibleIntent = coalescibleIntent;
+        node.superseded = std::make_shared<std::atomic_bool>(false);
         node.buildAttempted = false;
         node.error.clear();
         node.gpuSubmissions.reset();
@@ -2987,9 +3257,10 @@ void AsyncStateGraph::Cancel(ArtifactKey key) {
         auto lock = m_impl->LockMutex(GraphMutexPhase::CancelApply);
         const auto found = m_impl->nodes.find(key);
         if (found == m_impl->nodes.end()) return;
+        m_impl->RemoveWaiterEdges(found->second);
         ++found->second.generation;
         found->second.desired = false;
-        found->second.successors.clear();
+        m_impl->ClearSuccessors(found->second);
         found->second.retryAt.reset();
         if ((found->second.state == ArtifactReadiness::CpuReady ||
              found->second.state == ArtifactReadiness::UploadSubmitted) &&
@@ -3017,7 +3288,7 @@ void AsyncStateGraph::Release(ArtifactKey key) {
         m_impl->RemoveWaiterEdges(node);
         ++node.generation;
         node.desired = false;
-        node.successors.clear();
+        m_impl->ClearSuccessors(node);
         node.retryAt.reset();
         if ((node.state == ArtifactReadiness::CpuReady ||
              node.state == ArtifactReadiness::UploadSubmitted) && node.waitingGpuSubmissions &&
@@ -3148,6 +3419,35 @@ void AsyncStateGraph::NotifySuspensionSatisfied(std::uint64_t identity) {
         }
     }
     m_impl->ScheduleDrain();
+}
+
+std::function<void(std::uint64_t)> AsyncStateGraph::MakeSuspensionNotifier() const {
+    const std::weak_ptr<Impl> weak = m_impl;
+    return [weak](std::uint64_t identity) {
+        if (identity == 0) return;
+        const auto impl = weak.lock();
+        if (!impl) return;
+        {
+            auto lock = impl->LockMutex(GraphMutexPhase::SuspensionSatisfied);
+            const auto registered = impl->suspendedByIdentity.find(identity);
+            if (registered == impl->suspendedByIdentity.end()) {
+                impl->satisfiedSuspensions.insert(identity);
+            } else {
+                const auto version = registered->second;
+                impl->suspendedByIdentity.erase(registered);
+                const auto found = impl->nodes.find(version.address);
+                if (found != impl->nodes.end() &&
+                    found->second.desiredRevision == version.revision &&
+                    found->second.generation == version.generation &&
+                    found->second.suspension &&
+                    found->second.suspension->identity == identity) {
+                    found->second.suspension.reset();
+                    impl->QueueNode(found->second);
+                }
+            }
+        }
+        impl->ScheduleDrain();
+    };
 }
 
 void AsyncStateGraph::SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback) {

@@ -606,13 +606,15 @@ public:
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
-            Builtin::Terrain::TextureGroup)
+            Builtin::Terrain::TextureGroup,
+            Builtin::Material::TextureStreamingMetadataBuffer)
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtHeightAtlas,
                 Builtin::Terrain::RvtAlbedoAtlas,
                 Builtin::Terrain::RvtNormalAtlas,
                 Builtin::Terrain::RvtMaterialAtlas,
-                Builtin::Terrain::RvtStats)
+                Builtin::Terrain::RvtStats,
+                Builtin::Material::TextureStreamingFeedbackBuffer)
             .WithIndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs)
             .WithConstantBuffer(Builtin::PerFrameBuffer);
     }

@@ -32,6 +32,7 @@
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Render/RenderContext.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/TextureImageTableArtifacts.h"
 #include "Telemetry/NvPerfIntegration.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Render/PassBuilders.h"
@@ -764,6 +765,7 @@ void Renderer::Initialize(
 	br::render::RegisterTextureBindingProducer(*m_asyncStateGraph);
 	br::render::RegisterTerrainStateProducer(*m_asyncStateGraph);
     br::render::RegisterVersionedGpuBufferProducer(*m_asyncStateGraph);
+	br::render::RegisterTextureImageTableProducer(*m_asyncStateGraph);
     br::render::RegisterObjectBufferStateProducer(*m_asyncStateGraph);
     br::render::RegisterStaticStateProducers(*m_asyncStateGraph);
     m_asyncStateGraph->SetReadyCallback([this](const br::render::ArtifactSnapshot& artifact) {
@@ -813,7 +815,8 @@ void Renderer::Initialize(
 	m_pObjectManager = ObjectManager::CreateUnique();
 	m_pObjectManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
-		currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr);
+		currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr,
+		m_numFramesInFlight);
 	m_pIndirectCommandBufferManager = IndirectCommandBufferManager::CreateUnique();
 	m_pViewManager = ViewManager::CreateUnique();
 	m_pEnvironmentManager = EnvironmentManager::CreateUnique();
@@ -1030,7 +1033,7 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool 
     }
     const auto taskStats = TaskSchedulerManager::GetInstance().GetQueueStats();
     snapshot.schedulerWorkerCount = TaskSchedulerManager::GetInstance().WorkerCount();
-    static_assert(static_cast<std::size_t>(TaskDomain::Count) == 10);
+    static_assert(static_cast<std::size_t>(TaskDomain::Count) == 12);
     for (std::size_t index = 0; index < snapshot.schedulerDomains.size(); ++index) {
         const auto& source = taskStats.domains[index];
         auto& target = snapshot.schedulerDomains[index];
@@ -1063,11 +1066,19 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool 
         target.capacity = source.capacity;
         target.byteCount = source.byteCount;
         target.writeCount = source.writeCount;
+        target.exhaustedCapacityClass = source.exhaustedCapacityClass;
+        target.exhaustedBackingCount = source.exhaustedBackingCount;
+        target.exhaustedBackingGenerations = source.exhaustedBackingGenerations;
+        target.exhaustedBackingReferences = source.exhaustedBackingReferences;
+        target.exhaustedResourceReferences = source.exhaustedResourceReferences;
         target.debugName = source.debugName;
         for (std::size_t index = 0; index < target.maxPhaseMicros.size(); ++index) {
             target.maxPhaseMicros[index] = source.maxPhaseMicros[index];
             target.phaseCompletions[index] = source.phaseCompletions[index];
         }
+    }
+    if (m_rendererStatePublisher) {
+        snapshot.rendererStatePublisher = m_rendererStatePublisher->Stats();
     }
     snapshot.ioTasks = taskStats.ioQueued + taskStats.ioActive;
     snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;
@@ -3175,25 +3186,40 @@ void Renderer::Update(float elapsedSeconds) {
                 m_context.publishedRendererState = commit.state;
                 m_context.publishedManifestLease = commit.lease;
                 }
+                if (m_rendererStateRequests) {
+                    m_rendererStateRequests->RefreshPublication();
+                }
                 if (commit.HasDeferredWork()) {
                     BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::ScheduleDeferredCommit");
                     auto* objectManager = commit.committed ? m_pObjectManager.get() : nullptr;
+					auto* materialManager = commit.committed ? m_pMaterialManager.get() : nullptr;
                     auto committedState = commit.committed ? commit.state : nullptr;
                     auto* stateGraph = m_asyncStateGraph.get();
                     const bool submitted = TaskSchedulerManager::GetInstance().Submit(
                         m_rendererStateCommitScope, TaskLane::Background, TaskDomain::Cleanup,
                         "RendererStatePublisher::DeferredCommit",
-                        [commit = std::move(commit), objectManager,
+						[commit = std::move(commit), objectManager, materialManager,
                             stateGraph, committedState = std::move(committedState)](
                             const br::TaskContext& context) mutable {
                             if (context.StopRequested()) return;
                             if (objectManager && committedState) {
                                 objectManager->AcknowledgePublishedBufferState(committedState);
                             }
+							if (materialManager && committedState) {
+								materialManager->AcknowledgePublishedTextureImageTable(committedState);
+							}
                             if (stateGraph && committedState) {
-                                if (const auto& bundle = committedState->publicationBundle) {
-                                    stateGraph->MarkPublished(bundle->versions);
+                                std::array<br::render::ArtifactVersionID,
+                                    br::render::kPublishedFragmentCount> roots{};
+                                std::size_t rootCount = 0;
+                                for (std::size_t index = 0;
+                                    index < br::render::kPublishedFragmentCount; ++index) {
+                                    const auto root = committedState->Fragment(
+                                        static_cast<br::render::PublishedFragmentKind>(index))
+                                        .publicationRoot;
+                                    if (root) roots[rootCount++] = root;
                                 }
+                                stateGraph->MarkPublished(std::span(roots).first(rootCount));
                             }
                             commit.RunDeferred();
                         });
@@ -3352,11 +3378,19 @@ void Renderer::Update(float elapsedSeconds) {
                         }
                         const auto requestTable = [readbackService, &path, published](
                             const char* label,
-                            const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& table) {
+                            const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& table,
+                            Resource* captureResource = nullptr) {
                             if (!table || !table->resource || !table->cpuShadow) return;
                             auto tablePath = path;
                             tablePath += std::filesystem::path(fmt::format(".{}.bin", label));
                             const auto expected = table->cpuShadow;
+							auto expectedPath = tablePath;
+							expectedPath += L".expected";
+							std::ofstream expectedOutput(expectedPath, std::ios::binary | std::ios::trunc);
+							if (expectedOutput && !expected->empty()) {
+								expectedOutput.write(reinterpret_cast<const char*>(expected->data()),
+									static_cast<std::streamsize>(expected->size()));
+							}
                             const auto resourceID = table->resource->GetGlobalResourceID();
                             const br::render::ArtifactSnapshot* tableArtifact = nullptr;
                             for (const auto& dependency : published->materials.dependencyClosure) {
@@ -3392,6 +3426,11 @@ void Renderer::Update(float elapsedSeconds) {
                                 tableMetadata << "buffer_backing_generation="
                                     << (table->backing ? table->backing->backingGeneration : 0u) << '\n';
                                 tableMetadata << "resource_id=" << resourceID << '\n';
+                                tableMetadata << "capture_resource_id="
+                                    << (captureResource
+                                        ? captureResource->GetGlobalResourceID() : resourceID) << '\n';
+                                tableMetadata << "capture_matches_published="
+                                    << (!captureResource || captureResource == table->resource.get()) << '\n';
                                 if (tableArtifact) {
                                     tableMetadata << "artifact_kind="
                                         << static_cast<std::uint32_t>(tableArtifact->key.kind) << '\n';
@@ -3409,19 +3448,13 @@ void Renderer::Update(float elapsedSeconds) {
                                 }
                             }
                             readbackService->RequestReadbackCapture(
-                                "MenuRenderPass", table->resource.get(), RangeSpec{},
+                                "EvaluateMaterialGroupsPass",
+                                captureResource ? captureResource : table->resource.get(), RangeSpec{},
                                 [tablePath, expected, resourceID, label](ReadbackCaptureResult&& result) {
                                     std::ofstream output(tablePath, std::ios::binary | std::ios::trunc);
                                     if (output && !result.data.empty()) {
                                         output.write(reinterpret_cast<const char*>(result.data.data()),
                                             static_cast<std::streamsize>(result.data.size()));
-                                    }
-                                    auto expectedPath = tablePath;
-                                    expectedPath += L".expected";
-                                    std::ofstream expectedOutput(expectedPath, std::ios::binary | std::ios::trunc);
-                                    if (expectedOutput && !expected->empty()) {
-                                        expectedOutput.write(reinterpret_cast<const char*>(expected->data()),
-                                            static_cast<std::streamsize>(expected->size()));
                                     }
                                     const auto comparedBytes = (std::min)(result.data.size(), expected->size());
                                     std::size_t firstMismatch = comparedBytes;
@@ -3444,6 +3477,78 @@ void Renderer::Update(float elapsedSeconds) {
                         requestTable("base", materialState->baseTable);
                         requestTable("eval", materialState->evalTable);
                         requestTable("openpbr", materialState->openPbrTable);
+                        const auto textureImages = published->textureImages.payload
+                            .Get<br::render::PublishedTextureImageTable>();
+                        if (textureImages && textureImages->table) {
+                            const auto* textureStreaming = m_pMaterialManager
+                                ? m_pMaterialManager->GetTextureStreamingManager() : nullptr;
+                            const auto boundTextureTable = textureStreaming
+                                ? textureStreaming->ResolvePublishedImageTableResourceForDiagnostics()
+                                : std::shared_ptr<Resource>{};
+							const auto readbackAnchor = textureStreaming
+								? textureStreaming->PublishedImageTableReadbackAnchorForDiagnostics()
+								: std::shared_ptr<Resource>{};
+                            requestTable("texture-images", textureImages->table,
+								readbackAnchor ? readbackAnchor.get() :
+									(boundTextureTable ? boundTextureTable.get() : nullptr));
+                        }
+
+                        const auto requestTexture = [readbackService, &path](
+                            const char* label, const std::shared_ptr<Resource>& texture) {
+                            if (!texture) return;
+                            auto texturePath = path;
+                            texturePath += std::filesystem::path(fmt::format(".{}.bin", label));
+                            const auto resourceID = texture->GetGlobalResourceID();
+                            readbackService->RequestReadbackCapture(
+                                "EvaluateMaterialGroupsPass", texture.get(), RangeSpec{},
+                                [texturePath, resourceID, label](ReadbackCaptureResult&& result) {
+                                    std::ofstream output(texturePath, std::ios::binary | std::ios::trunc);
+                                    if (output && !result.data.empty()) {
+                                        output.write(reinterpret_cast<const char*>(result.data.data()),
+                                            static_cast<std::streamsize>(result.data.size()));
+                                    }
+                                    auto textureMetadataPath = texturePath;
+                                    textureMetadataPath += L".meta.txt";
+                                    std::ofstream textureMetadata(textureMetadataPath, std::ios::trunc);
+                                    if (textureMetadata) {
+                                        textureMetadata << "resource_id=" << resourceID << '\n';
+                                        textureMetadata << "format="
+                                            << static_cast<std::uint32_t>(result.format) << '\n';
+                                        textureMetadata << "width=" << result.width << '\n';
+                                        textureMetadata << "height=" << result.height << '\n';
+                                        textureMetadata << "depth=" << result.depth << '\n';
+                                        textureMetadata << "bytes=" << result.data.size() << '\n';
+                                        textureMetadata << "layouts=" << result.layouts.size() << '\n';
+                                        for (std::size_t index = 0; index < result.layouts.size(); ++index) {
+                                            const auto& layout = result.layouts[index];
+                                            textureMetadata << "layout[" << index << "].offset="
+                                                << layout.offset << '\n';
+                                            textureMetadata << "layout[" << index << "].row_pitch="
+                                                << layout.rowPitch << '\n';
+                                        }
+                                    }
+                                    spdlog::info(
+                                        "Published material pixel readback: texture={} resource={} bytes={} dimensions={}x{} output='{}'.",
+                                        label, resourceID, result.data.size(), result.width, result.height,
+                                        texturePath.string());
+                                });
+                            auto requestMetadataPath = texturePath;
+                            requestMetadataPath += L".request.txt";
+                            std::ofstream requestMetadata(requestMetadataPath, std::ios::trunc);
+                            if (requestMetadata) {
+                                requestMetadata << "resource_id=" << resourceID << '\n';
+                                requestMetadata << "requested=1\n";
+                            }
+                        };
+                        requestTexture("hdr", m_coreResourceProvider.m_HDRColorTarget);
+                        if (const auto* primaryView = m_pViewManager
+                                ? m_pViewManager->Get(m_context.primaryViewID) : nullptr) {
+                            requestTexture("visibility", primaryView->gpu.visibilityBuffer);
+                        }
+                        requestTexture("surface-base-color", currentRenderGraph->RequestResourcePtr(
+                            Builtin::Surface::BaseColorOpacity, true));
+                        requestTexture("surface-records", currentRenderGraph->RequestResourcePtr(
+                            Builtin::Surface::Records, true));
                     }
                 }
             }
@@ -5521,7 +5626,7 @@ void Renderer::Cleanup() {
         m_context.publishedRendererState.reset();
         m_context.publishedManifestLease.reset();
         br::render::PublishedStateSource::SetProcessSource({});
-        m_rendererStatePublisher->DiscardCandidate();
+        m_rendererStatePublisher->Shutdown();
         m_rendererStatePublisher.reset();
         spdlog::info("Renderer state cleanup: publisher destroyed");
     }

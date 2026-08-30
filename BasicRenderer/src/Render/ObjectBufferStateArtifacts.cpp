@@ -23,7 +23,6 @@ ArtifactBuildResult BuildObjectBufferState(const ArtifactBuildContext& context) 
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::DrawRecords;
     root->fragment.revision = context.revision;
-    root->fragment.dependencyClosure = context.dependencies;
     state->buffers = input->buffers;
 
     for (const auto& expected : input->buffers) {
@@ -43,6 +42,7 @@ ArtifactBuildResult BuildObjectBufferState(const ArtifactBuildContext& context) 
             version->revision != expected.revision) {
             return ArtifactBuildResult::Failure("object buffer dependency ABI/revision mismatch");
         }
+        state->versions.push_back(version);
         auto resources = std::make_shared<PublishedResourceCatalog::ResourceList>();
         resources->push_back(version->resource);
         root->catalogEntries.emplace_back(PublishedResourceKey{
@@ -60,7 +60,7 @@ ArtifactBuildResult BuildObjectBufferState(const ArtifactBuildContext& context) 
 
 void RegisterObjectBufferStateProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::DrawRecordPage, {
-        TaskLane::FrameCritical, TaskDomain::RendererState,
+        TaskLane::FrameCritical, TaskDomain::GraphPublication,
         "ObjectBufferStateArtifact::Build", BuildObjectBufferState });
 }
 

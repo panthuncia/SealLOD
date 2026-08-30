@@ -839,6 +839,8 @@ struct TextureStreamingGPUInfo {
     uint pendingTopMip;
     uint bindingRevisionLo;
     uint bindingRevisionHi;
+	uint imageDescriptorIndex;
+	uint samplerDescriptorIndex;
 };
 
 struct SingleMatrix {

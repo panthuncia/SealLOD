@@ -5,8 +5,10 @@
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Render/Runtime/StreamingUploadTypes.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/TextureImageTableArtifacts.h"
 #include "Render/StaticStateArtifacts.h"
 #include "Resources/Resolvers/PublishedStateResourceResolver.h"
+#include "Resources/Buffers/Buffer.h"
 
 #include <atomic>
 #include <cstring>
@@ -53,7 +55,9 @@ int main() {
         journal.Initialize(std::as_bytes(std::span(initialRows)), 3, 4);
         auto capture = journal.CaptureDesired();
         Check(capture.writeSequence == 1 && capture.elementCount == 3 &&
-            capture.capacity == 4 && capture.initialBytes.size() == sizeof(initialRows));
+			capture.capacity == 4 && capture.initialBytes.size() == sizeof(initialRows) &&
+			capture.desiredBytes && capture.desiredBytes->size() == sizeof(initialRows));
+		const auto initialDesired = capture.desiredBytes;
 
         auto published = std::make_shared<PublishedGpuBufferVersion>();
         published->writeSequence = capture.writeSequence;
@@ -68,11 +72,31 @@ int main() {
         journal.AppendWrite(1, std::as_bytes(std::span(&replacement, 1)), 4);
         capture = journal.CaptureDesired();
         Check(capture.previous == published && capture.initialBytes.empty() &&
-            capture.writes.size() == 2 && capture.capacity == 8 && capture.elementCount == 4);
-        const auto repeatedCapture = journal.CaptureDesired();
-        Check(repeatedCapture.writes.size() == capture.writes.size() &&
+			capture.writes.size() == 2 && capture.capacity == 8 && capture.elementCount == 4 &&
+			capture.journalBaseSequence == published->writeSequence && capture.desiredBytes);
+		Check(std::memcmp(initialDesired->data(), initialRows, sizeof(initialRows)) == 0);
+		const auto capturedDesired = capture.desiredBytes;
+		const auto* desiredRows = reinterpret_cast<const std::uint32_t*>(capturedDesired->data());
+		Check(desiredRows[0] == 10 && desiredRows[1] == 200 &&
+			desiredRows[2] == 30 && desiredRows[3] == 0);
+		const std::uint32_t overlap[]{ 300, 400 };
+		journal.AppendWrite(1, std::as_bytes(std::span(overlap)), 4);
+		// Captures are immutable even while the producer advances its authoritative shadow.
+		desiredRows = reinterpret_cast<const std::uint32_t*>(capturedDesired->data());
+		Check(desiredRows[1] == 200 && desiredRows[2] == 30);
+		const auto repeatedCapture = journal.CaptureDesired();
+		Check(repeatedCapture.writes.size() == capture.writes.size() + 1u &&
             repeatedCapture.writes.back().bytes && capture.writes.back().bytes &&
-            *repeatedCapture.writes.back().bytes == *capture.writes.back().bytes);
+			repeatedCapture.desiredBytes != capturedDesired);
+		const std::uint32_t lowRangeReplacement = 11;
+		journal.AppendWrite(0, std::as_bytes(std::span(&lowRangeReplacement, 1)), 1);
+		const auto sparseCapture = journal.CaptureDesired();
+		Check(sparseCapture.elementCount == 4 && sparseCapture.desiredBytes &&
+			sparseCapture.desiredBytes->size() == 4 * sizeof(std::uint32_t));
+		const auto* sparseRows = reinterpret_cast<const std::uint32_t*>(
+			sparseCapture.desiredBytes->data());
+		Check(sparseRows[0] == 11 && sparseRows[1] == 300 &&
+			sparseRows[2] == 400 && sparseRows[3] == 0);
 
         VersionedGpuBufferBuildInput input{};
         input.elementStride = sizeof(std::uint32_t);
@@ -81,11 +105,43 @@ int main() {
         input.writeSequence = capture.writeSequence;
         input.previous = capture.previous;
         input.writes = capture.writes;
+		input.desiredBytes = capture.desiredBytes;
+		input.journalBaseSequence = capture.journalBaseSequence;
         std::string error;
-        const auto replay = ReplayVersionedGpuBufferShadow(input, error);
-        Check(replay && error.empty());
+        const auto replay = ReplayVersionedGpuBufferAuthoritativeState(input, error);
+		Check(replay && replay == capture.desiredBytes && error.empty());
         const auto* rows = reinterpret_cast<const std::uint32_t*>(replay->data());
         Check(rows[0] == 10 && rows[1] == 200 && rows[2] == 30 && rows[3] == 0);
+
+		const std::uint32_t compactedRows[]{ 7, 8 };
+		const auto replacementSequence = journal.ReplaceImage(
+			std::as_bytes(std::span(compactedRows)), 2, 8);
+		const auto compacted = journal.CaptureDesired();
+		Check(compacted.writeSequence == replacementSequence &&
+			compacted.elementCount == 2 && compacted.capacity == 8 &&
+			compacted.desiredBytes &&
+			compacted.desiredBytes->size() == sizeof(compactedRows));
+		const auto* compactedImage = reinterpret_cast<const std::uint32_t*>(
+			compacted.desiredBytes->data());
+		Check(compactedImage[0] == 7 && compactedImage[1] == 8);
+    }
+
+    {
+        auto pool = std::make_shared<VersionedGpuBufferBackingPool>();
+        std::atomic_uint retirementWakes{ 0 };
+        std::atomic_uint64_t observedIdentity{ 0 };
+        const auto identity = pool->SubscribeAvailability(
+            [&](std::uint64_t satisfied) {
+                observedIdentity.store(satisfied, std::memory_order_release);
+                retirementWakes.fetch_add(1, std::memory_order_acq_rel);
+            });
+        Check(identity != 0);
+        Check(retirementWakes.load(std::memory_order_acquire) == 0);
+        NotifyVersionedGpuBufferFrameRetirement();
+        Check(retirementWakes.load(std::memory_order_acquire) == 1);
+        Check(observedIdentity.load(std::memory_order_acquire) == identity);
+        NotifyVersionedGpuBufferFrameRetirement();
+        Check(retirementWakes.load(std::memory_order_acquire) == 1);
     }
     {
         VersionedGpuBufferBuildInput initial{};
@@ -97,7 +153,7 @@ int main() {
         initial.bytes.resize(sizeof(initialRows));
         std::memcpy(initial.bytes.data(), initialRows, sizeof(initialRows));
         std::string error;
-        const auto initialShadow = ReplayVersionedGpuBufferShadow(initial, error);
+        const auto initialShadow = ReplayVersionedGpuBufferAuthoritativeState(initial, error);
         Check(initialShadow && error.empty());
 
         auto previous = std::make_shared<PublishedGpuBufferVersion>();
@@ -119,13 +175,13 @@ int main() {
             { 2, 1, replacementBytes },
             { 3, 3, appendedBytes }
         };
-        const auto successorShadow = ReplayVersionedGpuBufferShadow(successor, error);
+        const auto successorShadow = ReplayVersionedGpuBufferAuthoritativeState(successor, error);
         Check(successorShadow && error.empty());
         const auto* rows = reinterpret_cast<const std::uint32_t*>(successorShadow->data());
         Check(rows[0] == 10 && rows[1] == 200 && rows[2] == 30 && rows[3] == 40);
 
         successor.writeSequence = 4;
-        Check(!ReplayVersionedGpuBufferShadow(successor, error));
+        Check(!ReplayVersionedGpuBufferAuthoritativeState(successor, error));
         Check(!error.empty());
 
         // RequestSnapshot successors carry a complete immutable image rather
@@ -140,7 +196,7 @@ int main() {
         const std::uint32_t fullRows[]{ 70, 80, 90 };
         fullSuccessor.bytes.resize(sizeof(fullRows));
         std::memcpy(fullSuccessor.bytes.data(), fullRows, sizeof(fullRows));
-        const auto fullShadow = ReplayVersionedGpuBufferShadow(fullSuccessor, error);
+        const auto fullShadow = ReplayVersionedGpuBufferAuthoritativeState(fullSuccessor, error);
         Check(fullShadow && error.empty());
         Check(std::memcmp(fullShadow->data(), fullRows, sizeof(fullRows)) == 0);
     }
@@ -255,6 +311,55 @@ int main() {
 		{ Latest(generationDependency, ArtifactReadiness::GpuReady) }, Payload(2), 12));
 	graph.WaitIdle();
 	Check(graph.Snapshot(generationConsumer).revision == 2);
+
+    // LatestAtLeast remains satisfied by the newest ready archived version
+    // while the address cursor is blocked on a newer desired revision.
+    const ArtifactKey archivedLatestSource{ ArtifactKind::Generic, 875, 0 };
+    const ArtifactKey archivedLatestConsumer{ ArtifactKind::Generic, 876, 0 };
+    auto archivedSourceV1 = graph.Request(
+        archivedLatestSource, 1, {}, Payload(10), 10);
+    Check(archivedSourceV1);
+    graph.WaitIdle();
+    const ArtifactVersionID unavailableDependency{
+        { ArtifactKind::Generic, 874, 0 }, 1, 0xabcdefu };
+    auto blockedSourceV2 = graph.Request(archivedLatestSource, 2,
+        { Exact(unavailableDependency, ArtifactReadiness::GpuReady) }, Payload(20), 20);
+    Check(blockedSourceV2);
+    auto archivedConsumer = graph.Request(archivedLatestConsumer, 1,
+        { LatestAtLeast(archivedLatestSource, 1, ArtifactReadiness::GpuReady) },
+        Payload(1), 31);
+    Check(archivedConsumer);
+    graph.WaitIdle();
+    const auto archivedConsumerSnapshot = graph.Snapshot(archivedConsumer.version);
+    Check(archivedConsumerSnapshot.readiness == ArtifactReadiness::GpuReady);
+    Check(archivedConsumerSnapshot.payload.Get<Value>()->value == 2);
+    graph.Cancel(archivedLatestSource);
+
+    // A blocked LatestAtLeast consumer itself retains the ready archive that
+    // currently satisfies its lower bound. Caller handles are not required:
+    // reclaiming that version while a newer source revision is also blocked
+    // creates a dependency/capacity stalemate.
+    const ArtifactKey retainedLatestSource{ ArtifactKind::Generic, 872, 0 };
+    const ArtifactKey retainedLatestConsumer{ ArtifactKind::Generic, 873, 0 };
+    const ArtifactKey retainedLatestGate{ ArtifactKind::Generic, 871, 0 };
+    auto retainedSourceV1 = graph.Request(retainedLatestSource, 1, {}, Payload(10), 10);
+    Check(retainedSourceV1);
+    graph.WaitIdle();
+    const auto retainedSourceV1ID = retainedSourceV1.version;
+    auto retainedConsumer = graph.Request(retainedLatestConsumer, 1, {
+        LatestAtLeast(retainedLatestSource, 1, ArtifactReadiness::GpuReady),
+        Exact(ArtifactVersionID{ retainedLatestGate, 1, 0 }, ArtifactReadiness::GpuReady)
+    }, Payload(1), 32);
+    Check(retainedConsumer);
+    retainedSourceV1.lease.reset();
+    Check(graph.Request(retainedLatestSource, 2,
+        { Exact(unavailableDependency, ArtifactReadiness::GpuReady) }, Payload(20), 20));
+    graph.WaitIdle();
+    Check(graph.Snapshot(retainedSourceV1ID).readiness == ArtifactReadiness::GpuReady);
+    Check(graph.Request(retainedLatestGate, 1, {}, Payload(1), 1));
+    graph.WaitIdle();
+    Check(graph.Snapshot(retainedConsumer.version).readiness == ArtifactReadiness::GpuReady);
+    graph.Cancel(retainedLatestSource);
 
     // Returned version IDs own their archive entry until the last copied lease
     // is released. Once superseded and unreferenced, the payload is reclaimed
@@ -1128,7 +1233,36 @@ int main() {
 	Check(resolver.GetContentVersion() == missingResourceVersion);
 	Check(stagedResolver.GetContentVersion() == stagedFallbackVersion);
 	stagedResolver.SetPublishedEnabled(true);
-    Check(stagedResolver.GetContentVersion() != stagedFallbackVersion);
+	Check(stagedResolver.GetContentVersion() != stagedFallbackVersion);
+
+	// Resolve must observe a newly committed lease even when the graph reuses
+	// its layout and does not query GetContentVersion first.
+	RendererStatePublisher directResolvePublisher(2);
+	const PublishedResourceKey directResolveKey{
+		PublishedFragmentKind::TextureImages, PublishedResourceUsage::ShaderResource,
+		0, 0, kTextureImageTableBufferVariant };
+	PublishedStateResourceResolver directResolver(
+		directResolvePublisher.ResourceSource(), directResolveKey);
+	Check(directResolver.Resolve().empty());
+	auto directResource = Buffer::CreateSharedUnmaterialized(
+		rhi::HeapType::DeviceLocal, sizeof(std::uint32_t), false);
+	auto directResources = std::make_shared<PublishedResourceCatalog::ResourceList>();
+	directResources->push_back(directResource);
+	PublishedStatePatch directPatch;
+	directPatch.catalogOwnerMask = PublishedFragmentMask(PublishedFragmentKind::TextureImages);
+	directPatch.catalogEntries.emplace_back(directResolveKey, directResources);
+	PublishedStateFragment directFragment;
+	directFragment.revision = 1;
+	directFragment.publicationRoot = {
+		{ ArtifactKind::TextureImageTable, 0, 0 }, 1, 1 };
+	directPatch.fragments[static_cast<std::size_t>(PublishedFragmentKind::TextureImages)] =
+		directFragment;
+	Check(directResolvePublisher.PublishPatch(std::move(directPatch)));
+	auto directCommit = directResolvePublisher.Commit(0);
+	Check(directCommit.committed);
+	directCommit.RunDeferred();
+	const auto directlyResolved = directResolver.Resolve();
+	Check(directlyResolved.size() == 1 && directlyResolved.front() == directResource);
 
     // Independent fragments submitted against the same source snapshot rebase
     // together. Only an explicitly named exact precondition may reject a patch.
@@ -1183,6 +1317,73 @@ int main() {
     Check(rejectedPatchCommit.state->drawRecords.revision == 0);
     Check(patchPublisher.Stats().rejectedPatchPreconditions == 1);
     rejectedPatchCommit.RunDeferred();
+
+	// Catalog publication is an immutable overlay: unchanged owners share the
+	// previous catalog, owner replacement hides old keys, and long chains are
+	// compacted without changing effective lookup results.
+	RendererStatePublisher catalogPublisher(2);
+	const PublishedResourceKey materialResourceKey{
+		PublishedFragmentKind::Materials, PublishedResourceUsage::ShaderResource, 0, 0, 1 };
+	const PublishedResourceKey replacementMaterialKey{
+		PublishedFragmentKind::Materials, PublishedResourceUsage::ShaderResource, 0, 0, 2 };
+	const PublishedResourceKey terrainResourceKey{
+		PublishedFragmentKind::Terrain, PublishedResourceUsage::ShaderResource, 0, 0, 1 };
+	auto materialResources = std::make_shared<PublishedResourceCatalog::ResourceList>();
+	auto terrainResources = std::make_shared<PublishedResourceCatalog::ResourceList>();
+	PublishedStatePatch initialCatalogPatch;
+	initialCatalogPatch.catalogEntries = {
+		{ materialResourceKey, materialResources }, { terrainResourceKey, terrainResources } };
+	PublishedStateFragment initialMaterials;
+	initialMaterials.revision = 1;
+	initialMaterials.publicationRoot = { { ArtifactKind::MaterialTable, 77, 0 }, 1, 1 };
+	PublishedStateFragment initialTerrain;
+	initialTerrain.revision = 1;
+	initialTerrain.publicationRoot = { { ArtifactKind::TerrainState, 78, 0 }, 1, 2 };
+	initialCatalogPatch.fragments[static_cast<std::size_t>(PublishedFragmentKind::Materials)] =
+		initialMaterials;
+	initialCatalogPatch.fragments[static_cast<std::size_t>(PublishedFragmentKind::Terrain)] =
+		initialTerrain;
+	Check(catalogPublisher.PublishPatch(std::move(initialCatalogPatch)));
+	auto initialCatalogCommit = catalogPublisher.Commit(0);
+	Check(initialCatalogCommit.committed);
+	Check(initialCatalogCommit.state->resourceCatalog->Find(materialResourceKey) == materialResources);
+	Check(initialCatalogCommit.state->resourceCatalog->Find(terrainResourceKey) == terrainResources);
+	initialCatalogCommit.RunDeferred();
+
+	PublishedStatePatch replaceMaterialCatalog;
+	replaceMaterialCatalog.catalogOwnerMask = PublishedFragmentMask(PublishedFragmentKind::Materials);
+	auto replacementResources = std::make_shared<PublishedResourceCatalog::ResourceList>();
+	replaceMaterialCatalog.catalogEntries = { { replacementMaterialKey, replacementResources } };
+	initialMaterials.revision = 2;
+	initialMaterials.publicationRoot.revision = 2;
+	initialMaterials.publicationRoot.generation = 3;
+	replaceMaterialCatalog.fragments[static_cast<std::size_t>(PublishedFragmentKind::Materials)] =
+		initialMaterials;
+	Check(catalogPublisher.PublishPatch(std::move(replaceMaterialCatalog)));
+	auto replacementCommit = catalogPublisher.Commit(1);
+	Check(replacementCommit.committed);
+	Check(!replacementCommit.state->resourceCatalog->Find(materialResourceKey));
+	Check(replacementCommit.state->resourceCatalog->Find(replacementMaterialKey) == replacementResources);
+	Check(replacementCommit.state->resourceCatalog->Find(terrainResourceKey) == terrainResources);
+	replacementCommit.RunDeferred();
+
+	for (std::uint64_t revision = 2; revision <= 40; ++revision) {
+		PublishedStatePatch overlayPatch;
+		PublishedStateFragment terrain = initialTerrain;
+		terrain.revision = revision;
+		terrain.publicationRoot.revision = revision;
+		terrain.publicationRoot.generation = 100 + revision;
+		overlayPatch.fragments[static_cast<std::size_t>(PublishedFragmentKind::Terrain)] = terrain;
+		overlayPatch.catalogEntries = { { terrainResourceKey, terrainResources } };
+		Check(catalogPublisher.PublishPatch(std::move(overlayPatch)));
+		auto overlayCommit = catalogPublisher.Commit(revision % 2u);
+		Check(overlayCommit.committed);
+		overlayCommit.RunDeferred();
+	}
+	for (const auto& shard : catalogPublisher.Active()->resourceCatalog->ownerShards)
+		Check(static_cast<bool>(shard));
+	Check(catalogPublisher.Active()->resourceCatalog->Find(replacementMaterialKey) == replacementResources);
+	Check(catalogPublisher.Active()->resourceCatalog->Find(terrainResourceKey) == terrainResources);
 
     // Ordinary publication is monotonic per fragment family even when
     // completions arrive in arbitrary order. Each frame lease remains an
@@ -1302,9 +1503,10 @@ int main() {
     Check(manifestState->publicationBundle != nullptr);
     Check(manifestState->materials.publicationBundle->root ==
         manifestState->materials.publicationRoot);
-    Check(std::ranges::contains(manifestState->publicationBundle->versions,
-        manifestState->materials.publicationRoot));
-    graph.MarkPublished(manifestState->publicationBundle->versions);
+    Check(std::ranges::contains(manifestState->publicationBundle->parents,
+        manifestState->materials.publicationBundle));
+    Check(manifestState->publicationBundle->versions.empty());
+    graph.MarkPublished(manifestState->materials.publicationRoot);
     graph.WaitIdle();
     Check(graph.Snapshot(manifestState->materials.publicationRoot).readiness ==
         ArtifactReadiness::Published);
@@ -1419,16 +1621,36 @@ int main() {
         latestGraph.WaitIdle();
         Check(latestGraph.Snapshot(latestKey).revision == 100);
         Check(latestGraph.Stats().coalescedIntents == 98);
-        std::vector<ArtifactRequest> batch;
+        Check(latestGraph.Stats().supersededBuilds != 0);
+        std::vector<ArtifactIntent> batch;
         batch.push_back({ { ArtifactKind::Generic, 0xf002, 0 }, 1, {}, Payload(11), 11 });
         batch.push_back({ { ArtifactKind::Generic, 0xf003, 0 }, 1, {}, Payload(12), 12 });
-        const auto batchResults = latestGraph.RequestBatch(std::move(batch));
+        const auto batchResults = latestGraph.SubmitLatestIntentBatch(std::move(batch));
         Check(batchResults.size() == 2);
         Check(static_cast<bool>(batchResults[0]));
         Check(static_cast<bool>(batchResults[1]));
         latestGraph.WaitIdle();
         Check(latestGraph.Snapshot(ArtifactKey{ ArtifactKind::Generic, 0xf002, 0 }).revision == 1);
         Check(latestGraph.Snapshot(ArtifactKey{ ArtifactKind::Generic, 0xf003, 0 }).revision == 1);
+        Check(latestGraph.Stats().intentBatches == 1);
+
+		const ArtifactKey absentDependency{ ArtifactKind::Generic, 0xf004, 0 };
+		const ArtifactKey blockedLatestKey{ ArtifactKind::Generic, 0xf005, 0 };
+		Check(latestGraph.SubmitLatestIntent(blockedLatestKey, 1, {
+			Exact(ArtifactVersionID{ absentDependency, 1, 1 },
+				ArtifactReadiness::GpuReady)
+		}, Payload(1), 101) == ArtifactRequestStatus::Accepted);
+		while (latestGraph.Snapshot(blockedLatestKey).readiness !=
+			ArtifactReadiness::Blocked) std::this_thread::yield();
+		Check(latestGraph.SubmitLatestIntent(
+			blockedLatestKey, 2, {}, Payload(2), 102) ==
+			ArtifactRequestStatus::Accepted);
+		latestGraph.WaitIdle();
+		const auto promotedLatest = latestGraph.Snapshot(blockedLatestKey);
+		Check(promotedLatest.revision == 2 &&
+			promotedLatest.readiness == ArtifactReadiness::GpuReady &&
+			promotedLatest.payload.Get<Value>() &&
+			promotedLatest.payload.Get<Value>()->value == 2);
         latestGraph.Shutdown();
     }
 

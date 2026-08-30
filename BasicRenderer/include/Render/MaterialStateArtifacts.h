@@ -16,24 +16,13 @@ class TextureFactory;
 namespace br::render {
 
 struct PublishedGpuBufferVersion;
-struct PublishedTextureBinding;
-
-enum class MaterialTextureTarget : std::uint8_t {
-    BaseColor, Normal, Metallic, Roughness, Emissive, AmbientOcclusion,
-    Height, Opacity, CoatColor, CoatWeight, CoatRoughness,
-    FuzzColor, FuzzWeight, FuzzRoughness
-};
-struct MaterialRowTextureTarget { ArtifactAddress bindingAddress{}; MaterialTextureTarget target{}; };
 struct MaterialRowInput {
     std::uint32_t materialID = 0, materialSlot = 0; std::uint64_t sourceRevision = 0;
     PerMaterialCB base{}; PerMaterialEvalCB evaluation{}; PerMaterialOpenPBRCB openPbr{};
-    std::vector<MaterialRowTextureTarget> textureTargets;
 };
 struct MaterialRowArtifact {
     std::uint32_t materialID = 0, materialSlot = 0; std::uint64_t sourceRevision = 0;
     PerMaterialCB base{}; PerMaterialEvalCB evaluation{}; PerMaterialOpenPBRCB openPbr{};
-    std::vector<ArtifactVersionID> textureBindings;
-    std::vector<std::shared_ptr<const PublishedTextureBinding>> selectedBindings;
 };
 
 inline constexpr std::uint64_t kMaterialBaseTableVariant = 1;
@@ -59,10 +48,6 @@ struct MaterialStateBuildInput {
     std::uint64_t materialRowCount = 0;
     std::uint32_t slotsUsed = 0;
     std::vector<MaterialCompileFlagEntryDTO> activeCompileFlags;
-	std::vector<MaterialTextureBindingDependencyDTO> textureBindings;
-	// Immutable, already-usable coarse bindings captured from the streaming
-	// owner. These are lifetime holds, not mip-residency graph prerequisites.
-	std::vector<std::shared_ptr<const PublishedTextureBinding>> preparedTextureBindings;
     ArtifactKey baseTableKey{ ArtifactKind::BufferVersion, 0, kMaterialBaseTableVariant };
     ArtifactKey evalTableKey{ ArtifactKind::BufferVersion, 0, kMaterialEvalTableVariant };
     ArtifactKey openPbrTableKey{ ArtifactKind::BufferVersion, 0, kMaterialOpenPbrTableVariant };
@@ -76,7 +61,6 @@ struct PublishedMaterialState {
     std::shared_ptr<const PublishedGpuBufferVersion> baseTable;
     std::shared_ptr<const PublishedGpuBufferVersion> evalTable;
     std::shared_ptr<const PublishedGpuBufferVersion> openPbrTable;
-    std::vector<std::shared_ptr<const PublishedTextureBinding>> textureBindings;
 };
 
 struct MaterialUsageBatchEntry {

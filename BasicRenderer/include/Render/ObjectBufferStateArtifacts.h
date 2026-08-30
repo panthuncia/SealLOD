@@ -1,12 +1,15 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "Render/AsyncStateGraph.h"
 #include "Render/PublishedRendererState.h"
 
 namespace br::render {
+
+struct PublishedGpuBufferVersion;
 
 inline constexpr std::uint64_t kObjectPerObjectVariant = 1;
 inline constexpr std::uint64_t kObjectInstanceTransformVariant = 2;
@@ -27,6 +30,7 @@ struct ObjectBufferStateBuildInput {
 
 struct PublishedObjectBufferState {
     std::vector<ObjectBufferDependencyDTO> buffers;
+    std::vector<std::shared_ptr<const PublishedGpuBufferVersion>> versions;
 };
 
 void RegisterObjectBufferStateProducer(AsyncStateGraph& graph);

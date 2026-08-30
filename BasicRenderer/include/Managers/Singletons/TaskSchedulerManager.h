@@ -22,7 +22,10 @@ enum class TaskDomain : std::uint8_t {
     // Keep graph topology transitions and manifest assembly out of the
     // single-slot RendererState producer queue. Appended to preserve the
     // numeric identity of existing telemetry domains.
-	GraphControl, GraphPublication, StaticImportControl, Count
+	GraphControl, GraphPublication, StaticImportControl,
+    // Mutable resource work must not queue behind serialized renderer-state
+    // acceptance or texture decoding.
+    MaterialAcceptance, GpuBufferBuild, Count
 };
 
 class TaskScope {

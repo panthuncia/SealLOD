@@ -49,6 +49,12 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
 	// ready when indirect state was built, preventing every later material table
 	// from publishing. View lifetimes have the same gate-only semantics. Buffer
 	// artifacts remain in the closure because they are exact resource inputs.
+	// DrawRecordPage is different from the other ready gates: active-list entries
+	// carry generations that must be interpreted with the exact draw-record and
+	// visibility-generation snapshot selected for this indirect root. Retain that
+	// resolved root in the publication closure so the manifest advances both
+	// fragments atomically. BuildManifest keeps historical ready roots available,
+	// so a newer desired DrawRecordPage does not invalidate this coherent pair.
 	for (const auto& dependency : context.dependencies) {
 		if (dependency.key.kind == ArtifactKind::MaterialTable ||
 			dependency.key.kind == ArtifactKind::ViewLifetime) continue;
@@ -66,6 +72,7 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
             return ArtifactBuildResult::Failure(
                 "indirect workload exact draw-record dependency missing");
         }
+        state->drawRecordsRoot = drawRecords->Version();
         const auto visibility = std::ranges::find_if(drawRoot->catalogEntries,
             [](const auto& entry) {
                 return entry.first.owner == PublishedFragmentKind::DrawRecords &&
@@ -109,6 +116,7 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
                 return ArtifactBuildResult::Failure("indirect workload active-list dependency type/ABI mismatch");
             }
             activeBuffer = version->resource;
+            state->activeListVersions.push_back({ workload.activeListArtifactKey.primaryID, version });
         }
         for (const auto viewID : input->viewIDs) {
             std::shared_ptr<org::GloballyIndexedResource> dynamicArgs;
@@ -179,10 +187,10 @@ std::vector<const PublishedIndirectWorkload*> PublishedIndirectState::Find(
 
 void RegisterIndirectStateProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::ViewLifetime, {
-        TaskLane::FrameCritical, TaskDomain::RendererState,
+        TaskLane::FrameCritical, TaskDomain::GraphPublication,
         "ViewLifetimeArtifact::Build", BuildViewLifetime });
     graph.RegisterProducer(ArtifactKind::IndirectWorkload, {
-        TaskLane::FrameCritical, TaskDomain::RendererState,
+        TaskLane::FrameCritical, TaskDomain::GraphPublication,
         "IndirectStateArtifact::Build", BuildIndirectState });
 }
 

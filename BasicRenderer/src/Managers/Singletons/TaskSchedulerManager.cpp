@@ -82,6 +82,8 @@ const char* DomainName(TaskDomain domain) {
     case TaskDomain::GraphControl: return "GraphControl";
     case TaskDomain::GraphPublication: return "GraphPublication";
 	case TaskDomain::StaticImportControl: return "StaticImportControl";
+    case TaskDomain::MaterialAcceptance: return "MaterialAcceptance";
+    case TaskDomain::GpuBufferBuild: return "GpuBufferBuild";
     default: return "Unknown";
     }
 }
@@ -319,7 +321,9 @@ void TaskSchedulerManager::Initialize(Config config) {
     const std::uint32_t blockingCount = std::clamp(ReadEnvironmentUint("SARP_SCHEDULER_BLOCKING_THREADS",
         config.blockingThreadCount == 0 ? autoBlocking : config.blockingThreadCount), 1u, 4u);
     const std::uint32_t staticLimit = std::clamp(ReadEnvironmentUint("SARP_SCHEDULER_STATIC_CONCURRENCY",
-        config.staticConcurrency == 0 ? std::min(4u, m_workerCount) : config.staticConcurrency), 1u, m_workerCount);
+        config.staticConcurrency == 0
+            ? (std::min)(8u, (std::max)(2u, (m_workerCount + 1u) / 2u))
+            : config.staticConcurrency), 1u, m_workerCount);
     const std::uint32_t shaderLimit = std::clamp(ReadEnvironmentUint("SARP_SCHEDULER_SHADER_CONCURRENCY",
         config.shaderConcurrency == 0 ? std::min(2u, std::max(1u, m_workerCount / 2u)) : config.shaderConcurrency), 1u, m_workerCount);
 
@@ -372,6 +376,9 @@ void TaskSchedulerManager::Initialize(Config config) {
     state.domains[static_cast<std::size_t>(TaskDomain::GraphControl)].limit = 1u;
     state.domains[static_cast<std::size_t>(TaskDomain::GraphPublication)].limit = 1u;
 	state.domains[static_cast<std::size_t>(TaskDomain::StaticImportControl)].limit = 1u;
+    state.domains[static_cast<std::size_t>(TaskDomain::MaterialAcceptance)].limit = 1u;
+    state.domains[static_cast<std::size_t>(TaskDomain::GpuBufferBuild)].limit =
+        (std::min)(4u, m_workerCount);
 
     state.timerThread = std::thread([this] {
         TracyCSetThreadName("Task Timer"); ApplyCpuSets(m_runtimeState->workerCpuSets);

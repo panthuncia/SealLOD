@@ -29,6 +29,10 @@ public:
         if (m_selection && !m_selection->publishedEnabled.load(std::memory_order_acquire)) {
             return ResolveFallback();
         }
+        // Resolution is permitted without a preceding content-version query.
+        // Bind the newest published lease here so a resolver cannot remain on
+        // its bootstrap fallback merely because the graph reused its layout.
+        CaptureLatestLease();
         const auto lease = BoundLease();
         const auto state = lease ? lease->state : nullptr;
         if (!state || !state->resourceCatalog) return ResolveFallback();
@@ -62,6 +66,7 @@ public:
     std::vector<org::ExternalTimelinePoint> GetExternalTimelineWaits() const override {
         std::vector<org::ExternalTimelinePoint> waits;
         if (m_selection && !m_selection->publishedEnabled.load(std::memory_order_acquire)) return waits;
+        CaptureLatestLease();
         const auto lease = BoundLease();
         const auto state = lease ? lease->state : nullptr;
         if (!state || !state->resourceCatalog) return waits;

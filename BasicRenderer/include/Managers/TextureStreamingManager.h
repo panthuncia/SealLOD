@@ -18,6 +18,8 @@
 
 #include "Interfaces/IResourceProvider.h"
 #include "Render/AsyncStateGraph.h"
+#include "Render/TextureImageTableArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/Texture.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
@@ -33,9 +35,11 @@ using org::CopyPass;
 namespace org { class Buffer; }
 using org::Buffer;
 class MaterialTextureTransferService;
+class PublishedStateResourceResolver;
 
 namespace org::runtime {
 class IReadbackService;
+class IUploadService;
 }
 
 struct MaterialTextureStreamingRecord {
@@ -99,6 +103,10 @@ struct MaterialTextureStreamingReadinessStats {
 
 struct TextureStreamingBindingOptions {
 	bool seedCurrentBinding = true;
+	// Exact graph versions are reserved for consumers which embed a concrete
+	// descriptor in an immutable transaction (terrain and pinned resources).
+	// Materials resolve stable IDs through the mutable image table instead.
+	bool requiresExactGraphPublication = true;
 	bool alphaTested = false;
 	bool allowIdleCoarsening = true;
 	uint32_t maximumResidentTopMip = (std::numeric_limits<uint32_t>::max)();
@@ -114,11 +122,16 @@ public:
 	~TextureStreamingManager();
 
 	void Initialize(TextureFactory& textureFactory, uint32_t framesInFlight);
-	void SetRendererStateRequestService(br::render::RendererStateRequestService* service);
+	void SetRendererStateRequestService(br::render::RendererStateRequestService* service,
+		org::runtime::IUploadService* uploads = nullptr);
 	void Shutdown();
 	void EnqueueFrameTick(uint64_t frameIndex);
 	void EnqueueTextureUploadAdvance(const std::shared_ptr<TextureAsset>& texture, const char* reason = "external");
 	std::size_t DrainPendingBindingChanges();
+	void AcknowledgePublishedImageTable(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published);
+	std::shared_ptr<Resource> ResolvePublishedImageTableResourceForDiagnostics() const;
+	std::shared_ptr<Resource> PublishedImageTableReadbackAnchorForDiagnostics() const;
 	void RetirePatchedBindingResources();
 	bool RequestExternalMaterialTextureReadback(
 		const std::shared_ptr<PixelBuffer>& image,
@@ -179,6 +192,7 @@ private:
 		TextureStreamingGPUInfo metadata{};
 		std::vector<std::shared_ptr<PixelBuffer>> supersededImages;
 		std::shared_ptr<const br::render::TextureTransferArtifact> transfer;
+		bool requiresExactGraphPublication = true;
 		bool graphRequested = false;
 		bool waitingForGraphWake = false;
 		bool graphReady = false;
@@ -210,10 +224,22 @@ private:
 	void NotifyBindingChanged(TextureAsset& texture);
 	void TrackTexture(const std::shared_ptr<TextureAsset>& texture);
 	void RecordTextureDirtyReason(const char* reason);
+	void PublishTextureImageTable();
 	MaterialTextureStreamingStats BuildTextureStreamingStats() const;
 
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
 	std::shared_ptr<DynamicStructuredBuffer<TextureStreamingGPUInfo>> m_textureStreamingMetadataBuffer;
+	std::shared_ptr<PublishedStateResourceResolver> m_textureImageTableResolver;
+	br::render::VersionedGpuBufferJournal m_textureImageTableJournal{ sizeof(TextureStreamingGPUInfo) };
+	std::shared_ptr<br::render::VersionedBufferFamily> m_textureImageTableFamily;
+	std::vector<std::shared_ptr<const br::render::TextureImageHoldChunk>> m_textureImageHoldChunks;
+	std::uint64_t m_textureImageTableEpoch = 0;
+	std::uint64_t m_textureImageTableLogicalExtent = 1;
+	bool m_textureImageTableDirty = false;
+	br::render::ArtifactVersionHandle m_textureImageTableHandle;
+	std::uint32_t m_framesInFlight = 1;
+	std::uint64_t m_lastTextureImageTableAdmissionRetirementEpoch = 0;
+	std::atomic<std::uint64_t> m_textureImageTableAcknowledgedEpoch{ 0 };
 	std::shared_ptr<DynamicStructuredBuffer<uint32_t>> m_textureStreamingFeedbackBuffer;
 	// Orders worker metadata publication against main-thread adoption writes.  The
 	// buffer has its own call-level lock, but that alone cannot prevent an older
@@ -239,6 +265,7 @@ private:
 	std::atomic<uint64_t> m_nextBindingID{1u};
 	TextureFactory* m_textureFactory = nullptr;
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
+	org::runtime::IUploadService* m_uploadService = nullptr;
 	br::render::ArtifactObservation m_graphBindingObservation;
 	struct ObservedGraphBindingState {
 		br::render::ArtifactVersionID version{};
@@ -278,6 +305,7 @@ private:
 	std::mutex m_liveBindingMutex;
 	std::unordered_map<uint64_t, MainThreadBindingOwner> m_liveBindingsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_liveBindingIDsByStreamingTextureID;
+	std::unordered_map<uint32_t, uint32_t> m_activeBindingOwnerCountsByStreamingTextureID;
 	std::vector<uint64_t> m_dirtyLiveBindingIDs;
 	std::unordered_set<uint64_t> m_dirtyLiveBindingIDSet;
 	mutable std::mutex m_statsMutex;

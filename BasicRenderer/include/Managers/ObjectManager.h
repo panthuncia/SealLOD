@@ -23,6 +23,7 @@
 #include "Interfaces/IResourceProvider.h"
 #include "Materials/TechniqueDescriptor.h"
 #include "Render/Runtime/BufferUploadPolicy.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 
 namespace org { class BufferView; }
@@ -513,7 +514,7 @@ public:
 	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
 	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
 	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
-		org::runtime::IUploadService* uploads);
+		org::runtime::IUploadService* uploads, std::uint32_t framesInFlight);
 	std::uint64_t PublishDesiredBufferState();
 	void AcknowledgePublishedBufferState(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
@@ -626,12 +627,14 @@ private:
 	br::render::ArtifactVersionID m_objectBufferStateVersion{};
 	std::atomic<std::uint64_t> m_activeObjectBufferStateRevision{ 0 };
 	std::uint64_t m_objectBufferFingerprint = 0;
+	mutable std::mutex m_objectBufferGraphStateMutex;
 	std::atomic_bool m_objectBufferGraphDirty{ true };
-	std::uint32_t m_objectBufferDiagnosticTicks = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
+	br::render::VersionedGpuBufferJournal m_visibilityGenerationJournal{ sizeof(std::uint32_t) };
 	br::render::ArtifactVersionID m_visibilityGenerationSubmittedVersion{};
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_visibilityGenerationBackingPool;
-	std::shared_ptr<const br::render::PublishedGpuBufferVersion> m_visibilityGenerationPrevious;
+	std::uint32_t m_graphFramesInFlight = 1;
+	std::uint64_t m_lastBufferStatePublicationRetirementEpoch = 0;
 	std::atomic<std::uint64_t> m_nextStaticImportTransactionID{ 1 };
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
@@ -662,6 +665,7 @@ private:
 	std::shared_ptr<SortedUnsignedIntBuffer> EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey, std::size_t initialCapacity = 1);
 	std::uint32_t ActivateDrawRecordCPU(std::uint32_t drawRecordIndex);
 	std::uint32_t AdvanceDrawRecordVisibilityGenerationCPU(std::uint32_t drawRecordIndex);
+	void JournalDrawRecordVisibilityRange(std::size_t first, std::size_t count);
 	std::uint32_t ActivateDrawRecord(std::uint32_t drawRecordIndex);
 	void TombstoneDrawRecord(std::uint32_t drawRecordIndex);
 	void TombstoneDrawRecords(std::span<const std::uint32_t> drawRecordIndices);
