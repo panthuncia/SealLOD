@@ -821,27 +821,66 @@ int main() {
         ArtifactPayload::Make<StaticTransactionBuildInput>(std::move(staticB)), 1002);
     Check(staticVersionA);
     Check(staticVersionB);
+    struct RequestedStaticPages {
+        std::vector<StaticScenePageRef> refs;
+        std::vector<ArtifactRequirement> requirements;
+    };
+    std::array<std::uint64_t, kStaticScenePageCount> staticPageRevisions{};
+    const auto requestStaticPages = [&](std::vector<StaticSceneGroupOwner> owners,
+        std::uint64_t fingerprintBase) {
+        RequestedStaticPages result;
+        std::array<std::vector<StaticSceneGroupOwner>, kStaticScenePageCount> buckets;
+        for (const auto& owner : owners) buckets[StaticScenePageIndex(owner.groupID)].push_back(owner);
+        for (std::size_t pageIndex = 0; pageIndex < buckets.size(); ++pageIndex) {
+            if (buckets[pageIndex].empty()) continue;
+            auto input = std::make_shared<StaticScenePageBuildInput>();
+            input->pageIndex = static_cast<std::uint32_t>(pageIndex);
+            input->sourceFingerprint = fingerprintBase ^ pageIndex;
+            input->groupOwners = std::move(buckets[pageIndex]);
+            std::vector<ArtifactRequirement> transactionRequirements;
+            for (const auto& owner : input->groupOwners) {
+                if (std::ranges::none_of(transactionRequirements,
+                    [&](const ArtifactRequirement& requirement) {
+                        return requirement.key == owner.transaction.address &&
+                            requirement.minimumRevision == owner.transaction.revision &&
+                            requirement.requiredGeneration == owner.transaction.generation;
+                    })) {
+                    transactionRequirements.push_back(Exact(
+                        owner.transaction, ArtifactReadiness::GpuReady));
+                }
+            }
+            const ArtifactKey key{ ArtifactKind::StaticScenePage, pageIndex + 1u, 0 };
+            const auto pageFingerprint = fingerprintBase ^ pageIndex;
+            const auto page = graph.Request(key, ++staticPageRevisions[pageIndex],
+                std::move(transactionRequirements),
+                ArtifactPayload::Make<StaticScenePageBuildInput>(std::move(input)),
+                pageFingerprint == 0 ? 1u : pageFingerprint);
+            Check(page);
+            result.refs.push_back({ static_cast<std::uint32_t>(pageIndex), page.version });
+            result.requirements.push_back(Exact(page.version, ArtifactReadiness::CpuReady));
+        }
+        return result;
+    };
+    auto initialPages = requestStaticPages({
+        { 10001, staticVersionA.version }, { 10002, staticVersionA.version },
+        { 10003, staticVersionB.version }, { 10004, staticVersionB.version },
+        { 10005, staticVersionB.version } }, 8001);
     auto staticSceneInput = std::make_shared<StaticSceneBuildInput>();
     staticSceneInput->sourceFingerprint = 9001;
     staticSceneInput->publishRoot = true;
     staticSceneInput->desiredPlacementCount = 15;
     staticSceneInput->materializedPlacementCount = 15;
-    staticSceneInput->groupOwners = {
-        { 10001, staticVersionA.version }, { 10002, staticVersionA.version },
-        { 10003, staticVersionB.version }, { 10004, staticVersionB.version },
-        { 10005, staticVersionB.version } };
-    Check(graph.Request(staticScene, 1, {
-        { staticTransactionA, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf },
-        { staticTransactionB, 1, ArtifactReadiness::GpuReady, DependencyPolicy::AllOf },
-    }, ArtifactPayload::Make<StaticSceneBuildInput>(std::move(staticSceneInput)), 9001));
+    staticSceneInput->pages = initialPages.refs;
+    Check(graph.Request(staticScene, 1, std::move(initialPages.requirements),
+        ArtifactPayload::Make<StaticSceneBuildInput>(std::move(staticSceneInput)), 9001));
     graph.WaitIdle();
     const auto staticRoot = graph.Snapshot(staticScene)
         .payload.Get<RendererStateFragmentArtifact>();
     Check(staticRoot && staticRoot->kind == PublishedFragmentKind::Geometry);
     Check(staticRoot->publishRoot);
     const auto staticPublished = staticRoot->fragment.payload.Get<PublishedStaticSceneState>();
-    Check(staticPublished && staticPublished->transactions.size() == 2);
-    Check(staticPublished->transactions[0].transactionID == 101);
+    Check(staticPublished && staticPublished->ContainsGroup(10001) &&
+        staticPublished->ContainsGroup(10005) && !staticPublished->ContainsGroup(99999));
     Check(staticPublished->groupCount == 5 && staticPublished->drawRecordCount == 24 &&
         staticPublished->activeEntryCount == 48);
     Check(staticPublished->publishedPlacementCount == 15 &&
@@ -866,17 +905,16 @@ int main() {
     const auto staticVersionC = graph.Request(staticTransactionC, 1, {},
         ArtifactPayload::Make<StaticTransactionBuildInput>(std::move(staticC)), 1005);
     Check(staticVersionC);
+    auto supersededPages = requestStaticPages({
+        { 10001, staticVersionC.version }, { 10002, staticVersionA.version } }, 8002);
     auto supersededGroupScene = std::make_shared<StaticSceneBuildInput>();
     supersededGroupScene->sourceFingerprint = 9002;
     supersededGroupScene->publishRoot = true;
     supersededGroupScene->desiredPlacementCount = 5;
     supersededGroupScene->materializedPlacementCount = 5;
-    supersededGroupScene->groupOwners = {
-        { 10001, staticVersionC.version }, { 10002, staticVersionA.version } };
-    Check(graph.Request(staticScene, 2, {
-        Exact(staticVersionA.version, ArtifactReadiness::GpuReady),
-        Exact(staticVersionC.version, ArtifactReadiness::GpuReady),
-    }, ArtifactPayload::Make<StaticSceneBuildInput>(std::move(supersededGroupScene)), 9002));
+    supersededGroupScene->pages = supersededPages.refs;
+    Check(graph.Request(staticScene, 2, supersededPages.requirements,
+        ArtifactPayload::Make<StaticSceneBuildInput>(std::move(supersededGroupScene)), 9002));
     graph.WaitIdle();
     const auto supersededRoot = graph.Snapshot(staticScene)
         .payload.Get<RendererStateFragmentArtifact>();
@@ -884,11 +922,9 @@ int main() {
         ? supersededRoot->fragment.payload.Get<PublishedStaticSceneState>() : nullptr;
     Check(supersededPublished && supersededPublished->groupCount == 2 &&
         supersededPublished->publishedPlacementCount == 5);
-    Check(supersededPublished && std::ranges::all_of(
-        supersededPublished->transactions,
-        [](const PublishedStaticTransaction& transaction) {
-            return transaction.groups.size() == 1;
-        }));
+    Check(supersededPublished && supersededPublished->ContainsGroup(10001) &&
+        supersededPublished->ContainsGroup(10002) &&
+        !supersededPublished->ContainsGroup(10003));
 
     // The authoritative renderer path adds one coherent resource closure at
     // the scene root. Historical transactions stay metadata-only, so replacing
@@ -924,22 +960,20 @@ int main() {
     closedScene->requireResourceClosure = true;
     closedScene->desiredPlacementCount = 5;
     closedScene->materializedPlacementCount = 5;
-    closedScene->groupOwners = {
-        { 10001, staticVersionC.version }, { 10002, staticVersionA.version } };
-    Check(graph.Request(staticScene, 3, {
-        Exact(staticVersionA.version, ArtifactReadiness::GpuReady),
-        Exact(staticVersionC.version, ArtifactReadiness::GpuReady),
-        Exact(materialRootVersion.version, ArtifactReadiness::GpuReady),
-        Exact(objectRootVersion.version, ArtifactReadiness::GpuReady),
-        Exact(indirectRootVersion.version, ArtifactReadiness::GpuReady),
-    }, ArtifactPayload::Make<StaticSceneBuildInput>(std::move(closedScene)), 9003));
+    closedScene->pages = supersededPages.refs;
+    auto closedRequirements = supersededPages.requirements;
+    closedRequirements.push_back(Exact(materialRootVersion.version, ArtifactReadiness::GpuReady));
+    closedRequirements.push_back(Exact(objectRootVersion.version, ArtifactReadiness::GpuReady));
+    closedRequirements.push_back(Exact(indirectRootVersion.version, ArtifactReadiness::GpuReady));
+    Check(graph.Request(staticScene, 3, std::move(closedRequirements),
+        ArtifactPayload::Make<StaticSceneBuildInput>(std::move(closedScene)), 9003));
     graph.WaitIdle();
     const auto closedRoot = graph.Snapshot(staticScene)
         .payload.Get<RendererStateFragmentArtifact>();
-    Check(closedRoot && closedRoot->fragment.dependencyClosure.size() == 2);
+    Check(closedRoot && closedRoot->fragment.dependencyClosure.size() == supersededPages.refs.size());
     Check(std::ranges::all_of(closedRoot->fragment.dependencyClosure,
         [](const ArtifactSnapshot& dependency) {
-            return dependency.key.kind == ArtifactKind::StaticTransaction;
+            return dependency.key.kind == ArtifactKind::StaticScenePage;
         }));
 
     const ArtifactKey mismatchedTransaction{ ArtifactKind::StaticTransaction, 103, 7 };

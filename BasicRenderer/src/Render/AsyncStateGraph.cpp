@@ -46,7 +46,7 @@ std::string_view KindName(ArtifactKind kind) {
     static constexpr std::string_view names[]{ "Generic", "TextureBinding", "Material",
         "MaterialTable", "MaterialUsageBatch", "Mesh", "MeshTable", "DrawRecordPage",
         "ActiveDrawList", "ViewLifetime", "IndirectWorkload", "StaticTransaction",
-        "StaticScene", "TerrainState", "BufferVersion", "FrameManifest", "StaticGroup",
+        "StaticScenePage", "StaticScene", "TerrainState", "BufferVersion", "FrameManifest", "StaticGroup",
         "TextureImageTable", "GrassCell", "GrassShard", "GrassScratch", "GrassScene" };
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(names) ? names[index] : "Unknown";
@@ -595,6 +595,8 @@ public:
         std::map<TraceVersion, const ExpandedGraphTraceEvent*> submittedBuilds;
         std::map<std::uint64_t, GroupStages> currentGroupStages;
         std::map<TraceAddressRevision, std::vector<TraceVersion>> transactionScenes;
+        std::map<TraceAddressRevision, std::vector<TraceAddressRevision>> transactionPages;
+        std::map<TraceAddressRevision, std::vector<TraceVersion>> pageScenes;
         std::vector<GroupJourney> groupJourneys;
         std::vector<const ExpandedGraphTraceEvent*> slowBuilds;
         for (const auto& event : events) {
@@ -661,14 +663,34 @@ public:
                     currentGroupStages[event.related.primaryID],
                     { static_cast<unsigned>(event.key.kind), event.key.primaryID,
                         event.revision, event.generation }, event.timestampMicros, event.detail });
-            } else if (event.event == "DependencyDeclared" &&
-                event.key.kind == ArtifactKind::StaticScene &&
-                event.related.kind == ArtifactKind::StaticTransaction) {
-                transactionScenes[{ static_cast<unsigned>(event.related.kind),
-                    event.related.primaryID, event.related.variantID, event.relatedRevision }]
-                    .push_back({ static_cast<unsigned>(event.key.kind), event.key.primaryID,
-                        event.revision, event.generation });
+            } else if (event.event == "DependencyDeclared") {
+                const TraceAddressRevision related{
+                    static_cast<unsigned>(event.related.kind), event.related.primaryID,
+                    event.related.variantID, event.relatedRevision };
+                if (event.key.kind == ArtifactKind::StaticScene &&
+                    event.related.kind == ArtifactKind::StaticTransaction) {
+                    transactionScenes[related].push_back({ static_cast<unsigned>(event.key.kind),
+                        event.key.primaryID, event.revision, event.generation });
+                } else if (event.key.kind == ArtifactKind::StaticScenePage &&
+                    event.related.kind == ArtifactKind::StaticTransaction) {
+                    transactionPages[related].push_back({ static_cast<unsigned>(event.key.kind),
+                        event.key.primaryID, event.key.variantID, event.revision });
+                } else if (event.key.kind == ArtifactKind::StaticScene &&
+                    event.related.kind == ArtifactKind::StaticScenePage) {
+                    pageScenes[related].push_back({ static_cast<unsigned>(event.key.kind),
+                        event.key.primaryID, event.revision, event.generation });
+                }
             }
+        }
+        for (const auto& [transaction, pages] : transactionPages) {
+            auto& scenes = transactionScenes[transaction];
+            for (const auto& page : pages) {
+                const auto found = pageScenes.find(page);
+                if (found == pageScenes.end()) continue;
+                scenes.insert(scenes.end(), found->second.begin(), found->second.end());
+            }
+            std::ranges::sort(scenes);
+            scenes.erase(std::unique(scenes.begin(), scenes.end()), scenes.end());
         }
         for (const auto& [_, state] : lastState) {
             const auto duration = report.elapsed.count() - state.second;
@@ -3294,7 +3316,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                 if (const auto scene = input.Get<StaticSceneBuildInput>()) {
                     requestTrace->Record(AsyncStateGraphTraceEventID::StaticSceneContents, key, desiredRevision,
                         versionGeneration->second, ArtifactReadiness::Missing, 0,
-                        { { scene->groupOwners.size(), scene->desiredPlacementCount,
+                        { { scene->pages.size(), scene->desiredPlacementCount,
                             scene->materializedPlacementCount, scene->retiredPlacementCount } });
                 }
             }

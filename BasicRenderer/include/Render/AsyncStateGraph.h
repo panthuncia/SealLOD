@@ -35,6 +35,7 @@ enum class ArtifactKind : std::uint16_t {
     ViewLifetime,
     IndirectWorkload,
     StaticTransaction,
+    StaticScenePage,
     StaticScene,
     TerrainState,
     BufferVersion,
