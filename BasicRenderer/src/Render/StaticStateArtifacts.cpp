@@ -36,13 +36,24 @@ std::uint64_t StaticScenePlacementDigest(std::uint64_t groupDigest,
 }
 
 bool PublishedStaticScenePage::ContainsGroup(std::uint64_t groupID) const noexcept {
-    return std::ranges::binary_search(groupOwners, groupID, {},
-        &StaticSceneGroupOwner::groupID);
+    return FindGroup(groupID) != nullptr;
+}
+
+const StaticTransactionGroup* PublishedStaticScenePage::FindGroup(
+    std::uint64_t groupID) const noexcept {
+    const auto it = std::ranges::lower_bound(groups, groupID, {},
+        &StaticTransactionGroup::groupID);
+    return it != groups.end() && it->groupID == groupID ? std::addressof(*it) : nullptr;
 }
 
 bool PublishedStaticSceneState::ContainsGroup(std::uint64_t groupID) const noexcept {
+    return FindGroup(groupID) != nullptr;
+}
+
+const StaticTransactionGroup* PublishedStaticSceneState::FindGroup(
+    std::uint64_t groupID) const noexcept {
     const auto& page = pages[StaticScenePageIndex(groupID)];
-    return page && page->ContainsGroup(groupID);
+    return page ? page->FindGroup(groupID) : nullptr;
 }
 
 namespace {
@@ -128,6 +139,7 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
     page->sourceFingerprint = input->sourceFingerprint;
     page->pageGeneration = context.generation;
     page->groupOwners = std::move(owners);
+    page->groups.reserve(page->groupOwners.size());
     for (const auto& owner : page->groupOwners) {
         const auto transactionIt = transactions.find(owner.transaction);
         if (transactionIt == transactions.end()) {
@@ -144,6 +156,7 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
         page->drawRecordCount += groupIt->drawRecordCount;
         page->activeEntryCount += groupIt->activeEntryCount;
         page->placementCount += groupIt->placementCount;
+        page->groups.push_back(*groupIt);
     }
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<PublishedStaticScenePage>(std::move(page)));

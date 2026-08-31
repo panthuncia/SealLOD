@@ -352,6 +352,33 @@ void ObjectManager::SetRendererStateServices(
 	}
 	m_visibilityGenerationBackingPool =
 		std::make_shared<br::render::VersionedGpuBufferBackingPool>();
+	// Establish the initial immutable cut before the renderer begins consuming
+	// graph state. No mutation can race service initialization.
+	SealDesiredBufferStateLocked();
+}
+
+std::uint64_t ObjectManager::SealDesiredBufferStateLocked() {
+	if (!m_objectBufferGraphDirty.exchange(false, std::memory_order_acq_rel)) {
+		return m_objectBufferSnapshotGeneration;
+	}
+	auto& cut = m_objectBufferSnapshotMailbox.ProducerValue();
+	cut.buffers.clear();
+	cut.buffers.reserve(m_graphBufferBindings.size());
+	cut.fingerprint = 1469598103934665603ull;
+	for (const auto& binding : m_graphBufferBindings) {
+		cut.buffers.push_back(binding.buffer->CaptureVersionedGraphState());
+		const auto revision = (std::max<std::uint64_t>)(cut.buffers.back().writeSequence, 1u);
+		cut.fingerprint ^= revision + 0x9e3779b97f4a7c15ull +
+			(cut.fingerprint << 6u) + (cut.fingerprint >> 2u);
+	}
+	cut.visibility = m_visibilityGenerationJournal.CaptureDesired();
+	const auto visibilityRevision =
+		(std::max<std::uint64_t>)(cut.visibility.writeSequence, 1u);
+	cut.fingerprint ^= visibilityRevision + 0x9e3779b97f4a7c15ull +
+		(cut.fingerprint << 6u) + (cut.fingerprint >> 2u);
+	m_objectBufferSnapshotMailbox.Publish(++m_objectBufferSnapshotGeneration);
+	basic_telemetry::AddCounter("SARP.VersionedBuffer.Object.SnapshotCutsSealed");
+	return m_objectBufferSnapshotGeneration;
 }
 
 std::uint64_t ObjectManager::PublishDesiredBufferState() {
@@ -385,20 +412,25 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 		basic_telemetry::AddCounter("SARP.VersionedBuffer.Object.RetirementCoalesced");
 		return m_objectBufferStateRevision;
 	}
-	if (!m_objectBufferGraphDirty.exchange(false, std::memory_order_acq_rel)) {
+	const auto* snapshotCut = m_objectBufferSnapshotMailbox.ConsumeLatest();
+	if (!snapshotCut && m_objectBufferSnapshotMailbox.ConsumedGeneration() >
+		m_objectBufferSubmittedSnapshotGeneration) {
+		snapshotCut = m_objectBufferSnapshotMailbox.ConsumerValue();
+	}
+	if (!snapshotCut) {
 		return m_objectBufferStateRevision;
 	}
+	if (snapshotCut->buffers.size() != m_graphBufferBindings.size()) return m_objectBufferStateRevision;
 
 	std::vector<br::render::ArtifactIntent> bufferIntents;
 	std::vector<std::size_t> intentBindingIndices;
 	std::vector<std::uint64_t> desiredRevisions(m_graphBufferBindings.size());
-	std::uint64_t fingerprint = 1469598103934665603ull;
+	const auto fingerprint = snapshotCut->fingerprint;
 	for (std::size_t bindingIndex = 0; bindingIndex < m_graphBufferBindings.size(); ++bindingIndex) {
 		auto& binding = m_graphBufferBindings[bindingIndex];
-		const auto capture = binding.buffer->CaptureVersionedGraphState();
+		const auto& capture = snapshotCut->buffers[bindingIndex];
 		const auto revision = (std::max<std::uint64_t>)(capture.writeSequence, 1u);
 		desiredRevisions[bindingIndex] = revision;
-		fingerprint ^= revision + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
 		if (binding.submittedVersion.revision != revision) {
 			auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
 			input->uploadService = m_uploadService;
@@ -426,14 +458,12 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	// each active-list entry. Publish that sidecar in the same DrawRecords root;
 	// leaving it on the legacy upload path made otherwise byte-correct graph
 	// states timing-dependent.
-	const auto visibilityCapture = m_visibilityGenerationJournal.CaptureDesired();
+	const auto& visibilityCapture = snapshotCut->visibility;
 	const auto visibilityRevision =
 		(std::max<std::uint64_t>)(visibilityCapture.writeSequence, 1u);
 	const br::render::ArtifactKey visibilityKey{
 		br::render::ArtifactKind::BufferVersion, 0x4f424a4255460000ull,
 		br::render::kObjectVisibilityGenerationVariant };
-	fingerprint ^= visibilityRevision + 0x9e3779b97f4a7c15ull +
-		(fingerprint << 6u) + (fingerprint >> 2u);
 	bool visibilityIntentPending = false;
 	if (m_visibilityGenerationSubmittedVersion.revision != visibilityRevision) {
 		auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
@@ -516,13 +546,17 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 		if (rootRequest) {
 			m_objectBufferFingerprint = fingerprint;
 			m_objectBufferStateRevision = candidateRevision;
-			m_objectBufferStateVersion = rootRequest.version;
+			m_objectBufferStateVersion = rootRequest.Handle();
 		} else {
 			// Admission failure must leave the mailbox dirty. Committing the
 			// fingerprint here suppresses every retry and strands consumers on
 			// the last accepted exact buffer closure.
 			m_objectBufferGraphDirty.store(true, std::memory_order_release);
 		}
+	}
+	if (fingerprint == m_objectBufferFingerprint) {
+		m_objectBufferSubmittedSnapshotGeneration =
+			m_objectBufferSnapshotMailbox.ConsumedGeneration();
 	}
 	return m_objectBufferStateRevision;
 }
@@ -532,6 +566,16 @@ std::optional<br::render::ArtifactRequirement> ObjectManager::DesiredBufferState
 	if (!m_objectBufferStateVersion) return std::nullopt;
 	return br::render::Exact(
 		m_objectBufferStateVersion, br::render::ArtifactReadiness::UploadSubmitted);
+}
+
+br::render::ArtifactVersionHandle ObjectManager::DesiredBufferStateHandle() const {
+	std::lock_guard graphStateLock(m_objectBufferGraphStateMutex);
+	return m_objectBufferStateVersion;
+}
+
+ObjectManager::DesiredObjectBufferStateCut ObjectManager::DesiredBufferStateCut() const {
+	std::lock_guard graphStateLock(m_objectBufferGraphStateMutex);
+	return { m_objectBufferStateVersion, m_objectBufferSubmittedSnapshotGeneration };
 }
 
 void ObjectManager::AcknowledgePublishedBufferState(
@@ -903,6 +947,7 @@ void ObjectManager::PumpActiveDrawSetCompactionRequests(std::size_t maxRequests)
 }
 
 std::vector<ObjectManager::ActiveDrawSetCompactionPublishResult> ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults) {
+	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
 	std::vector<ActiveDrawSetCompactionPublishResult> published;
 	PumpActiveDrawSetCompactionRequests(maxResults);
 
@@ -962,6 +1007,7 @@ std::vector<ObjectManager::ActiveDrawSetCompactionPublishResult> ObjectManager::
 			.outputEntries = buffer->LiveSize()
 		});
 	}
+	SealDesiredBufferStateLocked();
 
 	return published;
 }
@@ -2389,6 +2435,7 @@ void ObjectManager::StageStaticImportTransactionUploads(
 
 ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction) {
 	ZoneScopedN("ObjectManager::PublishStaticImportTransaction");
+	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
 	ZoneValue(static_cast<int64_t>(transaction.reservation.drawRecords));
 	StaticImportPublishResult result;
 	result.transactionID = transaction.reservation.id;
@@ -2478,11 +2525,13 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 
 	TracyPlot("ObjectManager.StaticImportTransaction.PublishedGroups", static_cast<int64_t>(result.groupsImported));
 	TracyPlot("ObjectManager.StaticImportTransaction.PublishedDrawRecords", static_cast<int64_t>(result.drawRecords));
+	SealDesiredBufferStateLocked();
 	return result;
 }
 
 ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportTransactionsBulk(std::span<MaterializedStaticImportTransaction*> transactions) {
 	ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk");
+	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
 	StaticImportBulkPublishResult result;
 	if (transactions.empty()) {
 		return result;
@@ -2635,6 +2684,7 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkPublishedGroups", static_cast<int64_t>(result.groupsImported));
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkPublishedDrawRecords", static_cast<int64_t>(result.drawRecords));
+	result.snapshotGeneration = SealDesiredBufferStateLocked();
 	return result;
 }
 
@@ -3440,6 +3490,7 @@ void ObjectManager::RemoveStaticObjectsBulk(
 	if (payloads.empty()) {
 		return;
 	}
+	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
 	ZoneValue(payloads.size());
 	const auto removeBegin = std::chrono::steady_clock::now();
 	++m_stats.bulkRemoveCalls;
@@ -3638,6 +3689,7 @@ void ObjectManager::RemoveStaticObjectsBulk(
 
 	m_stats.bulkRemoveUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - removeBegin).count());
+	SealDesiredBufferStateLocked();
 }
 
 void ObjectManager::RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads) {
@@ -3649,6 +3701,7 @@ ObjectManager::StaticVisibilityUpdateResult ObjectManager::SetStaticObjectsVisib
 	bool visible)
 {
 	ZoneScopedN("ObjectManager::SetStaticObjectsVisibleBulk");
+	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
 	StaticVisibilityUpdateResult spans;
 	std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> inserts;
 	for (auto* handle : handles) {
@@ -3689,6 +3742,7 @@ ObjectManager::StaticVisibilityUpdateResult ObjectManager::SetStaticObjectsVisib
 		buffer->SetLiveSize(buffer->LiveSize() + entries.size());
 		spans[workloadKey] = buffer->Size();
 	}
+	SealDesiredBufferStateLocked();
 	return spans;
 }
 

@@ -14,6 +14,10 @@ struct StaticTransactionGroup {
     std::uint64_t drawRecordCount = 0;
     std::uint64_t activeEntryCount = 0;
     std::uint64_t placementCount = 0;
+    // Host-defined immutable ownership data. The graph never interprets it;
+    // transaction/page/scene snapshots retain it transitively so lifecycle
+    // consumers can use the selected scene cut without replaying acknowledgements.
+    std::shared_ptr<const void> ownership;
 };
 
 struct StaticTransactionBuildInput {
@@ -68,8 +72,10 @@ struct PublishedStaticScenePage {
     std::uint64_t activeEntryCount = 0;
     std::uint64_t placementCount = 0;
     std::vector<StaticSceneGroupOwner> groupOwners;
+    std::vector<StaticTransactionGroup> groups;
 
     [[nodiscard]] bool ContainsGroup(std::uint64_t groupID) const noexcept;
+    [[nodiscard]] const StaticTransactionGroup* FindGroup(std::uint64_t groupID) const noexcept;
 };
 
 struct StaticScenePageRef {
@@ -106,6 +112,7 @@ struct PublishedStaticSceneState {
     std::array<std::shared_ptr<const PublishedStaticScenePage>, kStaticScenePageCount> pages{};
 
     [[nodiscard]] bool ContainsGroup(std::uint64_t groupID) const noexcept;
+    [[nodiscard]] const StaticTransactionGroup* FindGroup(std::uint64_t groupID) const noexcept;
 };
 
 void RegisterStaticStateProducers(AsyncStateGraph& graph);

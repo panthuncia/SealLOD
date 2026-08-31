@@ -9,6 +9,7 @@
 #include "Render/StaticStateArtifacts.h"
 #include "Resources/Resolvers/PublishedStateResourceResolver.h"
 #include "Resources/Buffers/Buffer.h"
+#include "Utilities/TripleGenerationMailbox.h"
 
 #include <atomic>
 #include <cstring>
@@ -49,6 +50,44 @@ ArtifactSnapshot FragmentSnapshot(PublishedFragmentKind kind, ArtifactAddress ad
 }
 
 int main() {
+    {
+        br::TripleGenerationMailbox<Value> mailbox;
+        mailbox.ProducerValue().value = 1;
+        mailbox.Publish(1);
+        Check(mailbox.ConsumeLatest() && mailbox.ConsumerValue()->value == 1);
+        Check(mailbox.ConsumeLatest() == nullptr);
+
+        mailbox.ProducerValue().value = 2;
+        mailbox.Publish(2);
+        mailbox.ProducerValue().value = 3;
+        mailbox.Publish(3);
+        const auto* latest = mailbox.ConsumeLatest();
+        Check(latest && latest->value == 3);
+        Check(mailbox.ConsumedGeneration() == 3);
+        Check(mailbox.PublishedGeneration() == 3);
+    }
+    {
+        br::TripleGenerationMailbox<Value> mailbox;
+        constexpr std::uint64_t finalGeneration = 100000;
+        std::atomic_bool producerDone{ false };
+        std::thread producer([&] {
+            for (std::uint64_t generation = 1; generation <= finalGeneration; ++generation) {
+                mailbox.ProducerValue().value = generation;
+                mailbox.Publish(generation);
+            }
+            producerDone.store(true, std::memory_order_release);
+        });
+        std::uint64_t observed = 0;
+        while (!producerDone.load(std::memory_order_acquire) ||
+            mailbox.ConsumedGeneration() < mailbox.PublishedGeneration()) {
+            if (const auto* value = mailbox.ConsumeLatest()) {
+                Check(value->value > observed);
+                observed = value->value;
+            }
+        }
+        producer.join();
+        Check(observed == finalGeneration);
+    }
     {
         VersionedGpuBufferJournal journal(sizeof(std::uint32_t));
         const std::uint32_t initialRows[]{ 10, 20, 30 };
@@ -798,10 +837,11 @@ int main() {
     const ArtifactKey staticTransactionB{ ArtifactKind::StaticTransaction, 102, 7 };
     const ArtifactKey staticScene{ ArtifactKind::StaticScene, 1, 0 };
     auto staticA = std::make_shared<StaticTransactionBuildInput>();
+    auto staticOwnership = std::make_shared<std::uint64_t>(0x5a17u);
     staticA->transactionID = 101;
     staticA->streamGeneration = 7;
     staticA->sourceFingerprint = 1001;
-    staticA->groups = { { 10001, 5, 10, 2 }, { 10002, 6, 12, 3 } };
+    staticA->groups = { { 10001, 5, 10, 2, staticOwnership }, { 10002, 6, 12, 3 } };
     staticA->groupCount = 2;
     staticA->drawRecordCount = 11;
     staticA->activeEntryCount = 22;
@@ -881,6 +921,8 @@ int main() {
     const auto staticPublished = staticRoot->fragment.payload.Get<PublishedStaticSceneState>();
     Check(staticPublished && staticPublished->ContainsGroup(10001) &&
         staticPublished->ContainsGroup(10005) && !staticPublished->ContainsGroup(99999));
+    const auto* ownedStaticGroup = staticPublished->FindGroup(10001);
+    Check(ownedStaticGroup && ownedStaticGroup->ownership == staticOwnership);
     Check(staticPublished->groupCount == 5 && staticPublished->drawRecordCount == 24 &&
         staticPublished->activeEntryCount == 48);
     Check(staticPublished->publishedPlacementCount == 15 &&

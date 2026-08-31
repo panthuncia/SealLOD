@@ -25,6 +25,7 @@
 #include "Render/Runtime/BufferUploadPolicy.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
+#include "Utilities/TripleGenerationMailbox.h"
 
 namespace org { class BufferView; }
 using org::BufferView;
@@ -386,6 +387,17 @@ public:
 		std::uint64_t groupsImported = 0;
 		std::uint64_t drawRecords = 0;
 		std::uint64_t preparedBytes = 0;
+		// Immutable journal snapshot sealed after every transaction in this bulk
+		// result was activated. A graph cut is compatible only when it covers at
+		// least this mailbox generation.
+		std::uint64_t snapshotGeneration = 0;
+	};
+
+	struct DesiredObjectBufferStateCut {
+		br::render::ArtifactVersionHandle version;
+		std::uint64_t snapshotGeneration = 0;
+
+		explicit operator bool() const noexcept { return static_cast<bool>(version); }
 	};
 
 	struct ActiveDrawSetCompactionPublishResult {
@@ -519,6 +531,8 @@ public:
 	void AcknowledgePublishedBufferState(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
+	br::render::ArtifactVersionHandle DesiredBufferStateHandle() const;
+	DesiredObjectBufferStateCut DesiredBufferStateCut() const;
 	std::shared_ptr<SortedUnsignedIntBuffer> TryGetActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
 		auto it = m_activeDrawSetIndices.find(workloadKey);
 		return it != m_activeDrawSetIndices.end() ? it->second : nullptr;
@@ -551,6 +565,17 @@ private:
 		br::render::ArtifactVersionID submittedVersion{};
 		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
 	};
+
+	// Immutable producer cut handed from the ordered object-journal writer to
+	// the graph submitter. Capturing happens once at the end of a mutation
+	// transaction; graph submission never reaches back into mutable buffers.
+	struct ObjectBufferSnapshotCut {
+		std::vector<br::render::VersionedGpuBufferJournal::Capture> buffers;
+		br::render::VersionedGpuBufferJournal::Capture visibility;
+		std::uint64_t fingerprint = 0;
+	};
+
+	std::uint64_t SealDesiredBufferStateLocked();
 
 	struct DeferredBufferRangeRetire {
 		std::shared_ptr<DynamicBuffer> buffer;
@@ -624,11 +649,14 @@ private:
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	org::runtime::IUploadService* m_uploadService = nullptr;
 	std::uint64_t m_objectBufferStateRevision = 0;
-	br::render::ArtifactVersionID m_objectBufferStateVersion{};
+	br::render::ArtifactVersionHandle m_objectBufferStateVersion{};
 	std::atomic<std::uint64_t> m_activeObjectBufferStateRevision{ 0 };
 	std::uint64_t m_objectBufferFingerprint = 0;
 	mutable std::mutex m_objectBufferGraphStateMutex;
 	std::atomic_bool m_objectBufferGraphDirty{ true };
+	br::TripleGenerationMailbox<ObjectBufferSnapshotCut> m_objectBufferSnapshotMailbox;
+	std::uint64_t m_objectBufferSnapshotGeneration = 0;
+	std::uint64_t m_objectBufferSubmittedSnapshotGeneration = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
 	br::render::VersionedGpuBufferJournal m_visibilityGenerationJournal{ sizeof(std::uint32_t) };
 	br::render::ArtifactVersionID m_visibilityGenerationSubmittedVersion{};
@@ -636,6 +664,11 @@ private:
 	std::uint32_t m_graphFramesInFlight = 1;
 	std::uint64_t m_lastBufferStatePublicationRetirementEpoch = 0;
 	std::atomic<std::uint64_t> m_nextStaticImportTransactionID{ 1 };
+	// Serializes the ordered producer side of the static CPU journals,
+	// visibility generations, and active lists. Each transaction seals an
+	// immutable cut into m_objectBufferSnapshotMailbox before releasing it;
+	// graph submission therefore never acquires this mutation lock.
+	mutable std::mutex m_staticPublicationMutationMutex;
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
 	Stats m_stats{};
