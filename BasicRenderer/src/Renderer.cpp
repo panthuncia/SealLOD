@@ -3137,20 +3137,20 @@ void Renderer::Update(float elapsedSeconds) {
                 }();
 				if (m_asyncStateGraph && m_asyncStateGraph->TraceActive()) {
 					m_asyncStateGraph->TraceEvent(
-						commit.committed ? "ManifestCommitAccepted" : "ManifestCommitUnchanged",
+						commit.committed ? br::render::AsyncStateGraphTraceEventID::ManifestCommitAccepted :
+							br::render::AsyncStateGraphTraceEventID::ManifestCommitUnchanged,
 						{ br::render::ArtifactKind::FrameManifest, 0, 0 },
 						commit.state ? commit.state->epoch : 0, 0,
-						std::format("frame_slot={}", m_frameIndex));
+						{ { m_frameIndex } });
 					if (commit.committed && commit.state) {
 						for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
 							const auto& fragment = commit.state->Fragment(
 								static_cast<br::render::PublishedFragmentKind>(index));
 							if (!fragment.publicationRoot) continue;
-							m_asyncStateGraph->TraceEvent("ManifestFragmentCommitted",
+							m_asyncStateGraph->TraceEvent(br::render::AsyncStateGraphTraceEventID::ManifestFragmentCommitted,
 								fragment.publicationRoot.address, fragment.publicationRoot.revision,
 								fragment.publicationRoot.generation,
-								std::format("epoch={} frame_slot={} fragment={}",
-									commit.state->epoch, m_frameIndex, index));
+								{ { commit.state->epoch, m_frameIndex, index } });
 						}
 					}
 				}

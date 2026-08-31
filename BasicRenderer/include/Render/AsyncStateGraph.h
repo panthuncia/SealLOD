@@ -41,9 +41,13 @@ enum class ArtifactKind : std::uint16_t {
     FrameManifest,
     StaticGroup,
     TextureImageTable,
+    GrassCell,
+    GrassShard,
+    GrassScratch,
+    GrassScene,
 };
 inline constexpr std::size_t kArtifactKindCount =
-    static_cast<std::size_t>(ArtifactKind::TextureImageTable) + 1u;
+    static_cast<std::size_t>(ArtifactKind::GrassScene) + 1u;
 
 struct ArtifactAddress {
     ArtifactKind kind = ArtifactKind::Generic;
@@ -593,11 +597,44 @@ enum class AsyncStateGraphTraceDetail : std::uint8_t {
 	FullDependencies
 };
 
+// Trace records carry only this stable ID and numeric payload on graph workers.
+// Human-readable names and detail strings are expanded after capture stops.
+enum class AsyncStateGraphTraceEventID : std::uint16_t {
+    TraceStarted, TraceStopped, GraphMutex, GraphPopulation,
+    AcceptanceApplied, GraphControlStarted, StateChanged, VersionReclaimed,
+    VersionsReclaimed, QueueNodePhase, DependencyBlocked, BuildSubmitted,
+    BuildDependencyResolved, BuildStarted, BuildCompleted, BuildRejected,
+    AcceptanceQueued, CompletionApplied, CompletionStale, SuspensionRegistered,
+    DrainStarted, DrainGpuCollectPhase, GpuNotificationApplied, ExactWaitSatisfied,
+    DrainCompleted, RequestReceived, RequestPhase, DependencyDeclared,
+    StaticTransactionContents, StaticGroupTransactionLinked, StaticSceneContents,
+    RequestConflict, RequestAlreadyDesired, SuccessorQueued, RequestAccepted,
+    Invalidated, Cancelled, Released, Published, SuspensionSatisfied,
+    ObservationRegistered, ObservationCancelled, KindObservationRegistered,
+    ExactWaitRegistered, ExactWaitCancelled, DiagnosePhase,
+    ManifestCommitAccepted, ManifestCommitUnchanged, ManifestFragmentCommitted,
+    GrassCellIntentAccepted, GrassCompactionShardRequested, GrassDeltaShardRequested,
+    GrassCellCompactionBatched, GrassCellDeltaBatched, GrassShardGpuReady,
+    GrassCellSelected, GrassSceneBatchRequested, GrassScenePublished,
+    StaticGroupDiscovered, StaticGroupBatchQueued, StaticGroupPrepared,
+    StaticGroupValidated, StaticGroupWorkerSubmitted, StaticGroupMaterialized,
+    StaticGroupBridgeApplied,
+    Count
+};
+
+struct AsyncStateGraphTracePayload {
+    std::array<std::uint64_t, 8> values{};
+};
+
 struct AsyncStateGraphTraceConfig {
     std::size_t maximumEvents = 1'000'000;
 	AsyncStateGraphTraceDetail detail = AsyncStateGraphTraceDetail::Lifecycle;
     bool includeDependencyEvents = true;
     bool includeRetentionEvents = true;
+	// Empty/unfiltered traces retain the existing all-artifact behavior. Focused
+	// captures can select kinds without adding work to the trace-off path.
+	bool filterArtifactKinds = false;
+	std::array<bool, kArtifactKindCount> includedKinds{};
 };
 
 struct AsyncStateGraphTraceReport {
@@ -634,7 +671,7 @@ public:
             if (!input) return ArtifactBuildResult::Failure("artifact input type mismatch");
             auto result = producer(context, input);
             if (result.outcome == ArtifactBuildResult::Outcome::Ready &&
-                !result.payload.Get<Output>()) {
+				!result.payload.template Get<Output>()) {
                 return ArtifactBuildResult::Failure("artifact output type mismatch");
             }
             return result;
@@ -688,9 +725,9 @@ public:
     void StartTrace(AsyncStateGraphTraceConfig config = {});
     [[nodiscard]] bool TraceActive() const;
     AsyncStateGraphTraceReport StopTraceAndWriteReport(const std::filesystem::path& outputDirectory);
-    void TraceEvent(std::string_view event, ArtifactAddress address,
+    void TraceEvent(AsyncStateGraphTraceEventID event, ArtifactAddress address,
         std::uint64_t revision = 0, std::uint64_t generation = 0,
-        std::string detail = {}, ArtifactAddress related = {},
+        AsyncStateGraphTracePayload payload = {}, ArtifactAddress related = {},
         std::uint64_t relatedRevision = 0);
     void WaitIdle() const;
     void Shutdown();

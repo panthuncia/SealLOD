@@ -268,6 +268,7 @@ public:
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle, BackendInstanceId backendInstance);
 	void PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags materialCompileFlags);
 	void PrecompileShaderArtifact(const ShaderVariantRequest& request);
+	void PrecompileShaderBundleArtifact(const ShaderInfoBundle& shaderInfoBundle);
 	ShaderLibraryBundle CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines = {});
 
     void GetPreprocessedBlob(

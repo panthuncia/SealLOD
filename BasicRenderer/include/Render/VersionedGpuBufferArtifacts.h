@@ -83,6 +83,7 @@ struct VersionedGpuBufferBuildInput {
     std::uint64_t capacity = 0;
     bool unorderedAccess = false;
     bool indirectArguments = false;
+    bool gpuWritten = false;
     PublishedFragmentKind catalogOwner = PublishedFragmentKind::Geometry;
     PublishedResourceUsage catalogUsage = PublishedResourceUsage::ShaderResource;
     std::uint64_t catalogVariant = 0;
@@ -175,6 +176,7 @@ public:
         PublishedFragmentKind catalogOwner = PublishedFragmentKind::Geometry;
         PublishedResourceUsage catalogUsage = PublishedResourceUsage::ShaderResource;
         std::uint64_t catalogVariant = 0;
+        bool gpuWritten = false;
     };
 
     explicit VersionedBufferFamily(Config config);
@@ -182,6 +184,9 @@ public:
         org::runtime::IUploadService& uploads, std::uint64_t revision,
         std::span<const std::byte> bytes, std::uint64_t elementCount,
         std::uint64_t capacity = 0);
+    [[nodiscard]] ArtifactRequestResult RequestGpuWritten(
+        RendererStateRequestService& requests, org::runtime::IUploadService& uploads,
+        std::uint64_t revision, std::uint64_t elementCount, std::uint64_t capacity = 0);
     [[nodiscard]] ArtifactRequestResult RequestContentSnapshot(
         RendererStateRequestService& requests, org::runtime::IUploadService& uploads,
         std::span<const std::byte> bytes, std::uint64_t elementCount,

@@ -14,6 +14,12 @@ namespace br::render {
 class RendererStateRequestService {
 public:
     RendererStateRequestService(AsyncStateGraph& graph, RendererStatePublisher& publisher);
+    void RegisterProducer(ArtifactKind kind, ArtifactProducerRegistration registration) {
+        m_graph.RegisterProducer(kind, std::move(registration));
+    }
+    [[nodiscard]] std::function<void(std::uint64_t)> MakeSuspensionNotifier() {
+        return m_graph.MakeSuspensionNotifier();
+    }
     ~RendererStateRequestService();
 
     ArtifactRequestResult Request(ArtifactAddress address, std::uint64_t revision,
@@ -53,11 +59,11 @@ public:
         return m_graph.Outstanding(kind);
     }
     [[nodiscard]] bool TraceActive() const { return m_graph.TraceActive(); }
-    void TraceEvent(std::string_view event, ArtifactAddress address,
+    void TraceEvent(AsyncStateGraphTraceEventID event, ArtifactAddress address,
         std::uint64_t revision = 0, std::uint64_t generation = 0,
-        std::string detail = {}, ArtifactAddress related = {},
+        AsyncStateGraphTracePayload payload = {}, ArtifactAddress related = {},
         std::uint64_t relatedRevision = 0) {
-        m_graph.TraceEvent(event, address, revision, generation, std::move(detail),
+        m_graph.TraceEvent(event, address, revision, generation, payload,
             related, relatedRevision);
     }
     [[nodiscard]] std::uint64_t SubscribeReady(

@@ -42,7 +42,8 @@ enum class PublishedResourceUsage : std::uint8_t {
 };
 
 enum class PublishedFragmentKind : std::uint8_t {
-    Materials, TextureImages, Terrain, Geometry, DrawRecords, ActiveDrawLists, IndirectWorkloads, Count
+    Materials, TextureImages, Terrain, Geometry, DrawRecords, ActiveDrawLists, IndirectWorkloads,
+    Grass, Count
 };
 
 inline constexpr std::size_t kPublishedFragmentCount =
@@ -144,6 +145,7 @@ struct PublishedRendererState {
     PublishedStateFragment drawRecords;
     PublishedStateFragment activeDrawLists;
     PublishedStateFragment indirectWorkloads;
+    PublishedStateFragment grass;
     std::shared_ptr<const PublishedResourceCatalog> resourceCatalog;
     std::shared_ptr<const PublicationBundle> publicationBundle;
 

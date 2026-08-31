@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 #include <BasicTelemetry/Tracy.h>
+#include <BasicTelemetry/Telemetry.h>
 
 #include "Resources/Buffers/BufferView.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -1204,10 +1205,14 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
             BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::SyncUploadPolicyState");
             SyncUploadPolicyState();
         }
-        {
-            BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::EnsureCpuShadowSize");
-            EnsureCpuShadowSize(newSize);
-        }
+        // The CPU shadow is authoritative only through its written high-water
+        // mark. Extending it to the backing's reserve capacity zero-filled and
+        // replayed large unused tails (grass commonly reserves in 64 MiB
+        // quanta), turning publication into a render-thread memcpy/upload
+        // stall. Future writes grow the shadow before they are retained, so an
+        // unwritten backing tail deliberately has no CPU representation.
+        basic_telemetry::Record("SARP.DynamicBuffer.Resize.UnwrittenTailBytes",
+            newSize > m_cpuShadowData.size() ? newSize - m_cpuShadowData.size() : 0u);
         {
             BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::OnBufferResized");
             m_uploadPolicyState.OnBufferResized(GetBufferSize());

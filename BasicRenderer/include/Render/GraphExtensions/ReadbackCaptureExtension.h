@@ -56,7 +56,12 @@ public:
                 continue;
             }
 
-            auto handle = rg.RequestResourceHandle(resource.get(), /*allowFailure=*/true);
+            // Published-state resolvers expose their backing resource directly to
+            // readback clients, but that backing is not necessarily registered as
+            // a named graph resource. Register and frame-pin it here so the
+            // explicitly anchored capture pass can transition and copy the exact
+            // resource that the client requested.
+            auto handle = rg.RequestResourceHandle(resource.get(), /*allowFailure=*/false);
             if (handle.GetGeneration() == 0) {
                 spdlog::warn(
                     "ReadbackCaptureExtension: failed to resolve handle for capture resource id {} after pass '{}'.",
@@ -87,7 +92,7 @@ public:
                 ReadbackCopyCaptureInputs inputs{};
                 inputs.target = ResourceHandleAndRange(handle, capture.range);
 
-                auto pass = std::make_shared<ReadbackCopyCapturePass>(inputs, std::move(capture.callback), m_readbackService, passInstanceName);
+                auto pass = std::make_shared<ReadbackCopyCapturePass>(inputs, resource, std::move(capture.callback), m_readbackService, passInstanceName);
                 out.push_back(
                     RenderGraph::ExternalPassDesc::Copy(
                         passInstanceName,
@@ -103,7 +108,7 @@ public:
                 ReadbackCaptureInputs inputs{};
                 inputs.target = ResourceHandleAndRange(handle, capture.range);
 
-                auto pass = std::make_shared<ReadbackCapturePass>(inputs, std::move(capture.callback), m_readbackService, passInstanceName);
+                auto pass = std::make_shared<ReadbackCapturePass>(inputs, resource, std::move(capture.callback), m_readbackService, passInstanceName);
                 out.push_back(
                     RenderGraph::ExternalPassDesc::Render(
                         passInstanceName,

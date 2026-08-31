@@ -268,6 +268,22 @@ int main() {
 	graph.WaitIdle();
 	Check(awaitedCallbacks.load(std::memory_order_acquire) == 2);
 
+	// Publication is an external renderer-state transition. Exact waiters must
+	// receive it just like producer/GPU transitions; otherwise callers that
+	// serialize publication can remain pinned forever after MarkPublished.
+	std::atomic_uint32_t publishedCallbacks{ 0 };
+	auto publishedAwaiter = graph.AwaitExact(awaited.Handle(), ArtifactReadiness::Published,
+		TaskLane::Streaming, TaskDomain::RendererState,
+		[&](const ArtifactSnapshot& snapshot) {
+			if (snapshot.readiness == ArtifactReadiness::Published) {
+				publishedCallbacks.fetch_add(1, std::memory_order_acq_rel);
+			}
+		});
+	Check(publishedAwaiter.subscription != 0);
+	graph.MarkPublished(awaited.version);
+	graph.WaitIdle();
+	Check(publishedCallbacks.load(std::memory_order_acquire) == 1);
+
 	// Dropping the RAII registration before a blocked version advances prevents
 	// dispatch and releases its waiter pin.
 	const ArtifactKey awaitDependency{ ArtifactKind::Generic, 879, 0 };
@@ -1221,6 +1237,7 @@ int main() {
     auto source = publisher.ResourceSource();
     PublishedStateResourceResolver resolver(source, PublishedResourceKey{});
     const auto missingResourceVersion = resolver.GetContentVersion();
+    Check(missingResourceVersion != 0);
     Check(resolver.Resolve().empty());
 	PublishedStateResourceResolver stagedResolver(source, PublishedResourceKey{}, {}, false);
 	const auto stagedFallbackVersion = stagedResolver.GetContentVersion();
@@ -1243,6 +1260,8 @@ int main() {
 		0, 0, kTextureImageTableBufferVariant };
 	PublishedStateResourceResolver directResolver(
 		directResolvePublisher.ResourceSource(), directResolveKey);
+	const auto directMissingVersion = directResolver.GetContentVersion();
+	Check(directMissingVersion != 0);
 	Check(directResolver.Resolve().empty());
 	auto directResource = Buffer::CreateSharedUnmaterialized(
 		rhi::HeapType::DeviceLocal, sizeof(std::uint32_t), false);
@@ -1261,6 +1280,7 @@ int main() {
 	auto directCommit = directResolvePublisher.Commit(0);
 	Check(directCommit.committed);
 	directCommit.RunDeferred();
+	Check(directResolver.GetContentVersion() != directMissingVersion);
 	const auto directlyResolved = directResolver.Resolve();
 	Check(directlyResolved.size() == 1 && directlyResolved.front() == directResource);
 
@@ -1595,6 +1615,27 @@ int main() {
     const auto boundedTrace = graph.StopTraceAndWriteReport(traceDirectory / "bounded");
     Check(boundedTrace.capturedEvents == 2);
     Check(boundedTrace.droppedEvents != 0);
+
+    graph.StartTrace({ .maximumEvents = 10'000 });
+    std::atomic_bool traceWritersRunning{ true };
+    std::atomic_uint64_t traceWriterCalls{ 0 };
+    std::vector<std::jthread> traceWriters;
+    for (std::uint64_t thread = 0; thread < 4; ++thread) {
+        traceWriters.emplace_back([&, thread] {
+            while (traceWritersRunning.load(std::memory_order_acquire)) {
+                graph.TraceEvent(AsyncStateGraphTraceEventID::GrassCellIntentAccepted,
+                    { ArtifactKind::GrassCell, thread, 0 },
+                    traceWriterCalls.fetch_add(1, std::memory_order_relaxed) + 1);
+            }
+        });
+    }
+    while (traceWriterCalls.load(std::memory_order_acquire) < 10'000) std::this_thread::yield();
+    const auto concurrentStopTrace = graph.StopTraceAndWriteReport(traceDirectory / "concurrent_stop");
+    traceWritersRunning.store(false, std::memory_order_release);
+    traceWriters.clear();
+    Check(!graph.TraceActive());
+    Check(concurrentStopTrace.capturedEvents != 0);
+    Check(std::filesystem::exists(concurrentStopTrace.eventsCsv));
 
     {
         AsyncStateGraph latestGraph(scheduler, "LatestIntentTests");

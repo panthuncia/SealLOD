@@ -2251,6 +2251,13 @@ void PSOManager::PrecompileShaderArtifact(const ShaderVariantRequest& request)
     CompileShadersForBackend(shaderInfo, rhi::Backend::D3D12);
 }
 
+void PSOManager::PrecompileShaderBundleArtifact(const ShaderInfoBundle& shaderInfoBundle)
+{
+    // Offline tools do not create a DeviceManager, so compile explicitly for
+    // the renderer-host backend and populate the same artifact cache it reads.
+    CompileShadersForBackend(shaderInfoBundle, rhi::Backend::D3D12);
+}
+
 PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,
     const wchar_t* shaderPath,
     const wchar_t* entryPoint,

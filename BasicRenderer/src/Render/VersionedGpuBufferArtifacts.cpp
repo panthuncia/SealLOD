@@ -432,6 +432,7 @@ ArtifactRequestResult VersionedBufferFamily::RequestSnapshot(
     input->capacity = (std::max<std::uint64_t>)((std::max)(capacity, elementCount), 1u);
     input->unorderedAccess = m_config.unorderedAccess;
     input->indirectArguments = m_config.indirectArguments;
+    input->gpuWritten = m_config.gpuWritten;
     input->catalogOwner = m_config.catalogOwner;
     input->catalogUsage = m_config.catalogUsage;
     input->catalogVariant = m_config.catalogVariant;
@@ -451,6 +452,33 @@ ArtifactRequestResult VersionedBufferFamily::RequestSnapshot(
     if (fingerprint == 0) fingerprint = 1;
     return requests.SubmitLatest({ m_config.address, revision, {},
         ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint });
+}
+
+ArtifactRequestResult VersionedBufferFamily::RequestGpuWritten(
+    RendererStateRequestService& requests, org::runtime::IUploadService& uploads,
+    std::uint64_t revision, std::uint64_t elementCount, std::uint64_t capacity) {
+    if (revision == 0 || !m_config.gpuWritten) {
+        return { ArtifactRequestStatus::ConflictingRevision, 0, {} };
+    }
+    auto input = std::make_shared<VersionedGpuBufferBuildInput>();
+    input->uploadService = &uploads;
+    input->debugName = m_config.debugName;
+    input->writeSequence = revision;
+    input->elementStride = m_config.elementStride;
+    input->elementCount = elementCount;
+    input->capacity = (std::max<std::uint64_t>)((std::max)(capacity, elementCount), 1u);
+    input->unorderedAccess = m_config.unorderedAccess;
+    input->indirectArguments = m_config.indirectArguments;
+    input->gpuWritten = true;
+    input->catalogOwner = m_config.catalogOwner;
+    input->catalogUsage = m_config.catalogUsage;
+    input->catalogVariant = m_config.catalogVariant;
+    input->backingPool = m_backingPool;
+    const auto fingerprint = revision ^ (elementCount << 1u) ^
+        (input->capacity << 7u) ^ (m_config.catalogVariant << 17u) ^ 0x4750555752495445ull;
+    return requests.SubmitLatest({ m_config.address, revision, {},
+        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)),
+        fingerprint != 0u ? fingerprint : 1u });
 }
 
 ArtifactRequestResult VersionedBufferFamily::RequestContentSnapshot(
@@ -742,8 +770,10 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     // Do not replay the CPU journal until a bounded backing-ring slot is
     // available. Ring exhaustion is an expected transient state; replaying on
     // every retry multiplied host work while waiting for frame retirement.
-    std::string replayError;
-    auto shadow = ReplayVersionedGpuBufferAuthoritativeState(*input, replayError);
+	std::string replayError;
+	auto shadow = input->gpuWritten
+		? std::make_shared<const std::vector<std::byte>>()
+		: ReplayVersionedGpuBufferAuthoritativeState(*input, replayError);
     if (!shadow) return ArtifactBuildResult::Failure(std::move(replayError));
 	if (input->desiredBytes) {
 		basic_telemetry::AddCounter("SARP.VersionedBuffer.AuthoritativeStateReused");
@@ -785,7 +815,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     // consumes it, so uploading the producer's zero-filled CPU shadow is both
     // unnecessary and actively harmful: thousands of view/workload buffers can
     // otherwise serialize behind the tracked copy timeline during scene load.
-    const bool needsInitialContent = !(input->unorderedAccess &&
+    const bool needsInitialContent = !input->gpuWritten && !(input->unorderedAccess &&
         input->indirectArguments && input->bytes.empty() && input->writes.empty());
     std::uint64_t uploadedBytes = 0;
     std::uint64_t dirtyRangeCount = 0;
@@ -857,7 +887,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     basic_telemetry::Record("SARP.VersionedBuffer.BytesUploaded", uploadedBytes);
     basic_telemetry::Record("SARP.VersionedBuffer.DirtyRanges", dirtyRangeCount);
     backing->contentEpoch = input->writeSequence;
-    backing->cpuShadow = shadow;
+    backing->cpuShadow = input->gpuWritten ? nullptr : shadow;
 
     auto version = std::make_shared<PublishedGpuBufferVersion>();
     version->revision = context.revision;
@@ -872,7 +902,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     version->backing = std::move(backing);
     version->backingPool = pool;
     version->resource = resource;
-    version->cpuShadow = std::move(shadow);
+    version->cpuShadow = input->gpuWritten ? nullptr : std::move(shadow);
 
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = input->catalogOwner;
