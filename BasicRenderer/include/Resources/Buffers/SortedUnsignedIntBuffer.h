@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <rhi.h>
 
 #include "Resources/Buffers/Buffer.h"
@@ -53,11 +54,13 @@ public:
     void AssignActiveSnapshot(std::vector<ActiveDrawSetEntry> entries);
     std::vector<ActiveDrawSetEntry> SnapshotActiveEntries() const;
     uint64_t MutationRevision() const {
+        if (m_activeEntryMode) {
+            std::lock_guard lock(m_activeStateMutex);
+            return m_mutationRevision;
+        }
         return m_mutationRevision;
     }
-    void SetActiveMutationCallback(ActiveMutationCallback callback) {
-        m_activeMutationCallback = std::move(callback);
-    }
+    void SetActiveMutationCallback(ActiveMutationCallback callback);
 
     // Remove an element (and shift the tail on GPU)
     void Remove(unsigned int element);
@@ -73,7 +76,11 @@ public:
     }
 
     UINT Size() const {
-        return m_activeEntryMode ? static_cast<UINT>(m_activeEntries.size()) : static_cast<UINT>(m_data.size());
+        if (m_activeEntryMode) {
+            std::lock_guard lock(m_activeStateMutex);
+            return static_cast<UINT>(m_activeEntries.size());
+        }
+        return static_cast<UINT>(m_data.size());
     }
 
     uint64_t ResidentCapacity() const {
@@ -166,6 +173,11 @@ private:
 
     // Sorted list of unsigned integers
     std::vector<unsigned int> m_data;
+    // Graph publication mutates active lists on streaming workers while wind
+    // and other extensions may snapshot them on the render thread. The owning
+    // ObjectManager mutex orders writers but cannot protect those external
+    // readers, so active-list state has its own narrow synchronization domain.
+    mutable std::mutex m_activeStateMutex;
     std::vector<ActiveDrawSetEntry> m_activeEntries;
     std::vector<std::byte> m_cpuShadowData;
 

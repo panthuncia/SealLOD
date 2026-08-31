@@ -269,13 +269,13 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
 
 void RegisterStaticStateProducers(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::StaticTransaction, {
-        TaskLane::Streaming, TaskDomain::General,
+        TaskLane::FrameCritical, TaskDomain::GraphPublication,
         "StaticStateArtifact::BuildTransaction", BuildStaticTransaction });
     graph.RegisterProducer(ArtifactKind::StaticScenePage, {
-        TaskLane::Streaming, TaskDomain::General,
+        TaskLane::FrameCritical, TaskDomain::GraphPublication,
         "StaticStateArtifact::BuildScenePage", BuildStaticScenePage });
     graph.RegisterProducer(ArtifactKind::StaticScene, {
-        TaskLane::Streaming, TaskDomain::General,
+        TaskLane::FrameCritical, TaskDomain::GraphPublication,
         "StaticStateArtifact::BuildScene", BuildStaticScene });
 }
 

@@ -1145,6 +1145,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::uint64_t fingerprint = 0;
         ArtifactPayload input;
         std::vector<ArtifactRequirement> requirements;
+        std::vector<ArtifactRequirement> requestedRequirements;
         ArtifactLease lease;
         bool coalescibleIntent = false;
     };
@@ -2165,7 +2166,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         node.requestFingerprint = successor.fingerprint;
         node.lease = std::move(successor.lease);
         node.requirements = std::move(successor.requirements);
-        node.requestedRequirements = node.requirements;
+        node.requestedRequirements = std::move(successor.requestedRequirements);
         node.input = std::move(successor.input);
         node.checkpoint = {};
         node.payload = {};
@@ -2215,7 +2216,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
         if (fingerprint == 0) fingerprint = 1;
         node.successors.push_back({ revision, generation, fingerprint, node.input,
-            node.requestedRequirements, AcquireVersionLease({ node.key, revision, generation }),
+            node.requestedRequirements, node.requestedRequirements,
+            AcquireVersionLease({ node.key, revision, generation }),
             node.coalescibleIntent });
         PinSuccessor(node, node.successors.back());
         node.latestSuccessorNeeded = false;
@@ -3183,6 +3185,41 @@ AsyncStateGraph::AsyncStateGraph(TaskSchedulerManager& scheduler, std::string_vi
 
 AsyncStateGraph::~AsyncStateGraph() { Shutdown(); }
 
+// Request replacement can release the last graph-owned reference to a large
+// immutable recipe, checkpoint, or completed payload. Their destructors may in
+// turn release substantial CPU/GPU ownership trees. Keep those releases out of
+// the graph mutex, and share one sink across a request batch so none of the old
+// state is destroyed between mutations.
+struct AsyncStateGraph::RequestDeferredCleanup {
+    std::vector<ArtifactPayload> payloads;
+    std::vector<std::vector<ArtifactRequirement>> requirements;
+    std::vector<std::vector<ArtifactSnapshot>> snapshots;
+    std::vector<ArtifactLease> leases;
+    std::vector<std::shared_ptr<const GpuSubmissionSet>> submissions;
+
+    void Reserve(std::size_t requestCount) {
+        payloads.reserve(requestCount * 3);
+        requirements.reserve(requestCount * 2);
+        snapshots.reserve(requestCount);
+        leases.reserve(requestCount);
+        submissions.reserve(requestCount * 2);
+    }
+};
+
+// Request recipe copies and cancellation state may allocate. Construct them
+// before entering the graph mutex so a large batch does not serialize heap
+// work with unrelated graph transitions.
+struct AsyncStateGraph::RequestPreparedState {
+    std::vector<ArtifactRequirement> requestedRequirements;
+    std::vector<ArtifactRequirement> signatureRequirements;
+    std::shared_ptr<std::atomic_bool> superseded;
+
+    explicit RequestPreparedState(const std::vector<ArtifactRequirement>& requirements)
+        : requestedRequirements(requirements),
+          signatureRequirements(requirements),
+          superseded(std::make_shared<std::atomic_bool>(false)) {}
+};
+
 void AsyncStateGraph::RegisterProducer(ArtifactKind kind, ArtifactProducerRegistration registration) {
     auto lock = m_impl->LockMutex(GraphMutexPhase::RegisterProducer);
     m_impl->producers[kind] = std::move(registration);
@@ -3191,8 +3228,10 @@ void AsyncStateGraph::RegisterProducer(ArtifactKind kind, ArtifactProducerRegist
 ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t desiredRevision,
     std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
     std::uint64_t requestFingerprint) {
+    RequestDeferredCleanup cleanup;
+    RequestPreparedState prepared(requirements);
     return RequestInternal(key, desiredRevision, std::move(requirements), std::move(input),
-        requestFingerprint, false);
+        requestFingerprint, false, false, &cleanup, &prepared);
 }
 
 ArtifactRequestStatus AsyncStateGraph::SubmitLatestIntent(ArtifactKey key,
@@ -3201,24 +3240,69 @@ ArtifactRequestStatus AsyncStateGraph::SubmitLatestIntent(ArtifactKey key,
     if (key.kind == ArtifactKind::StaticTransaction) {
         return ArtifactRequestStatus::TypeMismatch;
     }
+    RequestDeferredCleanup cleanup;
+    RequestPreparedState prepared(requirements);
     return RequestInternal(key, desiredRevision, std::move(requirements), std::move(input),
-        requestFingerprint, true).status;
+        requestFingerprint, true, false, &cleanup, &prepared).status;
 }
 
 std::vector<ArtifactRequestResult> AsyncStateGraph::SubmitLatestIntentBatch(
     std::vector<ArtifactIntent> intents) {
-    std::vector<ArtifactRequestResult> results;
-    results.reserve(intents.size());
-    auto batchLock = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
-    ++m_impl->stats.intentBatches;
-    for (auto& intent : intents) {
+    std::vector<ArtifactRequestResult> results(intents.size());
+    std::vector<bool> valid(intents.size(), true);
+    std::unordered_set<ArtifactKey, ArtifactKey::Hasher> uniqueAddresses;
+    std::unordered_set<Impl::VersionKey, Impl::VersionKey::Hasher> uniqueVersions;
+    uniqueAddresses.reserve(intents.size());
+    uniqueVersions.reserve(intents.size());
+    RequestDeferredCleanup cleanup;
+    cleanup.Reserve(intents.size());
+    std::vector<RequestPreparedState> prepared;
+    prepared.reserve(intents.size());
+    for (const auto& intent : intents) prepared.emplace_back(intent.requirements);
+
+    // Do immutable validation and canonical hashing before taking the graph
+    // mutex. Keep one result slot per input intent: duplicate addresses still
+    // execute in caller order because latest-wins semantics are observable.
+    for (std::size_t index = 0; index < intents.size(); ++index) {
+        auto& intent = intents[index];
         if (intent.key.kind == ArtifactKind::StaticTransaction) {
-            results.push_back({ ArtifactRequestStatus::TypeMismatch, 0, {} });
+            results[index] = { ArtifactRequestStatus::TypeMismatch, 0, {} };
+            valid[index] = false;
             continue;
         }
-        results.push_back(RequestInternal(intent.key, intent.desiredRevision,
+        if (intent.input.Valid() && intent.requestFingerprint == 0) {
+            results[index] = { ArtifactRequestStatus::MissingFingerprint, 0, {} };
+            valid[index] = false;
+            continue;
+        }
+        if (intent.requestFingerprint == 0) {
+            intent.requestFingerprint = CanonicalRequestFingerprint(intent.key,
+                intent.desiredRevision, intent.requirements);
+        }
+        uniqueAddresses.insert(intent.key);
+        uniqueVersions.insert({ intent.key, intent.desiredRevision });
+    }
+
+    auto batchLock = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
+    ++m_impl->stats.intentBatches;
+    const auto reserveForBatch = [](auto& container, std::size_t additional) {
+        const auto required = container.size() + additional;
+        const auto currentCapacity = static_cast<std::size_t>(
+            container.bucket_count() * container.max_load_factor());
+        if (required > currentCapacity) {
+            container.reserve((std::max)(required,
+                container.size() + container.size() / 2 + std::size_t{ 16 }));
+        }
+    };
+    reserveForBatch(m_impl->nodes, uniqueAddresses.size());
+    reserveForBatch(m_impl->versionGenerations, uniqueVersions.size());
+    reserveForBatch(m_impl->versionSignatures, uniqueVersions.size());
+    for (std::size_t index = 0; index < intents.size(); ++index) {
+        if (!valid[index]) continue;
+        auto& intent = intents[index];
+        results[index] = RequestInternal(intent.key, intent.desiredRevision,
             std::move(intent.requirements), std::move(intent.input),
-            intent.requestFingerprint, true, true));
+            intent.requestFingerprint, true, true, &cleanup, &prepared[index]);
     }
     batchLock.Unlock();
     m_impl->ScheduleDrain();
@@ -3229,11 +3313,16 @@ std::vector<ArtifactRequestResult> AsyncStateGraph::RequestBatch(
     std::vector<ArtifactRequest> requests) {
     std::vector<ArtifactRequestResult> results;
     results.reserve(requests.size());
+    RequestDeferredCleanup cleanup;
+    cleanup.Reserve(requests.size());
+    std::vector<RequestPreparedState> prepared;
+    prepared.reserve(requests.size());
+    for (const auto& request : requests) prepared.emplace_back(request.requirements);
     auto batchLock = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
     for (auto& request : requests) {
         results.push_back(RequestInternal(request.key, request.desiredRevision,
             std::move(request.requirements), std::move(request.input),
-            request.requestFingerprint, false, true));
+            request.requestFingerprint, false, true, &cleanup, &prepared[results.size()]));
     }
     batchLock.Unlock();
     m_impl->ScheduleDrain();
@@ -3242,7 +3331,15 @@ std::vector<ArtifactRequestResult> AsyncStateGraph::RequestBatch(
 
 ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uint64_t desiredRevision,
     std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
-    std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex) {
+    std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex,
+    RequestDeferredCleanup* deferredCleanup, RequestPreparedState* preparedState) {
+    RequestDeferredCleanup localCleanup;
+    if (!deferredCleanup) deferredCleanup = &localCleanup;
+    std::optional<RequestPreparedState> localPrepared;
+    if (!preparedState) {
+        localPrepared.emplace(requirements);
+        preparedState = &*localPrepared;
+    }
     auto requestTrace = m_impl->AcquireTrace();
     if (requestTrace) {
         requestTrace->Record(AsyncStateGraphTraceEventID::RequestReceived, key, desiredRevision, 0,
@@ -3383,7 +3480,8 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             versionGeneration->second });
         if (knownSignature == m_impl->versionSignatures.end()) {
             m_impl->versionSignatures.emplace(requestedVersion, Impl::VersionSignature{
-                requestFingerprint, input.Type(), requirements });
+                requestFingerprint, input.Type(),
+                std::move(preparedState->signatureRequirements) });
         }
         node.latestRequestedRevision = desiredRevision;
         ++m_impl->stats.requests;
@@ -3420,7 +3518,9 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                 }
             }
             node.successors.push_back({ desiredRevision, versionGeneration->second, requestFingerprint,
-                std::move(input), std::move(requirements), versionLease, coalescibleIntent });
+                std::move(input), std::move(requirements),
+                std::move(preparedState->requestedRequirements), versionLease,
+                coalescibleIntent });
             m_impl->PinSuccessor(node, node.successors.back());
             const Impl::StoredVersionKey activeVersion{
                 key, node.desiredRevision, node.versionGeneration };
@@ -3446,7 +3546,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                     versionGeneration->second, node.state);
             }
             // The active immutable version retains its own input and closure.
-            m_impl->ScheduleDrain();
+            if (!callerOwnsMutex) m_impl->ScheduleDrain();
             return result;
         }
 
@@ -3458,20 +3558,31 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
         node.versionGeneration = versionGeneration->second;
         node.generation = versionGeneration->second;
         node.requestFingerprint = requestFingerprint;
+        deferredCleanup->leases.push_back(std::move(node.lease));
+        deferredCleanup->requirements.push_back(std::move(node.requirements));
+        deferredCleanup->requirements.push_back(std::move(node.requestedRequirements));
+        deferredCleanup->payloads.push_back(std::move(node.input));
+        deferredCleanup->payloads.push_back(std::move(node.payload));
+        deferredCleanup->payloads.push_back(std::move(node.checkpoint));
+        deferredCleanup->snapshots.push_back(std::move(node.resolvedDependencies));
+        deferredCleanup->submissions.push_back(std::move(node.gpuSubmissions));
+        deferredCleanup->submissions.push_back(std::move(node.waitingGpuSubmissions));
         node.lease = versionLease;
         node.requirements = std::move(requirements);
-        node.requestedRequirements = node.requirements;
+        node.requestedRequirements = std::move(preparedState->requestedRequirements);
         node.input = std::move(input);
         node.producedRevision = 0;
         node.payload = {};
+        node.checkpoint = {};
         node.resolvedDependencies.clear();
         node.terminalFailure = false;
         node.latestSuccessorNeeded = false;
         node.coalescibleIntent = coalescibleIntent;
-        node.superseded = std::make_shared<std::atomic_bool>(false);
+        node.superseded = std::move(preparedState->superseded);
         node.buildAttempted = false;
         node.error.clear();
         node.gpuSubmissions.reset();
+        node.waitingGpuSubmissions.reset();
         node.retryAt.reset();
         m_impl->SetState(node, ArtifactReadiness::Missing);
         recordRequestPhase("reset_version_state");
@@ -3494,7 +3605,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                 versionGeneration->second, node.state);
         }
     }
-    m_impl->ScheduleDrain();
+    if (!callerOwnsMutex) m_impl->ScheduleDrain();
     return result;
 }
 
@@ -3610,10 +3721,60 @@ void AsyncStateGraph::Release(ArtifactKey key) {
         ++m_impl->stats.cancelled;
 
         const auto dependents = m_impl->waiters.find(key);
-        if (!node.buildInFlight && (dependents == m_impl->waiters.end() || dependents->second.empty())) {
+        if (!node.buildInFlight &&
+            (dependents == m_impl->waiters.end() || dependents->second.empty()))
             m_impl->nodes.erase(found);
+    }
+    m_impl->ScheduleDrain();
+}
+
+void AsyncStateGraph::ReleaseBatch(std::span<const ArtifactKey> keys) {
+    if (keys.empty()) return;
+
+    std::vector<ArtifactKey> uniqueKeys;
+    uniqueKeys.reserve(keys.size());
+    std::unordered_set<ArtifactKey, ArtifactKey::Hasher> seen;
+    seen.reserve(keys.size());
+    for (const auto& key : keys) {
+        if (seen.insert(key).second) uniqueKeys.push_back(key);
+    }
+    if (auto session = m_impl->AcquireTrace()) {
+        for (const auto& key : uniqueKeys)
+            session->Record(AsyncStateGraphTraceEventID::Released, key);
+    }
+
+    std::vector<std::shared_ptr<const GpuSubmissionSet>> cancellations;
+    cancellations.reserve(uniqueKeys.size());
+    {
+        auto lock = m_impl->LockMutex(GraphMutexPhase::CancelApply);
+        for (const auto& key : uniqueKeys) {
+            const auto found = m_impl->nodes.find(key);
+            if (found == m_impl->nodes.end()) continue;
+            auto& node = found->second;
+            m_impl->RemoveWaiterEdges(node);
+            ++node.generation;
+            node.desired = false;
+            m_impl->ClearSuccessors(node);
+            node.retryAt.reset();
+            if ((node.state == ArtifactReadiness::CpuReady ||
+                 node.state == ArtifactReadiness::UploadSubmitted) &&
+                node.waitingGpuSubmissions && m_impl->stats.gpuWaiting)
+                --m_impl->stats.gpuWaiting;
+            if (node.waitingGpuSubmissions)
+                cancellations.push_back(std::move(node.waitingGpuSubmissions));
+            node.gpuSubmissions.reset();
+            node.lease.reset();
+            m_impl->SetState(node, ArtifactReadiness::Cancelled);
+            ++m_impl->stats.cancelled;
+
+            const auto dependents = m_impl->waiters.find(key);
+            if (!node.buildInFlight &&
+                (dependents == m_impl->waiters.end() || dependents->second.empty()))
+                m_impl->nodes.erase(found);
         }
     }
+    for (const auto& cancellation : cancellations)
+        if (cancellation) (void)cancellation->Cancel();
     m_impl->ScheduleDrain();
 }
 

@@ -11,6 +11,9 @@ namespace br::render {
 
 struct StaticTransactionGroup {
     std::uint64_t groupID = 0;
+    // Host admission identity for this group. A transaction may gather groups
+    // admitted under distinct latest-wins tickets.
+    std::uint64_t admissionTicketID = 0;
     std::uint64_t drawRecordCount = 0;
     std::uint64_t activeEntryCount = 0;
     std::uint64_t placementCount = 0;

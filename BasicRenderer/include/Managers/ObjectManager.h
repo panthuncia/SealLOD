@@ -98,6 +98,10 @@ public:
 		std::span<const PreparedStaticMeshTemplateRef> mappedMeshTemplates;
 		std::shared_ptr<const void> mappedRecipeOwner;
 		std::shared_ptr<const void> mappedTemplateOwner;
+		// Mapping storage and recipe publication semantics are independent. Static
+		// import scatter/gather batches also map immutable rows, but still require
+		// legacy draw-info/removal payload construction.
+		bool mappedRecipeSemantics = false;
 
 		[[nodiscard]] std::span<const PerObjectCB> PerObjectRows() const {
 			return mappedPerObjectCBs.empty() ? std::span<const PerObjectCB>{ perObjectCBs } : mappedPerObjectCBs;
@@ -108,7 +112,7 @@ public:
 		[[nodiscard]] std::span<const PreparedStaticMeshTemplateRef> MeshTemplates() const {
 			return mappedMeshTemplates.empty() ? std::span<const PreparedStaticMeshTemplateRef>{ meshTemplates } : mappedMeshTemplates;
 		}
-		[[nodiscard]] bool IsRecipeView() const { return !mappedPerObjectCBs.empty(); }
+		[[nodiscard]] bool IsRecipeView() const { return mappedRecipeSemantics; }
 	};
 
 	struct StaticRecipeTemplateBinding {
@@ -527,6 +531,8 @@ public:
 	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
 	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
 		org::runtime::IUploadService* uploads, std::uint32_t framesInFlight);
+	using DesiredBufferStateReadyCallback = std::function<void()>;
+	void SetDesiredBufferStateReadyCallback(DesiredBufferStateReadyCallback callback);
 	std::uint64_t PublishDesiredBufferState();
 	void AcknowledgePublishedBufferState(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
@@ -663,6 +669,8 @@ private:
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_visibilityGenerationBackingPool;
 	std::uint32_t m_graphFramesInFlight = 1;
 	std::uint64_t m_lastBufferStatePublicationRetirementEpoch = 0;
+	mutable std::mutex m_desiredBufferStateReadyCallbackMutex;
+	DesiredBufferStateReadyCallback m_desiredBufferStateReadyCallback;
 	std::atomic<std::uint64_t> m_nextStaticImportTransactionID{ 1 };
 	// Serializes the ordered producer side of the static CPU journals,
 	// visibility generations, and active lists. Each transaction seals an

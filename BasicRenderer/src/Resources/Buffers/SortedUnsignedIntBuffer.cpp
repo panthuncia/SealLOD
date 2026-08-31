@@ -211,19 +211,23 @@ void SortedUnsignedIntBuffer::AppendActiveEntries(const std::vector<ActiveDrawSe
         return;
     }
 
-    const auto firstIndex = m_activeEntries.size();
     (void)PublishReadyAsyncResize(false);
-    EnsureCapacityForSize(firstIndex + entries.size());
-    m_activeEntries.insert(m_activeEntries.end(), entries.begin(), entries.end());
-    ++m_mutationRevision;
-    if (m_activeMutationCallback) {
-        m_activeMutationCallback(false, m_mutationRevision,
-            std::make_shared<const std::vector<ActiveDrawSetEntry>>(entries));
+    ActiveMutationCallback callback;
+    std::uint64_t revision = 0;
+    {
+        std::lock_guard lock(m_activeStateMutex);
+        const auto firstIndex = m_activeEntries.size();
+        EnsureCapacityForSize(firstIndex + entries.size());
+        m_activeEntries.insert(m_activeEntries.end(), entries.begin(), entries.end());
+        revision = ++m_mutationRevision;
+        callback = m_activeMutationCallback;
+        StageOrUpload(
+            entries.data(),
+            sizeof(ActiveDrawSetEntry) * entries.size(),
+            firstIndex * sizeof(ActiveDrawSetEntry));
     }
-    StageOrUpload(
-        entries.data(),
-        sizeof(ActiveDrawSetEntry) * entries.size(),
-        firstIndex * sizeof(ActiveDrawSetEntry));
+    if (callback) callback(false, revision,
+        std::make_shared<const std::vector<ActiveDrawSetEntry>>(entries));
 }
 
 void SortedUnsignedIntBuffer::AssignActiveSnapshot(std::vector<ActiveDrawSetEntry> entries) {
@@ -243,30 +247,37 @@ void SortedUnsignedIntBuffer::AssignActiveSnapshot(std::vector<ActiveDrawSetEntr
         return;
     }
 
-    const auto oldSize = m_activeEntries.size();
-    EnsureCapacityForSize(entries.size());
-    m_activeEntries = std::move(entries);
-    m_liveSize = m_activeEntries.size();
-    m_activeTombstoneEstimate = 0;
-    ++m_mutationRevision;
-    if (m_activeMutationCallback) {
-        m_activeMutationCallback(true, m_mutationRevision,
-            std::make_shared<const std::vector<ActiveDrawSetEntry>>(m_activeEntries));
+    ActiveMutationCallback callback;
+    std::shared_ptr<const std::vector<ActiveDrawSetEntry>> callbackEntries;
+    std::uint64_t revision = 0;
+    {
+        std::lock_guard lock(m_activeStateMutex);
+        const auto oldSize = m_activeEntries.size();
+        EnsureCapacityForSize(entries.size());
+        m_activeEntries = std::move(entries);
+        m_liveSize = m_activeEntries.size();
+        m_activeTombstoneEstimate = 0;
+        revision = ++m_mutationRevision;
+        callback = m_activeMutationCallback;
+        if (callback) callbackEntries =
+            std::make_shared<const std::vector<ActiveDrawSetEntry>>(m_activeEntries);
+        if (!m_activeEntries.empty()) {
+            StageOrUpload(m_activeEntries.data(), sizeof(ActiveDrawSetEntry) * m_activeEntries.size(), 0);
+        }
+        if (oldSize > m_activeEntries.size()) {
+            std::vector<ActiveDrawSetEntry> zeros(oldSize - m_activeEntries.size());
+            StageOrUpload(
+                zeros.data(),
+                sizeof(ActiveDrawSetEntry) * zeros.size(),
+                m_activeEntries.size() * sizeof(ActiveDrawSetEntry));
+        }
     }
-    if (!m_activeEntries.empty()) {
-        StageOrUpload(m_activeEntries.data(), sizeof(ActiveDrawSetEntry) * m_activeEntries.size(), 0);
-    }
-    if (oldSize > m_activeEntries.size()) {
-        std::vector<ActiveDrawSetEntry> zeros(oldSize - m_activeEntries.size());
-        StageOrUpload(
-            zeros.data(),
-            sizeof(ActiveDrawSetEntry) * zeros.size(),
-            m_activeEntries.size() * sizeof(ActiveDrawSetEntry));
-    }
+    if (callback) callback(true, revision, std::move(callbackEntries));
 }
 
 std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> SortedUnsignedIntBuffer::SnapshotActiveEntries() const {
     if (m_activeEntryMode) {
+        std::lock_guard lock(m_activeStateMutex);
         return m_activeEntries;
     }
 
@@ -279,6 +290,11 @@ std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> SortedUnsignedIntBuffer
         });
     }
     return entries;
+}
+
+void SortedUnsignedIntBuffer::SetActiveMutationCallback(ActiveMutationCallback callback) {
+    std::lock_guard lock(m_activeStateMutex);
+    m_activeMutationCallback = std::move(callback);
 }
 
 void SortedUnsignedIntBuffer::Remove(unsigned int element) {

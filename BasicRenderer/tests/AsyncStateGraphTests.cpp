@@ -515,6 +515,29 @@ int main() {
     graph.WaitIdle();
     Check(graph.Snapshot(recreatedV1.version).payload.Get<Value>() != nullptr);
 
+    // Batch release applies each address once, leaves caller-held immutable
+    // versions readable, and permits every released address to be requested
+    // again with its original signature.
+    const ArtifactKey batchReleaseA{ ArtifactKind::Generic, 0xf006, 0 };
+    const ArtifactKey batchReleaseB{ ArtifactKind::Generic, 0xf007, 0 };
+    auto batchReleaseAV1 = graph.Request(batchReleaseA, 1, {}, Payload(31), 0x781u);
+    auto batchReleaseBV1 = graph.Request(batchReleaseB, 1, {}, Payload(32), 0x782u);
+    Check(batchReleaseAV1 && batchReleaseBV1);
+    graph.WaitIdle();
+    const auto batchReleaseAVersion = batchReleaseAV1.version;
+    const auto batchReleaseBVersion = batchReleaseBV1.version;
+    const std::array releasedAddresses{ batchReleaseA, batchReleaseB, batchReleaseA };
+    graph.ReleaseBatch(releasedAddresses);
+    graph.WaitIdle();
+    Check(graph.Snapshot(batchReleaseAVersion).payload.Get<Value>() != nullptr);
+    Check(graph.Snapshot(batchReleaseBVersion).payload.Get<Value>() != nullptr);
+    batchReleaseAV1.lease.reset();
+    batchReleaseBV1.lease.reset();
+    graph.WaitIdle();
+    Check(graph.Request(batchReleaseA, 1, {}, Payload(31), 0x781u));
+    Check(graph.Request(batchReleaseB, 1, {}, Payload(32), 0x782u));
+    graph.WaitIdle();
+
     std::atomic_uint readySubscriberA{ 0 };
     std::atomic_uint readySubscriberB{ 0 };
     const ArtifactKey subscribedKey{ ArtifactKind::Generic, 900, 0 };
@@ -712,6 +735,31 @@ int main() {
     Check(latestV2.payload.Get<Value>() && latestV2.payload.Get<Value>()->value == 3);
     const auto retainedLatestV1 = graph.Snapshot(latestV1Request.version);
     Check(retainedLatestV1.payload.Get<Value>() && retainedLatestV1.payload.Get<Value>()->value == 2);
+
+    // Optional Latest requirements remain live requirements after every
+    // immutable successor promotion. Terrain intentionally publishes once
+    // with fallback rows, then rebuilds repeatedly as texture bindings arrive.
+    // A promoted successor must not replace that policy with its latched exact
+    // closure or subsequent binding revisions will be missed.
+    const ArtifactKey optionalLatestDependency{ ArtifactKind::Generic, 313, 0 };
+    const ArtifactKey optionalLatestConsumer{ ArtifactKind::Generic, 314, 0 };
+    const auto optionalInitial = graph.Request(optionalLatestConsumer, 1, {
+        Latest(optionalLatestDependency, ArtifactReadiness::GpuReady,
+            DependencyPolicy::Optional)
+    });
+    Check(optionalInitial);
+    graph.WaitIdle();
+    const auto optionalInitialSnapshot = graph.Snapshot(optionalLatestConsumer);
+    Check(optionalInitialSnapshot.readiness == ArtifactReadiness::GpuReady);
+    Check(graph.Request(optionalLatestDependency, 1));
+    graph.WaitIdle();
+    const auto optionalFirstAdvance = graph.Snapshot(optionalLatestConsumer);
+    Check(optionalFirstAdvance.generation != optionalInitialSnapshot.generation);
+    Check(graph.Request(optionalLatestDependency, 2));
+    graph.WaitIdle();
+    const auto optionalSecondAdvance = graph.Snapshot(optionalLatestConsumer);
+    Check(optionalSecondAdvance.generation != optionalFirstAdvance.generation);
+
     Check(graph.Request(gateDependency, 2));
     graph.WaitIdle();
     Check(graph.Snapshot(gateConsumer).payload.Get<Value>()->value == 2);

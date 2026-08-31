@@ -698,6 +698,7 @@ public:
     bool Invalidate(ArtifactKey key, std::uint64_t desiredRevision);
     void Cancel(ArtifactKey key);
     void Release(ArtifactKey key);
+    void ReleaseBatch(std::span<const ArtifactKey> keys);
     void MarkPublished(ArtifactKey key, std::uint64_t revision);
     void MarkPublished(ArtifactVersionID version);
     void MarkPublished(std::span<const ArtifactVersionID> versions);
@@ -739,9 +740,13 @@ public:
     void Shutdown();
 
 private:
+    struct RequestDeferredCleanup;
+    struct RequestPreparedState;
     ArtifactRequestResult RequestInternal(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
-        std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex = false);
+        std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex = false,
+        RequestDeferredCleanup* deferredCleanup = nullptr,
+        RequestPreparedState* preparedState = nullptr);
     struct Impl;
     std::shared_ptr<Impl> m_impl;
 };

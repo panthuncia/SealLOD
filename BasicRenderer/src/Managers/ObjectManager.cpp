@@ -184,8 +184,10 @@ void PrepareStaticGroupsBulkPlanInPlace(
 		prepared.workloadKeysByMeshTemplate.clear();
 		prepared.mappedPerObjectCBs = {};
 		prepared.mappedNormalMatrices = {};
+		prepared.mappedMeshTemplates = {};
 		prepared.mappedRecipeOwner.reset();
 		prepared.mappedTemplateOwner.reset();
+		prepared.mappedRecipeSemantics = false;
 		prepared.meshTemplates.reserve(group.meshTemplates.size());
 		for (const auto& meshTemplate : group.meshTemplates) {
 			auto& preparedTemplate = prepared.meshTemplates.emplace_back();
@@ -561,6 +563,12 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	return m_objectBufferStateRevision;
 }
 
+void ObjectManager::SetDesiredBufferStateReadyCallback(
+	DesiredBufferStateReadyCallback callback) {
+	std::lock_guard lock(m_desiredBufferStateReadyCallbackMutex);
+	m_desiredBufferStateReadyCallback = std::move(callback);
+}
+
 std::optional<br::render::ArtifactRequirement> ObjectManager::DesiredBufferStateRequirement() const {
 	std::lock_guard graphStateLock(m_objectBufferGraphStateMutex);
 	if (!m_objectBufferStateVersion) return std::nullopt;
@@ -654,6 +662,17 @@ void ObjectManager::AcknowledgePublishedBufferState(
 	m_activeObjectBufferStateRevision.store(published->drawRecords.revision, std::memory_order_release);
 	m_lastBufferStatePublicationRetirementEpoch =
 		br::render::VersionedGpuBufferFrameRetirementEpoch();
+	DesiredBufferStateReadyCallback readyCallback;
+	{
+		std::lock_guard lock(m_desiredBufferStateReadyCallbackMutex);
+		readyCallback = m_desiredBufferStateReadyCallback;
+	}
+	// Publication acknowledgement is itself an admission transition. A newer
+	// journal cut may already have been sealed into the mailbox, which clears the
+	// dirty bit even though a caller is waiting for this predecessor to retire.
+	// The subscriber owns the cheap pending-work filter; suppressing this edge
+	// here can strand a prepared publication cut indefinitely.
+	if (readyCallback) readyCallback();
 }
 
 void ObjectManager::StopDeferredRetireWorker() {
@@ -1070,6 +1089,12 @@ void ObjectManager::PublishDeferredRetireCompletedFrame(std::uint64_t completedF
 	}
 	if (completedFrame >= observed) {
 		ScheduleDeferredRetireDrain();
+		DesiredBufferStateReadyCallback readyCallback;
+		{
+			std::lock_guard lock(m_desiredBufferStateReadyCallbackMutex);
+			readyCallback = m_desiredBufferStateReadyCallback;
+		}
+		if (readyCallback) readyCallback();
 	}
 }
 
@@ -1128,6 +1153,13 @@ ObjectManager::GetPublishedDrawRecordVisibilityGenerationBuffer(
 }
 
 void ObjectManager::SetActiveDrawSetMutationCallback(ActiveDrawSetMutationCallback callback) {
+	// Observer installation snapshots every CPU active-list vector. Static
+	// publication appends to those vectors and can also add workload entries on
+	// worker threads, so installation must participate in the same ordered
+	// mutation domain as publication/removal. Without this lock the initial
+	// render-thread snapshot could copy a vector while a publication reallocated
+	// it, corrupting the process heap under high import throughput.
+	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
 	m_activeDrawSetMutationCallback = std::move(callback);
 	for (auto& [workloadKey, buffer] : m_activeDrawSetIndices) {
 		if (!buffer) continue;
