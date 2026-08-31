@@ -41,6 +41,7 @@ enum class ArtifactKind : std::uint16_t {
     BufferVersion,
     FrameManifest,
     StaticGroup,
+    StaticTemplate,
     TextureImageTable,
     GrassCell,
     GrassShard,
@@ -701,6 +702,10 @@ public:
     void MarkPublished(ArtifactVersionID version);
     void MarkPublished(std::span<const ArtifactVersionID> versions);
     void PumpGpuCompletions();
+    // External suspension identities share one process-wide namespace because
+    // completion routing is keyed only by identity. Producers must obtain IDs
+    // here rather than maintaining independent counters.
+    [[nodiscard]] static std::uint64_t AllocateSuspensionIdentity() noexcept;
     void NotifySuspensionSatisfied(std::uint64_t identity);
     [[nodiscard]] std::function<void(std::uint64_t)> MakeSuspensionNotifier() const;
     void SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback);

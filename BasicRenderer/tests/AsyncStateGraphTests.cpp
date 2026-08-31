@@ -166,6 +166,10 @@ int main() {
     }
 
     {
+        const auto first = AsyncStateGraph::AllocateSuspensionIdentity();
+        const auto second = AsyncStateGraph::AllocateSuspensionIdentity();
+        Check(first != 0 && second != 0 && first != second);
+
         auto pool = std::make_shared<VersionedGpuBufferBackingPool>();
         std::atomic_uint retirementWakes{ 0 };
         std::atomic_uint64_t observedIdentity{ 0 };
@@ -175,6 +179,7 @@ int main() {
                 retirementWakes.fetch_add(1, std::memory_order_acq_rel);
             });
         Check(identity != 0);
+        Check(identity != first && identity != second);
         Check(retirementWakes.load(std::memory_order_acquire) == 0);
         NotifyVersionedGpuBufferFrameRetirement();
         Check(retirementWakes.load(std::memory_order_acquire) == 1);

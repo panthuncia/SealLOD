@@ -20,6 +20,9 @@ public:
     [[nodiscard]] std::function<void(std::uint64_t)> MakeSuspensionNotifier() {
         return m_graph.MakeSuspensionNotifier();
     }
+    [[nodiscard]] std::uint64_t AllocateSuspensionIdentity() const noexcept {
+        return AsyncStateGraph::AllocateSuspensionIdentity();
+    }
     ~RendererStateRequestService();
 
     ArtifactRequestResult Request(ArtifactAddress address, std::uint64_t revision,

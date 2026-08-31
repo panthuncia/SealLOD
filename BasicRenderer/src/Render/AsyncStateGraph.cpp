@@ -25,6 +25,10 @@
 #include "Managers/SerializedTaskPump.h"
 
 namespace br::render {
+
+namespace {
+std::atomic_uint64_t g_nextArtifactSuspensionIdentity{ 1 };
+}
 bool ArtifactReachedMilestone(ArtifactReadiness actual, ArtifactReadiness required) noexcept {
     if (actual == ArtifactReadiness::Published) return true;
     if (actual == ArtifactReadiness::Failed || actual == ArtifactReadiness::Cancelled ||
@@ -47,7 +51,7 @@ std::string_view KindName(ArtifactKind kind) {
         "MaterialTable", "MaterialUsageBatch", "Mesh", "MeshTable", "DrawRecordPage",
         "ActiveDrawList", "ViewLifetime", "IndirectWorkload", "StaticTransaction",
         "StaticScenePage", "StaticScene", "TerrainState", "BufferVersion", "FrameManifest", "StaticGroup",
-        "TextureImageTable", "GrassCell", "GrassShard", "GrassScratch", "GrassScene" };
+        "StaticTemplate", "TextureImageTable", "GrassCell", "GrassShard", "GrassScratch", "GrassScene" };
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(names) ? names[index] : "Unknown";
 }
@@ -3704,6 +3708,14 @@ void AsyncStateGraph::PumpGpuCompletions() {
     }
 	for (const auto key : pending) m_impl->gpuSignals.push({ key });
     m_impl->ScheduleDrain();
+}
+
+std::uint64_t AsyncStateGraph::AllocateSuspensionIdentity() noexcept {
+    auto identity = g_nextArtifactSuspensionIdentity.fetch_add(1, std::memory_order_relaxed);
+    while (identity == 0) {
+        identity = g_nextArtifactSuspensionIdentity.fetch_add(1, std::memory_order_relaxed);
+    }
+    return identity;
 }
 
 void AsyncStateGraph::NotifySuspensionSatisfied(std::uint64_t identity) {

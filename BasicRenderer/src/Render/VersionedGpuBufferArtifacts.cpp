@@ -20,7 +20,6 @@ namespace br::render {
 namespace {
 std::mutex g_backingRetirementMutex;
 std::vector<std::weak_ptr<VersionedGpuBufferBackingPool>> g_backingRetirementWaiters;
-std::atomic_uint64_t g_nextBackingSuspensionIdentity{ 1 };
 std::atomic_uint64_t g_backingFrameRetirementEpoch{ 0 };
 
 void RegisterBackingRetirementWaiter(
@@ -104,10 +103,7 @@ VersionedGpuBufferBackingPool::~VersionedGpuBufferBackingPool() {
 std::uint64_t VersionedGpuBufferBackingPool::SubscribeAvailability(
     std::function<void(std::uint64_t)> callback) {
     if (!callback) return 0;
-    auto identity = g_nextBackingSuspensionIdentity.fetch_add(1, std::memory_order_relaxed);
-    if (identity == 0) {
-        identity = g_nextBackingSuspensionIdentity.fetch_add(1, std::memory_order_relaxed);
-    }
+    const auto identity = AsyncStateGraph::AllocateSuspensionIdentity();
     bool registerPool = false;
     {
         std::lock_guard lock(m_mutex);
