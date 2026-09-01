@@ -3168,8 +3168,14 @@ void Renderer::Update(float elapsedSeconds) {
 					auto* materialManager = commit.committed ? m_pMaterialManager.get() : nullptr;
                     auto committedState = commit.committed ? commit.state : nullptr;
                     auto* stateGraph = m_asyncStateGraph.get();
+                    // Publication acknowledgement advances object-buffer mutation
+                    // coverage and wakes the next admissible graph cut.  Keeping it
+                    // in Background/Cleanup allowed an import-time cleanup flood to
+                    // strand otherwise committed renderer state indefinitely.  Run
+                    // the deferred handoff off-thread in the serialized renderer-
+                    // state domain, where streaming work has bounded precedence.
                     const bool submitted = TaskSchedulerManager::GetInstance().Submit(
-                        m_rendererStateCommitScope, TaskLane::Background, TaskDomain::Cleanup,
+                        m_rendererStateCommitScope, TaskLane::Streaming, TaskDomain::RendererState,
                         "RendererStatePublisher::DeferredCommit",
 						[commit = std::move(commit), objectManager, materialManager,
                             stateGraph, committedState = std::move(committedState)](

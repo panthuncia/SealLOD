@@ -399,9 +399,18 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	// the admitted exact root until it is consumed. Reopening before that exact
 	// root is in the published indirect closure lets obsolete roots outrun their
 	// consumer and retain the entire bounded backing ring.
-	if (m_objectBufferStateRevision != 0 &&
+	// The initialization cut has mutation coverage zero and owns no static
+	// transaction. It may legitimately never be selected by an indirect root
+	// before the first bulk import arrives. Requiring that bootstrap root to be
+	// consumed creates a cycle: the first data-bearing cut cannot be captured,
+	// while the static transaction that would drive indirect publication waits
+	// for that cut. Superseding it is safe because the journal capture contains
+	// the complete current image. Once a data-bearing cut has been submitted,
+	// retain the strict one-root-at-a-time consumer gate.
+	if (m_objectBufferSubmittedMutationGeneration != 0 &&
+		m_objectBufferStateRevision != 0 &&
 		m_activeObjectBufferStateRevision.load(std::memory_order_acquire) <
-			m_objectBufferStateRevision) {
+		m_objectBufferStateRevision) {
 		m_objectBufferGraphDirty.store(true, std::memory_order_release);
 		basic_telemetry::AddCounter("SARP.VersionedBuffer.Object.MailboxCoalesced");
 		return m_objectBufferStateRevision;
@@ -603,7 +612,8 @@ void ObjectManager::AcknowledgePublishedBufferState(
 	const std::shared_ptr<const br::render::PublishedRendererState>& published) {
 	const auto state = published
 		? published->drawRecords.payload.Get<br::render::PublishedObjectBufferState>() : nullptr;
-	if (!state || m_activeObjectBufferStateRevision.load(std::memory_order_acquire) ==
+	if (!state) return;
+	if (m_activeObjectBufferStateRevision.load(std::memory_order_acquire) ==
 		published->drawRecords.revision) return;
 	// DrawRecords and the indirect workloads that consume them form one mutable
 	// publication epoch. Do not advance the journals' previous versions on an

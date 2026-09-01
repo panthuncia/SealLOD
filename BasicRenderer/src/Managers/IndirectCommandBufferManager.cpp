@@ -154,6 +154,22 @@ void IndirectCommandBufferManager::PublishDesiredState(
 		std::lock_guard desiredLock(m_desiredMutex);
 		const auto indirect = publishedState->indirectWorkloads.payload
 			.Get<br::render::PublishedIndirectState>();
+		std::uint64_t publishedDrawCount = 0;
+		if (indirect) {
+			for (const auto& workload : indirect->workloads) {
+				publishedDrawCount += workload.count;
+			}
+		}
+		basic_telemetry::SetGauge("SARP.Indirect.PublishedRootRevision",
+			static_cast<std::int64_t>(publishedState->indirectWorkloads.revision));
+		basic_telemetry::SetGauge("SARP.Indirect.PublishedWorkloadCount",
+			static_cast<std::int64_t>(indirect ? indirect->workloads.size() : 0u));
+		basic_telemetry::SetGauge("SARP.Indirect.PublishedDrawCount",
+			static_cast<std::int64_t>(publishedDrawCount));
+		basic_telemetry::SetGauge("SARP.Indirect.PublishedDrawRecordsRevision",
+			static_cast<std::int64_t>(publishedState->drawRecords.revision));
+		basic_telemetry::SetGauge("SARP.Indirect.PublishedConsumesDrawRecordsRevision",
+			static_cast<std::int64_t>(indirect ? indirect->drawRecordsRoot.revision : 0u));
 		for (const auto& active : indirect
 			? indirect->activeListVersions
 			: std::vector<br::render::PublishedIndirectState::ActiveListVersion>{}) {
@@ -647,6 +663,11 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
     }
 	if (rootRequest) {
 		m_admittedRootRevision.store(snapshot.revision, std::memory_order_release);
+		basic_telemetry::SetGauge("SARP.Indirect.AdmittedRootRevision",
+			static_cast<std::int64_t>(snapshot.revision));
+		basic_telemetry::SetGauge("SARP.Indirect.AdmittedDrawRecordsRevision",
+			static_cast<std::int64_t>(snapshot.objectBufferRequirement
+				? snapshot.objectBufferRequirement->minimumRevision : 0u));
 		m_lastAdmissionRetirementEpoch.store(
 			br::render::VersionedGpuBufferFrameRetirementEpoch(),
 			std::memory_order_release);
