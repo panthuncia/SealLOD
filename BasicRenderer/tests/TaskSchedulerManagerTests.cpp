@@ -193,6 +193,30 @@ int main() {
 		Check(controlStarted.load(std::memory_order_acquire));
 	}
 
+    // Direct CPU submissions use the full TBB arena even when the legacy
+    // domain limit is one. They are counted active only after their bodies
+    // start, so a queued arena task cannot occupy a synthetic admission slot.
+    {
+        auto scope = scheduler.CreateScope("direct-cpu-full-arena");
+        std::atomic<std::uint32_t> started{ 0 };
+        std::atomic<bool> release{ false };
+        for (std::uint32_t index = 0; index < 2; ++index) {
+            Check(scheduler.SubmitCpu(scope, TaskLane::Streaming, TaskDomain::StaticImport,
+                "direct-static-import", [&](const br::TaskContext&) {
+                    started.fetch_add(1, std::memory_order_release);
+                    while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+                }));
+        }
+        const auto deadline = std::chrono::steady_clock::now() + 250ms;
+        while (started.load(std::memory_order_acquire) != 2 &&
+            std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        Check(started.load(std::memory_order_acquire) == 2);
+        const auto stats = scheduler.GetQueueStats();
+        Check(stats.domains[static_cast<std::size_t>(TaskDomain::StaticImport)].active == 2);
+        release.store(true, std::memory_order_release);
+        scope.Wait();
+    }
+
     // Shared scene-graph admission rotates among producer keys without violating
     // FIFO within a key. A deep static-ingestion prefix must not hide ready grass,
     // dependency, or publication work using another key in the same domain/lane.

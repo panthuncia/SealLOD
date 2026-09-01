@@ -2788,7 +2788,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         const auto workClass = continuation
             ? ArtifactWorkClass::Continuation
             : registration.scheduling.initialClass;
-        const bool submitted = scheduler.Submit(scope, lane, registration.domain,
+        const bool submitted = scheduler.SubmitCpu(scope, lane, registration.domain,
             registration.taskName.empty() ? "AsyncStateGraph::Build" : registration.taskName,
             [weak, registration, context = std::move(context), key, revision, generation,
                 taskKind, correlationID,
@@ -3669,7 +3669,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 			}
 			auto continuation = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
 				std::move(waiter.continuation));
-			const bool submitted = scheduler.Submit(scope, waiter.lane, waiter.domain,
+			const bool submitted = scheduler.SubmitCpu(scope, waiter.lane, waiter.domain,
 				"AsyncStateGraph::AwaitExact",
 				[continuation, snapshot](
 					const TaskContext& context) mutable {
@@ -4678,7 +4678,7 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 		}
 		auto callback = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
 			std::move(continuation));
-		const bool submitted = m_impl->scheduler.Submit(m_impl->scope, lane, domain,
+		const bool submitted = m_impl->scheduler.SubmitCpu(m_impl->scope, lane, domain,
 			"AsyncStateGraph::AwaitExactReady",
 			[callback, snapshot](const TaskContext& context) {
 				if (!context.StopRequested()) (*callback)(snapshot);

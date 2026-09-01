@@ -130,6 +130,11 @@ public:
 
     bool Submit(const TaskScope&, TaskLane, TaskDomain, std::string_view,
         std::function<void(const TaskContext&)>&& task, TaskTraceMetadata trace = {});
+    // Enqueue ordinary CPU work directly into the selected oneTBB arena. This
+    // path has no domain or scene-graph pre-admission slot; a task becomes
+    // active only when its body actually starts on a TBB worker.
+    bool SubmitCpu(const TaskScope&, TaskLane, TaskDomain, std::string_view,
+        std::function<void(const TaskContext&)>&& task, TaskTraceMetadata trace = {});
     bool Submit(TaskLane, TaskDomain, std::string_view, std::function<void()>&& task,
         TaskTraceMetadata trace = {});
     bool ScheduleAfter(const TaskScope&, std::chrono::steady_clock::duration, TaskLane, TaskDomain,

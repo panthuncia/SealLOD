@@ -243,15 +243,23 @@ struct TaskSchedulerManager::RuntimeState {
     };
     struct DomainRuntime {
         std::array<std::deque<PendingTask>, static_cast<std::size_t>(TaskLane::Count)> queues;
+        std::uint64_t directQueued{};
         std::uint32_t active{};
+        std::uint32_t directActive{};
         std::uint32_t limit{ 1 };
         std::uint32_t consecutiveFrameCritical{};
         DomainStats stats;
 
         [[nodiscard]] std::size_t Queued() const noexcept {
+            return AdmissionQueued() + directQueued;
+        }
+        [[nodiscard]] std::size_t AdmissionQueued() const noexcept {
             std::size_t result = 0;
             for (const auto& queue : queues) result += queue.size();
             return result;
+        }
+        [[nodiscard]] std::uint32_t Active() const noexcept {
+            return active + directActive;
         }
     };
     struct BlockingTask {
@@ -508,12 +516,130 @@ bool TaskSchedulerManager::Submit(const TaskScope& scope, TaskLane lane, TaskDom
         runtime.stats.queued = runtime.Queued();
         runtime.stats.highWatermark = std::max(runtime.stats.highWatermark, runtime.stats.queued);
         queuedDepth = runtime.stats.queued;
-        activeCount = runtime.active;
+        activeCount = runtime.Active();
     }
     if (tracing) EmitTaskTrace({ TaskTraceEventID::Queued, trace, traceTaskID,
         0, 0, queuedDepth, activeCount, domain, lane, 0 });
     if (IsSceneGraphDomain(domain)) DispatchSceneGraphWork();
     else DispatchDomain(domain);
+    return true;
+}
+
+bool TaskSchedulerManager::SubmitCpu(
+    const TaskScope& scope,
+    TaskLane lane,
+    TaskDomain domain,
+    std::string_view name,
+    std::function<void(const TaskContext&)>&& body,
+    TaskTraceMetadata trace) {
+    const bool tracing = TaskTraceActive();
+    if (tracing && trace.taskKind == 0) trace.taskKind = StableTaskKind(name);
+    const auto traceTaskID = tracing
+        ? m_nextTraceTaskID.fetch_add(1, std::memory_order_relaxed) : 0;
+    const auto reject = [&] {
+        if (tracing) EmitTaskTrace({ TaskTraceEventID::Rejected, trace, traceTaskID,
+            0, 0, 0, 0, domain, lane, 1 });
+        return false;
+    };
+    if (!m_runtimeState || !scope.m_state ||
+        !scope.m_state->accepting.load(std::memory_order_acquire)) return reject();
+    {
+        std::lock_guard lock(scope.m_state->mutex);
+        if (!scope.m_state->accepting.load(std::memory_order_relaxed)) return reject();
+        ++scope.m_state->outstanding;
+    }
+
+    auto task = std::make_shared<RuntimeState::PendingTask>(RuntimeState::PendingTask{
+        scope.m_state, lane, domain, std::string(name), std::move(body),
+        std::chrono::steady_clock::now(), trace, traceTaskID });
+    {
+        std::lock_guard lock(m_runtimeState->taskMutex);
+        auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(domain)];
+        ++runtime.directQueued;
+        runtime.stats.queued = runtime.Queued();
+        runtime.stats.highWatermark = (std::max)(
+            runtime.stats.highWatermark, runtime.stats.queued);
+        task->admittedQueuedDepth = runtime.stats.queued;
+        task->admittedActiveCount = runtime.Active();
+    }
+    if (tracing) {
+        EmitTaskTrace({ TaskTraceEventID::Queued, trace, traceTaskID,
+            0, 0, task->admittedQueuedDepth, task->admittedActiveCount,
+            domain, lane, 0 });
+        EmitTaskTrace({ TaskTraceEventID::Admitted, trace, traceTaskID,
+            0, 0, task->admittedQueuedDepth, task->admittedActiveCount,
+            domain, lane, 0 });
+    }
+
+    SelectArena(*m_runtimeState, lane).enqueue([this, task] {
+        const auto started = std::chrono::steady_clock::now();
+        const auto queuedUs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                started - task->queuedAt).count());
+        std::uint64_t queuedDepth = 0;
+        std::uint32_t activeCount = 0;
+        {
+            std::lock_guard lock(m_runtimeState->taskMutex);
+            auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task->domain)];
+            if (runtime.directQueued != 0) --runtime.directQueued;
+            ++runtime.directActive;
+            runtime.stats.queued = runtime.Queued();
+            runtime.stats.active = runtime.Active();
+            queuedDepth = runtime.stats.queued;
+            activeCount = runtime.Active();
+        }
+        if (task->traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Started,
+            task->trace, task->traceTaskID, queuedUs, 0, queuedDepth,
+            activeCount, task->domain, task->lane, 0 });
+
+        auto contextState = std::make_shared<TaskContext::State>();
+        contextState->scope = task->scope;
+        TaskContext context(contextState);
+        std::exception_ptr error;
+        const bool cancelled = context.StopRequested();
+        const bool prior = g_inSchedulerTask;
+        g_inSchedulerTask = true;
+        if (!cancelled) {
+            TracyCZone(zone, 1);
+            TracyCZoneName(zone, task->name.data(), task->name.size());
+            try { task->body(context); }
+            catch (...) { error = std::current_exception(); }
+            TracyCZoneEnd(zone);
+        }
+        g_inSchedulerTask = prior;
+        LogTaskException(task->name, task->domain, error);
+        const auto elapsedUs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count());
+        if (task->lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros)
+            LogLongTask(task->name, task->domain, elapsedUs);
+        CompleteScope(task->scope, error);
+        {
+            std::lock_guard lock(m_runtimeState->taskMutex);
+            auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task->domain)];
+            --runtime.directActive;
+            runtime.stats.active = runtime.Active();
+            runtime.stats.queueWaitMicros += queuedUs;
+            if (queuedUs > runtime.stats.maxQueueWaitMicros) {
+                runtime.stats.maxQueueWaitMicros = queuedUs;
+                runtime.stats.maxQueueWaitTask = task->name;
+            }
+            runtime.stats.executionMicros += elapsedUs;
+            if (elapsedUs > runtime.stats.maxExecutionMicros) {
+                runtime.stats.maxExecutionMicros = elapsedUs;
+                runtime.stats.maxExecutionTask = task->name;
+            }
+            if (cancelled) ++runtime.stats.cancelled;
+            else if (error) ++runtime.stats.failed;
+            else ++runtime.stats.completed;
+            if (task->lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros)
+                ++runtime.stats.longTasks;
+        }
+        if (task->traceTaskID != 0) EmitTaskTrace({
+            cancelled ? TaskTraceEventID::Cancelled : TaskTraceEventID::Completed,
+            task->trace, task->traceTaskID, queuedUs, elapsedUs, 0, 0,
+            task->domain, task->lane, static_cast<std::uint8_t>(error ? 2 : 0) });
+    });
     return true;
 }
 
@@ -529,7 +655,7 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
     {
         std::lock_guard lock(m_runtimeState->taskMutex);
         auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(domain)];
-        while (runtime.active < runtime.limit && runtime.Queued() != 0) {
+        while (runtime.active < runtime.limit && runtime.AdmissionQueued() != 0) {
             // Graph-critical state producers must not sit behind a scene-load flood
             // of ordinary renderer mutations.  Bound the priority burst so lower
             // lanes still make deterministic progress under sustained critical work.
@@ -556,9 +682,9 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
             auto& queue = runtime.queues[selected];
             launch.push_back(std::move(queue.front())); queue.pop_front(); ++runtime.active;
             launch.back().admittedQueuedDepth = runtime.Queued();
-            launch.back().admittedActiveCount = runtime.active;
+            launch.back().admittedActiveCount = runtime.Active();
         }
-        runtime.stats.queued = runtime.Queued(); runtime.stats.active = runtime.active;
+        runtime.stats.queued = runtime.Queued(); runtime.stats.active = runtime.Active();
     }
     for (auto& task : launch) {
         if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Admitted,
@@ -589,7 +715,7 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
             {
                 std::lock_guard lock(m_runtimeState->taskMutex);
                 auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task.domain)];
-                --runtime.active; runtime.stats.active = runtime.active;
+                --runtime.active; runtime.stats.active = runtime.Active();
                 runtime.stats.queueWaitMicros += queuedUs;
                 if (queuedUs > runtime.stats.maxQueueWaitMicros) {
                     runtime.stats.maxQueueWaitMicros = queuedUs;
@@ -732,9 +858,9 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
             ++state.sceneGraphActive;
             state.sceneGraphDomainCursor = (domainIndex + 1u) % kDomainCount;
             launch.back().admittedQueuedDepth = runtime.Queued();
-            launch.back().admittedActiveCount = runtime.active;
+            launch.back().admittedActiveCount = runtime.Active();
             runtime.stats.queued = runtime.Queued();
-            runtime.stats.active = runtime.active;
+            runtime.stats.active = runtime.Active();
         }
     }
     for (auto& task : launch) {
@@ -767,7 +893,7 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
                 auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task.domain)];
                 --runtime.active;
                 --m_runtimeState->sceneGraphActive;
-                runtime.stats.active = runtime.active;
+                runtime.stats.active = runtime.Active();
                 runtime.stats.queueWaitMicros += queuedUs;
                 if (queuedUs > runtime.stats.maxQueueWaitMicros) {
                     runtime.stats.maxQueueWaitMicros = queuedUs;
