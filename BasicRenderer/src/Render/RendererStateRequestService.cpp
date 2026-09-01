@@ -96,7 +96,11 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
         } else {
             basic_telemetry::AddCounter("SARP.RendererStateManifest.UnchangedCommits");
         }
-        RequestManifest();
+        // PublishArtifact only enqueues a candidate. Renderer::Update commits it
+        // before calling RefreshPublication for the frame. Building a successor
+        // here would therefore capture the previous active epoch and guarantees
+        // needless rejection whenever roots arrived during this build. Let the
+        // level-trigger below chain the successor from the committed base.
         return;
     }
     const auto fragment = artifact.payload.Get<RendererStateFragmentArtifact>();
@@ -148,7 +152,6 @@ void RendererStateRequestService::RefreshPublication() {
     if (!m_accepting.load(std::memory_order_acquire)) return;
     const auto active = m_publisher.Active();
     bool needsManifest = false;
-    bool markedDirty = false;
     {
         std::lock_guard lock(m_mutex);
         for (std::size_t index = 0; index < m_roots.size() && !needsManifest; ++index) {
@@ -169,14 +172,17 @@ void RendererStateRequestService::RefreshPublication() {
         if (needsManifest && !m_manifestInFlight &&
             m_manifestDirtyGeneration <= m_manifestSubmittedDirtyGeneration) {
             ++m_manifestDirtyGeneration;
-            markedDirty = true;
             basic_telemetry::AddCounter("SARP.RendererStateManifest.WakeRequests");
             basic_telemetry::AddCounter("SARP.RendererStateManifest.LevelTriggeredWakes");
             basic_telemetry::SetGauge("SARP.RendererStateManifest.DirtyGeneration",
                 static_cast<std::int64_t>(m_manifestDirtyGeneration));
         }
     }
-    if (needsManifest && (markedDirty || m_manifestInFlight)) RequestManifest();
+    // RequestManifest performs both the dirty-generation and single-in-flight
+    // checks. Calling it for every level-triggered newer root is required when
+    // dirtyGeneration already exceeds submittedGeneration: that is precisely
+    // the case left after a candidate was enqueued and then committed.
+    if (needsManifest) RequestManifest();
 }
 
 void RendererStateRequestService::MarkManifestDirty() {
@@ -233,9 +239,14 @@ void RendererStateRequestService::RequestManifest() {
         m_manifestInFlightRevision = manifestRevision;
         m_manifestInFlight = true;
     }
-    const auto request = m_graph.SubmitLatestIntent({ ArtifactKind::FrameManifest, 0, 0 },
+    const auto status = m_graph.SubmitLatestIntent({ ArtifactKind::FrameManifest, 0, 0 },
         manifestRevision, {}, ArtifactPayload::Make<ManifestInput>(input), manifestRevision);
-    if (static_cast<bool>(request)) {
+    // ArtifactRequestStatus is not a truth value: Accepted intentionally has
+    // the zero enumerator.  Converting it to bool inverted the common path,
+    // cleared the in-flight revision, and caused OnArtifactReady to discard
+    // every successfully built manifest.
+    if (status == ArtifactRequestStatus::Accepted ||
+        status == ArtifactRequestStatus::AlreadyDesired) {
         basic_telemetry::AddCounter("SARP.RendererStateManifest.BuildsSubmitted");
         return;
     }
@@ -246,6 +257,8 @@ void RendererStateRequestService::RequestManifest() {
         m_manifestSubmittedDirtyGeneration = m_manifestCompletedDirtyGeneration;
     }
     basic_telemetry::AddCounter("SARP.RendererStateManifest.SubmissionFailures");
+    basic_telemetry::SetGauge("SARP.RendererStateManifest.SubmissionFailureStatus",
+        static_cast<std::int64_t>(status));
 }
 
 ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBuildContext& context) {
