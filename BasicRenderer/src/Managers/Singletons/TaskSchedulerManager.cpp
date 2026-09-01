@@ -572,10 +572,6 @@ bool TaskSchedulerManager::SubmitCpu(
     }
 
     SelectArena(*m_runtimeState, lane).enqueue([this, task] {
-        const auto started = std::chrono::steady_clock::now();
-        const auto queuedUs = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                started - task->queuedAt).count());
         std::uint64_t queuedDepth = 0;
         std::uint32_t activeCount = 0;
         {
@@ -588,9 +584,14 @@ bool TaskSchedulerManager::SubmitCpu(
             queuedDepth = runtime.stats.queued;
             activeCount = runtime.Active();
         }
+        const auto bodyReady = std::chrono::steady_clock::now();
+        const auto queuedUs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                bodyReady - task->queuedAt).count());
         if (task->traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Started,
             task->trace, task->traceTaskID, queuedUs, 0, queuedDepth,
             activeCount, task->domain, task->lane, 0 });
+        const auto started = std::chrono::steady_clock::now();
 
         auto contextState = std::make_shared<TaskContext::State>();
         contextState->scope = task->scope;
@@ -606,11 +607,11 @@ bool TaskSchedulerManager::SubmitCpu(
             catch (...) { error = std::current_exception(); }
             TracyCZoneEnd(zone);
         }
-        g_inSchedulerTask = prior;
-        LogTaskException(task->name, task->domain, error);
         const auto elapsedUs = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - started).count());
+        g_inSchedulerTask = prior;
+        LogTaskException(task->name, task->domain, error);
         if (task->lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros)
             LogLongTask(task->name, task->domain, elapsedUs);
         CompleteScope(task->scope, error);
@@ -691,23 +692,24 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
             task.trace, task.traceTaskID, 0, 0, task.admittedQueuedDepth,
             task.admittedActiveCount, task.domain, task.lane, 0 });
         SelectArena(*m_runtimeState, task.lane).enqueue([this, task = std::move(task)]() {
-            const auto started = std::chrono::steady_clock::now();
-            const auto queuedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(started - task.queuedAt).count());
-            if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Started,
-                task.trace, task.traceTaskID, queuedUs, 0, task.admittedQueuedDepth,
-                task.admittedActiveCount, task.domain, task.lane, 0 });
             auto contextState = std::make_shared<TaskContext::State>(); contextState->scope = task.scope;
             TaskContext context(contextState); std::exception_ptr error;
             const bool cancelled = context.StopRequested();
+            const auto bodyReady = std::chrono::steady_clock::now();
+            const auto queuedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(bodyReady - task.queuedAt).count());
+            if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Started,
+                task.trace, task.traceTaskID, queuedUs, 0, task.admittedQueuedDepth,
+                task.admittedActiveCount, task.domain, task.lane, 0 });
+            const auto started = std::chrono::steady_clock::now();
             const bool prior = g_inSchedulerTask; g_inSchedulerTask = true;
             if (!cancelled) {
                 TracyCZone(zone, 1); TracyCZoneName(zone, task.name.data(), task.name.size());
                 try { task.body(context); } catch (...) { error = std::current_exception(); }
                 TracyCZoneEnd(zone);
             }
+            const auto elapsedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
             g_inSchedulerTask = prior;
 			LogTaskException(task.name, task.domain, error);
-            const auto elapsedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
             if (task.lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros) {
                 LogLongTask(task.name, task.domain, elapsedUs);
             }
@@ -868,23 +870,24 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
             task.trace, task.traceTaskID, 0, 0, task.admittedQueuedDepth,
             task.admittedActiveCount, task.domain, task.lane, 0 });
         SelectArena(*m_runtimeState, task.lane).enqueue([this, task = std::move(task)]() {
-            const auto started = std::chrono::steady_clock::now();
-            const auto queuedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(started - task.queuedAt).count());
-            if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Started,
-                task.trace, task.traceTaskID, queuedUs, 0, task.admittedQueuedDepth,
-                task.admittedActiveCount, task.domain, task.lane, 0 });
             auto contextState = std::make_shared<TaskContext::State>(); contextState->scope = task.scope;
             TaskContext context(contextState); std::exception_ptr error;
             const bool cancelled = context.StopRequested();
+            const auto bodyReady = std::chrono::steady_clock::now();
+            const auto queuedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(bodyReady - task.queuedAt).count());
+            if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Started,
+                task.trace, task.traceTaskID, queuedUs, 0, task.admittedQueuedDepth,
+                task.admittedActiveCount, task.domain, task.lane, 0 });
+            const auto started = std::chrono::steady_clock::now();
             const bool prior = g_inSchedulerTask; g_inSchedulerTask = true;
             if (!cancelled) {
                 TracyCZone(zone, 1); TracyCZoneName(zone, task.name.data(), task.name.size());
                 try { task.body(context); } catch (...) { error = std::current_exception(); }
                 TracyCZoneEnd(zone);
             }
+            const auto elapsedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
             g_inSchedulerTask = prior;
             LogTaskException(task.name, task.domain, error);
-            const auto elapsedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
             if (task.lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros)
                 LogLongTask(task.name, task.domain, elapsedUs);
             CompleteScope(task.scope, error);
