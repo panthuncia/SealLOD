@@ -162,6 +162,7 @@ public:
 private:
     TaskSchedulerManager() = default;
     void DispatchDomain(TaskDomain domain);
+    void DispatchSceneGraphWork();
     void ParallelForImpl(std::string_view, std::size_t, std::function<void(std::size_t)>&&);
     void ParallelForLimitedImpl(std::string_view, std::size_t, std::size_t,
         std::function<void(std::size_t)>&&);

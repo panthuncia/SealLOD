@@ -2760,7 +2760,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 	void FlushDeferredRequestTrace(RequestDeferredCleanup& cleanup);
 
     void SubmitBuild(const ArtifactProducerRegistration& registration, ArtifactBuildContext context,
-        std::shared_ptr<const std::atomic_bool> superseded) {
+        std::shared_ptr<const std::atomic_bool> superseded, bool continuation) {
         auto weak = weak_from_this();
         const auto key = context.key;
         const auto revision = context.revision;
@@ -2782,7 +2782,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				}
 			}
         }
-        const bool submitted = scheduler.Submit(scope, registration.lane, registration.domain,
+        const auto lane = continuation
+            ? registration.scheduling.continuationLane
+            : registration.lane;
+        const auto workClass = continuation
+            ? ArtifactWorkClass::Continuation
+            : registration.scheduling.initialClass;
+        const bool submitted = scheduler.Submit(scope, lane, registration.domain,
             registration.taskName.empty() ? "AsyncStateGraph::Build" : registration.taskName,
             [weak, registration, context = std::move(context), key, revision, generation,
                 taskKind, correlationID,
@@ -2823,9 +2829,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             }, TaskTraceMetadata{
                 .taskKind = taskKind,
                 .correlationID = correlationID,
-                .admissionKey = registration.scheduling.admissionKey,
-                .workClass = static_cast<std::uint8_t>(registration.scheduling.initialClass),
-                .schedulingReason = 0,
+                .admissionKey = registration.scheduling.admissionKey != 0
+                    ? registration.scheduling.admissionKey : taskKind,
+                .workClass = static_cast<std::uint8_t>(workClass),
+                .schedulingReason = static_cast<std::uint8_t>(continuation ? 1 : 0),
                 .admissionGroup = registration.scheduling.admissionGroup });
         if (!submitted) {
             if (auto session = AcquireTrace()) {
@@ -3235,6 +3242,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             ArtifactProducerRegistration registration;
             ArtifactBuildContext context;
             std::shared_ptr<const std::atomic_bool> superseded;
+            bool continuation = false;
         };
         std::vector<PendingBuild> builds;
         std::vector<ArtifactSnapshot> ready;
@@ -3496,6 +3504,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     ready.push_back(MakeSnapshot(node));
                     continue;
                 }
+                const bool continuation = node.buildAttempted;
                 node.buildInFlight = true;
                 node.buildAttempted = true;
                 node.buildStartedAt = std::chrono::steady_clock::now();
@@ -3529,7 +3538,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				}
 				ArtifactBuildContext context{ node.key, node.desiredRevision, node.generation,
 					std::move(dependencySnapshots), node.input, node.checkpoint, {} };
-                builds.emplace_back(producer->second, std::move(context), node.superseded);
+                builds.emplace_back(producer->second, std::move(context), node.superseded,
+                    continuation);
 				if (std::chrono::steady_clock::now() - started >= maxDuration) break;
             }
 			recordApplyPhase("apply_pending_builds");
@@ -3646,8 +3656,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 			gpuSignals.push({ subscription.key });
 		}
 		hasImmediateWork = hasImmediateWork || !pendingGpuSubscriptions.empty();
-        for (auto& [registration, context, superseded] : builds)
-            SubmitBuild(registration, std::move(context), std::move(superseded));
+        for (auto& [registration, context, superseded, continuation] : builds)
+            SubmitBuild(registration, std::move(context), std::move(superseded), continuation);
         EnqueueAcceptances(std::move(acceptanceDispatches));
 		for (auto& [action, snapshot] : accepted) if (action) action(snapshot);
 		for (auto& [waiter, snapshot] : exactDispatches) {

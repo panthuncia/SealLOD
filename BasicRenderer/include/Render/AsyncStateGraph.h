@@ -543,7 +543,9 @@ struct ArtifactSchedulingPolicy {
     ArtifactWorkClass initialClass = ArtifactWorkClass::Ingestion;
     TaskLane initialLane = TaskLane::Streaming;
     TaskLane continuationLane = TaskLane::FrameCritical;
-    std::uint8_t admissionGroup = 0;
+    // All renderer graph producers share the scheduler's bounded scene-work
+    // admission group unless a registration explicitly opts out.
+    std::uint8_t admissionGroup = 1;
     std::uint64_t admissionKey = 0;
 };
 

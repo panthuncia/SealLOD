@@ -38,6 +38,21 @@ constexpr std::size_t kDomainCount = static_cast<std::size_t>(TaskDomain::Count)
 thread_local bool g_inSchedulerTask = false;
 const char* DomainName(TaskDomain domain);
 
+constexpr bool IsSceneGraphDomain(TaskDomain domain) noexcept {
+    switch (domain) {
+    case TaskDomain::RendererState:
+    case TaskDomain::StaticImport:
+    case TaskDomain::GraphControl:
+    case TaskDomain::GraphPublication:
+    case TaskDomain::StaticImportControl:
+    case TaskDomain::MaterialAcceptance:
+    case TaskDomain::GpuBufferBuild:
+        return true;
+    default:
+        return false;
+    }
+}
+
 constexpr std::uint64_t StableTaskKind(std::string_view value) noexcept {
     std::uint64_t hash = 1469598103934665603ull;
     for (const unsigned char character : value) {
@@ -252,6 +267,10 @@ struct TaskSchedulerManager::RuntimeState {
     std::array<std::unique_ptr<CpuSetObserver>, kLaneCount> observers;
     std::array<std::shared_ptr<TaskScope::State>, kDomainCount> processScopes;
     std::array<DomainRuntime, kDomainCount> domains;
+    std::uint32_t sceneGraphActive{};
+    std::uint32_t sceneGraphLimit{ 1 };
+    std::uint32_t sceneGraphConsecutiveCritical{};
+    std::size_t sceneGraphDomainCursor{};
     std::vector<ULONG> workerCpuSets;
     mutable std::mutex taskMutex;
     std::atomic_bool stopping{ false };
@@ -392,6 +411,7 @@ void TaskSchedulerManager::Initialize(Config config) {
     state.domains[static_cast<std::size_t>(TaskDomain::MaterialAcceptance)].limit = 1u;
     state.domains[static_cast<std::size_t>(TaskDomain::GpuBufferBuild)].limit =
         (std::min)(4u, m_workerCount);
+    state.sceneGraphLimit = m_workerCount;
 
     state.timerThread = std::thread([this] {
         TracyCSetThreadName("Task Timer"); ApplyCpuSets(m_runtimeState->workerCpuSets);
@@ -490,7 +510,8 @@ bool TaskSchedulerManager::Submit(const TaskScope& scope, TaskLane lane, TaskDom
     }
     if (tracing) EmitTaskTrace({ TaskTraceEventID::Queued, trace, traceTaskID,
         0, 0, queuedDepth, activeCount, domain, lane, 0 });
-    DispatchDomain(domain);
+    if (IsSceneGraphDomain(domain)) DispatchSceneGraphWork();
+    else DispatchDomain(domain);
     return true;
 }
 
@@ -585,6 +606,156 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
                 task.trace, task.traceTaskID, queuedUs, elapsedUs, 0, 0,
                 task.domain, task.lane, static_cast<std::uint8_t>(error ? 2 : 0) });
             DispatchDomain(task.domain);
+        });
+    }
+}
+
+void TaskSchedulerManager::DispatchSceneGraphWork() {
+    if (!m_runtimeState) return;
+    std::vector<RuntimeState::PendingTask> launch;
+    {
+        std::lock_guard lock(m_runtimeState->taskMutex);
+        auto& state = *m_runtimeState;
+        constexpr std::uint32_t kMaximumCriticalBurst = 8;
+        constexpr auto kStarvationLimit = std::chrono::seconds(2);
+        const auto now = std::chrono::steady_clock::now();
+
+        // ArtifactWorkClass values intentionally remain a scheduler-independent
+        // numeric ABI: Publication=0, Continuation=1, Ingestion=2, Maintenance=3.
+        // Non-graph service tasks have no admission group, so retain their lane
+        // semantics while selecting them from the same bounded pool.
+        const auto effectiveWorkClass = [](const RuntimeState::PendingTask& task) {
+            if (task.trace.admissionGroup != 0) {
+                if (task.trace.workClass == 1) return std::uint8_t{ 1 };
+                if (task.domain == TaskDomain::GraphPublication ||
+                    task.domain == TaskDomain::RendererState)
+                    return std::uint8_t{ 0 };
+                return task.trace.workClass;
+            }
+            switch (task.lane) {
+            case TaskLane::FrameCritical: return std::uint8_t{ 0 };
+            case TaskLane::Streaming: return std::uint8_t{ 2 };
+            case TaskLane::Background: return std::uint8_t{ 3 };
+            default: return std::uint8_t{ 3 };
+            }
+        };
+        const auto select = [&](bool starvedOnly, std::uint8_t classFilter)
+            -> std::optional<std::pair<std::size_t, std::size_t>> {
+            std::optional<std::pair<std::size_t, std::size_t>> selected;
+            std::chrono::steady_clock::time_point oldest{};
+            for (std::size_t offset = 0; offset < kDomainCount; ++offset) {
+                const auto domainIndex = (state.sceneGraphDomainCursor + offset) % kDomainCount;
+                const auto domain = static_cast<TaskDomain>(domainIndex);
+                if (!IsSceneGraphDomain(domain)) continue;
+                auto& runtime = state.domains[domainIndex];
+                if (runtime.active >= runtime.limit) continue;
+                for (std::size_t laneIndex = 0; laneIndex < kLaneCount; ++laneIndex) {
+                    auto& queue = runtime.queues[laneIndex];
+                    if (queue.empty()) continue;
+                    if (classFilter < 4 && effectiveWorkClass(queue.front()) != classFilter)
+                        continue;
+                    const bool starved = now - queue.front().queuedAt >= kStarvationLimit;
+                    if (starvedOnly != starved) continue;
+                    if (!selected || queue.front().queuedAt < oldest) {
+                        selected = { domainIndex, laneIndex };
+                        oldest = queue.front().queuedAt;
+                    }
+                }
+            }
+            return selected;
+        };
+
+        while (state.sceneGraphActive < state.sceneGraphLimit) {
+            constexpr std::uint8_t kAnyClass = 4;
+            constexpr std::uint8_t kPublication = 0;
+            constexpr std::uint8_t kContinuation = 1;
+            constexpr std::uint8_t kIngestion = 2;
+            constexpr std::uint8_t kMaintenance = 3;
+            auto selected = select(true, kAnyClass);
+            if (!selected) {
+                if (state.sceneGraphConsecutiveCritical < kMaximumCriticalBurst) {
+                    selected = select(false, kPublication);
+                    if (!selected) selected = select(false, kContinuation);
+                }
+                if (!selected) {
+                    selected = select(false, kIngestion);
+                    if (!selected) selected = select(false, kMaintenance);
+                    state.sceneGraphConsecutiveCritical = 0;
+                } else {
+                    ++state.sceneGraphConsecutiveCritical;
+                }
+                if (!selected) {
+                    selected = select(false, kPublication);
+                    if (!selected) selected = select(false, kContinuation);
+                }
+            }
+            if (!selected) break;
+            const auto [domainIndex, laneIndex] = *selected;
+            auto& runtime = state.domains[domainIndex];
+            auto& queue = runtime.queues[laneIndex];
+            launch.push_back(std::move(queue.front()));
+            queue.pop_front();
+            ++runtime.active;
+            ++state.sceneGraphActive;
+            state.sceneGraphDomainCursor = (domainIndex + 1u) % kDomainCount;
+            launch.back().admittedQueuedDepth = runtime.Queued();
+            launch.back().admittedActiveCount = runtime.active;
+            runtime.stats.queued = runtime.Queued();
+            runtime.stats.active = runtime.active;
+        }
+    }
+    for (auto& task : launch) {
+        if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Admitted,
+            task.trace, task.traceTaskID, 0, 0, task.admittedQueuedDepth,
+            task.admittedActiveCount, task.domain, task.lane, 0 });
+        SelectArena(*m_runtimeState, task.lane).enqueue([this, task = std::move(task)]() {
+            const auto started = std::chrono::steady_clock::now();
+            const auto queuedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(started - task.queuedAt).count());
+            if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Started,
+                task.trace, task.traceTaskID, queuedUs, 0, task.admittedQueuedDepth,
+                task.admittedActiveCount, task.domain, task.lane, 0 });
+            auto contextState = std::make_shared<TaskContext::State>(); contextState->scope = task.scope;
+            TaskContext context(contextState); std::exception_ptr error;
+            const bool cancelled = context.StopRequested();
+            const bool prior = g_inSchedulerTask; g_inSchedulerTask = true;
+            if (!cancelled) {
+                TracyCZone(zone, 1); TracyCZoneName(zone, task.name.data(), task.name.size());
+                try { task.body(context); } catch (...) { error = std::current_exception(); }
+                TracyCZoneEnd(zone);
+            }
+            g_inSchedulerTask = prior;
+            LogTaskException(task.name, task.domain, error);
+            const auto elapsedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
+            if (task.lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros)
+                LogLongTask(task.name, task.domain, elapsedUs);
+            CompleteScope(task.scope, error);
+            {
+                std::lock_guard lock(m_runtimeState->taskMutex);
+                auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task.domain)];
+                --runtime.active;
+                --m_runtimeState->sceneGraphActive;
+                runtime.stats.active = runtime.active;
+                runtime.stats.queueWaitMicros += queuedUs;
+                if (queuedUs > runtime.stats.maxQueueWaitMicros) {
+                    runtime.stats.maxQueueWaitMicros = queuedUs;
+                    runtime.stats.maxQueueWaitTask = task.name;
+                }
+                runtime.stats.executionMicros += elapsedUs;
+                if (elapsedUs > runtime.stats.maxExecutionMicros) {
+                    runtime.stats.maxExecutionMicros = elapsedUs;
+                    runtime.stats.maxExecutionTask = task.name;
+                }
+                if (cancelled) ++runtime.stats.cancelled;
+                else if (error) ++runtime.stats.failed;
+                else ++runtime.stats.completed;
+                if (task.lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros)
+                    ++runtime.stats.longTasks;
+            }
+            if (task.traceTaskID != 0) EmitTaskTrace({
+                cancelled ? TaskTraceEventID::Cancelled : TaskTraceEventID::Completed,
+                task.trace, task.traceTaskID, queuedUs, elapsedUs, 0, 0,
+                task.domain, task.lane, static_cast<std::uint8_t>(error ? 2 : 0) });
+            DispatchSceneGraphWork();
         });
     }
 }
