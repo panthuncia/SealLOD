@@ -94,10 +94,12 @@ private:
     };
     struct ManifestInput {
         std::uint64_t baseEpoch = 0;
+        std::uint64_t dirtyGeneration = 0;
         std::shared_ptr<const PublishedRendererState> base;
         std::vector<ArtifactSnapshot> roots;
         std::shared_ptr<PublicationNodeCache> publicationNodes;
     };
+    void MarkManifestDirty();
     void RequestManifest();
     static ArtifactBuildResult BuildManifest(const ArtifactBuildContext& context);
 
@@ -109,6 +111,11 @@ private:
     // when interdependent slots complete out of order.
     std::array<std::vector<ArtifactSnapshot>, kPublishedFragmentCount> m_roots;
     std::uint64_t m_manifestRevision = 0;
+    std::uint64_t m_manifestDirtyGeneration = 0;
+    std::uint64_t m_manifestSubmittedDirtyGeneration = 0;
+    std::uint64_t m_manifestCompletedDirtyGeneration = 0;
+    std::uint64_t m_manifestInFlightRevision = 0;
+    bool m_manifestInFlight = false;
     std::shared_ptr<PublicationNodeCache> m_publicationNodes =
         std::make_shared<PublicationNodeCache>();
     std::atomic_bool m_accepting{ true };

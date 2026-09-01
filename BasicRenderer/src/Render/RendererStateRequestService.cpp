@@ -67,7 +67,36 @@ ArtifactDiagnostic RendererStateRequestService::Diagnose(ArtifactKey key) const 
 void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifact) {
     if (!m_accepting.load(std::memory_order_acquire)) return;
     if (artifact.key.kind == ArtifactKind::FrameManifest) {
-        (void)m_publisher.PublishArtifact(artifact);
+        const bool publishable = artifact.readiness == ArtifactReadiness::UploadSubmitted ||
+            artifact.readiness == ArtifactReadiness::GpuReady ||
+            artifact.readiness == ArtifactReadiness::Published;
+        const bool terminal = artifact.readiness == ArtifactReadiness::Failed ||
+            artifact.readiness == ArtifactReadiness::Cancelled ||
+            artifact.readiness == ArtifactReadiness::Superseded;
+        if (!publishable && !terminal) return;
+        std::uint64_t coveredDirtyGenerations = 0;
+        {
+            std::lock_guard lock(m_mutex);
+            if (artifact.revision == m_manifestInFlightRevision) {
+                coveredDirtyGenerations = m_manifestSubmittedDirtyGeneration -
+                    (std::min)(m_manifestCompletedDirtyGeneration,
+                        m_manifestSubmittedDirtyGeneration);
+                m_manifestCompletedDirtyGeneration = m_manifestSubmittedDirtyGeneration;
+                m_manifestInFlight = false;
+                m_manifestInFlightRevision = 0;
+            } else {
+                return;
+            }
+        }
+        basic_telemetry::AddCounter("SARP.RendererStateManifest.BuildsCompleted");
+        basic_telemetry::Record("SARP.RendererStateManifest.DirtyGenerationsCovered",
+            coveredDirtyGenerations);
+        if (m_publisher.PublishArtifact(artifact)) {
+            basic_telemetry::AddCounter("SARP.RendererStateManifest.AcceptedCommits");
+        } else {
+            basic_telemetry::AddCounter("SARP.RendererStateManifest.UnchangedCommits");
+        }
+        RequestManifest();
         return;
     }
     const auto fragment = artifact.payload.Get<RendererStateFragmentArtifact>();
@@ -80,8 +109,14 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
         const auto existing = std::ranges::find_if(roots, [&](const ArtifactSnapshot& value) {
             return value.Version() == artifact.Version();
         });
-        if (existing != roots.end()) *existing = artifact;
-        else roots.push_back(artifact);
+        bool changed = false;
+        if (existing != roots.end()) {
+            changed = existing->readiness != artifact.readiness;
+            *existing = artifact;
+        } else {
+            roots.push_back(artifact);
+            changed = true;
+        }
 
         const auto newest = std::ranges::max_element(roots, [](const ArtifactSnapshot& left,
             const ArtifactSnapshot& right) {
@@ -96,12 +131,17 @@ void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifa
 			// state as their base, so only the newest candidate root belongs here.
             return value.Version() != newestVersion;
         });
+        if (!changed) return;
+        ++m_manifestDirtyGeneration;
+        basic_telemetry::AddCounter("SARP.RendererStateManifest.WakeRequests");
+        basic_telemetry::SetGauge("SARP.RendererStateManifest.DirtyGeneration",
+            static_cast<std::int64_t>(m_manifestDirtyGeneration));
     }
     RequestManifest();
 }
 
 void RendererStateRequestService::OnCandidateRejected(std::uint64_t) {
-    if (m_accepting.load(std::memory_order_acquire)) RequestManifest();
+    if (m_accepting.load(std::memory_order_acquire)) MarkManifestDirty();
 }
 
 void RendererStateRequestService::RefreshPublication() {
@@ -125,12 +165,32 @@ void RendererStateRequestService::RefreshPublication() {
     if (needsManifest) RequestManifest();
 }
 
-void RendererStateRequestService::RequestManifest() {
-    auto input = std::make_shared<ManifestInput>();
+void RendererStateRequestService::MarkManifestDirty() {
     {
         std::lock_guard lock(m_mutex);
+        if (!m_accepting.load(std::memory_order_acquire)) return;
+        ++m_manifestDirtyGeneration;
+        basic_telemetry::AddCounter("SARP.RendererStateManifest.WakeRequests");
+        basic_telemetry::SetGauge("SARP.RendererStateManifest.DirtyGeneration",
+            static_cast<std::int64_t>(m_manifestDirtyGeneration));
+    }
+    RequestManifest();
+}
+
+void RendererStateRequestService::RequestManifest() {
+    auto input = std::make_shared<ManifestInput>();
+    std::uint64_t manifestRevision = 0;
+    {
+        std::lock_guard lock(m_mutex);
+        if (!m_accepting.load(std::memory_order_acquire) ||
+            m_manifestDirtyGeneration <= m_manifestSubmittedDirtyGeneration) return;
+        if (m_manifestInFlight) {
+            basic_telemetry::AddCounter("SARP.RendererStateManifest.CoalescedWakes");
+            return;
+        }
         input->base = m_publisher.Active();
         input->baseEpoch = input->base ? input->base->epoch : 0u;
+        input->dirtyGeneration = m_manifestDirtyGeneration;
         input->publicationNodes = m_publicationNodes;
         input->roots.reserve(m_roots.size() * 2u);
         const auto appendRoot = [&input](const ArtifactSnapshot& root) {
@@ -154,10 +214,24 @@ void RendererStateRequestService::RequestManifest() {
                 if (dependencyRoot && dependencyRoot->publishRoot) appendRoot(dependency);
             }
         }
-        ++m_manifestRevision;
+        manifestRevision = ++m_manifestRevision;
+        m_manifestSubmittedDirtyGeneration = input->dirtyGeneration;
+        m_manifestInFlightRevision = manifestRevision;
+        m_manifestInFlight = true;
     }
-    (void)m_graph.SubmitLatestIntent({ ArtifactKind::FrameManifest, 0, 0 }, m_manifestRevision, {},
-        ArtifactPayload::Make<ManifestInput>(std::move(input)), m_manifestRevision);
+    const auto request = m_graph.SubmitLatestIntent({ ArtifactKind::FrameManifest, 0, 0 },
+        manifestRevision, {}, ArtifactPayload::Make<ManifestInput>(input), manifestRevision);
+    if (static_cast<bool>(request)) {
+        basic_telemetry::AddCounter("SARP.RendererStateManifest.BuildsSubmitted");
+        return;
+    }
+    std::lock_guard lock(m_mutex);
+    if (m_manifestInFlightRevision == manifestRevision) {
+        m_manifestInFlight = false;
+        m_manifestInFlightRevision = 0;
+        m_manifestSubmittedDirtyGeneration = m_manifestCompletedDirtyGeneration;
+    }
+    basic_telemetry::AddCounter("SARP.RendererStateManifest.SubmissionFailures");
 }
 
 ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBuildContext& context) {
@@ -447,6 +521,8 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
 void RendererStateRequestService::Stop() {
     if (!m_accepting.exchange(false, std::memory_order_acq_rel)) return;
     std::lock_guard lock(m_mutex);
+    m_manifestInFlight = false;
+    m_manifestInFlightRevision = 0;
     for (auto& roots : m_roots) roots.clear();
 }
 
