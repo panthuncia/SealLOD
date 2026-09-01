@@ -11,6 +11,7 @@
 #include <optional>
 #include <queue>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -271,6 +272,7 @@ struct TaskSchedulerManager::RuntimeState {
     std::uint32_t sceneGraphLimit{ 1 };
     std::uint32_t sceneGraphConsecutiveCritical{};
     std::size_t sceneGraphDomainCursor{};
+    std::array<std::uint64_t, 4> sceneGraphLastAdmissionKeys{};
     std::vector<ULONG> workerCpuSets;
     mutable std::mutex taskMutex;
     std::atomic_bool stopping{ false };
@@ -640,8 +642,8 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
             }
         };
         const auto select = [&](bool starvedOnly, std::uint8_t classFilter)
-            -> std::optional<std::pair<std::size_t, std::size_t>> {
-            std::optional<std::pair<std::size_t, std::size_t>> selected;
+            -> std::optional<std::tuple<std::size_t, std::size_t, std::size_t>> {
+            std::optional<std::tuple<std::size_t, std::size_t, std::size_t>> selected;
             std::chrono::steady_clock::time_point oldest{};
             for (std::size_t offset = 0; offset < kDomainCount; ++offset) {
                 const auto domainIndex = (state.sceneGraphDomainCursor + offset) % kDomainCount;
@@ -652,13 +654,39 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
                 for (std::size_t laneIndex = 0; laneIndex < kLaneCount; ++laneIndex) {
                     auto& queue = runtime.queues[laneIndex];
                     if (queue.empty()) continue;
-                    if (classFilter < 4 && effectiveWorkClass(queue.front()) != classFilter)
-                        continue;
-                    const bool starved = now - queue.front().queuedAt >= kStarvationLimit;
-                    if (starvedOnly != starved) continue;
-                    if (!selected || queue.front().queuedAt < oldest) {
-                        selected = { domainIndex, laneIndex };
-                        oldest = queue.front().queuedAt;
+
+                    // Only the first queued task for each admission key is eligible,
+                    // preserving FIFO within a key while allowing another producer
+                    // class/key to bypass a large homogeneous queue prefix.
+                    std::optional<std::size_t> candidate;
+                    std::optional<std::size_t> fallback;
+                    const auto lastKey = classFilter < 4
+                        ? state.sceneGraphLastAdmissionKeys[classFilter] : 0;
+                    for (std::size_t queueIndex = 0; queueIndex < queue.size(); ++queueIndex) {
+                        const auto& task = queue[queueIndex];
+                        const auto workClass = effectiveWorkClass(task);
+                        if (classFilter < 4 && workClass != classFilter) continue;
+                        const auto key = task.trace.admissionKey;
+                        const auto priorWithKey = std::find_if(queue.begin(),
+                            queue.begin() + static_cast<std::ptrdiff_t>(queueIndex),
+                            [key](const RuntimeState::PendingTask& prior) {
+                                return prior.trace.admissionKey == key;
+                            });
+                        if (priorWithKey != queue.begin() +
+                            static_cast<std::ptrdiff_t>(queueIndex)) continue;
+                        const bool starved = now - task.queuedAt >= kStarvationLimit;
+                        if (starvedOnly != starved) continue;
+                        if (!fallback) fallback = queueIndex;
+                        if (classFilter >= 4 || key == 0 || key != lastKey) {
+                            candidate = queueIndex;
+                            break;
+                        }
+                    }
+                    const auto queueIndex = candidate ? candidate : fallback;
+                    if (!queueIndex) continue;
+                    if (!selected || queue[*queueIndex].queuedAt < oldest) {
+                        selected = { domainIndex, laneIndex, *queueIndex };
+                        oldest = queue[*queueIndex].queuedAt;
                     }
                 }
             }
@@ -690,11 +718,16 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
                 }
             }
             if (!selected) break;
-            const auto [domainIndex, laneIndex] = *selected;
+            const auto [domainIndex, laneIndex, queueIndex] = *selected;
             auto& runtime = state.domains[domainIndex];
             auto& queue = runtime.queues[laneIndex];
-            launch.push_back(std::move(queue.front()));
-            queue.pop_front();
+            launch.push_back(std::move(queue[queueIndex]));
+            queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(queueIndex));
+            const auto selectedClass = effectiveWorkClass(launch.back());
+            if (selectedClass < state.sceneGraphLastAdmissionKeys.size()) {
+                state.sceneGraphLastAdmissionKeys[selectedClass] =
+                    launch.back().trace.admissionKey;
+            }
             ++runtime.active;
             ++state.sceneGraphActive;
             state.sceneGraphDomainCursor = (domainIndex + 1u) % kDomainCount;

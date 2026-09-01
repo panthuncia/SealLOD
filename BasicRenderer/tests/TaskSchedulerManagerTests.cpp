@@ -141,6 +141,45 @@ int main() {
 		Check(controlStarted.load(std::memory_order_acquire));
 	}
 
+    // Shared scene-graph admission rotates among producer keys without violating
+    // FIFO within a key. A deep static-ingestion prefix must not hide ready grass,
+    // dependency, or publication work using another key in the same domain/lane.
+    {
+        auto scope = scheduler.CreateScope("scene-graph-admission-key-rotation");
+        std::atomic<bool> heldStarted{ false };
+        std::atomic<bool> releaseHeld{ false };
+        std::mutex orderMutex;
+        std::vector<int> order;
+        const br::TaskTraceMetadata staticTrace{
+            .admissionKey = 11, .workClass = 2, .admissionGroup = 1 };
+        const br::TaskTraceMetadata otherTrace{
+            .admissionKey = 22, .workClass = 2, .admissionGroup = 1 };
+        Check(scheduler.Submit(scope, TaskLane::Streaming, TaskDomain::StaticImport,
+            "held-static-key", [&](const br::TaskContext&) {
+                heldStarted.store(true, std::memory_order_release);
+                while (!releaseHeld.load(std::memory_order_acquire)) std::this_thread::yield();
+            }, staticTrace));
+        while (!heldStarted.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (int index = 0; index < 16; ++index) {
+            Check(scheduler.Submit(scope, TaskLane::Streaming, TaskDomain::StaticImport,
+                "queued-static-key", [&, index](const br::TaskContext&) {
+                    std::lock_guard lock(orderMutex);
+                    order.push_back(index);
+                }, staticTrace));
+        }
+        Check(scheduler.Submit(scope, TaskLane::Streaming, TaskDomain::StaticImport,
+            "queued-other-key", [&](const br::TaskContext&) {
+                std::lock_guard lock(orderMutex);
+                order.push_back(100);
+            }, otherTrace));
+        releaseHeld.store(true, std::memory_order_release);
+        scope.Wait();
+        std::lock_guard lock(orderMutex);
+        Check(!order.empty());
+        Check(order.front() == 100);
+        for (int index = 0; index < 16; ++index) Check(order[index + 1] == index);
+    }
+
     {
         auto scope = scheduler.CreateScope("serialized-pump-stress");
         std::atomic<int> pending{0};
