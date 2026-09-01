@@ -148,7 +148,6 @@ void RendererStateRequestService::RefreshPublication() {
     if (!m_accepting.load(std::memory_order_acquire)) return;
     const auto active = m_publisher.Active();
     bool needsManifest = false;
-    bool markedDirty = false;
     {
         std::lock_guard lock(m_mutex);
         for (std::size_t index = 0; index < m_roots.size() && !needsManifest; ++index) {
@@ -162,21 +161,8 @@ void RendererStateRequestService::RefreshPublication() {
                             root.generation > activeRoot.generation));
             });
         }
-        // This is a level-triggered recovery path. A completed manifest may be
-        // cancelled, replaced as a candidate, or fail to advance the active
-        // state. Once no successor is pending, mint exactly one new dirty
-        // generation so retained newer roots cannot remain stranded.
-        if (needsManifest && !m_manifestInFlight &&
-            m_manifestDirtyGeneration <= m_manifestSubmittedDirtyGeneration) {
-            ++m_manifestDirtyGeneration;
-            markedDirty = true;
-            basic_telemetry::AddCounter("SARP.RendererStateManifest.WakeRequests");
-            basic_telemetry::AddCounter("SARP.RendererStateManifest.LevelTriggeredWakes");
-            basic_telemetry::SetGauge("SARP.RendererStateManifest.DirtyGeneration",
-                static_cast<std::int64_t>(m_manifestDirtyGeneration));
-        }
     }
-    if (needsManifest && (markedDirty || m_manifestInFlight)) RequestManifest();
+    if (needsManifest) RequestManifest();
 }
 
 void RendererStateRequestService::MarkManifestDirty() {
