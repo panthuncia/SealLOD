@@ -94,27 +94,28 @@ int main() {
         journal.Initialize(std::as_bytes(std::span(initialRows)), 3, 4);
         auto capture = journal.CaptureDesired();
         Check(capture.writeSequence == 1 && capture.elementCount == 3 &&
-			capture.capacity == 4 && capture.initialBytes.size() == sizeof(initialRows) &&
-			capture.desiredBytes && capture.desiredBytes->size() == sizeof(initialRows));
-		const auto initialDesired = capture.desiredBytes;
+			capture.capacity == 4 && capture.image &&
+            capture.image->ByteSize() == sizeof(initialRows));
+		const auto initialDesired = capture.image->Materialize();
 
         auto published = std::make_shared<PublishedGpuBufferVersion>();
         published->writeSequence = capture.writeSequence;
         published->elementCount = capture.elementCount;
         published->capacity = capture.capacity;
         published->elementStride = sizeof(std::uint32_t);
-        published->cpuShadow = std::make_shared<const std::vector<std::byte>>(capture.initialBytes);
+        published->image = capture.image;
         journal.Acknowledge(published);
 
         journal.RequestCapacity(8);
         const std::uint32_t replacement = 200;
         journal.AppendWrite(1, std::as_bytes(std::span(&replacement, 1)), 4);
         capture = journal.CaptureDesired();
-        Check(capture.previous == published && capture.initialBytes.empty() &&
+        Check(capture.previous == published &&
 			capture.writes.size() == 2 && capture.capacity == 8 && capture.elementCount == 4 &&
-			capture.journalBaseSequence == published->writeSequence && capture.desiredBytes);
+			capture.journalBaseSequence == published->writeSequence && capture.image);
 		Check(std::memcmp(initialDesired->data(), initialRows, sizeof(initialRows)) == 0);
-		const auto capturedDesired = capture.desiredBytes;
+		const auto capturedImage = capture.image;
+		const auto capturedDesired = capturedImage->Materialize();
 		const auto* desiredRows = reinterpret_cast<const std::uint32_t*>(capturedDesired->data());
 		Check(desiredRows[0] == 10 && desiredRows[1] == 200 &&
 			desiredRows[2] == 30 && desiredRows[3] == 0);
@@ -124,16 +125,16 @@ int main() {
 		desiredRows = reinterpret_cast<const std::uint32_t*>(capturedDesired->data());
 		Check(desiredRows[1] == 200 && desiredRows[2] == 30);
 		const auto repeatedCapture = journal.CaptureDesired();
-		Check(repeatedCapture.writes.size() == capture.writes.size() + 1u &&
-            repeatedCapture.writes.back().bytes && capture.writes.back().bytes &&
-			repeatedCapture.desiredBytes != capturedDesired);
+        Check(repeatedCapture.writes.size() == capture.writes.size() + 1u &&
+			repeatedCapture.image != capturedImage);
 		const std::uint32_t lowRangeReplacement = 11;
 		journal.AppendWrite(0, std::as_bytes(std::span(&lowRangeReplacement, 1)), 1);
 		const auto sparseCapture = journal.CaptureDesired();
-		Check(sparseCapture.elementCount == 4 && sparseCapture.desiredBytes &&
-			sparseCapture.desiredBytes->size() == 4 * sizeof(std::uint32_t));
+		Check(sparseCapture.elementCount == 4 && sparseCapture.image &&
+			sparseCapture.image->ByteSize() == 4 * sizeof(std::uint32_t));
+		const auto sparseBytes = sparseCapture.image->Materialize();
 		const auto* sparseRows = reinterpret_cast<const std::uint32_t*>(
-			sparseCapture.desiredBytes->data());
+			sparseBytes->data());
 		Check(sparseRows[0] == 11 && sparseRows[1] == 300 &&
 			sparseRows[2] == 400 && sparseRows[3] == 0);
 
@@ -144,11 +145,11 @@ int main() {
         input.writeSequence = capture.writeSequence;
         input.previous = capture.previous;
         input.writes = capture.writes;
-		input.desiredBytes = capture.desiredBytes;
+		input.image = capture.image;
 		input.journalBaseSequence = capture.journalBaseSequence;
         std::string error;
         const auto replay = ReplayVersionedGpuBufferAuthoritativeState(input, error);
-		Check(replay && replay == capture.desiredBytes && error.empty());
+		Check(replay && error.empty());
         const auto* rows = reinterpret_cast<const std::uint32_t*>(replay->data());
         Check(rows[0] == 10 && rows[1] == 200 && rows[2] == 30 && rows[3] == 0);
 
@@ -158,10 +159,10 @@ int main() {
 		const auto compacted = journal.CaptureDesired();
 		Check(compacted.writeSequence == replacementSequence &&
 			compacted.elementCount == 2 && compacted.capacity == 8 &&
-			compacted.desiredBytes &&
-			compacted.desiredBytes->size() == sizeof(compactedRows));
+			compacted.image && compacted.image->ByteSize() == sizeof(compactedRows));
+		const auto compactedBytes = compacted.image->Materialize();
 		const auto* compactedImage = reinterpret_cast<const std::uint32_t*>(
-			compacted.desiredBytes->data());
+			compactedBytes->data());
 		Check(compactedImage[0] == 7 && compactedImage[1] == 8);
     }
 
@@ -202,7 +203,7 @@ int main() {
 
         auto previous = std::make_shared<PublishedGpuBufferVersion>();
         previous->writeSequence = 1;
-        previous->cpuShadow = initialShadow;
+        previous->image = VersionedGpuBufferImage::FromBytes(*initialShadow);
         VersionedGpuBufferBuildInput successor{};
         successor.elementStride = sizeof(std::uint32_t);
         successor.elementCount = 4;
@@ -215,10 +216,11 @@ int main() {
         auto appendedBytes = std::make_shared<std::vector<std::byte>>(sizeof(appended));
         std::memcpy(replacementBytes->data(), &replacement, sizeof(replacement));
         std::memcpy(appendedBytes->data(), &appended, sizeof(appended));
-        successor.writes = {
-            { 2, 1, replacementBytes },
-            { 3, 3, appendedBytes }
-        };
+        const std::uint32_t successorRows[]{ 10, 200, 30, 40 };
+        successor.image = VersionedGpuBufferImage::FromBytes(
+            std::as_bytes(std::span(successorRows)));
+        successor.writes = { { 2, sizeof(std::uint32_t), sizeof(std::uint32_t) },
+            { 3, 3 * sizeof(std::uint32_t), sizeof(std::uint32_t) } };
         const auto successorShadow = ReplayVersionedGpuBufferAuthoritativeState(successor, error);
         Check(successorShadow && error.empty());
         const auto* rows = reinterpret_cast<const std::uint32_t*>(successorShadow->data());

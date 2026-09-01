@@ -896,6 +896,19 @@ void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) 
     BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload");
     BT_ZONE_VALUE(static_cast<int64_t>(size));
     BT_ZONE_TEXT(m_name.data(), m_name.size());
+    if (m_versionedGraphExclusive.load(std::memory_order_acquire)) {
+        if (data == nullptr || size == 0) return;
+        if (!m_versionedGraphJournal || (offset % m_elementSize) != 0 ||
+            (size % m_elementSize) != 0) {
+            throw std::runtime_error("versioned DynamicBuffer write is not element aligned");
+        }
+        m_versionedGraphJournal->AppendWrite(
+            offset / m_elementSize,
+            std::span<const std::byte>(reinterpret_cast<const std::byte*>(data), size),
+            (offset + size) / m_elementSize);
+        if (m_versionedGraphMutationCallback) m_versionedGraphMutationCallback();
+        return;
+    }
     std::unique_lock<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex, std::defer_lock);
     {
         BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload::WaitUploadPolicyMutex");
@@ -905,7 +918,6 @@ void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) 
         BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload::RetainCpuShadow");
         RetainCpuShadowWrite(data, size, offset);
     }
-	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return;
     if (offset + size > GetBufferSize()) {
         // The logical view has been allocated ahead of the GPU backing resize.
         // Keep the CPU shadow authoritative and replay it when the resize publishes.

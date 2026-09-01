@@ -447,8 +447,7 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 			input->previous = capture.previous;
 			input->backingPool = binding.backingPool;
 			input->writes = capture.writes;
-			input->bytes = capture.initialBytes;
-			input->desiredBytes = capture.desiredBytes;
+			input->image = capture.image;
 			input->journalBaseSequence = capture.journalBaseSequence;
 			bufferIntents.push_back({ binding.key, revision, {},
 				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)),
@@ -481,8 +480,7 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 		input->backingPool = m_visibilityGenerationBackingPool;
 		input->previous = visibilityCapture.previous;
 		input->writes = visibilityCapture.writes;
-		input->bytes = visibilityCapture.initialBytes;
-		input->desiredBytes = visibilityCapture.desiredBytes;
+		input->image = visibilityCapture.image;
 		input->journalBaseSequence = visibilityCapture.journalBaseSequence;
 		bufferIntents.push_back({ visibilityKey, visibilityRevision, {},
 			br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(
@@ -626,23 +624,8 @@ void ObjectManager::AcknowledgePublishedBufferState(
 			}
 			continue;
 		}
-		const auto liveBytes = binding.buffer->CaptureCpuShadowBytes();
-		if (!version->cpuShadow || version->cpuShadow->size() > liveBytes.size()) {
-			spdlog::error(
-				"Object buffer graph parity failed: buffer='{}' revision={} graphBytes={} liveBytes={}",
-				binding.identifier.ToString(), version->revision,
-				version->cpuShadow ? version->cpuShadow->size() : 0u, liveBytes.size());
-			return;
-		}
-		const auto mismatch = std::mismatch(
-			version->cpuShadow->begin(), version->cpuShadow->end(), liveBytes.begin());
-		if (mismatch.first != version->cpuShadow->end()) {
-			spdlog::error(
-				"Object buffer graph parity failed: buffer='{}' revision={} firstMismatch={}",
-				binding.identifier.ToString(), version->revision,
-				std::distance(version->cpuShadow->begin(), mismatch.first));
-			return;
-		}
+		if (!version->image || version->image->ByteSize() !=
+			version->elementCount * version->elementStride) return;
 		binding.buffer->AcknowledgeVersionedGraphState(version);
 		if (auto pool = version->backingPool.lock(); version->backing) {
 			pool->AcknowledgePublished(

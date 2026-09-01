@@ -537,8 +537,7 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
 			activeInput->previous = activeCapture.previous;
 			activeInput->backingPool = journal.backingPool;
 			activeInput->writes = activeCapture.writes;
-			activeInput->bytes = activeCapture.initialBytes;
-			activeInput->desiredBytes = activeCapture.desiredBytes;
+			activeInput->image = activeCapture.image;
 			activeInput->journalBaseSequence = activeCapture.journalBaseSequence;
             const auto activeListRequest = m_rendererStateRequests->SubmitLatest({
                 dto.activeListArtifactKey, activeRevision, {},

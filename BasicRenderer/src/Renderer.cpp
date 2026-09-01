@@ -3353,10 +3353,10 @@ void Renderer::Update(float elapsedSeconds) {
                             const char* label,
                             const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& table,
                             Resource* captureResource = nullptr) {
-                            if (!table || !table->resource || !table->cpuShadow) return;
+                            if (!table || !table->resource || !table->image) return;
                             auto tablePath = path;
                             tablePath += std::filesystem::path(fmt::format(".{}.bin", label));
-                            const auto expected = table->cpuShadow;
+                            const auto expected = table->MaterializeCpuImage();
 							auto expectedPath = tablePath;
 							expectedPath += L".expected";
 							std::ofstream expectedOutput(expectedPath, std::ios::binary | std::ios::trunc);

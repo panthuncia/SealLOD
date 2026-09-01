@@ -22,6 +22,25 @@ namespace br::render {
 struct PublishedGpuBufferVersion;
 class RendererStateRequestService;
 
+class VersionedGpuBufferImage {
+public:
+    static constexpr std::size_t PageBytes = 64u * 1024u;
+    using Page = std::vector<std::byte>;
+
+    [[nodiscard]] static std::shared_ptr<const VersionedGpuBufferImage> FromBytes(
+        std::span<const std::byte> bytes);
+    [[nodiscard]] std::shared_ptr<const std::vector<std::byte>> Materialize() const;
+    [[nodiscard]] std::size_t ByteSize() const noexcept { return m_byteSize; }
+    [[nodiscard]] const std::vector<std::shared_ptr<const Page>>& Pages() const noexcept {
+        return m_pages;
+    }
+
+private:
+    friend class VersionedGpuBufferJournal;
+    std::size_t m_byteSize = 0;
+    std::vector<std::shared_ptr<const Page>> m_pages;
+};
+
 enum class BufferRevisionMode : std::uint8_t {
     Patch,
     Replace,
@@ -33,7 +52,7 @@ struct BufferBackingArtifact {
     std::uint64_t capacityClass = 0;
     std::uint64_t byteCapacity = 0;
     std::uint64_t contentEpoch = 0;
-    std::shared_ptr<const std::vector<std::byte>> cpuShadow;
+    std::shared_ptr<const VersionedGpuBufferImage> image;
     std::uint64_t lastPublishedRetirementEpoch = 0;
     bool wasPublished = false;
 };
@@ -70,8 +89,8 @@ void NotifyVersionedGpuBufferFrameRetirement() noexcept;
 
 struct VersionedGpuBufferWrite {
     std::uint64_t sequence = 0;
-    std::uint64_t elementOffset = 0;
-    std::shared_ptr<const std::vector<std::byte>> bytes;
+    std::uint64_t byteOffset = 0;
+    std::uint64_t byteSize = 0;
 };
 
 struct VersionedGpuBufferBuildInput {
@@ -90,9 +109,8 @@ struct VersionedGpuBufferBuildInput {
     std::shared_ptr<const PublishedGpuBufferVersion> previous;
     std::shared_ptr<VersionedGpuBufferBackingPool> backingPool;
     std::vector<VersionedGpuBufferWrite> writes;
-	// Immutable view of the producer's authoritative desired image. The journal
-	// uses copy-on-write, so captures share this image until the next mutation.
-	std::shared_ptr<const std::vector<std::byte>> desiredBytes;
+	// Immutable paged view of the producer's authoritative desired image.
+	std::shared_ptr<const VersionedGpuBufferImage> image;
 	// All writes after this epoch are present in writes. A backing at or beyond
 	// this epoch can catch up without scanning or replaying the full image.
 	std::uint64_t journalBaseSequence = 0;
@@ -114,7 +132,10 @@ struct PublishedGpuBufferVersion {
     std::shared_ptr<BufferBackingArtifact> backing;
     std::weak_ptr<VersionedGpuBufferBackingPool> backingPool;
     std::shared_ptr<org::GloballyIndexedResource> resource;
-    std::shared_ptr<const std::vector<std::byte>> cpuShadow;
+    std::shared_ptr<const VersionedGpuBufferImage> image;
+    [[nodiscard]] std::shared_ptr<const std::vector<std::byte>> MaterializeCpuImage() const {
+        return image ? image->Materialize() : nullptr;
+    }
 };
 
 using BufferContentArtifact = PublishedGpuBufferVersion;
@@ -131,8 +152,7 @@ public:
         std::uint64_t capacity = 0;
         std::shared_ptr<const PublishedGpuBufferVersion> previous;
         std::vector<VersionedGpuBufferWrite> writes;
-        std::vector<std::byte> initialBytes;
-		std::shared_ptr<const std::vector<std::byte>> desiredBytes;
+		std::shared_ptr<const VersionedGpuBufferImage> image;
 		std::uint64_t journalBaseSequence = 0;
     };
 
@@ -158,8 +178,8 @@ private:
     std::uint64_t m_capacity = 0;
     std::shared_ptr<const PublishedGpuBufferVersion> m_previous;
     std::vector<VersionedGpuBufferWrite> m_writes;
-    std::vector<std::byte> m_initialBytes;
-	std::shared_ptr<std::vector<std::byte>> m_desiredBytes;
+    std::size_t m_byteSize = 0;
+    std::vector<std::shared_ptr<VersionedGpuBufferImage::Page>> m_pages;
 };
 
 // The single manager-facing authority for one persistent buffer address. It

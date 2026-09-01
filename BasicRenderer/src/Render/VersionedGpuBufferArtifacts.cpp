@@ -202,6 +202,33 @@ PublishedGpuBufferVersion::~PublishedGpuBufferVersion() {
     // can re-enter scheduling while sibling catalog holds are being torn down.
 }
 
+std::shared_ptr<const VersionedGpuBufferImage> VersionedGpuBufferImage::FromBytes(
+    std::span<const std::byte> bytes) {
+    auto image = std::make_shared<VersionedGpuBufferImage>();
+    image->m_byteSize = bytes.size();
+    image->m_pages.reserve((bytes.size() + PageBytes - 1u) / PageBytes);
+    for (std::size_t offset = 0; offset < bytes.size(); offset += PageBytes) {
+        const auto size = (std::min)(PageBytes, bytes.size() - offset);
+        image->m_pages.push_back(std::make_shared<Page>(
+            bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+            bytes.begin() + static_cast<std::ptrdiff_t>(offset + size)));
+    }
+    return image;
+}
+
+std::shared_ptr<const std::vector<std::byte>> VersionedGpuBufferImage::Materialize() const {
+    auto bytes = std::make_shared<std::vector<std::byte>>(m_byteSize);
+    std::size_t offset = 0;
+    for (const auto& page : m_pages) {
+        if (!page || offset >= m_byteSize) break;
+        const auto size = (std::min)(page->size(), m_byteSize - offset);
+        std::copy_n(page->begin(), size, bytes->begin() + static_cast<std::ptrdiff_t>(offset));
+        offset += size;
+    }
+    basic_telemetry::Record("SARP.VersionedBuffer.ImageMaterializedBytes", m_byteSize);
+    return bytes;
+}
+
 std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     std::uint64_t capacityClass, std::uint32_t elementStride,
     bool unorderedAccess, bool indirectArguments, std::string_view debugName,
@@ -290,8 +317,16 @@ void VersionedGpuBufferJournal::Initialize(std::span<const std::byte> bytes,
     std::lock_guard lock(m_mutex);
     m_previous.reset();
     m_writes.clear();
-    m_initialBytes.assign(bytes.begin(), bytes.end());
-	m_desiredBytes = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
+    m_byteSize = bytes.size();
+    m_pages.clear();
+    m_pages.reserve((bytes.size() + VersionedGpuBufferImage::PageBytes - 1u) /
+        VersionedGpuBufferImage::PageBytes);
+    for (std::size_t offset = 0; offset < bytes.size(); offset += VersionedGpuBufferImage::PageBytes) {
+        const auto size = (std::min)(VersionedGpuBufferImage::PageBytes, bytes.size() - offset);
+        m_pages.push_back(std::make_shared<VersionedGpuBufferImage::Page>(
+            bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+            bytes.begin() + static_cast<std::ptrdiff_t>(offset + size)));
+    }
     m_elementCount = elementCount;
     m_capacity = capacity;
     m_writeSequence = 1;
@@ -311,23 +346,45 @@ std::uint64_t VersionedGpuBufferJournal::AppendWrite(std::uint64_t elementOffset
     if (resultingElementCount > m_capacity) {
         throw std::out_of_range("versioned GPU buffer journal write exceeds desired capacity");
     }
-    VersionedGpuBufferWrite write;
-    write.sequence = ++m_writeSequence;
-    write.elementOffset = elementOffset;
-    write.bytes = std::make_shared<const std::vector<std::byte>>(bytes.begin(), bytes.end());
-    m_writes.push_back(std::move(write));
-	if (!m_desiredBytes) m_desiredBytes = std::make_shared<std::vector<std::byte>>();
-	else if (m_desiredBytes.use_count() != 1)
-		m_desiredBytes = std::make_shared<std::vector<std::byte>>(*m_desiredBytes);
-	// resultingElementCount describes the extent reached by this mutation. Sparse
-	// allocator writes can target an older/lower range after a larger range has
-	// already established the journal's logical extent; never truncate the
-	// authoritative image in that case.
-	const auto logicalElementCount = (std::max)(m_elementCount, resultingElementCount);
-	const auto desiredSize = static_cast<std::size_t>(logicalElementCount * m_elementStride);
-	m_desiredBytes->resize(desiredSize);
-	std::copy(bytes.begin(), bytes.end(),
-		m_desiredBytes->begin() + static_cast<std::size_t>(elementOffset * m_elementStride));
+    const auto sequence = ++m_writeSequence;
+    const auto logicalElementCount = (std::max)(m_elementCount, resultingElementCount);
+    const auto desiredSize = static_cast<std::size_t>(logicalElementCount * m_elementStride);
+    const auto byteOffset = static_cast<std::size_t>(elementOffset * m_elementStride);
+    const auto requiredPages = (desiredSize + VersionedGpuBufferImage::PageBytes - 1u) /
+        VersionedGpuBufferImage::PageBytes;
+    while (m_pages.size() < requiredPages) {
+        const auto pageOffset = m_pages.size() * VersionedGpuBufferImage::PageBytes;
+        const auto pageSize = (std::min)(VersionedGpuBufferImage::PageBytes, desiredSize - pageOffset);
+        m_pages.push_back(std::make_shared<VersionedGpuBufferImage::Page>(pageSize));
+        basic_telemetry::Record("SARP.VersionedBuffer.JournalPageAllocatedBytes", pageSize);
+    }
+    std::size_t sourceOffset = 0;
+    while (sourceOffset < bytes.size()) {
+        const auto absoluteOffset = byteOffset + sourceOffset;
+        const auto pageIndex = absoluteOffset / VersionedGpuBufferImage::PageBytes;
+        const auto pageOffset = absoluteOffset % VersionedGpuBufferImage::PageBytes;
+        const auto pageBegin = pageIndex * VersionedGpuBufferImage::PageBytes;
+        const auto requiredPageSize = (std::min)(VersionedGpuBufferImage::PageBytes,
+            desiredSize - pageBegin);
+        if (m_pages[pageIndex].use_count() != 1) {
+            m_pages[pageIndex] =
+                std::make_shared<VersionedGpuBufferImage::Page>(*m_pages[pageIndex]);
+            basic_telemetry::Record("SARP.VersionedBuffer.JournalPageClonedBytes",
+                m_pages[pageIndex]->size());
+        }
+        if (m_pages[pageIndex]->size() < requiredPageSize) {
+            m_pages[pageIndex]->resize(requiredPageSize);
+        }
+        const auto copySize = (std::min)(bytes.size() - sourceOffset,
+            m_pages[pageIndex]->size() - pageOffset);
+        std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(sourceOffset), copySize,
+            m_pages[pageIndex]->begin() + static_cast<std::ptrdiff_t>(pageOffset));
+        sourceOffset += copySize;
+    }
+    m_byteSize = desiredSize;
+    m_writes.push_back(VersionedGpuBufferWrite{
+        sequence, byteOffset, static_cast<std::uint64_t>(bytes.size()) });
+    basic_telemetry::Record("SARP.VersionedBuffer.JournalDirtyBytes", bytes.size());
     m_elementCount = logicalElementCount;
     return m_writeSequence;
 }
@@ -343,10 +400,16 @@ std::uint64_t VersionedGpuBufferJournal::ReplaceImage(
     m_capacity = (std::max)(m_capacity, capacity);
     m_elementCount = elementCount;
     ++m_writeSequence;
-    m_desiredBytes = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
-    auto replacement = std::make_shared<const std::vector<std::byte>>(bytes.begin(), bytes.end());
+    m_byteSize = 0;
+    m_pages.clear();
+    const auto image = VersionedGpuBufferImage::FromBytes(bytes);
+    m_byteSize = image->ByteSize();
+    m_pages.reserve(image->Pages().size());
+    for (const auto& page : image->Pages()) {
+        m_pages.push_back(std::make_shared<VersionedGpuBufferImage::Page>(*page));
+    }
     m_writes.push_back(VersionedGpuBufferWrite{
-        m_writeSequence, 0u, std::move(replacement) });
+        m_writeSequence, 0u, static_cast<std::uint64_t>(bytes.size()) });
     return m_writeSequence;
 }
 
@@ -357,27 +420,26 @@ void VersionedGpuBufferJournal::RequestCapacity(std::uint64_t capacity) {
         ++m_writeSequence;
         // Capacity-only revisions need an explicit zero-length checkpoint to
         // close the captured sequence without inventing a data write.
-        m_writes.push_back(VersionedGpuBufferWrite{ m_writeSequence, m_elementCount, {} });
+        m_writes.push_back(VersionedGpuBufferWrite{ m_writeSequence,
+            m_elementCount * m_elementStride, 0u });
     }
 }
 
 VersionedGpuBufferJournal::Capture VersionedGpuBufferJournal::CaptureDesired() const {
     std::lock_guard lock(m_mutex);
-    // AppendWrite seals every byte range in an immutable shared allocation.
-    // A capture therefore only needs to copy the compact descriptors. Deep
-    // copying and coalescing here made request construction proportional to all
-    // unpublished bytes and put multi-megabyte memcpy/insert work on callers
-    // such as the render host. Replay is a graph producer operation and can
-    // consume adjacent descriptors directly.
     Capture capture;
 	capture.writeSequence = m_writeSequence;
 	capture.elementCount = m_elementCount;
 	capture.capacity = m_capacity;
 	capture.previous = m_previous;
 	capture.writes = m_writes;
-	capture.initialBytes = m_previous ? std::vector<std::byte>{} : m_initialBytes;
-	capture.desiredBytes = m_desiredBytes;
+	auto image = std::make_shared<VersionedGpuBufferImage>();
+    image->m_byteSize = m_byteSize;
+    image->m_pages.reserve(m_pages.size());
+    for (const auto& page : m_pages) image->m_pages.push_back(page);
+    capture.image = std::move(image);
 	capture.journalBaseSequence = m_previous ? m_previous->writeSequence : 0u;
+	basic_telemetry::Record("SARP.VersionedBuffer.JournalRetainedImageBytes", m_byteSize);
 	return capture;
 }
 
@@ -391,7 +453,6 @@ void VersionedGpuBufferJournal::Acknowledge(
     std::erase_if(m_writes, [&](const VersionedGpuBufferWrite& write) {
         return write.sequence <= version->writeSequence;
     });
-    m_initialBytes.clear();
 }
 
 std::uint64_t VersionedGpuBufferJournal::DesiredSequence() const {
@@ -531,21 +592,12 @@ ArtifactRequestResult VersionedBufferFamily::RequestCapture(
     input->backingPool = m_backingPool;
     input->previous = std::move(capture.previous);
     input->writes = std::move(capture.writes);
-    input->bytes = std::move(capture.initialBytes);
-	input->desiredBytes = std::move(capture.desiredBytes);
+	input->image = std::move(capture.image);
 	input->journalBaseSequence = capture.journalBaseSequence;
     std::uint64_t fingerprint = revision ^ (capture.elementCount << 1u) ^
         (capture.capacity << 7u) ^ (m_config.catalogVariant << 17u) ^ 0x5642464a4f5552ull;
-    const auto hashBytes = [&fingerprint](std::span<const std::byte> values) {
-        for (const auto value : values) {
-            fingerprint ^= static_cast<std::uint8_t>(value);
-            fingerprint *= 1099511628211ull;
-        }
-    };
-    hashBytes(input->bytes);
     for (const auto& write : input->writes) {
-        fingerprint ^= write.sequence ^ (write.elementOffset << 3u);
-        if (write.bytes) hashBytes(*write.bytes);
+        fingerprint ^= write.sequence ^ (write.byteOffset << 3u) ^ (write.byteSize << 11u);
     }
     if (fingerprint == 0) fingerprint = 1;
     auto result = requests.SubmitLatest({ m_config.address, revision, {},
@@ -581,12 +633,27 @@ std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferAuthoritat
         return {};
     }
     const auto requiredBytes = static_cast<std::size_t>(input.elementCount * input.elementStride);
-	if (input.desiredBytes) {
-		if (input.desiredBytes->size() != requiredBytes) {
+	std::uint64_t validatedSequence = input.previous ? input.previous->writeSequence : 0u;
+	for (const auto& write : input.writes) {
+		if (write.sequence <= validatedSequence || write.sequence > input.writeSequence ||
+			write.byteOffset > requiredBytes || write.byteSize > requiredBytes - write.byteOffset ||
+			write.byteOffset % input.elementStride != 0u ||
+			write.byteSize % input.elementStride != 0u) {
+			error = "versioned buffer write journal sequence/range invalid";
+			return {};
+		}
+		validatedSequence = write.sequence;
+	}
+	if (!input.writes.empty() && validatedSequence != input.writeSequence) {
+		error = "versioned buffer is not closed through requested write sequence";
+		return {};
+	}
+	if (input.image) {
+		if (input.image->ByteSize() != requiredBytes) {
 			error = "versioned buffer desired image byte count does not match rows";
 			return {};
 		}
-		return input.desiredBytes;
+		return input.image->Materialize();
 	}
     auto shadow = std::make_shared<std::vector<std::byte>>(requiredBytes);
     if (!input.bytes.empty()) {
@@ -595,9 +662,10 @@ std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferAuthoritat
             return {};
         }
         *shadow = input.bytes;
-    } else if (input.previous && input.previous->cpuShadow) {
-        const auto copyBytes = (std::min)(shadow->size(), input.previous->cpuShadow->size());
-        std::copy_n(input.previous->cpuShadow->begin(), copyBytes, shadow->begin());
+    } else if (input.previous && input.previous->image) {
+        const auto previous = input.previous->image->Materialize();
+        const auto copyBytes = (std::min)(shadow->size(), previous->size());
+        std::copy_n(previous->begin(), copyBytes, shadow->begin());
     }
     std::uint64_t lastSequence = input.previous ? input.previous->writeSequence : 0u;
     for (const auto& write : input.writes) {
@@ -605,22 +673,19 @@ std::shared_ptr<const std::vector<std::byte>> ReplayVersionedGpuBufferAuthoritat
             error = "versioned buffer write journal sequence invalid";
             return {};
         }
-        const auto& bytes = write.bytes;
-        if (bytes && bytes->size() % input.elementStride != 0u) {
+        if (write.byteSize % input.elementStride != 0u ||
+            write.byteOffset % input.elementStride != 0u) {
             error = "versioned buffer journal write is not row aligned";
             return {};
         }
-        if (write.elementOffset > (std::numeric_limits<std::size_t>::max)() / input.elementStride) {
-            error = "versioned buffer journal offset overflows address space";
-            return {};
-        }
-        const auto byteOffset = static_cast<std::size_t>(write.elementOffset * input.elementStride);
-        const auto byteCount = bytes ? bytes->size() : 0u;
-        if (byteOffset > shadow->size() || byteCount > shadow->size() - byteOffset) {
+        if (write.byteOffset > shadow->size() || write.byteSize > shadow->size() - write.byteOffset) {
             error = "versioned buffer journal write exceeds desired size";
             return {};
         }
-        if (bytes) std::copy(bytes->begin(), bytes->end(), shadow->begin() + byteOffset);
+        if (write.byteSize != 0u) {
+            error = "versioned buffer deltas require an immutable paged image";
+            return {};
+        }
         lastSequence = write.sequence;
     }
     // A full snapshot is self-contained. Its revision need not be contiguous
@@ -743,9 +808,10 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     if (context.stopRequested && context.stopRequested()) return ArtifactBuildResult::Cancelled();
     const bool fitsBacking = input->previous && input->previous->resource &&
         input->capacity <= input->previous->capacity;
-    const bool appendOnly = fitsBacking && input->bytes.empty() &&
+    const bool appendOnly = fitsBacking && input->bytes.empty() && input->image &&
         std::ranges::all_of(input->writes, [&](const auto& write) {
-        return !write.bytes || write.elementOffset >= input->previous->elementCount;
+        return write.byteSize == 0u ||
+            write.byteOffset >= input->previous->elementCount * input->elementStride;
     });
     const auto mode = fitsBacking ? BufferRevisionMode::Patch : BufferRevisionMode::Replace;
     auto pool = input->backingPool ? input->backingPool
@@ -766,16 +832,18 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     // Do not replay the CPU journal until a bounded backing-ring slot is
     // available. Ring exhaustion is an expected transient state; replaying on
     // every retry multiplied host work while waiting for frame retirement.
-	std::string replayError;
-	auto shadow = input->gpuWritten
-		? std::make_shared<const std::vector<std::byte>>()
-		: ReplayVersionedGpuBufferAuthoritativeState(*input, replayError);
-    if (!shadow) return ArtifactBuildResult::Failure(std::move(replayError));
-	if (input->desiredBytes) {
+	std::shared_ptr<const VersionedGpuBufferImage> image = input->image;
+    if (!input->gpuWritten && !image) {
+        std::string replayError;
+        const auto bytes = ReplayVersionedGpuBufferAuthoritativeState(*input, replayError);
+        if (!bytes) return ArtifactBuildResult::Failure(std::move(replayError));
+        image = VersionedGpuBufferImage::FromBytes(*bytes);
+    }
+	if (input->image) {
 		basic_telemetry::AddCounter("SARP.VersionedBuffer.AuthoritativeStateReused");
 		basic_telemetry::Record("SARP.VersionedBuffer.BytesReplayed", 0);
 	} else {
-		basic_telemetry::Record("SARP.VersionedBuffer.BytesReplayed", shadow->size());
+		basic_telemetry::Record("SARP.VersionedBuffer.BytesReplayed", image ? image->ByteSize() : 0u);
 	}
     if (context.stopRequested && context.stopRequested()) return ArtifactBuildResult::Cancelled();
 
@@ -815,20 +883,18 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
         input->indirectArguments && input->bytes.empty() && input->writes.empty());
     std::uint64_t uploadedBytes = 0;
     std::uint64_t dirtyRangeCount = 0;
-    if (needsInitialContent && !shadow->empty()) {
+    if (needsInitialContent && image && image->ByteSize() != 0u) {
         struct DirtyRange { std::size_t offset = 0, size = 0; };
         std::vector<DirtyRange> dirtyRanges;
-        const auto previousBackingShadow = backing->cpuShadow;
-		const bool journalCoversBacking = !backingExpanded && input->desiredBytes &&
+		const bool journalCoversBacking = !backingExpanded && input->image &&
 			backing->contentEpoch >= input->journalBaseSequence &&
 			backing->contentEpoch <= input->writeSequence &&
-			previousBackingShadow && previousBackingShadow->size() == shadow->size();
+			backing->image && backing->image->ByteSize() == image->ByteSize();
 		if (journalCoversBacking) {
 			for (const auto& write : input->writes) {
-				if (write.sequence <= backing->contentEpoch || !write.bytes || write.bytes->empty()) continue;
-				dirtyRanges.push_back({
-					static_cast<std::size_t>(write.elementOffset * input->elementStride),
-					write.bytes->size() });
+				if (write.sequence <= backing->contentEpoch || write.byteSize == 0u) continue;
+				dirtyRanges.push_back({ static_cast<std::size_t>(write.byteOffset),
+					static_cast<std::size_t>(write.byteSize) });
 			}
 			std::ranges::sort(dirtyRanges, {}, &DirtyRange::offset);
 			std::vector<DirtyRange> merged;
@@ -841,40 +907,31 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
 			}
 			dirtyRanges = std::move(merged);
 			basic_telemetry::AddCounter("SARP.VersionedBuffer.BackingEpochJournalCatchup");
-		} else if (!backingExpanded && previousBackingShadow &&
-            previousBackingShadow->size() == shadow->size()) {
-            constexpr std::size_t mergeGapBytes = 256;
-            std::size_t cursor = 0;
-            while (cursor < shadow->size()) {
-                while (cursor < shadow->size() &&
-                    (*previousBackingShadow)[cursor] == (*shadow)[cursor]) ++cursor;
-                if (cursor == shadow->size()) break;
-                const auto begin = cursor++;
-                std::size_t lastDifference = begin;
-                while (cursor < shadow->size()) {
-                    if ((*previousBackingShadow)[cursor] != (*shadow)[cursor]) {
-                        lastDifference = cursor;
-                    } else if (cursor - lastDifference > mergeGapBytes) {
-                        break;
-                    }
-                    ++cursor;
-                }
-                dirtyRanges.push_back({ begin, lastDifference - begin + 1u });
-            }
         } else {
-            dirtyRanges.push_back({ 0, shadow->size() });
+            dirtyRanges.push_back({ 0, image->ByteSize() });
         }
         const auto dirtyBytes = std::accumulate(dirtyRanges.begin(), dirtyRanges.end(),
             std::size_t{ 0 }, [](std::size_t total, const DirtyRange& range) {
                 return total + range.size;
             });
-        if (dirtyRanges.size() > 128u || dirtyBytes * 2u > shadow->size()) {
-            dirtyRanges.assign(1u, DirtyRange{ 0, shadow->size() });
+        if (dirtyRanges.size() > 128u || dirtyBytes * 2u > image->ByteSize()) {
+            dirtyRanges.assign(1u, DirtyRange{ 0, image->ByteSize() });
         }
         for (const auto& range : dirtyRanges) {
-            tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
-                shadow->data() + range.offset, range.size, resource, range.offset));
-            uploadedBytes += range.size;
+            std::size_t remaining = range.size;
+            std::size_t offset = range.offset;
+            while (remaining != 0u) {
+                const auto pageIndex = offset / VersionedGpuBufferImage::PageBytes;
+                const auto pageOffset = offset % VersionedGpuBufferImage::PageBytes;
+                if (pageIndex >= image->Pages().size() || !image->Pages()[pageIndex]) break;
+                const auto size = (std::min)(remaining,
+                    image->Pages()[pageIndex]->size() - pageOffset);
+                tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
+                    image->Pages()[pageIndex]->data() + pageOffset, size, resource, offset));
+                uploadedBytes += size;
+                offset += size;
+                remaining -= size;
+            }
         }
         dirtyRangeCount = dirtyRanges.size();
     } else if (!needsInitialContent) {
@@ -883,7 +940,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     basic_telemetry::Record("SARP.VersionedBuffer.BytesUploaded", uploadedBytes);
     basic_telemetry::Record("SARP.VersionedBuffer.DirtyRanges", dirtyRangeCount);
     backing->contentEpoch = input->writeSequence;
-    backing->cpuShadow = input->gpuWritten ? nullptr : shadow;
+    backing->image = input->gpuWritten ? nullptr : image;
 
     auto version = std::make_shared<PublishedGpuBufferVersion>();
     version->revision = context.revision;
@@ -898,7 +955,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     version->backing = std::move(backing);
     version->backingPool = pool;
     version->resource = resource;
-    version->cpuShadow = input->gpuWritten ? nullptr : std::move(shadow);
+    version->image = input->gpuWritten ? nullptr : std::move(image);
 
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = input->catalogOwner;
