@@ -358,6 +358,25 @@ std::uint64_t VersionedGpuBufferJournal::AppendWrite(std::uint64_t elementOffset
         m_pages.push_back(std::make_shared<VersionedGpuBufferImage::Page>(pageSize));
         basic_telemetry::Record("SARP.VersionedBuffer.JournalPageAllocatedBytes", pageSize);
     }
+	// Sparse growth can begin in a later page, leaving the former tail page
+	// shorter than its newly covered logical extent. The immutable image is a
+	// dense zero-filled byte image even when its dirty journal is sparse, so grow
+	// every newly covered tail before applying the write. In practice only the
+	// previous last page needs adjustment; new intervening pages were allocated
+	// at their complete size above.
+	for (std::size_t pageIndex = 0; pageIndex < requiredPages; ++pageIndex) {
+		const auto pageBegin = pageIndex * VersionedGpuBufferImage::PageBytes;
+		const auto requiredPageSize = (std::min)(VersionedGpuBufferImage::PageBytes,
+			desiredSize - pageBegin);
+		if (m_pages[pageIndex]->size() >= requiredPageSize) continue;
+		if (m_pages[pageIndex].use_count() != 1) {
+			m_pages[pageIndex] =
+				std::make_shared<VersionedGpuBufferImage::Page>(*m_pages[pageIndex]);
+			basic_telemetry::Record("SARP.VersionedBuffer.JournalPageClonedBytes",
+				m_pages[pageIndex]->size());
+		}
+		m_pages[pageIndex]->resize(requiredPageSize);
+	}
     std::size_t sourceOffset = 0;
     while (sourceOffset < bytes.size()) {
         const auto absoluteOffset = byteOffset + sourceOffset;
@@ -920,18 +939,32 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
         for (const auto& range : dirtyRanges) {
             std::size_t remaining = range.size;
             std::size_t offset = range.offset;
+			std::vector<org::StreamingUploadSegment> segments;
+			segments.reserve((range.size + VersionedGpuBufferImage::PageBytes - 1u) /
+				VersionedGpuBufferImage::PageBytes + 1u);
             while (remaining != 0u) {
                 const auto pageIndex = offset / VersionedGpuBufferImage::PageBytes;
                 const auto pageOffset = offset % VersionedGpuBufferImage::PageBytes;
                 if (pageIndex >= image->Pages().size() || !image->Pages()[pageIndex]) break;
                 const auto size = (std::min)(remaining,
                     image->Pages()[pageIndex]->size() - pageOffset);
-                tickets.push_back(input->uploadService->QueueTrackedStreamingUpload(
-                    image->Pages()[pageIndex]->data() + pageOffset, size, resource, offset));
+				if (size == 0u) break;
+				segments.push_back({ image->Pages()[pageIndex]->data() + pageOffset, size });
                 uploadedBytes += size;
                 offset += size;
                 remaining -= size;
             }
+			if (remaining != 0u) {
+				return ArtifactBuildResult::Failure(
+					"versioned buffer paged image does not cover upload range");
+			}
+			if (auto ticket = input->uploadService->QueueTrackedStreamingUploadSegments(
+				segments, range.size, resource, range.offset)) {
+				tickets.push_back(std::move(ticket));
+			} else {
+				return ArtifactBuildResult::Failure(
+					"versioned buffer streaming upload enqueue failed");
+			}
         }
         dirtyRangeCount = dirtyRanges.size();
     } else if (!needsInitialContent) {

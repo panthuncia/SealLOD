@@ -138,6 +138,21 @@ int main() {
 		Check(sparseRows[0] == 11 && sparseRows[1] == 300 &&
 			sparseRows[2] == 400 && sparseRows[3] == 0);
 
+		VersionedGpuBufferJournal crossPageSparseJournal(1);
+		const std::byte first{ 0x2a };
+		crossPageSparseJournal.Initialize(std::span(&first, 1), 1,
+			VersionedGpuBufferImage::PageBytes + 8u);
+		const std::byte distant{ 0x5b };
+		crossPageSparseJournal.AppendWrite(
+			VersionedGpuBufferImage::PageBytes + 5u, std::span(&distant, 1),
+			VersionedGpuBufferImage::PageBytes + 6u);
+		const auto crossPageSparse = crossPageSparseJournal.CaptureDesired();
+		const auto crossPageBytes = crossPageSparse.image->Materialize();
+		Check(crossPageBytes->size() == VersionedGpuBufferImage::PageBytes + 6u &&
+			(*crossPageBytes)[0] == first &&
+			(*crossPageBytes)[VersionedGpuBufferImage::PageBytes - 1u] == std::byte{} &&
+			(*crossPageBytes)[VersionedGpuBufferImage::PageBytes + 5u] == distant);
+
         VersionedGpuBufferBuildInput input{};
         input.elementStride = sizeof(std::uint32_t);
         input.elementCount = capture.elementCount;
