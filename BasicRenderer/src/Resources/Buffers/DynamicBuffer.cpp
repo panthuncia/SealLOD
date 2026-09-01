@@ -1010,6 +1010,14 @@ void DynamicBuffer::SetVersionedGraphExclusive(bool exclusive) {
 	const bool previous = m_versionedGraphExclusive.exchange(exclusive, std::memory_order_acq_rel);
 	if (!previous && exclusive) {
 		UnregisterDeferredBackingResizeClient(this);
+		// Immutable graph versions, rather than this legacy mutable backing, are
+		// authoritative once exclusive publication is enabled. Keep the journal
+		// used to describe desired versions, but remove the buffer from frame-wide
+		// upload-policy traversal and dirty flushing.
+		UnregisterUploadPolicyClient();
+	} else if (previous && !exclusive) {
+		RegisterDeferredBackingResizeClient(this);
+		RefreshUploadPolicyRegistration();
 	}
 }
 
