@@ -374,12 +374,16 @@ std::uint64_t ObjectManager::SealDesiredBufferStateLocked() {
 			(cut.fingerprint << 6u) + (cut.fingerprint >> 2u);
 	}
 	cut.visibility = m_visibilityGenerationJournal.CaptureDesired();
+	cut.coveredMutationGeneration =
+		m_objectBufferMutationGeneration.load(std::memory_order_acquire);
 	const auto visibilityRevision =
 		(std::max<std::uint64_t>)(cut.visibility.writeSequence, 1u);
 	cut.fingerprint ^= visibilityRevision + 0x9e3779b97f4a7c15ull +
 		(cut.fingerprint << 6u) + (cut.fingerprint >> 2u);
 	m_objectBufferSnapshotMailbox.Publish(++m_objectBufferSnapshotGeneration);
 	basic_telemetry::AddCounter("SARP.VersionedBuffer.Object.SnapshotCutsSealed");
+	basic_telemetry::SetGauge("SARP.VersionedBuffer.Object.MutationCoverageCaptured",
+		static_cast<std::int64_t>(cut.coveredMutationGeneration));
 	return m_objectBufferSnapshotGeneration;
 }
 
@@ -414,6 +418,13 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 		basic_telemetry::AddCounter("SARP.VersionedBuffer.Object.RetirementCoalesced");
 		return m_objectBufferStateRevision;
 	}
+	// Capture only after the indirect-consumer and frame-retirement gates admit
+	// another root. Holding the producer lock makes the cut coherent while
+	// allowing all intervening static transactions to collapse into one image.
+	{
+		std::lock_guard mutationLock(m_staticPublicationMutationMutex);
+		SealDesiredBufferStateLocked();
+	}
 	const auto* snapshotCut = m_objectBufferSnapshotMailbox.ConsumeLatest();
 	if (!snapshotCut && m_objectBufferSnapshotMailbox.ConsumedGeneration() >
 		m_objectBufferSubmittedSnapshotGeneration) {
@@ -428,6 +439,7 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	std::vector<std::size_t> intentBindingIndices;
 	std::vector<std::uint64_t> desiredRevisions(m_graphBufferBindings.size());
 	const auto fingerprint = snapshotCut->fingerprint;
+	const auto coveredMutationGeneration = snapshotCut->coveredMutationGeneration;
 	for (std::size_t bindingIndex = 0; bindingIndex < m_graphBufferBindings.size(); ++bindingIndex) {
 		auto& binding = m_graphBufferBindings[bindingIndex];
 		const auto& capture = snapshotCut->buffers[bindingIndex];
@@ -557,6 +569,9 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	if (fingerprint == m_objectBufferFingerprint) {
 		m_objectBufferSubmittedSnapshotGeneration =
 			m_objectBufferSnapshotMailbox.ConsumedGeneration();
+		m_objectBufferSubmittedMutationGeneration = coveredMutationGeneration;
+		basic_telemetry::SetGauge("SARP.VersionedBuffer.Object.MutationCoveragePublished",
+			static_cast<std::int64_t>(coveredMutationGeneration));
 	}
 	return m_objectBufferStateRevision;
 }
@@ -581,7 +596,7 @@ br::render::ArtifactVersionHandle ObjectManager::DesiredBufferStateHandle() cons
 
 ObjectManager::DesiredObjectBufferStateCut ObjectManager::DesiredBufferStateCut() const {
 	std::lock_guard graphStateLock(m_objectBufferGraphStateMutex);
-	return { m_objectBufferStateVersion, m_objectBufferSubmittedSnapshotGeneration };
+	return { m_objectBufferStateVersion, m_objectBufferSubmittedMutationGeneration };
 }
 
 void ObjectManager::AcknowledgePublishedBufferState(
@@ -2699,7 +2714,11 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkPublishedGroups", static_cast<int64_t>(result.groupsImported));
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkPublishedDrawRecords", static_cast<int64_t>(result.drawRecords));
-	result.snapshotGeneration = SealDesiredBufferStateLocked();
+	result.mutationCoverageGeneration =
+		m_objectBufferMutationGeneration.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+	basic_telemetry::AddCounter("SARP.VersionedBuffer.Object.MutationCoverageIssued");
+	basic_telemetry::SetGauge("SARP.VersionedBuffer.Object.LatestMutationCoverage",
+		static_cast<std::int64_t>(result.mutationCoverageGeneration));
 	return result;
 }
 

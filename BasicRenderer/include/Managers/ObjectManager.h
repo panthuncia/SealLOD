@@ -391,15 +391,15 @@ public:
 		std::uint64_t groupsImported = 0;
 		std::uint64_t drawRecords = 0;
 		std::uint64_t preparedBytes = 0;
-		// Immutable journal snapshot sealed after every transaction in this bulk
-		// result was activated. A graph cut is compatible only when it covers at
-		// least this mailbox generation.
-		std::uint64_t snapshotGeneration = 0;
+		// Logical mutation epoch covered by this bulk publication. Physical journal
+		// capture is deferred until the DrawRecords root is admissible; a graph cut
+		// is compatible only when it covers at least this generation.
+		std::uint64_t mutationCoverageGeneration = 0;
 	};
 
 	struct DesiredObjectBufferStateCut {
 		br::render::ArtifactVersionHandle version;
-		std::uint64_t snapshotGeneration = 0;
+		std::uint64_t coveredMutationGeneration = 0;
 
 		explicit operator bool() const noexcept { return static_cast<bool>(version); }
 	};
@@ -579,6 +579,7 @@ private:
 		std::vector<br::render::VersionedGpuBufferJournal::Capture> buffers;
 		br::render::VersionedGpuBufferJournal::Capture visibility;
 		std::uint64_t fingerprint = 0;
+		std::uint64_t coveredMutationGeneration = 0;
 	};
 
 	std::uint64_t SealDesiredBufferStateLocked();
@@ -663,6 +664,8 @@ private:
 	br::TripleGenerationMailbox<ObjectBufferSnapshotCut> m_objectBufferSnapshotMailbox;
 	std::uint64_t m_objectBufferSnapshotGeneration = 0;
 	std::uint64_t m_objectBufferSubmittedSnapshotGeneration = 0;
+	std::atomic<std::uint64_t> m_objectBufferMutationGeneration{ 0 };
+	std::uint64_t m_objectBufferSubmittedMutationGeneration = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
 	br::render::VersionedGpuBufferJournal m_visibilityGenerationJournal{ sizeof(std::uint32_t) };
 	br::render::ArtifactVersionID m_visibilityGenerationSubmittedVersion{};
@@ -673,9 +676,9 @@ private:
 	DesiredBufferStateReadyCallback m_desiredBufferStateReadyCallback;
 	std::atomic<std::uint64_t> m_nextStaticImportTransactionID{ 1 };
 	// Serializes the ordered producer side of the static CPU journals,
-	// visibility generations, and active lists. Each transaction seals an
-	// immutable cut into m_objectBufferSnapshotMailbox before releasing it;
-	// graph submission therefore never acquires this mutation lock.
+	// visibility generations, and active lists. Transactions issue logical
+	// coverage generations while the graph submitter captures the newest
+	// coherent cut only after its admission gates open.
 	mutable std::mutex m_staticPublicationMutationMutex;
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
