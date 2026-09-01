@@ -2207,10 +2207,17 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 		}
 	}
 
-    void InstallWaiterEdges(Node& node) {
+    void InstallWaiterEdges(Node& node, std::vector<ArtifactKey> preparedWaiterKeys = {}) {
 		RebuildRequestedRequirementIndex(node);
 		AdjustExactRecipePins(node.key, node.coalescibleIntent, node.requirements, 1);
 		node.installedWaiterKeys.clear();
+		if (!preparedWaiterKeys.empty()) {
+			node.installedWaiterKeys = std::move(preparedWaiterKeys);
+			for (const auto& dependency : node.installedWaiterKeys)
+				waiters[dependency].insert(node.key);
+			node.completedWaiterEdgesPruned = false;
+			return;
+		}
 		node.installedWaiterKeys.reserve(node.requirements.size() +
 			node.requestedRequirements.size());
 		std::unordered_set<ArtifactKey, ArtifactKey::Hasher> unique;
@@ -3767,12 +3774,25 @@ void AsyncStateGraph::Impl::FlushDeferredRequestTrace(
 struct AsyncStateGraph::RequestPreparedState {
     std::vector<ArtifactRequirement> requestedRequirements;
     std::vector<ArtifactRequirement> signatureRequirements;
+    std::vector<ArtifactKey> waiterKeys;
     std::shared_ptr<std::atomic_bool> superseded;
 
     explicit RequestPreparedState(const std::vector<ArtifactRequirement>& requirements)
         : requestedRequirements(requirements),
           signatureRequirements(requirements),
-          superseded(std::make_shared<std::atomic_bool>(false)) {}
+          superseded(std::make_shared<std::atomic_bool>(false)) {
+		// Reverse-edge discovery used to allocate and hash both the mutable and
+		// requested recipes while holding the graph mutex. New requests begin
+		// with those recipes equal, so prepare their unique address set while the
+		// caller still owns the immutable input.
+		std::unordered_set<ArtifactKey, ArtifactKey::Hasher> unique;
+		unique.reserve(requirements.size());
+		waiterKeys.reserve(requirements.size());
+		for (const auto& requirement : requirements) {
+			if (unique.insert(requirement.key).second)
+				waiterKeys.push_back(requirement.key);
+		}
+	}
 };
 
 void AsyncStateGraph::RegisterProducer(ArtifactKind kind, ArtifactProducerRegistration registration) {
@@ -4163,7 +4183,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
         node.retryAt.reset();
         m_impl->SetState(node, ArtifactReadiness::Missing);
         recordRequestPhase("reset_version_state");
-        m_impl->InstallWaiterEdges(node);
+        m_impl->InstallWaiterEdges(node, std::move(preparedState->waiterKeys));
         recordRequestPhase("install_waiter_edges");
         const auto cycle = m_impl->DetectCycle(node);
         recordRequestPhase("detect_cycle");
