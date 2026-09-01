@@ -894,7 +894,7 @@ int main() {
     staticA->transactionID = 101;
     staticA->streamGeneration = 7;
     staticA->sourceFingerprint = 1001;
-    staticA->groups = { { 10001, 5, 10, 2, staticOwnership }, { 10002, 6, 12, 3 } };
+    staticA->groups = { { 10001, 0, 5, 10, 2, staticOwnership }, { 10002, 0, 6, 12, 3 } };
     staticA->groupCount = 2;
     staticA->drawRecordCount = 11;
     staticA->activeEntryCount = 22;
@@ -903,7 +903,7 @@ int main() {
     staticB->transactionID = 102;
     staticB->streamGeneration = 7;
     staticB->sourceFingerprint = 1002;
-    staticB->groups = { { 10003, 4, 8, 1 }, { 10004, 4, 8, 4 }, { 10005, 5, 10, 5 } };
+    staticB->groups = { { 10003, 0, 4, 8, 1 }, { 10004, 0, 4, 8, 4 }, { 10005, 0, 5, 10, 5 } };
     staticB->groupCount = 3;
     staticB->drawRecordCount = 13;
     staticB->activeEntryCount = 26;
@@ -992,7 +992,7 @@ int main() {
     staticC->transactionID = 105;
     staticC->streamGeneration = 8;
     staticC->sourceFingerprint = 1005;
-    staticC->groups = { { 10001, 7, 14, 2 } };
+    staticC->groups = { { 10001, 0, 7, 14, 2 } };
     staticC->groupCount = 1;
     staticC->drawRecordCount = 7;
     staticC->activeEntryCount = 14;
@@ -1076,7 +1076,7 @@ int main() {
     mismatchedInput->transactionID = 103;
     mismatchedInput->streamGeneration = 7;
     mismatchedInput->sourceFingerprint = 1003;
-    mismatchedInput->groups = { { 10006, 1, 2, 2 } };
+    mismatchedInput->groups = { { 10006, 0, 1, 2, 2 } };
     mismatchedInput->groupCount = 1;
     mismatchedInput->placementCount = 3;
     Check(graph.Request(mismatchedTransaction, 1, {},
@@ -1734,8 +1734,14 @@ int main() {
     Check(eventsCsv.contains("RequestAccepted"));
     Check(eventsCsv.contains("BuildCompleted"));
     Check(eventsCsv.contains("StateChanged"));
+    Check(eventsCsv.contains("TaskScheduler"));
+    Check(eventsCsv.contains("SchedulerTaskQueued"));
+    Check(eventsCsv.contains("SchedulerTaskStarted"));
+    Check(eventsCsv.contains("SchedulerTaskCompleted"));
     Check(readFile(traceReport.chromeTraceJson).contains("\"traceEvents\""));
-    Check(readFile(traceReport.summaryMarkdown).contains("Producer timing by artifact kind"));
+    const auto traceSummary = readFile(traceReport.summaryMarkdown);
+    Check(traceSummary.contains("Producer timing by artifact kind"));
+    Check(traceSummary.contains("Unified scheduler execution"));
 
     graph.StartTrace({ .maximumEvents = 2 });
     Check(static_cast<bool>(graph.Request(

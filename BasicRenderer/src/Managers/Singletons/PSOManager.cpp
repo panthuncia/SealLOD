@@ -2,6 +2,7 @@
 #include <ORGModuleServices/CompileFlightRegistry.h>
 
 #include <condition_variable>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
@@ -31,6 +32,15 @@ namespace {
     // runtime path still uses the artifact cache; only the worker servicing an
     // explicit pso.recompile request bypasses cache reads.
     thread_local bool g_bypassShaderArtifactCacheReads = false;
+
+    bool ShaderCacheDiagnosticsEnabled()
+    {
+        static const bool enabled = [] {
+            const char* value = std::getenv("SARP_SHADER_CACHE_DIAGNOSTICS");
+            return value && value[0] != '\0' && value[0] != '0';
+        }();
+        return enabled;
+    }
 
     // BRSL resource arguments must be valid HLSL-like identifiers, but some
     // renderer-neutral graph resources intentionally use URI-style public
@@ -207,48 +217,102 @@ std::string NormalizePathUtf8(const std::filesystem::path& path)
     return NormalizeCacheSourcePath(ws2s(path.wstring()));
 }
 
-uint64_t BuildBundleIdentityHash(
-    const ShaderInfoBundle& info,
-    const DxcBuffer& amplificationBuffer,
-    const DxcBuffer& meshBuffer,
-    const DxcBuffer& pixelBuffer,
-    const DxcBuffer& vertexBuffer,
-    const DxcBuffer& computeBuffer)
+uint64_t ComputeShaderSourceTreeIdentityHash()
+{
+    // Shader artifacts are addressed by their compile recipe plus one content
+    // digest for the complete source tree. This lets runtime cache hits happen
+    // before DXC preprocessing. The former preprocessed-source identity forced
+    // every nominal cache hit to preprocess every include again, accounting for
+    // multi-second "Compile*PSO" tasks after an offline preprocessing run.
+	uint64_t seed = 0;
+	std::size_t sourceCount = 0;
+	std::error_code ec;
+	for (const std::wstring_view rootName : { L"shaders", L"SARPShaders", L"NVSL" }) {
+		const auto shaderRoot = std::filesystem::weakly_canonical(
+			std::filesystem::current_path() / rootName, ec);
+		if (ec || !std::filesystem::is_directory(shaderRoot, ec)) return 0;
+
+		std::vector<std::pair<std::string, std::filesystem::path>> sources;
+		for (std::filesystem::recursive_directory_iterator it(shaderRoot, ec), end;
+			!ec && it != end; it.increment(ec)) {
+			if (!it->is_regular_file(ec)) continue;
+			const auto extension = it->path().extension().wstring();
+			if (extension != L".hlsl" && extension != L".hlsli" && extension != L".h") continue;
+			const auto relative = NormalizePathUtf8(std::filesystem::relative(it->path(), shaderRoot, ec));
+			if (ec) return 0;
+			sources.emplace_back(relative, it->path());
+		}
+		if (ec) return 0;
+		std::ranges::sort(sources, {}, &std::pair<std::string, std::filesystem::path>::first);
+
+		util::hash_combine_u64(seed, HashStringStable(ws2s(std::wstring(rootName))));
+		for (const auto& [relative, path] : sources) {
+			util::hash_combine_u64(seed, HashStringStable(relative));
+			util::hash_combine_u64(seed, HashFileContentStable(path));
+		}
+		util::hash_combine_u64(seed, sources.size());
+		sourceCount += sources.size();
+	}
+	if (ShaderCacheDiagnosticsEnabled()) {
+		spdlog::info("Shader cache source identity roots='shaders,SARPShaders,NVSL' files={} identity=0x{:X}",
+			sourceCount, seed);
+	}
+    return seed;
+}
+
+uint64_t GetShaderSourceTreeIdentityHash()
+{
+    static const uint64_t identity = ComputeShaderSourceTreeIdentityHash();
+    return identity;
+}
+
+void HashShaderDefines(uint64_t& seed, const std::vector<DxcDefine>& defines)
+{
+    util::hash_combine_u64(seed, defines.size());
+    for (const auto& define : defines) {
+        util::hash_combine_u64(seed, HashStringStable(ws2s(define.Name ? define.Name : L"")));
+        util::hash_combine_u64(seed, HashStringStable(ws2s(define.Value ? define.Value : L"")));
+    }
+}
+
+uint64_t BuildBundleIdentityHash(const ShaderInfoBundle& info)
 {
     uint64_t seed = 0;
+    util::hash_combine_u64(seed, GetShaderSourceTreeIdentityHash());
     util::hash_combine_u64(seed, info.enableDebugInfo ? 1u : 0u);
     util::hash_combine_u64(seed, info.warningsAsErrors ? 1u : 0u);
+    HashShaderDefines(seed, info.defines);
 
-    auto hashSlot = [&](shadercache::BlobKind blobKind, const std::optional<ShaderInfo>& slot, const DxcBuffer& buffer) {
+    auto hashSlot = [&](shadercache::BlobKind blobKind, const std::optional<ShaderInfo>& slot) {
         util::hash_combine_u64(seed, static_cast<uint8_t>(blobKind));
         util::hash_combine_u64(seed, slot.has_value() ? 1u : 0u);
         if (!slot) {
             return;
         }
 
-        util::hash_combine_u64(seed, HashCanonicalPreprocessedBuffer(buffer));
-        util::hash_combine_u64(seed, GetCanonicalPreprocessedBufferSize(buffer));
+        util::hash_combine_u64(seed, HashStringStable(NormalizeCacheSourcePath(ws2s(slot->filename))));
         util::hash_combine_u64(seed, HashStringStable(ws2s(slot->entryPoint)));
         util::hash_combine_u64(seed, HashStringStable(ws2s(slot->target)));
         util::hash_combine_u64(seed, ShouldSkipValidationForEntryPoint(slot->entryPoint) ? 1u : 0u);
     };
 
-    hashSlot(shadercache::BlobKind::Amplification, info.amplificationShader, amplificationBuffer);
-    hashSlot(shadercache::BlobKind::Mesh, info.meshShader, meshBuffer);
-    hashSlot(shadercache::BlobKind::Vertex, info.vertexShader, vertexBuffer);
-    hashSlot(shadercache::BlobKind::Pixel, info.pixelShader, pixelBuffer);
-    hashSlot(shadercache::BlobKind::Compute, info.computeShader, computeBuffer);
+    hashSlot(shadercache::BlobKind::Amplification, info.amplificationShader);
+    hashSlot(shadercache::BlobKind::Mesh, info.meshShader);
+    hashSlot(shadercache::BlobKind::Vertex, info.vertexShader);
+    hashSlot(shadercache::BlobKind::Pixel, info.pixelShader);
+    hashSlot(shadercache::BlobKind::Compute, info.computeShader);
     return seed;
 }
 
 uint64_t BuildLibraryIdentityHash(
     const ShaderLibraryInfo& info,
-    const DxcBuffer& preprocessedBuffer)
+    const std::vector<DxcDefine>& defines)
 {
     uint64_t seed = 0;
-    util::hash_combine_u64(seed, HashCanonicalPreprocessedBuffer(preprocessedBuffer));
-    util::hash_combine_u64(seed, GetCanonicalPreprocessedBufferSize(preprocessedBuffer));
+    util::hash_combine_u64(seed, GetShaderSourceTreeIdentityHash());
+    util::hash_combine_u64(seed, HashStringStable(NormalizeCacheSourcePath(ws2s(info.filename))));
     util::hash_combine_u64(seed, HashStringStable(ws2s(info.target)));
+    HashShaderDefines(seed, defines);
     return seed;
 }
 
@@ -2833,29 +2897,12 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
 	const shadercache::BinaryFormat binaryFormat = GetShaderBinaryFormat(DeviceManager::GetInstance().GetBackend());
 	const bool emitSpirv = IsSpirvFormat(binaryFormat);
     Microsoft::WRL::ComPtr<ID3DBlob> outBlob;
-    DxcBuffer dxcPreprocessBuff;
-
-	// Preprocess
-    GetPreprocessedBlob(
-        libraryInfo.filename,
-        L"",
-        libraryInfo.target,
-        defines,
-		outBlob,
-		emitSpirv
-	);
-
-    dxcPreprocessBuff.Ptr = outBlob->GetBufferPointer();
-    dxcPreprocessBuff.Size = outBlob->GetBufferSize();
-    dxcPreprocessBuff.Encoding = 0;
-
-    std::string debug_shader_string((const char*)dxcPreprocessBuff.Ptr, dxcPreprocessBuff.Size);
 
     const uint64_t buildConfigHash = ComputeShaderCacheBuildConfigHash(binaryFormat);
     const shadercache::CacheKey cacheKey{
         .binaryFormat = binaryFormat,
         .artifactKind = shadercache::ArtifactKind::Library,
-        .identityHash = BuildLibraryIdentityHash(libraryInfo, dxcPreprocessBuff),
+        .identityHash = BuildLibraryIdentityHash(libraryInfo, defines),
     };
     const ShaderCompileFlightKey flightKey{
         .binaryFormat = cacheKey.binaryFormat,
@@ -2868,17 +2915,39 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
             "Shader live reload: bypassing library artifact cache identity=0x{:X}",
             cacheKey.identityHash);
     }
+    bool cacheLookupLogged = false;
     for (;;) {
         if (!g_bypassShaderArtifactCacheReads) {
-            if (std::optional<ShaderLibraryBundle> cachedBundle = TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
-                return *cachedBundle;
+            std::optional<ShaderLibraryBundle> cachedBundle =
+                TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get());
+            if (ShaderCacheDiagnosticsEnabled() && !cacheLookupLogged) {
+                cacheLookupLogged = true;
+                spdlog::info("Shader library cache lookup file='{}' target='{}' identity=0x{:X} build=0x{:X} result={}",
+                    ws2s(libraryInfo.filename), ws2s(libraryInfo.target), cacheKey.identityHash,
+                    buildConfigHash, cachedBundle ? "hit" : "miss");
             }
+            if (cachedBundle) return *cachedBundle;
         }
         if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
             break;
         }
     }
     ShaderCompileFlightScope flightScope(flightKey);
+
+	// Cache misses alone pay preprocessing/BRSL rewrite/compilation. Offline
+	// preprocessing writes the same recipe-addressed artifact used above.
+    DxcBuffer dxcPreprocessBuff{};
+    GetPreprocessedBlob(
+        libraryInfo.filename,
+        L"",
+        libraryInfo.target,
+        defines,
+		outBlob,
+		emitSpirv
+	);
+    dxcPreprocessBuff.Ptr = outBlob->GetBufferPointer();
+    dxcPreprocessBuff.Size = outBlob->GetBufferSize();
+    dxcPreprocessBuff.Encoding = 0;
 
     // Compile BRSL info
     PreprocessedLibraryResult libPP = PreprocessShaderLibrary(dxcPreprocessBuff);
@@ -2939,6 +3008,52 @@ ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, 
 	if (info.computeShader && (info.meshShader || info.amplificationShader || info.vertexShader || info.pixelShader))
 		throw std::runtime_error("Cannot compile compute shader with other shader types in the same bundle");
 
+    const uint64_t buildConfigHash = ComputeShaderCacheBuildConfigHash(binaryFormat);
+    const shadercache::CacheKey cacheKey{
+        .binaryFormat = binaryFormat,
+        .artifactKind = shadercache::ArtifactKind::Bundle,
+        .identityHash = BuildBundleIdentityHash(info),
+    };
+    const bool logMaterialEvalCache =
+        info.computeShader.has_value()
+        && info.computeShader->filename == L"shaders/VisUtilEvaluate.hlsl";
+    const ShaderCompileFlightKey flightKey{
+        .binaryFormat = cacheKey.binaryFormat,
+        .artifactKind = cacheKey.artifactKind,
+        .identityHash = cacheKey.identityHash,
+        .buildConfigHash = buildConfigHash,
+    };
+    if (g_bypassShaderArtifactCacheReads) {
+        spdlog::info(
+            "Shader live reload: bypassing bundle artifact cache identity=0x{:X}",
+            cacheKey.identityHash);
+    }
+    bool cacheLookupLogged = false;
+    for (;;) {
+        if (!g_bypassShaderArtifactCacheReads) {
+            std::optional<ShaderBundle> cachedBundle =
+                TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get());
+            if (ShaderCacheDiagnosticsEnabled() && !cacheLookupLogged) {
+                cacheLookupLogged = true;
+                const auto& slot = info.computeShader ? info.computeShader :
+                    (info.meshShader ? info.meshShader :
+                    (info.vertexShader ? info.vertexShader : info.pixelShader));
+                spdlog::info("Shader bundle cache lookup file='{}' entry='{}' defines={} identity=0x{:X} build=0x{:X} result={}",
+                    slot ? ws2s(slot->filename) : std::string{},
+                    slot ? ws2s(slot->entryPoint) : std::string{}, info.defines.size(),
+                    cacheKey.identityHash, buildConfigHash, cachedBundle ? "hit" : "miss");
+            }
+            if (cachedBundle) return *cachedBundle;
+        }
+        if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
+            break;
+        }
+    }
+    ShaderCompileFlightScope flightScope(flightKey);
+    if (logMaterialEvalCache) {
+        spdlog::debug("VisUtil material eval shader artifact cache miss; compiling identity=0x{:X}", cacheKey.identityHash);
+    }
+
 	Microsoft::WRL::ComPtr<ID3DBlob> preprocessedAmplificationShader;
 	DxcBuffer amplificationBuffer = {};
 	Microsoft::WRL::ComPtr<ID3DBlob> preprocessedMeshShader;
@@ -2955,47 +3070,6 @@ ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, 
     PreprocessShaderSlot(info.pixelShader, info.defines, preprocessedPixelShader, pixelBuffer, emitSpirv);
     PreprocessShaderSlot(info.vertexShader, info.defines, preprocessedVertexShader, vertexBuffer, emitSpirv);
     PreprocessShaderSlot(info.computeShader, info.defines, preprocessedComputeShader, computeBuffer, emitSpirv);
-
-    const uint64_t buildConfigHash = ComputeShaderCacheBuildConfigHash(binaryFormat);
-    const shadercache::CacheKey cacheKey{
-        .binaryFormat = binaryFormat,
-        .artifactKind = shadercache::ArtifactKind::Bundle,
-        .identityHash = BuildBundleIdentityHash(
-            info,
-            amplificationBuffer,
-            meshBuffer,
-            pixelBuffer,
-            vertexBuffer,
-            computeBuffer),
-    };
-    const bool logMaterialEvalCache =
-        info.computeShader.has_value()
-        && info.computeShader->filename == L"shaders/VisUtilEvaluate.hlsl";
-    const ShaderCompileFlightKey flightKey{
-        .binaryFormat = cacheKey.binaryFormat,
-        .artifactKind = cacheKey.artifactKind,
-        .identityHash = cacheKey.identityHash,
-        .buildConfigHash = buildConfigHash,
-    };
-    if (g_bypassShaderArtifactCacheReads) {
-        spdlog::info(
-            "Shader live reload: bypassing bundle artifact cache identity=0x{:X}",
-            cacheKey.identityHash);
-    }
-    for (;;) {
-        if (!g_bypassShaderArtifactCacheReads) {
-            if (std::optional<ShaderBundle> cachedBundle = TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
-            return *cachedBundle;
-            }
-        }
-        if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
-            break;
-        }
-    }
-    ShaderCompileFlightScope flightScope(flightKey);
-    if (logMaterialEvalCache) {
-        spdlog::debug("VisUtil material eval shader artifact cache miss; compiling identity=0x{:X}", cacheKey.identityHash);
-    }
 
     auto prepareSlot = [&](const std::optional<ShaderInfo>& slot, const DxcBuffer& buffer)
         -> std::optional<PreparedShaderSource>

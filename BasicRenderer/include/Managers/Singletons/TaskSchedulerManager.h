@@ -28,6 +28,38 @@ enum class TaskDomain : std::uint8_t {
     MaterialAcceptance, GpuBufferBuild, Count
 };
 
+// Numeric scheduler trace metadata is deliberately independent of the graph
+// headers. The scheduler can therefore feed the renderer's unified async trace
+// without formatting strings or allocating trace records on its hot path.
+enum class TaskTraceEventID : std::uint8_t {
+    Queued, Admitted, Started, Completed, Cancelled, Rejected, Resubmitted
+};
+
+struct TaskTraceMetadata {
+    std::uint64_t taskKind = 0;
+    std::uint64_t correlationID = 0;
+    std::uint64_t admissionKey = 0;
+    std::uint8_t workClass = 0;
+    std::uint8_t schedulingReason = 0;
+    std::uint8_t admissionGroup = 0;
+};
+
+struct TaskTraceEvent {
+    TaskTraceEventID event{ TaskTraceEventID::Queued };
+    TaskTraceMetadata metadata{};
+    std::uint64_t taskID = 0;
+    std::uint64_t queueWaitMicros = 0;
+    std::uint64_t executionMicros = 0;
+    std::uint64_t queuedDepth = 0;
+    std::uint32_t activeCount = 0;
+    TaskDomain domain{ TaskDomain::General };
+    TaskLane lane{ TaskLane::Streaming };
+    std::uint8_t outcome = 0;
+};
+static_assert(std::is_trivially_copyable_v<TaskTraceEvent>);
+
+using TaskTraceCallback = void(*)(void*, const TaskTraceEvent&) noexcept;
+
 class TaskScope {
 public:
     struct State;
@@ -97,13 +129,16 @@ public:
     [[nodiscard]] TaskScope ProcessScope(TaskDomain domain) const;
 
     bool Submit(const TaskScope&, TaskLane, TaskDomain, std::string_view,
-        std::function<void(const TaskContext&)>&& task);
-    bool Submit(TaskLane, TaskDomain, std::string_view, std::function<void()>&& task);
+        std::function<void(const TaskContext&)>&& task, TaskTraceMetadata trace = {});
+    bool Submit(TaskLane, TaskDomain, std::string_view, std::function<void()>&& task,
+        TaskTraceMetadata trace = {});
     bool ScheduleAfter(const TaskScope&, std::chrono::steady_clock::duration, TaskLane, TaskDomain,
         std::string_view, std::function<void(const TaskContext&)>&& task);
     bool SubmitBlockingIo(const TaskScope&, TaskDomain, std::string_view,
         std::function<void(const TaskContext&)>&& blockingOperation, TaskLane continuationLane,
         std::function<void(const TaskContext&)>&& continuation);
+    bool InstallTaskTraceSink(void* context, TaskTraceCallback callback) noexcept;
+    void RemoveTaskTraceSink(void* context) noexcept;
 
     template <typename Func>
     void ParallelFor(std::size_t itemCount, Func&& func) {
@@ -133,6 +168,19 @@ private:
     std::unique_ptr<RuntimeState> m_runtimeState;
     std::atomic_bool m_initialized{ false };
     std::uint32_t m_workerCount = 0;
+    void EmitTaskTrace(const TaskTraceEvent& event) noexcept;
+    [[nodiscard]] bool TaskTraceActive() const noexcept {
+        return m_taskTraceContext.load(std::memory_order_acquire) != nullptr;
+    }
+    std::atomic<void*> m_taskTraceContext{ nullptr };
+    std::atomic<TaskTraceCallback> m_taskTraceCallback{ nullptr };
+    struct TaskTraceHazardSlot {
+        std::atomic<void*> context{ nullptr };
+        TaskTraceHazardSlot* next = nullptr;
+    };
+    [[nodiscard]] TaskTraceHazardSlot* ThreadTaskTraceHazard() noexcept;
+    std::atomic<TaskTraceHazardSlot*> m_taskTraceHazards{ nullptr };
+    std::atomic_uint64_t m_nextTraceTaskID{ 1 };
 };
 
 } // namespace br

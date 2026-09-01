@@ -535,6 +535,18 @@ struct ArtifactBuildResult {
 
 using ArtifactProducer = std::function<ArtifactBuildResult(const ArtifactBuildContext&)>;
 
+enum class ArtifactWorkClass : std::uint8_t {
+    Publication, Continuation, Ingestion, Maintenance
+};
+
+struct ArtifactSchedulingPolicy {
+    ArtifactWorkClass initialClass = ArtifactWorkClass::Ingestion;
+    TaskLane initialLane = TaskLane::Streaming;
+    TaskLane continuationLane = TaskLane::FrameCritical;
+    std::uint8_t admissionGroup = 0;
+    std::uint64_t admissionKey = 0;
+};
+
 struct ArtifactProducerRegistration {
     TaskLane lane = TaskLane::Streaming;
     TaskDomain domain = TaskDomain::General;
@@ -542,6 +554,7 @@ struct ArtifactProducerRegistration {
     ArtifactProducer producer;
     std::type_index inputType{ typeid(void) };
     std::type_index outputType{ typeid(void) };
+    ArtifactSchedulingPolicy scheduling{};
 };
 
 struct ArtifactDiagnostic {
@@ -621,6 +634,9 @@ enum class AsyncStateGraphTraceEventID : std::uint16_t {
     StaticGroupDiscovered, StaticGroupBatchQueued, StaticGroupPrepared,
     StaticGroupValidated, StaticGroupWorkerSubmitted, StaticGroupMaterialized,
     StaticGroupBridgeApplied,
+    SchedulerTaskQueued, SchedulerTaskAdmitted, SchedulerTaskStarted,
+    SchedulerTaskCompleted, SchedulerTaskCancelled, SchedulerTaskRejected,
+    SchedulerTaskResubmitted,
     Count
 };
 

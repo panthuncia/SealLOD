@@ -38,6 +38,15 @@ constexpr std::size_t kDomainCount = static_cast<std::size_t>(TaskDomain::Count)
 thread_local bool g_inSchedulerTask = false;
 const char* DomainName(TaskDomain domain);
 
+constexpr std::uint64_t StableTaskKind(std::string_view value) noexcept {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const unsigned char character : value) {
+        hash ^= character;
+        hash *= 1099511628211ull;
+    }
+    return hash == 0 ? 1u : hash;
+}
+
 void LogLongTask(std::string_view name, TaskDomain domain, std::uint64_t elapsedUs) {
     struct WarningState {
         std::chrono::steady_clock::time_point lastLogged{};
@@ -203,6 +212,10 @@ struct TaskSchedulerManager::RuntimeState {
         std::string name;
         std::function<void(const TaskContext&)> body;
         std::chrono::steady_clock::time_point queuedAt;
+        TaskTraceMetadata trace{};
+        std::uint64_t traceTaskID = 0;
+        std::uint64_t admittedQueuedDepth = 0;
+        std::uint32_t admittedActiveCount = 0;
     };
     struct DelayedTask {
         std::chrono::steady_clock::time_point due;
@@ -400,7 +413,12 @@ void TaskSchedulerManager::Initialize(Config config) {
 				}
 			}
 			if (tokenActive) {
-				Submit(TaskScope(delayed.task.scope), delayed.task.lane, delayed.task.domain, delayed.task.name, std::move(delayed.task.body));
+				if (delayed.task.traceTaskID != 0) EmitTaskTrace({
+					TaskTraceEventID::Resubmitted, delayed.task.trace,
+					delayed.task.traceTaskID, 0, 0, 0, 0,
+					delayed.task.domain, delayed.task.lane, 0 });
+				Submit(TaskScope(delayed.task.scope), delayed.task.lane, delayed.task.domain,
+					delayed.task.name, std::move(delayed.task.body), delayed.task.trace);
 				CompleteScope(delayed.task.scope);
 			}
             lock.lock();
@@ -440,27 +458,46 @@ void TaskSchedulerManager::Initialize(Config config) {
 }
 
 bool TaskSchedulerManager::Submit(const TaskScope& scope, TaskLane lane, TaskDomain domain, std::string_view name,
-    std::function<void(const TaskContext&)>&& body) {
-    if (!m_runtimeState || !scope.m_state || !scope.m_state->accepting.load(std::memory_order_acquire)) return false;
+    std::function<void(const TaskContext&)>&& body, TaskTraceMetadata trace) {
+    const bool tracing = TaskTraceActive();
+    if (tracing && trace.taskKind == 0) trace.taskKind = StableTaskKind(name);
+    const auto traceTaskID = tracing
+        ? m_nextTraceTaskID.fetch_add(1, std::memory_order_relaxed) : 0;
+    const auto reject = [&] {
+        if (tracing) EmitTaskTrace({ TaskTraceEventID::Rejected, trace, traceTaskID,
+            0, 0, 0, 0, domain, lane, 1 });
+        return false;
+    };
+    if (!m_runtimeState || !scope.m_state ||
+        !scope.m_state->accepting.load(std::memory_order_acquire)) return reject();
     {
         std::lock_guard lock(scope.m_state->mutex);
-        if (!scope.m_state->accepting.load(std::memory_order_relaxed)) return false;
+        if (!scope.m_state->accepting.load(std::memory_order_relaxed)) return reject();
         ++scope.m_state->outstanding;
     }
+    std::uint64_t queuedDepth = 0;
+    std::uint32_t activeCount = 0;
     {
         std::lock_guard lock(m_runtimeState->taskMutex);
         auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(domain)];
         runtime.queues[static_cast<std::size_t>(lane)].push_back(
-            { scope.m_state, lane, domain, std::string(name), std::move(body), std::chrono::steady_clock::now() });
+            { scope.m_state, lane, domain, std::string(name), std::move(body),
+                std::chrono::steady_clock::now(), trace, traceTaskID });
         runtime.stats.queued = runtime.Queued();
         runtime.stats.highWatermark = std::max(runtime.stats.highWatermark, runtime.stats.queued);
+        queuedDepth = runtime.stats.queued;
+        activeCount = runtime.active;
     }
+    if (tracing) EmitTaskTrace({ TaskTraceEventID::Queued, trace, traceTaskID,
+        0, 0, queuedDepth, activeCount, domain, lane, 0 });
     DispatchDomain(domain);
     return true;
 }
 
-bool TaskSchedulerManager::Submit(TaskLane lane, TaskDomain domain, std::string_view name, std::function<void()>&& body) {
-    return Submit(ProcessScope(domain), lane, domain, name, [body = std::move(body)](const TaskContext&) mutable { body(); });
+bool TaskSchedulerManager::Submit(TaskLane lane, TaskDomain domain, std::string_view name,
+    std::function<void()>&& body, TaskTraceMetadata trace) {
+    return Submit(ProcessScope(domain), lane, domain, name,
+        [body = std::move(body)](const TaskContext&) mutable { body(); }, trace);
 }
 
 void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
@@ -495,13 +532,21 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
             }
             auto& queue = runtime.queues[selected];
             launch.push_back(std::move(queue.front())); queue.pop_front(); ++runtime.active;
+            launch.back().admittedQueuedDepth = runtime.Queued();
+            launch.back().admittedActiveCount = runtime.active;
         }
         runtime.stats.queued = runtime.Queued(); runtime.stats.active = runtime.active;
     }
     for (auto& task : launch) {
+        if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Admitted,
+            task.trace, task.traceTaskID, 0, 0, task.admittedQueuedDepth,
+            task.admittedActiveCount, task.domain, task.lane, 0 });
         SelectArena(*m_runtimeState, task.lane).enqueue([this, task = std::move(task)]() {
             const auto started = std::chrono::steady_clock::now();
             const auto queuedUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(started - task.queuedAt).count());
+            if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Started,
+                task.trace, task.traceTaskID, queuedUs, 0, task.admittedQueuedDepth,
+                task.admittedActiveCount, task.domain, task.lane, 0 });
             auto contextState = std::make_shared<TaskContext::State>(); contextState->scope = task.scope;
             TaskContext context(contextState); std::exception_ptr error;
             const bool cancelled = context.StopRequested();
@@ -535,6 +580,10 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
                 if (cancelled) ++runtime.stats.cancelled; else if (error) ++runtime.stats.failed; else ++runtime.stats.completed;
                 if (task.lane != TaskLane::FrameCritical && elapsedUs > kLongTaskMicros) ++runtime.stats.longTasks;
             }
+            if (task.traceTaskID != 0) EmitTaskTrace({
+                cancelled ? TaskTraceEventID::Cancelled : TaskTraceEventID::Completed,
+                task.trace, task.traceTaskID, queuedUs, elapsedUs, 0, 0,
+                task.domain, task.lane, static_cast<std::uint8_t>(error ? 2 : 0) });
             DispatchDomain(task.domain);
         });
     }
@@ -546,8 +595,15 @@ bool TaskSchedulerManager::ScheduleAfter(const TaskScope& scope, std::chrono::st
     { std::lock_guard lock(scope.m_state->mutex); ++scope.m_state->outstanding; ++scope.m_state->delayedOutstanding; }
     {
         std::lock_guard lock(m_runtimeState->timerMutex);
+        TaskTraceMetadata trace{};
+        std::uint64_t traceTaskID = 0;
+        if (TaskTraceActive()) {
+            trace.taskKind = StableTaskKind(name);
+            traceTaskID = m_nextTraceTaskID.fetch_add(1, std::memory_order_relaxed);
+        }
         m_runtimeState->timers.push({ std::chrono::steady_clock::now() + delay, ++m_runtimeState->nextTimer,
-            { scope.m_state, lane, domain, std::string(name), std::move(body), std::chrono::steady_clock::now() } });
+            { scope.m_state, lane, domain, std::string(name), std::move(body),
+                std::chrono::steady_clock::now(), trace, traceTaskID } });
     }
     m_runtimeState->timerCv.notify_one(); return true;
 }
@@ -617,6 +673,71 @@ TaskSchedulerManager::QueueStats TaskSchedulerManager::GetQueueStats() const {
     result.shaderCompileQueued = static_cast<std::uint32_t>(shader.queued);
     result.shaderCompileActive = static_cast<std::uint32_t>(shader.active);
     return result;
+}
+
+bool TaskSchedulerManager::InstallTaskTraceSink(void* context,
+    TaskTraceCallback callback) noexcept {
+    if (!context || !callback) return false;
+    void* expected = nullptr;
+    m_taskTraceCallback.store(callback, std::memory_order_release);
+    if (m_taskTraceContext.compare_exchange_strong(expected, context,
+        std::memory_order_release, std::memory_order_acquire)) return true;
+    if (expected != context) m_taskTraceCallback.store(nullptr, std::memory_order_release);
+    return expected == context;
+}
+
+void TaskSchedulerManager::RemoveTaskTraceSink(void* context) noexcept {
+    if (!context) return;
+    void* expected = context;
+    if (!m_taskTraceContext.compare_exchange_strong(expected, nullptr,
+        std::memory_order_seq_cst, std::memory_order_acquire)) return;
+    for (;;) {
+        bool writerActive = false;
+        for (auto* hazard = m_taskTraceHazards.load(std::memory_order_acquire);
+            hazard; hazard = hazard->next) {
+            if (hazard->context.load(std::memory_order_seq_cst) == context) {
+                writerActive = true;
+                break;
+            }
+        }
+        if (!writerActive) break;
+        std::this_thread::yield();
+    }
+    m_taskTraceCallback.store(nullptr, std::memory_order_release);
+}
+
+void TaskSchedulerManager::EmitTaskTrace(const TaskTraceEvent& event) noexcept {
+    auto* hazard = ThreadTaskTraceHazard();
+    for (;;) {
+        auto* context = m_taskTraceContext.load(std::memory_order_acquire);
+        if (!context) return;
+        hazard->context.store(context, std::memory_order_seq_cst);
+        if (context != m_taskTraceContext.load(std::memory_order_seq_cst)) {
+            hazard->context.store(nullptr, std::memory_order_seq_cst);
+            continue;
+        }
+        const auto callback = m_taskTraceCallback.load(std::memory_order_acquire);
+        if (callback) callback(context, event);
+        hazard->context.store(nullptr, std::memory_order_seq_cst);
+        return;
+    }
+}
+
+TaskSchedulerManager::TaskTraceHazardSlot*
+TaskSchedulerManager::ThreadTaskTraceHazard() noexcept {
+    struct CacheEntry {
+        TaskSchedulerManager* owner = nullptr;
+        TaskTraceHazardSlot* slot = nullptr;
+    };
+    static thread_local CacheEntry cache;
+    if (cache.owner == this && cache.slot) return cache.slot;
+    auto* slot = new TaskTraceHazardSlot();
+    auto* head = m_taskTraceHazards.load(std::memory_order_relaxed);
+    do { slot->next = head; }
+    while (!m_taskTraceHazards.compare_exchange_weak(head, slot,
+        std::memory_order_release, std::memory_order_relaxed));
+    cache = { this, slot };
+    return slot;
 }
 
 void TaskSchedulerManager::Cleanup() {

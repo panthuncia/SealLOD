@@ -12,7 +12,7 @@ namespace shadercache {
 
 // Schema 4 artifacts were produced by a temporary material-record diagnostic
 // ABI. Never reuse them with the restored production surface-record layout.
-inline constexpr uint32_t kSchemaVersion = 6;
+inline constexpr uint32_t kSchemaVersion = 7;
 
 enum class BinaryFormat : uint8_t {
     Dxil = 1,
