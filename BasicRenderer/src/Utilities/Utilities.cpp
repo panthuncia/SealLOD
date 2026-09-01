@@ -648,74 +648,6 @@ namespace detail {
         return desc;
     }
 
-    std::optional<TextureDescription> TryBuildDeferredDDSDescription(
-        const std::wstring& filePath,
-        bool preferSRGB,
-        bool allowRTV,
-        bool allowUAV,
-        std::string* outFailureReason = nullptr)
-    {
-        if (outFailureReason) {
-            outFailureReason->clear();
-        }
-        if (!IsDDSPath(filePath)) {
-            return std::nullopt;
-        }
-
-        DirectX::TexMetadata metadata{};
-        const auto result = DirectX::GetMetadataFromDDSFile(
-            filePath.c_str(), DirectX::DDS_FLAGS_NONE, metadata);
-        if (FAILED(result) || metadata.width == 0 || metadata.height == 0 || metadata.mipLevels == 0) {
-            if (outFailureReason) {
-                *outFailureReason = "failed to read DDS metadata";
-            }
-            return std::nullopt;
-        }
-
-        TextureDescription desc{};
-        const auto dxgiFormat = preferSRGB
-            ? DirectX::MakeSRGB(metadata.format)
-            : DirectX::MakeLinear(metadata.format);
-        desc.format = rhi::helpers::ToRHI(dxgiFormat);
-        desc.channels = static_cast<unsigned short>(rhi::helpers::FormatChannelCount(desc.format));
-        desc.isCubemap = metadata.IsCubemap();
-        desc.isArray = metadata.arraySize > 1 && !desc.isCubemap;
-        desc.arraySize = desc.isCubemap
-            ? static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize / size_t(6)))
-            : static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize));
-        desc.hasRTV = allowRTV;
-        desc.hasUAV = allowUAV;
-        desc.generateMipMaps = false;
-        desc.initialLayout = rhi::ResourceLayout::Common;
-
-        const uint32_t totalSlices = desc.isCubemap
-            ? desc.arraySize * 6u
-            : desc.arraySize;
-        desc.imageDimensions.reserve(static_cast<size_t>(totalSlices) * metadata.mipLevels);
-        for (uint32_t arraySlice = 0; arraySlice < totalSlices; ++arraySlice) {
-            for (size_t mip = 0; mip < metadata.mipLevels; ++mip) {
-                const size_t mipWidth = (std::max)(size_t(1), metadata.width >> mip);
-                const size_t mipHeight = (std::max)(size_t(1), metadata.height >> mip);
-                size_t rowPitch = 0;
-                size_t slicePitch = 0;
-                if (FAILED(DirectX::ComputePitch(
-                        dxgiFormat, mipWidth, mipHeight, rowPitch, slicePitch))) {
-                    if (outFailureReason) {
-                        *outFailureReason = "failed to compute DDS mip pitch";
-                    }
-                    return std::nullopt;
-                }
-                desc.imageDimensions.push_back(ImageDimensions{
-                    .width = static_cast<uint32_t>(mipWidth),
-                    .height = static_cast<uint32_t>(mipHeight),
-                    .rowPitch = rowPitch,
-                    .slicePitch = slicePitch,
-                });
-            }
-        }
-        return desc;
-    }
-
     std::shared_ptr<TextureAsset> TryLoadProcessedTextureCacheToVRAM(
         const std::wstring& filePath,
         std::shared_ptr<Sampler> sampler,
@@ -1280,21 +1212,6 @@ LoadTextureFromFileDeferred(
                 cacheShapeError);
         }
     }
-	else if (::detail::IsDDSPath(filePath)) {
-		std::string ddsShapeError;
-		if (auto ddsDesc = ::detail::TryBuildDeferredDDSDescription(
-				filePath, preferSRGB, allowRTV, allowUAV, &ddsShapeError)) {
-			desc = std::move(*ddsDesc);
-			deferredShapeDetail = "texture load deferred; source shape populated from DDS metadata";
-			TracyPlot("SARP.Texture.DeferredDDSShape", static_cast<int64_t>(1));
-		}
-		else if (!ddsShapeError.empty()) {
-			spdlog::debug(
-				"LoadTextureFromFileDeferred: using placeholder shape for '{}' because {}",
-				utf8,
-				ddsShapeError);
-		}
-	}
 
     if (desc.imageDimensions.empty()) {
         desc.channels = 4;
