@@ -35,7 +35,9 @@ struct IndirectWorkloadInputDTO {
     std::uint32_t residentDrawRecordCount = 0;
     std::uint32_t minimumCapacity = 0;
     std::uint64_t activeListRevision = 0;
-    std::vector<ActiveDrawEntryDTO> activeEntries;
+    // Entry content is owned by the exact ActiveDrawList artifact. Keeping
+    // only its logical extent makes aggregate construction O(workload count).
+    std::uint64_t logicalEntryCount = 0;
     struct ArgumentArtifact {
         std::uint64_t viewID = 0;
         ArtifactKey key{ ArtifactKind::BufferVersion, 0, 0 };

@@ -93,7 +93,7 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
     }
 
     for (const auto& workload : input->workloads) {
-        const auto logicalCount = static_cast<std::uint64_t>(workload.activeEntries.size());
+        const auto logicalCount = workload.logicalEntryCount;
         const auto safeCount64 = (std::min)({ static_cast<std::uint64_t>(workload.requestedCount),
             logicalCount, static_cast<std::uint64_t>(workload.residentDrawRecordCount) });
         const auto safeCount = static_cast<std::uint32_t>(safeCount64);

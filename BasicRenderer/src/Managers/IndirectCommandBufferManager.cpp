@@ -451,6 +451,9 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
     std::uint64_t deferredEntryCount = 0;
     std::uint64_t safeDrawCount = 0;
     std::uint32_t nonEmptyWorkloads = 0;
+    std::uint64_t workloadsVisited = 0;
+    std::uint64_t activeListArtifactsRequested = 0;
+    std::uint64_t activeListArtifactsReused = 0;
     const auto roundUp = [increment = snapshot.incrementSize](unsigned int value) {
         const auto rounded = ((static_cast<std::uint64_t>(value) + increment - 1u) /
             increment) * increment;
@@ -479,34 +482,9 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
 			idFound == snapshot.workloadIDs.end() || journalFound->second.revision == 0) continue;
         const auto& journal = journalFound->second;
 		const auto& activeCapture = captureFound->second;
-        std::size_t entryCount = journal.base ? journal.base->size() : 0u;
-        for (const auto& append : journal.appends) {
-            if (append) entryCount += append->size();
-        }
-        std::vector<br::render::ActiveDrawEntryDTO> entries;
-        entries.reserve(entryCount);
-        const auto appendEntries = [&entries](const auto& source) {
-            if (!source) return;
-            for (const auto& entry : *source) {
-                entries.push_back({ entry.drawRecordIndex, entry.generation });
-            }
-        };
-        appendEntries(journal.base);
-        for (const auto& append : journal.appends) appendEntries(append);
-        sourceEntryCount += entries.size();
-
-        // Active-set mutation and the logical draw-record extent are observed
-        // independently. Keep the complete immutable active-list version even
-        // when its draw-record rows have not reached the coherent root yet. The
-        // root's safe count below temporarily clamps execution, and the later
-        // extent-only mutation can then reuse this complete list. Filtering here
-        // permanently cached a truncated (often empty) artifact under the active
-        // journal revision, so an extent-only successor could never recover the
-        // missing static entries.
-        deferredEntryCount += static_cast<std::uint64_t>(std::ranges::count_if(
-            entries, [&](const auto& entry) {
-                return entry.drawRecordIndex >= snapshot.residentDrawRecordCount;
-            }));
+        ++workloadsVisited;
+        const auto logicalEntryCount = activeCapture.elementCount;
+        sourceEntryCount += logicalEntryCount;
 
         br::render::IndirectWorkloadInputDTO dto{};
         dto.key = key;
@@ -517,11 +495,12 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
             (std::min<std::uint64_t>)(snapshot.residentDrawRecordCount,
                 (std::numeric_limits<std::uint32_t>::max)()));
         dto.activeListRevision = activeCapture.writeSequence;
-        dto.activeEntries = entries;
+        dto.logicalEntryCount = logicalEntryCount;
 
         const auto activeRevision = (std::max<std::uint64_t>)(journal.revision, 1u);
         auto activeListHandle = cachedHandle(dto.activeListArtifactKey, activeRevision);
         if (!activeListHandle) {
+            ++activeListArtifactsRequested;
             auto activeInput = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
             activeInput->uploadService = m_uploadService;
             activeInput->debugName = "PublishedActiveDrawList";
@@ -552,13 +531,15 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
             }
             activeListHandle = activeListRequest.Handle();
             cacheHandle(dto.activeListArtifactKey, activeRevision, activeListHandle);
+        } else {
+            ++activeListArtifactsReused;
         }
         requirements.push_back(br::render::Exact(
             activeListHandle.version, br::render::ArtifactReadiness::UploadSubmitted));
         dependencyHandles.push_back(std::move(activeListHandle));
 
         const auto safeCount = static_cast<unsigned int>((std::min<std::uint64_t>)({
-            requestedCount, entries.size(), dto.residentDrawRecordCount }));
+            requestedCount, logicalEntryCount, dto.residentDrawRecordCount }));
         safeDrawCount += safeCount;
         nonEmptyWorkloads += safeCount != 0u ? 1u : 0u;
         auto& capacity = snapshot.capacities[key];
@@ -652,6 +633,12 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
         static_cast<std::int64_t>(safeDrawCount));
     basic_telemetry::SetGauge("SARP.Indirect.DesiredStateNonEmptyWorkloads",
         static_cast<std::int64_t>(nonEmptyWorkloads));
+    basic_telemetry::SetGauge("SARP.Indirect.DesiredStateWorkloadsVisited",
+        static_cast<std::int64_t>(workloadsVisited));
+    basic_telemetry::AddCounter("SARP.Indirect.ActiveListArtifactsRequested",
+        static_cast<std::int64_t>(activeListArtifactsRequested));
+    basic_telemetry::AddCounter("SARP.Indirect.ActiveListArtifactsReused",
+        static_cast<std::int64_t>(activeListArtifactsReused));
     basic_telemetry::SetGauge("SARP.Indirect.DesiredStateAdmissionFailureStage",
         rootRequest ? 0 : 6);
     if (!rootRequest) {
