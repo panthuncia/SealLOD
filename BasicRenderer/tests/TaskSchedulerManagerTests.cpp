@@ -64,6 +64,58 @@ int main() {
         Check(rejected.load(std::memory_order_relaxed) == 1);
     }
 
+    // A delayed recovery token has independent ownership: it cannot suppress
+    // an immediate producer notification, and a replaced token is a no-op.
+    {
+        std::vector<br::SerializedTaskPump::Task> immediateTasks;
+        std::vector<br::SerializedTaskPump::Task> delayedTasks;
+        std::atomic<int> drains{0};
+        br::SerializedTaskPump pump;
+        pump.Configure(
+            [&](br::SerializedTaskPump::Task task) {
+                immediateTasks.push_back(std::move(task));
+                return true;
+            },
+            [&] { drains.fetch_add(1, std::memory_order_relaxed); },
+            {},
+            [&](std::chrono::steady_clock::duration, br::SerializedTaskPump::Task task) {
+                delayedTasks.push_back(std::move(task));
+                return true;
+            });
+
+        Check(pump.NotifyAfter(10ms));
+        Check(pump.NotifyAfter(5ms));
+        Check(delayedTasks.size() == 2);
+        Check(pump.Notify());
+        Check(immediateTasks.size() == 1);
+        auto immediate = std::move(immediateTasks.front());
+        immediateTasks.clear();
+        immediate();
+        Check(drains.load(std::memory_order_relaxed) == 1);
+
+        auto staleTimer = std::move(delayedTasks.front());
+        delayedTasks.erase(delayedTasks.begin());
+        staleTimer();
+        Check(immediateTasks.empty());
+        auto currentTimer = std::move(delayedTasks.front());
+        delayedTasks.clear();
+        currentTimer();
+        Check(immediateTasks.size() == 1);
+        auto delayedDrain = std::move(immediateTasks.front());
+        immediateTasks.clear();
+        delayedDrain();
+        Check(drains.load(std::memory_order_relaxed) == 2);
+
+        const auto stats = pump.GetStats();
+        Check(stats.requestedEpoch == 2);
+        Check(stats.drainedEpoch == 2);
+        Check(stats.delayedRequests == 2);
+        Check(stats.delayedFired == 1);
+        Check(stats.staleDelayed == 1);
+        Check(!stats.runnerActive);
+        Check(!stats.delayedArmed);
+    }
+
     auto& scheduler = TaskSchedulerManager::GetInstance();
     TaskSchedulerManager::Config config{};
     config.workerCount = 2;
