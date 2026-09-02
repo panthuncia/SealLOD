@@ -2131,12 +2131,12 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 			: removalPayload.drawRecordIndices;
 
 		struct WorkloadAppendTarget {
-			std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>* inserts = nullptr;
-			std::size_t removalBucketIndex = 0;
+			std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>* inserts;
+			std::size_t removalBucketIndex;
 		};
 		struct WorkloadAppendRange {
-			std::size_t first = 0;
-			std::size_t count = 0;
+			std::size_t first;
+			std::size_t count;
 		};
 		std::size_t workloadTargetCount = 0;
 		for (std::size_t meshTemplateIndex = 0; meshTemplateIndex < meshTemplates.size(); ++meshTemplateIndex) {
@@ -2146,8 +2146,8 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 		}
 		constexpr std::size_t inlineTemplateCapacity = 32;
 		constexpr std::size_t inlineWorkloadTargetCapacity = 64;
-		std::array<WorkloadAppendTarget, inlineWorkloadTargetCapacity> inlineWorkloadTargets{};
-		std::array<WorkloadAppendRange, inlineTemplateCapacity> inlineWorkloadTargetRanges{};
+		std::array<WorkloadAppendTarget, inlineWorkloadTargetCapacity> inlineWorkloadTargets;
+		std::array<WorkloadAppendRange, inlineTemplateCapacity> inlineWorkloadTargetRanges;
 		std::vector<WorkloadAppendTarget> overflowWorkloadTargets;
 		std::vector<WorkloadAppendRange> overflowWorkloadTargetRanges;
 		std::span<WorkloadAppendTarget> workloadTargets;
@@ -2166,6 +2166,8 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 		}
 		std::size_t nextWorkloadTarget = 0;
 		activeDrawSetRemovals.reserve(workloadTargetCount);
+		{
+		BT_ZONE_SCOPE("ObjectManager::MaterializeStaticImportTransaction::BuildWorkloadRoutes");
 		for (std::size_t meshTemplateIndex = 0; meshTemplateIndex < meshTemplates.size(); ++meshTemplateIndex) {
 			const auto& meshTemplate = meshTemplates[meshTemplateIndex];
 			const auto workloadKeys = meshTemplateIndex < group.workloadKeysByMeshTemplate.size()
@@ -2196,6 +2198,7 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 			}
 			targetRange.count = nextWorkloadTarget - targetRange.first;
 		}
+		}
 
 		struct TypeBounds {
 			std::uint32_t slot;
@@ -2204,6 +2207,9 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 			float scale;
 		};
 		std::vector<TypeBounds> skinnedTypes;
+		const std::size_t skinnedPlacementBase = transaction.skinnedAssemblyPlacements.size();
+		{
+		BT_ZONE_SCOPE("ObjectManager::MaterializeStaticImportTransaction::BuildSkinnedTypes");
 		for (const auto& meshTemplate : meshTemplates) {
 			if (meshTemplate.skinnedAssemblyTypeSlot == 0xFFFFFFFFu) continue;
 			auto found = std::ranges::find(skinnedTypes, meshTemplate.skinnedAssemblyTypeSlot, &TypeBounds::slot);
@@ -2216,7 +2222,6 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 			}
 		}
 		for (auto& type : skinnedTypes) type.bounds = FitBoundingSpheres(type.components);
-		const std::size_t skinnedPlacementBase = transaction.skinnedAssemblyPlacements.size();
 		for (const auto& type : skinnedTypes) {
 			for (std::uint32_t transformIndex = 0; transformIndex < transformCount; ++transformIndex) {
 				MaterializedStaticImportTransaction::PendingSkinnedAssemblyPlacement pending{};
@@ -2231,6 +2236,7 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 				pending.placement.boundsScale = type.scale;
 				transaction.skinnedAssemblyPlacements.push_back(pending);
 			}
+		}
 		}
 
 		{

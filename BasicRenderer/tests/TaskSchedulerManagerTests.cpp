@@ -50,6 +50,39 @@ int main() {
         Check(tasks.empty());
     }
 
+    // Bounded consumers can force a scheduler handoff between drain passes.
+    // A notification during the first pass remains level-triggered, but it is
+    // represented by a second submitted task rather than extending the first.
+    {
+        std::vector<br::SerializedTaskPump::Task> tasks;
+        std::atomic<int> drains{0};
+        br::SerializedTaskPump pump;
+        pump.Configure(
+            [&](br::SerializedTaskPump::Task task) {
+                tasks.push_back(std::move(task));
+                return true;
+            },
+            [&] {
+                const int pass = drains.fetch_add(1, std::memory_order_acq_rel);
+                if (pass == 0) Check(pump.Notify());
+            },
+            {}, {}, br::SerializedTaskPump::HandoffMode::Resubmit);
+        Check(pump.Notify());
+        Check(tasks.size() == 1);
+        auto first = std::move(tasks.front());
+        tasks.clear();
+        first();
+        Check(drains.load(std::memory_order_acquire) == 1);
+        Check(tasks.size() == 1);
+        auto second = std::move(tasks.front());
+        tasks.clear();
+        second();
+        Check(drains.load(std::memory_order_acquire) == 2);
+        Check(tasks.empty());
+        Check(pump.IsIdle());
+        Check(pump.GetStats().handoffResubmissions == 1);
+    }
+
     // Scheduler rejection closes the pump and reports failure exactly once;
     // subsequent producers cannot leave silently stranded work behind.
     {

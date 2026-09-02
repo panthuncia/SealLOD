@@ -29,6 +29,7 @@ void Check(bool condition,
     const std::source_location location = std::source_location::current()) {
     if (condition) return;
     std::fprintf(stderr, "check failed at %s:%u\n", location.file_name(), location.line());
+    std::fflush(stderr);
     std::abort();
 }
 
@@ -1017,6 +1018,48 @@ int main() {
     const auto staticVersionC = graph.Request(staticTransactionC, 1, {},
         ArtifactPayload::Make<StaticTransactionBuildInput>(std::move(staticC)), 1005);
     Check(staticVersionC);
+
+    // Page successors retain unchanged groups from an exact immutable base while
+    // replacing and removing only the groups named by the delta.
+    const auto deltaPageIndex = StaticScenePageIndex(10001);
+    const auto basePageRef = std::ranges::find(initialPages.refs,
+        static_cast<std::uint32_t>(deltaPageIndex), &StaticScenePageRef::pageIndex);
+    Check(basePageRef != initialPages.refs.end());
+    const ArtifactKey deltaPageKey{ ArtifactKind::StaticScenePage, deltaPageIndex + 1u, 0 };
+    auto replacementDelta = std::make_shared<StaticScenePageBuildInput>();
+    replacementDelta->pageIndex = static_cast<std::uint32_t>(deltaPageIndex);
+    replacementDelta->sourceFingerprint = 8101;
+    replacementDelta->basePage = basePageRef->page;
+    replacementDelta->basePagePayload = graph.Snapshot(deltaPageKey).payload.Get<PublishedStaticScenePage>();
+    replacementDelta->groupOwners.push_back({ 10001, staticVersionC.version });
+    const auto replacedPage = graph.Request(deltaPageKey, ++staticPageRevisions[deltaPageIndex],
+        { Exact(staticVersionC.version, ArtifactReadiness::GpuReady) },
+        ArtifactPayload::Make<StaticScenePageBuildInput>(std::move(replacementDelta)), 8101);
+    Check(replacedPage);
+    graph.WaitIdle();
+    const auto replacedPagePayload = graph.Snapshot(deltaPageKey).payload.Get<PublishedStaticScenePage>();
+    Check(replacedPagePayload && replacedPagePayload->ContainsGroup(10001));
+    const auto* replacedGroup = replacedPagePayload ? replacedPagePayload->FindGroup(10001) : nullptr;
+    Check(replacedGroup && replacedGroup->drawRecordCount == 7);
+
+    auto removalDelta = std::make_shared<StaticScenePageBuildInput>();
+    removalDelta->pageIndex = static_cast<std::uint32_t>(deltaPageIndex);
+    removalDelta->sourceFingerprint = 8102;
+    removalDelta->basePage = replacedPage.version;
+    removalDelta->basePagePayload = replacedPagePayload;
+    removalDelta->removedGroupIDs.push_back(10001);
+    const auto removedPage = graph.Request(deltaPageKey, ++staticPageRevisions[deltaPageIndex],
+        {},
+        ArtifactPayload::Make<StaticScenePageBuildInput>(std::move(removalDelta)), 8102);
+    Check(removedPage);
+    graph.WaitIdle();
+    const auto removedPagePayload = graph.Snapshot(deltaPageKey).payload.Get<PublishedStaticScenePage>();
+    Check(removedPagePayload && !removedPagePayload->ContainsGroup(10001));
+    std::vector<StaticTransactionGroup> effectiveGroups;
+    removedPagePayload->MaterializeGroups(effectiveGroups);
+    Check(std::ranges::none_of(effectiveGroups,
+        [](const auto& group) { return group.groupID == 10001; }));
+
     auto supersededPages = requestStaticPages({
         { 10001, staticVersionC.version }, { 10002, staticVersionA.version } }, 8002);
     auto supersededGroupScene = std::make_shared<StaticSceneBuildInput>();

@@ -39,11 +39,56 @@ bool PublishedStaticScenePage::ContainsGroup(std::uint64_t groupID) const noexce
     return FindGroup(groupID) != nullptr;
 }
 
+const StaticSceneGroupOwner* PublishedStaticScenePage::FindOwner(
+    std::uint64_t groupID) const noexcept {
+    if (std::ranges::binary_search(removedGroupIDs, groupID)) return nullptr;
+    const auto it = std::ranges::lower_bound(groupOwners, groupID, {},
+        &StaticSceneGroupOwner::groupID);
+    if (it != groupOwners.end() && it->groupID == groupID) return std::addressof(*it);
+    return basePage ? basePage->FindOwner(groupID) : nullptr;
+}
+
 const StaticTransactionGroup* PublishedStaticScenePage::FindGroup(
     std::uint64_t groupID) const noexcept {
+    if (std::ranges::binary_search(removedGroupIDs, groupID)) return nullptr;
     const auto it = std::ranges::lower_bound(groups, groupID, {},
         &StaticTransactionGroup::groupID);
-    return it != groups.end() && it->groupID == groupID ? std::addressof(*it) : nullptr;
+    if (it != groups.end() && it->groupID == groupID) return std::addressof(*it);
+    return basePage ? basePage->FindGroup(groupID) : nullptr;
+}
+
+void PublishedStaticScenePage::MaterializeGroups(
+    std::vector<StaticTransactionGroup>& out) const {
+    std::map<std::uint64_t, StaticTransactionGroup> effective;
+    std::vector<const PublishedStaticScenePage*> layers;
+    for (auto layer = this; layer != nullptr; layer = layer->basePage.get()) {
+        layers.push_back(layer);
+    }
+    for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
+        for (const auto groupID : (*layer)->removedGroupIDs) effective.erase(groupID);
+        for (const auto& group : (*layer)->groups) effective.insert_or_assign(group.groupID, group);
+    }
+    out.clear();
+    out.reserve(effective.size());
+    for (auto& [_, group] : effective) out.push_back(std::move(group));
+}
+
+void PublishedStaticScenePage::MaterializeOwners(
+    std::vector<StaticSceneGroupOwner>& out) const {
+    std::map<std::uint64_t, StaticSceneGroupOwner> effective;
+    std::vector<const PublishedStaticScenePage*> layers;
+    for (auto layer = this; layer != nullptr; layer = layer->basePage.get()) {
+        layers.push_back(layer);
+    }
+    for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
+        for (const auto groupID : (*layer)->removedGroupIDs) effective.erase(groupID);
+        for (const auto& owner : (*layer)->groupOwners) {
+            effective.insert_or_assign(owner.groupID, owner);
+        }
+    }
+    out.clear();
+    out.reserve(effective.size());
+    for (auto& [_, owner] : effective) out.push_back(std::move(owner));
 }
 
 bool PublishedStaticSceneState::ContainsGroup(std::uint64_t groupID) const noexcept {
@@ -101,49 +146,60 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
         return ArtifactBuildResult::Failure("static scene page immutable input is invalid");
     }
 
+    const auto* basePage = input->basePagePayload.get();
+    if (static_cast<bool>(input->basePage) != static_cast<bool>(basePage) ||
+        (basePage && basePage->pageIndex != input->pageIndex)) {
+        return ArtifactBuildResult::Failure("static scene page base payload is inconsistent");
+    }
+    std::map<ArtifactVersionID, const PublishedStaticTransaction*> transactions;
+    for (const auto& dependency : context.dependencies) {
+        if (dependency.key.kind == ArtifactKind::StaticScenePage) {
+            return ArtifactBuildResult::Failure("static scene page cannot depend on its own address");
+        } else if (dependency.key.kind == ArtifactKind::StaticTransaction) {
+            const auto transaction = dependency.payload.Get<PublishedStaticTransaction>();
+            if (!transaction || transaction->transactionID != dependency.key.primaryID) {
+                return ArtifactBuildResult::Failure("static scene page transaction dependency is invalid");
+            }
+            transactions.emplace(dependency.Version(), transaction.get());
+        }
+    }
+    auto removals = input->removedGroupIDs;
+    std::ranges::sort(removals);
+    if (std::ranges::adjacent_find(removals) != removals.end()) {
+        return ArtifactBuildResult::Failure("static scene page contains duplicate removals");
+    }
     auto owners = input->groupOwners;
     std::ranges::sort(owners, {}, &StaticSceneGroupOwner::groupID);
     if (std::ranges::adjacent_find(owners, {}, &StaticSceneGroupOwner::groupID) != owners.end()) {
-        return ArtifactBuildResult::Failure("static scene page contains duplicate groups");
+        return ArtifactBuildResult::Failure("static scene page contains duplicate owners");
     }
-    std::unordered_map<ArtifactKey, ArtifactVersionID, ArtifactKey::Hasher> expected;
-    expected.reserve(owners.size());
     for (const auto& owner : owners) {
         if (owner.groupID == 0 || StaticScenePageIndex(owner.groupID) != input->pageIndex ||
-            owner.transaction.address.kind != ArtifactKind::StaticTransaction || !owner.transaction) {
+            owner.transaction.address.kind != ArtifactKind::StaticTransaction || !owner.transaction ||
+            std::ranges::binary_search(removals, owner.groupID)) {
             return ArtifactBuildResult::Failure("static scene page group owner is invalid");
         }
-        const auto [it, inserted] = expected.emplace(owner.transaction.address, owner.transaction);
-        if (!inserted && it->second != owner.transaction) {
-            return ArtifactBuildResult::Failure(
-                "static scene page selects multiple versions of one transaction");
-        }
     }
-    if (context.dependencies.size() != expected.size()) {
-        return ArtifactBuildResult::Failure("static scene page dependency closure is incomplete");
-    }
-
-    std::map<ArtifactVersionID, const PublishedStaticTransaction*> transactions;
-    for (const auto& dependency : context.dependencies) {
-        const auto expectedIt = expected.find(dependency.key);
-        const auto transaction = dependency.payload.Get<PublishedStaticTransaction>();
-        if (expectedIt == expected.end() || expectedIt->second != dependency.Version() ||
-            !transaction || transaction->transactionID != dependency.key.primaryID) {
-            return ArtifactBuildResult::Failure("static scene page transaction mismatch");
-        }
-        transactions.emplace(dependency.Version(), transaction.get());
-    }
-
     auto page = std::make_shared<PublishedStaticScenePage>();
     page->pageIndex = input->pageIndex;
     page->sourceFingerprint = input->sourceFingerprint;
     page->pageGeneration = context.generation;
+    page->successorDepth = basePage ? basePage->successorDepth + 1u : 0u;
+    page->basePage = input->basePagePayload;
     page->groupOwners = std::move(owners);
+    page->removedGroupIDs = std::move(removals);
+    if (basePage) {
+        page->groupDigest = basePage->groupDigest;
+        page->groupCount = basePage->groupCount;
+        page->drawRecordCount = basePage->drawRecordCount;
+        page->activeEntryCount = basePage->activeEntryCount;
+        page->placementCount = basePage->placementCount;
+    }
     page->groups.reserve(page->groupOwners.size());
     for (const auto& owner : page->groupOwners) {
         const auto transactionIt = transactions.find(owner.transaction);
         if (transactionIt == transactions.end()) {
-            return ArtifactBuildResult::Failure("static scene page owner transaction is missing");
+            return ArtifactBuildResult::Failure("static scene page changed owner transaction is missing");
         }
         const auto& groups = transactionIt->second->groups;
         const auto groupIt = std::ranges::lower_bound(groups, owner.groupID, {},
@@ -151,12 +207,42 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
         if (groupIt == groups.end() || groupIt->groupID != owner.groupID) {
             return ArtifactBuildResult::Failure("static scene page transaction omits its group");
         }
-        page->groupDigest ^= StaticSceneGroupDigest(owner.groupID);
-        ++page->groupCount;
+        if (const auto* oldGroup = basePage ? basePage->FindGroup(owner.groupID) : nullptr) {
+            page->drawRecordCount -= oldGroup->drawRecordCount;
+            page->activeEntryCount -= oldGroup->activeEntryCount;
+            page->placementCount -= oldGroup->placementCount;
+        } else {
+            page->groupDigest ^= StaticSceneGroupDigest(owner.groupID);
+            ++page->groupCount;
+        }
         page->drawRecordCount += groupIt->drawRecordCount;
         page->activeEntryCount += groupIt->activeEntryCount;
         page->placementCount += groupIt->placementCount;
         page->groups.push_back(*groupIt);
+    }
+    for (const auto groupID : page->removedGroupIDs) {
+        const auto* oldGroup = basePage ? basePage->FindGroup(groupID) : nullptr;
+        if (!oldGroup) continue;
+        page->groupDigest ^= StaticSceneGroupDigest(groupID);
+        --page->groupCount;
+        page->drawRecordCount -= oldGroup->drawRecordCount;
+        page->activeEntryCount -= oldGroup->activeEntryCount;
+        page->placementCount -= oldGroup->placementCount;
+    }
+    // Immutable deltas make the common update proportional to its mutation set,
+    // but an unbounded shared_ptr chain would retain every historical layer and
+    // turn owner lookup into progressively more work. Periodically flatten the
+    // effective page into a fresh immutable snapshot to bound both costs.
+    if (page->successorDepth >= kStaticScenePageMaxSuccessorDepth) {
+        std::vector<StaticSceneGroupOwner> effectiveOwners;
+        std::vector<StaticTransactionGroup> effectiveGroups;
+        page->MaterializeOwners(effectiveOwners);
+        page->MaterializeGroups(effectiveGroups);
+        page->basePage.reset();
+        page->successorDepth = 0;
+        page->groupOwners = std::move(effectiveOwners);
+        page->groups = std::move(effectiveGroups);
+        page->removedGroupIDs.clear();
     }
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<PublishedStaticScenePage>(std::move(page)));

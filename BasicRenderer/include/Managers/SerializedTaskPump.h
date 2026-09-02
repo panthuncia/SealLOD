@@ -20,6 +20,11 @@ public:
     using Drain = std::function<void()>;
     using Reject = std::function<void()>;
 
+    enum class HandoffMode : std::uint8_t {
+        Inline,
+        Resubmit,
+    };
+
     struct Stats {
         std::uint64_t requestedEpoch = 0;
         std::uint64_t drainedEpoch = 0;
@@ -27,6 +32,7 @@ public:
         std::uint64_t coalescedNotifications = 0;
         std::uint64_t drainPasses = 0;
         std::uint64_t handoffRetries = 0;
+        std::uint64_t handoffResubmissions = 0;
         std::uint64_t delayedRequests = 0;
         std::uint64_t delayedCoalesced = 0;
         std::uint64_t delayedFired = 0;
@@ -40,12 +46,14 @@ public:
     SerializedTaskPump(const SerializedTaskPump&) = delete;
     SerializedTaskPump& operator=(const SerializedTaskPump&) = delete;
 
-    void Configure(Submit submit, Drain drain, Reject reject = {}, SubmitDelayed submitDelayed = {}) {
+    void Configure(Submit submit, Drain drain, Reject reject = {}, SubmitDelayed submitDelayed = {},
+        HandoffMode handoffMode = HandoffMode::Inline) {
         std::lock_guard lock(m_mutex);
         m_submit = std::move(submit);
         m_submitDelayed = std::move(submitDelayed);
         m_drain = std::move(drain);
         m_reject = std::move(reject);
+        m_handoffMode = handoffMode;
         m_state = State::Idle;
         m_requestedEpoch = 0;
         m_drainedEpoch = 0;
@@ -161,6 +169,7 @@ private:
         for (;;) {
             Drain drain;
             std::uint64_t observedEpoch = 0;
+            Submit handoffSubmit;
             {
                 std::lock_guard lock(m_mutex);
                 if (m_state == State::Stopping) return;
@@ -191,10 +200,29 @@ private:
                     m_state = State::Idle;
                     return;
                 }
-                // Work was signalled while the consumer was running. Keep
-                // ownership and drain it without another scheduler handoff.
+                // Work was signalled while the consumer was running. Most pumps
+                // retain ownership for the cheapest possible handoff. A bounded
+                // drain can opt into resubmission so its scheduler task actually
+                // yields between passes instead of extending one task indefinitely.
                 ++m_stats.handoffRetries;
+                if (m_handoffMode == HandoffMode::Resubmit) {
+                    m_state = State::Scheduled;
+                    handoffSubmit = m_submit;
+                    ++m_stats.handoffResubmissions;
+                }
             }
+            if (!handoffSubmit) continue;
+            if (handoffSubmit([this] { Run(); })) return;
+
+            Reject reject;
+            {
+                std::lock_guard lock(m_mutex);
+                m_state = State::Stopping;
+                ++m_stats.rejected;
+                reject = m_reject;
+            }
+            if (reject) reject();
+            return;
         }
     }
 
@@ -209,6 +237,7 @@ private:
     SubmitDelayed m_submitDelayed;
     Drain m_drain;
     Reject m_reject;
+    HandoffMode m_handoffMode = HandoffMode::Inline;
 };
 
 } // namespace br
