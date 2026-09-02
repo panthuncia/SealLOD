@@ -52,7 +52,11 @@ struct StaticSceneGroupOwner {
     ArtifactVersionID transaction;
 };
 
-inline constexpr std::size_t kStaticScenePageCount = 1024;
+// Static pages are publication/coalescing units, not allocation pages.  A 1024-way
+// directory made a 100k-group scene submit hundreds of tiny graph mutations at
+// every progressive checkpoint.  Sixty-four pages retain independent progress
+// and bounded root fan-out while amortizing graph admission over useful batches.
+inline constexpr std::size_t kStaticScenePageCount = 64;
 
 [[nodiscard]] std::size_t StaticScenePageIndex(std::uint64_t groupID) noexcept;
 [[nodiscard]] std::uint64_t StaticSceneGroupDigest(std::uint64_t groupID) noexcept;
