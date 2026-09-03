@@ -123,22 +123,24 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
             if (input->materializeResources) {
                 const auto argument = std::ranges::find_if(workload.argumentArtifacts,
                     [viewID](const auto& candidate) { return candidate.viewID == viewID; });
-                if (argument == workload.argumentArtifacts.end()) {
-                    return ArtifactBuildResult::Failure("indirect argument artifact identity missing");
+                // Shadow/reflection/probe views participate in culling, but do
+                // not execute ForwardRenderPass' indirect command buffers.
+                // Their workload rows intentionally carry no argument artifact.
+                if (argument != workload.argumentArtifacts.end()) {
+                    const auto dependency = std::ranges::find_if(context.dependencies, [&](const auto& candidate) {
+                        return candidate.key == argument->key;
+                    });
+                    const auto dependencyRoot = dependency != context.dependencies.end()
+                        ? dependency->payload.Get<RendererStateFragmentArtifact>() : nullptr;
+                    const auto version = dependencyRoot
+                        ? dependencyRoot->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
+                    if (!version || !version->resource ||
+                        version->elementStride != sizeof(DispatchMeshIndirectCommand) ||
+                        version->capacity < capacity) {
+                        return ArtifactBuildResult::Failure("indirect argument dependency type/capacity mismatch");
+                    }
+                    dynamicArgs = version->resource;
                 }
-                const auto dependency = std::ranges::find_if(context.dependencies, [&](const auto& candidate) {
-                    return candidate.key == argument->key;
-                });
-                const auto dependencyRoot = dependency != context.dependencies.end()
-                    ? dependency->payload.Get<RendererStateFragmentArtifact>() : nullptr;
-                const auto version = dependencyRoot
-                    ? dependencyRoot->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
-                if (!version || !version->resource ||
-                    version->elementStride != sizeof(DispatchMeshIndirectCommand) ||
-                    version->capacity < capacity) {
-                    return ArtifactBuildResult::Failure("indirect argument dependency type/capacity mismatch");
-                }
-                dynamicArgs = version->resource;
             }
             state->workloads.push_back(PublishedIndirectWorkload{
                 viewID, workload.key, dynamicArgs, activeBuffer, safeCount, capacity,

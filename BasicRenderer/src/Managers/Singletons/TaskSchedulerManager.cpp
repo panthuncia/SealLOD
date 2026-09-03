@@ -48,6 +48,7 @@ constexpr bool IsSceneGraphDomain(TaskDomain domain) noexcept {
     case TaskDomain::StaticImportControl:
     case TaskDomain::MaterialAcceptance:
     case TaskDomain::GpuBufferBuild:
+    case TaskDomain::StaticGroupPreparation:
         return true;
     default:
         return false;
@@ -109,6 +110,7 @@ const char* DomainName(TaskDomain domain) {
 	case TaskDomain::StaticImportControl: return "StaticImportControl";
     case TaskDomain::MaterialAcceptance: return "MaterialAcceptance";
     case TaskDomain::GpuBufferBuild: return "GpuBufferBuild";
+    case TaskDomain::StaticGroupPreparation: return "StaticGroupPreparation";
     default: return "Unknown";
     }
 }
@@ -366,6 +368,11 @@ void TaskSchedulerManager::Initialize(Config config) {
         config.staticConcurrency == 0
             ? (std::min)(8u, (std::max)(2u, (m_workerCount + 1u) / 2u))
             : config.staticConcurrency), 1u, m_workerCount);
+    // Preparation is CPU-local and memory-bounded by the bridge's prepared-byte
+    // window. It can scale across the worker pool independently of the service
+    // drains; the shared sceneGraphLimit still bounds their combined occupancy.
+    const std::uint32_t staticPreparationLimit = std::clamp(ReadEnvironmentUint(
+        "SARP_SCHEDULER_STATIC_PREPARATION_CONCURRENCY", m_workerCount), 1u, m_workerCount);
     const std::uint32_t shaderLimit = std::clamp(ReadEnvironmentUint("SARP_SCHEDULER_SHADER_CONCURRENCY",
         config.shaderConcurrency == 0 ? std::min(2u, std::max(1u, m_workerCount / 2u)) : config.shaderConcurrency), 1u, m_workerCount);
 
@@ -403,6 +410,7 @@ void TaskSchedulerManager::Initialize(Config config) {
         state.domains[i].limit = m_workerCount;
     }
     state.domains[static_cast<std::size_t>(TaskDomain::StaticImport)].limit = staticLimit;
+    state.domains[static_cast<std::size_t>(TaskDomain::StaticGroupPreparation)].limit = staticPreparationLimit;
     state.domains[static_cast<std::size_t>(TaskDomain::RendererState)].limit = 1u;
     state.domains[static_cast<std::size_t>(TaskDomain::AssetImport)].limit = std::min(4u, m_workerCount);
     // Texture decode/reload work is the dominant CPU queue during scene import.
@@ -483,8 +491,8 @@ void TaskSchedulerManager::Initialize(Config config) {
             }
         });
     }
-    spdlog::info("Unified oneTBB scheduler: concurrency={} workers={} blocking={} static={} shaders={}",
-        concurrency, m_workerCount, blockingCount, staticLimit, shaderLimit);
+    spdlog::info("Unified oneTBB scheduler: concurrency={} workers={} blocking={} static={} static_prepare={} shaders={}",
+        concurrency, m_workerCount, blockingCount, staticLimit, staticPreparationLimit, shaderLimit);
 }
 
 bool TaskSchedulerManager::Submit(const TaskScope& scope, TaskLane lane, TaskDomain domain, std::string_view name,

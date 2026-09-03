@@ -120,7 +120,7 @@ uint64_t ViewManager::CreateView(const CameraInfo& cameraInfo,
 
     // Indirect buffers
     if (m_indirectManager) {
-        m_indirectManager->CreateBuffersForView(id);
+        m_indirectManager->CreateBuffersForView(id, flags.primaryCamera);
     }
 
     // Camera buffer view

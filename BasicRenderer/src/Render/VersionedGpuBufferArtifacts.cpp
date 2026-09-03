@@ -9,6 +9,7 @@
 #include <numeric>
 
 #include "Render/Runtime/IUploadService.h"
+#include "Render/MemoryIntrospectionAPI.h"
 #include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/RendererStateRequestService.h"
 #include "Resources/Buffers/Buffer.h"
@@ -291,6 +292,17 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
         static_cast<std::uint32_t>((std::max<std::uint64_t>)(capacityClass, 1u)),
         elementStride, unorderedAccess, indirectArguments);
     resource->SetName(std::string(debugName));
+    // These buffers bypass the higher-level factories that normally attach
+    // semantic memory ownership. Preserve ownership for every backing
+    // generation, including unpublished successors retained by the ring.
+    if (debugName.starts_with("SARPGrass.Scratch.")) {
+        org::memory::SetResourceUsageHint(*resource, "Grass transient scratch");
+        org::memory::SetResourceMemoryIdentifier(*resource, std::string(debugName));
+    }
+    else if (debugName.starts_with("SARPGrass.")) {
+        org::memory::SetResourceUsageHint(*resource, "Grass persistent resources");
+        org::memory::SetResourceMemoryIdentifier(*resource, std::string(debugName));
+    }
     auto backing = std::make_shared<BufferBackingArtifact>();
     backing->resource = std::move(resource);
     backing->backingGeneration = m_nextGeneration++;

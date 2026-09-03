@@ -159,6 +159,43 @@ std::vector<DrawWorkloadKey> ResolveStaticTemplateWorkloadKeys(const ObjectManag
 	return { keys.begin(), keys.end() };
 }
 
+void BuildPreparedStaticGroupWorkloadRoutes(ObjectManager::PreparedStaticGroupInfo& group)
+{
+	const auto meshTemplates = group.MeshTemplates();
+	group.uniqueWorkloadKeys.clear();
+	group.workloadRouteIndices.clear();
+	group.workloadRouteRanges.clear();
+	group.workloadRouteOccurrences.clear();
+	group.mappedUniqueWorkloadKeys = {};
+	group.mappedWorkloadRouteIndices = {};
+	group.mappedWorkloadRouteRanges = {};
+	group.mappedWorkloadRouteOccurrences = {};
+	group.workloadRouteRanges.reserve(meshTemplates.size());
+	for (std::size_t templateIndex = 0; templateIndex < meshTemplates.size(); ++templateIndex) {
+		const auto keys = templateIndex < group.workloadKeysByMeshTemplate.size()
+			? std::span<const DrawWorkloadKey>{ group.workloadKeysByMeshTemplate[templateIndex] }
+			: meshTemplates[templateIndex].WorkloadKeys();
+		const auto first = group.workloadRouteIndices.size();
+		for (const auto& key : keys) {
+			auto found = std::ranges::find(group.uniqueWorkloadKeys, key);
+			std::size_t routeIndex = 0;
+			if (found == group.uniqueWorkloadKeys.end()) {
+				routeIndex = group.uniqueWorkloadKeys.size();
+				group.uniqueWorkloadKeys.push_back(key);
+				group.workloadRouteOccurrences.push_back(0u);
+			} else {
+				routeIndex = static_cast<std::size_t>(
+					std::distance(group.uniqueWorkloadKeys.begin(), found));
+			}
+			group.workloadRouteIndices.push_back(static_cast<std::uint32_t>(routeIndex));
+			++group.workloadRouteOccurrences[routeIndex];
+		}
+		group.workloadRouteRanges.push_back({
+			.first = static_cast<std::uint32_t>(first),
+			.count = static_cast<std::uint32_t>(group.workloadRouteIndices.size() - first) });
+	}
+}
+
 void PrepareStaticGroupsBulkPlanInPlace(
 	ObjectManager::PreparedStaticGroupsBulkPlan& plan,
 	const std::vector<ObjectManager::StaticGroupBuildInfo>& groups)
@@ -182,6 +219,14 @@ void PrepareStaticGroupsBulkPlanInPlace(
 		prepared.perObjectCBs.clear();
 		prepared.normalMatrices.clear();
 		prepared.workloadKeysByMeshTemplate.clear();
+		prepared.uniqueWorkloadKeys.clear();
+		prepared.workloadRouteIndices.clear();
+		prepared.workloadRouteRanges.clear();
+		prepared.workloadRouteOccurrences.clear();
+		prepared.mappedUniqueWorkloadKeys = {};
+		prepared.mappedWorkloadRouteIndices = {};
+		prepared.mappedWorkloadRouteRanges = {};
+		prepared.mappedWorkloadRouteOccurrences = {};
 		prepared.mappedPerObjectCBs = {};
 		prepared.mappedNormalMatrices = {};
 		prepared.mappedMeshTemplates = {};
@@ -227,6 +272,7 @@ void PrepareStaticGroupsBulkPlanInPlace(
 		for (const auto& meshTemplate : prepared.meshTemplates) {
 			prepared.workloadKeysByMeshTemplate.push_back(ResolveStaticTemplateWorkloadKeys(meshTemplate));
 		}
+		BuildPreparedStaticGroupWorkloadRoutes(prepared);
 	}
 	plan.workloadBuildUs = static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - workloadBuildBegin).count());
@@ -277,6 +323,37 @@ ObjectManager::~ObjectManager() {
 	}
 	for (auto& [_, buffer] : m_activeDrawSetIndices) {
 		if (buffer) buffer->SetActiveMutationCallback({});
+	}
+}
+
+template <class Fn>
+void ForEachActiveDrawSetRemoval(
+	const ObjectManager::StaticObjectRemovalPayload& payload,
+	Fn&& fn)
+{
+	if (const auto& storage = payload.sharedActiveDrawSetRemovals) {
+		const auto rangeEnd = (std::min)(
+			storage->ranges.size(),
+			static_cast<std::size_t>(payload.firstActiveDrawSetRemovalRange) +
+				payload.activeDrawSetRemovalRangeCount);
+		for (std::size_t rangeIndex = payload.firstActiveDrawSetRemovalRange;
+			rangeIndex < rangeEnd; ++rangeIndex) {
+			const auto& range = storage->ranges[rangeIndex];
+			if (range.workloadSlot >= storage->workloadKeys.size()) {
+				continue;
+			}
+			const auto indexEnd = (std::min)(
+				storage->nextIndex,
+				static_cast<std::size_t>(range.firstIndex) + range.indexCount);
+			if (range.firstIndex < indexEnd) {
+				fn(storage->workloadKeys[range.workloadSlot], std::span<const std::uint32_t>(
+					storage->indices.get() + range.firstIndex,
+					indexEnd - range.firstIndex));
+			}
+		}
+	}
+	for (const auto& bucket : payload.activeDrawSetRemovals) {
+		fn(bucket.workloadKey, std::span<const std::uint32_t>{ bucket.indices });
 	}
 }
 
@@ -1728,19 +1805,37 @@ void ObjectManager::FinalizeStaticImportBuildBatch(StaticImportBuildBatch& build
 	build.transformCounts.clear();
 	build.drawRecordCounts.clear();
 	build.activeReserveCounts.clear();
+	build.activeWorkloadKeys.clear();
+	build.activeWorkloadRoutesByGroup.clear();
 	build.transformCounts.reserve(build.prepared.groups.size());
 	build.drawRecordCounts.reserve(build.prepared.groups.size());
+	build.activeWorkloadRoutesByGroup.reserve(build.prepared.groups.size());
 	build.drawRecords = 0;
 	build.activeInsertIndices = 0;
 	build.preparedBytes = build.prepared.preparedBytes;
 
-	for (const auto& group : build.prepared.groups) {
+	std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> workloadSlots;
+	for (auto& group : build.prepared.groups) {
+		if (group.WorkloadRouteRanges().size() != group.MeshTemplates().size()) {
+			BuildPreparedStaticGroupWorkloadRoutes(group);
+		}
 		const auto transforms = group.PerObjectRows().size();
 		const auto meshTemplates = group.MeshTemplates();
 		const auto records = transforms * meshTemplates.size();
 		build.transformCounts.push_back(transforms);
 		build.drawRecordCounts.push_back(records);
 		build.drawRecords += records;
+		auto& groupRoutes = build.activeWorkloadRoutesByGroup.emplace_back();
+		const auto uniqueWorkloadKeys = group.UniqueWorkloadKeys();
+		groupRoutes.reserve(uniqueWorkloadKeys.size());
+		for (const auto& workloadKey : uniqueWorkloadKeys) {
+			auto [slotIt, inserted] = workloadSlots.try_emplace(
+				workloadKey, static_cast<std::uint32_t>(build.activeWorkloadKeys.size()));
+			if (inserted) {
+				build.activeWorkloadKeys.push_back(workloadKey);
+			}
+			groupRoutes.push_back(slotIt->second);
+		}
 		for (std::size_t meshIndex = 0; meshIndex < meshTemplates.size(); ++meshIndex) {
 			const auto workloadKeys = meshIndex < group.workloadKeysByMeshTemplate.size()
 				? std::span<const DrawWorkloadKey>{ group.workloadKeysByMeshTemplate[meshIndex] }
@@ -2039,13 +2134,33 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 	transaction.drawInfos.reserve(legacyDrawInfoCount);
 	transaction.drawInfoIndicesByGroup.assign(groupCount, UINT32_MAX);
 	transaction.removalPayloads.resize(groupCount);
+	transaction.activeDrawSetRemovalStorage =
+		std::make_shared<StaticObjectRemovalPayload::ActiveDrawSetRemovalStorage>();
+	transaction.activeDrawSetRemovalStorage->workloadKeys = build.activeWorkloadKeys;
+	transaction.activeDrawSetRemovalStorage->indexCapacity =
+		static_cast<std::size_t>(build.activeInsertIndices);
+	if (transaction.activeDrawSetRemovalStorage->indexCapacity != 0) {
+		transaction.activeDrawSetRemovalStorage->indices =
+			std::make_unique_for_overwrite<std::uint32_t[]>(
+				transaction.activeDrawSetRemovalStorage->indexCapacity);
+	}
+	std::size_t removalRangeCapacity = 0;
+	for (const auto& preparedGroup : build.prepared.groups) {
+		removalRangeCapacity += preparedGroup.UniqueWorkloadKeys().size();
+	}
+	transaction.activeDrawSetRemovalStorage->ranges.reserve(removalRangeCapacity);
 	transaction.perObjectRows.reserve(static_cast<std::size_t>(build.prepared.transformRows));
 	transaction.normalRows.reserve(static_cast<std::size_t>(build.prepared.transformRows));
 	transaction.drawRecordRows.reserve(static_cast<std::size_t>(reservation.drawRecords));
 	transaction.activeDrawSetInserts.reserve(build.activeReserveCounts.size());
-	for (const auto& [workloadKey, count] : build.activeReserveCounts) {
+	std::vector<std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>*> activeInsertTargets;
+	activeInsertTargets.reserve(build.activeWorkloadKeys.size());
+	for (const auto& workloadKey : build.activeWorkloadKeys) {
+		const auto countIt = build.activeReserveCounts.find(workloadKey);
+		const auto count = countIt == build.activeReserveCounts.end() ? 0u : countIt->second;
 		auto& entries = transaction.activeDrawSetInserts.try_emplace(workloadKey).first->second;
 		entries.reserve(static_cast<std::size_t>(count));
+		activeInsertTargets.push_back(std::addressof(entries));
 	}
 	
 	for (std::size_t groupIndex = 0; groupIndex < groupCount; ++groupIndex) {
@@ -2123,80 +2238,66 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 				drawInfo->perMeshInstanceBufferIndices.push_back(meshTemplate.meshTemplateIndex);
 			}
 		}
-		auto& activeDrawSetRemovals = drawInfo
-			? drawInfo->activeDrawSetRemovals
-			: removalPayload.activeDrawSetRemovals;
 		auto& instanceDrawRecordIndices = drawInfo
 			? drawInfo->instanceDrawRecordIndices
 			: removalPayload.drawRecordIndices;
 
-		struct WorkloadAppendTarget {
+		struct RemovalBuildBucket {
 			std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>* inserts;
-			std::size_t removalBucketIndex;
+			std::uint32_t workloadSlot;
+			std::size_t occurrenceCount;
+			std::size_t writeCount;
+			std::size_t storageRangeIndex;
 		};
-		struct WorkloadAppendRange {
-			std::size_t first;
-			std::size_t count;
-		};
-		std::size_t workloadTargetCount = 0;
-		for (std::size_t meshTemplateIndex = 0; meshTemplateIndex < meshTemplates.size(); ++meshTemplateIndex) {
-			workloadTargetCount += meshTemplateIndex < group.workloadKeysByMeshTemplate.size()
-				? group.workloadKeysByMeshTemplate[meshTemplateIndex].size()
-				: meshTemplates[meshTemplateIndex].WorkloadKeys().size();
-		}
-		constexpr std::size_t inlineTemplateCapacity = 32;
 		constexpr std::size_t inlineWorkloadTargetCapacity = 64;
-		std::array<WorkloadAppendTarget, inlineWorkloadTargetCapacity> inlineWorkloadTargets;
-		std::array<WorkloadAppendRange, inlineTemplateCapacity> inlineWorkloadTargetRanges;
-		std::vector<WorkloadAppendTarget> overflowWorkloadTargets;
-		std::vector<WorkloadAppendRange> overflowWorkloadTargetRanges;
-		std::span<WorkloadAppendTarget> workloadTargets;
-		std::span<WorkloadAppendRange> workloadTargetRanges;
-		if (workloadTargetCount <= inlineWorkloadTargets.size()) {
-			workloadTargets = std::span{ inlineWorkloadTargets }.first(workloadTargetCount);
+		std::array<RemovalBuildBucket, inlineWorkloadTargetCapacity> inlineRemovalBuckets;
+		std::vector<RemovalBuildBucket> overflowRemovalBuckets;
+		std::span<RemovalBuildBucket> removalBuckets;
+		const auto uniqueWorkloadKeys = group.UniqueWorkloadKeys();
+		const auto workloadRouteOccurrences = group.WorkloadRouteOccurrences();
+		const auto workloadRouteRanges = group.WorkloadRouteRanges();
+		const auto workloadRouteIndices = group.WorkloadRouteIndices();
+		const auto removalBucketCount = uniqueWorkloadKeys.size();
+		if (removalBucketCount <= inlineRemovalBuckets.size()) {
+			removalBuckets = std::span{ inlineRemovalBuckets }.first(removalBucketCount);
 		} else {
-			overflowWorkloadTargets.resize(workloadTargetCount);
-			workloadTargets = overflowWorkloadTargets;
+			overflowRemovalBuckets.resize(removalBucketCount);
+			removalBuckets = overflowRemovalBuckets;
 		}
-		if (meshTemplates.size() <= inlineWorkloadTargetRanges.size()) {
-			workloadTargetRanges = std::span{ inlineWorkloadTargetRanges }.first(meshTemplates.size());
-		} else {
-			overflowWorkloadTargetRanges.resize(meshTemplates.size());
-			workloadTargetRanges = overflowWorkloadTargetRanges;
-		}
-		std::size_t nextWorkloadTarget = 0;
-		activeDrawSetRemovals.reserve(workloadTargetCount);
 		{
 		BT_ZONE_SCOPE("ObjectManager::MaterializeStaticImportTransaction::BuildWorkloadRoutes");
-		for (std::size_t meshTemplateIndex = 0; meshTemplateIndex < meshTemplates.size(); ++meshTemplateIndex) {
-			const auto& meshTemplate = meshTemplates[meshTemplateIndex];
-			const auto workloadKeys = meshTemplateIndex < group.workloadKeysByMeshTemplate.size()
-				? std::span<const DrawWorkloadKey>{ group.workloadKeysByMeshTemplate[meshTemplateIndex] }
-				: meshTemplate.WorkloadKeys();
-			auto& targetRange = workloadTargetRanges[meshTemplateIndex];
-			targetRange.first = nextWorkloadTarget;
-			for (const auto& workloadKey : workloadKeys) {
-				auto insertIt = transaction.activeDrawSetInserts.find(workloadKey);
-				if (insertIt == transaction.activeDrawSetInserts.end()) {
-					continue;
-				}
-				auto removalIt = std::ranges::find(
-					activeDrawSetRemovals,
-					workloadKey,
-					&Components::ObjectDrawInfo::ActiveDrawSetRemovalBucket::workloadKey);
-				if (removalIt == activeDrawSetRemovals.end()) {
-					removalIt = activeDrawSetRemovals.emplace(
-						activeDrawSetRemovals.end(),
-						Components::ObjectDrawInfo::ActiveDrawSetRemovalBucket{ .workloadKey = workloadKey });
-				}
-				removalIt->indices.reserve(removalIt->indices.size() + transformCount);
-				workloadTargets[nextWorkloadTarget++] = WorkloadAppendTarget{
-					.inserts = std::addressof(insertIt->second),
-					.removalBucketIndex = static_cast<std::size_t>(
-						std::distance(activeDrawSetRemovals.begin(), removalIt))
-				};
+		const auto& transactionRoutes = build.activeWorkloadRoutesByGroup[groupIndex];
+		for (std::size_t bucketIndex = 0; bucketIndex < removalBucketCount; ++bucketIndex) {
+			const auto transactionSlot = bucketIndex < transactionRoutes.size()
+				? transactionRoutes[bucketIndex] : UINT32_MAX;
+			if (transactionSlot >= build.activeWorkloadKeys.size()) {
+				throw std::logic_error("static-import workload route slot mismatch");
 			}
-			targetRange.count = nextWorkloadTarget - targetRange.first;
+			removalBuckets[bucketIndex] = RemovalBuildBucket{
+				.inserts = transactionSlot < activeInsertTargets.size()
+					? activeInsertTargets[transactionSlot] : nullptr,
+				.workloadSlot = transactionSlot,
+				.occurrenceCount = bucketIndex < workloadRouteOccurrences.size()
+					? workloadRouteOccurrences[bucketIndex] : 0u,
+				.writeCount = 0,
+				.storageRangeIndex = 0 };
+		}
+		removalPayload.sharedActiveDrawSetRemovals = transaction.activeDrawSetRemovalStorage;
+		removalPayload.firstActiveDrawSetRemovalRange = static_cast<std::uint32_t>(
+			transaction.activeDrawSetRemovalStorage->ranges.size());
+		removalPayload.activeDrawSetRemovalRangeCount = static_cast<std::uint32_t>(removalBucketCount);
+		for (auto& bucket : removalBuckets) {
+			bucket.storageRangeIndex = transaction.activeDrawSetRemovalStorage->ranges.size();
+			const auto firstIndex = transaction.activeDrawSetRemovalStorage->nextIndex;
+			const auto indexCount = bucket.occurrenceCount * transformCount;
+			if (firstIndex + indexCount > transaction.activeDrawSetRemovalStorage->indexCapacity) {
+				throw std::logic_error("static-import removal index capacity mismatch");
+			}
+			transaction.activeDrawSetRemovalStorage->ranges.push_back({
+				.workloadSlot = bucket.workloadSlot,
+				.firstIndex = static_cast<std::uint32_t>(firstIndex),
+				.indexCount = static_cast<std::uint32_t>(indexCount) });
+			transaction.activeDrawSetRemovalStorage->nextIndex += indexCount;
 		}
 		}
 
@@ -2277,14 +2378,17 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 						drawInfo->drawInfo.indices.push_back(drawRecordIndex);
 					}
 					instanceDrawRecordIndices.push_back(drawRecordIndex);
-					const auto targetRange = workloadTargetRanges[meshTemplateIndex];
-					for (const auto& target : std::span{ workloadTargets }.subspan(targetRange.first, targetRange.count)) {
-						if (target.inserts && target.removalBucketIndex < activeDrawSetRemovals.size()) {
-							target.inserts->push_back(SortedUnsignedIntBuffer::ActiveDrawSetEntry{
+					const auto targetRange = workloadRouteRanges[meshTemplateIndex];
+					for (const auto bucketIndex : workloadRouteIndices.subspan(targetRange.first, targetRange.count)) {
+						if (bucketIndex < removalBucketCount && removalBuckets[bucketIndex].inserts) {
+							removalBuckets[bucketIndex].inserts->push_back(SortedUnsignedIntBuffer::ActiveDrawSetEntry{
 								.drawRecordIndex = drawRecordIndex,
 								.generation = 0u
 							});
-							activeDrawSetRemovals[target.removalBucketIndex].indices.push_back(drawRecordIndex);
+							auto& bucket = removalBuckets[bucketIndex];
+							const auto& range = transaction.activeDrawSetRemovalStorage->ranges[bucket.storageRangeIndex];
+							transaction.activeDrawSetRemovalStorage->indices[
+								range.firstIndex + bucket.writeCount++] = drawRecordIndex;
 						}
 					}
 					++localDrawRecordOrdinal;
@@ -2301,8 +2405,13 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 				continue;
 			}
 			const auto& drawInfo = transaction.drawInfos[drawInfoIndex];
-			transaction.removalPayloads[groupIndex] = BuildStaticObjectRemovalPayload(
+			auto payload = BuildStaticObjectRemovalPayload(
 				std::span<const Components::ObjectDrawInfo>(&drawInfo, 1));
+			const auto& routePayload = transaction.removalPayloads[groupIndex];
+			payload.sharedActiveDrawSetRemovals = routePayload.sharedActiveDrawSetRemovals;
+			payload.firstActiveDrawSetRemovalRange = routePayload.firstActiveDrawSetRemovalRange;
+			payload.activeDrawSetRemovalRangeCount = routePayload.activeDrawSetRemovalRangeCount;
+			transaction.removalPayloads[groupIndex] = std::move(payload);
 		}
 	}
 
@@ -3645,9 +3754,9 @@ void ObjectManager::RemoveStaticObjectsBulk(
 				retirePayloadRange(retireRange);
 			}
 			const auto collectBegin = std::chrono::steady_clock::now();
-			for (const auto& bucket : payload.activeDrawSetRemovals) {
-				activeDrawSetRemoveCounts[bucket.workloadKey] += bucket.indices.size();
-			}
+			ForEachActiveDrawSetRemoval(payload, [&](const DrawWorkloadKey& workloadKey, auto indices) {
+				activeDrawSetRemoveCounts[workloadKey] += indices.size();
+			});
 			collectUs += static_cast<std::uint64_t>(
 				std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - collectBegin).count());
 			tombstoneDrawRecordIndices.insert(
@@ -3759,29 +3868,29 @@ ObjectManager::StaticVisibilityUpdateResult ObjectManager::SetStaticObjectsVisib
 		auto& payload = handle->destructionPayload;
 		if (!visible) {
 			TombstoneDrawRecords(payload.drawRecordIndices);
-			for (const auto& bucket : payload.activeDrawSetRemovals) {
-				auto found = m_activeDrawSetIndices.find(bucket.workloadKey);
-				if (found == m_activeDrawSetIndices.end() || !found->second) continue;
-				const auto count = static_cast<std::uint64_t>(bucket.indices.size());
+			ForEachActiveDrawSetRemoval(payload, [&](const DrawWorkloadKey& workloadKey, auto indices) {
+				auto found = m_activeDrawSetIndices.find(workloadKey);
+				if (found == m_activeDrawSetIndices.end() || !found->second) return;
+				const auto count = static_cast<std::uint64_t>(indices.size());
 				const auto currentLive = found->second->LiveSize();
 				found->second->SetLiveSize(currentLive > count ? currentLive - count : 0u);
 				found->second->AddActiveTombstoneEstimate(count);
-				MaybeQueueActiveDrawSetCompaction(bucket.workloadKey, found->second);
-				spans[bucket.workloadKey] = found->second->Size();
-			}
+				MaybeQueueActiveDrawSetCompaction(workloadKey, found->second);
+				spans[workloadKey] = found->second->Size();
+			});
 		} else {
 			std::unordered_map<std::uint32_t, std::uint32_t> generations;
 			generations.reserve(payload.drawRecordIndices.size());
 			for (const auto index : payload.drawRecordIndices) generations[index] = ActivateDrawRecord(index);
-			for (const auto& bucket : payload.activeDrawSetRemovals) {
-				auto& entries = inserts[bucket.workloadKey];
-				entries.reserve(entries.size() + bucket.indices.size());
-				for (const auto index : bucket.indices) {
+			ForEachActiveDrawSetRemoval(payload, [&](const DrawWorkloadKey& workloadKey, auto indices) {
+				auto& entries = inserts[workloadKey];
+				entries.reserve(entries.size() + indices.size());
+				for (const auto index : indices) {
 					if (const auto found = generations.find(index); found != generations.end()) {
 						entries.push_back({ index, found->second });
 					}
 				}
-			}
+			});
 		}
 		handle->visible = visible;
 	}

@@ -752,9 +752,11 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
         }
     }
     auto pb = PixelBuffer::CreateShared(desc);
+	org::memory::SetResourceUsageHint(*pb, "Non-material texture assets");
 
     if (!debugName.empty()) {
         pb->SetName(std::string(debugName));
+		org::memory::SetResourceMemoryIdentifier(*pb, std::string(debugName));
     }
 
     UploadTextureData(pb, desc, initialData.subresources, pb->GetMipLevels());
@@ -877,8 +879,10 @@ bool TextureFactory::SubmitBC7CompressionJob(
 
     TextureDescription compressedDesc = BuildBc7CompressedDescription(compressionLayoutSource, requestMeta);
     auto compressedTexture = PixelBuffer::CreateShared(compressedDesc);
+    org::memory::SetResourceUsageHint(*compressedTexture, "Texture processing compressed outputs");
     if (!jobName.empty()) {
         compressedTexture->SetName(jobName + "[BC7]");
+        org::memory::SetResourceMemoryIdentifier(*compressedTexture, jobName);
     }
 
     if (compressedTexture->GetMipLevels() != compressedMipLevels) {
@@ -1805,7 +1809,9 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateMaterialResidentPixelBuffer(
 	desc.hasNonShaderVisibleUAV = false;
 	desc.initialLayout = rhi::ResourceLayout::Common;
 	auto image = PixelBuffer::CreateShared(desc);
+	org::memory::SetResourceUsageHint(*image, "Material textures");
 	if (!debugName.empty()) image->SetName(std::string(debugName));
+	if (!debugName.empty()) org::memory::SetResourceMemoryIdentifier(*image, std::string(debugName));
 	m_materialTextureTransferService->EnqueueUpload(image, desc, std::move(initialData));
 	return image;
 }

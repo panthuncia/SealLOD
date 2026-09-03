@@ -25,7 +25,11 @@ enum class TaskDomain : std::uint8_t {
 	GraphControl, GraphPublication, StaticImportControl,
     // Mutable resource work must not queue behind serialized renderer-state
     // acceptance or texture decoding.
-    MaterialAcceptance, GpuBufferBuild, Count
+	MaterialAcceptance, GpuBufferBuild,
+    // StaticGroup graph producers need bounded admission, but sharing the
+    // StaticImport FIFO with service drains creates head-of-line blocking.
+    // Keep their capacity and queue independently observable.
+    StaticGroupPreparation, Count
 };
 
 // Numeric scheduler trace metadata is deliberately independent of the graph

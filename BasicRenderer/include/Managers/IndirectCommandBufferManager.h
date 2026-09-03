@@ -55,7 +55,7 @@ public:
     void RegisterWorkload(const DrawWorkloadKey& workloadKey);
 
     // Ensure we have buffers for all known workloads for this view.
-    void CreateBuffersForView(uint64_t viewID);
+    void CreateBuffersForView(uint64_t viewID, bool materializeIndirectArguments);
 
     // Remove buffers associated with a view
     void UnregisterBuffers(uint64_t viewID);
@@ -97,6 +97,7 @@ private:
         std::unordered_map<DrawWorkloadKey, br::render::VersionedGpuBufferJournal::Capture,
             DrawWorkloadKey::Hasher> activeCaptures;
         std::unordered_set<std::uint64_t> viewIDs;
+        std::unordered_set<std::uint64_t> argumentViewIDs;
         std::unordered_map<std::uint64_t, std::uint64_t> viewLifetimeRevisions;
     };
 
@@ -106,6 +107,9 @@ private:
     std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> m_workloadIDs;
     std::uint64_t m_nextWorkloadID = 1;
     std::unordered_set<std::uint64_t> m_viewIDs;
+    // Culling needs an active workload for every view, but only views that
+    // execute mesh draws need a private indirect-argument buffer/counter.
+    std::unordered_set<std::uint64_t> m_argumentViewIDs;
     std::unordered_map<std::uint64_t, std::uint64_t> m_viewLifetimeRevisions;
     unsigned int m_incrementSize = 1000;
     br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;

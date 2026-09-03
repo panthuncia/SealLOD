@@ -85,12 +85,29 @@ public:
 	};
 
 	struct PreparedStaticGroupInfo {
+		struct WorkloadRouteRange {
+			std::uint32_t first = 0;
+			std::uint32_t count = 0;
+		};
 		std::uint64_t stableGroupID = 0;
 		std::uint64_t allocationScopeID = 0;
 		std::vector<PerObjectCB> perObjectCBs;
 		std::vector<DirectX::XMFLOAT4X4> normalMatrices;
 		std::vector<PreparedStaticMeshTemplateRef> meshTemplates;
 		std::vector<std::vector<DrawWorkloadKey>> workloadKeysByMeshTemplate;
+		// Immutable compact routing: each template range contains indices into
+		// uniqueWorkloadKeys. Materialization binds each unique key once instead
+		// of hashing and deduplicating every template occurrence again.
+		std::vector<DrawWorkloadKey> uniqueWorkloadKeys;
+		std::vector<std::uint32_t> workloadRouteIndices;
+		std::vector<WorkloadRouteRange> workloadRouteRanges;
+		std::vector<std::uint32_t> workloadRouteOccurrences;
+		// Scatter/gather publication batches retain the source artifact and map
+		// these immutable route tables instead of copying four vectors per group.
+		std::span<const DrawWorkloadKey> mappedUniqueWorkloadKeys;
+		std::span<const std::uint32_t> mappedWorkloadRouteIndices;
+		std::span<const WorkloadRouteRange> mappedWorkloadRouteRanges;
+		std::span<const std::uint32_t> mappedWorkloadRouteOccurrences;
 		// Recipe-backed groups keep immutable transform rows in their mapped pack.
 		// Runtime bindings remain owning because their indices are renderer-assigned.
 		std::span<const PerObjectCB> mappedPerObjectCBs;
@@ -111,6 +128,18 @@ public:
 		}
 		[[nodiscard]] std::span<const PreparedStaticMeshTemplateRef> MeshTemplates() const {
 			return mappedMeshTemplates.empty() ? std::span<const PreparedStaticMeshTemplateRef>{ meshTemplates } : mappedMeshTemplates;
+		}
+		[[nodiscard]] std::span<const DrawWorkloadKey> UniqueWorkloadKeys() const {
+			return mappedUniqueWorkloadKeys.empty() ? std::span<const DrawWorkloadKey>{ uniqueWorkloadKeys } : mappedUniqueWorkloadKeys;
+		}
+		[[nodiscard]] std::span<const std::uint32_t> WorkloadRouteIndices() const {
+			return mappedWorkloadRouteIndices.empty() ? std::span<const std::uint32_t>{ workloadRouteIndices } : mappedWorkloadRouteIndices;
+		}
+		[[nodiscard]] std::span<const WorkloadRouteRange> WorkloadRouteRanges() const {
+			return mappedWorkloadRouteRanges.empty() ? std::span<const WorkloadRouteRange>{ workloadRouteRanges } : mappedWorkloadRouteRanges;
+		}
+		[[nodiscard]] std::span<const std::uint32_t> WorkloadRouteOccurrences() const {
+			return mappedWorkloadRouteOccurrences.empty() ? std::span<const std::uint32_t>{ workloadRouteOccurrences } : mappedWorkloadRouteOccurrences;
 		}
 		[[nodiscard]] bool IsRecipeView() const { return mappedRecipeSemantics; }
 	};
@@ -257,6 +286,11 @@ public:
 		std::vector<std::size_t> transformCounts;
 		std::vector<std::size_t> drawRecordCounts;
 		std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> activeReserveCounts;
+		// Transaction-wide workload slots and each group's local-to-transaction
+		// mapping. Materialization can bind vector destinations directly instead
+		// of hashing every workload key for every group.
+		std::vector<DrawWorkloadKey> activeWorkloadKeys;
+		std::vector<std::vector<std::uint32_t>> activeWorkloadRoutesByGroup;
 		std::uint64_t drawRecords = 0;
 		std::uint64_t activeInsertIndices = 0;
 		std::uint64_t preparedBytes = 0;
@@ -325,11 +359,28 @@ public:
 			Components::ObjectDrawInfo::BufferRange range;
 			BufferKind kind = BufferKind::PerObject;
 		};
+		struct ActiveDrawSetRemovalRange {
+			std::uint32_t workloadSlot = UINT32_MAX;
+			std::uint32_t firstIndex = 0;
+			std::uint32_t indexCount = 0;
+		};
+		struct ActiveDrawSetRemovalStorage {
+			// Workload identity is transaction-wide. Intern it once instead of
+			// copying RenderPhase strings into every per-group removal range.
+			std::vector<DrawWorkloadKey> workloadKeys;
+			std::vector<ActiveDrawSetRemovalRange> ranges;
+			std::unique_ptr<std::uint32_t[]> indices;
+			std::size_t indexCapacity = 0;
+			std::size_t nextIndex = 0;
+		};
 
 		std::array<BufferRetireRange, 4> inlineBufferRanges;
 		std::uint8_t inlineBufferRangeCount = 0;
 		std::vector<BufferRetireRange> bufferRanges;
 		std::vector<Components::ObjectDrawInfo::ActiveDrawSetRemovalBucket> activeDrawSetRemovals;
+		std::shared_ptr<const ActiveDrawSetRemovalStorage> sharedActiveDrawSetRemovals;
+		std::uint32_t firstActiveDrawSetRemovalRange = 0;
+		std::uint32_t activeDrawSetRemovalRangeCount = 0;
 		std::vector<std::uint32_t> drawRecordIndices;
 		std::vector<std::uint32_t> skinnedAssemblyPlacementIndices;
 		std::size_t drawInfoCount = 0;
@@ -358,6 +409,7 @@ public:
 		std::vector<Components::ObjectDrawInfo> drawInfos;
 		std::vector<std::uint32_t> drawInfoIndicesByGroup;
 		std::vector<StaticObjectRemovalPayload> removalPayloads;
+		std::shared_ptr<StaticObjectRemovalPayload::ActiveDrawSetRemovalStorage> activeDrawSetRemovalStorage;
 		std::vector<PendingSkinnedAssemblyPlacement> skinnedAssemblyPlacements;
 		std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 		std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> activeDrawSetSpans;

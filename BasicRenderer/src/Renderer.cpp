@@ -1033,7 +1033,6 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool 
     }
     const auto taskStats = TaskSchedulerManager::GetInstance().GetQueueStats();
     snapshot.schedulerWorkerCount = TaskSchedulerManager::GetInstance().WorkerCount();
-    static_assert(static_cast<std::size_t>(TaskDomain::Count) == 12);
     for (std::size_t index = 0; index < snapshot.schedulerDomains.size(); ++index) {
         const auto& source = taskStats.domains[index];
         auto& target = snapshot.schedulerDomains[index];

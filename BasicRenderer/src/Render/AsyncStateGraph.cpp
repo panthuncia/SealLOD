@@ -1462,6 +1462,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     // Completed versions are immutable. The mutable address slot above is only
     // the desired/build cursor; ExactSnapshot never resolves through that cursor.
     std::unordered_map<StoredVersionKey, ArtifactSnapshot, StoredVersionKey::Hasher> versions;
+	std::array<std::uint64_t, kArtifactKindCount> archivedVersionsByKind{};
+	mutable std::array<std::atomic_uint64_t, kArtifactKindCount> activeVersionLeasesByKind{};
     using AddressVersionIndex = std::map<std::pair<std::uint64_t, std::uint64_t>, StoredVersionKey>;
     std::unordered_map<ArtifactKey, AddressVersionIndex, ArtifactKey::Hasher> versionsByAddress;
     std::unordered_map<VersionKey, std::uint64_t, VersionKey::Hasher> versionGenerations;
@@ -1871,10 +1873,18 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             if (auto lease = found->second.lock()) return ArtifactLease{ std::move(lease) };
         }
         auto weak = const_cast<Impl*>(this)->weak_from_this();
+		const auto kindIndex = static_cast<std::size_t>(version.address.kind);
+		if (kindIndex < activeVersionLeasesByKind.size()) {
+			activeVersionLeasesByKind[kindIndex].fetch_add(1, std::memory_order_relaxed);
+		}
         auto lease = std::shared_ptr<const void>(new std::uint8_t(0),
-			[weak, version](const void* value) {
+			[weak, version, kindIndex](const void* value) {
                 delete static_cast<const std::uint8_t*>(value);
 				if (auto graph = weak.lock()) {
+					if (kindIndex < graph->activeVersionLeasesByKind.size()) {
+						graph->activeVersionLeasesByKind[kindIndex].fetch_sub(
+							1, std::memory_order_relaxed);
+					}
 					graph->reclaimQueue.push(version);
 					graph->ScheduleDrain();
 				}
@@ -1923,7 +1933,11 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         // requirements, returned handles, manifests and frame leases own pins.
         snapshot.lease.reset();
         const StoredVersionKey key{ node.key, node.producedRevision, node.versionGeneration };
-        versions.insert_or_assign(key, std::move(snapshot));
+		const auto [_, inserted] = versions.insert_or_assign(key, std::move(snapshot));
+		const auto kindIndex = static_cast<std::size_t>(node.key.kind);
+		if (inserted && kindIndex < archivedVersionsByKind.size()) {
+			++archivedVersionsByKind[kindIndex];
+		}
         versionsByAddress[node.key].insert_or_assign(
             std::pair{ node.producedRevision, node.versionGeneration }, key);
 		reclaimQueue.push(key);
@@ -1999,7 +2013,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     }
 
 	void ReclaimUnreferencedVersions(std::chrono::steady_clock::time_point deadline) {
-		constexpr std::size_t maxCandidatesPerDrain = 64;
+		// Reclamation already has a wall-clock deadline.  The old 64-candidate
+		// ceiling was reached long before that deadline during streaming traversal,
+		// so completed GrassScene archives accumulated faster than they could be
+		// inspected and retained the exact shard closures of obsolete scenes.  Keep
+		// a generous corruption/runaway guard, but let the time budget control normal
+		// throughput.
+		constexpr std::size_t maxCandidatesPerDrain = 4096;
 		auto retentionTrace = AcquireTrace();
 		const bool traceIndividualVersions = retentionTrace &&
 			retentionTrace->Config().includeRetentionEvents &&
@@ -2050,6 +2070,11 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 			const auto reclaimed = candidate;
 			pendingRetirement.push_back(std::move(version->second));
 			version = versions.erase(version);
+			const auto kindIndex = static_cast<std::size_t>(reclaimed.address.kind);
+			if (kindIndex < archivedVersionsByKind.size() &&
+				archivedVersionsByKind[kindIndex] != 0) {
+				--archivedVersionsByKind[kindIndex];
+			}
             if (auto address = versionsByAddress.find(reclaimed.address);
                 address != versionsByAddress.end()) {
                 address->second.erase({ reclaimed.revision, reclaimed.generation });
@@ -2788,9 +2813,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         const auto workClass = continuation
             ? ArtifactWorkClass::Continuation
             : registration.scheduling.initialClass;
-        const bool submitted = scheduler.SubmitCpu(scope, lane, registration.domain,
-            registration.taskName.empty() ? "AsyncStateGraph::Build" : registration.taskName,
-            [weak, registration, context = std::move(context), key, revision, generation,
+        // Most graph producers are already constrained by their artifact flow.
+        // StaticGroup preparation is intentionally admitted through its own
+        // scheduler domain: it can otherwise occupy the entire TBB pool, while
+        // using StaticImport's FIFO puts its service drains behind thousands of
+        // producer tasks.
+        auto body = [weak, registration, context = std::move(context), key, revision, generation,
                 taskKind, correlationID,
                 dependencyStamp = std::move(dependencyStamp),
                 superseded = std::move(superseded)](const TaskContext& cancellation) mutable {
@@ -2826,14 +2854,20 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 					std::move(dependencyStamp), std::move(result) });
 				self->completionCount.fetch_add(1, std::memory_order_release);
                 self->ScheduleDrain();
-            }, TaskTraceMetadata{
+            };
+        const TaskTraceMetadata trace{
                 .taskKind = taskKind,
                 .correlationID = correlationID,
                 .admissionKey = registration.scheduling.admissionKey != 0
                     ? registration.scheduling.admissionKey : taskKind,
                 .workClass = static_cast<std::uint8_t>(workClass),
                 .schedulingReason = static_cast<std::uint8_t>(continuation ? 1 : 0),
-                .admissionGroup = registration.scheduling.admissionGroup });
+                .admissionGroup = registration.scheduling.admissionGroup };
+        const auto taskName = registration.taskName.empty()
+            ? std::string_view("AsyncStateGraph::Build") : std::string_view(registration.taskName);
+        const bool submitted = registration.domain == TaskDomain::StaticGroupPreparation
+            ? scheduler.Submit(scope, lane, registration.domain, taskName, std::move(body), trace)
+            : scheduler.SubmitCpu(scope, lane, registration.domain, taskName, std::move(body), trace);
         if (!submitted) {
             if (auto session = AcquireTrace()) {
                 session->Record(AsyncStateGraphTraceEventID::BuildRejected, key, revision, generation,
@@ -3270,6 +3304,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             std::uint64_t exactWaiters = 0;
             std::uint64_t pending = 0;
             std::uint64_t gpuWaiting = 0;
+			std::uint64_t exactRecipePins = 0;
+			std::array<std::uint64_t, kArtifactKindCount> archivedByKind{};
+			std::array<std::uint64_t, kArtifactKindCount> activeLeasesByKind{};
         };
         std::optional<DiagnosticSnapshot> diagnosticSnapshot;
 		std::vector<StoredVersionKey> publishedReady;
@@ -3594,7 +3631,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				// reconstructs detailed populations after capture.
 				stats.exactWaiters = exactWaiterCount;
 				diagnosticSnapshot = DiagnosticSnapshot{ nodes.size(), versions.size(),
-					reclaimedVersions, exactWaiterCount, pending.size(), stats.gpuWaiting };
+					reclaimedVersions, exactWaiterCount, pending.size(), stats.gpuWaiting,
+					exactRecipePins.size() };
+				diagnosticSnapshot->archivedByKind = archivedVersionsByKind;
+				for (std::size_t index = 0; index < kArtifactKindCount; ++index) {
+					diagnosticSnapshot->activeLeasesByKind[index] =
+						activeVersionLeasesByKind[index].load(std::memory_order_relaxed);
+				}
             }
 			recordApplyPhase("apply_tail");
         }
@@ -3623,6 +3666,16 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				static_cast<std::int64_t>(diagnosticSnapshot->pending));
 			basic_telemetry::SetGauge("SARP.AsyncStateGraph.GpuWaiting",
 				static_cast<std::int64_t>(diagnosticSnapshot->gpuWaiting));
+			basic_telemetry::SetGauge("SARP.AsyncStateGraph.ExactRecipePins",
+				static_cast<std::int64_t>(diagnosticSnapshot->exactRecipePins));
+			for (std::size_t index = 0; index < kArtifactKindCount; ++index) {
+				basic_telemetry::SetGauge("SARP.AsyncStateGraph.ArchivedVersionsByKind." +
+					std::to_string(index), static_cast<std::int64_t>(
+						diagnosticSnapshot->archivedByKind[index]));
+				basic_telemetry::SetGauge("SARP.AsyncStateGraph.ActiveVersionLeasesByKind." +
+					std::to_string(index), static_cast<std::int64_t>(
+						diagnosticSnapshot->activeLeasesByKind[index]));
+			}
 		}
 		for (const auto value : buildLatencySamples)
 			basic_telemetry::Record("SARP.AsyncStateGraph.BuildLatencyNs", value);
@@ -4312,6 +4365,12 @@ void AsyncStateGraph::Release(ArtifactKey key) {
         const auto found = m_impl->nodes.find(key);
         if (found == m_impl->nodes.end()) return;
         auto& node = found->second;
+		if (const auto archived = m_impl->versionsByAddress.find(key);
+			archived != m_impl->versionsByAddress.end()) {
+			for (const auto& [_, version] : archived->second) {
+				m_impl->reclaimQueue.push(version);
+			}
+		}
         m_impl->RemoveWaiterEdges(node);
         ++node.generation;
 		m_impl->SetDesired(node, false);
@@ -4363,6 +4422,12 @@ void AsyncStateGraph::ReleaseBatch(std::span<const ArtifactKey> keys) {
             const auto found = m_impl->nodes.find(key);
             if (found == m_impl->nodes.end()) continue;
             auto& node = found->second;
+			if (const auto archived = m_impl->versionsByAddress.find(key);
+				archived != m_impl->versionsByAddress.end()) {
+				for (const auto& [_, version] : archived->second) {
+					m_impl->reclaimQueue.push(version);
+				}
+			}
             m_impl->RemoveWaiterEdges(node);
             ++node.generation;
 			m_impl->SetDesired(node, false);

@@ -42,10 +42,12 @@ void IndirectCommandBufferManager::RegisterWorkload(const DrawWorkloadKey& workl
     ScheduleDesiredBuild();
 }
 
-void IndirectCommandBufferManager::CreateBuffersForView(uint64_t viewID) {
+void IndirectCommandBufferManager::CreateBuffersForView(
+    uint64_t viewID, bool materializeIndirectArguments) {
     {
         std::lock_guard lock(m_desiredMutex);
         if (!m_viewIDs.insert(viewID).second) return;
+        if (materializeIndirectArguments) m_argumentViewIDs.insert(viewID);
         ++m_viewLifetimeRevisions[viewID];
         ++m_desiredMutationRevision;
     }
@@ -57,10 +59,13 @@ void IndirectCommandBufferManager::UnregisterBuffers(uint64_t viewID) {
     {
         std::lock_guard lock(m_desiredMutex);
         if (m_viewIDs.erase(viewID) == 0) return;
+        const bool hadArguments = m_argumentViewIDs.erase(viewID) != 0;
         retiredAddresses.push_back({ br::render::ArtifactKind::ViewLifetime, viewID, 0 });
-        retiredAddresses.reserve(m_workloadIDs.size() + 1u);
-        for (const auto& [_, workloadID] : m_workloadIDs) {
-            retiredAddresses.push_back({ br::render::ArtifactKind::BufferVersion, workloadID, viewID });
+        retiredAddresses.reserve((hadArguments ? m_workloadIDs.size() : 0u) + 1u);
+        if (hadArguments) {
+            for (const auto& [_, workloadID] : m_workloadIDs) {
+                retiredAddresses.push_back({ br::render::ArtifactKind::BufferVersion, workloadID, viewID });
+            }
         }
         ++m_desiredMutationRevision;
     }
@@ -311,6 +316,7 @@ IndirectCommandBufferManager::CaptureDesiredSnapshotLocked() const {
 		}
 	}
     snapshot.viewIDs = m_viewIDs;
+    snapshot.argumentViewIDs = m_argumentViewIDs;
     snapshot.viewLifetimeRevisions = m_viewLifetimeRevisions;
     return snapshot;
 }
@@ -563,6 +569,7 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
         dto.minimumCapacity = capacity;
         if (safeCount != 0u) {
             for (const auto viewID : input->viewIDs) {
+				if (!snapshot.argumentViewIDs.contains(viewID)) continue;
 				// A view ID may be destroyed and later reused. Capacity alone is
 				// therefore not a version identity: after Release it could match a
 				// signature tombstone and return AlreadyDesired without recreating the

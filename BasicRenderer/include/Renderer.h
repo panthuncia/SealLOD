@@ -154,7 +154,7 @@ public:
         uint32_t backgroundTasks = 0;
         uint32_t shaderCompileTasks = 0;
         uint32_t schedulerWorkerCount = 0;
-        std::array<SchedulerDomainSnapshot, 12> schedulerDomains{};
+        std::array<SchedulerDomainSnapshot, static_cast<std::size_t>(TaskDomain::Count)> schedulerDomains{};
         br::render::RendererStatePublisherStats rendererStatePublisher;
         uint64_t deferredRetireQueueDepth = 0;
         uint64_t drawRecordsAllocated = 0;

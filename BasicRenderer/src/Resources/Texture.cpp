@@ -1487,6 +1487,8 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 		return {};
 	}
+	org::memory::SetResourceUsageHint(*pixelBuffer, "Streamed textures (DirectStorage synchronous)");
+	org::memory::SetResourceMemoryIdentifier(*pixelBuffer, path);
 	std::string directStorageMessage;
 	if (!DirectStorageManager::GetInstance().UploadTextureRegionsFromFile(filePath.wstring(), pixelBuffer->GetAPIResource(), regions, &directStorageMessage)) {
 		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::EnqueueFailed, path, directStorageMessage);
@@ -1536,6 +1538,8 @@ std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 		return {};
 	}
+	org::memory::SetResourceUsageHint(*pixelBuffer, "Streamed textures (DirectStorage synchronous)");
+	org::memory::SetResourceMemoryIdentifier(*pixelBuffer, path);
 
 	std::string directStorageMessage;
 	if (!DirectStorageManager::GetInstance().UploadTextureSubresourceRangeFromFile(
@@ -1701,6 +1705,8 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 				throw std::runtime_error("failed to create resident PixelBuffer for DirectStorage GPU-direct texture upload");
 			}
+			org::memory::SetResourceUsageHint(*uploadedImage, "Streamed textures (DirectStorage pending)");
+			org::memory::SetResourceMemoryIdentifier(*uploadedImage, path);
 			if (handle->cancelRequested.load(std::memory_order_acquire)) {
 				throw std::runtime_error("DirectStorage texture upload was canceled before enqueue");
 			}
@@ -1812,6 +1818,8 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 				throw std::runtime_error("failed to create resident PixelBuffer for conditioned texture cache DirectStorage upload");
 			}
+			org::memory::SetResourceUsageHint(*uploadedImage, "Streamed textures (DirectStorage pending)");
+			org::memory::SetResourceMemoryIdentifier(*uploadedImage, path);
 			if (handle->cancelRequested.load(std::memory_order_acquire)) {
 				throw std::runtime_error("conditioned texture cache DirectStorage upload was canceled before enqueue");
 			}
@@ -1922,6 +1930,17 @@ void TextureAsset::RefreshStreamingStateFromDescription() {
 		if (!m_meta.filePath.empty()) {
 			org::memory::SetResourceMemoryIdentifier(*m_image, m_meta.filePath);
 		}
+	}
+	else if (m_image && !m_meta.filePath.empty()) {
+		std::string normalizedPath = m_meta.filePath;
+		std::ranges::transform(normalizedPath, normalizedPath.begin(), [](unsigned char ch) {
+			return ch == '\\' ? '/' : static_cast<char>(std::tolower(ch));
+		});
+		org::memory::SetResourceUsageHint(*m_image,
+			normalizedPath.find("object_reyes_atlas_height") != std::string::npos
+				? "Object Reyes height atlases"
+				: "Non-material texture assets");
+		org::memory::SetResourceMemoryIdentifier(*m_image, m_meta.filePath);
 	}
 	const bool wasEligible = m_streamingState.eligible;
 	UpdateSourceShapeFromDescription(m_desc);
@@ -3242,6 +3261,17 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 					m_streamingState.enabled &&
 					isParticipatingMaterialTexture &&
 					!conditionedCachePath.empty();
+				if (preferStreamedProcessingResult && uploadedImage) {
+					// The GPU-produced image has already been read back into the
+					// conditioned cache. Streaming material textures intentionally
+					// create their resident image from that cache, so retaining this
+					// full-resolution compression destination until DirectStorage
+					// finishes duplicates VRAM without providing fallback value.
+					// The CPU result remains available for the existing fallback.
+					std::scoped_lock lock(m_processingHandle->mutex);
+					m_processingHandle->uploadedImage.reset();
+					uploadedImage.reset();
+				}
 
 				if (!isParticipatingMaterialTexture && !preferStreamedProcessingResult &&
 					uploadedImage && uploadedImage->HasValidBackingResource()) {
