@@ -1425,32 +1425,30 @@ int main() {
     materialCommit.RunDeferred();
     auto source = publisher.ResourceSource();
     PublishedStateResourceResolver resolver(source, PublishedResourceKey{});
-    const auto missingResourceVersion = resolver.GetContentVersion();
-    Check(missingResourceVersion != 0);
+    const auto missingResourceIdentity = resolver.CaptureDeclarationState()->resourceSetIdentity;
     Check(resolver.Resolve().empty());
 	PublishedStateResourceResolver stagedResolver(source, PublishedResourceKey{}, {}, false);
-	const auto stagedFallbackVersion = stagedResolver.GetContentVersion();
+	const auto stagedFallbackIdentity = stagedResolver.CaptureDeclarationState()->resourceSetIdentity;
 	Check(stagedResolver.Resolve().empty());
 	auto epochAdvance = std::make_shared<PublishedRendererState>(*publisher.Active());
 	epochAdvance->epoch = publisher.ActiveEpoch() + 1u;
 	Check(publisher.PublishCandidate({ publisher.ActiveEpoch(), epochAdvance }));
 	auto epochCommit = publisher.Commit(1);
 	epochCommit.RunDeferred();
-	Check(resolver.GetContentVersion() == missingResourceVersion);
-	Check(stagedResolver.GetContentVersion() == stagedFallbackVersion);
+	Check(resolver.CaptureDeclarationState()->resourceSetIdentity == missingResourceIdentity);
+	Check(stagedResolver.CaptureDeclarationState()->resourceSetIdentity == stagedFallbackIdentity);
 	stagedResolver.SetPublishedEnabled(true);
-	Check(stagedResolver.GetContentVersion() != stagedFallbackVersion);
+	Check(stagedResolver.CaptureDeclarationState()->resourceSetIdentity == stagedFallbackIdentity);
 
 	// Resolve must observe a newly committed lease even when the graph reuses
-	// its layout and does not query GetContentVersion first.
+	// its layout and does not capture declaration state first.
 	RendererStatePublisher directResolvePublisher(2);
 	const PublishedResourceKey directResolveKey{
 		PublishedFragmentKind::TextureImages, PublishedResourceUsage::ShaderResource,
 		0, 0, kTextureImageTableBufferVariant };
 	PublishedStateResourceResolver directResolver(
 		directResolvePublisher.ResourceSource(), directResolveKey);
-	const auto directMissingVersion = directResolver.GetContentVersion();
-	Check(directMissingVersion != 0);
+	const auto directMissingIdentity = directResolver.CaptureDeclarationState()->resourceSetIdentity;
 	Check(directResolver.Resolve().empty());
 	auto directResource = Buffer::CreateSharedUnmaterialized(
 		rhi::HeapType::DeviceLocal, sizeof(std::uint32_t), false);
@@ -1469,9 +1467,25 @@ int main() {
 	auto directCommit = directResolvePublisher.Commit(0);
 	Check(directCommit.committed);
 	directCommit.RunDeferred();
-	Check(directResolver.GetContentVersion() != directMissingVersion);
+	Check(directResolver.CaptureDeclarationState()->resourceSetIdentity != directMissingIdentity);
 	const auto directlyResolved = directResolver.Resolve();
 	Check(directlyResolved.size() == 1 && directlyResolved.front() == directResource);
+	const auto firstDeclarationState = directResolver.CaptureDeclarationState();
+	PublishedStatePatch contentOnlyPatch;
+	contentOnlyPatch.catalogOwnerMask = PublishedFragmentMask(PublishedFragmentKind::TextureImages);
+	contentOnlyPatch.catalogEntries.emplace_back(directResolveKey, directResources);
+	PublishedStateFragment contentOnlyFragment = directFragment;
+	contentOnlyFragment.revision = 2;
+	contentOnlyFragment.publicationRoot.revision = 2;
+	contentOnlyPatch.fragments[static_cast<std::size_t>(PublishedFragmentKind::TextureImages)] =
+		contentOnlyFragment;
+	Check(directResolvePublisher.PublishPatch(std::move(contentOnlyPatch)));
+	auto contentOnlyCommit = directResolvePublisher.Commit(1);
+	Check(contentOnlyCommit.committed);
+	contentOnlyCommit.RunDeferred();
+	const auto contentOnlyState = directResolver.CaptureDeclarationState();
+	Check(contentOnlyState->resourceSetIdentity == firstDeclarationState->resourceSetIdentity);
+	Check(contentOnlyState->contentRevision != firstDeclarationState->contentRevision);
 
     // Independent fragments submitted against the same source snapshot rebase
     // together. Only an explicitly named exact precondition may reject a patch.

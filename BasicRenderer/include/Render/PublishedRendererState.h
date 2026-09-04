@@ -186,11 +186,23 @@ public:
         std::size_t frameSlot, std::shared_ptr<const PublishedRendererState> state = {}) noexcept;
     [[nodiscard]] std::shared_ptr<const PublishedManifestLease> LoadLease() const noexcept;
     [[nodiscard]] std::uint64_t Epoch() const noexcept;
+	[[nodiscard]] std::shared_ptr<const void> ResolverDependencyIdentity(
+		const PublishedResourceKey& key) const;
+	[[nodiscard]] std::shared_ptr<const void> ResolverDependencyIdentity(
+		const PublishedResourceQuery& query) const;
     void Clear() noexcept;
 private:
+	struct ResolverIdentityEntry {
+		bool exact = false;
+		PublishedResourceKey key{};
+		PublishedResourceQuery query{};
+		std::weak_ptr<const void> identity;
+	};
     std::atomic<std::shared_ptr<const PublishedRendererState>> m_state;
     std::atomic<std::shared_ptr<const PublishedManifestLease>> m_lease;
     std::atomic<std::uint64_t> m_leaseSequence{ 0 };
+	mutable std::mutex m_resolverIdentityMutex;
+	mutable std::vector<ResolverIdentityEntry> m_resolverIdentities;
 };
 
 struct RendererStateCandidate {

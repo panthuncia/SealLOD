@@ -2,9 +2,11 @@
 
 #include <memory>
 #include <atomic>
+#include <algorithm>
 
 #include "Interfaces/IResourceResolver.h"
 #include "Render/PublishedRendererState.h"
+#include "Resources/Resource.h"
 
 class PublishedStateResourceResolver final : public org::ClonableResolver<PublishedStateResourceResolver> {
 public:
@@ -19,13 +21,17 @@ public:
           m_leaseBinding(std::make_shared<LeaseBinding>()) {
         m_fallback->resource.store(std::move(fallback), std::memory_order_release);
         m_selection->publishedEnabled.store(publishedEnabled, std::memory_order_release);
+		m_dependencyIdentity = m_source ? m_source->ResolverDependencyIdentity(m_key) : nullptr;
         CaptureLatestLease();
     }
     PublishedStateResourceResolver(std::shared_ptr<br::render::PublishedStateSource> source,
         br::render::PublishedResourceQuery query)
         : m_source(std::move(source)), m_query(std::move(query)),
           m_configured(true),
-          m_leaseBinding(std::make_shared<LeaseBinding>()) { CaptureLatestLease(); }
+          m_leaseBinding(std::make_shared<LeaseBinding>()) {
+		m_dependencyIdentity = m_source ? m_source->ResolverDependencyIdentity(m_query) : nullptr;
+		CaptureLatestLease();
+	}
 
     std::vector<std::shared_ptr<org::Resource>> Resolve() const override {
         if (m_selection && !m_selection->publishedEnabled.load(std::memory_order_acquire)) {
@@ -44,32 +50,104 @@ public:
         return resources && !resources->empty() ? *resources : ResolveFallback();
     }
 
-    std::uint64_t GetContentVersion() const override {
-        if (!m_configured) return 0u;
+    std::shared_ptr<const org::ResolverDeclarationState> CaptureDeclarationState() const override {
+        org::ResolverDeclarationState result;
+        if (!m_configured) return std::make_shared<const org::ResolverDeclarationState>();
+        CaptureLatestLease();
+        const auto lease = BoundLease();
+        const auto leaseSequence = lease ? lease->sequence : 0u;
         const bool publishedEnabled = !m_selection ||
             m_selection->publishedEnabled.load(std::memory_order_acquire);
+        const auto fallbackGeneration = m_fallback
+            ? m_fallback->generation.load(std::memory_order_acquire) : 0u;
+        const auto selectionGeneration = m_selection
+            ? m_selection->generation.load(std::memory_order_acquire) : 0u;
+        if (const auto cached = m_declarationCache->value.load(std::memory_order_acquire);
+            cached && cached->leaseSequence == leaseSequence &&
+            cached->fallbackGeneration == fallbackGeneration &&
+            cached->selectionGeneration == selectionGeneration) {
+            return cached->state;
+        }
+        result.dependencyIdentity = m_dependencyIdentity;
+        result.tracked = true;
         std::uint64_t entryVersion = 0;
+        std::vector<std::shared_ptr<org::Resource>> resources;
+        std::vector<org::ExternalTimelinePoint> waits;
         if (publishedEnabled) {
-            CaptureLatestLease();
-            const auto lease = BoundLease();
             const auto state = lease ? lease->state : nullptr;
             if (state && state->resourceCatalog) {
                 entryVersion = m_exact
                     ? state->resourceCatalog->ContentVersion(m_key)
                     : state->resourceCatalog->ContentVersion(m_query);
+                resources = ResolveFrom(state);
+                const auto appendSelection = [&](const br::render::PublishedResourceSelection& selection) {
+                    for (const auto& submissions : selection.gpuSubmissions) {
+                        if (!submissions) continue;
+                        for (const auto& submission : submissions->submissions) {
+                            const auto owner = std::static_pointer_cast<const rhi::TimelinePtr>(submission.TimelineOwner());
+                            if (!owner || !*owner) continue;
+                            waits.push_back({ owner->Get(), submission.TimelineValue() });
+                        }
+                    }
+                };
+                if (m_exact) {
+                    if (const auto* selection = state->resourceCatalog->FindSelection(m_key)) appendSelection(*selection);
+                } else {
+                    for (const auto* selection : state->resourceCatalog->FindSelections(m_query))
+                        if (selection) appendSelection(*selection);
+                }
             }
+        } else {
+            resources = ResolveFallback();
         }
-        const auto fallbackGeneration = m_fallback
-            ? m_fallback->generation.load(std::memory_order_acquire) : 0u;
-        const auto selectionGeneration = m_selection
-            ? m_selection->generation.load(std::memory_order_acquire) : 0u;
-        // Zero means "this resolver is not dynamic" to the render-graph pass
-        // builders.  Published resources are dynamic even before their first
-        // artifact exists: retaining that absent-state snapshot is what lets a
-        // pass refresh its declarations when the resource is first published.
-        // Reserve bit zero as the nonzero dynamic-resolver tag.
-        return ((entryVersion << 3u) ^ (fallbackGeneration << 2u) ^
-            (selectionGeneration << 1u)) | 1u;
+        result.contentRevision = entryVersion;
+
+        auto mix = [](std::uint64_t& hash, std::uint64_t value) {
+            hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
+        };
+        std::uint64_t setLow = 0x7365746964656e74ull;
+        std::uint64_t setHigh = 0x7265736f75726365ull;
+        for (const auto& resource : resources) {
+            const auto id = resource ? resource->GetGlobalResourceID() : 0u;
+            mix(setLow, id); mix(setHigh, id ^ 0x94d049bb133111ebull);
+        }
+        mix(setLow, resources.size());
+        result.resourceSetIdentity = { setLow, setHigh };
+
+        std::sort(waits.begin(), waits.end(), [](const auto& lhs, const auto& rhs) {
+            const auto lh = lhs.timeline.GetHandle();
+            const auto rh = rhs.timeline.GetHandle();
+            return lh.index != rh.index ? lh.index < rh.index :
+                (lh.generation != rh.generation ? lh.generation < rh.generation : lhs.value < rhs.value);
+        });
+        std::vector<org::ExternalTimelinePoint> normalized;
+        for (const auto& wait : waits) {
+            if (!normalized.empty()) {
+                const auto previous = normalized.back().timeline.GetHandle();
+                const auto current = wait.timeline.GetHandle();
+                if (previous.index == current.index && previous.generation == current.generation) {
+                    normalized.back().value = (std::max)(normalized.back().value, wait.value);
+                    continue;
+                }
+            }
+            normalized.push_back(wait);
+        }
+        std::uint64_t waitRevision = 0x7761697472657601ull;
+        for (const auto& wait : normalized) {
+            mix(waitRevision, wait.timeline.GetHandle().index);
+            mix(waitRevision, wait.timeline.GetHandle().generation);
+            mix(waitRevision, wait.value);
+        }
+        result.waitRevision = waitRevision;
+        result.resources = std::make_shared<const org::ResolverResourceList>(std::move(resources));
+        result.waits = std::make_shared<const std::vector<org::ExternalTimelinePoint>>(std::move(normalized));
+        auto cached = std::make_shared<CachedDeclaration>();
+        cached->leaseSequence = leaseSequence;
+        cached->fallbackGeneration = fallbackGeneration;
+        cached->selectionGeneration = selectionGeneration;
+        cached->state = std::make_shared<const org::ResolverDeclarationState>(std::move(result));
+        m_declarationCache->value.store(std::move(cached), std::memory_order_release);
+        return m_declarationCache->value.load(std::memory_order_acquire)->state;
     }
 
     // Returns the immutable manifest lease used by this resolver. Consumers
@@ -97,36 +175,6 @@ public:
         return resources && !resources->empty() ? *resources : ResolveFallback();
     }
 
-    std::vector<org::ExternalTimelinePoint> GetExternalTimelineWaits() const override {
-        std::vector<org::ExternalTimelinePoint> waits;
-        if (m_selection && !m_selection->publishedEnabled.load(std::memory_order_acquire)) return waits;
-        CaptureLatestLease();
-        const auto lease = BoundLease();
-        const auto state = lease ? lease->state : nullptr;
-        if (!state || !state->resourceCatalog) return waits;
-        const auto appendSelection = [&](const br::render::PublishedResourceSelection& selection) {
-            for (const auto& submissions : selection.gpuSubmissions) {
-                if (!submissions || submissions->Complete()) continue;
-                for (const auto& submission : submissions->submissions) {
-                    const auto owner = std::static_pointer_cast<const rhi::TimelinePtr>(
-                        submission.TimelineOwner());
-                    if (!owner || !*owner) continue;
-                    waits.push_back({ owner->Get(), submission.TimelineValue() });
-                }
-            }
-        };
-        if (m_exact) {
-            if (const auto* selection = state->resourceCatalog->FindSelection(m_key)) {
-                appendSelection(*selection);
-            }
-        } else {
-            for (const auto* selection : state->resourceCatalog->FindSelections(m_query)) {
-                if (selection) appendSelection(*selection);
-            }
-        }
-        return waits;
-    }
-
     void SetPublishedEnabled(bool enabled) noexcept {
         if (!m_selection) return;
         const bool previous = m_selection->publishedEnabled.exchange(enabled, std::memory_order_acq_rel);
@@ -151,6 +199,15 @@ private:
     struct LeaseBinding {
         std::atomic<std::shared_ptr<const br::render::PublishedManifestLease>> lease;
         std::atomic<std::uint64_t> sequence{ 0 };
+    };
+    struct CachedDeclaration {
+        std::uint64_t leaseSequence = 0;
+        std::uint64_t fallbackGeneration = 0;
+        std::uint64_t selectionGeneration = 0;
+        std::shared_ptr<const org::ResolverDeclarationState> state;
+    };
+    struct DeclarationCache {
+        std::atomic<std::shared_ptr<const CachedDeclaration>> value;
     };
     void CaptureLatestLease() const {
         if (!m_leaseBinding) return;
@@ -180,4 +237,6 @@ private:
     std::shared_ptr<FallbackState> m_fallback;
     std::shared_ptr<SelectionState> m_selection;
     std::shared_ptr<LeaseBinding> m_leaseBinding;
+    std::shared_ptr<DeclarationCache> m_declarationCache = std::make_shared<DeclarationCache>();
+	std::shared_ptr<const void> m_dependencyIdentity;
 };

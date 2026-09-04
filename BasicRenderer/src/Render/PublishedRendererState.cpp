@@ -1,6 +1,7 @@
 #include "Render/PublishedRendererState.h"
 
 #include <chrono>
+#include <algorithm>
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
@@ -115,18 +116,24 @@ const PublishedResourceSelection* PublishedResourceCatalog::FindSelection(
 
 std::vector<const PublishedResourceSelection*> PublishedResourceCatalog::FindSelections(
     const PublishedResourceQuery& query) const {
-    std::vector<const PublishedResourceSelection*> result;
+	std::vector<std::pair<PublishedResourceKey, const PublishedResourceSelection*>> matches;
 	for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
 		if (query.owner && static_cast<std::size_t>(*query.owner) != index) continue;
 		if (const auto& shard = ownerShards[index]) {
 			for (const auto& [key, selection] : shard->selections)
-				if (query.Matches(key)) result.push_back(&selection);
+				if (query.Matches(key)) matches.emplace_back(key, &selection);
 		} else {
 			for (const auto& [key, selection] : selections)
 				if (static_cast<std::size_t>(key.owner) == index && query.Matches(key))
-					result.push_back(&selection);
+					matches.emplace_back(key, &selection);
 		}
 	}
+	std::ranges::sort(matches, [](const auto& lhs, const auto& rhs) {
+		return lhs.first < rhs.first;
+	});
+	std::vector<const PublishedResourceSelection*> result;
+	result.reserve(matches.size());
+	for (const auto& [_, selection] : matches) result.push_back(selection);
     return result;
 }
 
@@ -175,15 +182,24 @@ bool PublishedResourceQuery::Matches(const PublishedResourceKey& key) const noex
 
 PublishedResourceCatalog::ResourceList PublishedResourceCatalog::FindAll(
     const PublishedResourceQuery& query) const {
-    ResourceList result;
+	std::vector<std::pair<PublishedResourceKey, std::shared_ptr<const ResourceList>>> matches;
 	for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
 		if (query.owner && static_cast<std::size_t>(*query.owner) != index) continue;
 		const auto& ownerEntries = ownerShards[index] ? ownerShards[index]->entries : entries;
 		for (const auto& [key, resources] : ownerEntries) {
 			if (static_cast<std::size_t>(key.owner) != index || !query.Matches(key) || !resources) continue;
-			result.insert(result.end(), resources->begin(), resources->end());
+			matches.emplace_back(key, resources);
 		}
 	}
+	std::ranges::sort(matches, [](const auto& lhs, const auto& rhs) {
+		return lhs.first < rhs.first;
+	});
+	std::size_t resourceCount = 0;
+	for (const auto& [_, resources] : matches) resourceCount += resources->size();
+	ResourceList result;
+	result.reserve(resourceCount);
+	for (const auto& [_, resources] : matches)
+		result.insert(result.end(), resources->begin(), resources->end());
     return result;
 }
 
@@ -205,6 +221,41 @@ std::shared_ptr<const PublishedRendererState> PublishedStateSource::Load() const
 std::uint64_t PublishedStateSource::Epoch() const noexcept {
     const auto state = Load();
     return state ? state->epoch : 0u;
+}
+
+std::shared_ptr<const void> PublishedStateSource::ResolverDependencyIdentity(
+	const PublishedResourceKey& key) const {
+	std::scoped_lock lock(m_resolverIdentityMutex);
+	for (auto& entry : m_resolverIdentities) {
+		if (!entry.exact || entry.key != key) continue;
+		if (auto identity = entry.identity.lock()) return identity;
+		auto identity = std::make_shared<const std::uint8_t>(0);
+		entry.identity = identity;
+		return identity;
+	}
+	auto identity = std::make_shared<const std::uint8_t>(0);
+	m_resolverIdentities.push_back({ .exact = true, .key = key, .identity = identity });
+	return identity;
+}
+
+std::shared_ptr<const void> PublishedStateSource::ResolverDependencyIdentity(
+	const PublishedResourceQuery& query) const {
+	const auto equalQuery = [](const PublishedResourceQuery& lhs, const PublishedResourceQuery& rhs) {
+		return lhs.owner == rhs.owner && lhs.usage == rhs.usage &&
+			lhs.renderPhaseHash == rhs.renderPhaseHash && lhs.viewOrWorkloadID == rhs.viewOrWorkloadID &&
+			lhs.requiredVariantMask == rhs.requiredVariantMask && lhs.forbiddenVariantMask == rhs.forbiddenVariantMask;
+	};
+	std::scoped_lock lock(m_resolverIdentityMutex);
+	for (auto& entry : m_resolverIdentities) {
+		if (entry.exact || !equalQuery(entry.query, query)) continue;
+		if (auto identity = entry.identity.lock()) return identity;
+		auto identity = std::make_shared<const std::uint8_t>(0);
+		entry.identity = identity;
+		return identity;
+	}
+	auto identity = std::make_shared<const std::uint8_t>(0);
+	m_resolverIdentities.push_back({ .exact = false, .query = query, .identity = identity });
+	return identity;
 }
 
 std::shared_ptr<const PublishedManifestLease> PublishedStateSource::AcquireLease(

@@ -551,7 +551,7 @@ void Renderer::Initialize(
     settingsManager.registerSetting<UpscalingMode>(
         "upscalingMode",
         enableStreamline ? UpscalingMode::DLSS : UpscalingMode::None);
-    settingsManager.registerSetting<UpscaleQualityMode>("upscalingQualityMode", UpscaleQualityMode::DLAA);
+    settingsManager.registerSetting<UpscaleQualityMode>("upscalingQualityMode", UpscaleQualityMode::Quality);
     settingsManager.registerSetting<bool>("enableDilatedMotionVectors", true);
     settingsManager.registerSetting<bool>("enableVisibilityRendering", m_visibilityRendering);
     settingsManager.registerSetting<bool>("enableStreamline", enableStreamline);

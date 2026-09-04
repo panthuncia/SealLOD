@@ -39,6 +39,13 @@ public:
         return resources;
     }
 
+    std::shared_ptr<const org::ResolverDeclarationState> CaptureDeclarationState() const override {
+        auto state = std::make_shared<org::ResolverDeclarationState>();
+        state->resources = std::make_shared<const org::ResolverResourceList>(Resolve());
+        state->waits = std::make_shared<const std::vector<org::ExternalTimelinePoint>>();
+        return state;
+    }
+
 private:
     std::function<void(std::vector<std::shared_ptr<Resource>>&)> m_enumerator;
 };
