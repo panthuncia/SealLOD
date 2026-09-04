@@ -1746,7 +1746,15 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtHeightScale = rvtSample.heightScale;
         inputs.terrainRvtLocal = rvtSample.local;
         inputs.terrainRvtTerrainClipCount = rvtSample.terrainClipCount;
-        inputs.geometricHeightDebug = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(terrainSetIndex, rvtSamplePositionWS, dpdxWS, dpdyWS));
+        if (perFrameBuffer.outputType == OUTPUT_TERRAIN_GEOMETRIC_HEIGHT)
+        {
+            inputs.geometricHeightDebug = saturate(
+                TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(
+                    terrainSetIndex,
+                    rvtSamplePositionWS,
+                    dpdxWS,
+                    dpdyWS));
+        }
         inputs.parallaxApplied = rvtParallaxApplied ? 1u : inputs.parallaxApplied;
         return;
     }

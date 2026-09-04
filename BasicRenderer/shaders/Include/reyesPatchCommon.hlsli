@@ -485,7 +485,7 @@ float3 ReyesMakePatchGridBarycentrics(uint col, uint row, uint tessSegments)
 
 float3 ReyesComposeSourceBarycentricsPoint(float3 patchBary, float3 domain0, float3 domain1, float3 domain2)
 {
-    precise float3 sourceBarycentrics =
+    float3 sourceBarycentrics =
         domain0 * patchBary.x +
         domain1 * patchBary.y +
         domain2 * patchBary.z;
@@ -494,7 +494,7 @@ float3 ReyesComposeSourceBarycentricsPoint(float3 patchBary, float3 domain0, flo
 
 float3 ReyesInterpolateFloat3Precise(float3 value0, float3 value1, float3 value2, float3 barycentrics)
 {
-    precise float3 result =
+    float3 result =
         value0 * barycentrics.x +
         value1 * barycentrics.y +
         value2 * barycentrics.z;
@@ -503,7 +503,7 @@ float3 ReyesInterpolateFloat3Precise(float3 value0, float3 value1, float3 value2
 
 float2 ReyesInterpolateFloat2Precise(float2 value0, float2 value1, float2 value2, float3 barycentrics)
 {
-    precise float2 result =
+    float2 result =
         value0 * barycentrics.x +
         value1 * barycentrics.y +
         value2 * barycentrics.z;
@@ -1442,21 +1442,43 @@ void ReyesEvaluateDisplacedPatchTriangle(
             const float3 patchPosition0WS = mul(float4(patchPosition0, 1.0f), objectModelMatrix).xyz;
             const float3 patchPosition1WS = mul(float4(patchPosition1, 1.0f), objectModelMatrix).xyz;
             const float3 patchPosition2WS = mul(float4(patchPosition2, 1.0f), objectModelMatrix).xyz;
-            float2 dUVdx = 0.0f.xx;
-            float2 dUVdy = 0.0f.xx;
-            const bool useUvDerivatives = ReyesEstimateUvDerivativesFromPatch(
-                camera,
-                patchPosition0WS,
-                patchPosition1WS,
-                patchPosition2WS,
-                patchUv0,
-                patchUv1,
-                patchUv2,
-                dUVdx,
-                dUVdy);
-            patchPosition0 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition0, patchPosition0WS, patchNormal0, patchUv0, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
-            patchPosition1 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition1, patchPosition1WS, patchNormal1, patchUv1, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
-            patchPosition2 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition2, patchPosition2WS, patchNormal2, patchUv2, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+            if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+            {
+                Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+                const float displacementScale = ReyesGeometricDisplacementGlobalScale(materialInfo);
+                const float displacementRange = materialInfo.geometricDisplacementMax - materialInfo.geometricDisplacementMin;
+                const float displacement0 = (materialInfo.geometricDisplacementMin + displacementRange *
+                    saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv0))) * displacementScale;
+                const float displacement1 = (materialInfo.geometricDisplacementMin + displacementRange *
+                    saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv1))) * displacementScale;
+                const float displacement2 = (materialInfo.geometricDisplacementMin + displacementRange *
+                    saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv2))) * displacementScale;
+                patchPosition0 += patchNormal0 * displacement0 *
+                    CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition0WS);
+                patchPosition1 += patchNormal1 * displacement1 *
+                    CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition1WS);
+                patchPosition2 += patchNormal2 * displacement2 *
+                    CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition2WS);
+            }
+            else
+            {
+                float2 dUVdx = 0.0f.xx;
+                float2 dUVdy = 0.0f.xx;
+                const bool useUvDerivatives = ReyesEstimateUvDerivativesFromPatch(
+                    camera,
+                    patchPosition0WS,
+                    patchPosition1WS,
+                    patchPosition2WS,
+                    patchUv0,
+                    patchUv1,
+                    patchUv2,
+                    dUVdx,
+                    dUVdy);
+                patchPosition0 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition0, patchPosition0WS, patchNormal0, patchUv0, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+                patchPosition1 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition1, patchPosition1WS, patchNormal1, patchUv1, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+                patchPosition2 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition2, patchPosition2WS, patchNormal2, patchUv2, camera, patchDepth, useUvDerivatives, dUVdx, dUVdy, reyesFadeStartDistance, reyesFadeEndDistance);
+            }
         }
     }
 }

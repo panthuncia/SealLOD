@@ -871,24 +871,7 @@ float SampleMaterialTexture2DGradNoFeedback(
 
 float ObjectReyesSampleAtlasHeightSmooth(Texture2D<float4> tex, SamplerState samp, float2 uv)
 {
-    uint width;
-    uint height;
-	uint mipCount;
-	tex.GetDimensions(0u, width, height, mipCount);
-    const float2 texel = float2(1.0f, 1.0f) / max(float2((float)width, (float)height), float2(1.0f, 1.0f));
-    uv = saturate(uv);
-
-    float sum = 0.0f;
-    sum += tex.SampleLevel(samp, uv, 0.0f).r * 4.0f;
-    sum += tex.SampleLevel(samp, saturate(uv + float2(texel.x, 0.0f)), 0.0f).r * 2.0f;
-    sum += tex.SampleLevel(samp, saturate(uv - float2(texel.x, 0.0f)), 0.0f).r * 2.0f;
-    sum += tex.SampleLevel(samp, saturate(uv + float2(0.0f, texel.y)), 0.0f).r * 2.0f;
-    sum += tex.SampleLevel(samp, saturate(uv - float2(0.0f, texel.y)), 0.0f).r * 2.0f;
-    sum += tex.SampleLevel(samp, saturate(uv + texel), 0.0f).r;
-    sum += tex.SampleLevel(samp, saturate(uv - texel), 0.0f).r;
-    sum += tex.SampleLevel(samp, saturate(uv + float2(texel.x, -texel.y)), 0.0f).r;
-    sum += tex.SampleLevel(samp, saturate(uv + float2(-texel.x, texel.y)), 0.0f).r;
-    return sum * (1.0f / 16.0f);
+    return tex.SampleLevel(samp, saturate(uv), 0.0f).r;
 }
 
 float ObjectSurfaceHash21(float2 p)
@@ -3096,16 +3079,21 @@ void SampleMaterialFromUvCache(
         ret);
 #endif
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
-    ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
-        uvCache,
-        uvBindings,
-        materialInfo,
-        materialFlags,
-        hasParallaxResolvedUv,
-        parallaxUv,
-        parallaxDUdx,
-        parallaxDUdy,
-        ret);
+    ConstantBuffer<PerFrameBuffer> debugPerFrameBuffer =
+        ResourceDescriptorHeap[0];
+    if (debugPerFrameBuffer.outputType == OUTPUT_TERRAIN_GEOMETRIC_HEIGHT)
+    {
+        ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
+            uvCache,
+            uvBindings,
+            materialInfo,
+            materialFlags,
+            hasParallaxResolvedUv,
+            parallaxUv,
+            parallaxDUdx,
+            parallaxDUdy,
+            ret);
+    }
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
@@ -3133,16 +3121,37 @@ void SampleMaterialEvalFromUvCache(
 #if defined(PSO_PARALLAX)
     if (uvBindings.hasHeightSource && uvBindings.hasTbnSource)
     {
-        const float3x3 parallaxTBN = BuildMaterialTBN(uvCache, uvBindings, normalWSBase, dpdx, dpdy);
-        const MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
         ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
-        StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-        Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
-
-        float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS.xyz);
-
         if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
         {
+            StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+            const float3 cameraDelta =
+                cameras[perFrameBuffer.mainCameraIndex].positionWorldSpace.xyz -
+                posWS;
+            const float fadeStart = max(perFrameBuffer.heightFadeStartDistance, 0.0f);
+            const float fadeEnd = max(perFrameBuffer.heightFadeEndDistance, 0.0f);
+            const float distanceSquared = dot(cameraDelta, cameraDelta);
+            const bool usesDistanceFade = fadeEnd > fadeStart;
+            const bool insideParallaxRange =
+                !usesDistanceFade || distanceSquared < fadeEnd * fadeEnd;
+            if (insideParallaxRange)
+            {
+            const float viewDistance = sqrt(max(distanceSquared, 1.0e-10f));
+            const float parallaxFade = usesDistanceFade
+                ? 1.0f - smoothstep(fadeStart, fadeEnd, viewDistance)
+                : 1.0f;
+            const float3 viewDir = cameraDelta / viewDistance;
+            const float3x3 parallaxTBN = BuildMaterialTBN(
+                uvCache, uvBindings, normalWSBase, dpdx, dpdy);
+            const MaterialUvSample heightUv = GetBoundUvSample(
+                uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
+            const float parallaxHeightScale =
+                materialInfo.heightMapScale *
+                perFrameBuffer.objectParallaxHeightScale *
+                parallaxFade;
+            const uint parallaxStepCount = max(
+                4u,
+                (uint)ceil(16.0f * parallaxFade));
             float3 uvh;
             if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
             {
@@ -3155,8 +3164,8 @@ void SampleMaterialEvalFromUvCache(
                     parallaxTBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
-                    16u,
+                    parallaxHeightScale,
+                    parallaxStepCount,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
             }
@@ -3170,8 +3179,8 @@ void SampleMaterialEvalFromUvCache(
                     parallaxTBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
-                    16u,
+                    parallaxHeightScale,
+                    parallaxStepCount,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
             }
@@ -3181,6 +3190,7 @@ void SampleMaterialEvalFromUvCache(
             parallaxDUdy = heightUv.dUVdy;
             hasParallaxResolvedUv = true;
             ret.parallaxApplied = 1u;
+            }
         }
     }
 #endif
