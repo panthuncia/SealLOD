@@ -346,6 +346,10 @@ public:
 		std::uint64_t retireFrame = 0;
 	};
 
+	struct StaticObjectRemovalResult {
+		std::uint64_t mutationCoverageGeneration = 0;
+	};
+
 	struct StaticObjectRemovalPayload {
 		enum class BufferKind : std::uint8_t {
 			PerObject,
@@ -525,10 +529,10 @@ public:
 		const std::vector<const Components::ObjectDrawInfo*>& drawInfos,
 		const RemoveObjectsBulkOptions& options);
 	void RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo *> &drawInfos);
-	void RemoveStaticObjectsBulk(
+	StaticObjectRemovalResult RemoveStaticObjectsBulk(
 		std::span<const StaticObjectRemovalPayload> payloads,
 		const RemoveObjectsBulkOptions& options);
-	void RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads);
+	StaticObjectRemovalResult RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads);
 	StaticVisibilityUpdateResult SetStaticObjectsVisibleBulk(
 		std::span<StaticObjectResidencyHandle*> handles,
 		bool visible);
@@ -536,9 +540,6 @@ public:
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
 	void PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames);
 	std::uint64_t MakeDeferredRetireFrame() const;
-	// maxResults == 0 is work-conserving: admit and publish every item that is
-	// currently available. A nonzero value remains for explicit diagnostic use.
-	std::vector<ActiveDrawSetCompactionPublishResult> PublishActiveDrawSetCompactionResults(std::size_t maxResults = 0);
 	std::vector<ActiveDrawSetDebugStats> SnapshotActiveDrawSetDebugStats() const;
 
 	org::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
@@ -552,12 +553,8 @@ public:
 		return m_perObjectBuffers;
 	}
 
-	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>>& GetDrawRecordVisibilityGenerationBuffer() {
-		return m_drawRecordVisibilityGenerationSidecar;
-	}
-
 	std::uint64_t GetResidentInstanceDrawRecordCount() const {
-		// The visibility-generation sidecar has exactly one logical row per allocated
+		// The graph-owned visibility-generation table has exactly one logical row per allocated
 		// draw-record index. Use that logical extent for immutable active-list
 		// validation; backing capacity can temporarily lag while an asynchronous grow
 		// is awaiting publication.
@@ -571,8 +568,6 @@ public:
 	std::span<const std::uint32_t> GetDrawRecordVisibilityGenerations() const {
 		return m_drawRecordVisibilityGenerations;
 	}
-	std::shared_ptr<org::GloballyIndexedResource> GetPublishedDrawRecordVisibilityGenerationBuffer(
-		const std::shared_ptr<const br::render::PublishedRendererState>& published) const;
 	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>>& GetSkinnedAssemblyPlacements() { return m_skinnedAssemblyPlacements; }
 	std::shared_ptr<SortedUnsignedIntBuffer>& GetActiveSkinnedAssemblyPlacements() { return m_activeSkinnedAssemblyPlacements; }
 	std::span<const SkinnedAssemblyPlacementGPU> GetSkinnedAssemblyPlacementCPU() const { return m_skinnedAssemblyPlacementCPU; }
@@ -679,6 +674,9 @@ private:
 	void StartActiveDrawSetCompactionWorker();
 	void StopActiveDrawSetCompactionWorker();
 	void RunActiveDrawSetCompaction(ActiveDrawSetCompactionJob job, const br::TaskContext& context);
+	void ScheduleActiveDrawSetCompactionDrain();
+	std::vector<ActiveDrawSetCompactionPublishResult> PublishActiveDrawSetCompactionResults(
+		std::size_t maxResults = 0);
 	void PumpActiveDrawSetCompactionRequests(std::size_t maxRequests);
 	void MaybeQueueActiveDrawSetCompaction(
 		const DrawWorkloadKey& workloadKey,
@@ -688,10 +686,6 @@ private:
 	std::shared_ptr<DynamicBuffer> m_perObjectBuffers; // Per object constant buffer
 	std::shared_ptr<DynamicBuffer> m_perInstanceTransformBuffers; // Per instance transform/object data
 	std::shared_ptr<DynamicBuffer> m_instanceDrawRecordBuffers; // Compact draw records consumed by GPU culling
-	// Absolute-index sidecar for append-only active draw entries.
-	// This is deliberately not a DynamicBuffer allocation pool: draw-record index N
-	// must always read generation[N], and backing growth replays the CPU mirror.
-	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> m_drawRecordVisibilityGenerationSidecar;
 	std::shared_ptr<DynamicBuffer> m_masterIndirectCommandsBuffer; // Indirect draw command buffer
 	std::shared_ptr<DynamicBuffer> m_normalMatrixBuffer; // Normal matrices for each object
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
@@ -755,6 +749,7 @@ private:
 	std::unordered_set<DrawWorkloadKey, DrawWorkloadKey::Hasher> m_activeDrawSetCompactionQueued;
 	TaskScope m_activeDrawSetCompactionScope;
 	std::atomic_bool m_activeDrawSetCompactionStop{ false };
+	std::atomic_bool m_activeDrawSetCompactionDrainScheduled{ false };
 	std::mutex m_objectUpdateMutex; // Mutex for thread safety
 	std::mutex m_normalMatrixUpdateMutex; // Mutex for thread safety
 

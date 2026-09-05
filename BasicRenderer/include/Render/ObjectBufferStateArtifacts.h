@@ -26,11 +26,13 @@ struct ObjectBufferDependencyDTO {
 
 struct ObjectBufferStateBuildInput {
     std::vector<ObjectBufferDependencyDTO> buffers;
+    std::uint64_t coveredMutationGeneration = 0;
 };
 
 struct PublishedObjectBufferState {
     std::vector<ObjectBufferDependencyDTO> buffers;
     std::vector<std::shared_ptr<const PublishedGpuBufferVersion>> versions;
+    std::uint64_t coveredMutationGeneration = 0;
 };
 
 void RegisterObjectBufferStateProducer(AsyncStateGraph& graph);

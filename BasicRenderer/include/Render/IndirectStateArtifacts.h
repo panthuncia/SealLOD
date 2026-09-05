@@ -46,7 +46,6 @@ struct IndirectWorkloadInputDTO {
 };
 
 struct IndirectStateBuildInput {
-    bool materializeResources = false;
     std::uint32_t incrementSize = 1000;
     std::vector<std::uint64_t> viewIDs;
     std::vector<IndirectWorkloadInputDTO> workloads;
@@ -66,7 +65,7 @@ struct PublishedIndirectWorkload {
 };
 
 struct PublishedIndirectState {
-    // Exact visibility-generation sidecar selected with the active-list
+    // Exact graph-owned visibility-generation buffer selected with the active-list
     // closure. Culling must not fetch this from an independently advancing
     // DrawRecords catalog slot or generations can be compared across cuts.
     std::shared_ptr<org::GloballyIndexedResource> visibilityGenerations;

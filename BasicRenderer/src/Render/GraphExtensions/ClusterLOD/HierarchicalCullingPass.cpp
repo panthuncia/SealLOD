@@ -812,6 +812,10 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
                 : nullptr;
             const auto workloads = published ? published->Find(view, m_renderPhase, m_clodOnlyWorkloads)
                                              : std::vector<const br::render::PublishedIndirectWorkload*>{};
+			if (!workloads.empty() && !published->visibilityGenerations) {
+				spdlog::error("HierarchicalCullingPass: skipping indirect snapshot without its exact visibility-generation resource");
+				return;
+			}
 			for (const auto* wl : workloads) {
 				const auto activeDrawSetIndices = wl ? wl->activeDrawList : nullptr;
 				if (!activeDrawSetIndices) {
@@ -830,13 +834,8 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
 				ObjectCullRecord record{};
 				record.viewDataIndex = cameraBufferIndex;
 				record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
-				auto visibilityGenerations = published->visibilityGenerations;
-				if (!visibilityGenerations) {
-					visibilityGenerations = context.objectManager
-						->GetDrawRecordVisibilityGenerationBuffer();
-				}
 				record.drawRecordVisibilityGenerationSRVIndex =
-					visibilityGenerations->GetSRVInfo(0).slot.index;
+					published->visibilityGenerations->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;
                 record.dispatchGridX = static_cast<uint>((count + 63) / 64);
                 record.dispatchGridY = 1;

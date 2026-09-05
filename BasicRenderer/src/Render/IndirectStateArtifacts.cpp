@@ -61,35 +61,33 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
 		root->fragment.dependencyClosure.push_back(dependency);
 	}
 
-    if (input->materializeResources) {
-        const auto drawRecords = std::ranges::find_if(context.dependencies,
-            [](const ArtifactSnapshot& dependency) {
-                return dependency.key.kind == ArtifactKind::DrawRecordPage;
-            });
-        const auto drawRoot = drawRecords != context.dependencies.end()
-            ? drawRecords->payload.Get<RendererStateFragmentArtifact>() : nullptr;
-        if (!drawRoot) {
-            return ArtifactBuildResult::Failure(
-                "indirect workload exact draw-record dependency missing");
-        }
-        state->drawRecordsRoot = drawRecords->Version();
-        const auto visibility = std::ranges::find_if(drawRoot->catalogEntries,
-            [](const auto& entry) {
-                return entry.first.owner == PublishedFragmentKind::DrawRecords &&
-                    entry.first.usage == PublishedResourceUsage::ShaderResource &&
-                    entry.first.variant == kObjectVisibilityGenerationVariant;
-            });
-        if (visibility == drawRoot->catalogEntries.end() || !visibility->second ||
-            visibility->second->empty()) {
-            return ArtifactBuildResult::Failure(
-                "indirect workload visibility-generation dependency missing");
-        }
-        state->visibilityGenerations = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
-            visibility->second->front());
-        if (!state->visibilityGenerations) {
-            return ArtifactBuildResult::Failure(
-                "indirect workload visibility-generation dependency type mismatch");
-        }
+    const auto drawRecords = std::ranges::find_if(context.dependencies,
+        [](const ArtifactSnapshot& dependency) {
+            return dependency.key.kind == ArtifactKind::DrawRecordPage;
+        });
+    const auto drawRoot = drawRecords != context.dependencies.end()
+        ? drawRecords->payload.Get<RendererStateFragmentArtifact>() : nullptr;
+    if (!drawRoot) {
+        return ArtifactBuildResult::Failure(
+            "indirect workload exact draw-record dependency missing");
+    }
+    state->drawRecordsRoot = drawRecords->Version();
+    const auto visibility = std::ranges::find_if(drawRoot->catalogEntries,
+        [](const auto& entry) {
+            return entry.first.owner == PublishedFragmentKind::DrawRecords &&
+                entry.first.usage == PublishedResourceUsage::ShaderResource &&
+                entry.first.variant == kObjectVisibilityGenerationVariant;
+        });
+    if (visibility == drawRoot->catalogEntries.end() || !visibility->second ||
+        visibility->second->empty()) {
+        return ArtifactBuildResult::Failure(
+            "indirect workload visibility-generation dependency missing");
+    }
+    state->visibilityGenerations = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
+        visibility->second->front());
+    if (!state->visibilityGenerations) {
+        return ArtifactBuildResult::Failure(
+            "indirect workload visibility-generation dependency type mismatch");
     }
 
     for (const auto& workload : input->workloads) {
@@ -101,46 +99,41 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
 
         const auto capacity = (std::max)(workload.minimumCapacity,
             safeCount == 0u ? 0u : RoundUp(safeCount, input->incrementSize));
-        std::shared_ptr<org::GloballyIndexedResource> activeBuffer;
-        if (input->materializeResources) {
-            const auto dependency = std::ranges::find_if(context.dependencies, [&](const auto& candidate) {
-                return candidate.key == workload.activeListArtifactKey;
-            });
-            if (dependency == context.dependencies.end()) {
-                return ArtifactBuildResult::Failure("indirect workload active-list dependency missing");
-            }
-            const auto dependencyRoot = dependency->payload.Get<RendererStateFragmentArtifact>();
-            const auto version = dependencyRoot
-                ? dependencyRoot->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
-            if (!version || !version->resource || version->elementStride != sizeof(ActiveDrawEntryDTO)) {
-                return ArtifactBuildResult::Failure("indirect workload active-list dependency type/ABI mismatch");
-            }
-            activeBuffer = version->resource;
-            state->activeListVersions.push_back({ workload.activeListArtifactKey.primaryID, version });
+        const auto dependency = std::ranges::find_if(context.dependencies, [&](const auto& candidate) {
+            return candidate.key == workload.activeListArtifactKey;
+        });
+        if (dependency == context.dependencies.end()) {
+            return ArtifactBuildResult::Failure("indirect workload active-list dependency missing");
         }
+        const auto dependencyRoot = dependency->payload.Get<RendererStateFragmentArtifact>();
+        const auto version = dependencyRoot
+            ? dependencyRoot->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
+        if (!version || !version->resource || version->elementStride != sizeof(ActiveDrawEntryDTO)) {
+            return ArtifactBuildResult::Failure("indirect workload active-list dependency type/ABI mismatch");
+        }
+        const auto activeBuffer = version->resource;
+        state->activeListVersions.push_back({ workload.activeListArtifactKey.primaryID, version });
         for (const auto viewID : input->viewIDs) {
             std::shared_ptr<org::GloballyIndexedResource> dynamicArgs;
-            if (input->materializeResources) {
-                const auto argument = std::ranges::find_if(workload.argumentArtifacts,
-                    [viewID](const auto& candidate) { return candidate.viewID == viewID; });
-                // Shadow/reflection/probe views participate in culling, but do
-                // not execute ForwardRenderPass' indirect command buffers.
-                // Their workload rows intentionally carry no argument artifact.
-                if (argument != workload.argumentArtifacts.end()) {
-                    const auto dependency = std::ranges::find_if(context.dependencies, [&](const auto& candidate) {
-                        return candidate.key == argument->key;
-                    });
-                    const auto dependencyRoot = dependency != context.dependencies.end()
-                        ? dependency->payload.Get<RendererStateFragmentArtifact>() : nullptr;
-                    const auto version = dependencyRoot
-                        ? dependencyRoot->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
-                    if (!version || !version->resource ||
-                        version->elementStride != sizeof(DispatchMeshIndirectCommand) ||
-                        version->capacity < capacity) {
-                        return ArtifactBuildResult::Failure("indirect argument dependency type/capacity mismatch");
-                    }
-                    dynamicArgs = version->resource;
+            const auto argument = std::ranges::find_if(workload.argumentArtifacts,
+                [viewID](const auto& candidate) { return candidate.viewID == viewID; });
+            // Shadow/reflection/probe views participate in culling, but do
+            // not execute ForwardRenderPass' indirect command buffers.
+            // Their workload rows intentionally carry no argument artifact.
+            if (argument != workload.argumentArtifacts.end()) {
+                const auto argumentDependency = std::ranges::find_if(context.dependencies, [&](const auto& candidate) {
+                    return candidate.key == argument->key;
+                });
+                const auto argumentRoot = argumentDependency != context.dependencies.end()
+                    ? argumentDependency->payload.Get<RendererStateFragmentArtifact>() : nullptr;
+                const auto argumentVersion = argumentRoot
+                    ? argumentRoot->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
+                if (!argumentVersion || !argumentVersion->resource ||
+                    argumentVersion->elementStride != sizeof(DispatchMeshIndirectCommand) ||
+                    argumentVersion->capacity < capacity) {
+                    return ArtifactBuildResult::Failure("indirect argument dependency type/capacity mismatch");
                 }
+                dynamicArgs = argumentVersion->resource;
             }
             state->workloads.push_back(PublishedIndirectWorkload{
                 viewID, workload.key, dynamicArgs, activeBuffer, safeCount, capacity,

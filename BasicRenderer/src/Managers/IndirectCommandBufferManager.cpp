@@ -399,7 +399,6 @@ void IndirectCommandBufferManager::DrainDesiredBuild(const br::TaskContext& cont
 bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
     const auto started = std::chrono::steady_clock::now();
     auto input = std::make_shared<br::render::IndirectStateBuildInput>();
-    input->materializeResources = true;
     input->incrementSize = snapshot.incrementSize;
     input->viewIDs.assign(snapshot.viewIDs.begin(), snapshot.viewIDs.end());
     std::ranges::sort(input->viewIDs);

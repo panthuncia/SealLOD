@@ -24,6 +24,7 @@ ArtifactBuildResult BuildObjectBufferState(const ArtifactBuildContext& context) 
     root->kind = PublishedFragmentKind::DrawRecords;
     root->fragment.revision = context.revision;
     state->buffers = input->buffers;
+    state->coveredMutationGeneration = input->coveredMutationGeneration;
 
     for (const auto& expected : input->buffers) {
         if (!variants.insert(expected.catalogVariant).second) {
