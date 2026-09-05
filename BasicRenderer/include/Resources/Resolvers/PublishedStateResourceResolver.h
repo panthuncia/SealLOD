@@ -3,6 +3,7 @@
 #include <memory>
 #include <atomic>
 #include <algorithm>
+#include <stdexcept>
 
 #include "Interfaces/IResourceResolver.h"
 #include "Render/PublishedRendererState.h"
@@ -21,7 +22,9 @@ public:
           m_leaseBinding(std::make_shared<LeaseBinding>()) {
         m_fallback->resource.store(std::move(fallback), std::memory_order_release);
         m_selection->publishedEnabled.store(publishedEnabled, std::memory_order_release);
-		m_dependencyIdentity = m_source ? m_source->ResolverDependencyIdentity(m_key) : nullptr;
+        // Exact resolvers have independently mutable fallback/selection policy.
+        // Clones share this state; unrelated policies cannot share capture keys.
+        m_dependencyIdentity = m_selection;
         CaptureLatestLease();
     }
     PublishedStateResourceResolver(std::shared_ptr<br::render::PublishedStateSource> source,
@@ -51,10 +54,19 @@ public:
     }
 
     std::shared_ptr<const org::ResolverDeclarationState> CaptureDeclarationState() const override {
+        CaptureLatestLease();
+        return CaptureDeclarationState(org::ResolverCaptureContext(BoundLease()));
+    }
+
+    std::shared_ptr<const org::ResolverDeclarationState> CaptureDeclarationState(
+        const org::ResolverCaptureContext& context) const override {
         org::ResolverDeclarationState result;
         if (!m_configured) return std::make_shared<const org::ResolverDeclarationState>();
-        CaptureLatestLease();
-        const auto lease = BoundLease();
+        if (!context.Is<br::render::PublishedManifestLease>())
+            throw std::invalid_argument("Published resolver requires a manifest capture lease");
+        const auto lease = context.Get<br::render::PublishedManifestLease>();
+        // A null lease represents bootstrap. It must never fall through to the
+        // process source: the caller selected this publication explicitly.
         const auto leaseSequence = lease ? lease->sequence : 0u;
         const bool publishedEnabled = !m_selection ||
             m_selection->publishedEnabled.load(std::memory_order_acquire);
@@ -63,12 +75,13 @@ public:
         const auto selectionGeneration = m_selection
             ? m_selection->generation.load(std::memory_order_acquire) : 0u;
         if (const auto cached = m_declarationCache->value.load(std::memory_order_acquire);
-            cached && cached->leaseSequence == leaseSequence &&
+            cached && cached->lease == lease && cached->leaseSequence == leaseSequence &&
             cached->fallbackGeneration == fallbackGeneration &&
             cached->selectionGeneration == selectionGeneration) {
             return cached->state;
         }
         result.dependencyIdentity = m_dependencyIdentity;
+        result.publicationLease = lease;
         result.tracked = true;
         std::uint64_t entryVersion = 0;
         std::vector<std::shared_ptr<org::Resource>> resources;
@@ -142,12 +155,14 @@ public:
         result.resources = std::make_shared<const org::ResolverResourceList>(std::move(resources));
         result.waits = std::make_shared<const std::vector<org::ExternalTimelinePoint>>(std::move(normalized));
         auto cached = std::make_shared<CachedDeclaration>();
+        cached->lease = lease;
         cached->leaseSequence = leaseSequence;
         cached->fallbackGeneration = fallbackGeneration;
         cached->selectionGeneration = selectionGeneration;
         cached->state = std::make_shared<const org::ResolverDeclarationState>(std::move(result));
+        const auto captured = cached->state;
         m_declarationCache->value.store(std::move(cached), std::memory_order_release);
-        return m_declarationCache->value.load(std::memory_order_acquire)->state;
+        return captured;
     }
 
     // Returns the immutable manifest lease used by this resolver. Consumers
@@ -201,6 +216,7 @@ private:
         std::atomic<std::uint64_t> sequence{ 0 };
     };
     struct CachedDeclaration {
+        std::shared_ptr<const br::render::PublishedManifestLease> lease;
         std::uint64_t leaseSequence = 0;
         std::uint64_t fallbackGeneration = 0;
         std::uint64_t selectionGeneration = 0;
@@ -215,7 +231,7 @@ private:
         auto lease = m_source->LoadLease();
         if (!lease) lease = m_source->AcquireLease(0u);
         const auto current = m_leaseBinding->lease.load(std::memory_order_acquire);
-        if (current && current->sequence >= lease->sequence) return;
+        if (!lease || (current && current->sequence >= lease->sequence)) return;
         m_leaseBinding->lease.store(lease, std::memory_order_release);
         m_leaseBinding->sequence.store(lease->sequence, std::memory_order_release);
     }

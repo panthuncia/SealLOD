@@ -29,9 +29,17 @@
 IndirectCommandBufferManager::IndirectCommandBufferManager() = default;
 
 IndirectCommandBufferManager::~IndirectCommandBufferManager() {
+    Shutdown();
+}
+
+void IndirectCommandBufferManager::Shutdown() {
+    BT_ZONE_SCOPE("IndirectCommandBufferManager::Shutdown");
     m_stopping.store(true, std::memory_order_release);
     if (m_observedObjectManager) m_observedObjectManager->SetActiveDrawSetMutationCallback({});
     if (m_buildScope.Valid()) m_buildScope.CancelAndWait();
+    m_observedObjectManager = nullptr;
+    m_rendererStateRequests = nullptr;
+    m_uploadService = nullptr;
 }
 
 void IndirectCommandBufferManager::RegisterWorkload(const DrawWorkloadKey& workloadKey) {

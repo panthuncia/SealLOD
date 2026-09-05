@@ -1415,10 +1415,8 @@ add_test(NAME CLodCoordinatorTests COMMAND CLodCoordinatorTests)
 add_test(NAME StatisticalSamplerTests COMMAND StatisticalSamplerTests)
 
 if(WIN32)
-    # BasicRenderer keeps its shared runtime payload in the common output root,
-    # while test executables live in a per-target configuration directory.
-    # Make tests runnable through CTest without requiring a developer shell to
-    # manually reproduce the renderer's deployed PATH.
+    # SARP tests use the deployed runtime, including optional SDK DLLs and
+    # relative runtime assets. Standalone BasicRenderer uses its output root.
     set(_basicrenderer_runtime_tests
         ShaderPreprocessTests
         SkeletonArtifactCacheTests
@@ -1430,6 +1428,12 @@ if(WIN32)
         AsyncStateGraphTests
         CLodCoordinatorTests
         StatisticalSamplerTests)
-    set_tests_properties(${_basicrenderer_runtime_tests} PROPERTIES
-        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_OUTPUT_ROOT}")
+    if(BASICRENDERER_TEST_RUNTIME_DIR)
+        set_tests_properties(${_basicrenderer_runtime_tests} PROPERTIES
+            WORKING_DIRECTORY "${BASICRENDERER_TEST_RUNTIME_DIR}"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_TEST_RUNTIME_DIR}")
+    else()
+        set_tests_properties(${_basicrenderer_runtime_tests} PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_OUTPUT_ROOT}")
+    endif()
 endif()

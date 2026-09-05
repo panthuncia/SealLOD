@@ -70,6 +70,9 @@ public:
     void PublishDesiredState(ObjectManager& objectManager, MaterialManager& materialManager);
     void SetRendererStateServices(br::render::RendererStateRequestService* requests,
         org::runtime::IUploadService* uploads);
+    // End preparation while borrowed request/upload services are still alive.
+    // Idempotent; must run before those services are destroyed.
+    void Shutdown();
 
     // Set growth granularity
     void SetIncrementSize(unsigned int incrementSize);

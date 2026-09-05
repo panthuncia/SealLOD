@@ -361,6 +361,9 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.collectPassStatistics = sm.getSettingGetter<bool>("collectPassStatistics")();
     orgSettings.collectPipelineStatistics = sm.getSettingGetter<bool>("collectPipelineStatistics")();
     orgSettings.useAsyncCompute = sm.getSettingGetter<bool>("useAsyncCompute")();
+    orgSettings.experimentalAsyncCompileShadow = sm.getSettingGetter<bool>("experimentalAsyncCompileShadow")();
+    orgSettings.experimentalCompileConcurrency = static_cast<uint8_t>(std::clamp(
+        sm.getSettingGetter<int>("experimentalCompileConcurrency")(), 1, 4));
     orgSettings.renderGraphCompileDumpEnabled = sm.getSettingGetter<bool>("renderGraphCompileDumpEnabled")();
     orgSettings.renderGraphVramDumpEnabled = sm.getSettingGetter<bool>("renderGraphVramDumpEnabled")();
     orgSettings.renderGraphBatchTraceEnabled = sm.getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
@@ -564,6 +567,10 @@ void Renderer::Initialize(
         "renderGraphBatchTraceEnabled",
         ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_BATCH_TRACE"));
     settingsManager.registerSetting<bool>("renderGraphLightweightCompileSummaryEnabled", false);
+    settingsManager.registerSetting<bool>("experimentalAsyncCompileShadow", false);
+    settingsManager.registerSetting<int>("experimentalCompileConcurrency", 2);
+    if (const auto* enabled = std::getenv("SARP_ASYNC_COMPILE_SHADOW"); enabled && std::string_view(enabled) == "1")
+        settingsManager.getSettingSetter<bool>("experimentalAsyncCompileShadow")(true);
     LoadPipeline(hwnd, x_res, y_res);
     DirectStorageManager::GetInstance().Initialize();
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after LoadPipeline");
@@ -3308,6 +3315,7 @@ void Renderer::Update(float elapsedSeconds) {
     });
 
     UpdateExecutionContext context{};
+    context.resolverCaptureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease);
     context.frameIndex = m_frameIndex;
     context.frameFenceValue = m_currentFrameFenceValue;
     context.deltaTime = elapsedSeconds;
@@ -5262,6 +5270,12 @@ void Renderer::Cleanup() {
 		m_pMaterialManager->ShutdownTextureStreaming();
 	}
 	spdlog::info("Cleaning up resources");
+    // Desired-state jobs borrow the request service. Its Stop flag cannot be
+    // read safely after destruction: join the producer before closing/freeing
+    // that service (ASAN caught SubmitLatest racing the old reset order).
+    if (m_pIndirectCommandBufferManager) {
+        m_pIndirectCommandBufferManager->Shutdown();
+    }
     // Close the renderer-state request boundary before any upload/descriptor
     // service it can target is destroyed. CancelAndWait also prevents a late
     // producer completion from publishing into manager teardown.

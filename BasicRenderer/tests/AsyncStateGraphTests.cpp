@@ -1487,6 +1487,36 @@ int main() {
 	Check(contentOnlyState->resourceSetIdentity == firstDeclarationState->resourceSetIdentity);
 	Check(contentOnlyState->contentRevision != firstDeclarationState->contentRevision);
 
+    // Two workers capturing different manifests through cloned resolvers must
+    // never return whichever manifest won the shared declaration-cache store.
+    const org::ResolverCaptureContext oldCapture(directCommit.lease);
+    const org::ResolverCaptureContext newCapture(contentOnlyCommit.lease);
+    auto resolverClone = directResolver.Clone();
+    std::atomic_bool captureMismatch{false};
+    std::jthread oldReader([&] {
+        for (int i = 0; i < 2000; ++i) {
+            const auto captured = directResolver.CaptureDeclarationState(oldCapture);
+            if (captured->contentRevision != firstDeclarationState->contentRevision ||
+                captured->publicationLease != directCommit.lease) captureMismatch = true;
+        }
+    });
+    std::jthread newReader([&] {
+        for (int i = 0; i < 2000; ++i) {
+            const auto captured = resolverClone->CaptureDeclarationState(newCapture);
+            if (captured->contentRevision != contentOnlyState->contentRevision ||
+                captured->publicationLease != contentOnlyCommit.lease) captureMismatch = true;
+        }
+    });
+    oldReader.join(); newReader.join();
+    Check(!captureMismatch);
+    Check(directResolver.CaptureDeclarationState(oldCapture)->dependencyIdentity ==
+        resolverClone->CaptureDeclarationState(newCapture)->dependencyIdentity);
+    PublishedStateResourceResolver independentPolicy(directResolvePublisher.ResourceSource(), directResolveKey, {}, false);
+    Check(independentPolicy.CaptureDeclarationState(newCapture)->dependencyIdentity !=
+        directResolver.CaptureDeclarationState(newCapture)->dependencyIdentity);
+    const org::ResolverCaptureContext bootstrapCapture(std::shared_ptr<const PublishedManifestLease>{});
+    Check(directResolver.CaptureDeclarationState(bootstrapCapture)->resources->empty());
+
     // Independent fragments submitted against the same source snapshot rebase
     // together. Only an explicitly named exact precondition may reject a patch.
     RendererStatePublisher patchPublisher(2);
