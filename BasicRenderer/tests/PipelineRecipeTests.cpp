@@ -48,7 +48,7 @@ std::shared_ptr<org::PixelBuffer> MakeHistoryResource()
 void TestDepthHistoryReservationOwnership()
 {
     auto resource = MakeHistoryResource();
-    auto views = std::make_shared<br::render::PublishedViewFamilyState>();
+    auto views = std::make_shared<br::render::PreparedViewFamilyState>();
     views->views.push_back({ .id = 17, .linearDepthMap = resource });
 
     auto service = std::make_unique<br::render::DepthHistoryPublicationService>();

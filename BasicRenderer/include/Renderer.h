@@ -315,7 +315,6 @@ private:
     std::optional<br::render::AsyncStateGraphTraceConfig> m_pendingAsyncStateGraphTrace;
     std::unique_ptr<br::render::RendererStatePublisher> m_rendererStatePublisher;
     std::unique_ptr<br::render::RendererStateRequestService> m_rendererStateRequests;
-    std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 2> m_viewTableFamilies;
     std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 5> m_lightTableFamilies;
     std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 4> m_poseTableFamilies;
     TaskScope m_rendererStateCommitScope;

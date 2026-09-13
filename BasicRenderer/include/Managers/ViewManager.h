@@ -10,6 +10,7 @@
 
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Render/ShadowViewService.h"
+#include "Render/ViewStateArtifacts.h"
 #include "Resources/Buffers/LazyDynamicStructuredBuffer.h"
 #include "Scene/Components.h"
 #include "ShaderBuffers.h"
@@ -147,6 +148,8 @@ public:
 
     // Update camera matrices/params
     void UpdateCamera(uint64_t viewID, const CameraInfo& cameraInfo);
+    br::render::PrimaryCameraFrameUpload CapturePrimaryCameraUpload(
+        std::uint64_t frameNumber) const;
 
     uint64_t CreateShadowView(const CameraInfo& cameraInfo,
         const ViewFlags& flags, const ViewCreationParams& params) override {
@@ -159,6 +162,8 @@ public:
     uint32_t ShadowViewCameraBufferIndex(uint64_t viewID) const override;
 
 	uint32_t GetCameraBufferSize() const { return static_cast<uint32_t>(m_cameraBuffer->Size()); }
+    std::shared_ptr<Resource> GetCameraBuffer() const { return m_cameraBuffer; }
+    std::shared_ptr<Resource> GetCullingCameraBuffer() const { return m_cullingCameraBuffer; }
     std::shared_ptr<const std::vector<std::byte>> CaptureCameraTableImage() const {
         return std::make_shared<const std::vector<std::byte>>(m_cameraBuffer->CaptureCpuShadowBytes());
     }
@@ -217,7 +222,11 @@ private:
 
     uint64_t m_resourceLayoutRevision = 1u;
     std::atomic_uint64_t m_publicationRevision{1};
+    std::atomic_uint64_t m_primaryCameraRevision{1};
+    std::uint64_t m_primaryViewID = 0;
+    std::shared_ptr<BufferView> m_primaryCameraBufferView;
+    std::shared_ptr<BufferView> m_primaryCullingCameraBufferView;
 
-    std::mutex m_cameraUpdateMutex;
+    mutable std::mutex m_cameraUpdateMutex;
     ViewEvents m_events;
 };

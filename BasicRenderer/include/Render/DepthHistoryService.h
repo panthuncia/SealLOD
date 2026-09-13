@@ -18,7 +18,7 @@ public:
     virtual ~IDepthHistoryService() = default;
     virtual std::shared_ptr<const org::PreparedLifecycleEffect>
         ReserveDepthHistoryPublication(
-            std::shared_ptr<const PublishedViewFamilyState> views,
+            std::shared_ptr<const PreparedViewFamilyState> views,
             std::uint64_t producerFrameNumber) = 0;
 };
 
@@ -63,11 +63,11 @@ public:
 
     std::shared_ptr<const org::PreparedLifecycleEffect>
         ReserveDepthHistoryPublication(
-            std::shared_ptr<const PublishedViewFamilyState> views,
+            std::shared_ptr<const PreparedViewFamilyState> views,
             std::uint64_t producerFrameNumber) override {
         struct Reservation {
             std::shared_ptr<State> state;
-            std::shared_ptr<const PublishedViewFamilyState> views;
+            std::shared_ptr<const PreparedViewFamilyState> views;
             std::uint64_t producerFrameNumber = 0;
             std::uint64_t generation = 0;
             std::shared_ptr<DepthHistoryDependency> dependency;

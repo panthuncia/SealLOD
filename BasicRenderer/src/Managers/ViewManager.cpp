@@ -9,7 +9,6 @@
 #include "Resources/ResourceGroup.h"
 #include "Resources/PixelBuffer.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
-#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "../../generated/BuiltinResources.h"
 #include "Resources/DynamicResource.h"
@@ -87,7 +86,9 @@ namespace
 ViewManager::ViewManager() {
     auto& resourceManager = ::ResourceManager::GetInstance();
     m_cameraBuffer = LazyDynamicStructuredBuffer<CameraInfo>::CreateShared(1, "cameraBuffer<ViewManager>");
-	m_cullingCameraBuffer = LazyDynamicStructuredBuffer<CullingCameraInfo>::CreateShared(1, "cullingCameraBuffer<ViewManager>");
+    m_cullingCameraBuffer = LazyDynamicStructuredBuffer<CullingCameraInfo>::CreateShared(1, "cullingCameraBuffer<ViewManager>");
+    m_primaryCameraBufferView = m_cameraBuffer->Add();
+    m_primaryCullingCameraBufferView = m_cullingCameraBuffer->Add();
     org::memory::SetResourceUsageHint(*m_cameraBuffer, "Camera and view buffers");
 	org::memory::SetResourceUsageHint(*m_cullingCameraBuffer, "Camera and view buffers");
     m_linearDepthGroup = std::make_shared<ResourceGroup>("LinearDepthMaps");
@@ -95,17 +96,6 @@ ViewManager::ViewManager() {
     // Register provided resources
     m_resources[Builtin::CameraBuffer] = m_cameraBuffer;
 	m_resources[Builtin::CullingCameraBuffer] = m_cullingCameraBuffer;
-    const auto publishedSource = br::render::PublishedStateSource::ProcessSource();
-    m_resolvers[Builtin::CameraBuffer] = std::make_shared<PublishedStateResourceResolver>(
-        publishedSource, br::render::PublishedResourceKey{
-            br::render::PublishedFragmentKind::Views,
-            br::render::PublishedResourceUsage::ShaderResource, 0, 0,
-            br::render::ViewCameraTableVariant }, m_cameraBuffer);
-    m_resolvers[Builtin::CullingCameraBuffer] = std::make_shared<PublishedStateResourceResolver>(
-        publishedSource, br::render::PublishedResourceKey{
-            br::render::PublishedFragmentKind::Views,
-            br::render::PublishedResourceUsage::ShaderResource, 0, 0,
-            br::render::ViewCullingCameraTableVariant }, m_cullingCameraBuffer);
     m_resolvers[Builtin::LinearDepthMaps] =
         std::make_shared<ResourceGroupResolver>(m_linearDepthGroup);
     // History is the last submitted contents of the persistent linear-depth
@@ -131,14 +121,22 @@ uint64_t ViewManager::CreateView(const CameraInfo& cameraInfo,
     v.cascadeIndex = params.cascadeIndex;
     v.parentEntityID = params.parentEntityID;
 
-    // Camera buffer view
-    v.gpu.cameraBufferView = m_cameraBuffer->Add();
+    // The primary camera owns the permanently reserved first table element.
+    if (flags.primaryCamera) {
+        if (m_primaryViewID != 0)
+            throw std::logic_error("ViewManager supports exactly one primary camera view");
+        m_primaryViewID = id;
+        v.gpu.cameraBufferView = m_primaryCameraBufferView;
+        v.gpu.cullingCameraBufferView = m_primaryCullingCameraBufferView;
+    } else {
+        v.gpu.cameraBufferView = m_cameraBuffer->Add();
+        v.gpu.cullingCameraBufferView = m_cullingCameraBuffer->Add();
+    }
     v.gpu.cameraBufferIndex = static_cast<uint32_t>(v.gpu.cameraBufferView->GetOffset() / sizeof(CameraInfo));
     m_cameraBuffer->UpdateView(v.gpu.cameraBufferView.get(), &cameraInfo);
 
     CullingCameraInfo cullCam = BuildCullingCameraInfo(cameraInfo);
 
-	v.gpu.cullingCameraBufferView = m_cullingCameraBuffer->Add();
 	m_cullingCameraBuffer->UpdateView(v.gpu.cullingCameraBufferView.get(), &cullCam);
 
     // Depth (optional)
@@ -160,8 +158,12 @@ void ViewManager::DestroyView(uint64_t viewID) {
     auto& v = it->second;
 
     // Camera buffer view
-    m_cameraBuffer->Remove(v.gpu.cameraBufferView.get());
-	m_cullingCameraBuffer->Remove(v.gpu.cullingCameraBufferView.get());
+    if (v.flags.primaryCamera) {
+        m_primaryViewID = 0;
+    } else {
+        m_cameraBuffer->Remove(v.gpu.cameraBufferView.get());
+	    m_cullingCameraBuffer->Remove(v.gpu.cullingCameraBufferView.get());
+    }
 
     if (v.gpu.linearDepthMap) {
         const uint64_t sourceID = v.gpu.linearDepthMap->GetGlobalResourceID();
@@ -285,10 +287,14 @@ void ViewManager::UpdateCamera(uint64_t viewID, const CameraInfo& cameraInfo) {
     std::lock_guard<std::mutex> lock(m_cameraUpdateMutex);
     const bool depthSliceChanged = v->cameraInfo.depthBufferArrayIndex != cameraInfo.depthBufferArrayIndex;
     v->cameraInfo = cameraInfo;
-    m_cameraBuffer->UpdateView(v->gpu.cameraBufferView.get(), &cameraInfo);
-	CullingCameraInfo cullInfo = BuildCullingCameraInfo(cameraInfo);
-	m_cullingCameraBuffer->UpdateView(v->gpu.cullingCameraBufferView.get(), &cullInfo);
-    m_publicationRevision.fetch_add(1, std::memory_order_release);
+    if (!v->flags.primaryCamera) {
+        m_cameraBuffer->UpdateView(v->gpu.cameraBufferView.get(), &cameraInfo);
+	    CullingCameraInfo cullInfo = BuildCullingCameraInfo(cameraInfo);
+	    m_cullingCameraBuffer->UpdateView(v->gpu.cullingCameraBufferView.get(), &cullInfo);
+        m_publicationRevision.fetch_add(1, std::memory_order_release);
+    } else {
+        m_primaryCameraRevision.fetch_add(1, std::memory_order_release);
+    }
     if (depthSliceChanged) {
         ++m_resourceLayoutRevision;
     }
@@ -308,6 +314,21 @@ const View* ViewManager::Get(uint64_t viewID) const {
     auto it = m_views.find(viewID);
     if (it == m_views.end()) return nullptr;
     return &it->second;
+}
+
+br::render::PrimaryCameraFrameUpload ViewManager::CapturePrimaryCameraUpload(
+    std::uint64_t frameNumber) const {
+    std::lock_guard<std::mutex> lock(m_cameraUpdateMutex);
+    const auto* view = Get(m_primaryViewID);
+    if (!view) return {};
+    return {
+        .camera = view->cameraInfo,
+        .cullingCamera = BuildCullingCameraInfo(view->cameraInfo),
+        .viewID = view->id,
+        .revision = m_primaryCameraRevision.load(std::memory_order_acquire),
+        .frameNumber = frameNumber,
+        .cameraBufferIndex = 0,
+    };
 }
 
 uint32_t ViewManager::ShadowViewCameraBufferIndex(uint64_t viewID) const {

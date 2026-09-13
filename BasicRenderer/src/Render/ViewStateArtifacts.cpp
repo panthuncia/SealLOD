@@ -18,18 +18,6 @@ ArtifactBuildResult BuildViewFamily(const ArtifactBuildContext& context) {
     state->resourceLayoutRevision = input->resourceLayoutRevision;
     state->views = input->views;
     state->retainedResources = input->retainedResources;
-    state->cameraTableImage = input->cameraTableImage;
-    state->cullingCameraTableImage = input->cullingCameraTableImage;
-    for (const auto& dependency : context.dependencies) {
-        const auto dependencyRoot = dependency.payload.Get<RendererStateFragmentArtifact>();
-        const auto version = dependencyRoot
-            ? dependencyRoot->fragment.payload.Get<PublishedGpuBufferVersion>() : nullptr;
-        if (!version || !version->resource) continue;
-        state->tableVersions.push_back(version);
-        root->fragment.resourceHolds.push_back(version);
-        root->catalogEntries.insert(root->catalogEntries.end(),
-            dependencyRoot->catalogEntries.begin(), dependencyRoot->catalogEntries.end());
-    }
 
     root->kind = PublishedFragmentKind::Views;
     root->fragment.revision = context.revision;

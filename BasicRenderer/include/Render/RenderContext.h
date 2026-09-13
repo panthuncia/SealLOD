@@ -61,7 +61,7 @@ struct RenderContext {
 	MaterialTextureStreamingStats materialTextureStreamingStats{};
 	br::render::EnvironmentWorkServices environmentWork;
 	std::shared_ptr<br::render::CLodRayTracingSystem> clodRayTracingSystem;
-	std::shared_ptr<const br::render::PublishedViewFamilyState> viewFamily;
+	std::shared_ptr<const br::render::PreparedViewFamilyState> viewFamily;
 	std::shared_ptr<const br::render::PublishedLightTableState> lightTables;
 	std::shared_ptr<const br::render::PublishedPoseState> poses;
 	// Deep-copied at frame acceptance. Preparation and recording never consult
@@ -127,7 +127,7 @@ struct UpdateContext {
 	// Ordered ray-tracing build/trace service. The typed reflections pass captures
 	// all resource and program ownership before invoking it on a recording worker.
 	std::shared_ptr<br::render::CLodRayTracingSystem> clodRayTracingSystem;
-	std::shared_ptr<const br::render::PublishedViewFamilyState> viewFamily;
+	std::shared_ptr<const br::render::PreparedViewFamilyState> viewFamily;
 	std::shared_ptr<const br::render::PublishedLightTableState> lightTables;
 	std::shared_ptr<const br::render::PublishedPoseState> poses;
 	// Immutable logical-frame material-bucket snapshot. Pass Update/Prepare

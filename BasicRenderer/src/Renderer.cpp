@@ -61,6 +61,7 @@
 #include "RenderPasses/PostProcessing/DebugResolvePass.h"
 #include "RenderPasses/MenuRenderPass.h"
 #include "RenderPasses/PresentPass.h"
+#include "RenderPasses/PrimaryCameraUploadPass.h"
 #include "Resources/TextureDescription.h"
 #include "Menu/Menu.h"
 #include "Managers/Singletons/DeletionManager.h"
@@ -930,10 +931,6 @@ void Renderer::Initialize(
                 unorderedAccess, false, owner,
                 br::render::PublishedResourceUsage::ShaderResource, variant, false });
     };
-    m_viewTableFamilies[0] = makeFrameTableFamily(100, "ViewCameraTable", sizeof(CameraInfo),
-        br::render::PublishedFragmentKind::Views, br::render::ViewCameraTableVariant);
-    m_viewTableFamilies[1] = makeFrameTableFamily(101, "ViewCullingCameraTable", sizeof(CullingCameraInfo),
-        br::render::PublishedFragmentKind::Views, br::render::ViewCullingCameraTableVariant);
     constexpr std::array<std::uint64_t, 5> lightVariants{
         br::render::LightInfoTableVariant, br::render::LightSpotViewTableVariant,
         br::render::LightPointViewTableVariant, br::render::LightDirectionalViewTableVariant,
@@ -3108,6 +3105,11 @@ void Renderer::Update(float elapsedSeconds) {
         elapsedSeconds = 0.0f;
     }
     BT_ZONE_SCOPE("Renderer::Update");
+    // Capture input before camera application clears the per-frame mouse delta.
+    // Used only by the opt-in camera telemetry stream below.
+    const auto cameraTelemetryMovement = movementState;
+    const float cameraTelemetryPitch = verticalAngle;
+    const float cameraTelemetryYaw = horizontalAngle;
     // The previous accepted owner remains retained by its queued graph work.
     // Clear the renderer-side alias so any early return applies backpressure
     // instead of rendering the preceding logical frame twice.
@@ -3309,6 +3311,24 @@ void Renderer::Update(float elapsedSeconds) {
                 m_context.publishedRendererState = commit.state;
                 m_context.publishedManifestLease = commit.lease;
                 }
+                if (commit.committed && commit.state) {
+                    // Versioned table families need the same publication
+                    // acknowledgement as object/material tables. Without it,
+                    // their bounded backing rings retain the original active
+                    // generation forever; after a few camera updates the next
+                    // view build suspends permanently on ring exhaustion.
+                    const auto acknowledgeTables = [](const auto& families, const auto& state) {
+                        if (!state) return;
+                        const auto count = (std::min)(families.size(), state->tableVersions.size());
+                        for (std::size_t i = 0; i < count; ++i) {
+                            if (families[i]) families[i]->Acknowledge(state->tableVersions[i]);
+                        }
+                    };
+                    acknowledgeTables(m_lightTableFamilies,
+                        commit.state->lights.payload.Get<br::render::PublishedLightTableState>());
+                    acknowledgeTables(m_poseTableFamilies,
+                        commit.state->poses.payload.Get<br::render::PublishedPoseState>());
+                }
                 if (m_rendererStateRequests) {
                     m_rendererStateRequests->RefreshPublication();
                 }
@@ -3466,6 +3486,7 @@ void Renderer::Update(float elapsedSeconds) {
     updateData.samplerDescriptorHeap = m_context.samplerDescriptorHeap;
     updateData.rtvHeap = rtvHeap->GetHandle();
     updateData.primaryCamera = camera.get<Components::Camera>();
+    const auto desiredPrimaryCamera = updateData.primaryCamera;
     updateData.primaryViewID = m_context.primaryViewID;
     updateData.hasPrimaryCamera = true;
     updateData.frameSlot = m_preparationFrameIndex;
@@ -3505,34 +3526,17 @@ void Renderer::Update(float elapsedSeconds) {
     renderSnapshot.lighting = updateData.lighting;
     renderSnapshot.proceduralWind = updateData.proceduralWind;
     renderSnapshot.deltaTime = updateData.deltaTime;
-    auto desiredViewFamily = std::make_shared<br::render::ViewFamilyBuildInput>();
-    br::render::ArtifactVersionHandle desiredViewFamilyHandle;
+    auto currentViews = std::make_shared<br::render::PreparedViewFamilyState>();
+    br::render::PrimaryCameraFrameUpload primaryCameraUpload{};
     if (m_pViewManager) {
-        desiredViewFamily->revision = m_pViewManager->GetPublicationRevision();
-        desiredViewFamily->cameraBufferSize = m_pViewManager->GetCameraBufferSize();
-        desiredViewFamily->cameraTableImage = m_pViewManager->CaptureCameraTableImage();
-        desiredViewFamily->cullingCameraTableImage = m_pViewManager->CaptureCullingCameraTableImage();
-        std::vector<br::render::ArtifactRequirement> viewRequirements;
-        if (auto uploads = currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr;
-            uploads && m_rendererStateRequests) {
-            const std::array images{ desiredViewFamily->cameraTableImage,
-                desiredViewFamily->cullingCameraTableImage };
-            const std::array<std::uint32_t, 2> strides{ sizeof(CameraInfo), sizeof(CullingCameraInfo) };
-            for (std::size_t i = 0; i < images.size(); ++i) {
-                const auto& image = images[i];
-                const auto count = image ? image->size() / strides[i] : 0;
-                const auto request = m_viewTableFamilies[i]->RequestContentSnapshot(
-                    *m_rendererStateRequests, uploads,
-                    image ? std::span<const std::byte>(*image) : std::span<const std::byte>{},
-                    count, (std::max<std::uint64_t>)(count, 1));
-                if (request) viewRequirements.push_back(br::render::Exact(request.Handle()));
-            }
-        }
+        currentViews->revision = m_pViewManager->GetPublicationRevision();
+        currentViews->cameraBufferSize = m_pViewManager->GetCameraBufferSize();
+        primaryCameraUpload = m_pViewManager->CapturePrimaryCameraUpload(updateData.frameNumber);
         if (auto cameraBuffer = m_pViewManager->ProvideResource(Builtin::CameraBuffer))
-            desiredViewFamily->retainedResources.push_back(std::move(cameraBuffer));
+            currentViews->retainedResources.push_back(std::move(cameraBuffer));
         if (auto cullingBuffer = m_pViewManager->ProvideResource(Builtin::CullingCameraBuffer))
-            desiredViewFamily->retainedResources.push_back(std::move(cullingBuffer));
-        m_pViewManager->ForEachView([&](uint64_t viewID) {
+            currentViews->retainedResources.push_back(std::move(cullingBuffer));
+        const auto appendView = [&](uint64_t viewID) {
             auto* view = m_pViewManager->Get(viewID);
             if (!view) return;
             if (view->gpu.visibilityBuffer && !view->gpu.clodDeepVisibilityHeadPointers) {
@@ -3540,7 +3544,7 @@ void Renderer::Update(float elapsedSeconds) {
                 view = m_pViewManager->Get(viewID);
                 if (!view) return;
             }
-            desiredViewFamily->views.push_back({
+            currentViews->views.push_back({
                 .id = view->id,
                 .cameraBufferIndex = view->gpu.cameraBufferIndex,
                 .primary = view->flags.primaryCamera,
@@ -3548,6 +3552,10 @@ void Renderer::Update(float elapsedSeconds) {
                 .cascade = view->flags.cascaded,
                 .lightType = view->lightType,
                 .cameraInfo = view->cameraInfo,
+                .jitterPixelSpace = view->flags.primaryCamera
+                    ? desiredPrimaryCamera.jitterPixelSpace : DirectX::XMFLOAT2{},
+                .jitterNDC = view->flags.primaryCamera
+                    ? desiredPrimaryCamera.jitterNDC : DirectX::XMFLOAT2{},
                 .visibilityBuffer = view->gpu.visibilityBuffer,
                 .deepVisibilityHeadPointers = view->gpu.clodDeepVisibilityHeadPointers,
                 .linearDepthMap = view->gpu.linearDepthMap,
@@ -3559,32 +3567,55 @@ void Renderer::Update(float elapsedSeconds) {
                 .deepVisibilityHeadPointersUAVIndex = view->gpu.clodDeepVisibilityHeadPointersUAVIndex,
             });
             if (view->gpu.visibilityBuffer)
-                desiredViewFamily->retainedResources.push_back(view->gpu.visibilityBuffer);
+                currentViews->retainedResources.push_back(view->gpu.visibilityBuffer);
             if (view->gpu.clodDeepVisibilityHeadPointers)
-                desiredViewFamily->retainedResources.push_back(view->gpu.clodDeepVisibilityHeadPointers);
+                currentViews->retainedResources.push_back(view->gpu.clodDeepVisibilityHeadPointers);
             if (view->gpu.linearDepthMap)
-                desiredViewFamily->retainedResources.push_back(view->gpu.linearDepthMap);
+                currentViews->retainedResources.push_back(view->gpu.linearDepthMap);
+        };
+        // Primary is a structural invariant: every frame snapshot starts with it.
+        appendView(updateData.primaryViewID);
+        m_pViewManager->ForEachView([&](uint64_t viewID) {
+            if (viewID != updateData.primaryViewID) appendView(viewID);
         });
-        desiredViewFamily->resourceLayoutRevision = m_pViewManager->GetResourceLayoutRevision();
-        if (m_rendererStateRequests) {
-            const auto revision = (std::max<std::uint64_t>)(
-                desiredViewFamily->revision, 1u);
-            auto viewRequest = m_rendererStateRequests->SubmitLatest({
-                { br::render::ArtifactKind::ViewFamily, 0, 0 }, revision, std::move(viewRequirements),
-                br::render::ArtifactPayload::Make<br::render::ViewFamilyBuildInput>(desiredViewFamily),
-                revision });
-            if (viewRequest) desiredViewFamilyHandle = viewRequest.Handle();
+        currentViews->resourceLayoutRevision = m_pViewManager->GetResourceLayoutRevision();
+        if (currentViews->views.empty() || !currentViews->views.front().primary ||
+            currentViews->views.front().cameraBufferIndex != 0) {
+            throw std::logic_error("Accepted frame is missing primary view slot zero");
         }
     }
-    const auto publishedViews = updateData.publishedRendererState
-        ? updateData.publishedRendererState->views.payload.Get<br::render::PublishedViewFamilyState>()
-        : nullptr;
-    std::shared_ptr<const br::render::PublishedViewFamilyState> selectedViews = publishedViews;
-    if (publishedViews) {
-        basic_telemetry::AddCounter("SARP.FrameInputs.PublishedViewFamilySelection");
+    updateData.viewFamily = currentViews;
+    renderSnapshot.viewFamily = currentViews;
+    const auto& desiredCameraPosition = desiredPrimaryCamera.info.positionWorldSpace;
+    BT_PLOT("SARP.Camera.Desired.X", static_cast<int64_t>(desiredCameraPosition.x));
+    BT_PLOT("SARP.Camera.Desired.Y", static_cast<int64_t>(desiredCameraPosition.y));
+    BT_PLOT("SARP.Camera.Desired.Z", static_cast<int64_t>(desiredCameraPosition.z));
+    BT_PLOT("SARP.Camera.CapturedRevision", static_cast<int64_t>(primaryCameraUpload.revision));
+    static const std::filesystem::path cameraTelemetryPath = [] {
+        wchar_t* value = nullptr;
+        size_t length = 0;
+        _wdupenv_s(&value, &length, L"SARP_CAMERA_TELEMETRY_PATH");
+        std::filesystem::path result = value && value[0] ? value : L"";
+        std::free(value);
+        return result;
+    }();
+    if (!cameraTelemetryPath.empty()) {
+        std::error_code fileError;
+        if (cameraTelemetryPath.has_parent_path())
+            std::filesystem::create_directories(cameraTelemetryPath.parent_path(), fileError);
+        const bool writeHeader = !std::filesystem::exists(cameraTelemetryPath, fileError) ||
+            std::filesystem::file_size(cameraTelemetryPath, fileError) == 0u;
+        std::ofstream output(cameraTelemetryPath, std::ios::app);
+        if (writeHeader) {
+            output << "frame,dt,forward,backward,left,right,up,down,pitch,yaw,camera_revision,x,y,z\n";
+        }
+        output << m_totalFramesRendered << ',' << elapsedSeconds << ','
+            << cameraTelemetryMovement.forwardMagnitude << ',' << cameraTelemetryMovement.backwardMagnitude << ','
+            << cameraTelemetryMovement.leftMagnitude << ',' << cameraTelemetryMovement.rightMagnitude << ','
+            << cameraTelemetryMovement.upMagnitude << ',' << cameraTelemetryMovement.downMagnitude << ','
+            << cameraTelemetryPitch << ',' << cameraTelemetryYaw << ',' << primaryCameraUpload.revision << ','
+            << desiredCameraPosition.x << ',' << desiredCameraPosition.y << ',' << desiredCameraPosition.z << '\n';
     }
-    updateData.viewFamily = selectedViews;
-    renderSnapshot.viewFamily = std::move(selectedViews);
     basic_telemetry::SetGauge("SARP.FrameInputs.ViewFamily.ViewCount",
         static_cast<std::int64_t>(renderSnapshot.Views().size()));
 	const auto publishedObjects = updateData.publishedRendererState
@@ -3608,7 +3639,7 @@ void Renderer::Update(float elapsedSeconds) {
         desiredLights = std::make_shared<br::render::LightTableBuildInput>();
         const auto lightSourceRevision = (std::max<std::uint64_t>)(
             m_pLightManager->GetPublicationRevision(), 1u);
-        const auto lightViewRevision = desiredViewFamily->revision;
+        const auto lightViewRevision = std::uint64_t{0};
         if (lightSourceRevision != m_lastLightSourceRevision ||
             lightViewRevision != m_lastLightViewFamilyRevision) {
             ++m_lightArtifactRevision;
@@ -3653,9 +3684,6 @@ void Renderer::Update(float elapsedSeconds) {
                     count, (std::max<std::uint64_t>)(count, 1));
                 if (request) lightRequirements.push_back(br::render::Exact(request.Handle()));
             }
-        }
-        if (desiredViewFamilyHandle) {
-            lightRequirements.push_back(br::render::Exact(desiredViewFamilyHandle));
         }
         (void)m_rendererStateRequests->SubmitLatest({
             { br::render::ArtifactKind::LightTable, 0, 0 }, desiredLights->revision,
@@ -3749,7 +3777,7 @@ void Renderer::Update(float elapsedSeconds) {
         }
     });
 
-    const bool publicationsReady = publishedMaterialState && updateData.viewFamily
+    const bool publicationsReady = publishedMaterialState
         && updateData.lightTables && updateData.poses;
     if (!publicationsReady) {
         m_frameInputs.reset();
@@ -3762,7 +3790,8 @@ void Renderer::Update(float elapsedSeconds) {
     auto immutableUpdate = std::make_shared<const UpdateContext>(updateData);
     m_frameInputs = std::make_shared<const br::render::RendererFrameInputs>(
         std::move(immutableUpdate),
-        std::make_shared<const RenderContext>(std::move(renderSnapshot)));
+        std::make_shared<const RenderContext>(std::move(renderSnapshot)),
+        primaryCameraUpload);
 
     UpdateExecutionContext context{};
     context.resolverCaptureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease);
@@ -3776,6 +3805,87 @@ void Renderer::Update(float elapsedSeconds) {
         BT_ZONE_SCOPE("Renderer::Update::TerrainRvtTelemetry");
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
+        // Opt-in, bounded camera-buffer stream. At most one capture may be in
+        // flight, which preserves request/completion ordering and avoids
+        // retaining an unbounded readback tail during shutdown.
+        struct CameraReadbackStreamState {
+            std::atomic_bool inFlight{ false };
+            std::atomic_uint64_t completionSequence{ 0 };
+            std::mutex outputMutex;
+        };
+        static auto cameraReadbackState = std::make_shared<CameraReadbackStreamState>();
+        static const std::filesystem::path cameraReadbackPath = [] {
+            wchar_t* value = nullptr;
+            size_t length = 0;
+            _wdupenv_s(&value, &length, L"SARP_CAMERA_READBACK_PATH");
+            std::filesystem::path result = value && value[0] ? value : L"";
+            std::free(value);
+            return result;
+        }();
+        if (!cameraReadbackPath.empty() && currentRenderGraph && m_frameInputs &&
+            !cameraReadbackState->inFlight.exchange(true, std::memory_order_acq_rel)) {
+            const auto renderInputs = m_frameInputs->Render();
+            const auto views = renderInputs ? renderInputs->viewFamily : nullptr;
+            const auto primary = views ? std::find_if(views->views.begin(), views->views.end(),
+                [](const auto& view) { return view.primary; }) : decltype(views->views.begin()){};
+            const auto cameraResource = m_pViewManager ? m_pViewManager->GetCameraBuffer() : nullptr;
+            if (cameraResource && views && primary != views->views.end()) {
+                if (auto* service = currentRenderGraph->GetReadbackService()) {
+                    const auto requestFrame = m_totalFramesRendered;
+                    const auto cameraRevision = m_frameInputs->PrimaryCameraUpload().revision;
+                    const auto expected = primary->cameraInfo;
+                    try {
+                        service->RequestReadbackCapture("PrimaryCameraUploadReadback",
+                            cameraResource.get(), RangeSpec{},
+                            [state = cameraReadbackState, path = cameraReadbackPath, requestFrame,
+                                cameraRevision, expected](ReadbackCaptureResult&& result) {
+                            CameraInfo camera{};
+                            if (result.data.size() >= sizeof(camera))
+                                std::memcpy(&camera, result.data.data(), sizeof(camera));
+                            const auto expectedPreviousInverse = DirectX::XMMatrixInverse(nullptr, expected.prevView);
+                            const auto gpuPreviousInverse = DirectX::XMMatrixInverse(nullptr, camera.prevView);
+                            const auto completion = state->completionSequence.fetch_add(1,
+                                std::memory_order_relaxed) + 1u;
+                            {
+                                std::scoped_lock lock(state->outputMutex);
+                                std::error_code fileError;
+                                if (path.has_parent_path())
+                                    std::filesystem::create_directories(path.parent_path(), fileError);
+                                const bool writeHeader = !std::filesystem::exists(path, fileError) ||
+                                    std::filesystem::file_size(path, fileError) == 0u;
+                                std::ofstream output(path, std::ios::app);
+                                if (writeHeader) {
+                                    output << "completion,request_frame,camera_revision,bytes,cpu_x,cpu_y,cpu_z,cpu_prev_x,cpu_prev_y,cpu_prev_z,gpu_x,gpu_y,gpu_z,gpu_prev_x,gpu_prev_y,gpu_prev_z\n";
+                                }
+                                output << completion << ',' << requestFrame << ',' << cameraRevision << ','
+                                    << result.data.size() << ','
+                                    << expected.positionWorldSpace.x << ',' << expected.positionWorldSpace.y << ','
+                                    << expected.positionWorldSpace.z << ','
+                                    << DirectX::XMVectorGetX(expectedPreviousInverse.r[3]) << ','
+                                    << DirectX::XMVectorGetY(expectedPreviousInverse.r[3]) << ','
+                                    << DirectX::XMVectorGetZ(expectedPreviousInverse.r[3]) << ','
+                                    << camera.positionWorldSpace.x << ',' << camera.positionWorldSpace.y << ','
+                                    << camera.positionWorldSpace.z << ','
+                                    << DirectX::XMVectorGetX(gpuPreviousInverse.r[3]) << ','
+                                    << DirectX::XMVectorGetY(gpuPreviousInverse.r[3]) << ','
+                                    << DirectX::XMVectorGetZ(gpuPreviousInverse.r[3]) << '\n';
+                            }
+                                if (result.data.size() < sizeof(camera) ||
+                                    std::memcmp(&camera, &expected, sizeof(camera)) != 0)
+                                    basic_telemetry::AddCounter("SARP.Camera.Upload.ReadbackMismatch");
+                                state->inFlight.store(false, std::memory_order_release);
+                            });
+                    } catch (...) {
+                        cameraReadbackState->inFlight.store(false, std::memory_order_release);
+                        throw;
+                    }
+                } else {
+                    cameraReadbackState->inFlight.store(false, std::memory_order_release);
+                }
+            } else {
+                cameraReadbackState->inFlight.store(false, std::memory_order_release);
+            }
+        }
         // Opt-in, one-frame GPU work snapshot. Capture producers as well as their
         // indirect consumers so visual failures can be localized without GPU printf.
         static const uint64_t diagnosticCaptureFrame = [] {
@@ -6052,6 +6162,45 @@ void Renderer::Render() {
             currentRenderGraph->Execute(passExecutionContext); // Main render graph execution
             passExecutionContext.beginGpuPassRange = {};
             passExecutionContext.endGpuPassRange = {};
+            static const std::filesystem::path submittedCameraTracePath = [] {
+                wchar_t* value = nullptr;
+                size_t length = 0;
+                _wdupenv_s(&value, &length, L"SARP_SUBMITTED_CAMERA_TELEMETRY_PATH");
+                std::filesystem::path result = value && value[0] ? value : L"";
+                std::free(value);
+                return result;
+            }();
+            if (!submittedCameraTracePath.empty()) {
+                const auto submittedData = currentRenderGraph->GetLastSubmittedFrameData();
+                const auto* submitted = submittedData ? submittedData->Get<RenderContext>() : nullptr;
+                const auto views = submitted ? submitted->viewFamily : nullptr;
+                const auto primary = views ? std::find_if(views->views.begin(), views->views.end(),
+                    [](const auto& view) { return view.primary; }) : decltype(views->views.begin()){};
+                if (submitted && views && primary != views->views.end()) {
+                    const auto previousInverse = DirectX::XMMatrixInverse(nullptr, primary->cameraInfo.prevView);
+                    std::error_code fileError;
+                    if (submittedCameraTracePath.has_parent_path())
+                        std::filesystem::create_directories(submittedCameraTracePath.parent_path(), fileError);
+                    const bool writeHeader = !std::filesystem::exists(submittedCameraTracePath, fileError) ||
+                        std::filesystem::file_size(submittedCameraTracePath, fileError) == 0u;
+                    std::ofstream output(submittedCameraTracePath, std::ios::app);
+                    if (writeHeader)
+                        output << "present_call,owned_frame,preparation_slot,view_snapshot_revision,x,y,z,prev_x,prev_y,prev_z,context_x,context_y,context_z,jitter_x,jitter_y\n";
+                    output << m_totalFramesRendered << ',' << submitted->frameNumber << ','
+                        << submitted->frameSlot << ',' << views->revision << ','
+                        << primary->cameraInfo.positionWorldSpace.x << ','
+                        << primary->cameraInfo.positionWorldSpace.y << ','
+                        << primary->cameraInfo.positionWorldSpace.z << ','
+                        << DirectX::XMVectorGetX(previousInverse.r[3]) << ','
+                        << DirectX::XMVectorGetY(previousInverse.r[3]) << ','
+                        << DirectX::XMVectorGetZ(previousInverse.r[3]) << ','
+                        << submitted->primaryCamera.info.positionWorldSpace.x << ','
+                        << submitted->primaryCamera.info.positionWorldSpace.y << ','
+                        << submitted->primaryCamera.info.positionWorldSpace.z << ','
+                        << submitted->primaryCamera.jitterPixelSpace.x << ','
+                        << submitted->primaryCamera.jitterPixelSpace.y << '\n';
+                }
+            }
             if (renderGraphBatchTraceEnabled) {
                 spdlog::info("Renderer: frame {} completed RenderGraph::Execute", m_totalFramesRendered);
             }
@@ -6345,7 +6494,6 @@ void Renderer::Cleanup() {
     // successor request.  Producer shutdown above guarantees there can be no
     // more requests, so release those device-bound roots before descriptor and
     // allocator teardown rather than waiting for Renderer destruction.
-    for (auto& family : m_viewTableFamilies) family.reset();
     for (auto& family : m_lightTableFamilies) family.reset();
     for (auto& family : m_poseTableFamilies) family.reset();
     if (currentRenderGraph) {
@@ -6886,6 +7034,13 @@ void Renderer::CreateRenderGraph() {
     newGraph->PrepareExtensionsForBuild();
     }
     probeGraphBuildPhase("CreateRenderGraph after PrepareExtensionsForBuild");
+
+    // The primary camera is high-frequency frame data, not renderer-state
+    // publication. Insert its graphics-queue upload before all pipeline passes;
+    // their camera SRV declarations establish the required RAW dependencies.
+    newGraph->BuildPass<br::render::PrimaryCameraUploadPass>(
+        "PrimaryCameraUploadPass", m_pViewManager->GetCameraBuffer(),
+        m_pViewManager->GetCullingCameraBuffer(), m_numFramesInFlight);
 
     auto& depth = primaryCameraEntity.get<Components::DepthMap>();
     std::shared_ptr<PixelBuffer> depthTexture = depth.depthMap;

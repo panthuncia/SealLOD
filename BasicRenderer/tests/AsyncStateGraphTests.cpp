@@ -2472,8 +2472,6 @@ int main() {
         firstInput->revision = 11;
         firstInput->cameraBufferSize = 4;
         firstInput->resourceLayoutRevision = 11;
-        firstInput->cameraTableImage = std::make_shared<const std::vector<std::byte>>(
-            std::initializer_list<std::byte>{std::byte{0x11}});
         firstInput->views.push_back({ .id = 17, .cameraBufferIndex = 3, .primary = true });
         const auto first = graph.Request(key, 11, {},
             ArtifactPayload::Make<ViewFamilyBuildInput>(firstInput), 11);
@@ -2483,14 +2481,11 @@ int main() {
         auto root = snapshot.payload.Get<RendererStateFragmentArtifact>();
         auto family = root ? root->fragment.payload.Get<PublishedViewFamilyState>() : nullptr;
         Check(family && family->views.size() == 1 && family->views.front().id == 17);
-        Check(family->cameraTableImage && family->cameraTableImage->front() == std::byte{0x11});
 
         auto secondInput = std::make_shared<ViewFamilyBuildInput>(*firstInput);
         secondInput->revision = 12;
         secondInput->resourceLayoutRevision = 12;
         secondInput->views.front().id = 23;
-        secondInput->cameraTableImage = std::make_shared<const std::vector<std::byte>>(
-            std::initializer_list<std::byte>{std::byte{0x22}});
         const auto second = graph.Request(key, 12, {},
             ArtifactPayload::Make<ViewFamilyBuildInput>(secondInput), 12);
         Check(second);
@@ -2503,8 +2498,7 @@ int main() {
         snapshot = graph.Snapshot(first.version);
         root = snapshot.payload.Get<RendererStateFragmentArtifact>();
         family = root ? root->fragment.payload.Get<PublishedViewFamilyState>() : nullptr;
-        Check(family && family->views.front().id == 17 && family->cameraTableImage &&
-            family->cameraTableImage->front() == std::byte{0x11});
+        Check(family && family->views.front().id == 17);
     }
 
     {
@@ -2553,7 +2547,6 @@ int main() {
         const auto root = snapshot.payload.Get<RendererStateFragmentArtifact>();
         const auto lights = root ? root->fragment.payload.Get<PublishedLightTableState>() : nullptr;
         Check(lights && lights->revision == 5 && lights->lightCount == 3 &&
-            lights->viewFamilyRevision == 21 &&
             lights->tableImages.front()->front() == std::byte{0x44});
 
         auto newerViewInput = std::make_shared<ViewFamilyBuildInput>(*viewInput);
@@ -2566,7 +2559,7 @@ int main() {
         const auto retainedRoot = retainedLight.payload.Get<RendererStateFragmentArtifact>();
         const auto retainedState = retainedRoot
             ? retainedRoot->fragment.payload.Get<PublishedLightTableState>() : nullptr;
-        Check(retainedState && retainedState->viewFamilyRevision == 21);
+        Check(retainedState && retainedState->revision == 5);
     }
 
     {

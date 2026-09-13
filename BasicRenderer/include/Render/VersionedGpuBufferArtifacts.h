@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -54,6 +55,9 @@ struct BufferBackingArtifact {
     std::uint64_t contentEpoch = 0;
     std::shared_ptr<const VersionedGpuBufferImage> image;
     std::uint64_t lastPublishedRetirementEpoch = 0;
+    // Readback completion may trail frame retirement. Keep a backing immutable
+    // while an explicit diagnostic capture still observes its contents.
+    std::atomic_uint32_t readbackPins{ 0 };
     bool wasPublished = false;
 };
 

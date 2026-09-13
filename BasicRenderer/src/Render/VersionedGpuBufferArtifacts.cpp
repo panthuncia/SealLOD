@@ -248,12 +248,17 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     for (auto it = m_backings.begin(); it != m_backings.end();) {
         const auto& backing = *it;
         if (backing && backing->capacityClass == capacityClass) ++matchingCapacityClass;
+        // Async admission can overlap one generation of planned work with the
+        // submitted frame ring. Allow two complete ring rotations before
+        // recycling a published backing, and separately pin diagnostics whose
+        // copy completion may trail normal frame retirement.
         const auto retirementEpoch = VersionedGpuBufferFrameRetirementEpoch();
+        const auto safeRetirementDelay = static_cast<std::uint64_t>(m_framesInFlight) * 2u + 1u;
         const bool publicationRetired = backing && backing->wasPublished &&
             backing->backingGeneration != m_activePublishedGeneration &&
-            retirementEpoch >= backing->lastPublishedRetirementEpoch + m_framesInFlight;
-        const bool idle = backing &&
-            (backing.use_count() == 1 || publicationRetired);
+            backing->readbackPins.load(std::memory_order_acquire) == 0u &&
+            retirementEpoch >= backing->lastPublishedRetirementEpoch + safeRetirementDelay;
+        const bool idle = backing && (backing.use_count() == 1 || publicationRetired);
         if (idle && backing->capacityClass == capacityClass && !reusable) {
             reusable = backing;
             ++it;
@@ -280,8 +285,12 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     // admitted. At most frames-in-flight plus one unpublished successor are
     // therefore distinct. Keep the bound explicit: exhaustion suspends and
     // resumes from retirement rather than allocating past it.
+    // Publication, admitted-but-unsubmitted frames, submitted frame slots, and
+    // asynchronous diagnostics can overlap. Keep this bounded, but large enough
+    // that exact lifetime retirement—not premature mutation—is the steady-state
+    // reuse mechanism.
     const auto maximumBackingsPerCapacityClass =
-        static_cast<std::size_t>(m_framesInFlight) + 1u;
+        static_cast<std::size_t>(m_framesInFlight) * 2u + 2u;
     if (matchingCapacityClass >= maximumBackingsPerCapacityClass) {
         expanded = false;
         basic_telemetry::AddCounter("SARP.VersionedBuffer.BackingRingExhausted");

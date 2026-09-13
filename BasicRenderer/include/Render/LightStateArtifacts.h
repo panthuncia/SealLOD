@@ -39,7 +39,6 @@ struct PublishedLightTableState {
     std::uint64_t revision = 0;
     std::uint32_t lightCount = 0;
     std::uint32_t lightPagePoolSize = 0;
-    std::uint64_t viewFamilyRevision = 0;
     std::vector<PublishedDirectionalShadowLight> directionalShadows;
     std::vector<std::shared_ptr<org::Resource>> retainedResources;
     std::vector<std::shared_ptr<const std::vector<std::byte>>> tableImages;

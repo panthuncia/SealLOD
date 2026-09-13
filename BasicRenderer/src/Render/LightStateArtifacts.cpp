@@ -17,16 +17,6 @@ ArtifactBuildResult BuildLightTable(const ArtifactBuildContext& context) {
     state->revision = input->revision;
     state->lightCount = input->lightCount;
     state->lightPagePoolSize = input->lightPagePoolSize;
-    if (!context.dependencies.empty()) {
-        const auto viewsRoot = context.Dependency<RendererStateFragmentArtifact>(
-            { ArtifactKind::ViewFamily, 0, 0 });
-        if (!viewsRoot || viewsRoot.payload->kind != PublishedFragmentKind::Views ||
-            !viewsRoot.payload->fragment.payload.Get<PublishedViewFamilyState>()) {
-            return ArtifactBuildResult::Failure(
-                "light-table exact view-family dependency is invalid");
-        }
-        state->viewFamilyRevision = viewsRoot.payload->fragment.revision;
-    }
     state->directionalShadows = input->directionalShadows;
     state->retainedResources = input->retainedResources;
     state->tableImages = input->tableImages;
