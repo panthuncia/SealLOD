@@ -953,17 +953,13 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			ZoneScopedN("MeshManager::AddMesh::ResolveContainerPathFallback");
 			sharedState->resolvedContainerPath = CLodCache::ResolveContainerPath(sharedState->cacheSource);
 		}
+		// Opening every CLod container while static templates are admitted makes
+		// thousands of meshes pay filesystem namespace and handle-creation costs
+		// even when their pages are never streamed. The disk-streaming worker
+		// acquires the mapped lease on first use; warm-state tracking only depends
+		// on the locator table and can be initialized eagerly without a mapping.
 		if (!sharedState->resolvedContainerPath.empty() &&
-			!sharedState->pageDiskLocators.empty() &&
-			sharedState->mappedContainerLease == nullptr) {
-			ZoneScopedN("MeshManager::AddMesh::AcquireMappedContainerFallback");
-			CLodCache::AcquireMappedContainer(
-				sharedState->resolvedContainerPath,
-				static_cast<uint32_t>(
-					sharedState->pageDiskLocators.size()),
-				sharedState->mappedContainerLease);
-		}
-		if (sharedState->mappedContainerLease != nullptr) {
+			!sharedState->pageDiskLocators.empty()) {
 			ZoneScopedN("MeshManager::AddMesh::InitializeMappedPageWarmStates");
 			sharedState->mappedPageWarmStateCount =
 				static_cast<uint32_t>(
@@ -1435,8 +1431,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	TracyPlot("MeshManager.StaticTemplate.AsyncTemplateRows", static_cast<int64_t>(templateRowsToAdd));
 
 	if (!meshesToPrepare.empty()) {
-		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareMappedContainers");
-		BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareMappedContainers");
+		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareContainerPaths");
+		BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareContainerPaths");
 		std::vector<std::pair<Mesh*, PreparedCLodContainer>> preparedContainers;
 		preparedContainers.reserve(meshesToPrepare.size());
 		for (const auto& mesh : meshesToPrepare) {
@@ -1454,7 +1450,6 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 			}
 
 			std::wstring resolvedPath;
-			std::shared_ptr<const CLodCache::MappedContainerLease> lease;
 			{
 				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::ResolveContainerPath");
 				BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::ResolveContainerPath");
@@ -1463,24 +1458,12 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 			if (resolvedPath.empty()) {
 				continue;
 			}
-			{
-				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::AcquireMappedContainer");
-				BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::AcquireMappedContainer");
-				CLodCache::AcquireMappedContainer(
-					resolvedPath,
-					static_cast<uint32_t>(pageDiskLocators.size()),
-					lease);
-			}
-			if (!lease) {
-				continue;
-			}
-
 			preparedContainers.emplace_back(
 				mesh.get(),
 				PreparedCLodContainer{
 					.mesh = mesh,
 					.resolvedPath = std::move(resolvedPath),
-					.lease = std::move(lease),
+					.lease = {},
 					.pageCount = static_cast<uint32_t>(pageDiskLocators.size()),
 				});
 		}

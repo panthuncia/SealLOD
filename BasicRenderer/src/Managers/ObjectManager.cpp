@@ -1906,51 +1906,67 @@ ObjectManager::StaticImportBuildBatch ObjectManager::PrepareStaticImportBuildBat
 }
 
 void ObjectManager::FinalizeStaticImportBuildBatch(StaticImportBuildBatch& build) {
+	BT_ZONE_SCOPE("ObjectManager::FinalizeStaticImportBuildBatch");
 	if (build.finalized) {
 		return;
 	}
 
-	build.transformCounts.clear();
-	build.drawRecordCounts.clear();
-	build.activeReserveCounts.clear();
-	build.activeWorkloadKeys.clear();
-	build.activeWorkloadRoutesByGroup.clear();
-	build.transformCounts.reserve(build.prepared.groups.size());
-	build.drawRecordCounts.reserve(build.prepared.groups.size());
-	build.activeWorkloadRoutesByGroup.reserve(build.prepared.groups.size());
-	build.drawRecords = 0;
-	build.activeInsertIndices = 0;
-	build.preparedBytes = build.prepared.preparedBytes;
+	{
+		BT_ZONE_SCOPE("ObjectManager::FinalizeStaticImportBuildBatch::ResetMetadata");
+		build.transformCounts.clear();
+		build.drawRecordCounts.clear();
+		build.activeReserveCounts.clear();
+		build.activeWorkloadKeys.clear();
+		build.activeWorkloadRoutesByGroup.clear();
+		build.transformCounts.reserve(build.prepared.groups.size());
+		build.drawRecordCounts.reserve(build.prepared.groups.size());
+		build.activeWorkloadRoutesByGroup.reserve(build.prepared.groups.size());
+		build.drawRecords = 0;
+		build.activeInsertIndices = 0;
+		build.preparedBytes = build.prepared.preparedBytes;
+	}
 
 	std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> workloadSlots;
 	for (auto& group : build.prepared.groups) {
-		if (group.WorkloadRouteRanges().size() != group.MeshTemplates().size()) {
-			BuildPreparedStaticGroupWorkloadRoutes(group);
+		{
+			BT_ZONE_SCOPE("ObjectManager::FinalizeStaticImportBuildBatch::EnsureGroupWorkloadRoutes");
+			if (group.WorkloadRouteRanges().size() != group.MeshTemplates().size()) {
+				BuildPreparedStaticGroupWorkloadRoutes(group);
+			}
 		}
 		const auto transforms = group.PerObjectRows().size();
 		const auto meshTemplates = group.MeshTemplates();
-		const auto records = transforms * meshTemplates.size();
-		build.transformCounts.push_back(transforms);
-		build.drawRecordCounts.push_back(records);
-		build.drawRecords += records;
-		auto& groupRoutes = build.activeWorkloadRoutesByGroup.emplace_back();
-		const auto uniqueWorkloadKeys = group.UniqueWorkloadKeys();
-		groupRoutes.reserve(uniqueWorkloadKeys.size());
-		for (const auto& workloadKey : uniqueWorkloadKeys) {
-			auto [slotIt, inserted] = workloadSlots.try_emplace(
-				workloadKey, static_cast<std::uint32_t>(build.activeWorkloadKeys.size()));
-			if (inserted) {
-				build.activeWorkloadKeys.push_back(workloadKey);
-			}
-			groupRoutes.push_back(slotIt->second);
+		{
+			BT_ZONE_SCOPE("ObjectManager::FinalizeStaticImportBuildBatch::CollectGroupCounts");
+			const auto records = transforms * meshTemplates.size();
+			build.transformCounts.push_back(transforms);
+			build.drawRecordCounts.push_back(records);
+			build.drawRecords += records;
 		}
-		for (std::size_t meshIndex = 0; meshIndex < meshTemplates.size(); ++meshIndex) {
-			const auto workloadKeys = meshIndex < group.workloadKeysByMeshTemplate.size()
-				? std::span<const DrawWorkloadKey>{ group.workloadKeysByMeshTemplate[meshIndex] }
-				: meshTemplates[meshIndex].WorkloadKeys();
-			for (const auto& workloadKey : workloadKeys) {
-				build.activeReserveCounts[workloadKey] += transforms;
-				build.activeInsertIndices += transforms;
+		{
+			BT_ZONE_SCOPE("ObjectManager::FinalizeStaticImportBuildBatch::BuildTransactionWorkloadRoutes");
+			auto& groupRoutes = build.activeWorkloadRoutesByGroup.emplace_back();
+			const auto uniqueWorkloadKeys = group.UniqueWorkloadKeys();
+			groupRoutes.reserve(uniqueWorkloadKeys.size());
+			for (const auto& workloadKey : uniqueWorkloadKeys) {
+				auto [slotIt, inserted] = workloadSlots.try_emplace(
+					workloadKey, static_cast<std::uint32_t>(build.activeWorkloadKeys.size()));
+				if (inserted) {
+					build.activeWorkloadKeys.push_back(workloadKey);
+				}
+				groupRoutes.push_back(slotIt->second);
+			}
+		}
+		{
+			BT_ZONE_SCOPE("ObjectManager::FinalizeStaticImportBuildBatch::AccumulateActiveReserves");
+			for (std::size_t meshIndex = 0; meshIndex < meshTemplates.size(); ++meshIndex) {
+				const auto workloadKeys = meshIndex < group.workloadKeysByMeshTemplate.size()
+					? std::span<const DrawWorkloadKey>{ group.workloadKeysByMeshTemplate[meshIndex] }
+					: meshTemplates[meshIndex].WorkloadKeys();
+				for (const auto& workloadKey : workloadKeys) {
+					build.activeReserveCounts[workloadKey] += transforms;
+					build.activeInsertIndices += transforms;
+				}
 			}
 		}
 	}

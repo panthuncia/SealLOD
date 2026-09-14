@@ -76,7 +76,8 @@ std::string_view KindName(ArtifactKind kind) {
         "MaterialTable", "MaterialUsageBatch", "Mesh", "MeshTable", "DrawRecordPage",
         "ActiveDrawList", "ViewLifetime", "IndirectWorkload", "StaticTransaction",
         "StaticScenePage", "StaticScene", "TerrainState", "BufferVersion", "FrameManifest", "StaticGroup",
-        "StaticTemplate", "TextureImageTable", "GrassCell", "GrassShard", "GrassScratch", "GrassScene" };
+        "StaticTemplate", "TextureImageTable", "GrassCell", "GrassShard", "GrassScratch", "GrassScene",
+        "StaticAsset", "StaticMaterialVariant", "StaticShaderVariant", "StaticVariant" };
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(names) ? names[index] : "Unknown";
 }
@@ -1485,6 +1486,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 		std::size_t next = 0;
 	};
 	std::deque<PendingWaiterWake> pendingWaiterWakes;
+	std::vector<ArtifactSnapshot> propagatedReady;
 	tbb::concurrent_queue<Completion> completions;
 	std::atomic<std::uint64_t> completionCount{ 0 };
     static constexpr std::size_t kAcceptanceMailboxCount =
@@ -2580,6 +2582,29 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         recordQueuePhase("latch_ready_gates", latchStarted, latchDone);
         recordQueuePhase("dependencies_satisfied", latchDone, dependenciesDone);
         if (!dependenciesSatisfied) {
+			// An exact mandatory dependency that has reached a terminal state can
+			// never satisfy this revision. Propagate that terminal edge instead of
+			// leaving the consumer permanently Blocked. Alternative groups need a
+			// group-wide decision and continue to use their existing selection path.
+			for (const auto& requirement : node.requirements) {
+				if (requirement.policy != DependencyPolicy::AllOf ||
+					requirement.invalidation == DependencyInvalidationPolicy::LifetimeHold)
+					continue;
+				ArtifactSnapshot currentSnapshot;
+				const auto* dependency = SelectSnapshot(requirement, currentSnapshot);
+				if (!dependency || (dependency->readiness != ArtifactReadiness::Failed &&
+					dependency->readiness != ArtifactReadiness::Cancelled &&
+					dependency->readiness != ArtifactReadiness::Superseded)) continue;
+				node.error = std::format("required dependency {} terminated in state {}",
+					KeyString(requirement.key), ReadinessName(dependency->readiness));
+				node.terminalFailure = true;
+				SetState(node, ArtifactReadiness::Failed);
+				++stats.failed;
+				StoreVersion(node);
+				propagatedReady.push_back(MakeSnapshot(node));
+				WakeWaiters(node.key);
+				return;
+			}
             const bool newlyBlocked = node.state != ArtifactReadiness::Blocked;
             SetState(node, ArtifactReadiness::Blocked);
             if (auto session = AcquireTrace();
@@ -3183,6 +3208,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             ++stats.cancelled;
             ready.push_back({ node.key, completion.revision, completion.generation,
                 node.state, {}, {}, node.lease });
+            StoreVersion(node);
+            WakeWaiters(node.key);
             PromoteSuccessor(node);
             break;
         case ArtifactBuildResult::Outcome::Failed:
@@ -3194,6 +3221,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 KeyString(node.key), node.desiredRevision, node.generation, node.error);
             ready.push_back({ node.key, completion.revision, completion.generation,
                 node.state, {}, {}, node.lease });
+            // A terminal dependency is a readiness change even though it cannot
+            // satisfy a positive milestone. Persist it before waking exact-version
+            // dependents so their next evaluation observes and propagates failure
+            // instead of remaining Blocked forever.
+            StoreVersion(node);
+            WakeWaiters(node.key);
             PromoteSuccessor(node);
             break;
         }
@@ -3547,6 +3580,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				pendingWaiterWakes.pop_front();
 			}
 			recordApplyPhase("apply_waiter_wakes");
+			if (!propagatedReady.empty()) {
+				ready.insert(ready.end(),
+					std::make_move_iterator(propagatedReady.begin()),
+					std::make_move_iterator(propagatedReady.end()));
+				propagatedReady.clear();
+			}
 			while (!pending.empty()) {
 				++transitions;
                 const auto key = pending.front();
@@ -3637,6 +3676,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             callbacks.reserve(readyCallbacks.size());
             for (const auto& [_, callback] : readyCallbacks) callbacks.push_back(callback);
 			hasImmediateWork = !pending.empty() || !pendingWaiterWakes.empty() ||
+				!propagatedReady.empty() ||
 				completionCount.load(std::memory_order_acquire) != 0 ||
 				!gpuSignals.empty() || !publishedSignals.empty() || !pendingRetirement.empty();
             if (!gpuRecovery.empty() && !pauseGpuRecovery.load(std::memory_order_acquire)) {
