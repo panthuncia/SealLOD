@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <format>
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <spdlog/spdlog.h>
 
 #include "Render/Runtime/IUploadService.h"
 #include "Render/MemoryIntrospectionAPI.h"
@@ -119,10 +121,51 @@ std::uint64_t VersionedGpuBufferBackingPool::SubscribeAvailability(
 
 void VersionedGpuBufferBackingPool::NotifyAvailability() noexcept {
     std::vector<std::pair<std::uint64_t, std::function<void(std::uint64_t)>>> waiters;
+	bool rescheduleRetirement = false;
     {
         std::lock_guard lock(m_mutex);
         waiters.swap(m_waiters);
         m_registeredForRetirementWake = false;
+		const auto retirementEpoch = VersionedGpuBufferFrameRetirementEpoch();
+		const auto safeDelay = static_cast<std::uint64_t>(m_framesInFlight) * 2u + 1u;
+		std::shared_ptr<BufferBackingArtifact> reusable;
+		for (auto it = m_backings.begin(); it != m_backings.end();) {
+			const auto& backing = *it;
+			if (!backing || !m_releasedGenerations.contains(backing->backingGeneration) ||
+				backing->backingGeneration == m_activePublishedGeneration) {
+				++it;
+				continue;
+			}
+			const bool frameSafe = !backing->wasPublished ||
+				retirementEpoch >= backing->lastPublishedRetirementEpoch + safeDelay;
+			const bool unpinned = backing->readbackPins.load(std::memory_order_acquire) == 0u;
+			if (backing.use_count() != 1 || !frameSafe || !unpinned) {
+				rescheduleRetirement = true;
+				++it;
+				continue;
+			}
+			// Retain one warm allocation only for the active capacity class. All
+			// superseded classes and excess ring members retire event-first even
+			// when no later Acquire occurs to discover them.
+			const auto active = std::ranges::find_if(m_backings, [&](const auto& value) {
+				return value && value->backingGeneration == m_activePublishedGeneration;
+			});
+			const bool activeClass = active != m_backings.end() &&
+				(*active)->capacityClass == backing->capacityClass;
+			if (activeClass && !reusable) {
+				reusable = backing;
+				++it;
+				continue;
+			}
+			const auto generation = backing->backingGeneration;
+			const auto byteCapacity = backing->byteCapacity;
+			it = m_backings.erase(it);
+			m_releasedGenerations.erase(generation);
+			g_pooledBackingCount.fetch_sub(1, std::memory_order_relaxed);
+			g_pooledBackingBytes.fetch_sub(byteCapacity, std::memory_order_relaxed);
+			basic_telemetry::AddCounter("SARP.VersionedBuffer.PooledBackingEventRetired");
+			basic_telemetry::AddCounter("SARP.VersionedBuffer.PooledBackingEventRetiredBytes", byteCapacity);
+		}
     }
     for (auto& [identity, callback] : waiters) {
         try { if (callback) callback(identity); }
@@ -132,6 +175,29 @@ void VersionedGpuBufferBackingPool::NotifyAvailability() noexcept {
         basic_telemetry::AddCounter(
             "SARP.VersionedBuffer.BackingRetirementWakes", waiters.size());
     }
+	if (rescheduleRetirement) {
+		bool registerPool = false;
+		{
+			std::lock_guard lock(m_mutex);
+			registerPool = !m_registeredForRetirementWake;
+			m_registeredForRetirementWake = true;
+		}
+		if (registerPool) RegisterBackingRetirementWaiter(shared_from_this());
+	}
+	EmitBackingPoolTelemetry();
+}
+
+void VersionedGpuBufferBackingPool::ReleaseVersion(
+	std::uint64_t backingGeneration) noexcept {
+	if (backingGeneration == 0) return;
+	bool registerPool = false;
+	{
+		std::lock_guard lock(m_mutex);
+		m_releasedGenerations.insert(backingGeneration);
+		registerPool = !m_registeredForRetirementWake;
+		m_registeredForRetirementWake = true;
+	}
+	if (registerPool) RegisterBackingRetirementWaiter(shared_from_this());
 }
 
 void NotifyVersionedGpuBufferFrameRetirement() noexcept {
@@ -159,6 +225,7 @@ void VersionedGpuBufferBackingPool::Retire(std::uint64_t backingGeneration) noex
     if (found == m_backings.end()) return;
     const auto byteCapacity = (*found)->byteCapacity;
     m_backings.erase(found);
+	m_releasedGenerations.erase(backingGeneration);
     g_pooledBackingCount.fetch_sub(1, std::memory_order_relaxed);
     g_pooledBackingBytes.fetch_sub(byteCapacity, std::memory_order_relaxed);
     basic_telemetry::AddCounter("SARP.VersionedBuffer.PooledBackingRetired");
@@ -201,6 +268,24 @@ PublishedGpuBufferVersion::~PublishedGpuBufferVersion() {
     // Pool wakeups are issued after the containing artifact or frame state has
     // completed destruction. Calling graph continuations from this destructor
     // can re-enter scheduling while sibling catalog holds are being torn down.
+	static const bool traceLifetime = [] {
+		char* value = nullptr;
+		size_t length = 0;
+		const bool enabled = _dupenv_s(&value, &length, "SARP_GPU_LIFETIME_TRACE") == 0 &&
+			value && value[0] && value[0] != '0';
+		std::free(value);
+		return enabled;
+	}();
+	if (traceLifetime && resource) {
+		spdlog::info("GpuLifetime version_release: revision={} sequence={} resource={} name='{}' resource_remaining_refs={} backing_remaining_refs={}",
+			revision, writeSequence, resource->GetGlobalResourceID(), resource->GetName(),
+			resource.use_count() - 1, backing ? backing.use_count() - 1 : 0);
+	}
+	if (backing) {
+		if (auto pool = backingPool.lock()) {
+			pool->ReleaseVersion(backing->backingGeneration);
+		}
+	}
 }
 
 std::shared_ptr<const VersionedGpuBufferImage> VersionedGpuBufferImage::FromBytes(
@@ -310,6 +395,16 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     }
     else if (debugName.starts_with("SARPGrass.")) {
         org::memory::SetResourceUsageHint(*resource, "Grass persistent resources");
+        org::memory::SetResourceMemoryIdentifier(*resource, std::string(debugName));
+    }
+    else if (debugName.starts_with("Published::") ||
+        debugName.starts_with("PublishedIndirect") ||
+        debugName.starts_with("PublishedActive")) {
+        // Versioned publication backings bypass the manager factories which
+        // normally attach memory ownership metadata.  Tag every generation at
+        // allocation time so both active and frame-retired snapshots retain an
+        // attributable category while they pass through GPU retirement.
+        org::memory::SetResourceUsageHint(*resource, "Versioned scene publication");
         org::memory::SetResourceMemoryIdentifier(*resource, std::string(debugName));
     }
     auto backing = std::make_shared<BufferBackingArtifact>();

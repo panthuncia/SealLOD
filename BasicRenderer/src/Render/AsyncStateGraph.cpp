@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <deque>
 #include <format>
 #include <fstream>
@@ -1499,7 +1500,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     std::array<bool, kAcceptanceMailboxCount> acceptanceMailboxScheduled{};
     std::unordered_map<std::uint64_t, StoredVersionKey> suspendedByIdentity;
     std::unordered_set<std::uint64_t> satisfiedSuspensions;
-    std::deque<ArtifactSnapshot> pendingRetirement;
+	std::deque<ArtifactSnapshot> pendingRetirement;
 	tbb::concurrent_queue<StoredVersionKey> reclaimQueue;
 	tbb::concurrent_queue<StoredVersionKey> publishedSignals;
     std::priority_queue<RetryEntry, std::vector<RetryEntry>, std::greater<>> retries;
@@ -1990,8 +1991,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 ++exactRecipePins[key];
             } else if (const auto found = exactRecipePins.find(key);
                 found != exactRecipePins.end()) {
-                if (found->second <= 1) exactRecipePins.erase(found);
-                else --found->second;
+                if (found->second <= 1) {
+                    exactRecipePins.erase(found);
+                    // Pin transitions are ownership transitions. Reconsider
+                    // the immutable version now; any remaining cursor, waiter,
+                    // or external lease will keep it alive.
+                    reclaimQueue.push(key);
+                } else --found->second;
             }
         }
     }
@@ -2031,6 +2037,14 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 			retentionTrace->Config().includeRetentionEvents &&
 			retentionTrace->Config().detail == AsyncStateGraphTraceDetail::FullDependencies;
 		std::uint64_t reclaimedInBatch = 0;
+		static const bool traceGpuLifetime = [] {
+			char* value = nullptr;
+			size_t length = 0;
+			const bool enabled = _dupenv_s(&value, &length, "SARP_GPU_LIFETIME_TRACE") == 0 &&
+				value && value[0] && value[0] != '0';
+			std::free(value);
+			return enabled;
+		}();
 		StoredVersionKey candidate;
 		for (std::size_t examined = 0;
 			examined < maxCandidatesPerDrain && reclaimQueue.try_pop(candidate); ++examined) {
@@ -2044,35 +2058,56 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				continue;
 			}
 			const auto lease = versionLeases.find(candidate);
-			bool referenced = HasExactDependent(candidate) ||
-				(lease != versionLeases.end() && !lease->second.expired());
+			const bool exactPinned = HasExactDependent(candidate);
+			const bool externallyLeased = lease != versionLeases.end() && !lease->second.expired();
+			bool waiterReferenced = false;
+			bool cursorReferenced = false;
+			ArtifactKey retainingConsumer{};
+			bool referenced = exactPinned || externallyLeased;
 			if (const auto dependents = waiters.find(candidate.address);
 				!referenced && dependents != waiters.end()) {
 				for (const auto& dependentKey : dependents->second) {
 					const auto dependent = nodes.find(dependentKey);
 					if (dependent == nodes.end()) continue;
 					const auto& node = dependent->second;
-					referenced = RecipeReferences(candidate, node.requirements) ||
+					waiterReferenced = RecipeReferences(candidate, node.requirements) ||
 						RecipeReferences(candidate, node.requestedRequirements) ||
 						std::ranges::any_of(node.successors, [&](const RequestedVersion& successor) {
 							return RecipeReferences(candidate, successor.requirements);
 						});
+					referenced = waiterReferenced;
+					if (waiterReferenced) retainingConsumer = node.key;
 					if (referenced) break;
 				}
 			}
 			if (const auto current = nodes.find(candidate.address); current != nodes.end()) {
 				const auto& node = current->second;
-				referenced = referenced ||
-					(node.desiredRevision == candidate.revision &&
+				cursorReferenced = node.desired &&
+					((node.desiredRevision == candidate.revision &&
 					 node.versionGeneration == candidate.generation) ||
 					(node.producedRevision == candidate.revision &&
 					 node.versionGeneration == candidate.generation) ||
 					std::ranges::any_of(node.successors, [&](const RequestedVersion& successor) {
 						return successor.revision == candidate.revision &&
 							successor.generation == candidate.generation;
-					});
+					}));
+				referenced = referenced || cursorReferenced;
 			}
-			if (referenced) continue;
+			if (referenced) {
+				if (traceGpuLifetime && candidate.address.kind == ArtifactKind::BufferVersion) {
+					spdlog::info("GpuLifetime graph_retain: address=({},{}) revision={} generation={} exact={} lease={} waiter={} cursor={} consumer=({},{},{})",
+						candidate.address.primaryID, candidate.address.variantID, candidate.revision,
+						candidate.generation, exactPinned, externallyLeased, waiterReferenced,
+						cursorReferenced, static_cast<unsigned>(retainingConsumer.kind),
+						retainingConsumer.primaryID, retainingConsumer.variantID);
+				}
+				continue;
+			}
+			if (traceGpuLifetime && candidate.address.kind == ArtifactKind::BufferVersion) {
+				spdlog::info("GpuLifetime graph_reclaim: address=({},{}) revision={} generation={}",
+					candidate.address.primaryID, candidate.address.variantID,
+					candidate.revision, candidate.generation);
+			}
 			const auto reclaimed = candidate;
 			pendingRetirement.push_back(std::move(version->second));
 			version = versions.erase(version);
@@ -2632,6 +2667,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
     bool PromoteSuccessor(Node& node) {
         if (node.successors.empty() || node.buildInFlight) return false;
+        const StoredVersionKey previousVersion{
+            node.key, node.producedRevision, node.versionGeneration };
         StoreVersion(node);
         // Submission is a publication/scheduling milestone, not an ownership
         // lock on the logical address.  Once a version carries its immutable
@@ -2670,6 +2707,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         node.retryAt.reset();
         node.generation = successor.generation;
         InstallWaiterEdges(node);
+		// StoreVersion necessarily observed the old version while it was still
+		// the address cursor. Queue it after the cursor transition so the archive
+		// gets a chance to retire immediately.
+		if (previousVersion.revision != 0) reclaimQueue.push(previousVersion);
         SetState(node, ArtifactReadiness::Missing);
         if (const auto cycle = DetectCycle(node); !cycle.empty()) FailCycle(cycle);
         else QueueNode(node);
@@ -4273,6 +4314,8 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             return result;
         }
 
+        const Impl::StoredVersionKey previousVersion{
+            node.key, node.producedRevision, node.versionGeneration };
         m_impl->StoreVersion(node);
         traceAcceptedRequest();
         recordRequestPhase("store_and_trace_request");
@@ -4317,6 +4360,8 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
         node.waitingGpuSubmissions.reset();
 		recordRequestPhase("reset_gpu_state");
         node.retryAt.reset();
+		if (previousVersion.revision != 0)
+			m_impl->reclaimQueue.push(previousVersion);
         m_impl->SetState(node, ArtifactReadiness::Missing);
         recordRequestPhase("reset_version_state");
         m_impl->InstallWaiterEdges(node, std::move(preparedState->waiterKeys));
@@ -4412,6 +4457,11 @@ void AsyncStateGraph::Cancel(ArtifactKey key) {
         m_impl->RemoveWaiterEdges(found->second);
         ++found->second.generation;
 		m_impl->SetDesired(found->second, false);
+		if (const auto archived = m_impl->versionsByAddress.find(key);
+			archived != m_impl->versionsByAddress.end()) {
+			for (const auto& [_, version] : archived->second)
+				m_impl->reclaimQueue.push(version);
+		}
         m_impl->ClearSuccessors(found->second);
         found->second.retryAt.reset();
         if ((found->second.state == ArtifactReadiness::CpuReady ||

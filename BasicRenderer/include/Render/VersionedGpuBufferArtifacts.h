@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "Render/AsyncStateGraph.h"
 #include "Render/PublishedRendererState.h"
@@ -69,6 +70,10 @@ public:
         bool unorderedAccess, bool indirectArguments, std::string_view debugName,
         bool& expanded);
     void Retire(std::uint64_t backingGeneration) noexcept;
+	// Called by the final semantic version owner. Retirement is completed from
+	// frame-retirement notifications, after the version member releases its
+	// backing lease and the GPU safety window has elapsed.
+	void ReleaseVersion(std::uint64_t backingGeneration) noexcept;
     void AcknowledgePublished(std::uint64_t backingGeneration,
         std::uint32_t framesInFlight) noexcept;
     // Registers a one-shot wake for the next frame-safe retirement boundary.
@@ -84,6 +89,7 @@ private:
     std::uint64_t m_nextGeneration = 1;
     std::uint64_t m_activePublishedGeneration = 0;
     std::uint32_t m_framesInFlight = 3;
+	std::unordered_set<std::uint64_t> m_releasedGenerations;
 };
 
 // Called only after a renderer frame slot's fence has completed and its

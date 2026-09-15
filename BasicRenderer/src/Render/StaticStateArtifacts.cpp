@@ -137,7 +137,11 @@ ArtifactBuildResult BuildStaticTransaction(const ArtifactBuildContext& context) 
     transaction->drawRecordCount = input->drawRecordCount;
     transaction->activeEntryCount = input->activeEntryCount;
     transaction->placementCount = input->placementCount;
-    transaction->dependencyClosure = context.dependencies;
+    // Dependencies are build-time inputs. The page copies the immutable group
+    // records (including their explicit host ownership) and never consults the
+    // transaction's dependency snapshots again. Retaining this closure here
+    // kept every exact template/material/buffer publication alive through the
+    // page history after the graph dependency edge had retired.
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<PublishedStaticTransaction>(std::move(transaction)));
 }
@@ -310,7 +314,9 @@ ArtifactBuildResult BuildStaticTemplateBatch(const ArtifactBuildContext& context
     published->sourceFingerprint = input->sourceFingerprint;
     published->batchGeneration = context.generation;
     published->templateKeys = std::move(keys);
-    published->dependencyClosure = context.dependencies;
+    // Selection artifacts retain the finalized refs below. The exact material
+    // and texture snapshots are needed only until reservation acceptance and
+    // are already owned by the build context during that interval.
     auto result = ArtifactBuildResult::Ready(
         ArtifactPayload::Make<PublishedStaticTemplateBatch>(published));
     const auto reservation = input->reservation;

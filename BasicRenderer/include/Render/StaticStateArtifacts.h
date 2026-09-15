@@ -48,7 +48,6 @@ struct PublishedStaticTransaction {
     std::uint64_t drawRecordCount = 0;
     std::uint64_t activeEntryCount = 0;
     std::uint64_t placementCount = 0;
-    std::vector<ArtifactSnapshot> dependencyClosure;
 };
 
 struct StaticSceneGroupOwner {
@@ -186,7 +185,6 @@ struct PublishedStaticTemplateBatch {
     std::uint64_t batchGeneration = 0;
     std::vector<std::uint64_t> templateKeys;
     std::vector<ObjectManager::StaticMeshTemplateRef> templateRefs;
-    std::vector<ArtifactSnapshot> dependencyClosure;
 };
 
 class StaticTemplateBatchReservation {
