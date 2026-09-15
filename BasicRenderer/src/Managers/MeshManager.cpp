@@ -3833,14 +3833,8 @@ std::vector<ResourceIdentifier> MeshManager::GetSupportedResolverKeys() {
 void MeshManager::AcknowledgePublishedBufferState(
 	const std::shared_ptr<const br::render::PublishedRendererState>& published) {
 	if (!published) return;
-	const auto dependency = std::ranges::find_if(published->geometry.dependencyClosure,
-		[](const br::render::ArtifactSnapshot& snapshot) {
-			return snapshot.key.kind == br::render::ArtifactKind::GeometryBufferState;
-		});
-	if (dependency == published->geometry.dependencyClosure.end()) return;
-	const auto root = dependency->payload.Get<br::render::RendererStateFragmentArtifact>();
-	const auto state = root
-		? root->fragment.payload.Get<br::render::PublishedGeometryBufferState>() : nullptr;
+	const auto state = published->geometry.selectedState
+		.Get<br::render::PublishedGeometryBufferState>();
 	if (!state || state->versions.size() != m_graphBufferBindings.size()) return;
 	for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
 		const auto& version = state->versions[i];

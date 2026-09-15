@@ -3343,22 +3343,27 @@ void Renderer::Update(float elapsedSeconds) {
                     m_rendererStateRequests->RefreshPublication();
                 }
                 if (commit.committed && commit.state && m_asyncStateGraph) {
-                    std::array<br::render::ArtifactVersionID,
-                        br::render::kPublishedFragmentCount> publishedRoots{};
-                    std::size_t publishedRootCount = 0;
+                    auto publishedVersions = std::make_shared<
+                        std::vector<br::render::ArtifactVersionID>>();
                     for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
-                        const auto root = commit.state->Fragment(
-                            static_cast<br::render::PublishedFragmentKind>(index)).publicationRoot;
-                        if (root) publishedRoots[publishedRootCount++] = root;
+                        const auto& fragment = commit.state->Fragment(
+                            static_cast<br::render::PublishedFragmentKind>(index));
+                        if (fragment.publicationBundle) {
+                            for (const auto& version : fragment.publicationBundle->versions) {
+                                if (version && !std::ranges::contains(*publishedVersions, version))
+                                    publishedVersions->push_back(version);
+                            }
+                        } else if (fragment.publicationRoot) {
+                            publishedVersions->push_back(fragment.publicationRoot);
+                        }
                     }
                     const bool acknowledgementSubmitted = TaskSchedulerManager::GetInstance().Submit(
                         m_rendererStateCommitScope, TaskLane::FrameCritical,
                         TaskDomain::GraphPublication, "RendererStatePublisher::MarkPublished",
-                        [stateGraph = m_asyncStateGraph.get(), publishedRoots,
-                            publishedRootCount](const br::TaskContext& context) {
+                        [stateGraph = m_asyncStateGraph.get(), publishedVersions](
+                            const br::TaskContext& context) {
                             if (!context.StopRequested() && stateGraph) {
-                                stateGraph->MarkPublished(
-                                    std::span(publishedRoots).first(publishedRootCount));
+                                stateGraph->MarkPublished(*publishedVersions);
                             }
                         });
                     if (!acknowledgementSubmitted) {

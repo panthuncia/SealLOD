@@ -7,7 +7,6 @@
 #include <BasicTelemetry/Telemetry.h>
 
 #include <algorithm>
-#include <spdlog/spdlog.h>
 #include <stdexcept>
 
 namespace br::render {
@@ -130,19 +129,14 @@ void RegisterMaterialUsageBatchProducer(AsyncStateGraph& graph) {
                     if (!binding || binding.revision < expected.bindingRevision ||
                         binding.payload->imageDescriptorIndex != expected.imageDescriptorIndex ||
                         binding.payload->samplerDescriptorIndex != expected.samplerDescriptorIndex) {
-                        spdlog::error(
-                            "Material usage closure mismatch material={} texture={} "
-                            "expectedRevision={} actualRevision={} expectedImage={} actualImage={} "
-                            "expectedSampler={} actualSampler={} dependencyPresent={}",
-                            entry.materialID, expected.streamingTextureID,
-                            expected.bindingRevision, binding ? binding.revision : 0u,
-                            expected.imageDescriptorIndex,
-                            binding ? binding.payload->imageDescriptorIndex : UINT32_MAX,
-                            expected.samplerDescriptorIndex,
-                            binding ? binding.payload->samplerDescriptorIndex : UINT32_MAX,
-                            static_cast<bool>(binding));
-                        return ArtifactBuildResult::Failure(
-                            "material usage texture-binding closure mismatch");
+                        // LatestAtLeast may legitimately select a texture successor
+                        // published after this immutable material row was captured. Its
+                        // descriptor indices then differ even though neither asset has
+                        // failed. Cancel this stale capture so the owner can roll back its
+                        // reservation and recapture against the successor binding.
+                        basic_telemetry::AddCounter(
+                            "SARP.Material.UsageBatchStaleTextureClosure");
+                        return ArtifactBuildResult::Cancelled();
                     }
                 }
             }

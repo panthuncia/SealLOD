@@ -7,6 +7,8 @@
 
 #include <BasicTelemetry/Telemetry.h>
 
+#include "Render/StaticStateArtifacts.h"
+
 namespace br::render {
 
 RendererStateRequestService::RendererStateRequestService(
@@ -276,8 +278,10 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                 const auto& selected = candidate.Fragment(root->kind);
                 if (selected.publicationRoot != dependency.Version()) return false;
             }
-            for (const auto& [dependencyKind, version] : fragment.publicationDependencies) {
-                if (candidate.Fragment(dependencyKind).publicationRoot != version) return false;
+            for (const auto& dependency : fragment.publicationDependencies) {
+                if (dependency.publishRoot &&
+                    candidate.Fragment(dependency.fragmentKind).publicationRoot !=
+                        dependency.artifact) return false;
             }
         }
         return true;
@@ -354,11 +358,18 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             auto node = std::make_shared<PublicationBundle>();
             node->root = snapshot.Version();
             node->versions.push_back(snapshot.Version());
-            node->leases.Add(snapshot.lease);
             if (snapshot.gpuSubmissions) node->gpuSubmissions.push_back(snapshot.gpuSubmissions);
             nodes.emplace(snapshot.Version(), node);
             const auto fragment = snapshot.payload.Get<RendererStateFragmentArtifact>();
-            if (!fragment) return node;
+            if (!fragment) {
+                if (const auto page = snapshot.payload.Get<PublishedStaticScenePage>()) {
+                    for (const auto& version : page->publicationDependencies) {
+                        if (version && !std::ranges::contains(node->versions, version))
+                            node->versions.push_back(version);
+                    }
+                }
+                return node;
+            }
             node->resourceHolds.insert(node->resourceHolds.end(),
                 fragment->fragment.resourceHolds.begin(),
                 fragment->fragment.resourceHolds.end());
@@ -366,6 +377,16 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                 auto parent = self(self, dependency);
                 if (!parent) return {};
                 node->parents.push_back(std::move(parent));
+            }
+            for (const auto& parent : node->parents) {
+                for (const auto& version : parent->versions) {
+                    if (!std::ranges::contains(node->versions, version))
+                        node->versions.push_back(version);
+                }
+            }
+            if (const auto scene = fragment->fragment.payload.Get<PublishedStaticSceneState>();
+                scene && scene->ownership) {
+                node->sceneOwnershipHolds.push_back(scene->ownership);
             }
             // Each node stores the submissions reachable from its own root.
             // Successor manifests can therefore reuse the immutable node
@@ -488,15 +509,19 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         auto fragment = artifact->fragment;
         fragment.publicationRoot = selected[index]->Version();
         fragment.publicationBundle = makeBundle(*selected[index]);
-        if (kind == PublishedFragmentKind::IndirectWorkloads) {
-            for (const auto& dependency : fragment.dependencyClosure) {
-                const auto root = dependency.payload.Get<RendererStateFragmentArtifact>();
-                if (root && root->publishRoot) {
-                    fragment.publicationDependencies.emplace_back(root->kind, dependency.Version());
-                }
+        for (const auto& dependency : fragment.dependencyClosure) {
+            const auto dependencyRoot = dependency.payload.Get<RendererStateFragmentArtifact>();
+            const auto requiredReadiness = dependency.gpuSubmissions
+                ? ArtifactReadiness::UploadSubmitted : ArtifactReadiness::CpuReady;
+            fragment.publicationDependencies.push_back({ dependency.Version(),
+                dependencyRoot ? dependencyRoot->kind : PublishedFragmentKind::Count,
+                dependencyRoot && dependencyRoot->publishRoot, requiredReadiness });
+            if (kind == PublishedFragmentKind::Geometry &&
+                dependency.key.kind == ArtifactKind::GeometryBufferState && dependencyRoot) {
+                fragment.selectedState = dependencyRoot->fragment.payload;
             }
-            fragment.dependencyClosure.clear();
         }
+        fragment.dependencyClosure.clear();
         patch->fragments[index] = std::move(fragment);
         selectedMask |= PublishedFragmentMask(kind);
         patch->catalogOwnerMask |= artifact->catalogOwnerMask != 0
@@ -530,8 +555,9 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                     return root && root->publishRoot &&
                         (selectedMask & PublishedFragmentMask(root->kind)) != 0;
                 }) || std::ranges::any_of(fragment.publicationDependencies,
-                    [&](const auto& dependency) {
-                        return (selectedMask & PublishedFragmentMask(dependency.first)) != 0;
+                    [&](const PublishedDependencyRef& dependency) {
+                        return dependency.publishRoot &&
+                            (selectedMask & PublishedFragmentMask(dependency.fragmentKind)) != 0;
                     });
             if (observesReplacement) {
                 patch->preconditions.push_back({ kind, fragment.publicationRoot });

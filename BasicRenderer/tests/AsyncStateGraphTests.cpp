@@ -1284,6 +1284,9 @@ int main() {
     const auto staticPublished = staticRoot->fragment.payload.Get<PublishedStaticSceneState>();
     Check(staticPublished && staticPublished->ContainsGroup(10001) &&
         staticPublished->ContainsGroup(10005) && !staticPublished->ContainsGroup(99999));
+    Check(staticPublished->ownership && staticPublished->ownership->groups.size() == 5);
+    Check(std::ranges::all_of(staticPublished->pages,
+        [](const auto& page) { return !page; }));
     const auto* ownedStaticGroup = staticPublished->FindGroup(10001);
     Check(ownedStaticGroup && ownedStaticGroup->ownership == staticOwnership);
     Check(staticPublished->groupCount == 5 && staticPublished->drawRecordCount == 24 &&
@@ -1372,6 +1375,9 @@ int main() {
     Check(supersededPublished && supersededPublished->ContainsGroup(10001) &&
         supersededPublished->ContainsGroup(10002) &&
         !supersededPublished->ContainsGroup(10003));
+    Check(supersededPublished->ownership &&
+        supersededPublished->FindGroup(10002)->ownership ==
+            staticPublished->FindGroup(10002)->ownership);
 
     // The authoritative renderer path adds one coherent resource closure at
     // the scene root. Historical transactions stay metadata-only, so replacing
@@ -1394,13 +1400,19 @@ int main() {
     registerFragmentProducer(ArtifactKind::DrawRecordPage, PublishedFragmentKind::DrawRecords);
     registerFragmentProducer(ArtifactKind::IndirectWorkload,
         PublishedFragmentKind::IndirectWorkloads);
+    registerFragmentProducer(ArtifactKind::GeometryBufferState,
+        PublishedFragmentKind::Geometry);
     const ArtifactKey materialRoot{ ArtifactKind::MaterialTable, 0, 0 };
     const ArtifactKey objectRoot{ ArtifactKind::DrawRecordPage, 0, 0 };
     const ArtifactKey indirectRoot{ ArtifactKind::IndirectWorkload, 0, 0 };
+    const ArtifactKey geometryBufferRoot{ ArtifactKind::GeometryBufferState, 0, 0 };
     const auto materialRootVersion = graph.Request(materialRoot, 1, {}, Payload(1), 9101);
     const auto objectRootVersion = graph.Request(objectRoot, 1, {}, Payload(1), 9102);
     const auto indirectRootVersion = graph.Request(indirectRoot, 1, {}, Payload(1), 9103);
-    Check(materialRootVersion && objectRootVersion && indirectRootVersion);
+    const auto geometryBufferRootVersion = graph.Request(
+        geometryBufferRoot, 1, {}, Payload(1), 9104);
+    Check(materialRootVersion && objectRootVersion && indirectRootVersion &&
+        geometryBufferRootVersion);
     auto closedScene = std::make_shared<StaticSceneBuildInput>();
     closedScene->sourceFingerprint = 9003;
     closedScene->publishRoot = true;
@@ -1412,16 +1424,15 @@ int main() {
     closedRequirements.push_back(Exact(materialRootVersion.version, ArtifactReadiness::GpuReady));
     closedRequirements.push_back(Exact(objectRootVersion.version, ArtifactReadiness::GpuReady));
     closedRequirements.push_back(Exact(indirectRootVersion.version, ArtifactReadiness::GpuReady));
+    closedRequirements.push_back(Exact(
+        geometryBufferRootVersion.version, ArtifactReadiness::GpuReady));
     Check(graph.Request(staticScene, 3, std::move(closedRequirements),
         ArtifactPayload::Make<StaticSceneBuildInput>(std::move(closedScene)), 9003));
     graph.WaitIdle();
     const auto closedRoot = graph.Snapshot(staticScene)
         .payload.Get<RendererStateFragmentArtifact>();
-    Check(closedRoot && closedRoot->fragment.dependencyClosure.size() == supersededPages.refs.size());
-    Check(std::ranges::all_of(closedRoot->fragment.dependencyClosure,
-        [](const ArtifactSnapshot& dependency) {
-            return dependency.key.kind == ArtifactKind::StaticScenePage;
-        }));
+    Check(closedRoot && closedRoot->fragment.dependencyClosure.size() ==
+        supersededPages.refs.size() + 4);
 
     const ArtifactKey mismatchedTransaction{ ArtifactKind::StaticTransaction, 103, 7 };
     auto mismatchedInput = std::make_shared<StaticTransactionBuildInput>();
@@ -2048,6 +2059,7 @@ int main() {
     Check(manifestState->publicationBundle != nullptr);
     Check(manifestState->materials.publicationBundle->root ==
         manifestState->materials.publicationRoot);
+    Check(manifestState->materials.dependencyClosure.empty());
     Check(std::ranges::contains(manifestState->publicationBundle->parents,
         manifestState->materials.publicationBundle));
     Check(manifestState->publicationBundle->versions.empty());

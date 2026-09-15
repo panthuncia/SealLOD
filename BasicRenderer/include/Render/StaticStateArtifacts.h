@@ -97,6 +97,7 @@ struct PublishedStaticScenePage {
     std::vector<StaticSceneGroupOwner> groupOwners;
     std::vector<StaticTransactionGroup> groups;
     std::vector<std::uint64_t> removedGroupIDs;
+    std::vector<ArtifactVersionID> publicationDependencies;
 
     [[nodiscard]] bool ContainsGroup(std::uint64_t groupID) const noexcept;
     [[nodiscard]] const StaticSceneGroupOwner* FindOwner(std::uint64_t groupID) const noexcept;
@@ -108,6 +109,26 @@ struct PublishedStaticScenePage {
 struct StaticScenePageRef {
     std::uint32_t pageIndex = 0;
     ArtifactVersionID page;
+};
+
+struct PublishedStaticSceneOwnership {
+    struct PageIdentity {
+        std::uint32_t pageIndex = 0;
+        ArtifactVersionID artifact;
+        std::uint64_t generation = 0;
+    };
+
+    std::vector<StaticTransactionGroup> groups;
+    std::vector<PageIdentity> pages;
+    ArtifactVersionID geometryBufferVersion;
+    ArtifactVersionID objectBufferVersion;
+    ArtifactVersionID indirectWorkloadVersion;
+    ArtifactPayload selectedGeometryState;
+    std::vector<std::shared_ptr<const void>> runtimeResourceHolds;
+    std::vector<std::shared_ptr<const GpuSubmissionSet>> gpuSubmissionHolds;
+
+    [[nodiscard]] const StaticTransactionGroup* FindGroup(
+        std::uint64_t groupID) const noexcept;
 };
 
 struct StaticCoverageUnit {
@@ -254,6 +275,7 @@ struct PublishedStaticSceneState {
     std::vector<StaticCoverageRecord> coverage;
     std::vector<StaticFallbackPolicy> fallbackPolicies;
     std::shared_ptr<const PublishedStaticVisibility> visibility;
+    std::shared_ptr<const PublishedStaticSceneOwnership> ownership;
 
     [[nodiscard]] bool ContainsGroup(std::uint64_t groupID) const noexcept;
     [[nodiscard]] const StaticTransactionGroup* FindGroup(std::uint64_t groupID) const noexcept;

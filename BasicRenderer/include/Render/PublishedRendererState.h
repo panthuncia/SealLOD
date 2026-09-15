@@ -17,24 +17,15 @@ namespace org { class Resource; }
 
 namespace br::render {
 
-class ArtifactLeaseSet {
-public:
-    void Add(const ArtifactLease& lease);
-    void Merge(const ArtifactLeaseSet& other);
-    [[nodiscard]] std::size_t Size() const noexcept { return m_leases.size(); }
-private:
-    std::vector<ArtifactLease> m_leases;
-};
-
 struct PublicationBundle {
     ArtifactVersionID root;
-    // Persistent ownership DAG. Each node owns only its artifact and shares
-    // unchanged dependency nodes with successor manifests.
+    // Lightweight publication identity DAG. It never owns graph leases;
+    // resource and scene holds below are independent runtime ownership.
     std::vector<std::shared_ptr<const PublicationBundle>> parents;
     std::vector<ArtifactVersionID> versions;
     std::vector<std::shared_ptr<const GpuSubmissionSet>> gpuSubmissions;
     std::vector<std::shared_ptr<const void>> resourceHolds;
-    ArtifactLeaseSet leases;
+    std::vector<std::shared_ptr<const void>> sceneOwnershipHolds;
 };
 
 enum class PublishedResourceUsage : std::uint8_t {
@@ -44,6 +35,14 @@ enum class PublishedResourceUsage : std::uint8_t {
 enum class PublishedFragmentKind : std::uint8_t {
     Materials, TextureImages, Terrain, Geometry, GeometryResidency, DrawRecords, ActiveDrawLists, IndirectWorkloads,
     Grass, Views, Poses, Lights, Count
+};
+
+struct PublishedDependencyRef {
+    ArtifactVersionID artifact;
+    PublishedFragmentKind fragmentKind = PublishedFragmentKind::Count;
+    bool publishRoot = false;
+    ArtifactReadiness requiredReadiness = ArtifactReadiness::CpuReady;
+    auto operator<=>(const PublishedDependencyRef&) const = default;
 };
 
 inline constexpr std::size_t kPublishedFragmentCount =
@@ -115,13 +114,15 @@ struct PublishedResourceCatalog {
 
 struct PublishedStateFragment {
     std::uint64_t revision = 0;
-    // The graph artifact whose payload became this manifest fragment. The
-    // persistent publication bundle retains its dependency DAG and leases;
-    // frame commit therefore acknowledges only this root.
+    // The graph artifact whose payload became this manifest fragment.
     ArtifactVersionID publicationRoot{};
     std::shared_ptr<const PublicationBundle> publicationBundle;
-    std::vector<std::pair<PublishedFragmentKind, ArtifactVersionID>> publicationDependencies;
+    std::vector<PublishedDependencyRef> publicationDependencies;
     ArtifactPayload payload;
+    // Direct manager state selected by a non-root dependency.
+    ArtifactPayload selectedState;
+    // Producer-only build closure. Manifest acceptance converts it to the
+    // lightweight refs above and releases these snapshots.
     std::vector<ArtifactSnapshot> dependencyClosure;
     std::vector<std::shared_ptr<const void>> resourceHolds;
 };

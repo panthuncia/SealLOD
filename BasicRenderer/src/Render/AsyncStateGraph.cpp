@@ -4601,6 +4601,7 @@ void AsyncStateGraph::MarkPublished(ArtifactKey key, std::uint64_t revision) {
 				archived->second.readiness = ArtifactReadiness::Published;
 				publishedVersions.push_back(entry->second);
 			}
+			m_impl->reclaimQueue.push(entry->second);
 		}
 	}
     const auto found = m_impl->nodes.find(key);
@@ -4643,6 +4644,7 @@ void AsyncStateGraph::MarkPublished(std::span<const ArtifactVersionID> versions)
 				archived->second.readiness = ArtifactReadiness::Published;
 				m_impl->publishedSignals.push({ version.address, version.revision, version.generation });
 			}
+            m_impl->reclaimQueue.push({ version.address, version.revision, version.generation });
         }
         const auto found = m_impl->nodes.find(version.address);
         if (found == m_impl->nodes.end() ||

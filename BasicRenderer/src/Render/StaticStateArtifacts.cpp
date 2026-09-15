@@ -100,8 +100,16 @@ bool PublishedStaticSceneState::ContainsGroup(std::uint64_t groupID) const noexc
 
 const StaticTransactionGroup* PublishedStaticSceneState::FindGroup(
     std::uint64_t groupID) const noexcept {
+    if (ownership) return ownership->FindGroup(groupID);
     const auto& page = pages[StaticScenePageIndex(groupID)];
     return page ? page->FindGroup(groupID) : nullptr;
+}
+
+const StaticTransactionGroup* PublishedStaticSceneOwnership::FindGroup(
+    std::uint64_t groupID) const noexcept {
+    const auto it = std::ranges::lower_bound(groups, groupID, {},
+        &StaticTransactionGroup::groupID);
+    return it != groups.end() && it->groupID == groupID ? std::addressof(*it) : nullptr;
 }
 
 namespace {
@@ -251,6 +259,13 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
         page->groups = std::move(effectiveGroups);
         page->removedGroupIDs.clear();
     }
+    std::vector<StaticSceneGroupOwner> effectiveOwners;
+    page->MaterializeOwners(effectiveOwners);
+    page->publicationDependencies.reserve(effectiveOwners.size());
+    for (const auto& owner : effectiveOwners) {
+        if (!std::ranges::contains(page->publicationDependencies, owner.transaction))
+            page->publicationDependencies.push_back(owner.transaction);
+    }
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<PublishedStaticScenePage>(std::move(page)));
 }
@@ -357,7 +372,9 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     bool hasObjectBufferRoot = false;
     bool hasIndirectRoot = false;
     bool hasGeometryBufferRoot = false;
-	std::shared_ptr<const RendererStateFragmentArtifact> geometryBufferRoot;
+    std::shared_ptr<const RendererStateFragmentArtifact> geometryBufferRoot;
+    ArtifactVersionID geometryBufferVersion;
+    ArtifactVersionID indirectWorkloadVersion;
     std::shared_ptr<const PublishedObjectBufferState> objectBufferState;
     std::shared_ptr<const PublishedIndirectState> indirectState;
     ArtifactVersionID objectBufferVersion;
@@ -383,7 +400,10 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
 		case ArtifactKind::GeometryBufferState:
 			hasGeometryBufferRoot = !hasGeometryBufferRoot &&
 				root->kind == PublishedFragmentKind::Geometry;
-			if (hasGeometryBufferRoot) geometryBufferRoot = root;
+			if (hasGeometryBufferRoot) {
+                geometryBufferRoot = root;
+                geometryBufferVersion = dependency.Version();
+            }
 			break;
         case ArtifactKind::MaterialTable:
             hasMaterialRoot = !hasMaterialRoot &&
@@ -402,6 +422,7 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
                 root->kind == PublishedFragmentKind::IndirectWorkloads;
             if (hasIndirectRoot) {
                 indirectState = root->fragment.payload.Get<PublishedIndirectState>();
+                indirectWorkloadVersion = dependency.Version();
             }
             break;
         default:
@@ -464,6 +485,31 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     scene->placementSetDigest = StaticScenePlacementDigest(scene->placementSetDigest,
         scene->publishedPlacementCount, scene->groupCount);
 
+    auto ownership = std::make_shared<PublishedStaticSceneOwnership>();
+    ownership->geometryBufferVersion = geometryBufferVersion;
+    ownership->objectBufferVersion = objectBufferVersion;
+    ownership->indirectWorkloadVersion = indirectWorkloadVersion;
+    if (geometryBufferRoot) {
+        ownership->selectedGeometryState = geometryBufferRoot->fragment.payload;
+        ownership->runtimeResourceHolds = geometryBufferRoot->fragment.resourceHolds;
+    }
+    for (const auto& pageRef : input->pages) {
+        const auto& page = scene->pages[pageRef.pageIndex];
+        if (!page) continue;
+        ownership->pages.push_back({ pageRef.pageIndex, pageRef.page,
+            page->pageGeneration });
+        std::vector<StaticTransactionGroup> groups;
+        page->MaterializeGroups(groups);
+        ownership->groups.insert(ownership->groups.end(),
+            std::make_move_iterator(groups.begin()), std::make_move_iterator(groups.end()));
+    }
+    std::ranges::sort(ownership->groups, {}, &StaticTransactionGroup::groupID);
+    scene->ownership = ownership;
+    // The committed scene no longer owns page payloads or their bounded base
+    // chains. Membership and host ownership have been materialized above; page
+    // artifacts are now free to retire when no build or exact handle needs them.
+    scene->pages.fill({});
+
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::Geometry;
     root->publishRoot = input->publishRoot;
@@ -474,6 +520,7 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
 		root->fragment.resourceHolds.insert(root->fragment.resourceHolds.end(),
 			geometryBufferRoot->fragment.resourceHolds.begin(),
 			geometryBufferRoot->fragment.resourceHolds.end());
+		root->fragment.selectedState = geometryBufferRoot->fragment.payload;
 	}
     // The scene root is the atomic publication boundary. Retain every resolved
     // resource dependency—not merely the membership pages—so manifest solving

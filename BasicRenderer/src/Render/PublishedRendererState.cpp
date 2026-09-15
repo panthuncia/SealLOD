@@ -12,18 +12,6 @@
 
 namespace br::render {
 
-void ArtifactLeaseSet::Add(const ArtifactLease& lease) {
-    if (!lease) return;
-    const auto identity = lease.Token().get();
-    if (std::ranges::any_of(m_leases, [identity](const ArtifactLease& value) {
-        return value.Token().get() == identity;
-    })) return;
-    m_leases.push_back(lease);
-}
-
-void ArtifactLeaseSet::Merge(const ArtifactLeaseSet& other) {
-    for (const auto& lease : other.m_leases) Add(lease);
-}
 namespace {
 std::mutex g_processSourceMutex;
 std::weak_ptr<PublishedStateSource> g_processSource;
