@@ -540,8 +540,14 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
     }
     auto manifest = std::make_shared<FrameManifestPayload>();
     manifest->baseEpoch = input->baseEpoch;
-    manifest->state = MaterializePublishedState(input->base, *patch, input->baseEpoch + 1u);
-    if (!manifest->state) return ArtifactBuildResult::Cancelled();
+    // Publish the fragment patch, not the state materialized against the base
+    // captured when this worker build started.  Streaming continuously advances
+    // independent fragment slots; a whole-state candidate therefore becomes
+    // stale before Renderer::Update can commit it and strands otherwise-ready
+    // roots at GpuReady.  The patch carries the exact preconditions needed by
+    // fragments that observe a replaced slot and can safely rebase across
+    // unrelated publication epochs in RendererStatePublisher::Commit.
+    manifest->patch = std::move(patch);
     return ArtifactBuildResult::Ready(ArtifactPayload::Make<FrameManifestPayload>(std::move(manifest)));
 }
 

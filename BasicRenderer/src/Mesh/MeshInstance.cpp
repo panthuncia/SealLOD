@@ -144,6 +144,19 @@ void MeshInstance::SetPerMeshBufferIndex(uint32_t index) {
 		m_pCurrentMeshManager->UpdatePerMeshInstanceBuffer(m_perMeshInstanceBufferView, m_perMeshInstanceBufferData);
 	}
 }
+void MeshInstance::SetExpectedClodMeshMetadataIndex(uint32_t index) {
+	m_perMeshInstanceBufferData.expectedClodMeshMetadataIndex = index;
+	if (m_pCurrentMeshManager && m_perMeshInstanceBufferView) {
+		m_pCurrentMeshManager->UpdatePerMeshInstanceBuffer(m_perMeshInstanceBufferView, m_perMeshInstanceBufferData);
+	}
+}
+void MeshInstance::SetExpectedClodMeshIdentity(uint64_t identity) {
+	m_perMeshInstanceBufferData.expectedClodMeshIdentityLo = static_cast<uint32_t>(identity);
+	m_perMeshInstanceBufferData.expectedClodMeshIdentityHi = static_cast<uint32_t>(identity >> 32u);
+	if (m_pCurrentMeshManager && m_perMeshInstanceBufferView) {
+		m_pCurrentMeshManager->UpdatePerMeshInstanceBuffer(m_perMeshInstanceBufferView, m_perMeshInstanceBufferData);
+	}
+}
 
 void MeshInstance::SetSkinningInstanceSlot(uint32_t slot) {
 	m_perMeshInstanceBufferData.skinningInstanceSlot = slot;

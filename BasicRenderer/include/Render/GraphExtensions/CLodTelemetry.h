@@ -426,10 +426,15 @@ struct CLodSourceGroupMismatchDetail {
     uint32_t viewId = 0xFFFFFFFFu;
     uint32_t bucketMeshletIndex = 0u;
     uint32_t bucketCount = 0u;
-    uint32_t pad0 = 0u;
+    uint32_t actualOwnerMeshMetadataIndex = 0xFFFFFFFFu;
+    uint32_t expectedTemplateMeshMetadataIndex = 0xFFFFFFFFu;
+    uint32_t expectedMeshIdentityLo = 0u;
+    uint32_t expectedMeshIdentityHi = 0u;
+    uint32_t actualMeshIdentityLo = 0u;
+    uint32_t actualMeshIdentityHi = 0u;
 };
 
-static_assert(sizeof(CLodSourceGroupMismatchDetail) == 88u, "CLodSourceGroupMismatchDetail size must match HLSL");
+static_assert(sizeof(CLodSourceGroupMismatchDetail) == 108u, "CLodSourceGroupMismatchDetail size must match HLSL");
 
 inline constexpr uint32_t CLodDirectionalShadowDebugMaxClipmaps = 16u;
 

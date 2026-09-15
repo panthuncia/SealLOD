@@ -1131,6 +1131,71 @@ int main() {
     Check(requirementConflict.status == ArtifactRequestStatus::ConflictingRevision);
     Check(graph.Snapshot(fingerprinted).payload.Get<Value>()->value == 1);
 
+    // Template batches commit exactly once on the graph-publication lane and
+    // publish refs in the same deterministic order as their deduplicated keys.
+    std::atomic_uint32_t templateBatchCommits{ 0 };
+    auto templateBatchReservation = std::make_shared<StaticTemplateBatchReservation>(
+        [&](bool commit, PublishedStaticTemplateBatch& published) {
+            if (!commit) return true;
+            templateBatchCommits.fetch_add(1, std::memory_order_relaxed);
+            for (const auto key : published.templateKeys) {
+                ObjectManager::StaticMeshTemplateRef ref;
+                ref.meshTemplateIndex = static_cast<std::uint32_t>(key);
+                published.templateRefs.push_back(std::move(ref));
+            }
+            return true;
+        });
+    auto templateBatchInput = std::make_shared<StaticTemplateBatchBuildInput>();
+    templateBatchInput->sourceFingerprint = 0xb471u;
+    templateBatchInput->templateKeys = { 7, 3, 11 };
+    templateBatchInput->reservation = templateBatchReservation;
+    const ArtifactKey templateBatchKey{ ArtifactKind::StaticTemplateBatch, 1, 0 };
+    Check(graph.Request(templateBatchKey, 1, {},
+        ArtifactPayload::Make<StaticTemplateBatchBuildInput>(std::move(templateBatchInput)),
+        0xb471u));
+    graph.WaitIdle();
+    const auto templateBatch = graph.Snapshot(templateBatchKey)
+        .payload.Get<PublishedStaticTemplateBatch>();
+    Check(templateBatch && templateBatchCommits.load(std::memory_order_relaxed) == 1);
+    Check(templateBatch && templateBatch->templateKeys == std::vector<std::uint64_t>({ 3, 7, 11 }));
+    Check(templateBatch && templateBatch->templateRefs.size() == 3 &&
+        templateBatch->templateRefs[1].meshTemplateIndex == 7);
+
+    // Visibility is derived from exact generation/seal/admission coverage. An
+    // incomplete cell keeps the fallback visible; a complete successor closes
+    // the cut and hides it in the same serialized acceptance.
+    std::vector<StaticVisibilityDecision> acceptedVisibility;
+    const auto makeVisibilityReservation = [&] {
+        return std::make_shared<StaticVisibilityReservation>(
+            [&](bool commit, std::span<const StaticVisibilityDecision> decisions,
+                PublishedStaticVisibility&) {
+                if (commit) acceptedVisibility.assign(decisions.begin(), decisions.end());
+                return true;
+            });
+    };
+    const StaticCoverageUnit coverageUnit{ 0x3cu, 4, -2 };
+    const ArtifactKey visibilityKey{ ArtifactKind::StaticVisibility, 1, 0 };
+    auto incompleteVisibility = std::make_shared<StaticVisibilityBuildInput>();
+    incompleteVisibility->sourceFingerprint = 0x5151u;
+    incompleteVisibility->coverage = { { coverageUnit, 9, 2, 1, true } };
+    incompleteVisibility->fallbackPolicies = { { 42, 9, { coverageUnit } } };
+    incompleteVisibility->reservation = makeVisibilityReservation();
+    Check(graph.Request(visibilityKey, 1, {},
+        ArtifactPayload::Make<StaticVisibilityBuildInput>(std::move(incompleteVisibility)),
+        0x5151u));
+    graph.WaitIdle();
+    Check(acceptedVisibility.size() == 1 && acceptedVisibility.front().fallbackVisible);
+    auto completeVisibility = std::make_shared<StaticVisibilityBuildInput>();
+    completeVisibility->sourceFingerprint = 0x5152u;
+    completeVisibility->coverage = { { coverageUnit, 9, 2, 2, true } };
+    completeVisibility->fallbackPolicies = { { 42, 9, { coverageUnit } } };
+    completeVisibility->reservation = makeVisibilityReservation();
+    Check(graph.Request(visibilityKey, 2, {},
+        ArtifactPayload::Make<StaticVisibilityBuildInput>(std::move(completeVisibility)),
+        0x5152u));
+    graph.WaitIdle();
+    Check(acceptedVisibility.size() == 1 && !acceptedVisibility.front().fallbackVisible);
+
     const ArtifactKey staticTransactionA{ ArtifactKind::StaticTransaction, 101, 7 };
     const ArtifactKey staticTransactionB{ ArtifactKind::StaticTransaction, 102, 7 };
     const ArtifactKey staticScene{ ArtifactKind::StaticScene, 1, 0 };

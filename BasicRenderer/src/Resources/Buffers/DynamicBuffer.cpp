@@ -79,6 +79,19 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
         return Allocate(size, elementSize);
     }
 
+	// Versioned authoring storage has no mutable GPU backing to publish. Its
+	// logical range may therefore grow on any producer thread; the resulting
+	// capacity is materialized only by a later graph version. Handle this before
+	// the legacy off-thread deferred-backing branch, which intentionally refuses
+	// to hand out a view until a mutable replacement backing exists.
+	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) {
+		const size_t newCapacity = ComputeReserveCapacityLocked(requiredSize);
+		if (newCapacity <= m_capacity || !ExtendTrackedCapacityLocked(newCapacity)) {
+			return nullptr;
+		}
+		return Allocate(size, elementSize);
+	}
+
     if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
         const size_t previousCapacity = m_capacity;
         RequestAsyncReserveBytesLocked(requiredSize);
@@ -99,18 +112,6 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
         requiredSize,
         elementSize,
         m_capacity);
-
-	// Graph-exclusive buffers grow their logical allocation range without mutating
-	// the currently published GPU backing.  Do this before consuming the trailing
-	// free block: ExtendTrackedCapacityLocked owns the free-list update and must see
-	// the complete old range in order to preserve it.
-	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) {
-		const size_t newCapacity = ComputeReserveCapacityLocked(requiredSize);
-		if (newCapacity <= m_capacity || !ExtendTrackedCapacityLocked(newCapacity)) {
-			return nullptr;
-		}
-		return Allocate(size, elementSize);
-	}
 
 	// Absorb the last block if it is free
     size_t previousCapacity = m_capacity;

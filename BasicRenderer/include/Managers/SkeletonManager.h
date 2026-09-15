@@ -29,11 +29,15 @@ public:
 		uint32_t boneCount = 0u;
 	};
 
-    static std::unique_ptr<SkeletonManager> CreateUnique(std::shared_ptr<org::runtime::IUploadService> uploadService = {}) {
-        return std::unique_ptr<SkeletonManager>(new SkeletonManager(std::move(uploadService)));
+    static std::unique_ptr<SkeletonManager> CreateUnique(std::shared_ptr<org::runtime::IUploadService> uploadService = {},
+        uint32_t transientWindMatrixCapacity = 0) {
+        return std::unique_ptr<SkeletonManager>(new SkeletonManager(
+            std::move(uploadService), transientWindMatrixCapacity));
     }
-    static std::shared_ptr<SkeletonManager> CreateShared(std::shared_ptr<org::runtime::IUploadService> uploadService = {}) {
-        return std::shared_ptr<SkeletonManager>(new SkeletonManager(std::move(uploadService)));
+    static std::shared_ptr<SkeletonManager> CreateShared(std::shared_ptr<org::runtime::IUploadService> uploadService = {},
+        uint32_t transientWindMatrixCapacity = 0) {
+        return std::shared_ptr<SkeletonManager>(new SkeletonManager(
+            std::move(uploadService), transientWindMatrixCapacity));
     }
     ~SkeletonManager();
 
@@ -67,7 +71,8 @@ public:
     std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
 
 private:
-    explicit SkeletonManager(std::shared_ptr<org::runtime::IUploadService> uploadService);
+    explicit SkeletonManager(std::shared_ptr<org::runtime::IUploadService> uploadService,
+        uint32_t transientWindMatrixCapacity);
     org::runtime::IUploadService& UploadService() const;
 
     struct BaseRecord {

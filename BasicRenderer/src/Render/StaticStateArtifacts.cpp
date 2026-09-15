@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <map>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "Render/PublishedRendererState.h"
+#include "Render/ObjectBufferStateArtifacts.h"
+#include "Render/IndirectStateArtifacts.h"
 
 namespace br::render {
 
@@ -248,6 +251,81 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
         ArtifactPayload::Make<PublishedStaticScenePage>(std::move(page)));
 }
 
+ArtifactBuildResult BuildStaticVisibility(const ArtifactBuildContext& context) {
+    const auto input = context.input.Get<StaticVisibilityBuildInput>();
+    if (!input || !input->reservation || input->sourceFingerprint == 0) {
+        return ArtifactBuildResult::Failure("static visibility immutable input is invalid");
+    }
+    auto coverage = input->coverage;
+    std::ranges::sort(coverage, {}, &StaticCoverageRecord::unit);
+    if (std::ranges::adjacent_find(coverage, {}, &StaticCoverageRecord::unit) != coverage.end()) {
+        return ArtifactBuildResult::Failure("static visibility contains duplicate coverage units");
+    }
+    auto published = std::make_shared<PublishedStaticVisibility>();
+    published->sourceFingerprint = input->sourceFingerprint;
+    published->visibilityGeneration = context.generation;
+    published->decisions.reserve(input->fallbackPolicies.size());
+    std::unordered_set<std::uint64_t> fallbackIDs;
+    for (const auto& policy : input->fallbackPolicies) {
+        if (policy.fallbackGroupID == 0 || !fallbackIDs.insert(policy.fallbackGroupID).second) {
+            return ArtifactBuildResult::Failure("static visibility contains duplicate fallback policies");
+        }
+        bool complete = !policy.replacementUnits.empty();
+        for (const auto& unit : policy.replacementUnits) {
+            const auto record = std::ranges::lower_bound(coverage, unit, {},
+                &StaticCoverageRecord::unit);
+            if (record == coverage.end() || record->unit != unit ||
+                record->generation != policy.generation || !record->sealed ||
+                record->admittedGroupCount != record->expectedGroupCount) {
+                complete = false;
+                break;
+            }
+        }
+        published->decisions.push_back({ policy.fallbackGroupID, !complete });
+    }
+    auto result = ArtifactBuildResult::Ready(
+        ArtifactPayload::Make<PublishedStaticVisibility>(published));
+    const auto reservation = input->reservation;
+    result.acceptance = { TaskLane::Streaming, TaskDomain::GraphPublication,
+        [reservation, published](const ArtifactSnapshot&) {
+            if (!reservation->Commit(published->decisions, *published)) {
+                throw std::runtime_error("static visibility reservation commit failed");
+            }
+        } };
+    return result;
+}
+
+ArtifactBuildResult BuildStaticTemplateBatch(const ArtifactBuildContext& context) {
+    const auto input = context.input.Get<StaticTemplateBatchBuildInput>();
+    if (!input || !input->reservation || input->sourceFingerprint == 0 ||
+        input->templateKeys.empty()) {
+        return ArtifactBuildResult::Failure("static template batch immutable input is invalid");
+    }
+    auto keys = input->templateKeys;
+    std::ranges::sort(keys);
+    if (keys.front() == 0 || std::ranges::adjacent_find(keys) != keys.end()) {
+        return ArtifactBuildResult::Failure("static template batch contains duplicate keys");
+    }
+    auto published = std::make_shared<PublishedStaticTemplateBatch>();
+    published->sourceFingerprint = input->sourceFingerprint;
+    published->batchGeneration = context.generation;
+    published->templateKeys = std::move(keys);
+    published->dependencyClosure = context.dependencies;
+    auto result = ArtifactBuildResult::Ready(
+        ArtifactPayload::Make<PublishedStaticTemplateBatch>(published));
+    const auto reservation = input->reservation;
+    result.acceptance = { TaskLane::Streaming, TaskDomain::GraphPublication,
+        [reservation, published](const ArtifactSnapshot&) {
+            if (!reservation->Commit(*published)) {
+                throw std::runtime_error("static template batch reservation commit failed");
+            }
+            if (published->templateRefs.size() != published->templateKeys.size()) {
+                throw std::runtime_error("static template batch reservation returned an incomplete result");
+            }
+        } };
+    return result;
+}
+
 ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     const auto input = context.input.Get<StaticSceneBuildInput>();
     if (!input) return ArtifactBuildResult::Failure("static scene immutable input missing");
@@ -262,8 +340,9 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
         }
         expectedPages[page.pageIndex] = page.page;
     }
-    const auto expectedResourceRoots = (input->requireResourceClosure ? 3u : 0u) +
-        0u;
+    const auto expectedResourceRoots = (input->requireResourceClosure ? 4u : 0u) +
+        (input->requireGeometryBufferClosure ? 1u : 0u) +
+        (input->requireVisibilityClosure ? 1u : 0u);
     if (context.dependencies.size() != input->pages.size() + expectedResourceRoots) {
         return ArtifactBuildResult::Failure("static scene dependency closure is incomplete");
     }
@@ -271,14 +350,35 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     bool hasMaterialRoot = false;
     bool hasObjectBufferRoot = false;
     bool hasIndirectRoot = false;
+    bool hasGeometryBufferRoot = false;
+	std::shared_ptr<const RendererStateFragmentArtifact> geometryBufferRoot;
+    std::shared_ptr<const PublishedObjectBufferState> objectBufferState;
+    std::shared_ptr<const PublishedIndirectState> indirectState;
+    ArtifactVersionID objectBufferVersion;
+    std::shared_ptr<const PublishedStaticVisibility> visibility;
     for (const auto& dependency : context.dependencies) {
         if (dependency.key.kind == ArtifactKind::StaticScenePage) continue;
+        if (dependency.key.kind == ArtifactKind::StaticVisibility) {
+            if (visibility) return ArtifactBuildResult::Failure(
+                "static scene contains duplicate visibility closure");
+            visibility = dependency.payload.Get<PublishedStaticVisibility>();
+            if (!visibility) {
+                return ArtifactBuildResult::Failure(
+                    "static scene visibility closure is incomplete");
+            }
+            continue;
+        }
         const auto root = dependency.payload.Get<RendererStateFragmentArtifact>();
         if (!root) {
             return ArtifactBuildResult::Failure(
                 "static scene resource dependency is not a published fragment");
         }
         switch (dependency.key.kind) {
+		case ArtifactKind::GeometryBufferState:
+			hasGeometryBufferRoot = !hasGeometryBufferRoot &&
+				root->kind == PublishedFragmentKind::Geometry;
+			if (hasGeometryBufferRoot) geometryBufferRoot = root;
+			break;
         case ArtifactKind::MaterialTable:
             hasMaterialRoot = !hasMaterialRoot &&
                 root->kind == PublishedFragmentKind::Materials;
@@ -286,10 +386,17 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
         case ArtifactKind::DrawRecordPage:
             hasObjectBufferRoot = !hasObjectBufferRoot &&
                 root->kind == PublishedFragmentKind::DrawRecords;
+            if (hasObjectBufferRoot) {
+                objectBufferState = root->fragment.payload.Get<PublishedObjectBufferState>();
+                objectBufferVersion = dependency.Version();
+            }
             break;
         case ArtifactKind::IndirectWorkload:
             hasIndirectRoot = !hasIndirectRoot &&
                 root->kind == PublishedFragmentKind::IndirectWorkloads;
+            if (hasIndirectRoot) {
+                indirectState = root->fragment.payload.Get<PublishedIndirectState>();
+            }
             break;
         default:
             return ArtifactBuildResult::Failure(
@@ -297,9 +404,24 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
         }
     }
     if (input->requireResourceClosure &&
-        (!hasMaterialRoot || !hasObjectBufferRoot || !hasIndirectRoot)) {
+        (!hasMaterialRoot || !hasObjectBufferRoot || !hasIndirectRoot ||
+			!hasGeometryBufferRoot)) {
         return ArtifactBuildResult::Failure(
             "static scene renderer resource closure is incomplete");
+    }
+    if (input->requireGeometryBufferClosure && !hasGeometryBufferRoot) {
+        return ArtifactBuildResult::Failure(
+            "static scene geometry-buffer closure is incomplete");
+    }
+    if (input->requireVisibilityClosure && !visibility) {
+        return ArtifactBuildResult::Failure("static scene visibility closure is missing");
+    }
+    if (visibility && input->requireResourceClosure &&
+        (!objectBufferState || !indirectState ||
+            objectBufferState->coveredMutationGeneration <
+                visibility->requiredObjectMutationGeneration ||
+            indirectState->drawRecordsRoot != objectBufferVersion)) {
+        return ArtifactBuildResult::Retry(std::chrono::milliseconds(1));
     }
 
     auto scene = std::make_shared<PublishedStaticSceneState>();
@@ -308,6 +430,9 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     scene->desiredPlacementCount = input->desiredPlacementCount;
     scene->materializedPlacementCount = input->materializedPlacementCount;
     scene->retiredPlacementCount = input->retiredPlacementCount;
+    scene->coverage = input->coverage;
+    scene->fallbackPolicies = input->fallbackPolicies;
+    scene->visibility = std::move(visibility);
     for (const auto& dependency : context.dependencies) {
         if (dependency.key.kind != ArtifactKind::StaticScenePage) continue;
         const auto pageIndex = dependency.key.primaryID - 1u;
@@ -337,16 +462,20 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
     root->kind = PublishedFragmentKind::Geometry;
     root->publishRoot = input->publishRoot;
     root->fragment.revision = context.revision;
-    // Resource roots are one-time ReadyGate admission dependencies. They prove
-    // that this membership cut has a schedulable resource closure, but they do
-    // not become exact manifest coupling: materials, draw records, and indirect
-    // workloads advance independently and recombine with geometry at manifest
-    // selection. Transaction versions remain the authoritative exact closure.
-    std::ranges::copy_if(context.dependencies,
-        std::back_inserter(root->fragment.dependencyClosure),
-        [](const ArtifactSnapshot& dependency) {
-            return dependency.key.kind == ArtifactKind::StaticScenePage;
-        });
+	if (geometryBufferRoot) {
+		root->catalogEntries.insert(root->catalogEntries.end(),
+			geometryBufferRoot->catalogEntries.begin(), geometryBufferRoot->catalogEntries.end());
+		root->fragment.resourceHolds.insert(root->fragment.resourceHolds.end(),
+			geometryBufferRoot->fragment.resourceHolds.begin(),
+			geometryBufferRoot->fragment.resourceHolds.end());
+	}
+    // The scene root is the atomic publication boundary. Retain every resolved
+    // resource dependency—not merely the membership pages—so manifest solving
+    // cannot combine this geometry cut with an older/newer object, material, or
+    // indirect root. Allowing those slots to recombine independently made a
+    // successor scene briefly select replacement membership with incompatible
+    // draw records, which presented as all objects disappearing.
+    root->fragment.dependencyClosure = context.dependencies;
     root->fragment.payload = ArtifactPayload::Make<PublishedStaticSceneState>(std::move(scene));
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<RendererStateFragmentArtifact>(std::move(root)));
@@ -364,6 +493,12 @@ void RegisterStaticStateProducers(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::StaticScene, {
         TaskLane::FrameCritical, TaskDomain::GraphPublication,
         "StaticStateArtifact::BuildScene", BuildStaticScene });
+    graph.RegisterProducer(ArtifactKind::StaticVisibility, {
+        TaskLane::Streaming, TaskDomain::GraphPublication,
+        "StaticStateArtifact::BuildVisibility", BuildStaticVisibility });
+    graph.RegisterProducer(ArtifactKind::StaticTemplateBatch, {
+        TaskLane::Streaming, TaskDomain::GraphPublication,
+        "StaticStateArtifact::AcceptTemplateBatch", BuildStaticTemplateBatch });
 }
 
 } // namespace br::render

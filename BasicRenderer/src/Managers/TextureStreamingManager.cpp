@@ -997,6 +997,13 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 
 std::shared_ptr<RenderPass> TextureStreamingManager::CreateTextureStreamingFeedbackReadbackPass()
 {
+	// Diagnostic escape hatch for isolating unrelated render-graph failures. It
+	// suppresses only the feedback copy/readback; texture publication and uploads
+	// continue normally.
+	if (const char* disabled = std::getenv("SARP_DISABLE_MATERIAL_TEXTURE_STREAMING_READBACK");
+		disabled && disabled[0] != '\0' && disabled[0] != '0') {
+		return {};
+	}
 	if (!IsMaterialTextureStreamingEnabledSetting() || !m_readbackFence.IsValid() || !m_textureStreamingFeedbackBuffer) {
 		return {};
 	}

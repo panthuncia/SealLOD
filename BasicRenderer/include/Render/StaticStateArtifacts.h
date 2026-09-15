@@ -2,10 +2,14 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <span>
 #include <vector>
 
 #include "Render/AsyncStateGraph.h"
+#include "Managers/ObjectManager.h"
 
 namespace br::render {
 
@@ -107,15 +111,130 @@ struct StaticScenePageRef {
     ArtifactVersionID page;
 };
 
+struct StaticCoverageUnit {
+    std::uint64_t worldID = 0;
+    std::int32_t cellX = 0;
+    std::int32_t cellY = 0;
+    auto operator<=>(const StaticCoverageUnit&) const = default;
+};
+
+struct StaticCoverageRecord {
+    StaticCoverageUnit unit;
+    std::uint64_t generation = 0;
+    std::uint32_t expectedGroupCount = 0;
+    std::uint32_t admittedGroupCount = 0;
+    bool sealed = false;
+};
+
+struct StaticFallbackPolicy {
+    std::uint64_t fallbackGroupID = 0;
+    std::uint64_t generation = 0;
+    std::vector<StaticCoverageUnit> replacementUnits;
+};
+
+struct StaticVisibilityDecision {
+    std::uint64_t fallbackGroupID = 0;
+    bool fallbackVisible = true;
+};
+
+struct PublishedStaticVisibility {
+    std::uint64_t sourceFingerprint = 0;
+    std::uint64_t visibilityGeneration = 0;
+    std::uint64_t requiredObjectMutationGeneration = 0;
+    ArtifactVersionID objectBufferVersion;
+    ArtifactVersionID indirectWorkloadVersion;
+    std::vector<StaticVisibilityDecision> decisions;
+};
+
+class StaticVisibilityReservation {
+public:
+    using ResolveFn = std::function<bool(
+        bool, std::span<const StaticVisibilityDecision>, PublishedStaticVisibility&)>;
+    explicit StaticVisibilityReservation(ResolveFn resolve) : m_resolve(std::move(resolve)) {}
+    ~StaticVisibilityReservation() { PublishedStaticVisibility ignored; (void)Resolve(false, {}, ignored); }
+    StaticVisibilityReservation(const StaticVisibilityReservation&) = delete;
+    StaticVisibilityReservation& operator=(const StaticVisibilityReservation&) = delete;
+    [[nodiscard]] bool Commit(std::span<const StaticVisibilityDecision> decisions,
+        PublishedStaticVisibility& published) const { return Resolve(true, decisions, published); }
+
+private:
+    bool Resolve(bool commit, std::span<const StaticVisibilityDecision> decisions,
+        PublishedStaticVisibility& published) const {
+        std::scoped_lock lock(m_mutex);
+        if (m_resolved) return m_committed;
+        m_resolved = true;
+        m_committed = m_resolve ? m_resolve(commit, decisions, published) : !commit;
+        return m_committed;
+    }
+    ResolveFn m_resolve;
+    mutable std::mutex m_mutex;
+    mutable bool m_resolved = false;
+    mutable bool m_committed = false;
+};
+
+struct StaticVisibilityBuildInput {
+    std::uint64_t sourceFingerprint = 0;
+    std::uint64_t worldRevision = 0;
+    std::uint64_t cameraRevision = 0;
+    std::vector<StaticCoverageRecord> coverage;
+    std::vector<StaticFallbackPolicy> fallbackPolicies;
+    std::shared_ptr<const StaticVisibilityReservation> reservation;
+};
+
+struct PublishedStaticTemplateBatch {
+    std::uint64_t sourceFingerprint = 0;
+    std::uint64_t batchGeneration = 0;
+    std::vector<std::uint64_t> templateKeys;
+    std::vector<ObjectManager::StaticMeshTemplateRef> templateRefs;
+    std::vector<ArtifactSnapshot> dependencyClosure;
+};
+
+class StaticTemplateBatchReservation {
+public:
+    using ResolveFn = std::function<bool(bool, PublishedStaticTemplateBatch&)>;
+    explicit StaticTemplateBatchReservation(ResolveFn resolve) : m_resolve(std::move(resolve)) {}
+    ~StaticTemplateBatchReservation() { PublishedStaticTemplateBatch ignored; (void)Resolve(false, ignored); }
+    StaticTemplateBatchReservation(const StaticTemplateBatchReservation&) = delete;
+    StaticTemplateBatchReservation& operator=(const StaticTemplateBatchReservation&) = delete;
+    [[nodiscard]] bool Commit(PublishedStaticTemplateBatch& published) const {
+        return Resolve(true, published);
+    }
+
+private:
+    bool Resolve(bool commit, PublishedStaticTemplateBatch& published) const {
+        std::scoped_lock lock(m_mutex);
+        if (m_resolved) return m_committed;
+        m_resolved = true;
+        m_committed = m_resolve ? m_resolve(commit, published) : !commit;
+        return m_committed;
+    }
+    ResolveFn m_resolve;
+    mutable std::mutex m_mutex;
+    mutable bool m_resolved = false;
+    mutable bool m_committed = false;
+};
+
+struct StaticTemplateBatchBuildInput {
+    std::uint64_t sourceFingerprint = 0;
+    std::vector<std::uint64_t> templateKeys;
+    std::shared_ptr<const StaticTemplateBatchReservation> reservation;
+};
+
 struct StaticSceneBuildInput {
     std::uint64_t sourceFingerprint = 0;
     bool publishRoot = false;
     // Active renderer paths require one coherent material, object-buffer, and
     // indirect/active-list root in addition to the immutable transactions.
     bool requireResourceClosure = false;
+    // Select the immutable renderer geometry-table snapshot without creating
+    // publication-root cycles through draw/indirect state.
+    bool requireGeometryBufferClosure = false;
+    bool requireVisibilityClosure = false;
     std::uint64_t desiredPlacementCount = 0;
     std::uint64_t materializedPlacementCount = 0;
     std::uint64_t retiredPlacementCount = 0;
+    std::vector<StaticCoverageRecord> coverage;
+    std::vector<StaticFallbackPolicy> fallbackPolicies;
     // Every page version supplied here must already have reached the requested
     // graph milestone. Pages own the exact transaction membership closure; the
     // scene root only selects a bounded directory of immutable pages.
@@ -134,6 +253,9 @@ struct PublishedStaticSceneState {
     std::uint64_t drawRecordCount = 0;
     std::uint64_t activeEntryCount = 0;
     std::array<std::shared_ptr<const PublishedStaticScenePage>, kStaticScenePageCount> pages{};
+    std::vector<StaticCoverageRecord> coverage;
+    std::vector<StaticFallbackPolicy> fallbackPolicies;
+    std::shared_ptr<const PublishedStaticVisibility> visibility;
 
     [[nodiscard]] bool ContainsGroup(std::uint64_t groupID) const noexcept;
     [[nodiscard]] const StaticTransactionGroup* FindGroup(std::uint64_t groupID) const noexcept;

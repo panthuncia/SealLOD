@@ -281,6 +281,7 @@ private:
     std::uint64_t m_lightArtifactRevision = 1;
     std::uint64_t m_lastLightSourceRevision = 0;
     std::uint64_t m_lastLightViewFamilyRevision = 0;
+    std::uint64_t m_lastPoseSourceRevision = 0;
     MaterialEvaluationBuildInputs m_materialEvaluationInputs;
     // Persistent producer state survives graph rebuilds and full/producer
     // recipe switches. It is released only with the renderer/device lifetime.

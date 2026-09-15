@@ -238,6 +238,7 @@ void PrepareStaticGroupsBulkPlanInPlace(
 			auto& preparedTemplate = prepared.meshTemplates.emplace_back();
 			preparedTemplate.meshTemplateIndex = meshTemplate.meshTemplateIndex;
 			preparedTemplate.clodOffsetIndex = meshTemplate.clodOffsetIndex;
+			preparedTemplate.meshIdentity = meshTemplate.mesh ? meshTemplate.mesh->GetGlobalID() : 0u;
 			preparedTemplate.skinnedAssemblyTypeSlot = meshTemplate.skinnedAssemblyTypeSlot;
 			preparedTemplate.skinnedAssemblyBounds = meshTemplate.skinnedAssemblyBounds;
 			preparedTemplate.skinnedBoundsScale = meshTemplate.skinnedBoundsScale;
@@ -1769,6 +1770,9 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 				drawRecord.clodOffsetIndex = perMeshInstanceBufferIndex;
 				drawRecord.skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
 				drawRecord.skinningTypeSlot = meshInstance->GetPerMeshInstanceBufferData().skinningInstanceSlot;
+				const uint64_t meshIdentity = mesh->GetGlobalID();
+				drawRecord.expectedMeshIdentityLo = static_cast<uint32_t>(meshIdentity);
+				drawRecord.expectedMeshIdentityHi = static_cast<uint32_t>(meshIdentity >> 32u);
 				drawRecords.push_back(drawRecord);
 				if (transformIndex == 0) {
 					drawInfo.perMeshInstanceBufferIndices.push_back(perMeshInstanceBufferIndex);
@@ -3057,6 +3061,7 @@ ObjectManager::StaticImportPacket ObjectManager::BuildStaticImportPacket(StaticI
 				record.scopeTransformOrdinal = transformOrdinal;
 				record.meshTemplateIndex = meshTemplate.meshTemplateIndex;
 				record.clodOffsetIndex = meshTemplate.clodOffsetIndex;
+				record.meshIdentity = meshTemplate.meshIdentity;
 				record.skinnedAssemblyTypeSlot = meshTemplate.skinnedAssemblyTypeSlot;
 				record.skinnedAssemblyBounds = meshTemplate.skinnedAssemblyBounds;
 				record.skinnedBoundsScale = meshTemplate.skinnedBoundsScale;
@@ -3417,6 +3422,8 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					drawRecord.clodOffsetIndex = sourceRecord.clodOffsetIndex;
 					drawRecord.skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
 					drawRecord.skinningTypeSlot = sourceRecord.skinnedAssemblyTypeSlot;
+					drawRecord.expectedMeshIdentityLo = static_cast<uint32_t>(sourceRecord.meshIdentity);
+					drawRecord.expectedMeshIdentityHi = static_cast<uint32_t>(sourceRecord.meshIdentity >> 32u);
 					if (sourceRecord.skinnedAssemblyTypeSlot != 0xFFFFFFFFu) {
 						for (const auto placementIndex : drawInfo.skinnedAssemblyPlacementIndices) {
 							if (placementIndex >= m_skinnedAssemblyPlacementCPU.size()) continue;

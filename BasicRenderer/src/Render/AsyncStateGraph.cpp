@@ -73,11 +73,14 @@ std::string KeyString(const ArtifactKey& key) {
 
 std::string_view KindName(ArtifactKind kind) {
     static constexpr std::string_view names[]{ "Generic", "TextureBinding", "Material",
-        "MaterialTable", "MaterialUsageBatch", "Mesh", "MeshTable", "DrawRecordPage",
-        "ActiveDrawList", "ViewLifetime", "IndirectWorkload", "StaticTransaction",
-        "StaticScenePage", "StaticScene", "TerrainState", "BufferVersion", "FrameManifest", "StaticGroup",
-        "StaticTemplate", "TextureImageTable", "GrassCell", "GrassShard", "GrassScratch", "GrassScene",
-        "StaticAsset", "StaticMaterialVariant", "StaticShaderVariant", "StaticVariant" };
+        "MaterialTable", "MaterialUsageBatch", "Mesh", "MeshTable", "GeometryBufferState",
+        "DrawRecordPage", "ActiveDrawList", "ViewLifetime", "IndirectWorkload",
+        "StaticTransaction", "StaticScenePage", "StaticScene", "TerrainState",
+        "BufferVersion", "FrameManifest", "StaticGroup", "StaticTemplate",
+        "StaticTemplateBatch", "StaticVisibility", "StaticAsset", "StaticMaterialVariant",
+        "StaticShaderVariant", "StaticVariant", "TextureImageTable", "GrassCell",
+        "GrassShard", "GrassScratch", "GrassScene", "GeometryResidency", "ViewFamily",
+        "PoseState", "LightTable" };
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(names) ? names[index] : "Unknown";
 }

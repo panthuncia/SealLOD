@@ -114,6 +114,7 @@
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/StaticStateArtifacts.h"
 #include "Render/GeometryResidencyStateArtifacts.h"
+#include "Render/GeometryBufferStateArtifacts.h"
 #include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/RasterBucketFlags.h"
 #include "Render/TerrainRvtTelemetry.h"
@@ -810,6 +811,7 @@ void Renderer::Initialize(
     br::render::RegisterVersionedGpuBufferProducer(*m_asyncStateGraph);
 	br::render::RegisterTextureImageTableProducer(*m_asyncStateGraph);
     br::render::RegisterObjectBufferStateProducer(*m_asyncStateGraph);
+    br::render::RegisterGeometryBufferStateProducer(*m_asyncStateGraph);
     br::render::RegisterStaticStateProducers(*m_asyncStateGraph);
     br::render::RegisterGeometryResidencyStateProducer(*m_asyncStateGraph);
 	br::render::RegisterViewStateProducer(*m_asyncStateGraph);
@@ -859,7 +861,10 @@ void Renderer::Initialize(
     // Initialize GPU resource managers
     m_pLightManager = LightManager::CreateUnique();
     m_pMeshManager = MeshManager::CreateUnique();
-	m_pMeshManager->SetRendererStateRequestService(m_rendererStateRequests.get());
+	m_pMeshManager->SetRendererStateServices(
+		m_rendererStateRequests.get(),
+		currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
+		m_numFramesInFlight);
 	m_pObjectManager = ObjectManager::CreateUnique();
 	m_pObjectManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
@@ -918,7 +923,12 @@ void Renderer::Initialize(
     });
     m_pMeshManager->SetViewManager(m_pViewManager.get());
 	m_pIndirectCommandBufferManager->AttachActiveDrawSource(*m_pObjectManager);
-	m_pSkeletonManager = SkeletonManager::CreateShared(currentRenderGraph->RetainUploadService());
+	const auto transientWindMatrixCapacity = std::clamp(
+		SettingsManager::GetInstance().getSettingGetter<std::uint32_t>(
+			ProceduralWindTransientBoneCapacitySettingName)(),
+		1024u, 1048576u);
+	m_pSkeletonManager = SkeletonManager::CreateShared(
+		currentRenderGraph->RetainUploadService(), transientWindMatrixCapacity);
 	m_pMeshManager->SetSkeletonManager(m_pSkeletonManager.get());
 	m_poseInstanceRegistrationService.Configure(m_pSkeletonManager.get());
 	m_sceneRenderableResidencyService.Configure(m_pMeshManager.get(), m_pMaterialManager.get());
@@ -3332,12 +3342,35 @@ void Renderer::Update(float elapsedSeconds) {
                 if (m_rendererStateRequests) {
                     m_rendererStateRequests->RefreshPublication();
                 }
+                if (commit.committed && commit.state && m_asyncStateGraph) {
+                    std::array<br::render::ArtifactVersionID,
+                        br::render::kPublishedFragmentCount> publishedRoots{};
+                    std::size_t publishedRootCount = 0;
+                    for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
+                        const auto root = commit.state->Fragment(
+                            static_cast<br::render::PublishedFragmentKind>(index)).publicationRoot;
+                        if (root) publishedRoots[publishedRootCount++] = root;
+                    }
+                    const bool acknowledgementSubmitted = TaskSchedulerManager::GetInstance().Submit(
+                        m_rendererStateCommitScope, TaskLane::FrameCritical,
+                        TaskDomain::GraphPublication, "RendererStatePublisher::MarkPublished",
+                        [stateGraph = m_asyncStateGraph.get(), publishedRoots,
+                            publishedRootCount](const br::TaskContext& context) {
+                            if (!context.StopRequested() && stateGraph) {
+                                stateGraph->MarkPublished(
+                                    std::span(publishedRoots).first(publishedRootCount));
+                            }
+                        });
+                    if (!acknowledgementSubmitted) {
+                        spdlog::warn("Renderer-state graph publication acknowledgement was rejected");
+                    }
+                }
                 if (commit.HasDeferredWork()) {
                     BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::ScheduleDeferredCommit");
                     auto* objectManager = commit.committed ? m_pObjectManager.get() : nullptr;
+					auto* meshManager = commit.committed ? m_pMeshManager.get() : nullptr;
 					auto* materialManager = commit.committed ? m_pMaterialManager.get() : nullptr;
                     auto committedState = commit.committed ? commit.state : nullptr;
-                    auto* stateGraph = m_asyncStateGraph.get();
                     // Publication acknowledgement advances object-buffer mutation
                     // coverage and wakes the next admissible graph cut.  Keeping it
                     // in Background/Cleanup allowed an import-time cleanup flood to
@@ -3347,29 +3380,19 @@ void Renderer::Update(float elapsedSeconds) {
                     const bool submitted = TaskSchedulerManager::GetInstance().Submit(
                         m_rendererStateCommitScope, TaskLane::Streaming, TaskDomain::RendererState,
                         "RendererStatePublisher::DeferredCommit",
-						[commit = std::move(commit), objectManager, materialManager,
-                            stateGraph, committedState = std::move(committedState)](
+						[commit = std::move(commit), objectManager, meshManager, materialManager,
+                            committedState = std::move(committedState)](
                             const br::TaskContext& context) mutable {
                             if (context.StopRequested()) return;
                             if (objectManager && committedState) {
                                 objectManager->AcknowledgePublishedBufferState(committedState);
                             }
+							if (meshManager && committedState) {
+								meshManager->AcknowledgePublishedBufferState(committedState);
+							}
 							if (materialManager && committedState) {
 								materialManager->AcknowledgePublishedTextureImageTable(committedState);
 							}
-                            if (stateGraph && committedState) {
-                                std::array<br::render::ArtifactVersionID,
-                                    br::render::kPublishedFragmentCount> roots{};
-                                std::size_t rootCount = 0;
-                                for (std::size_t index = 0;
-                                    index < br::render::kPublishedFragmentCount; ++index) {
-                                    const auto root = committedState->Fragment(
-                                        static_cast<br::render::PublishedFragmentKind>(index))
-                                        .publicationRoot;
-                                    if (root) roots[rootCount++] = root;
-                                }
-                                stateGraph->MarkPublished(std::span(roots).first(rootCount));
-                            }
                             commit.RunDeferred();
                         });
                     if (!submitted) {
@@ -3450,6 +3473,8 @@ void Renderer::Update(float elapsedSeconds) {
             .getSettingGetter<bool>("enableGTAO")(),
         .clusteredLightingEnabled = SettingsManager::GetInstance()
             .getSettingGetter<bool>("enableClusteredLighting")() };
+    {
+    BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::Settings");
     updateData.proceduralWind = {
         .displacementScale = SettingsManager::GetInstance().getSettingGetter<float>(
             ProceduralWindDisplacementScaleSettingName)(),
@@ -3471,6 +3496,7 @@ void Renderer::Update(float elapsedSeconds) {
             ProceduralWindSkeletonLodLateReserveSettingName)(),
         .occlusionCullingEnabled = SettingsManager::GetInstance().getSettingGetter<bool>(
             "enableOcclusionCulling")() };
+    }
     const auto publishedMaterialState = updateData.publishedRendererState
         ? updateData.publishedRendererState->materials.payload
             .Get<br::render::PublishedMaterialState>()
@@ -3631,12 +3657,27 @@ void Renderer::Update(float elapsedSeconds) {
 			publishedObjects->activePlacementEntries
 				? static_cast<std::int64_t>(publishedObjects->activePlacementEntries->size()) : 0);
 	}
+	const auto publishedStaticScene = updateData.publishedRendererState
+		? updateData.publishedRendererState->geometry.payload
+			.Get<br::render::PublishedStaticSceneState>()
+		: nullptr;
+	if (publishedStaticScene) {
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.DesiredPlacements",
+			static_cast<std::int64_t>(publishedStaticScene->desiredPlacementCount));
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.PublishedPlacements",
+			static_cast<std::int64_t>(publishedStaticScene->publishedPlacementCount));
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.MaterializedPlacements",
+			static_cast<std::int64_t>(publishedStaticScene->materializedPlacementCount));
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.GeometryRevision",
+			static_cast<std::int64_t>(updateData.publishedRendererState->geometry.revision));
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.ManifestEpoch",
+			static_cast<std::int64_t>(updateData.publishedRendererState->epoch));
+	}
     renderSnapshot.preparedRasterBucketCount = updateData.preparedRasterBucketCount;
     renderSnapshot.preparedRasterBucketFlags = updateData.preparedRasterBucketFlags;
 
     std::shared_ptr<br::render::LightTableBuildInput> desiredLights;
     if (m_pLightManager && m_rendererStateRequests) {
-        desiredLights = std::make_shared<br::render::LightTableBuildInput>();
         const auto lightSourceRevision = (std::max<std::uint64_t>)(
             m_pLightManager->GetPublicationRevision(), 1u);
         const auto lightViewRevision = std::uint64_t{0};
@@ -3645,7 +3686,7 @@ void Renderer::Update(float elapsedSeconds) {
             ++m_lightArtifactRevision;
             m_lastLightSourceRevision = lightSourceRevision;
             m_lastLightViewFamilyRevision = lightViewRevision;
-        }
+            desiredLights = std::make_shared<br::render::LightTableBuildInput>();
         desiredLights->revision = m_lightArtifactRevision;
         desiredLights->lightCount = m_pLightManager->GetNumLights();
         desiredLights->lightPagePoolSize = m_pLightManager->GetLightPagePoolSize();
@@ -3690,6 +3731,7 @@ void Renderer::Update(float elapsedSeconds) {
             std::move(lightRequirements),
             br::render::ArtifactPayload::Make<br::render::LightTableBuildInput>(desiredLights),
             desiredLights->revision });
+        }
     }
     auto selectedLights = updateData.publishedRendererState
         ? updateData.publishedRendererState->lights.payload.Get<br::render::PublishedLightTableState>()
@@ -3704,9 +3746,12 @@ void Renderer::Update(float elapsedSeconds) {
     // the state graph. Accepted frames can now outlive later manager mutations.
     std::shared_ptr<br::render::PoseStateBuildInput> desiredPoses;
     if (m_pSkeletonManager && m_rendererStateRequests) {
-        desiredPoses = std::make_shared<br::render::PoseStateBuildInput>();
-        desiredPoses->activeInstanceRevision = (std::max<std::uint64_t>)(
+        const auto poseSourceRevision = (std::max<std::uint64_t>)(
             m_pSkeletonManager->GetActiveInstanceRevision(), 1u);
+        if (poseSourceRevision != m_lastPoseSourceRevision) {
+        m_lastPoseSourceRevision = poseSourceRevision;
+        desiredPoses = std::make_shared<br::render::PoseStateBuildInput>();
+        desiredPoses->activeInstanceRevision = poseSourceRevision;
         desiredPoses->tableImages = m_pSkeletonManager->CapturePoseTableImages();
         std::vector<br::render::ArtifactRequirement> poseRequirements;
         if (auto uploads = currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr) {
@@ -3742,6 +3787,7 @@ void Renderer::Update(float elapsedSeconds) {
             std::move(poseRequirements),
             br::render::ArtifactPayload::Make<br::render::PoseStateBuildInput>(desiredPoses),
             desiredPoses->activeInstanceRevision });
+        }
     }
     auto selectedPoses = updateData.publishedRendererState
         ? updateData.publishedRendererState->poses.payload.Get<br::render::PublishedPoseState>()
@@ -6965,6 +7011,10 @@ void Renderer::CreateRenderGraph() {
 		}
 		if (m_pObjectManager)
 			m_pObjectManager->SetRendererStateServices(
+				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService(),
+				m_numFramesInFlight);
+		if (m_pMeshManager)
+			m_pMeshManager->SetRendererStateServices(
 				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService(),
 				m_numFramesInFlight);
 		if (m_pIndirectCommandBufferManager)

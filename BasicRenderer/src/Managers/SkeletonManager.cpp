@@ -92,16 +92,33 @@ static uint32_t BytesToMatrixIndex(size_t byteOffset) {
     return static_cast<uint32_t>(byteOffset / sizeof(DirectX::XMMATRIX));
 }
 
-SkeletonManager::SkeletonManager(std::shared_ptr<org::runtime::IUploadService> uploadService)
+SkeletonManager::SkeletonManager(std::shared_ptr<org::runtime::IUploadService> uploadService,
+    uint32_t transientWindMatrixCapacity)
     : m_uploadService(std::move(uploadService)) {
     m_lifetimeToken = std::make_shared<std::atomic_bool>(true);
+    // Palette outputs are frame-written GPU resources. Give their backing its final
+    // configured size before the first frame snapshot can select it; growing these
+    // resources while a frame is executing would mutate renderer-visible backing
+    // outside publication. Immutable inverse-bind input takes the versioned path.
+    constexpr uint32_t staticPaletteHeadroom = 32768u;
+    const auto paletteCapacity = (std::max)(transientWindMatrixCapacity, 1u);
     m_inverseBindMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseBindMatricesPacked");
-    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "BoneSkinMatricesPacked", false, true);
+    m_inverseBindMatrices->EnableVersionedGraphJournal();
+    m_inverseBindMatrices->SetVersionedGraphExclusive(true);
+    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX),
+        static_cast<size_t>(paletteCapacity) * 2u + staticPaletteHeadroom * 2u,
+        "BoneSkinMatricesPacked", false, true);
     // TODO: This only exists to project skinned voxel samples back to object-space for voxel sample reconstruction.
     // Maybe we could avoid this if we changed the normal skinning path as well?
-    m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseSkinMatricesPacked", false, true);
+    m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX),
+        static_cast<size_t>(paletteCapacity) + staticPaletteHeadroom,
+        "InverseSkinMatricesPacked", false, true);
 
-    m_instanceInfo = DynamicStructuredBuffer<SkinningInstanceGPUInfo>::CreateShared(64, "SkinningInstanceInfo", true);
+    const auto instanceCapacity = static_cast<uint64_t>(kProceduralWindTransientSlotBase) + paletteCapacity;
+    m_instanceInfo = DynamicStructuredBuffer<SkinningInstanceGPUInfo>::CreateShared(
+        static_cast<uint32_t>((std::min)(instanceCapacity,
+            static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)()))),
+        "SkinningInstanceInfo", true);
 
     org::memory::SetResourceUsageHint(*m_inverseBindMatrices, "Skinning data");
     org::memory::SetResourceUsageHint(*m_boneTransforms, "Skinning data");

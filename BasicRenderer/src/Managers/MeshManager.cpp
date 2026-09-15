@@ -19,6 +19,7 @@
 #include <BasicTelemetry/Telemetry.h>
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -36,6 +37,9 @@
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/GeometryResidencyStateArtifacts.h"
 #include "Render/RendererStateRequestService.h"
+#include "Render/GeometryBufferStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 
 namespace {
 
@@ -216,9 +220,13 @@ ICLodGeometryStorage& MeshManager::GetCLodGeometryStorage() noexcept {
 }
 
 MeshManager::~MeshManager() {
+	for (auto& binding : m_graphBufferBindings) {
+		if (binding.buffer) binding.buffer->SetVersionedGraphMutationCallback({});
+	}
 }
 
 void MeshManager::InvalidateCLodDiskStreamingPipeline() {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	std::vector<DirectStorageAsyncRequestHandle> pendingDirectStorageUploads;
 	pendingDirectStorageUploads.reserve(m_clodPendingDirectStorageUploads.size());
 	for (const auto& pendingUpload : m_clodPendingDirectStorageUploads) {
@@ -647,6 +655,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 }
 
 bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	ZoneScopedN("MeshManager::AddMesh");
 	if (!mesh) {
 		return false;
@@ -1098,6 +1107,10 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			? static_cast<uint32_t>(mesh->GetCLodNodeBoneIndices().size())
 			: 0u;
 		clodMeshMetadata.nodeBoneLimit = requiresNodeSkinningSidecar ? mesh->GetCLodNodeBoneLimit() : 0u;
+		const uint64_t meshIdentity = mesh->GetGlobalID();
+		clodMeshMetadata.meshIdentityLo = static_cast<uint32_t>(meshIdentity);
+		clodMeshMetadata.meshIdentityHi = static_cast<uint32_t>(meshIdentity >> 32u);
+		clodMeshMetadata.meshIdentityClass = 0u;
 		sharedState->ownedMeshMetadataView = m_clodMeshMetadata->AddData(&clodMeshMetadata, sizeof(CLodMeshMetadata), sizeof(CLodMeshMetadata));
 		if (!sharedState->ownedMeshMetadataView) {
 			spdlog::error("MeshManager::AddMesh: failed to allocate logical mesh metadata view for mesh globalID={}", mesh->GetGlobalID());
@@ -1187,6 +1200,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 }
 
 void MeshManager::RemoveMesh(Mesh* mesh) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	if (mesh == nullptr) {
 		return;
 	}
@@ -1207,6 +1221,7 @@ void MeshManager::RemoveMesh(Mesh* mesh) {
 }
 
 void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	ZoneScopedN("MeshManager::AddMeshesBulk");
 	ZoneValue(static_cast<int64_t>(meshes.size()));
 	if (meshes.empty()) {
@@ -1363,6 +1378,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 }
 
 void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<StaticMeshTemplateRequest>& requests) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
 	BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
 	ZoneValue(static_cast<int64_t>(requests.size()));
@@ -1514,6 +1530,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 }
 
 std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticMeshTemplatesBulk(const std::vector<StaticMeshTemplateRequest>& requests) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk");
 	ZoneValue(static_cast<int64_t>(requests.size()));
 	std::vector<StaticMeshTemplateRegistration> registrations(requests.size());
@@ -1581,6 +1598,10 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 
 			MeshInstanceClodOffsets clodOffsets{};
 			clodOffsets.clodMeshMetadataIndex = sharedState ? sharedState->clodMeshMetadataIndex : 0u;
+			row.expectedClodMeshMetadataIndex = clodOffsets.clodMeshMetadataIndex;
+			const uint64_t meshIdentity = request.mesh->GetGlobalID();
+			row.expectedClodMeshIdentityLo = static_cast<uint32_t>(meshIdentity);
+			row.expectedClodMeshIdentityHi = static_cast<uint32_t>(meshIdentity >> 32u);
 
 			validRequestIndices.push_back(requestIndex);
 			perMeshInstanceRows.push_back(row);
@@ -1686,6 +1707,7 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 }
 
 bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	if (mesh == nullptr || !mesh->GetMesh()) {
 		return false;
 	}
@@ -1745,6 +1767,8 @@ bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 
 	MeshInstanceClodOffsets clodOffsets = {};
 	clodOffsets.clodMeshMetadataIndex = (sharedState != nullptr) ? sharedState->clodMeshMetadataIndex : 0u;
+	mesh->SetExpectedClodMeshMetadataIndex(clodOffsets.clodMeshMetadataIndex);
+	mesh->SetExpectedClodMeshIdentity(mesh->GetMesh()->GetGlobalID());
 	//clodOffsets.rootGroup = mesh->GetMesh()->GetCLodRootGroup();
 	auto clodOffsetsView = m_perMeshInstanceClodOffsets->AddData(&clodOffsets, sizeof(MeshInstanceClodOffsets), sizeof(MeshInstanceClodOffsets)); // Indexable by mesh instance
 	if (!clodOffsetsView) {
@@ -1772,6 +1796,7 @@ bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 }
 
 void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 
 	// Things to remove:
 	// - Post-skinning vertices
@@ -1822,6 +1847,7 @@ void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
 
 void MeshManager::RecomputeCLodActiveMaxTraversalDepth()
 {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	uint32_t maxTraversalDepth = 0u;
 	for (const auto& [_, sharedState] : m_clodSharedStreamingStateByMesh) {
 		if (sharedState == nullptr || sharedState->activeInstanceCount == 0u) {
@@ -1919,6 +1945,7 @@ void MeshManager::ProcessCLodDiskStreamingIO() {
 
 
 void MeshManager::RebuildCLodSharedStreamingRangeIndex() {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	if (!m_clodSharedStreamingRangesDirty) {
 		return;
 	}
@@ -1978,6 +2005,144 @@ void MeshManager::SetRendererStateRequestService(br::render::RendererStateReques
 		{}, br::render::ArtifactPayload::Make<br::render::GeometryResidencyDeltaInput>(
 			std::move(immutableInput)), revision);
 	if (result) m_geometryResidencyVersion = result.Handle();
+}
+
+void MeshManager::SetRendererStateServices(br::render::RendererStateRequestService* service,
+	std::shared_ptr<org::runtime::IUploadService> uploads, std::uint32_t framesInFlight) {
+	SetRendererStateRequestService(service);
+	m_geometryUploadService = std::move(uploads);
+	m_geometryFramesInFlight = (std::max)(framesInFlight, 1u);
+	if (!service || !m_geometryUploadService || !m_graphBufferBindings.empty()) return;
+	const std::array definitions{
+		std::tuple{ ResourceIdentifier{ Builtin::PerMeshBuffer }, m_perMeshBuffers, 1ull, uint32_t(sizeof(PerMeshCB)) },
+		std::tuple{ ResourceIdentifier{ Builtin::PerMeshInstanceBuffer }, m_perMeshInstanceBuffers, 2ull, uint32_t(sizeof(PerMeshInstanceCB)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::Offsets }, m_perMeshInstanceClodOffsets, 3ull, uint32_t(sizeof(MeshInstanceClodOffsets)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::MeshMetadata }, m_clodMeshMetadata, 5ull, uint32_t(sizeof(CLodMeshMetadata)) },
+		std::tuple{ ResourceIdentifier{ CLodLevelInfosBufferId }, m_clodHierarchyLevelInfos, 6ull, uint32_t(sizeof(CLodHierarchyLevelInfo)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::Groups }, m_clusterLODGroups, 7ull, uint32_t(sizeof(ClusterLODGroup)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::Segments }, m_clusterLODSegments, 8ull, uint32_t(sizeof(ClusterLODGroupSegment)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::Nodes }, m_clusterLODNodes, 9ull, uint32_t(sizeof(ClusterLODNode)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::NodeSkinningInfos }, m_clusterLODNodeSkinningInfos, 10ull, uint32_t(sizeof(ClusterLODNodeSkinningInfo)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::NodeBoneIndices }, m_clusterLODNodeBoneIndices, 11ull, uint32_t(sizeof(uint32_t)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::AssemblyTransforms }, m_clusterLODAssemblyTransforms, 12ull, uint32_t(sizeof(ClusterLODAssemblyTransform)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::AssemblyInstances }, m_clusterLODAssemblyInstances, 13ull, uint32_t(sizeof(ClusterLODAssemblyInstance)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemaps }, m_clusterLODAssemblyBoneRemaps, 14ull, uint32_t(sizeof(ClusterLODAssemblyBoneRemap)) },
+		std::tuple{ ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemapIndices }, m_clusterLODAssemblyBoneRemapIndices, 15ull, uint32_t(sizeof(uint32_t)) }
+	};
+	// GroupChunks and GroupPageMap are mutable CLOD residency state, not immutable
+	// mesh topology. CLodStreamingSystem owns their stable backing and updates it
+	// through ticketed frame snapshots. Publishing alternate geometry backings for
+	// them makes the upload stream write one resource while render passes resolve
+	// another, and can leave captured copy offsets beyond the stale backing size.
+	const auto source = br::render::PublishedStateSource::ProcessSource();
+	for (const auto& [identifier, buffer, variant, stride] : definitions) {
+		buffer->EnableVersionedGraphJournal();
+		buffer->SetVersionedGraphMutationCallback([this] {
+			m_geometryBufferGraphDirty.store(true, std::memory_order_release);
+		});
+		GraphBufferBinding binding{ identifier, buffer,
+			{ br::render::ArtifactKind::BufferVersion, 0x47454f4255460000ull, variant },
+			variant, stride, {}, std::make_shared<br::render::VersionedGpuBufferBackingPool>() };
+		m_graphBufferBindings.push_back(std::move(binding));
+		buffer->ReleaseECSEntity();
+		m_graphBufferResolvers.emplace(identifier,
+			std::make_shared<PublishedStateResourceResolver>(source,
+				br::render::PublishedResourceKey{ br::render::PublishedFragmentKind::Geometry,
+					br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant }, buffer, true));
+		buffer->SetVersionedGraphExclusive(true);
+		// Keep the inert bootstrap wrapper advertised as a symbolic resource as
+		// well as a resolver. Several CLOD setup passes mint handles before the
+		// first manifest exists; graph-exclusive mode prevents this wrapper from
+		// participating in legacy upload or backing-resize traversal.
+	}
+	(void)PublishDesiredBufferState();
+}
+
+std::uint64_t MeshManager::PublishDesiredBufferState() {
+	if (!m_rendererStateRequests || !m_geometryUploadService || m_graphBufferBindings.empty()) return 0;
+	// A GeometryBufferState is one publication cut, not fourteen independently
+	// meaningful buffer snapshots. Static-template acceptance appends related
+	// rows to several journals under this serialized acceptance lock. Capturing
+	// between those appends can pair new indices with old group/segment tables
+	// (or vice versa), which presents as valid pages rendering another asset's
+	// geometry. This lock is confined to the off-thread authoring/publication
+	// lane; render-side manager access remains lock-free and consumes only the
+	// immutable published state.
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
+	std::lock_guard lock(m_geometryBufferGraphMutex);
+	if (!m_geometryBufferGraphDirty.exchange(false, std::memory_order_acq_rel)) return m_geometryBufferStateRevision;
+	std::vector<br::render::ArtifactIntent> intents;
+	std::vector<br::render::VersionedGpuBufferJournal::Capture> captures;
+	captures.reserve(m_graphBufferBindings.size());
+	std::uint64_t fingerprint = 1469598103934665603ull;
+	for (auto& binding : m_graphBufferBindings) {
+		auto capture = binding.buffer->CaptureVersionedGraphState();
+		const auto revision = (std::max<std::uint64_t>)(capture.writeSequence, 1u);
+		fingerprint ^= revision + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
+		if (binding.submittedVersion.revision != revision) {
+			auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
+			input->uploadOwner = m_geometryUploadService;
+			input->uploadService = input->uploadOwner.get();
+			input->debugName = "Published::" + binding.identifier.ToString();
+			input->writeSequence = capture.writeSequence;
+			input->elementStride = binding.elementStride;
+			input->elementCount = capture.elementCount;
+			input->capacity = capture.capacity;
+			input->catalogOwner = br::render::PublishedFragmentKind::Geometry;
+			input->catalogVariant = binding.catalogVariant;
+			input->previous = capture.previous;
+			input->backingPool = binding.backingPool;
+			input->writes = capture.writes;
+			input->image = capture.image;
+			input->journalBaseSequence = capture.journalBaseSequence;
+			intents.push_back({ binding.key, revision, {},
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)),
+				(revision << 8u) ^ binding.catalogVariant });
+		}
+		captures.push_back(std::move(capture));
+	}
+	if (!intents.empty()) {
+		auto results = m_rendererStateRequests->SubmitLatestBatch(std::move(intents));
+		std::size_t resultIndex = 0;
+		for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
+			const auto revision = (std::max<std::uint64_t>)(captures[i].writeSequence, 1u);
+			if (m_graphBufferBindings[i].submittedVersion.revision == revision) continue;
+			if (resultIndex >= results.size() || !results[resultIndex]) {
+				m_geometryBufferGraphDirty.store(true, std::memory_order_release);
+				return m_geometryBufferStateRevision;
+			}
+			m_graphBufferBindings[i].submittedVersion = results[resultIndex++].version;
+		}
+	}
+	if (fingerprint == m_geometryBufferFingerprint) return m_geometryBufferStateRevision;
+	auto rootInput = std::make_shared<br::render::GeometryBufferStateBuildInput>();
+	std::vector<br::render::ArtifactRequirement> requirements;
+	for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
+		const auto& binding = m_graphBufferBindings[i];
+		const auto revision = (std::max<std::uint64_t>)(captures[i].writeSequence, 1u);
+		rootInput->buffers.push_back({ binding.key, revision, binding.elementStride, binding.catalogVariant });
+		requirements.push_back(br::render::Exact(binding.submittedVersion,
+			br::render::ArtifactReadiness::GpuReady));
+	}
+	const auto result = m_rendererStateRequests->SubmitLatest({
+		{ br::render::ArtifactKind::GeometryBufferState, 0, 0 }, ++m_geometryBufferStateRevision,
+		std::move(requirements),
+		br::render::ArtifactPayload::Make<br::render::GeometryBufferStateBuildInput>(std::move(rootInput)), fingerprint });
+	if (!result) {
+		--m_geometryBufferStateRevision;
+		m_geometryBufferGraphDirty.store(true, std::memory_order_release);
+		return m_geometryBufferStateRevision;
+	}
+	m_geometryBufferFingerprint = fingerprint;
+	m_geometryBufferStateVersion = result.Handle();
+	return m_geometryBufferStateRevision;
+}
+
+std::optional<br::render::ArtifactRequirement> MeshManager::DesiredBufferStateRequirement() const {
+	std::lock_guard lock(m_geometryBufferGraphMutex);
+	if (!m_geometryBufferStateVersion) return std::nullopt;
+	return br::render::Exact(m_geometryBufferStateVersion,
+		br::render::ArtifactReadiness::GpuReady);
 }
 
 std::optional<br::render::ArtifactVersionHandle> MeshManager::GeometryResidencyVersion() const {
@@ -2696,11 +2861,19 @@ bool MeshManager::CommitCLodGroupResidency(
 		for (size_t i = 0; i < meshPageIndices.size(); ++i) {
 			const uint32_t pageMapOffset = expectedPageMapOffsets[i];
 			if (pageMapOffset < sharedState->pageMapEntriesCPU.size()) {
-				sharedState->pageMapEntriesCPU[pageMapOffset] = pageMapEntries[i];
+				auto ownedEntry = pageMapEntries[i];
+				ownedEntry.ownerMeshMetadataIndex = sharedState->clodMeshMetadataIndex;
+				ownedEntry.ownerPageMapBase = sharedState->pageMapGlobalBase;
+				sharedState->pageMapEntriesCPU[pageMapOffset] = ownedEntry;
 			}
 		}
 		for (size_t i = 0; i < expectedPageMapOffsets.size(); ++i) {
-			UploadCLodGroupPageMapRange(*sharedState, expectedPageMapOffsets[i], std::span<const GroupPageMapEntry>(&pageMapEntries[i], 1));
+			const auto pageMapOffset = expectedPageMapOffsets[i];
+			if (pageMapOffset < sharedState->pageMapEntriesCPU.size()) {
+				UploadCLodGroupPageMapRange(*sharedState, pageMapOffset,
+					std::span<const GroupPageMapEntry>(
+						&sharedState->pageMapEntriesCPU[pageMapOffset], 1));
+			}
 		}
 	}
 
@@ -3204,6 +3377,10 @@ void MeshManager::UploadCLodGroupChunkTable(const CLodSharedStreamingState& stat
 	}
 
 	if (m_clodStreamingUploadFn) {
+		m_clodSharedGroupChunks->RetainExternalUpload(
+			materializedGroupChunks.data(),
+			materializedGroupChunks.size() * sizeof(ClusterLODGroupChunk),
+			state.groupChunksView->GetOffset());
 		m_clodStreamingUploadFn(
 			materializedGroupChunks.data(),
 			materializedGroupChunks.size() * sizeof(ClusterLODGroupChunk),
@@ -3231,6 +3408,8 @@ void MeshManager::UploadCLodGroupChunk(const CLodSharedStreamingState& state, ui
 		state.groupChunksView->GetOffset() + static_cast<size_t>(groupLocalIndex) * sizeof(ClusterLODGroupChunk);
 	const size_t byteSize = sizeof(ClusterLODGroupChunk);
 	if (m_clodStreamingUploadFn) {
+		m_clodSharedGroupChunks->RetainExternalUpload(
+			&materializedGroupChunk, byteSize, byteOffset);
 		m_clodStreamingUploadFn(
 			&materializedGroupChunk,
 			byteSize,
@@ -3261,6 +3440,8 @@ void MeshManager::UploadCLodGroupPageMapRange(
 		state.ownedPageMapView->GetOffset() + static_cast<size_t>(pageMapOffset) * sizeof(GroupPageMapEntry);
 	const size_t byteSize = pageMapEntries.size_bytes();
 	if (m_clodStreamingUploadFn) {
+		m_clodGroupPageMap->RetainExternalUpload(
+			pageMapEntries.data(), byteSize, byteOffset);
 		m_clodStreamingUploadFn(
 			pageMapEntries.data(),
 			byteSize,
@@ -3277,6 +3458,10 @@ void MeshManager::UploadCLodGroupPageMapRange(
 	}
 
 	if (m_clodStreamingUploadFn) {
+		m_clodGroupPageMap->RetainExternalUpload(
+			state.pageMapEntriesCPU.data(),
+			state.pageMapEntriesCPU.size() * sizeof(GroupPageMapEntry),
+			state.ownedPageMapView->GetOffset());
 		m_clodStreamingUploadFn(
 			state.pageMapEntriesCPU.data(),
 			state.pageMapEntriesCPU.size() * sizeof(GroupPageMapEntry),
@@ -3355,6 +3540,7 @@ bool MeshManager::ApplyCLodGroupEviction(CLodSharedStreamingState& state, uint32
 }
 
 void MeshManager::GetCLodActiveUniqueAssetGroupRanges(std::vector<CLodActiveGroupRange>& outRanges, uint32_t& outMaxGroupIndex) const {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	outRanges.clear();
 	outMaxGroupIndex = 0u;
 
@@ -3382,6 +3568,7 @@ void MeshManager::GetCLodActiveUniqueAssetGroupRanges(std::vector<CLodActiveGrou
 }
 
 void MeshManager::GetCLodCoarsestUniqueAssetGroupRanges(std::vector<CLodActiveGroupRange>& outRanges) const {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	outRanges.clear();
 
 	std::unordered_set<uint64_t> seenRanges;
@@ -3423,6 +3610,7 @@ void MeshManager::GetCLodCoarsestUniqueAssetGroupRanges(std::vector<CLodActiveGr
 }
 
 void MeshManager::GetCLodStreamingDomainSnapshot(CLodStreamingDomainSnapshot& outSnapshot) const {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	outSnapshot.activeRanges.clear();
 	outSnapshot.coarsestRanges.clear();
 	outSnapshot.maxGroupIndex = 0;
@@ -3628,4 +3816,38 @@ std::vector<ResourceIdentifier> MeshManager::GetSupportedKeys() {
 		keys.push_back(key);
 
 	return keys;
+}
+
+std::shared_ptr<IResourceResolver> MeshManager::ProvideResolver(ResourceIdentifier const& key) {
+	const auto it = m_graphBufferResolvers.find(key);
+	return it != m_graphBufferResolvers.end() ? it->second : nullptr;
+}
+
+std::vector<ResourceIdentifier> MeshManager::GetSupportedResolverKeys() {
+	std::vector<ResourceIdentifier> keys;
+	keys.reserve(m_graphBufferResolvers.size());
+	for (const auto& [key, _] : m_graphBufferResolvers) keys.push_back(key);
+	return keys;
+}
+
+void MeshManager::AcknowledgePublishedBufferState(
+	const std::shared_ptr<const br::render::PublishedRendererState>& published) {
+	if (!published) return;
+	const auto dependency = std::ranges::find_if(published->geometry.dependencyClosure,
+		[](const br::render::ArtifactSnapshot& snapshot) {
+			return snapshot.key.kind == br::render::ArtifactKind::GeometryBufferState;
+		});
+	if (dependency == published->geometry.dependencyClosure.end()) return;
+	const auto root = dependency->payload.Get<br::render::RendererStateFragmentArtifact>();
+	const auto state = root
+		? root->fragment.payload.Get<br::render::PublishedGeometryBufferState>() : nullptr;
+	if (!state || state->versions.size() != m_graphBufferBindings.size()) return;
+	for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
+		const auto& version = state->versions[i];
+		if (!version) return;
+		m_graphBufferBindings[i].buffer->AcknowledgeVersionedGraphState(version);
+		if (auto pool = version->backingPool.lock(); pool && version->backing) {
+			pool->AcknowledgePublished(version->backing->backingGeneration, m_geometryFramesInFlight);
+		}
+	}
 }

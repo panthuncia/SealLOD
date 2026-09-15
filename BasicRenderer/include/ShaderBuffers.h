@@ -191,6 +191,13 @@ struct PerMeshInstanceCB {
     unsigned int skinningInstanceSlot;
     float skinnedBoundsScale = 1.0f;
     BoundingSphere boundingSphere = {};
+    // Independent copy used to validate that the versioned CLOD-offset buffer
+    // selected for this draw still belongs to its published mesh template.
+    unsigned int expectedClodMeshMetadataIndex = 0xFFFFFFFFu;
+    // Immutable mesh identity, independent of every versioned table index. This
+    // catches a metadata slot whose contents were replaced by another mesh.
+    unsigned int expectedClodMeshIdentityLo = 0u;
+    unsigned int expectedClodMeshIdentityHi = 0u;
 };
 
 using PerInstanceTransformCB = PerObjectCB;
@@ -204,8 +211,12 @@ struct InstanceDrawRecordCB {
     // on the draw record lets ordinary skinning resolve transient wind slots
     // without introducing a placement-buffer dependency in every raster pass.
     unsigned int skinningTypeSlot = 0xFFFFFFFFu;
+    // Authored with the placement/group transaction, independently of the mesh
+    // template and CLOD metadata tables selected later by the GPU.
+    unsigned int expectedMeshIdentityLo = 0u;
+    unsigned int expectedMeshIdentityHi = 0u;
 };
-static_assert(sizeof(InstanceDrawRecordCB) == 20u);
+static_assert(sizeof(InstanceDrawRecordCB) == 28u);
 
 struct PerMaterialCB {
     unsigned int materialFlags;
@@ -743,7 +754,9 @@ struct CLodMeshMetadata
     uint nodeBoneIndexBase;
     uint nodeBoneIndexCount;
     uint nodeBoneLimit;
-    uint padNodeSkinning[3]{};
+    uint meshIdentityLo;
+    uint meshIdentityHi;
+    uint meshIdentityClass;
 };
 static_assert(sizeof(CLodMeshMetadata) == 96, "CLodMeshMetadata must match the HLSL structured-buffer layout");
 

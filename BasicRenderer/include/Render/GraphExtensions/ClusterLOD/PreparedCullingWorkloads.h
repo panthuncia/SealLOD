@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <spdlog/spdlog.h>
+#include <BasicTelemetry/Telemetry.h>
 
 #include "Managers/ViewManager.h"
 #include "Render/PublishedRendererState.h"
@@ -54,6 +55,8 @@ inline std::vector<PreparedCullingWorkload> PrepareCullingWorkloads(
     const auto published = rendererState
         ? rendererState->indirectWorkloads.payload.Get<PublishedIndirectState>()
         : nullptr;
+    std::uint64_t submittedPlacements = 0;
+    std::uint64_t submittedWorkloads = 0;
 
     for (const auto& view : views) {
         if ((filter.requirePrimary && !view.primary)
@@ -86,7 +89,27 @@ inline std::vector<PreparedCullingWorkload> PrepareCullingWorkloads(
                     : 0u,
                 .dispatchGridX = (workload->count + threadsPerGroup - 1u) / threadsPerGroup,
             });
+            submittedPlacements += workload->count;
+            ++submittedWorkloads;
         }
+    }
+    // Primary-camera CLOD work is the authoritative CPU-side count entering
+    // object culling. Shadow views deliberately duplicate placements and are
+    // reported separately by their own passes, so exclude them from this
+    // loaded-vs-culled invariant.
+    if (!useShadowCascadeViews && clodOnlyWorkloads) {
+        basic_telemetry::SetGauge("SARP.Culling.PrimaryCLod.SubmittedPlacements",
+            static_cast<std::int64_t>(submittedPlacements));
+        basic_telemetry::SetGauge("SARP.Culling.PrimaryCLod.SubmittedWorkloads",
+            static_cast<std::int64_t>(submittedWorkloads));
+        basic_telemetry::SetGauge("SARP.Culling.PrimaryCLod.ManifestEpoch",
+            rendererState ? static_cast<std::int64_t>(rendererState->epoch) : 0);
+        basic_telemetry::SetGauge("SARP.Culling.PrimaryCLod.IndirectRevision",
+            rendererState ? static_cast<std::int64_t>(
+                rendererState->indirectWorkloads.revision) : 0);
+        basic_telemetry::SetGauge("SARP.Culling.PrimaryCLod.DrawRecordRevision",
+            rendererState ? static_cast<std::int64_t>(
+                rendererState->drawRecords.revision) : 0);
     }
     return result;
 }

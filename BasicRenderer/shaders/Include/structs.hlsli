@@ -885,6 +885,9 @@ struct PerMeshInstanceBuffer {
     uint skinningInstanceSlot;
     float skinnedBoundsScale;
     BoundingSphere boundingSphere;
+    uint expectedClodMeshMetadataIndex;
+    uint expectedClodMeshIdentityLo;
+    uint expectedClodMeshIdentityHi;
 };
 
 struct PerInstanceTransformBuffer {
@@ -903,6 +906,8 @@ struct InstanceDrawRecordBuffer {
     uint clodOffsetIndex;
     uint skinnedAssemblyPlacementIndex;
     uint skinningTypeSlot;
+    uint expectedMeshIdentityLo;
+    uint expectedMeshIdentityHi;
 };
 
 struct SkinnedAssemblyPlacementBuffer {

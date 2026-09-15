@@ -13,6 +13,8 @@ public:
         const std::vector<MeshManager::StaticMeshTemplateRequest>& requests) const;
     void PrepareStaticMeshTemplateResourcesAsync(
         const std::vector<MeshManager::StaticMeshTemplateRequest>& requests) const;
+	std::uint64_t PublishDesiredBufferState() const;
+	std::optional<ArtifactRequirement> DesiredBufferStateRequirement() const;
 private:
     MeshManager* m_meshes = nullptr;
 };

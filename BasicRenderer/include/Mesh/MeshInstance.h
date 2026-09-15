@@ -70,6 +70,8 @@ public:
 
     void SetPerObjectBufferIndex(uint32_t index);
     void SetPerMeshBufferIndex(uint32_t index);
+    void SetExpectedClodMeshMetadataIndex(uint32_t index);
+    void SetExpectedClodMeshIdentity(uint64_t identity);
     uint32_t GetPerMeshBufferIndex() const { return m_perMeshInstanceBufferData.perMeshBufferIndex; }
 	void SetSkinningInstanceSlot(uint32_t slot);
 

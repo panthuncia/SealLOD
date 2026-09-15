@@ -412,23 +412,26 @@ MaterialManager::MaterialManager() {
 	org::memory::SetResourceUsageHint(*startupEval, "Material startup fallback");
 	org::memory::SetResourceUsageHint(*startupOpenPbr, "Material startup fallback");
 
-	// Visibility buffer resources
-    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialPixelCountBuffer", true);
-    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialOffsetBuffer", true);
-	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialWriteCursorBuffer", true);
+	// GPU-written frame scratch is not authored scene data. Allocate the bounded
+	// compile-flag domain up front so async material admission never replaces a
+	// backing resource while a frame snapshot is recording against it.
+	constexpr uint32_t initialCompileFlagCapacity = 256u;
+    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialPixelCountBuffer", true);
+    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialOffsetBuffer", true);
+	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(initialCompileFlagCapacity, "VisUtil::MaterialWriteCursorBuffer", true);
 	org::memory::SetResourceUsageHint(*m_materialPixelCountBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_materialOffsetBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_materialWriteCursorBuffer, "Material evaluation buffers");
 
 	// Per-block arrays for hierarchical scan
-	const uint32_t numBlocks = (m_compileFlagsRegistry.GetSlotsUsed() + kScanBlockSize - 1u) / kScanBlockSize;
+	const uint32_t numBlocks = (initialCompileFlagCapacity + kScanBlockSize - 1u) / kScanBlockSize;
 	m_blockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::BlockSumsBuffer", true);
 	m_scannedBlockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::ScannedBlockSumsBuffer", true);
 	org::memory::SetResourceUsageHint(*m_blockSumsBuffer, "Material evaluation buffers");
 	org::memory::SetResourceUsageHint(*m_scannedBlockSumsBuffer, "Material evaluation buffers");
 
 	// Indirect command buffer for material evaluation
-	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
+	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(initialCompileFlagCapacity, "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
 	org::memory::SetResourceUsageHint(*m_materialEvaluationCommandBuffer, "Indirect command buffers");
 
 	m_resources["Builtin::VisUtil::MaterialPixelCountBuffer"] = m_materialPixelCountBuffer;
@@ -1866,15 +1869,17 @@ unsigned int MaterialManager::AcquireCompileFlagsSlot(MaterialCompileFlags flags
 	if (count == 0u) {
 		throw std::invalid_argument("AcquireCompileFlagsSlot requires a non-zero count");
 	}
+	std::lock_guard mutationLock(m_materialMutationMutex);
 	const auto result = m_compileFlagsRegistry.Acquire(flags, count);
-	if (result.createdSlot) {
-		EnsureCompileFlagsBufferCapacity(m_compileFlagsRegistry.GetSlotsUsed());
-	}
+	// This is an authoring mutation only. GPU scratch capacity is reconciled by
+	// CommitGpuVisibleSnapshot, which publishes the matching material revision;
+	// resizing a live scratch buffer from an import worker races frame recording.
 	return result.slot;
 }
 
 bool MaterialManager::ReleaseCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count) {
 	ZoneScopedN("MaterialManager::ReleaseCompileFlagsSlot");
+	std::lock_guard mutationLock(m_materialMutationMutex);
 	if (!m_compileFlagsRegistry.Release(flags, count)) {
 		spdlog::error(
 			"MaterialManager::ReleaseCompileFlagsSlot rejected flags=0x{:X} count={}",
@@ -1889,6 +1894,7 @@ unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlag
 	if (count == 0u) {
 		return GetRasterBucketForFlags(rasterFlags);
 	}
+	std::lock_guard mutationLock(m_materialMutationMutex);
 
 	unsigned int slot;
 	auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
@@ -1914,6 +1920,7 @@ unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlag
 }
 
 void MaterialManager::ReleaseRasterBucket(MaterialRasterFlags rasterFlags) {
+	std::lock_guard mutationLock(m_materialMutationMutex);
 	const auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
 	if (it == m_rasterFlagToBucketMapping.end()) {
 		spdlog::error("Raster flags not found in mapping during release!");

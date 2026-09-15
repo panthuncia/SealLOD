@@ -356,7 +356,8 @@ private:
         uint32_t groupIndex,
         const PreAllocatedPages& pages,
         const MeshManager::CLodDiskStreamingCompletion& completion,
-        uint32_t expectedPageCount) const;
+        uint32_t expectedPageCount,
+        ICLodGeometryStorage* meshManager) const;
 
     std::shared_ptr<Buffer> m_streamingNonResidentBits;
     std::shared_ptr<Buffer> m_streamingActiveGroupsBits;

@@ -7,6 +7,7 @@
 #include <BasicTelemetry/Telemetry.h>
 
 #include <algorithm>
+#include <spdlog/spdlog.h>
 #include <stdexcept>
 
 namespace br::render {
@@ -126,9 +127,20 @@ void RegisterMaterialUsageBatchProducer(AsyncStateGraph& graph) {
                 for (const auto& expected : entry.textureBindings) {
                     const auto binding = context.Dependency<PublishedTextureBinding>({
                         ArtifactKind::TextureBinding, expected.streamingTextureID, 0 });
-                    if (!binding || binding.revision != expected.bindingRevision ||
+                    if (!binding || binding.revision < expected.bindingRevision ||
                         binding.payload->imageDescriptorIndex != expected.imageDescriptorIndex ||
                         binding.payload->samplerDescriptorIndex != expected.samplerDescriptorIndex) {
+                        spdlog::error(
+                            "Material usage closure mismatch material={} texture={} "
+                            "expectedRevision={} actualRevision={} expectedImage={} actualImage={} "
+                            "expectedSampler={} actualSampler={} dependencyPresent={}",
+                            entry.materialID, expected.streamingTextureID,
+                            expected.bindingRevision, binding ? binding.revision : 0u,
+                            expected.imageDescriptorIndex,
+                            binding ? binding.payload->imageDescriptorIndex : UINT32_MAX,
+                            expected.samplerDescriptorIndex,
+                            binding ? binding.payload->samplerDescriptorIndex : UINT32_MAX,
+                            static_cast<bool>(binding));
                         return ArtifactBuildResult::Failure(
                             "material usage texture-binding closure mismatch");
                     }

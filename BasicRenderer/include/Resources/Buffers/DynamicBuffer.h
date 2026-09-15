@@ -96,7 +96,6 @@ public:
     std::vector<PagedAllocation> AddDataPaged(const void* data, size_t count, size_t elementSize, size_t pageElementCount);
 	std::vector<std::shared_ptr<BufferView>> AddDataBatch(const void* data, size_t count, size_t elementSize);
 	void UpdateView(BufferView* view, const void* data) override;
-
     org::runtime::BulkWriteHandle BeginBulkWrite() {
         auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();

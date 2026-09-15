@@ -37,6 +37,9 @@ class ViewManager;
 class ICLodGeometryStorage;
 class MeshManagerCLodGeometryStorage;
 namespace br::render { class RendererStateRequestService; }
+namespace br::render { struct PublishedRendererState; class VersionedGpuBufferBackingPool; }
+namespace org::runtime { class IUploadService; }
+class PublishedStateResourceResolver;
 
 class MeshManager : public IResourceProvider {
 public:
@@ -142,7 +145,13 @@ public:
 
 	void AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices);
 	void SetSkeletonManager(SkeletonManager* manager) { m_skeletonManager = manager; }
+	void SetRendererStateServices(br::render::RendererStateRequestService* service,
+		std::shared_ptr<org::runtime::IUploadService> uploads, std::uint32_t framesInFlight);
 	void SetRendererStateRequestService(br::render::RendererStateRequestService* service);
+	std::uint64_t PublishDesiredBufferState();
+	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
+	void AcknowledgePublishedBufferState(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 	ICLodGeometryStorage& GetCLodGeometryStorage() noexcept;
 	[[nodiscard]] std::optional<br::render::ArtifactVersionHandle>
 		GeometryResidencyVersion() const;
@@ -277,6 +286,8 @@ public:
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
 	std::vector<ResourceIdentifier> GetSupportedKeys() override;
+	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
 
 private:
 	MeshManager();
@@ -388,6 +399,28 @@ private:
 	std::unordered_map<uint32_t, CLodStreamingInstanceState> m_clodStreamingStateByInstanceIndex;
 	std::unordered_map<const MeshInstance*, uint32_t> m_clodStreamingInstanceIndexByPtr;
 	std::unordered_map<const Mesh*, std::shared_ptr<CLodSharedStreamingState>> m_clodSharedStreamingStateByMesh;
+	// Serializes the mutable authoring registry. Render consumers never acquire
+	// this lock; they consume immutable geometry-buffer versions from a frame snapshot.
+	mutable std::recursive_mutex m_staticTemplatePublicationMutex;
+	struct GraphBufferBinding {
+		ResourceIdentifier identifier;
+		std::shared_ptr<DynamicBuffer> buffer;
+		br::render::ArtifactKey key;
+		std::uint64_t catalogVariant = 0;
+		std::uint32_t elementStride = 0;
+		br::render::ArtifactVersionID submittedVersion{};
+		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
+	};
+	std::vector<GraphBufferBinding> m_graphBufferBindings;
+	std::unordered_map<ResourceIdentifier, std::shared_ptr<PublishedStateResourceResolver>,
+		ResourceIdentifier::Hasher> m_graphBufferResolvers;
+	std::shared_ptr<org::runtime::IUploadService> m_geometryUploadService;
+	mutable std::mutex m_geometryBufferGraphMutex;
+	std::atomic_bool m_geometryBufferGraphDirty{ true };
+	std::uint64_t m_geometryBufferStateRevision = 0;
+	std::uint64_t m_geometryBufferFingerprint = 0;
+	br::render::ArtifactVersionHandle m_geometryBufferStateVersion{};
+	std::uint32_t m_geometryFramesInFlight = 1;
 	SkeletonManager* m_skeletonManager = nullptr;
 	std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> m_windTypeSkeletons;
 	std::vector<CLodSharedStreamingRange> m_clodSharedStreamingRanges;

@@ -5569,7 +5569,8 @@ bool CLodStreamingSystem::ValidateRenderableCompletion(
     uint32_t groupIndex,
     const PreAllocatedPages& pages,
     const MeshManager::CLodDiskStreamingCompletion& completion,
-    uint32_t expectedPageCount) const {
+    uint32_t expectedPageCount,
+    ICLodGeometryStorage* meshManager) const {
     if (expectedPageCount == 0u) {
         return completion.meshPageIndices.empty() &&
             completion.preAllocatedPages.empty() &&
@@ -5634,9 +5635,13 @@ bool CLodStreamingSystem::ValidateRenderableCompletion(
             return false;
         }
 
-#if 0
-        // Temporary CPU payload source-group validation disabled after page-lifecycle fix.
-        const auto info = MeshManager::CLodGroupStreamingInfo{};
+        // Validate cache/source ownership before upload as a second, independent
+        // observation point. This had been disabled after an earlier page-lifecycle
+        // fix, which allowed a persistent wrong-source payload to reach the GPU with
+        // only mesh-local group IDs available for diagnosis.
+        const auto info = meshManager
+            ? meshManager->GetCLodGroupStreamingInfo(groupIndex)
+            : MeshManager::CLodGroupStreamingInfo{};
         const bool needsFetch = completion.segmentNeedsFetch.empty() ||
             seg >= static_cast<uint32_t>(completion.segmentNeedsFetch.size()) ||
             completion.segmentNeedsFetch[seg];
@@ -5682,7 +5687,6 @@ bool CLodStreamingSystem::ValidateRenderableCompletion(
                 page,
                 completion.pageMapEntries[seg]);
         }
-#endif
     }
 
     return true;
@@ -7866,7 +7870,8 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(ICLodGeometryStorage* me
                         groupIndex,
                         preAlloc,
                         completion,
-                        expectedPageCount);
+                        expectedPageCount,
+                        meshManager);
                 }
                 if (!renderableCompletionValid) {
                     ReleasePreAllocatedPages(preAlloc, meshManager);
@@ -8310,13 +8315,19 @@ void CLodStreamingSystem::StreamingDrainTask(const br::TaskContext& context) {
                             for (uint32_t i = 0; i < detailCount; ++i) {
                                 const CLodSourceGroupMismatchDetail& detail = details[i];
                                 spdlog::error(
-                                    "CLod source group mismatch detail[{}]: expectedLocal={} foundLocal={} expectedGlobal={} foundGlobal={} metadata={} groupsBase={} expectedSegment={} expectedPage={} expectedMeshlets=[{}, {}) expectedMap={}:{} actualPageLocalMeshlet={} actualMap={}:{} visibleCluster={} unsortedCluster={} instance={} view={} bucketMeshlet={} bucketCount={}",
+									"CLod source group mismatch detail[{}]: expectedLocal={} foundLocal={} expectedGlobal={} foundGlobal={} metadata={} expectedTemplateMetadata={} actualOwnerMetadata={} expectedMeshIdentity={:08x}{:08x} actualMeshIdentity={:08x}{:08x} groupsBase={} expectedSegment={} expectedPage={} expectedMeshlets=[{}, {}) expectedMap={}:{} actualPageLocalMeshlet={} actualMap={}:{} visibleCluster={} unsortedCluster={} instance={} view={} bucketMeshlet={} bucketCount={}",
                                     i,
                                     detail.expectedGroupLocalIndex,
                                     detail.foundGroupLocalIndex,
                                     detail.expectedGroupGlobalIndex,
                                     detail.foundGroupGlobalIndex,
-                                    detail.clodMeshMetadataIndex,
+									detail.clodMeshMetadataIndex,
+									detail.expectedTemplateMeshMetadataIndex,
+									detail.actualOwnerMeshMetadataIndex,
+									detail.expectedMeshIdentityHi,
+									detail.expectedMeshIdentityLo,
+									detail.actualMeshIdentityHi,
+									detail.actualMeshIdentityLo,
                                     detail.groupsBase,
                                     detail.expectedSegmentGlobalIndex,
                                     detail.expectedSegmentPageIndex,

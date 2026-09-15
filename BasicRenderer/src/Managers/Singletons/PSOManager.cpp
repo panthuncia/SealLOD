@@ -2541,7 +2541,11 @@ PipelineState PSOManager::RegisterExternalPipeline(
 
 std::vector<DxcDefine> PSOManager::GetRasterShaderDefines(MaterialRasterFlags rasterFlags) {
     std::vector<DxcDefine> defines = {};
-    defines.push_back({ L"CLOD_ENABLE_SOURCE_GROUP_VALIDATION", L"0" });
+    // Keep the source-group identity carried by each encoded meshlet checked
+    // against the group selected through the active page map.  This is cheap
+    // enough for diagnostic builds and, unlike visual corruption, identifies
+    // the exact page/segment and published group whose addressing diverged.
+    defines.push_back({ L"CLOD_ENABLE_SOURCE_GROUP_VALIDATION", L"1" });
     static constexpr const wchar_t* uvCountValues[] = { L"0", L"1", L"2", L"3", L"4", L"5", L"6", L"7", L"8" };
     defines.push_back({ L"CLOD_FORWARD_UV_SET_COUNT", uvCountValues[GetForwardUvSetCount(rasterFlags)] });
     defines.push_back({ L"CLOD_FORWARD_VERTEX_COLOR", HasForwardVertexColor(rasterFlags) ? L"1" : L"0" });

@@ -150,6 +150,10 @@ struct GroupPageMapEntry
 {
 	uint32_t slabDescriptorIndex = 0; // Descriptor-heap index of the slab BAB
 	uint32_t slabByteOffset = 0;      // Byte offset of page start in slab
+	// Diagnostic ownership survives physical-page reuse and detects a draw
+	// resolving another mesh's otherwise-valid page-map entry.
+	uint32_t ownerMeshMetadataIndex = 0xFFFFFFFFu;
+	uint32_t ownerPageMapBase = 0xFFFFFFFFu;
 };
 
 // Retained for CPU-side streaming state tracking.

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "Render/Runtime/UploadTypes.h"
@@ -91,8 +92,12 @@ public:
 
 private:
     struct DeferredUpload {
-        const void* data = nullptr;
-        size_t size = 0;
+        // Bulk publication may be separated from the manager mutation that
+        // supplied the bytes by hundreds of residency operations.  Callers
+        // frequently supply stack-local chunks/zero entries, so retaining a
+        // borrowed pointer here corrupts the eventual page-map publication.
+        // Capture an immutable image at journal time instead.
+        std::vector<std::byte> data;
         org::runtime::UploadTarget target;
         size_t destinationOffset = 0;
     };

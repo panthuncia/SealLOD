@@ -58,6 +58,7 @@ public:
 	struct StaticMeshTemplateRef {
 		std::uint32_t meshTemplateIndex = 0;
 		std::uint32_t clodOffsetIndex = 0;
+		std::uint64_t meshIdentity = 0;
 		std::shared_ptr<Mesh> mesh;
 		std::shared_ptr<Material> material;
 		std::vector<DrawWorkloadKey> workloadKeys;
@@ -75,6 +76,7 @@ public:
 	struct PreparedStaticMeshTemplateRef {
 		std::uint32_t meshTemplateIndex = 0;
 		std::uint32_t clodOffsetIndex = 0;
+		std::uint64_t meshIdentity = 0;
 		std::vector<DrawWorkloadKey> workloadKeys;
 		std::span<const DrawWorkloadKey> mappedWorkloadKeys;
 		std::uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
@@ -252,6 +254,7 @@ public:
 			std::size_t scopeTransformOrdinal = 0;
 			std::uint32_t meshTemplateIndex = 0;
 			std::uint32_t clodOffsetIndex = 0;
+			std::uint64_t meshIdentity = 0;
 			std::uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
 			BoundingSphere skinnedAssemblyBounds{};
 			float skinnedBoundsScale = 1.0f;
