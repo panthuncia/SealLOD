@@ -167,7 +167,6 @@ namespace {
         result.roughnessScale = 1.0f;
         result.specularLevel = 0.04f;
         result.glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
-        result.farOverlayParams = { 0.0f, 0.0f, 1.0f, 0.0f };
         return result;
     }
 
@@ -538,7 +537,6 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             layer.roughnessScale = source.roughnessScale;
             layer.specularLevel = source.specularLevel;
             layer.glintParameters = source.glintParameters;
-            layer.farOverlayParams = source.farOverlayParams;
             if ((source.flags & TERRAIN_LAYER_FLAG_SNOW) != 0u) {
                 ++snowLayerCount;
             }
