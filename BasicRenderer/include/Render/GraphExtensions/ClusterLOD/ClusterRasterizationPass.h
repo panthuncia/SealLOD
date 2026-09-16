@@ -46,7 +46,7 @@ struct ClusterRasterBindings {
 
 class ClusterRasterizationPass
     : public org::TypedRenderGraphPass<ClusterRasterizationPass,
-          br::render::PreparedRenderIndirectSequence, ClusterRasterBindings>,
+          org::EmptyPassFrameData, ClusterRasterBindings, br::render::PreparedRenderIndirectSequence>,
       public IDynamicDeclaredResources {
 public:
     ClusterRasterizationPass(
@@ -85,9 +85,12 @@ public:
     void Initialize();
     void Update(const UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    br::render::PreparedRenderIndirectSequence Prepare(const ClusterRasterBindings&,
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const;
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedRenderIndirectSequence&,
+        const ClusterRasterBindings&, const org::PassPrepareContext&) const { return {}; }
+    br::render::PreparedRenderIndirectSequence BuildRecipe(const ClusterRasterBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const ClusterRasterBindings&, const br::render::PreparedRenderIndirectSequence& data,
+    static void Record(const br::render::PreparedRenderIndirectSequence& data, const org::EmptyPassFrameData&,
         org::PassRecordContext& recording) {
         br::render::RecordPreparedRenderIndirectSequence(data, recording);
     }

@@ -470,7 +470,7 @@ bool ClusterRasterizationPass::DeclaredResourcesChanged() const {
     return m_declaredResourcesChanged;
 }
 
-br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::Prepare(
+br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::BuildRecipe(
     const ClusterRasterBindings& bindings, const org::PassPrepareContext& preparation) const {
     if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer &&
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)())
@@ -673,4 +673,29 @@ br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::Prepare(
             static_cast<int64_t>(commandLayoutMismatches));
     }
     return data;
+}
+
+std::vector<uint64_t> ClusterRasterizationPass::RecipeRevision(const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    std::vector<uint64_t> revision{SettingsManager::GetInstance().Revision(), m_passWidth, m_passHeight,
+        m_wireframe, m_visibilityBuffers.size(), context->preparedRasterBucketCount,
+        context->lighting.shadowsEnabled, context->lighting.punctualLightingEnabled, context->lighting.gtaoEnabled,
+        reinterpret_cast<uintptr_t>(m_rasterizationCommandSignature.get())};
+    for (uint32_t i = 0; i < context->preparedRasterBucketCount; ++i) {
+        const auto flags = context->preparedRasterBucketFlags.at(i);
+        const PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
+            ? PSOManager::GetInstance().TryGetClusterLODRasterPSO(flags, m_wireframe, m_visibilityBuffers.size() == 1u)
+            : m_outputKind == CLodRasterOutputKind::VirtualShadow
+                ? PSOManager::GetInstance().TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
+            : m_outputKind == CLodRasterOutputKind::AVBOITOccupancy
+                ? PSOManager::GetInstance().TryGetClusterLODAVBOITOccupancyPSO(flags, m_wireframe)
+            : m_outputKind == CLodRasterOutputKind::AVBOIT
+                ? PSOManager::GetInstance().TryGetClusterLODAVBOITRasterPSO(flags, m_wireframe)
+            : m_outputKind == CLodRasterOutputKind::AVBOITShading
+                ? PSOManager::GetInstance().TryGetClusterLODAVBOITShadePSO(flags, m_wireframe, context->globalPSOFlags)
+            : PSOManager::GetInstance().TryGetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
+        revision.push_back(static_cast<uint64_t>(flags));
+        revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->GetPayload().get() : nullptr));
+    }
+    return revision;
 }

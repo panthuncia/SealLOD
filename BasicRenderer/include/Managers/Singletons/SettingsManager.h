@@ -7,12 +7,15 @@
 #include <typeinfo>
 #include <type_traits>
 #include <stdexcept>
+#include <atomic>
+#include <cstdint>
 
 #include "Setting.h"
 
 class SettingsManager {
 public:
     static SettingsManager& GetInstance();
+    uint64_t Revision() const noexcept { return m_revision.load(std::memory_order_acquire); }
 
     // Registers a setting with the given name and initial value
     template<typename T>
@@ -31,8 +34,9 @@ public:
         }
 
         auto setter = setting.getSetter();
-        return [setter](T newValue) {
+        return [this, setter](T newValue) {
             setter(static_cast<void*>(&newValue));
+            m_revision.fetch_add(1, std::memory_order_release);
         };
     }
 
@@ -380,6 +384,7 @@ public:
     }
 
 private:
+    std::atomic_uint64_t m_revision{1};
     std::unordered_map<std::string, std::unique_ptr<ISetting>> settings;
     std::vector<Subscription> m_dependencySubscriptions;
 

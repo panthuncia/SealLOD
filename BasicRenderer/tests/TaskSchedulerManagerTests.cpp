@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -396,6 +397,45 @@ int main() {
         Check(state.load(std::memory_order_acquire) == 2);
     }
 
+    // A scope may be complete while its callback is still destroying captured
+    // ownership. Custom scopes are not part of Cleanup's process-scope waits.
     scheduler.Cleanup();
+    config.workerCount = 4; // Three simultaneous held destructors need three workers.
+    scheduler.Initialize(config);
+    std::atomic<int> destroying{0};
+    std::atomic<bool> releaseDestruction{false};
+    struct HeldOwnership {
+        std::atomic<int>& destroying;
+        std::atomic<bool>& release;
+        HeldOwnership(std::atomic<int>& count, std::atomic<bool>& gate) : destroying(count), release(gate) {}
+        ~HeldOwnership() {
+            destroying.fetch_add(1, std::memory_order_release);
+            while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+        }
+    };
+    for (int route = 0; route < 3; ++route) {
+        auto scope = scheduler.CreateScope("custom-cleanup-ownership");
+        auto ownership = std::make_shared<HeldOwnership>(destroying, releaseDestruction);
+        auto body = [ownership = std::move(ownership)](const br::TaskContext&) { Check(static_cast<bool>(ownership)); };
+        if (route == 2)
+            Check(scheduler.SubmitCpu(scope, TaskLane::Streaming, TaskDomain::General, "held-direct", std::move(body)));
+        else
+            Check(scheduler.Submit(scope, TaskLane::Streaming,
+                route == 0 ? TaskDomain::General : TaskDomain::GraphPublication, "held-admitted", std::move(body)));
+        scope.Wait();
+    }
+    while (destroying.load(std::memory_order_acquire) != 3) std::this_thread::yield();
+    std::atomic<bool> cleanupStarted{false}, cleanupFinished{false};
+    std::thread cleanup([&] {
+        cleanupStarted.store(true, std::memory_order_release);
+        scheduler.Cleanup();
+        cleanupFinished.store(true, std::memory_order_release);
+    });
+    while (!cleanupStarted.load(std::memory_order_acquire)) std::this_thread::yield();
+    std::this_thread::sleep_for(10ms);
+    Check(!cleanupFinished.load(std::memory_order_acquire));
+    releaseDestruction.store(true, std::memory_order_release);
+    cleanup.join();
+    Check(cleanupFinished.load(std::memory_order_acquire));
     return 0;
 }

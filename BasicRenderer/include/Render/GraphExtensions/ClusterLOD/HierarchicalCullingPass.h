@@ -70,9 +70,14 @@ struct HierarchicalCullingBindings {
     bool hasPhase1 = false, hasSwWriteBase = false, hasVoxelQueues = false, hasPageJobQueues = false;
 };
 
+struct HierarchicalCullingInvocation {
+    bool initializeBacking = false;
+    br::render::PreparedWorkGraphCpuDispatch cpuDispatch;
+};
+
 class HierarchicalCullingPass
     : public org::TypedRenderGraphPass<HierarchicalCullingPass,
-          br::render::PreparedComputeCommandSequence, HierarchicalCullingBindings>
+          HierarchicalCullingInvocation, HierarchicalCullingBindings, br::render::PreparedComputeCommandSequence>
     , public IDynamicDeclaredResources {
 public:
     HierarchicalCullingPass(
@@ -121,11 +126,14 @@ public:
 
     HierarchicalCullingBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    br::render::PreparedComputeCommandSequence Prepare(const HierarchicalCullingBindings&,
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const;
+    br::render::PreparedComputeCommandSequence BuildRecipe(const HierarchicalCullingBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const HierarchicalCullingBindings&, const br::render::PreparedComputeCommandSequence& data,
+    HierarchicalCullingInvocation PrepareInvocation(const br::render::PreparedComputeCommandSequence&,
+        const HierarchicalCullingBindings&, const org::PassPrepareContext&) const;
+    static void Record(const br::render::PreparedComputeCommandSequence& recipe, const HierarchicalCullingInvocation& data,
         org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeCommands(data, recording);
+        br::render::RecordPreparedComputeCommands(recipe, recording, &data.cpuDispatch, data.initializeBacking);
     }
     void Update(const UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;

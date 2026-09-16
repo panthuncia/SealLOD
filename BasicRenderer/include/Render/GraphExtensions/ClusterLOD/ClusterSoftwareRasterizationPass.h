@@ -38,7 +38,7 @@ struct ClusterSoftwareRasterBindings {
 
 class ClusterSoftwareRasterizationPass
     : public org::TypedRenderGraphPass<ClusterSoftwareRasterizationPass,
-          ClusterSoftwareRasterFrameData, ClusterSoftwareRasterBindings>,
+          uint32_t, ClusterSoftwareRasterBindings, ClusterSoftwareRasterFrameData>,
       public IDynamicDeclaredResources {
 public:
     ClusterSoftwareRasterizationPass(
@@ -61,9 +61,12 @@ public:
     ClusterSoftwareRasterBindings Declare(org::PassBuilder& builder);
     void Update(const UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    ClusterSoftwareRasterFrameData Prepare(const ClusterSoftwareRasterBindings&,
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const;
+    uint32_t PrepareInvocation(const ClusterSoftwareRasterFrameData&, const ClusterSoftwareRasterBindings&,
+        const org::PassPrepareContext&) const;
+    ClusterSoftwareRasterFrameData BuildRecipe(const ClusterSoftwareRasterBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const ClusterSoftwareRasterBindings&, const ClusterSoftwareRasterFrameData&,
+    static void Record(const ClusterSoftwareRasterFrameData&, const uint32_t&,
         org::PassRecordContext&);
 
 private:

@@ -5,6 +5,11 @@
 #include <bit>
 #include <cstdlib>
 #include <format>
+#include <fstream>
+#include <filesystem>
+#include <chrono>
+#include <sstream>
+#include "Render/PublicationBindingBundle.h"
 #include <limits>
 #include <mutex>
 #include <numeric>
@@ -90,6 +95,40 @@ const ObjectBufferMetricNames* ObjectBufferMetrics(const VersionedGpuBufferBuild
     default: return nullptr;
     }
 }
+}
+
+void VersionedGpuBufferBackingPool::TraceExhaustion(std::string_view debugName) {
+    if (!org::BindingLifetimeTraceEnabled()) return;
+    const auto now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    auto previous = m_lastLifetimeTraceMs.load();
+    if (now - previous < 1000 || !m_lastLifetimeTraceMs.compare_exchange_strong(previous, now)) return;
+    std::ostringstream records;
+    std::vector<uint64_t> resourceIDs;
+    {
+        std::lock_guard lock(m_mutex);
+        for (const auto& backing : m_backings) {
+            if (!backing || !backing->resource) continue;
+            const auto id = backing->resource->GetGlobalResourceID();
+            resourceIDs.push_back(id);
+            records << "backing," << now << ',' << this << ',' << debugName << ',' << id << ','
+                << backing->backingGeneration << ',' << backing->byteCapacity << ','
+                << backing->bindingConsumers.load() << ',' << backing->readbackPins.load() << ','
+                << backing.use_count() << ',' << backing->resource.use_count() << ','
+                << backing->contentEpoch << ',' << backing->lastPublishedRetirementEpoch << ','
+                << m_activePublishedGeneration << ',' << VersionedGpuBufferFrameRetirementEpoch() << '\n';
+        }
+    }
+    // Locking weak observations can release the final semantic pin. Never do
+    // this while holding the backing pool mutex.
+    for (const auto id : resourceIDs) org::DumpBindingHolders(id, records);
+    static std::mutex outputMutex;
+    std::lock_guard outputLock(outputMutex);
+    const auto* directory = std::getenv("BASIC_TELEMETRY_OUTPUT_DIR");
+    if (!directory) return;
+    std::filesystem::create_directories(directory);
+    std::ofstream out(std::filesystem::path(directory) / "resource_lifetimes.csv", std::ios::app);
+    out << records.str();
 }
 
 VersionedGpuBufferBackingPool::~VersionedGpuBufferBackingPool() {
@@ -315,6 +354,27 @@ std::shared_ptr<const std::vector<std::byte>> VersionedGpuBufferImage::Materiali
     return bytes;
 }
 
+std::shared_ptr<const void> VersionedGpuBufferBackingPool::PinBindingConsumer(
+    const std::shared_ptr<BufferBackingArtifact>& backing) {
+    struct Pin {
+        std::weak_ptr<BufferBackingArtifact> backing;
+        std::weak_ptr<VersionedGpuBufferBackingPool> pool;
+        Pin(const std::shared_ptr<BufferBackingArtifact>& value, std::weak_ptr<VersionedGpuBufferBackingPool> owner)
+            : backing(value), pool(std::move(owner)) {
+            value->bindingConsumers.fetch_add(1, std::memory_order_acq_rel);
+        }
+        ~Pin() {
+            if (auto value = backing.lock())
+                if (value->bindingConsumers.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                    if (auto owner = pool.lock()) owner->NotifyAvailability();
+        }
+    };
+    std::lock_guard lock(m_mutex);
+    if (std::find(m_backings.begin(), m_backings.end(), backing) == m_backings.end())
+        throw std::invalid_argument("Cannot bind a retired semantic buffer backing");
+    return std::make_shared<const Pin>(backing, weak_from_this());
+}
+
 std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     std::uint64_t capacityClass, std::uint32_t elementStride,
     bool unorderedAccess, bool indirectArguments, std::string_view debugName,
@@ -343,7 +403,8 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
             backing->backingGeneration != m_activePublishedGeneration &&
             backing->readbackPins.load(std::memory_order_acquire) == 0u &&
             retirementEpoch >= backing->lastPublishedRetirementEpoch + safeRetirementDelay;
-        const bool idle = backing && (backing.use_count() == 1 || publicationRetired);
+        const bool idle = backing && backing->bindingConsumers.load(std::memory_order_acquire) == 0u
+            && (backing.use_count() == 1 || publicationRetired);
         if (idle && backing->capacityClass == capacityClass && !reusable) {
             reusable = backing;
             ++it;
@@ -409,6 +470,11 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
     }
     auto backing = std::make_shared<BufferBackingArtifact>();
     backing->resource = std::move(resource);
+    backing->resource->SetSemanticConsumerLeaseFactory([pool = weak_from_this(), weak = std::weak_ptr(backing)] {
+        const auto owner = pool.lock();
+        const auto value = weak.lock();
+        return owner && value ? owner->PinBindingConsumer(value) : std::shared_ptr<const void>{};
+    });
     backing->backingGeneration = m_nextGeneration++;
     backing->capacityClass = capacityClass;
     backing->byteCapacity = capacityClass * elementStride;
@@ -967,6 +1033,7 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     auto backing = pool->Acquire(capacityClass, input->elementStride,
         input->unorderedAccess, input->indirectArguments, input->debugName,
         backingExpanded);
+    if (org::BindingLifetimeTraceEnabled()) pool->TraceExhaustion(input->debugName);
     if (!backing) {
         const auto identity = pool->SubscribeAvailability(
             notifySuspension);

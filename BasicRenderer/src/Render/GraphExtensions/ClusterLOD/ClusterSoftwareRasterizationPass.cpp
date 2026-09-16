@@ -21,7 +21,7 @@
 #include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
 void ClusterSoftwareRasterizationPass::Record(
-    const ClusterSoftwareRasterBindings&, const ClusterSoftwareRasterFrameData& frame,
+    const ClusterSoftwareRasterFrameData& frame, const uint32_t& generation,
     org::PassRecordContext& recording) {
     if (!frame.enabled || frame.bucketCount == 0u) return;
 
@@ -38,13 +38,15 @@ void ClusterSoftwareRasterizationPass::Record(
         }
     };
 
+    auto cacheConstants = frame.cacheConstants;
+    cacheConstants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] = generation;
     if (frame.hasSkinCache) {
         bindProgram(frame.clearProgram);
         commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
             NumMiscUintRootConstants, frame.clearConstants.data());
         commands.Dispatch(1u, 1u, 1u);
         commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
-            NumMiscUintRootConstants, frame.cacheConstants.data());
+            NumMiscUintRootConstants, cacheConstants.data());
 
         const auto rasterArguments = recording.Resolve(*frame.raster.argumentsReference).GetHandle();
         auto dispatchBuckets = [&](const org::PreparedProgramBinding& binding) {
@@ -82,7 +84,8 @@ void ClusterSoftwareRasterizationPass::Record(
         br::render::RecordPreparedComputeUavBarrier(frame.cacheMapping, recording);
     }
 
-    br::render::RecordPreparedComputeIndirectSequence(frame.raster, recording);
+    br::render::RecordPreparedComputeIndirectSequence(frame.raster, recording,
+        std::pair<uint32_t, uint32_t>{CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION, generation});
 }
 
 ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
@@ -386,7 +389,7 @@ bool ClusterSoftwareRasterizationPass::DeclaredResourcesChanged() const {
     return m_declaredResourcesChanged;
 }
 
-ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::Prepare(
+ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::BuildRecipe(
     const ClusterSoftwareRasterBindings& bindings, const org::PassPrepareContext& preparation) const {
     ClusterSoftwareRasterFrameData frame{};
     if (m_runWhenComputeSWRasterEnabledOnly && !CLodSoftwareRasterUsesCompute(
@@ -442,13 +445,10 @@ ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::Prepare(
         constants[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = config.virtualResolution;
         if (bindings.hasTelemetry) constants[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
         if (bindings.hasSkinCache) {
-            ++m_dynamicWindSkinCacheGeneration;
-            if (m_dynamicWindSkinCacheGeneration == 0u || m_dynamicWindSkinCacheGeneration >= 0x7FFFFFFFu)
-                m_dynamicWindSkinCacheGeneration = 1u;
             constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX] = uav(bindings.skinMapping);
             constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_DESCRIPTOR_INDEX] = uav(bindings.skinHash);
             constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_ENTRY_COUNT] = m_dynamicWindSkinCacheHashEntryCount;
-            constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] = m_dynamicWindSkinCacheGeneration;
+            constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] = 0u;
             constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITIONS_DESCRIPTOR_INDEX] = uav(bindings.skinPositions);
             constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITION_CAPACITY] = m_dynamicWindSkinCachePositionCapacity;
             constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_ALLOCATOR_DESCRIPTOR_INDEX] = uav(bindings.skinAllocator);
@@ -493,4 +493,29 @@ ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::Prepare(
         frame.cacheMapping = preparation.CaptureResource(bindings.skinMapping);
     }
     return frame;
+}
+
+uint32_t ClusterSoftwareRasterizationPass::PrepareInvocation(const ClusterSoftwareRasterFrameData& recipe,
+    const ClusterSoftwareRasterBindings&, const org::PassPrepareContext&) const {
+    if (!recipe.enabled || !recipe.hasSkinCache || recipe.bucketCount == 0u) return 0u;
+    if (++m_dynamicWindSkinCacheGeneration == 0u || m_dynamicWindSkinCacheGeneration >= 0x7FFFFFFFu)
+        m_dynamicWindSkinCacheGeneration = 1u;
+    return m_dynamicWindSkinCacheGeneration;
+}
+std::vector<uint64_t> ClusterSoftwareRasterizationPass::RecipeRevision(const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    std::vector<uint64_t> revision{SettingsManager::GetInstance().Revision(), context->preparedRasterBucketCount,
+        reinterpret_cast<uintptr_t>(m_rasterizationCommandSignature.get()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheClearPipeline.GetPayload().get()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheBuildPipeline.GetPayload().get()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheFinalizePipeline.GetPayload().get()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheSkinPipeline.GetPayload().get()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheResolvePipeline.GetPayload().get())};
+    for (uint32_t i = 0; i < context->preparedRasterBucketCount; ++i) {
+        const auto flags = context->preparedRasterBucketFlags.at(i);
+        const auto* pso = PSOManager::GetInstance().TryGetClusterLODSoftwareRasterPSO(flags, m_outputKind);
+        revision.push_back(static_cast<uint64_t>(flags));
+        revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->GetPayload().get() : nullptr));
+    }
+    return revision;
 }

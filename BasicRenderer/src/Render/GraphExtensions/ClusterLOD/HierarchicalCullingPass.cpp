@@ -594,7 +594,7 @@ void HierarchicalCullingPass::Initialize() {
 }
 
 
-br::render::PreparedComputeCommandSequence HierarchicalCullingPass::Prepare(
+br::render::PreparedComputeCommandSequence HierarchicalCullingPass::BuildRecipe(
     const HierarchicalCullingBindings& bindings, const org::PassPrepareContext& preparation) const {
     const auto* update = preparation.preparationData
         ? preparation.preparationData->Get<UpdateContext>() : nullptr;
@@ -739,31 +739,13 @@ br::render::PreparedComputeCommandSequence HierarchicalCullingPass::Prepare(
     root[CLOD_WG_SW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX] = srv(
         bindings.hasSwWriteBase ? bindings.swWriteBase : bindings.swCounter);
 
-    const bool initializeBacking = !m_workGraphInitialization->initialized.load(std::memory_order_acquire);
-    if (initializeBacking) preparedCommands.Reserve(m_workGraphInitialization,
-        +[](WorkGraphInitializationState& state, org::SubmissionContext) {
-            state.initialized.store(true, std::memory_order_release);
-        });
-    preparedCommands.SetWorkGraph(
-        m_workGraph, capture(m_scratchBuffer), initializeBacking);
+    preparedCommands.SetWorkGraph(m_workGraph, capture(m_scratchBuffer), false);
     commands.emplace_back(br::render::PreparedComputeDescriptorIndices{
         CaptureResourceDescriptorIndices(m_pipelineResources)});
     constants(root);
 
     if (m_isFirstPass) {
-        const auto workloads = br::render::PrepareCullingWorkloads(
-            render->Views(), render->publishedRendererState, m_renderPhase,
-            m_clodOnlyWorkloads, m_useShadowCascadeViews, m_rasterOutputKind, 64u,
-            "HierarchicalCullingPass");
-        std::vector<ObjectCullRecord> records;
-        records.reserve(workloads.size());
-        for (const auto& workload : workloads) records.push_back({
-            workload.viewDataIndex, workload.activeDrawSetIndicesSRVIndex,
-            workload.activeDrawCount, workload.drawRecordVisibilityGenerationSRVIndex,
-            workload.dispatchGridX, workload.dispatchGridY, workload.dispatchGridZ});
-        basic_telemetry::SetGauge("SARP.Culling.GraphWorkloadRecords.WorkGraph",
-            static_cast<std::int64_t>(records.size()));
-        commands.emplace_back(br::render::PreparedWorkGraphCpuDispatch::From(0u, records));
+        commands.emplace_back(br::render::PreparedWorkGraphCpuDispatch{});
         barriers({m_visibleClustersCounterBuffer, m_occlusionReplayStateBuffer, m_occlusionReplayBuffer},
             rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceAccessType::UnorderedAccess);
     } else {
@@ -813,6 +795,44 @@ br::render::PreparedComputeCommandSequence HierarchicalCullingPass::Prepare(
     commands.emplace_back(br::render::PreparedDispatchGroups{1, 1, 1});
 
     return std::move(preparedCommands).FinishData();
+}
+
+std::vector<uint64_t> HierarchicalCullingPass::RecipeRevision(const org::PassPrepareContext& preparation) const {
+    const auto* render = preparation.preparationData ? preparation.preparationData->Get<RenderContext>() : nullptr;
+    return {SettingsManager::GetInstance().Revision(),
+        reinterpret_cast<uintptr_t>(m_workGraph.get()),
+        reinterpret_cast<uintptr_t>(m_clearPipelineState.GetPayload().get()),
+        reinterpret_cast<uintptr_t>(m_createCommandPipelineState.GetPayload().get()),
+        render ? render->preparedRasterBucketCount : 0u};
+}
+
+HierarchicalCullingInvocation HierarchicalCullingPass::PrepareInvocation(
+    const br::render::PreparedComputeCommandSequence&, const HierarchicalCullingBindings&,
+    const org::PassPrepareContext& preparation) const {
+    HierarchicalCullingInvocation invocation;
+    const auto* render = preparation.preparationData ? preparation.preparationData->Get<RenderContext>() : nullptr;
+    if (!render || !m_workGraph || !m_scratchBuffer) return invocation;
+    invocation.initializeBacking = !m_workGraphInitialization->initialized.load(std::memory_order_acquire);
+    if (invocation.initializeBacking) preparation.Reserve(m_workGraphInitialization,
+        +[](WorkGraphInitializationState& state, org::SubmissionContext) {
+            state.initialized.store(true, std::memory_order_release);
+        });
+    if (m_isFirstPass) {
+        const auto workloads = br::render::PrepareCullingWorkloads(
+            render->Views(), render->publishedRendererState, m_renderPhase,
+            m_clodOnlyWorkloads, m_useShadowCascadeViews, m_rasterOutputKind, 64u,
+            "HierarchicalCullingPass");
+        std::vector<ObjectCullRecord> records;
+        records.reserve(workloads.size());
+        for (const auto& workload : workloads) records.push_back({
+            workload.viewDataIndex, workload.activeDrawSetIndicesSRVIndex,
+            workload.activeDrawCount, workload.drawRecordVisibilityGenerationSRVIndex,
+            workload.dispatchGridX, workload.dispatchGridY, workload.dispatchGridZ});
+        basic_telemetry::SetGauge("SARP.Culling.GraphWorkloadRecords.WorkGraph",
+            static_cast<std::int64_t>(records.size()));
+        invocation.cpuDispatch = br::render::PreparedWorkGraphCpuDispatch::From(0u, records);
+    }
+    return invocation;
 }
 
 void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionContext) {

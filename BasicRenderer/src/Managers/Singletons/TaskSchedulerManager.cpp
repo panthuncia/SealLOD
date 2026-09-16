@@ -223,6 +223,10 @@ private:
 };
 
 struct TaskSchedulerManager::RuntimeState {
+    struct CallbackLifetime {
+        RuntimeState* state;
+        ~CallbackLifetime();
+    };
     struct PendingTask {
         std::shared_ptr<TaskScope::State> scope;
         TaskLane lane{};
@@ -234,6 +238,7 @@ struct TaskSchedulerManager::RuntimeState {
         std::uint64_t traceTaskID = 0;
         std::uint64_t admittedQueuedDepth = 0;
         std::uint32_t admittedActiveCount = 0;
+        std::shared_ptr<CallbackLifetime> callbackLifetime;
     };
     struct DelayedTask {
         std::chrono::steady_clock::time_point due;
@@ -285,6 +290,15 @@ struct TaskSchedulerManager::RuntimeState {
     std::array<std::uint64_t, 4> sceneGraphLastAdmissionKeys{};
     std::vector<ULONG> workerCpuSets;
     mutable std::mutex taskMutex;
+    std::condition_variable callbacksFinished;
+    std::size_t outstandingCallbacks{};
+    // Called under taskMutex before an admitted callback becomes visible.
+    std::shared_ptr<CallbackLifetime> RetainCallback() {
+        auto lifetime = std::make_shared<CallbackLifetime>();
+        lifetime->state = this;
+        ++outstandingCallbacks;
+        return lifetime;
+    }
     std::atomic_bool stopping{ false };
 
     std::mutex blockingMutex;
@@ -299,6 +313,11 @@ struct TaskSchedulerManager::RuntimeState {
     std::thread timerThread;
     std::uint64_t nextTimer{};
 };
+
+TaskSchedulerManager::RuntimeState::CallbackLifetime::~CallbackLifetime() {
+    std::lock_guard lock(state->taskMutex);
+    if (--state->outstandingCallbacks == 0) state->callbacksFinished.notify_all();
+}
 
 namespace {
 void LogTaskException(std::string_view taskName, TaskDomain domain, const std::exception_ptr& error) noexcept {
@@ -564,6 +583,7 @@ bool TaskSchedulerManager::SubmitCpu(
         std::lock_guard lock(m_runtimeState->taskMutex);
         auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(domain)];
         ++runtime.directQueued;
+        task->callbackLifetime = m_runtimeState->RetainCallback();
         runtime.stats.queued = runtime.Queued();
         runtime.stats.highWatermark = (std::max)(
             runtime.stats.highWatermark, runtime.stats.queued);
@@ -579,7 +599,9 @@ bool TaskSchedulerManager::SubmitCpu(
             domain, lane, 0 });
     }
 
-    SelectArena(*m_runtimeState, lane).enqueue([this, task] {
+    // pair destroys the task before releasing the runtime lifetime fence.
+    SelectArena(*m_runtimeState, lane).enqueue([this, work = std::make_pair(std::move(task->callbackLifetime), task)] {
+        const auto& task = work.second;
         std::uint64_t queuedDepth = 0;
         std::uint32_t activeCount = 0;
         {
@@ -690,6 +712,7 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
             }
             auto& queue = runtime.queues[selected];
             launch.push_back(std::move(queue.front())); queue.pop_front(); ++runtime.active;
+            launch.back().callbackLifetime = m_runtimeState->RetainCallback();
             launch.back().admittedQueuedDepth = runtime.Queued();
             launch.back().admittedActiveCount = runtime.Active();
         }
@@ -699,7 +722,8 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
         if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Admitted,
             task.trace, task.traceTaskID, 0, 0, task.admittedQueuedDepth,
             task.admittedActiveCount, task.domain, task.lane, 0 });
-        SelectArena(*m_runtimeState, task.lane).enqueue([this, task = std::move(task)]() {
+        SelectArena(*m_runtimeState, task.lane).enqueue([this, work = std::make_pair(std::move(task.callbackLifetime), std::move(task))]() {
+            const auto& task = work.second;
             auto contextState = std::make_shared<TaskContext::State>(); contextState->scope = task.scope;
             TaskContext context(contextState); std::exception_ptr error;
             const bool cancelled = context.StopRequested();
@@ -866,6 +890,7 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
             }
             ++runtime.active;
             ++state.sceneGraphActive;
+            launch.back().callbackLifetime = state.RetainCallback();
             state.sceneGraphDomainCursor = (domainIndex + 1u) % kDomainCount;
             launch.back().admittedQueuedDepth = runtime.Queued();
             launch.back().admittedActiveCount = runtime.Active();
@@ -877,7 +902,8 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
         if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Admitted,
             task.trace, task.traceTaskID, 0, 0, task.admittedQueuedDepth,
             task.admittedActiveCount, task.domain, task.lane, 0 });
-        SelectArena(*m_runtimeState, task.lane).enqueue([this, task = std::move(task)]() {
+        SelectArena(*m_runtimeState, task.lane).enqueue([this, work = std::make_pair(std::move(task.callbackLifetime), std::move(task))]() {
+            const auto& task = work.second;
             auto contextState = std::make_shared<TaskContext::State>(); contextState->scope = task.scope;
             TaskContext context(contextState); std::exception_ptr error;
             const bool cancelled = context.StopRequested();
@@ -1106,6 +1132,13 @@ void TaskSchedulerManager::Cleanup() {
     for (auto& scope : state.processScopes) {
         try { TaskScope(scope).Wait(); }
         catch (const std::exception& ex) { spdlog::error("Scheduler task failed during cleanup: {}", ex.what()); }
+    }
+    // Scope completion precedes callback bookkeeping and excludes custom scopes.
+    // Wait for entire arena callbacks, including captured ownership destruction,
+    // before tearing down the runtime or its worker observers.
+    {
+        std::unique_lock lock(state.taskMutex);
+        state.callbacksFinished.wait(lock, [&] { return state.outstandingCallbacks == 0; });
     }
     state.observers = {};
     state.frameArena->terminate(); state.streamingArena->terminate(); state.backgroundArena->terminate();

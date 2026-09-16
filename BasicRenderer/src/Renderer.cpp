@@ -801,6 +801,13 @@ void Renderer::Initialize(
         m_asyncStateGraph->StartTrace(*m_pendingAsyncStateGraphTrace);
     }
     m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight);
+    m_rendererStatePublisher->SetPreparationScheduler([scope = m_rendererStateCommitScope](std::function<void()>&& work) {
+        return TaskSchedulerManager::GetInstance().Submit(scope, TaskLane::Background, TaskDomain::RendererState,
+            "PublicationBindingBundles", [work = std::move(work)](const br::TaskContext& context) mutable {
+                auto operation = std::move(work);
+                if (!context.StopRequested()) operation();
+            });
+    });
     br::render::PublishedStateSource::SetProcessSource(m_rendererStatePublisher->ResourceSource());
     m_rendererStateRequests = std::make_unique<br::render::RendererStateRequestService>(
         *m_asyncStateGraph, *m_rendererStatePublisher);
@@ -3388,17 +3395,19 @@ void Renderer::Update(float elapsedSeconds) {
 						[commit = std::move(commit), objectManager, meshManager, materialManager,
                             committedState = std::move(committedState)](
                             const br::TaskContext& context) mutable {
+                            auto deferred = std::move(commit);
+                            auto state = std::move(committedState);
                             if (context.StopRequested()) return;
-                            if (objectManager && committedState) {
-                                objectManager->AcknowledgePublishedBufferState(committedState);
+                            if (objectManager && state) {
+                                objectManager->AcknowledgePublishedBufferState(state);
                             }
-							if (meshManager && committedState) {
-								meshManager->AcknowledgePublishedBufferState(committedState);
+							if (meshManager && state) {
+								meshManager->AcknowledgePublishedBufferState(state);
 							}
-							if (materialManager && committedState) {
-								materialManager->AcknowledgePublishedTextureImageTable(committedState);
+							if (materialManager && state) {
+								materialManager->AcknowledgePublishedTextureImageTable(state);
 							}
-                            commit.RunDeferred();
+                            deferred.RunDeferred();
                         });
                     if (!submitted) {
                         spdlog::warn("Renderer-state deferred commit cleanup was rejected by the scheduler");
@@ -3845,7 +3854,8 @@ void Renderer::Update(float elapsedSeconds) {
         primaryCameraUpload);
 
     UpdateExecutionContext context{};
-    context.resolverCaptureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease);
+    context.resolverCaptureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease,
+        m_context.publishedRendererState ? m_context.publishedRendererState->bindingBundle : nullptr);
     context.frameIndex = m_preparationFrameIndex;
     context.preparationSlot = m_preparationFrameIndex;
     context.frameFenceValue = m_currentFrameFenceValue;

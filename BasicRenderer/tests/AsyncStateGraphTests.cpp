@@ -1674,6 +1674,46 @@ int main() {
     Check(graph.Snapshot(retryKey).readiness == ArtifactReadiness::GpuReady);
     Check(retryAttempts.load(std::memory_order_relaxed) == 2);
 
+    // Binding preparation is selectable only after worker publication, and
+    // superseded or rejected jobs must not replace the previous valid cut.
+    {
+        RendererStatePublisher gated(2);
+        auto base = std::make_shared<PublishedRendererState>();
+        gated.Bootstrap(base, 2);
+        std::vector<std::function<void()>> jobs;
+        gated.SetPreparationScheduler([&](std::function<void()>&& work) { jobs.push_back(std::move(work)); return true; });
+        auto makePatch = [](uint64_t revision) {
+            PublishedStatePatch patch;
+            PublishedStateFragment fragment;
+            fragment.revision = revision;
+            patch.fragments[static_cast<size_t>(PublishedFragmentKind::Materials)] = fragment;
+            PublishedResourceSelection selection;
+            selection.resources = std::make_shared<const PublishedResourceSelection::ResourceList>();
+            PublishedResourceKey key; key.owner = PublishedFragmentKind::Materials;
+            patch.catalogSelections.emplace_back(key, std::move(selection));
+            return patch;
+        };
+        auto retiredOwner = std::make_shared<int>(1);
+        const std::weak_ptr<int> retiredOwnerLifetime = retiredOwner;
+        auto firstPatch = makePatch(1);
+        firstPatch.catalogSelections.front().second.lifetimeHolds.push_back(retiredOwner);
+        retiredOwner.reset();
+        Check(gated.PublishPatch(std::move(firstPatch)));
+        Check(jobs.size() == 1);
+        auto waiting = gated.Commit(0); Check(!waiting.committed); waiting.RunDeferred();
+        Check(gated.PublishPatch(makePatch(2)));
+        Check(jobs.size() == 2);
+        jobs[0]();
+        waiting = gated.Commit(1); Check(!waiting.committed); waiting.RunDeferred();
+        Check(retiredOwnerLifetime.expired()); // Completed callable is still in jobs.
+        jobs[1]();
+        auto ready = gated.Commit(0); Check(ready.committed && ready.state->materials.revision == 2); ready.RunDeferred();
+        gated.SetPreparationScheduler([](std::function<void()>&&) { return false; });
+        Check(!gated.PublishPatch(makePatch(3)));
+        waiting = gated.Commit(1); Check(!waiting.committed && waiting.state->materials.revision == 2); waiting.RunDeferred();
+        gated.Shutdown();
+    }
+
     RendererStatePublisher publisher(3);
     auto candidateState = std::make_shared<PublishedRendererState>();
     candidateState->epoch = 1;
@@ -1800,14 +1840,14 @@ int main() {
         for (int i = 0; i < 2000; ++i) {
             const auto captured = directResolver.CaptureDeclarationState(oldCapture);
             if (captured->contentRevision != firstDeclarationState->contentRevision ||
-                captured->publicationLease != directCommit.lease) captureMismatch = true;
+                captured->publicationLease) captureMismatch = true;
         }
     });
     std::jthread newReader([&] {
         for (int i = 0; i < 2000; ++i) {
             const auto captured = resolverClone->CaptureDeclarationState(newCapture);
             if (captured->contentRevision != contentOnlyState->contentRevision ||
-                captured->publicationLease != contentOnlyCommit.lease) captureMismatch = true;
+                captured->publicationLease) captureMismatch = true;
         }
     });
     oldReader.join(); newReader.join();
@@ -2101,6 +2141,40 @@ int main() {
     Check(coherentSuccessorCommit.state->geometry.revision == 10);
     Check(coherentSuccessorCommit.state->materials.revision == 101);
     coherentSuccessorCommit.RunDeferred();
+    // Historical manifest inputs must not turn metadata bases into permanent
+    // semantic consumers. Keep the graph alive while retiring all real frames.
+    {
+        auto pin = std::make_shared<int>(1);
+        const std::weak_ptr<int> retiredPin = pin;
+        auto pinned = std::make_shared<PublishedRendererState>(*manifestPublisher.Active());
+        pinned->epoch++;
+        pinned->bindingBundle = std::make_shared<const org::PublicationBindingBundle>(
+            std::vector<org::PublicationBindingBundle::Snapshot>{},
+            std::vector<std::shared_ptr<const void>>{pin});
+        pin.reset();
+        Check(manifestPublisher.PublishCandidate({ manifestPublisher.ActiveEpoch(), pinned }));
+        auto pinnedCommit = manifestPublisher.Commit(0);
+        pinnedCommit.RunDeferred();
+        PublishedStateResourceResolver idleResolver(manifestPublisher.ResourceSource(), PublishedResourceKey{});
+        auto declaration = idleResolver.CaptureDeclarationState();
+        const std::weak_ptr<const org::ResolverDeclarationState> declarationLifetime = declaration;
+        declaration.reset();
+        Check(declarationLifetime.expired()); // An idle resolver cache is not a consumer.
+        const auto archivedDeclaration = idleResolver.CaptureDeclarationState();
+        Check(!archivedDeclaration->publicationLease);
+        requestService.OnArtifactReady(FragmentSnapshot(PublishedFragmentKind::Materials,
+            { ArtifactKind::MaterialTable, 9201, 0 }, 102, 40102, { geometry10 }));
+        graph.WaitIdle();
+        auto rotated = manifestPublisher.Commit(1);
+        Check(rotated.committed && rotated.state->materials.revision == 102);
+        rotated.RunDeferred();
+        pinned.reset();
+        pinnedCommit.state.reset();
+        pinnedCommit.lease.reset();
+        Check(!retiredPin.expired()); // The selected frame still consumes it.
+        manifestPublisher.ReleaseFrameSlot(0);
+        Check(retiredPin.expired()); // Graph history must not consume it.
+    }
     requestService.Stop();
 
     auto& ecs = RendererECSManager::GetInstance();

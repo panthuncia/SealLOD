@@ -1,0 +1,30 @@
+# Search-scope control for ripgrep and other tools that honor .ignore.
+#
+# Two separate problems are solved here.
+#
+# 1. The parent SARP repository's .ignore lists "BasicRenderer/" so that searches
+#    of SARP's own code are not swamped by this submodule. ripgrep applies parent
+#    ignore files during traversal, and that pattern also matches THIS repository's
+#    own source directory (BasicRenderer/BasicRenderer/). Without the negation
+#    below, `rg` run from here returns thousands of vendored files and not one line
+#    of BasicRenderer's own code.
+!BasicRenderer/
+
+# 2. The vendored submodules below are ~6,400 of the ~6,800 files ripgrep would
+#    otherwise walk. They have their own histories and are not edited here.
+#
+#    To search one deliberately, opt in explicitly:
+#      rg --no-ignore <pattern> GPU-Reshape/
+GPU-Reshape/
+FidelityFX-SDK/
+xatlas/
+PyNifly/
+geometry-central/
+openpbr-bsdf/
+tree-sitter-hlsl/
+volk/
+
+# BasicRHI/, OpenRenderGraph/, BasicTelemetry/ and ORGModuleServices/ are NOT
+# listed. They are separate submodules but first-party components of this project
+# -- the README describes the BasicRHI / OpenRenderGraph / BasicRenderer split as
+# intentional -- and code here calls into them constantly, so they stay searchable.

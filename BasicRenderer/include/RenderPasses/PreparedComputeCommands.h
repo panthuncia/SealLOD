@@ -269,7 +269,9 @@ private:
 };
 
 inline void RecordPreparedComputeCommands(
-    const PreparedComputeCommandSequence& data, org::RecordingContext& recording) {
+    const PreparedComputeCommandSequence& data, org::RecordingContext& recording,
+    const PreparedWorkGraphCpuDispatch* cpuInvocation = nullptr,
+    std::optional<bool> initializeBacking = {}) {
     auto& commandList = recording.Commands();
     // Descriptor snapshots belong to the execution slot and are installed by
     // admission before any pass records. Frame data must not retain heap
@@ -333,16 +335,17 @@ inline void RecordPreparedComputeCommands(
                     {}, 0, value.maxCommandCount);
             } else if constexpr (std::is_same_v<T, PreparedSetWorkGraph>) {
                 commandList.SetWorkGraph(recording.Resolve(value.workGraph),
-                    recording.Resolve(value.backing).GetHandle(), value.initializeBacking);
+                    recording.Resolve(value.backing).GetHandle(), initializeBacking.value_or(value.initializeBacking));
             } else if constexpr (std::is_same_v<T, PreparedWorkGraphCpuDispatch>) {
-                if (value.records.empty()) return;
+                const auto& input = cpuInvocation ? *cpuInvocation : value;
+                if (input.records.empty()) return;
                 rhi::WorkGraphDispatchDesc dispatch{};
                 dispatch.dispatchMode = rhi::WorkGraphDispatchMode::NodeCpuInput;
-                dispatch.nodeCpuInput.entryPointIndex = value.entryPointIndex;
-                dispatch.nodeCpuInput.pRecords = value.records.data();
+                dispatch.nodeCpuInput.entryPointIndex = input.entryPointIndex;
+                dispatch.nodeCpuInput.pRecords = input.records.data();
                 dispatch.nodeCpuInput.numRecords = static_cast<uint32_t>(
-                    value.records.size() / value.recordStride);
-                dispatch.nodeCpuInput.recordByteStride = value.recordStride;
+                    input.records.size() / input.recordStride);
+                dispatch.nodeCpuInput.recordByteStride = input.recordStride;
                 commandList.DispatchWorkGraph(dispatch);
             } else if constexpr (std::is_same_v<T, PreparedWorkGraphGpuDispatch>) {
                 rhi::WorkGraphDispatchDesc dispatch{};

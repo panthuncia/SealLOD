@@ -210,7 +210,16 @@ void RendererStateRequestService::RequestManifest() {
             basic_telemetry::AddCounter("SARP.RendererStateManifest.CoalescedWakes");
             return;
         }
-        input->base = m_publisher.Active();
+        if (const auto active = m_publisher.Active()) {
+            // Graph versions retain immutable build inputs beyond frame
+            // retirement. A coherence base is not a semantic GPU consumer:
+            // archiving its catalog/bindings pins every old backing ring slot.
+            // Selection below consults only fragment metadata and payloads.
+            auto base = std::make_shared<PublishedRendererState>(*active);
+            base->resourceCatalog.reset();
+            base->bindingBundle.reset();
+            input->base = std::move(base);
+        }
         input->baseEpoch = input->base ? input->base->epoch : 0u;
         input->dirtyGeneration = m_manifestDirtyGeneration;
         input->publicationNodes = m_publicationNodes;

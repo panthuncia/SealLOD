@@ -9,12 +9,50 @@
 #include <BasicTelemetry/Tracy.h>
 
 #include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/PublicationBindingBundle.h"
 
 namespace br::render {
 
 namespace {
 std::mutex g_processSourceMutex;
 std::weak_ptr<PublishedStateSource> g_processSource;
+
+struct SelectionBindingInputs {
+    std::vector<org::PublicationBindingBundle::Snapshot> bindings;
+    std::vector<std::shared_ptr<const void>> owners;
+};
+SelectionBindingInputs CaptureSelectionBindingInputs(const PublishedResourceSelection& selection) {
+    SelectionBindingInputs inputs;
+    std::unordered_set<uint64_t> captured;
+    if (selection.resources) for (const auto& resource : *selection.resources) {
+        if (!resource) continue;
+        auto binding = org::PublicationBindingBundle::Capture(*resource);
+        if (binding && captured.insert(binding->resourceID).second)
+            inputs.bindings.push_back(std::move(binding));
+    }
+    inputs.owners = selection.lifetimeHolds;
+    if (selection.publicationBundle) inputs.owners.push_back(selection.publicationBundle);
+    return inputs;
+}
+std::shared_ptr<const org::PublicationBindingBundle> BuildSelectionBindings(SelectionBindingInputs inputs) {
+    auto result = std::make_shared<const org::PublicationBindingBundle>(std::move(inputs.bindings), std::move(inputs.owners));
+    org::TraceBindingHolder(result, result, "PublicationSelection");
+    return result;
+}
+std::shared_ptr<const org::PublicationBindingBundle> CaptureSelectionBindings(const PublishedResourceSelection& selection) {
+    return BuildSelectionBindings(CaptureSelectionBindingInputs(selection));
+}
+
+std::shared_ptr<const org::PublicationBindingBundle> GatherManifestBindings(
+    const PublishedRendererState& state) {
+    std::vector<std::shared_ptr<const org::PublicationBindingBundle>> roots;
+    if (state.resourceCatalog) for (const auto& shard : state.resourceCatalog->ownerShards)
+        if (shard && shard->bindingBundle) roots.push_back(shard->bindingBundle);
+    auto result = std::make_shared<const org::PublicationBindingBundle>(
+        std::vector<org::PublicationBindingBundle::Snapshot>{}, std::vector<std::shared_ptr<const void>>{}, std::move(roots));
+    org::TraceBindingHolder(result, result, "ManifestBindings", state.epoch);
+    return result;
+}
 
 std::shared_ptr<const PublishedResourceCatalog::OwnerShard> LegacyOwnerShard(
 	const std::shared_ptr<const PublishedResourceCatalog>& catalog,
@@ -62,8 +100,15 @@ std::shared_ptr<PublishedResourceCatalog> MakeCatalogUpdate(
 			if (key.owner != owner) continue;
 			auto stamped = selection;
 			stamped.manifestEpoch = targetEpoch;
+            if (!stamped.bindingBundle) stamped.bindingBundle = CaptureSelectionBindings(stamped);
 			shard->selections.insert_or_assign(key, std::move(stamped));
 		}
+        std::vector<std::shared_ptr<const org::PublicationBindingBundle>> roots;
+        for (const auto& [key, selection] : shard->selections) if (selection.bindingBundle) {
+            roots.push_back(selection.bindingBundle);
+        }
+        shard->bindingBundle = std::make_shared<const org::PublicationBindingBundle>(
+            std::vector<org::PublicationBindingBundle::Snapshot>{}, std::vector<std::shared_ptr<const void>>{}, std::move(roots));
 		result->ownerShards[index] = std::move(shard);
 	}
 	return result;
@@ -352,6 +397,7 @@ std::shared_ptr<const PublishedRendererState> MaterializePublishedState(
 		patch.catalogOwnerMask, patch.catalogEntries, patch.catalogSelections,
 		*state, targetEpoch);
     state->publicationBundle = BuildManifestOwnershipBundle(*state);
+    state->bindingBundle = GatherManifestBindings(*state);
     return state;
 }
 
@@ -364,6 +410,7 @@ void RendererStatePublisher::Bootstrap(std::shared_ptr<const PublishedRendererSt
     std::size_t framesInFlight) {
     std::lock_guard lock(m_mutex);
     m_candidate = {};
+    for (const auto& pending : m_patches) pending->cancelled.store(true, std::memory_order_release);
     m_patches.clear();
     m_active = fallback ? std::move(fallback) : std::make_shared<PublishedRendererState>();
     m_source->Store(m_active);
@@ -392,37 +439,95 @@ bool RendererStatePublisher::PublishCandidate(RendererStateCandidate candidate) 
     return true;
 }
 
+void RendererStatePublisher::SetPreparationScheduler(std::function<bool(std::function<void()>&&)> scheduler) {
+    std::lock_guard lock(m_mutex);
+    m_preparePublication = std::move(scheduler);
+}
+
 bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
     const bool hasFragment = std::ranges::any_of(patch.fragments,
         [](const auto& fragment) { return fragment.has_value(); });
-    if (!hasFragment) return false;
-    std::lock_guard lock(m_mutex);
-    if (patch.policy == ManifestPublicationPolicy::ExplicitRollback && patch.reason.empty()) {
+    if (!hasFragment || (patch.policy == ManifestPublicationPolicy::ExplicitRollback && patch.reason.empty())) return false;
+    // Capture mutable interfaces on the producer. The queued build consumes
+    // only exact-version values and leases, never a Resource or manager.
+    std::vector<std::pair<size_t, SelectionBindingInputs>> inputs;
+    try {
+        for (size_t i = 0; i < patch.catalogSelections.size(); ++i)
+            if (!patch.catalogSelections[i].second.bindingBundle)
+                inputs.emplace_back(i, CaptureSelectionBindingInputs(patch.catalogSelections[i].second));
+    } catch (const std::exception& error) {
+        spdlog::error("Publication binding capture failed: {}", error.what());
+        basic_telemetry::AddCounter("SARP.RendererStatePublisher.BindingPreparationFailures");
         return false;
     }
-    if (patch.policy == ManifestPublicationPolicy::MonotonicSuccessor) {
-        for (const auto& pending : m_patches) {
-            for (std::size_t index = 0; index < patch.fragments.size(); ++index) {
-                if (patch.fragments[index] && pending.fragments[index] &&
-                    !IsMonotonicFragmentSuccessor(*pending.fragments[index], *patch.fragments[index])) {
+    auto candidate = std::make_shared<PendingPatch>();
+    candidate->patch = std::move(patch);
+    std::function<bool(std::function<void()>&&)> scheduler;
+    {
+        std::lock_guard lock(m_mutex);
+        const auto& next = candidate->patch;
+        if (next.policy == ManifestPublicationPolicy::MonotonicSuccessor) {
+            for (const auto& pending : m_patches) for (size_t i = 0; i < next.fragments.size(); ++i) {
+                if (next.fragments[i] && pending->patch.fragments[i] &&
+                    !IsMonotonicFragmentSuccessor(*pending->patch.fragments[i], *next.fragments[i])) {
                     ++m_stats.rejectedFragmentRegressions;
-                    basic_telemetry::AddCounter(
-                        "SARP.RendererStatePublisher.FragmentRegressionRejections");
+                    basic_telemetry::AddCounter("SARP.RendererStatePublisher.FragmentRegressionRejections");
                     return false;
                 }
             }
         }
-    }
-    ++m_stats.candidates;
-    // A newer patch for the same fragment supersedes pending work for that
-    // fragment, while disjoint patches remain independently commit-able.
-    std::erase_if(m_patches, [&](const PublishedStatePatch& pending) {
-        for (std::size_t index = 0; index < patch.fragments.size(); ++index) {
-            if (patch.fragments[index] && pending.fragments[index]) return true;
+        ++m_stats.candidates;
+        for (const auto& pending : m_patches) {
+            const auto& prior = pending->patch;
+            bool superseded = true;
+            for (size_t i = 0; i < next.fragments.size(); ++i)
+                if (prior.fragments[i] && !next.fragments[i]) superseded = false;
+            auto keyCovered = [&](const PublishedResourceKey& key, bool selection) {
+                return (next.catalogOwnerMask & PublishedFragmentMask(key.owner)) != 0
+                    || (selection
+                        ? std::ranges::any_of(next.catalogSelections, [&](const auto& entry) { return entry.first == key; })
+                        : std::ranges::any_of(next.catalogEntries, [&](const auto& entry) { return entry.first == key; }));
+            };
+            for (const auto& entry : prior.catalogEntries) superseded &= keyCovered(entry.first, false);
+            for (const auto& entry : prior.catalogSelections) superseded &= keyCovered(entry.first, true);
+            if (!superseded) continue;
+            pending->cancelled.store(true, std::memory_order_release);
+            pending->failed.store(true, std::memory_order_relaxed);
+            pending->ready.store(true, std::memory_order_release);
+            // Commit reports rejection to the producer so an outstanding
+            // publication acknowledgement cannot be stranded by supersession.
         }
-        return false;
-    });
-    m_patches.push_back(std::move(patch));
+        m_patches.push_back(candidate);
+        // Startup has no previous valid publication to render.
+        if (m_active) scheduler = m_preparePublication;
+    }
+    const bool needsBuild = !inputs.empty();
+    auto prepare = [candidate, inputs = std::move(inputs)]() mutable {
+        BT_ZONE_SCOPE("ORG.Publication.BuildBindingBundles");
+        // A task service can retain a completed callable. Consume its captures
+        // on entry so completion, cancellation and failure all release them.
+        auto pending = std::move(candidate);
+        auto capturedInputs = std::move(inputs);
+        try {
+            for (auto& [index, captured] : capturedInputs) {
+                if (pending->cancelled.load(std::memory_order_acquire)) return;
+                pending->patch.catalogSelections[index].second.bindingBundle = BuildSelectionBindings(std::move(captured));
+            }
+        } catch (const std::exception& error) {
+            spdlog::error("Publication binding build failed: {}", error.what());
+            pending->failed.store(true, std::memory_order_relaxed);
+        }
+        pending->ready.store(true, std::memory_order_release);
+    };
+    if (scheduler && needsBuild) {
+        // inputs have moved into the closure; its work is always immutable.
+        if (!scheduler(std::move(prepare))) {
+            candidate->failed.store(true, std::memory_order_relaxed);
+            candidate->ready.store(true, std::memory_order_release);
+            basic_telemetry::AddCounter("SARP.RendererStatePublisher.BindingPreparationRejected");
+            return false;
+        }
+    } else prepare();
     return true;
 }
 
@@ -517,7 +622,17 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
 		std::shared_ptr<const PublishedResourceCatalog> catalog = patched->resourceCatalog;
 		const auto targetEpoch = (m_active ? m_active->epoch : 0u) + 1u;
         bool changed = false;
-        for (const auto& patch : m_patches) {
+        for (const auto& pending : m_patches) {
+            if (!pending->ready.load(std::memory_order_acquire)) continue;
+            const auto& patch = pending->patch;
+            if (pending->failed.load(std::memory_order_relaxed)) {
+                basic_telemetry::AddCounter(pending->cancelled.load(std::memory_order_acquire)
+                    ? "SARP.RendererStatePublisher.SupersededPublicationResults"
+                    : "SARP.RendererStatePublisher.BindingPreparationFailures");
+                result.rejectedCallback = m_candidateRejected;
+                result.rejectedEpoch = patched->epoch;
+                continue;
+            }
             BT_ZONE_SCOPE("RendererStatePublisher::Commit::ApplyOnePatch");
             const bool preconditionsSatisfied = std::ranges::all_of(
                 patch.preconditions, [&](const PublishedFragmentPrecondition& precondition) {
@@ -560,12 +675,13 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
 			catalog = MakeCatalogUpdate(catalog, patch.catalogOwnerMask,
 				patch.catalogEntries, patch.catalogSelections, *patched, targetEpoch);
         }
-        m_patches.clear();
+        std::erase_if(m_patches, [](const auto& pending) { return pending->ready.load(std::memory_order_acquire); });
         if (changed) {
             BT_ZONE_SCOPE("RendererStatePublisher::Commit::BuildManifestBundle");
             patched->publicationBundle = BuildManifestOwnershipBundle(*patched);
             patched->epoch = targetEpoch;
             patched->resourceCatalog = std::move(catalog);
+            patched->bindingBundle = GatherManifestBindings(*patched);
             if (m_active) result.retiredStates[result.retiredStateCount++] = std::move(m_active);
             m_active = std::move(patched);
             result.committed = true;
@@ -610,6 +726,7 @@ void RendererStatePublisher::ReleaseFrameSlot(std::size_t frameSlot) {
 void RendererStatePublisher::DiscardCandidate() {
     std::unique_lock lock(m_mutex);
     auto retired = std::move(m_candidate.state);
+    for (const auto& pending : m_patches) pending->cancelled.store(true, std::memory_order_release);
     m_patches.clear();
     m_candidate.baseEpoch = 0;
     lock.unlock();
@@ -618,14 +735,16 @@ void RendererStatePublisher::DiscardCandidate() {
 
 void RendererStatePublisher::Shutdown() {
     RendererStateCandidate candidate;
-    std::vector<PublishedStatePatch> patches;
+    std::vector<std::shared_ptr<PendingPatch>> patches;
     std::shared_ptr<const PublishedRendererState> active;
     std::vector<std::shared_ptr<const PublishedRendererState>> frameStates;
     std::shared_ptr<PublishedStateSource> source;
     {
         std::lock_guard lock(m_mutex);
         candidate = std::move(m_candidate);
+        for (const auto& pending : m_patches) pending->cancelled.store(true, std::memory_order_release);
         patches = std::move(m_patches);
+        m_preparePublication = {};
         active = std::move(m_active);
         frameStates = std::move(m_frameStates);
         source = m_source;

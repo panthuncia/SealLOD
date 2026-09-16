@@ -13,7 +13,7 @@
 
 #include "Render/AsyncStateGraph.h"
 
-namespace org { class Resource; }
+namespace org { class Resource; class PublicationBindingBundle; }
 
 namespace br::render {
 
@@ -80,11 +80,13 @@ struct PublishedResourceSelection {
     std::vector<std::shared_ptr<const void>> lifetimeHolds;
     std::uint64_t manifestEpoch = 0;
     std::shared_ptr<const PublicationBundle> publicationBundle;
+    std::shared_ptr<const org::PublicationBindingBundle> bindingBundle;
 };
 
 struct PublishedResourceCatalog {
     using ResourceList = std::vector<std::shared_ptr<org::Resource>>;
 	struct OwnerShard {
+        std::shared_ptr<const org::PublicationBindingBundle> bindingBundle;
 		std::unordered_map<PublishedResourceKey, std::shared_ptr<const ResourceList>,
 			PublishedResourceKey::Hasher> entries;
 		std::unordered_map<PublishedResourceKey, std::uint64_t,
@@ -153,6 +155,7 @@ struct PublishedRendererState {
     PublishedStateFragment lights;
     std::shared_ptr<const PublishedResourceCatalog> resourceCatalog;
     std::shared_ptr<const PublicationBundle> publicationBundle;
+    std::shared_ptr<const org::PublicationBindingBundle> bindingBundle;
 
     [[nodiscard]] PublishedStateFragment& Fragment(PublishedFragmentKind kind);
     [[nodiscard]] const PublishedStateFragment& Fragment(PublishedFragmentKind kind) const;
@@ -287,6 +290,7 @@ public:
     void Bootstrap(std::shared_ptr<const PublishedRendererState> fallback, std::size_t framesInFlight);
     bool PublishCandidate(RendererStateCandidate candidate);
     bool PublishPatch(PublishedStatePatch patch);
+    void SetPreparationScheduler(std::function<bool(std::function<void()>&&)> scheduler);
     bool PublishArtifact(const ArtifactSnapshot& artifact);
 
     // Must be called after the frame slot fence has completed. This releases
@@ -307,7 +311,12 @@ public:
 private:
     mutable std::mutex m_mutex;
     RendererStateCandidate m_candidate;
-    std::vector<PublishedStatePatch> m_patches;
+    struct PendingPatch {
+        PublishedStatePatch patch;
+        std::atomic_bool ready{false}, cancelled{false}, failed{false};
+    };
+    std::vector<std::shared_ptr<PendingPatch>> m_patches;
+    std::function<bool(std::function<void()>&&)> m_preparePublication;
     std::shared_ptr<const PublishedRendererState> m_active;
     std::vector<std::shared_ptr<const PublishedRendererState>> m_frameStates;
     RendererStatePublisherStats m_stats;

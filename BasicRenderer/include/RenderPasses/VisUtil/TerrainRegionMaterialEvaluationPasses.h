@@ -30,9 +30,19 @@ namespace TerrainRegionMaterialEval
     {
         return (flags & MaterialCompileFlags::MaterialCompileTerrain) != 0;
     }
+
+    inline std::vector<uint64_t> RecipeRevision(const PipelineState& pso, const org::PassPrepareContext& preparation) {
+        const auto& context = *preparation.preparationData->Get<UpdateContext>();
+        const auto& signatures = CommandSignatureManager::GetInstance();
+        return {reinterpret_cast<uintptr_t>(pso.GetPayload().get()), SettingsManager::GetInstance().Revision(),
+            context.publishedRendererState ? context.publishedRendererState->materials.revision : 0u,
+            reinterpret_cast<uintptr_t>(signatures.CaptureRawDispatchCommandSignature().get()),
+            reinterpret_cast<uintptr_t>(signatures.CaptureMaterialEvaluationCommandSignature().get()),
+            reinterpret_cast<uintptr_t>(signatures.CaptureTerrainRegionMaterialEvaluationCommandSignature().get())};
+    }
 }
 
-class TerrainRegionCounterResetPass : public org::TypedRenderGraphPass<TerrainRegionCounterResetPass, br::render::PreparedComputeDispatch> {
+class TerrainRegionCounterResetPass : public org::TypedRenderGraphPass<TerrainRegionCounterResetPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
 public:
     TerrainRegionCounterResetPass() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -52,7 +62,7 @@ public:
             "Builtin::VisUtil::TerrainRegionActiveCountBuffer");
     }
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+    br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
         const auto& ctx = *preparation.preparationData->Get<UpdateContext>();
         br::render::PreparedComputeDispatch data{};
         data.resourceHeap = ctx.textureDescriptorHeap.GetHandle();
@@ -65,7 +75,9 @@ public:
         return data;
     }
 
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const { return TerrainRegionMaterialEval::RecipeRevision(m_pso, preparation); }
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&, const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&, org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeDispatch(data, recording);
     }
 
@@ -74,7 +86,7 @@ private:
 };
 
 template<class Derived>
-class TerrainRegionMaterialRangePassBase : public org::TypedRenderGraphPass<Derived, std::vector<br::render::PreparedComputeIndirect>> {
+class TerrainRegionMaterialRangePassBase : public org::TypedRenderGraphPass<Derived, org::EmptyPassFrameData, org::LegacyPassBindings, std::vector<br::render::PreparedComputeIndirect>> {
 public:
     explicit TerrainRegionMaterialRangePassBase(const wchar_t* entryPoint, const char* debugName) {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -91,7 +103,7 @@ public:
 
     void ShutdownPass() { m_materialEvalCmds = nullptr; }
 
-    std::vector<br::render::PreparedComputeIndirect> Prepare(const org::PassPrepareContext& preparation) {
+    std::vector<br::render::PreparedComputeIndirect> BuildRecipe(const org::PassPrepareContext& preparation) const {
         const auto& ctx = *preparation.preparationData->Get<UpdateContext>();
         std::vector<br::render::PreparedComputeIndirect> result;
         br::render::PreparedComputeIndirect data{};
@@ -126,7 +138,9 @@ public:
         return result;
     }
 
-    static void Record(const std::vector<br::render::PreparedComputeIndirect>& work, org::PassRecordContext& recording) {
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const { return TerrainRegionMaterialEval::RecipeRevision(m_pso, preparation); }
+    org::EmptyPassFrameData PrepareInvocation(const std::vector<br::render::PreparedComputeIndirect>&, const org::PassPrepareContext&) const { return {}; }
+    static void Record(const std::vector<br::render::PreparedComputeIndirect>& work, const org::EmptyPassFrameData&, org::PassRecordContext& recording) {
         for (const auto& data : work) br::render::RecordPreparedComputeIndirect(data, recording);
     }
 
@@ -158,7 +172,7 @@ public:
 
 };
 
-class TerrainRegionBlockScanPass : public org::TypedRenderGraphPass<TerrainRegionBlockScanPass, br::render::PreparedComputeDispatch> {
+class TerrainRegionBlockScanPass : public org::TypedRenderGraphPass<TerrainRegionBlockScanPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
 public:
     TerrainRegionBlockScanPass() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -178,7 +192,7 @@ public:
                 "Builtin::VisUtil::TerrainRegionBlockSumsBuffer");
     }
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+    br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
         const auto& ctx = *preparation.preparationData->Get<UpdateContext>();
         br::render::PreparedComputeDispatch data{};
         data.resourceHeap = ctx.textureDescriptorHeap.GetHandle();
@@ -191,7 +205,9 @@ public:
         return data;
     }
 
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const { return TerrainRegionMaterialEval::RecipeRevision(m_pso, preparation); }
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&, const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&, org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeDispatch(data, recording);
     }
 
@@ -199,7 +215,7 @@ private:
     PipelineState m_pso;
 };
 
-class TerrainRegionBlockOffsetsPass : public org::TypedRenderGraphPass<TerrainRegionBlockOffsetsPass, br::render::PreparedComputeDispatch> {
+class TerrainRegionBlockOffsetsPass : public org::TypedRenderGraphPass<TerrainRegionBlockOffsetsPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
 public:
     TerrainRegionBlockOffsetsPass() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -222,7 +238,7 @@ public:
                 "Builtin::VisUtil::TerrainRegionTotalPixelCountBuffer");
     }
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+    br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
         const auto& ctx = *preparation.preparationData->Get<UpdateContext>();
         br::render::PreparedComputeDispatch data{};
         data.resourceHeap = ctx.textureDescriptorHeap.GetHandle();
@@ -236,7 +252,9 @@ public:
         return data;
     }
 
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const { return TerrainRegionMaterialEval::RecipeRevision(m_pso, preparation); }
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&, const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&, org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeDispatch(data, recording);
     }
 
@@ -268,7 +286,7 @@ public:
 
 };
 
-class BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass : public org::TypedRenderGraphPass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass, br::render::PreparedComputeDispatch> {
+class BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass : public org::TypedRenderGraphPass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
 public:
     BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -286,7 +304,7 @@ public:
             .WithUnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
     }
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+    br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
         const auto& ctx = *preparation.preparationData->Get<UpdateContext>();
         br::render::PreparedComputeDispatch data{};
         data.resourceHeap = ctx.textureDescriptorHeap.GetHandle();
@@ -299,7 +317,9 @@ public:
         return data;
     }
 
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const { return TerrainRegionMaterialEval::RecipeRevision(m_pso, preparation); }
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&, const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&, org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeDispatch(data, recording);
     }
 
@@ -307,7 +327,7 @@ private:
     PipelineState m_pso;
 };
 
-class BuildTerrainRegionMaterialIndirectCommandBufferPass : public org::TypedRenderGraphPass<BuildTerrainRegionMaterialIndirectCommandBufferPass, br::render::PreparedComputeIndirect> {
+class BuildTerrainRegionMaterialIndirectCommandBufferPass : public org::TypedRenderGraphPass<BuildTerrainRegionMaterialIndirectCommandBufferPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeIndirect> {
 public:
     BuildTerrainRegionMaterialIndirectCommandBufferPass() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -336,7 +356,7 @@ public:
 
     void ShutdownPass() { m_dispatchArgs = nullptr; }
 
-    br::render::PreparedComputeIndirect Prepare(const org::PassPrepareContext& preparation) {
+    br::render::PreparedComputeIndirect BuildRecipe(const org::PassPrepareContext& preparation) const {
         const auto& ctx = *preparation.preparationData->Get<UpdateContext>();
         br::render::PreparedComputeIndirect data{};
         data.resourceHeap = ctx.textureDescriptorHeap.GetHandle();
@@ -351,7 +371,9 @@ public:
         return data;
     }
 
-    static void Record(const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const { return TerrainRegionMaterialEval::RecipeRevision(m_pso, preparation); }
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeIndirect&, const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeIndirect& data, const org::EmptyPassFrameData&, org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeIndirect(data, recording);
     }
 
@@ -368,7 +390,7 @@ struct EvaluateTerrainRegionMaterialGroupsBindings {
 };
 
 class EvaluateTerrainRegionMaterialGroupsPass : public org::TypedRenderGraphPass<EvaluateTerrainRegionMaterialGroupsPass,
-    br::render::PreparedComputeIndirect, EvaluateTerrainRegionMaterialGroupsBindings> {
+    org::EmptyPassFrameData, EvaluateTerrainRegionMaterialGroupsBindings, br::render::PreparedComputeIndirect> {
 public:
     explicit EvaluateTerrainRegionMaterialGroupsPass(const MaterialEvaluationBuildInputs& services) {
         std::vector<DxcDefine> defines;
@@ -486,7 +508,7 @@ public:
     }
 
 
-    br::render::PreparedComputeIndirect Prepare(const EvaluateTerrainRegionMaterialGroupsBindings& bindings,
+    br::render::PreparedComputeIndirect BuildRecipe(const EvaluateTerrainRegionMaterialGroupsBindings& bindings,
         const org::PassPrepareContext& preparation) const {
         const auto& ctx = *preparation.preparationData->Get<UpdateContext>();
         br::render::PreparedComputeIndirect data{};
@@ -518,7 +540,9 @@ public:
         return data;
     }
 
-    static void Record(const EvaluateTerrainRegionMaterialGroupsBindings&, const br::render::PreparedComputeIndirect& data,
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const { return TerrainRegionMaterialEval::RecipeRevision(m_pso, preparation); }
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeIndirect&, const EvaluateTerrainRegionMaterialGroupsBindings&, const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeIndirect& data, const org::EmptyPassFrameData&,
         org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeIndirect(data, recording);
     }

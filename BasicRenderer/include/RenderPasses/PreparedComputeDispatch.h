@@ -126,7 +126,8 @@ struct PreparedComputeIndirectSequence {
 };
 
 inline void RecordPreparedComputeIndirectSequence(
-    const PreparedComputeIndirectSequence& data, org::RecordingContext& recording) {
+    const PreparedComputeIndirectSequence& data, org::RecordingContext& recording,
+    std::optional<std::pair<uint32_t, uint32_t>> constantPatch = {}) {
     auto& commands = recording.Commands();
     BindPreparedDescriptorHeaps(commands, data.resourceHeap, data.samplerHeap);
     for (const auto& step : data.steps) {
@@ -135,8 +136,10 @@ inline void RecordPreparedComputeIndirectSequence(
         if (!step.descriptorIndices.empty()) commands.PushConstants(rhi::ShaderStage::Compute, 0,
             org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
             static_cast<uint32_t>(step.descriptorIndices.size()), step.descriptorIndices.data());
+        auto constants = step.constants;
+        if (constantPatch) constants.at(constantPatch->first) = constantPatch->second;
         commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
-            NumMiscUintRootConstants, step.constants.data());
+            NumMiscUintRootConstants, constants.data());
         const auto arguments = data.argumentsReference
             ? recording.Resolve(*data.argumentsReference).GetHandle() : data.arguments;
         const auto countBuffer = data.countBufferReference

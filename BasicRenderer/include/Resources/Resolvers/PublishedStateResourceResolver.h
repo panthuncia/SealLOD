@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <atomic>
 #include <algorithm>
 #include <stdexcept>
@@ -75,13 +76,17 @@ public:
         const auto selectionGeneration = m_selection
             ? m_selection->generation.load(std::memory_order_acquire) : 0u;
         if (const auto cached = m_declarationCache->value.load(std::memory_order_acquire);
-            cached && cached->lease == lease && cached->leaseSequence == leaseSequence &&
+            cached && cached->lease.lock() == lease && cached->leaseSequence == leaseSequence &&
             cached->fallbackGeneration == fallbackGeneration &&
             cached->selectionGeneration == selectionGeneration) {
-            return cached->state;
+            if (auto state = cached->state.lock()) return state;
         }
         result.dependencyIdentity = m_dependencyIdentity;
-        result.publicationLease = lease;
+        // Declaration snapshots can outlive the frame in registry metadata.
+        // They own the exact Resource objects and waits below, but must not
+        // archive an entire publication's semantic consumer pins. The frame's
+        // ResolverCaptureContext retains its selected manifest through CPU/GPU
+        // completion independently of these declaration snapshots.
         result.tracked = true;
         std::uint64_t entryVersion = 0;
         std::vector<std::shared_ptr<org::Resource>> resources;
@@ -159,8 +164,8 @@ public:
         cached->leaseSequence = leaseSequence;
         cached->fallbackGeneration = fallbackGeneration;
         cached->selectionGeneration = selectionGeneration;
-        cached->state = std::make_shared<const org::ResolverDeclarationState>(std::move(result));
-        const auto captured = cached->state;
+        const auto captured = std::make_shared<const org::ResolverDeclarationState>(std::move(result));
+        cached->state = captured;
         m_declarationCache->value.store(std::move(cached), std::memory_order_release);
         return captured;
     }
@@ -212,15 +217,15 @@ private:
         std::atomic<std::uint64_t> generation{ 0 };
     };
     struct LeaseBinding {
-        std::atomic<std::shared_ptr<const br::render::PublishedManifestLease>> lease;
-        std::atomic<std::uint64_t> sequence{ 0 };
+        std::mutex mutex;
+        std::weak_ptr<const br::render::PublishedManifestLease> lease;
     };
     struct CachedDeclaration {
-        std::shared_ptr<const br::render::PublishedManifestLease> lease;
+        std::weak_ptr<const br::render::PublishedManifestLease> lease;
         std::uint64_t leaseSequence = 0;
         std::uint64_t fallbackGeneration = 0;
         std::uint64_t selectionGeneration = 0;
-        std::shared_ptr<const org::ResolverDeclarationState> state;
+        std::weak_ptr<const org::ResolverDeclarationState> state;
     };
     struct DeclarationCache {
         std::atomic<std::shared_ptr<const CachedDeclaration>> value;
@@ -230,14 +235,15 @@ private:
         if (!m_source) return;
         auto lease = m_source->LoadLease();
         if (!lease) lease = m_source->AcquireLease(0u);
-        const auto current = m_leaseBinding->lease.load(std::memory_order_acquire);
+        std::lock_guard lock(m_leaseBinding->mutex);
+        const auto current = m_leaseBinding->lease.lock();
         if (!lease || (current && current->sequence >= lease->sequence)) return;
-        m_leaseBinding->lease.store(lease, std::memory_order_release);
-        m_leaseBinding->sequence.store(lease->sequence, std::memory_order_release);
+        m_leaseBinding->lease = lease;
     }
     [[nodiscard]] std::shared_ptr<const br::render::PublishedManifestLease> BoundLease() const {
         if (!m_leaseBinding) return {};
-        return m_leaseBinding->lease.load(std::memory_order_acquire);
+        std::lock_guard lock(m_leaseBinding->mutex);
+        return m_leaseBinding->lease.lock();
     }
     std::vector<std::shared_ptr<org::Resource>> ResolveFallback() const {
         const auto fallback = m_fallback

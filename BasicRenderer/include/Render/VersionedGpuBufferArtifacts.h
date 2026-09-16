@@ -59,16 +59,19 @@ struct BufferBackingArtifact {
     // Readback completion may trail frame retirement. Keep a backing immutable
     // while an explicit diagnostic capture still observes its contents.
     std::atomic_uint32_t readbackPins{ 0 };
+    std::atomic_uint32_t bindingConsumers{ 0 };
     bool wasPublished = false;
 };
 
 class VersionedGpuBufferBackingPool : public std::enable_shared_from_this<VersionedGpuBufferBackingPool> {
 public:
     ~VersionedGpuBufferBackingPool();
+    [[nodiscard]] std::shared_ptr<const void> PinBindingConsumer(const std::shared_ptr<BufferBackingArtifact>&);
     [[nodiscard]] std::shared_ptr<BufferBackingArtifact> Acquire(
         std::uint64_t capacityClass, std::uint32_t elementStride,
         bool unorderedAccess, bool indirectArguments, std::string_view debugName,
         bool& expanded);
+    void TraceExhaustion(std::string_view debugName);
     void Retire(std::uint64_t backingGeneration) noexcept;
 	// Called by the final semantic version owner. Retirement is completed from
 	// frame-retirement notifications, after the version member releases its
@@ -82,6 +85,7 @@ public:
         std::function<void(std::uint64_t)> callback);
     void NotifyAvailability() noexcept;
 private:
+    std::atomic_uint64_t m_lastLifetimeTraceMs{0};
     std::mutex m_mutex;
     std::vector<std::shared_ptr<BufferBackingArtifact>> m_backings;
     std::vector<std::pair<std::uint64_t, std::function<void(std::uint64_t)>>> m_waiters;

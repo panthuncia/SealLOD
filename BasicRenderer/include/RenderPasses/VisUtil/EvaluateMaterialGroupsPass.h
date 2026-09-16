@@ -33,7 +33,7 @@ struct EvaluateMaterialGroupsBindings {
 };
 
 class EvaluateMaterialGroupsPass : public org::TypedRenderGraphPass<EvaluateMaterialGroupsPass,
-    br::render::PreparedComputeIndirectSequence, EvaluateMaterialGroupsBindings> {
+    org::EmptyPassFrameData, EvaluateMaterialGroupsBindings, br::render::PreparedComputeIndirectSequence> {
 public:
     EvaluateMaterialGroupsPass(MaterialEvaluationBuildInputs inputs, bool terrainRvtEnabled)
         : m_inputs(std::move(inputs)), m_terrainRvtEnabled(terrainRvtEnabled) {
@@ -146,7 +146,7 @@ public:
     }
 
 
-    br::render::PreparedComputeIndirectSequence Prepare(const EvaluateMaterialGroupsBindings& bindings,
+    br::render::PreparedComputeIndirectSequence BuildRecipe(const EvaluateMaterialGroupsBindings& bindings,
         const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
         const auto materialState = context->publishedRendererState
@@ -202,9 +202,26 @@ public:
         return data;
     }
 
-    static void Record(const EvaluateMaterialGroupsBindings&, const br::render::PreparedComputeIndirectSequence& data,
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const {
+        const auto* context = preparation.preparationData->Get<UpdateContext>();
+        const auto materialState = context->publishedRendererState
+            ? context->publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
+        std::vector<uint64_t> revision{SettingsManager::GetInstance().Revision(),
+            context->publishedRendererState ? context->publishedRendererState->materials.revision : 0u,
+            static_cast<uint64_t>(context->outputType), context->terrainRegionMaterialEvaluationEnabled};
+        if (materialState) for (const auto flags : materialState->activeCompileFlags) {
+            auto key = GetMaterialEvaluationShaderKey(flags);
+            if (context->outputType == OutputType::COLOR) key |= MaterialCompileFlags::MaterialCompileMaterialEvalColorOnly;
+            const auto* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(key);
+            revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->GetPayload().get() : nullptr));
+        }
+        return revision;
+    }
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeIndirectSequence&,
+        const EvaluateMaterialGroupsBindings&, const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeIndirectSequence& recipe, const org::EmptyPassFrameData&,
         org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeIndirectSequence(data, recording);
+        br::render::RecordPreparedComputeIndirectSequence(recipe, recording);
     }
 
     void ShutdownPass() {

@@ -16,8 +16,7 @@ struct MaterialHistogramBindings {
     uint32_t patchVisibilityIndexBase = 0;
 };
 
-class MaterialHistogramPass : public org::TypedRenderGraphPass<MaterialHistogramPass,
-    br::render::PreparedComputeDispatch, MaterialHistogramBindings> {
+class MaterialHistogramPass : public org::TypedRenderGraphPass<MaterialHistogramPass, org::EmptyPassFrameData, MaterialHistogramBindings, br::render::PreparedComputeDispatch> {
 public:
     explicit MaterialHistogramPass(const MaterialEvaluationBuildInputs& inputs)
         : m_visibleClusterResource(inputs.visibleClusters),
@@ -52,7 +51,7 @@ public:
         return bindings;
     }
 
-    br::render::PreparedComputeDispatch Prepare(const MaterialHistogramBindings& bindings,
+    br::render::PreparedComputeDispatch BuildRecipe(const MaterialHistogramBindings& bindings,
         const org::PassPrepareContext& preparation) const {
         const auto* update = preparation.preparationData->Get<UpdateContext>();
         const auto* render = preparation.preparationData->Get<RenderContext>();
@@ -84,7 +83,18 @@ public:
         return data;
     }
 
-    static void Record(const MaterialHistogramBindings&, const br::render::PreparedComputeDispatch& data,
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const {
+        const auto* update = preparation.preparationData->Get<UpdateContext>();
+        const auto* render = preparation.preparationData->Get<RenderContext>();
+        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
+        const auto resolution = update ? update->renderResolution : render->renderResolution;
+        return {reinterpret_cast<uintptr_t>(m_pso.GetPayload().get()),
+            published ? published->materials.revision : 0u, resolution.x, resolution.y};
+    }
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&,
+        const MaterialHistogramBindings&,
+        const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&,
         org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeDispatch(data, recording);
     }
