@@ -10,6 +10,7 @@
 #include <chrono>
 #include <sstream>
 #include "Render/PublicationBindingBundle.h"
+#include "Render/RenderGraph/ExperimentalExecutionState.h"
 #include <limits>
 #include <mutex>
 #include <numeric>
@@ -25,6 +26,7 @@
 #include <BasicTelemetry/Telemetry.h>
 
 namespace br::render {
+static bool TryClaimBacking(BufferBackingArtifact& backing);
 namespace {
 std::mutex g_backingRetirementMutex;
 std::vector<std::weak_ptr<VersionedGpuBufferBackingPool>> g_backingRetirementWaiters;
@@ -178,7 +180,7 @@ void VersionedGpuBufferBackingPool::NotifyAvailability() noexcept {
 			const bool frameSafe = !backing->wasPublished ||
 				retirementEpoch >= backing->lastPublishedRetirementEpoch + safeDelay;
 			const bool unpinned = backing->readbackPins.load(std::memory_order_acquire) == 0u;
-			if (backing.use_count() != 1 || !frameSafe || !unpinned) {
+			if (backing.use_count() != 1 || !frameSafe || !unpinned || !TryClaimBacking(*backing)) {
 				rescheduleRetirement = true;
 				++it;
 				continue;
@@ -192,6 +194,7 @@ void VersionedGpuBufferBackingPool::NotifyAvailability() noexcept {
 			const bool activeClass = active != m_backings.end() &&
 				(*active)->capacityClass == backing->capacityClass;
 			if (activeClass && !reusable) {
+				backing->retired.store(false, std::memory_order_seq_cst); // stays in circulation
 				reusable = backing;
 				++it;
 				continue;
@@ -263,6 +266,7 @@ void VersionedGpuBufferBackingPool::Retire(std::uint64_t backingGeneration) noex
     });
     if (found == m_backings.end()) return;
     const auto byteCapacity = (*found)->byteCapacity;
+    (*found)->retired.store(true, std::memory_order_seq_cst);
     m_backings.erase(found);
 	m_releasedGenerations.erase(backingGeneration);
     g_pooledBackingCount.fetch_sub(1, std::memory_order_relaxed);
@@ -369,10 +373,27 @@ std::shared_ptr<const void> VersionedGpuBufferBackingPool::PinBindingConsumer(
                     if (auto owner = pool.lock()) owner->NotifyAvailability();
         }
     };
-    std::lock_guard lock(m_mutex);
-    if (std::find(m_backings.begin(), m_backings.end(), backing) == m_backings.end())
+    // Lock-free: the pool claims a backing (retired = true, then reads the
+    // consumer count) and this pins in the opposite order, so one side always
+    // observes the other. Taking m_mutex here made the render thread wait for
+    // worker-side Acquire calls that allocate GPU memory under the lock.
+    auto pin = std::make_shared<const Pin>(backing, weak_from_this());
+    if (backing->retired.load(std::memory_order_seq_cst)) {
+        pin.reset();
         throw std::invalid_argument("Cannot bind a retired semantic buffer backing");
-    return std::make_shared<const Pin>(backing, weak_from_this());
+    }
+    return pin;
+}
+
+// Marks a backing as leaving circulation. Fails when a binding consumer pinned
+// it concurrently; the caller keeps the backing and retries later.
+static bool TryClaimBacking(BufferBackingArtifact& backing) {
+    backing.retired.store(true, std::memory_order_seq_cst);
+    if (backing.bindingConsumers.load(std::memory_order_seq_cst) != 0u) {
+        backing.retired.store(false, std::memory_order_seq_cst);
+        return false;
+    }
+    return true;
 }
 
 std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
@@ -403,9 +424,9 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
             backing->backingGeneration != m_activePublishedGeneration &&
             backing->readbackPins.load(std::memory_order_acquire) == 0u &&
             retirementEpoch >= backing->lastPublishedRetirementEpoch + safeRetirementDelay;
-        const bool idle = backing && backing->bindingConsumers.load(std::memory_order_acquire) == 0u
-            && (backing.use_count() == 1 || publicationRetired);
+        const bool idle = backing && (backing.use_count() == 1 || publicationRetired) && TryClaimBacking(*backing);
         if (idle && backing->capacityClass == capacityClass && !reusable) {
+            backing->retired.store(false, std::memory_order_seq_cst); // reused: back in circulation
             reusable = backing;
             ++it;
             continue;
@@ -1181,6 +1202,32 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
     version->backingPool = pool;
     version->resource = resource;
     version->image = input->gpuWritten ? nullptr : std::move(image);
+    if (const auto* persistent = std::getenv("SARP_PERSISTENT_PUBLICATIONS"); persistent && persistent[0] == '1') {
+        const auto snapshot = org::PublicationBindingBundle::Capture(*resource);
+        if (!snapshot) return ArtifactBuildResult::Failure("persistent buffer producer has no native snapshot");
+        auto initial = std::make_shared<org::experimental::PreparedBackingState>();
+        initial->graphResourceID = snapshot->resourceID;
+        initial->resource = snapshot->resource.GetHandle();
+        initial->shape = {(std::max)(1u,resource->GetMipLevels()),(std::max)(1u,resource->GetArraySize()),resource->HasLayout()};
+        initial->heapType = snapshot->description.heapType;
+        initial->aliasHeap = snapshot->aliasHeap;
+        initial->aliasHeapIdentity = snapshot->aliasHeap.get();
+        initial->aliasPoolID = snapshot->aliasPoolID;
+        initial->aliasOffset = snapshot->aliasOffset;
+        initial->aliasSize = snapshot->aliasSize;
+        auto regions = std::make_shared<std::vector<org::experimental::PreparedStateRegion>>();
+        if (const auto* tracker = resource->GetStateTracker()) for (const auto& segment : tracker->GetSegments()) {
+            const auto range = org::ResolveRangeSpec(segment.rangeSpec,initial->shape.mips,initial->shape.slices);
+            if (!range.isEmpty()) regions->push_back({{range.firstMip,range.mipCount,range.firstSlice,range.sliceCount},
+                {static_cast<uint64_t>(segment.state.access),static_cast<uint64_t>(segment.state.layout),
+                    static_cast<uint64_t>(segment.state.sync),rhi::AccessTypeIsWriteType(segment.state.access)}});
+        }
+        if (regions->empty()) regions->push_back({{0,initial->shape.mips,0,initial->shape.slices},
+            {static_cast<uint64_t>(rhi::ResourceAccessType::None),static_cast<uint64_t>(rhi::ResourceLayout::Undefined),
+                static_cast<uint64_t>(rhi::ResourceSyncState::None),false}});
+        initial->regions = std::move(regions);
+        version->initialState = std::move(initial);
+    }
 
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = input->catalogOwner;

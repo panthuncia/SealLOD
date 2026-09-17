@@ -44,7 +44,7 @@ struct PreparedCullingWorkload {
 inline std::vector<PreparedCullingWorkload> PrepareCullingWorkloads(
     std::span<const PreparedViewFrameData> views,
     const std::shared_ptr<const PublishedRendererState>& rendererState,
-    RenderPhase renderPhase,
+    const RenderPhase& renderPhase,
     bool clodOnlyWorkloads,
     bool useShadowCascadeViews,
     CLodRasterOutputKind rasterOutputKind,

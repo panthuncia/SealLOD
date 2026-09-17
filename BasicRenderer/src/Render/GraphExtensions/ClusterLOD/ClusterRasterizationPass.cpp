@@ -680,7 +680,14 @@ std::vector<uint64_t> ClusterRasterizationPass::RecipeRevision(const org::PassPr
     std::vector<uint64_t> revision{SettingsManager::GetInstance().Revision(), m_passWidth, m_passHeight,
         m_wireframe, m_visibilityBuffers.size(), context->preparedRasterBucketCount,
         context->lighting.shadowsEnabled, context->lighting.punctualLightingEnabled, context->lighting.gtaoEnabled,
-        reinterpret_cast<uintptr_t>(m_rasterizationCommandSignature.get())};
+        reinterpret_cast<uintptr_t>(m_rasterizationCommandSignature.get()),
+        // BuildRecipe embeds these live descriptor indices directly (not via
+        // the binding table), so they must be part of the revision.
+        m_rasterBucketsHistogramBuffer->GetSRVInfo(0).slot.index,
+        m_compactedVisibleClustersBuffer->GetSRVInfo(0).slot.index,
+        m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index,
+        m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index,
+        m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index};
     for (uint32_t i = 0; i < context->preparedRasterBucketCount; ++i) {
         const auto flags = context->preparedRasterBucketFlags.at(i);
         const PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer

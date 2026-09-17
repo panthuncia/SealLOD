@@ -443,8 +443,14 @@ void RendererStatePublisher::SetPreparationScheduler(std::function<bool(std::fun
     std::lock_guard lock(m_mutex);
     m_preparePublication = std::move(scheduler);
 }
+void RendererStatePublisher::SetExecutablePreparation(ExecutablePreparation prepare) {
+    std::lock_guard lock(m_mutex);
+    m_prepareExecutable = std::move(prepare);
+}
 
 bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
+    const auto submittedNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
     const bool hasFragment = std::ranges::any_of(patch.fragments,
         [](const auto& fragment) { return fragment.has_value(); });
     if (!hasFragment || (patch.policy == ManifestPublicationPolicy::ExplicitRollback && patch.reason.empty())) return false;
@@ -461,6 +467,7 @@ bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
         return false;
     }
     auto candidate = std::make_shared<PendingPatch>();
+    candidate->submittedNs = submittedNs;
     candidate->patch = std::move(patch);
     std::function<bool(std::function<void()>&&)> scheduler;
     {
@@ -500,6 +507,9 @@ bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
         m_patches.push_back(candidate);
         // Startup has no previous valid publication to render.
         if (m_active) scheduler = m_preparePublication;
+        candidate->base = m_active;
+        candidate->materializeOnWorker = static_cast<bool>(scheduler) || static_cast<bool>(m_prepareExecutable);
+        candidate->prepareExecutable = m_prepareExecutable;
     }
     const bool needsBuild = !inputs.empty();
     auto prepare = [candidate, inputs = std::move(inputs)]() mutable {
@@ -513,13 +523,27 @@ bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
                 if (pending->cancelled.load(std::memory_order_acquire)) return;
                 pending->patch.catalogSelections[index].second.bindingBundle = BuildSelectionBindings(std::move(captured));
             }
+            if (pending->materializeOnWorker && !pending->cancelled.load(std::memory_order_acquire)) {
+                BT_ZONE_SCOPE("ORG.Publication.MaterializeSuccessor");
+                auto prepared = MaterializePublishedState(pending->base,pending->patch,
+                    (pending->base ? pending->base->epoch : 0u) + 1u);
+                if (prepared && pending->prepareExecutable) {
+                    auto executableState = std::make_shared<PublishedRendererState>(*prepared);
+                    pending->prepareExecutable(pending->base,*executableState);
+                    prepared = std::move(executableState);
+                }
+                pending->prepared = std::move(prepared);
+            }
         } catch (const std::exception& error) {
             spdlog::error("Publication binding build failed: {}", error.what());
+            pending->failed.store(true, std::memory_order_relaxed);
+        } catch (...) {
+            spdlog::error("Publication successor build failed with an unknown exception");
             pending->failed.store(true, std::memory_order_relaxed);
         }
         pending->ready.store(true, std::memory_order_release);
     };
-    if (scheduler && needsBuild) {
+    if (scheduler && (needsBuild || candidate->materializeOnWorker)) {
         // inputs have moved into the closure; its work is always immutable.
         if (!scheduler(std::move(prepare))) {
             candidate->failed.store(true, std::memory_order_relaxed);
@@ -572,6 +596,7 @@ void RendererStateCommitResult::RunDeferred() noexcept {
     }
     for (std::uint8_t index = 0; index < retiredStateCount; ++index) retiredStates[index].reset();
     retiredStateCount = 0;
+    retiredPreparations.clear();
     // Commit is called only after this frame slot's fence completes. Notify
     // bounded mutable-resource pools after the retired manifests have released
     // their resource holds so suspended builds can retry without polling.
@@ -581,8 +606,10 @@ void RendererStateCommitResult::RunDeferred() noexcept {
 RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) {
     const auto started = std::chrono::steady_clock::now();
     RendererStateCommitResult result;
-    std::lock_guard lock(m_mutex);
+    std::unique_lock lock(m_mutex);
     BT_ZONE_SCOPE("RendererStatePublisher::Commit::Locked");
+    std::vector<std::pair<std::shared_ptr<PendingPatch>,std::function<void()>>> rebuilds;
+    const auto preparationScheduler = m_preparePublication;
     if (frameSlot >= m_frameStates.size()) {
         result.state = m_active;
         return result;
@@ -614,23 +641,88 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         m_candidate.baseEpoch = 0;
     }
     if (!m_patches.empty()) {
+        // Scheduled publication preparation produces complete immutable states.
+        // Select only an exact-base result. Independent patches whose base moved
+        // retry on workers rather than reconstructing a catalog on this thread.
+        for (const auto& pending : m_patches) {
+            if (!pending->materializeOnWorker || !pending->ready.load(std::memory_order_acquire)) continue;
+            if (pending->failed.load(std::memory_order_relaxed)
+                || pending->cancelled.load(std::memory_order_acquire)) continue;
+            if (pending->base != m_active) {
+                result.retiredPreparations.push_back(std::move(pending->prepared));
+                result.retiredPreparations.push_back(std::move(pending->base));
+                pending->base = m_active;
+                pending->ready.store(false,std::memory_order_release);
+                rebuilds.emplace_back(pending,[pending] {
+                    try {
+                        BT_ZONE_SCOPE("ORG.Publication.RebaseSuccessor");
+                        if (!pending->cancelled.load(std::memory_order_acquire)) {
+                            auto prepared = MaterializePublishedState(pending->base,pending->patch,
+                                (pending->base ? pending->base->epoch : 0u) + 1u);
+                            if (prepared && pending->prepareExecutable) {
+                                auto executableState = std::make_shared<PublishedRendererState>(*prepared);
+                                pending->prepareExecutable(pending->base,*executableState);
+                                prepared = std::move(executableState);
+                            }
+                            pending->prepared = std::move(prepared);
+                        }
+                    } catch (const std::exception& error) {
+                        spdlog::error("Publication successor rebase failed: {}",error.what());
+                        pending->failed.store(true,std::memory_order_relaxed);
+                    } catch (...) {
+                        spdlog::error("Publication successor rebase failed with an unknown exception");
+                        pending->failed.store(true,std::memory_order_relaxed);
+                    }
+                    pending->ready.store(true,std::memory_order_release);
+                });
+                basic_telemetry::AddCounter("SARP.RendererStatePublisher.SuccessorRebuilds");
+            }
+        }
         BT_ZONE_SCOPE("RendererStatePublisher::Commit::ApplyPatches");
-        auto patched = m_active ? std::make_shared<PublishedRendererState>(*m_active)
-                                : std::make_shared<PublishedRendererState>();
+        const bool hasInlinePatch = std::ranges::any_of(m_patches,[](const auto& pending) {
+            return !pending->materializeOnWorker && pending->ready.load(std::memory_order_acquire);
+        });
+        auto patched = hasInlinePatch ? (m_active ? std::make_shared<PublishedRendererState>(*m_active)
+                                : std::make_shared<PublishedRendererState>()) : nullptr;
         // Catalog patches are persistent overlays. Commit work is proportional
         // to changed entries rather than total renderer catalog size.
-		std::shared_ptr<const PublishedResourceCatalog> catalog = patched->resourceCatalog;
+		std::shared_ptr<const PublishedResourceCatalog> catalog = patched ? patched->resourceCatalog : nullptr;
 		const auto targetEpoch = (m_active ? m_active->epoch : 0u) + 1u;
         bool changed = false;
         for (const auto& pending : m_patches) {
             if (!pending->ready.load(std::memory_order_acquire)) continue;
             const auto& patch = pending->patch;
+            if (pending->materializeOnWorker && !pending->failed.load(std::memory_order_relaxed)) {
+                if (pending->base != m_active) continue;
+                if (pending->prepared) {
+                    BT_ZONE_SCOPE("ORG.Publication.SelectReadySuccessor");
+                    if (m_active) result.retiredPreparations.push_back(std::move(m_active));
+                    m_active = pending->prepared;
+                    result.committed = true;
+                    ++m_stats.committed;
+                    basic_telemetry::AddCounter("SARP.RendererStatePublisher.PreparedSuccessorsSelected");
+                    const auto selectedNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                    basic_telemetry::Record("SARP.RendererStatePublisher.PublicationLatencyNs",selectedNs - pending->submittedNs);
+                    if (patch.sourceEpoch != pending->base->epoch) ++m_stats.rebasedPatches;
+                    if (patch.policy == ManifestPublicationPolicy::ExplicitRollback) ++m_stats.explicitRollbacks;
+                } else {
+                    result.rejectedCallback = m_candidateRejected;
+                    result.rejectedEpoch = m_active ? m_active->epoch : 0u;
+                    const bool preconditions = std::ranges::all_of(patch.preconditions,[&](const auto& expected) {
+                        return m_active && m_active->Fragment(expected.kind).publicationRoot == expected.publicationRoot;
+                    });
+                    if (preconditions) ++m_stats.rejectedFragmentRegressions;
+                    else ++m_stats.rejectedPatchPreconditions;
+                }
+                continue;
+            }
             if (pending->failed.load(std::memory_order_relaxed)) {
                 basic_telemetry::AddCounter(pending->cancelled.load(std::memory_order_acquire)
                     ? "SARP.RendererStatePublisher.SupersededPublicationResults"
                     : "SARP.RendererStatePublisher.BindingPreparationFailures");
                 result.rejectedCallback = m_candidateRejected;
-                result.rejectedEpoch = patched->epoch;
+                result.rejectedEpoch = m_active ? m_active->epoch : 0u;
                 continue;
             }
             BT_ZONE_SCOPE("RendererStatePublisher::Commit::ApplyOnePatch");
@@ -675,7 +767,13 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
 			catalog = MakeCatalogUpdate(catalog, patch.catalogOwnerMask,
 				patch.catalogEntries, patch.catalogSelections, *patched, targetEpoch);
         }
-        std::erase_if(m_patches, [](const auto& pending) { return pending->ready.load(std::memory_order_acquire); });
+        std::erase_if(m_patches, [&](const auto& pending) {
+            if (!pending->ready.load(std::memory_order_acquire)) return false;
+            if (pending->materializeOnWorker && !pending->failed.load(std::memory_order_relaxed)
+                && pending->base != m_active && pending->prepared != m_active) return false;
+            result.retiredPreparations.push_back(pending);
+            return true;
+        });
         if (changed) {
             BT_ZONE_SCOPE("RendererStatePublisher::Commit::BuildManifestBundle");
             patched->publicationBundle = BuildManifestOwnershipBundle(*patched);
@@ -689,6 +787,18 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         }
     }
     m_frameStates[frameSlot] = m_active;
+    uint64_t oldestPendingNs = UINT64_MAX;
+    size_t readyPublications = 0;
+    for (const auto& pending : m_patches) {
+        oldestPendingNs = (std::min)(oldestPendingNs,pending->submittedNs);
+        readyPublications += pending->ready.load(std::memory_order_acquire);
+    }
+    const auto nowNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    basic_telemetry::SetGauge("SARP.RendererStatePublisher.PendingPublications",static_cast<int64_t>(m_patches.size()));
+    basic_telemetry::SetGauge("SARP.RendererStatePublisher.ReadyPublications",static_cast<int64_t>(readyPublications));
+    basic_telemetry::SetGauge("SARP.RendererStatePublisher.OldestPendingAgeUs",
+        oldestPendingNs == UINT64_MAX ? 0 : static_cast<int64_t>((nowNs - oldestPendingNs)/1000));
     if (m_active) ++m_stats.retainedFrameStates;
     m_stats.commitMicros = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started).count());
@@ -709,6 +819,20 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         BT_ZONE_SCOPE("RendererStatePublisher::Commit::PublishSourceAndLease");
         m_source->Store(result.state);
         result.lease = m_source->AcquireLease(frameSlot, result.state);
+    }
+    lock.unlock();
+    for (auto& [pending,rebuild] : rebuilds) {
+        // No publisher lock is held while entering the task service. Rejection
+        // executes the immutable rebuild inline only in scheduler-free bootstrap.
+        if (preparationScheduler) {
+            auto operation = std::make_shared<std::function<void()>>(std::move(rebuild));
+            if (!preparationScheduler([operation] { auto work = std::move(*operation); work(); })) {
+                // Run the error path without compiling on the owner thread.
+                basic_telemetry::AddCounter("SARP.RendererStatePublisher.SuccessorRebuildRejected");
+                pending->failed.store(true,std::memory_order_relaxed);
+                pending->ready.store(true,std::memory_order_release);
+            }
+        } else rebuild();
     }
     return result;
 }
@@ -745,6 +869,7 @@ void RendererStatePublisher::Shutdown() {
         for (const auto& pending : m_patches) pending->cancelled.store(true, std::memory_order_release);
         patches = std::move(m_patches);
         m_preparePublication = {};
+        m_prepareExecutable = {};
         active = std::move(m_active);
         frameStates = std::move(m_frameStates);
         source = m_source;

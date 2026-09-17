@@ -54,6 +54,31 @@ public:
         return resources && !resources->empty() ? *resources : ResolveFallback();
     }
 
+    // The captured state is a function of the newest published lease and the
+    // fallback/selection generations; the bound lease only advances with it.
+    // Leases advance every publication, but a query only observes the owner
+    // shards it matches; those shard objects are reused while that owner's
+    // selections (content versions and GPU submissions) are unchanged.
+    uint64_t DeclarationVersionHint() const noexcept override {
+        if (!m_configured || !m_source) return 0;
+        const auto lease = m_source->LoadLease();
+        if (!lease) return 0;
+        uint64_t hint = 0x70756273746174ull;
+        auto mix = [&](uint64_t value) { hint ^= value + 0x9e3779b97f4a7c15ull + (hint << 6u) + (hint >> 2u); };
+        const auto* catalog = lease->state ? lease->state->resourceCatalog.get() : nullptr;
+        if (!catalog) mix(lease->sequence);
+        else for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
+            if (m_exact ? static_cast<std::size_t>(m_key.owner) != index
+                : (m_query.owner && static_cast<std::size_t>(*m_query.owner) != index)) continue;
+            const auto& shard = catalog->ownerShards[index];
+            if (shard) mix(reinterpret_cast<std::uintptr_t>(shard.get()));
+            else { mix(lease->sequence); mix(index); }
+        }
+        mix(m_fallback ? m_fallback->generation.load(std::memory_order_acquire) : 0u);
+        mix(m_selection ? m_selection->generation.load(std::memory_order_acquire) : 0u);
+        return hint ? hint : 1;
+    }
+
     std::shared_ptr<const org::ResolverDeclarationState> CaptureDeclarationState() const override {
         CaptureLatestLease();
         return CaptureDeclarationState(org::ResolverCaptureContext(BoundLease()));

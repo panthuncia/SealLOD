@@ -14,8 +14,10 @@
 #include "Render/AsyncStateGraph.h"
 
 namespace org { class Resource; class PublicationBindingBundle; }
+namespace org::experimental { struct PreparedBackingState; }
 
 namespace br::render {
+struct PersistentRendererPublication;
 
 struct PublicationBundle {
     ArtifactVersionID root;
@@ -81,6 +83,9 @@ struct PublishedResourceSelection {
     std::uint64_t manifestEpoch = 0;
     std::shared_ptr<const PublicationBundle> publicationBundle;
     std::shared_ptr<const org::PublicationBindingBundle> bindingBundle;
+    // Captured on the producer only for persistent publication preparation.
+    // These are new-backing seeds; dynamic external state reports remain per frame.
+    std::shared_ptr<const std::vector<org::experimental::PreparedBackingState>> initialStates;
 };
 
 struct PublishedResourceCatalog {
@@ -156,6 +161,7 @@ struct PublishedRendererState {
     std::shared_ptr<const PublishedResourceCatalog> resourceCatalog;
     std::shared_ptr<const PublicationBundle> publicationBundle;
     std::shared_ptr<const org::PublicationBindingBundle> bindingBundle;
+    std::shared_ptr<const PersistentRendererPublication> persistentPublication;
 
     [[nodiscard]] PublishedStateFragment& Fragment(PublishedFragmentKind kind);
     [[nodiscard]] const PublishedStateFragment& Fragment(PublishedFragmentKind kind) const;
@@ -276,9 +282,12 @@ struct RendererStateCommitResult {
     std::uint8_t retiredStateCount = 0;
     std::function<void(std::uint64_t)> rejectedCallback;
     std::uint64_t rejectedEpoch = 0;
+    // Completed worker results can own large catalog/binding graphs. Release
+    // them with the renderer's existing deferred commit cleanup.
+    std::vector<std::shared_ptr<const void>> retiredPreparations;
 
     [[nodiscard]] bool HasDeferredWork() const noexcept {
-        return committed || retiredStateCount != 0 || static_cast<bool>(rejectedCallback);
+        return committed || retiredStateCount != 0 || !retiredPreparations.empty() || static_cast<bool>(rejectedCallback);
     }
     void RunDeferred() noexcept;
 };
@@ -291,6 +300,11 @@ public:
     bool PublishCandidate(RendererStateCandidate candidate);
     bool PublishPatch(PublishedStatePatch patch);
     void SetPreparationScheduler(std::function<bool(std::function<void()>&&)> scheduler);
+    // Runs on immutable worker-prepared successors before readiness. Native
+    // program/binding generation preparation must complete here before selection.
+    using ExecutablePreparation = std::function<void(
+        const std::shared_ptr<const PublishedRendererState>&, PublishedRendererState&)>;
+    void SetExecutablePreparation(ExecutablePreparation prepare);
     bool PublishArtifact(const ArtifactSnapshot& artifact);
 
     // Must be called after the frame slot fence has completed. This releases
@@ -313,10 +327,15 @@ private:
     RendererStateCandidate m_candidate;
     struct PendingPatch {
         PublishedStatePatch patch;
+        std::uint64_t submittedNs = 0;
+        std::shared_ptr<const PublishedRendererState> base, prepared;
+        ExecutablePreparation prepareExecutable;
+        bool materializeOnWorker = false;
         std::atomic_bool ready{false}, cancelled{false}, failed{false};
     };
     std::vector<std::shared_ptr<PendingPatch>> m_patches;
     std::function<bool(std::function<void()>&&)> m_preparePublication;
+    ExecutablePreparation m_prepareExecutable;
     std::shared_ptr<const PublishedRendererState> m_active;
     std::vector<std::shared_ptr<const PublishedRendererState>> m_frameStates;
     RendererStatePublisherStats m_stats;

@@ -6,8 +6,11 @@
 #include "ShaderBuffers.h"
 
 #include <array>
+#include <bit>
 #include <memory>
 #include <optional>
+#include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace br::render {
@@ -48,12 +51,12 @@ struct PreparedComputeDispatch {
     uint32_t groupsZ = 1;
 };
 
-inline void RecordPreparedComputeDispatch(
-    const PreparedComputeDispatch& data, org::RecordingContext& recording) {
-    // A zero-sized dispatch is the framework's canonical "no work this frame"
-    // packet.  Do not require passes to capture a program/layout merely to
-    // represent that state, and do not mutate command-list bindings for it.
-    if (data.groupsX == 0 || data.groupsY == 0 || data.groupsZ == 0) return;
+inline void RecordPreparedComputeDispatchWithInvocation(
+    const PreparedComputeDispatch& data,
+    const std::array<unsigned int,NumMiscUintRootConstants>& constants,
+    uint32_t groupsX, uint32_t groupsY, uint32_t groupsZ, org::RecordingContext& recording) {
+    // Zero work requires neither a program nor command-list mutation.
+    if (groupsX == 0 || groupsY == 0 || groupsZ == 0) return;
     auto& commands = recording.Commands();
     BindPreparedDescriptorHeaps(commands, data.resourceHeap, data.samplerHeap);
     commands.BindLayout(data.program ? recording.ResolveLayout(*data.program, data.layout) : data.layout);
@@ -64,8 +67,17 @@ inline void RecordPreparedComputeDispatch(
             static_cast<uint32_t>(data.descriptorIndices.size()), data.descriptorIndices.data());
     }
     commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
-        NumMiscUintRootConstants, data.constants.data());
-    commands.Dispatch(data.groupsX, data.groupsY, data.groupsZ);
+        NumMiscUintRootConstants, constants.data());
+    commands.Dispatch(groupsX,groupsY,groupsZ);
+}
+
+inline void RecordPreparedComputeDispatch(
+    const PreparedComputeDispatch& data, org::RecordingContext& recording) {
+    RecordPreparedComputeDispatchWithInvocation(data,data.constants,data.groupsX,data.groupsY,data.groupsZ,recording);
+}
+
+inline void RemapDescriptorIndices(PreparedComputeDispatch& data, const org::DescriptorIndexRemap& remap) {
+    org::RemapDescriptorIndices(data.descriptorIndices, remap);
 }
 
 struct PreparedComputeIndirect {
@@ -127,7 +139,11 @@ struct PreparedComputeIndirectSequence {
 
 inline void RecordPreparedComputeIndirectSequence(
     const PreparedComputeIndirectSequence& data, org::RecordingContext& recording,
-    std::optional<std::pair<uint32_t, uint32_t>> constantPatch = {}) {
+    std::optional<std::pair<uint32_t, uint32_t>> constantPatch = {},
+    std::span<const uint32_t> invocationConstants = {}, uint64_t invocationMask = 0) {
+    if (invocationMask && (std::bit_width(invocationMask) > invocationConstants.size()
+        || std::bit_width(invocationMask) > NumMiscUintRootConstants))
+        throw std::out_of_range("Indirect sequence invocation constants are incomplete");
     auto& commands = recording.Commands();
     BindPreparedDescriptorHeaps(commands, data.resourceHeap, data.samplerHeap);
     for (const auto& step : data.steps) {
@@ -137,6 +153,10 @@ inline void RecordPreparedComputeIndirectSequence(
             org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
             static_cast<uint32_t>(step.descriptorIndices.size()), step.descriptorIndices.data());
         auto constants = step.constants;
+        for (auto mask = invocationMask; mask; mask &= mask-1) {
+            const auto index = std::countr_zero(mask);
+            constants[index] = invocationConstants[index];
+        }
         if (constantPatch) constants.at(constantPatch->first) = constantPatch->second;
         commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
             NumMiscUintRootConstants, constants.data());
@@ -147,6 +167,10 @@ inline void RecordPreparedComputeIndirectSequence(
         commands.ExecuteIndirect(data.commandSignature, arguments, step.argumentsOffset,
             countBuffer, data.countOffset, step.maximumCount);
     }
+}
+
+inline void RemapDescriptorIndices(PreparedComputeIndirectSequence& data, const org::DescriptorIndexRemap& remap) {
+    for (auto& step : data.steps) org::RemapDescriptorIndices(step.descriptorIndices, remap);
 }
 
 struct PreparedComputeDispatchSequence {

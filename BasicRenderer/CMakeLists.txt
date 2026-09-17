@@ -324,6 +324,13 @@ if(EXISTS "${BASICRENDERER_REPO_ROOT}/geometry-central/CMakeLists.txt" AND NOT T
 endif()
 
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
+target_sources(${PROJECT_NAME} PRIVATE
+    "include/Render/PersistentRendererPublication.h"
+    "src/Render/PersistentRendererPublication.cpp"
+    "include/Render/GraphExtensions/ClusterLOD/CapturedHierarchicalDispatchCullingInputs.h"
+    "include/Render/GraphExtensions/ClusterLOD/CapturedCullingCommandSink.h"
+    "include/Render/GraphExtensions/ClusterLOD/PersistentHierarchicalDispatchCullingPass.h"
+    "include/RenderPasses/VisUtil/PersistentMaterialEvaluationPass.h")
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
 if(BASICRENDERER_BUILD_INTEROP_VALIDATION)
     add_library(SARPInteropValidation STATIC
@@ -1435,5 +1442,23 @@ if(WIN32)
     else()
         set_tests_properties(${_basicrenderer_runtime_tests} PROPERTIES
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_OUTPUT_ROOT}")
+    endif()
+    # Metadata-only publication preparation tests need no deployed assets.
+    foreach(_pipeline_runtime_dll WinPixEventRuntime.dll dxcompiler.dll dxil.dll hlsl.dll)
+        if(EXISTS "${BASICRENDERER_SOURCE_ROOT}/${_pipeline_runtime_dll}")
+            add_custom_command(TARGET PipelineRecipeTests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${BASICRENDERER_SOURCE_ROOT}/${_pipeline_runtime_dll}"
+                    "$<TARGET_FILE_DIR:PipelineRecipeTests>")
+        endif()
+    endforeach()
+    set_tests_properties(PipelineRecipeTests PROPERTIES
+        WORKING_DIRECTORY "$<TARGET_FILE_DIR:PipelineRecipeTests>"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_OUTPUT_ROOT}")
+    if(BASICRENDERER_ENABLE_NVPERF AND NVPERF_GRFX_HOST_DLL)
+        add_custom_command(TARGET PipelineRecipeTests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NVPERF_GRFX_HOST_DLL}"
+                "$<TARGET_FILE_DIR:PipelineRecipeTests>"
+            VERBATIM)
     endif()
 endif()

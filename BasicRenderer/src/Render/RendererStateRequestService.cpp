@@ -8,6 +8,11 @@
 #include <BasicTelemetry/Telemetry.h>
 
 #include "Render/StaticStateArtifacts.h"
+#include "Render/MaterialStateArtifacts.h"
+#include "Render/GeometryBufferStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/RenderGraph/ExperimentalExecutionState.h"
+#include "Resources/Resource.h"
 
 namespace br::render {
 
@@ -544,6 +549,26 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             selection.sourceArtifact = selected[index]->Version();
             selection.lifetimeHolds = artifact->fragment.resourceHolds;
             selection.publicationBundle = patch->fragments[index]->publicationBundle;
+            std::vector<std::shared_ptr<const PublishedGpuBufferVersion>> versions;
+            if (key.owner == PublishedFragmentKind::Materials) {
+                if (const auto material = artifact->fragment.payload.Get<PublishedMaterialState>();
+                    material && material->baseTable && material->baseTable->initialState)
+                    versions = {material->baseTable,material->evalTable,material->openPbrTable};
+            } else if (key.owner == PublishedFragmentKind::Geometry) {
+                const auto geometry = patch->fragments[index]->selectedState.Get<PublishedGeometryBufferState>();
+                if (geometry && !geometry->versions.empty() && geometry->versions.front()->initialState) versions = geometry->versions;
+            }
+            if (resources && !versions.empty()) {
+                auto seeds = std::make_shared<std::vector<org::experimental::PreparedBackingState>>();
+                for (const auto& resource : *resources) {
+                    if (!resource) continue;
+                    for (const auto& version : versions) if (version && version->initialState
+                        && version->initialState->graphResourceID == resource->GetGlobalResourceID()) {
+                        seeds->push_back(*version->initialState); break;
+                    }
+                }
+                if (!seeds->empty()) selection.initialStates = std::move(seeds);
+            }
             if (selection.publicationBundle) {
                 selection.gpuSubmissions = selection.publicationBundle->gpuSubmissions;
             }

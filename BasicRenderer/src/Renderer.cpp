@@ -3,6 +3,7 @@
 //
 
 #include "Renderer.h"
+#include "Render/PersistentRendererPublication.h"
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -801,6 +802,10 @@ void Renderer::Initialize(
         m_asyncStateGraph->StartTrace(*m_pendingAsyncStateGraphTrace);
     }
     m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight);
+    if (const auto* persistent = std::getenv("SARP_PERSISTENT_PUBLICATIONS"); persistent && persistent[0] == '1') {
+        m_rendererStatePublisher->SetExecutablePreparation(br::render::PreparePersistentRendererPublication);
+        spdlog::info("Persistent material/geometry publication preparation enabled; pass execution remains transitional");
+    }
     m_rendererStatePublisher->SetPreparationScheduler([scope = m_rendererStateCommitScope](std::function<void()>&& work) {
         return TaskSchedulerManager::GetInstance().Submit(scope, TaskLane::Background, TaskDomain::RendererState,
             "PublicationBindingBundles", [work = std::move(work)](const br::TaskContext& context) mutable {
@@ -7395,6 +7400,16 @@ void Renderer::CreateRenderGraph() {
 	spdlog::info("Renderer::CreateRenderGraph entering CompileStructural");
     newGraph->CompileStructural();
 	spdlog::info("Renderer::CreateRenderGraph leaving CompileStructural");
+    }
+    if (const auto* persistent = std::getenv("SARP_PERSISTENT_GRAPH"); persistent && persistent[0] == '1') {
+        // Segment placement is explicit: passes whose touched-resource set is
+        // only known per frame cannot live in the persistent main executable.
+        newGraph->SetPersistentSegment("Builtin::Uploads", RenderGraph::PersistentSegmentKind::Pre);
+        newGraph->SetPersistentSegment("CLod::AsyncUpload", RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentSegment("Builtin::Readbacks", RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentSegment("CLod::StreamingReadbackCopy", RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentExecutionEnabled(true);
+        spdlog::info("Persistent render graph execution enabled (SARP_PERSISTENT_GRAPH=1)");
     }
     probeGraphBuildPhase("CreateRenderGraph after CompileStructural");
     {

@@ -31,6 +31,10 @@ struct PreparedRenderIndirectSequence {
     std::vector<Step> steps;
 };
 
+inline void RemapDescriptorIndices(PreparedRenderIndirectSequence& data, const org::DescriptorIndexRemap& remap) {
+    for (auto& step : data.steps) org::RemapDescriptorIndices(step.program, remap);
+}
+
 inline void RecordPreparedRenderIndirectSequence(
     const PreparedRenderIndirectSequence& data, org::RecordingContext& recording) {
     // Preparation may legitimately produce no draws (for example an empty

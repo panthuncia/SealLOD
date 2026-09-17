@@ -60,6 +60,11 @@ struct BufferBackingArtifact {
     // while an explicit diagnostic capture still observes its contents.
     std::atomic_uint32_t readbackPins{ 0 };
     std::atomic_uint32_t bindingConsumers{ 0 };
+    // Set (seq_cst) by the pool before it reclaims or reuses the backing; a
+    // binding consumer pins lock-free by incrementing bindingConsumers and then
+    // checking this flag, so the render thread never waits on the pool mutex
+    // while a worker allocates inside Acquire.
+    std::atomic_bool retired{ false };
     bool wasPublished = false;
 };
 
@@ -148,6 +153,9 @@ struct PublishedGpuBufferVersion {
     std::weak_ptr<VersionedGpuBufferBackingPool> backingPool;
     std::shared_ptr<org::GloballyIndexedResource> resource;
     std::shared_ptr<const VersionedGpuBufferImage> image;
+    // Immutable producer seed, captured before visibility. It owns no semantic
+    // consumer pin, so journal retention cannot prevent pooled backing reuse.
+    std::shared_ptr<const org::experimental::PreparedBackingState> initialState;
     [[nodiscard]] std::shared_ptr<const std::vector<std::byte>> MaterializeCpuImage() const {
         return image ? image->Materialize() : nullptr;
     }

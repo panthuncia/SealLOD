@@ -2,6 +2,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
+#include <algorithm>
+#include <bit>
+#include <span>
+#include <optional>
+#include <memory>
+#include <stdexcept>
 #include <cstring>
 #include <type_traits>
 #include <utility>
@@ -11,21 +18,83 @@
 #include <rhi.h>
 
 #include "Render/PreparedPass.h"
+#include "Render/PipelineState.h"
+#include "Render/RenderGraph/PersistentGraph.h"
 #include "Render/ShaderAPI.h"
 
 namespace br::render {
+
+// Persistent templates use tokens; the legacy preparation adapter may still
+// supply frame-local references. Both record through the same command encoder.
+using PreparedCommandResource = std::variant<org::PreparedResourceReference,org::persistent::BindingToken>;
+inline rhi::Resource ResolveCommandResource(const PreparedCommandResource& resource, org::RecordingContext& recording) {
+    return std::visit([&](const auto& reference) { return recording.Resolve(reference); },resource);
+}
 
 struct PreparedBindComputeProgram {
     org::PreparedProgramReference program;
     std::vector<uint32_t> descriptorIndices;
 };
+struct PreparedBindPersistentComputeProgram {
+    std::shared_ptr<const org::PipelineStatePayload> program;
+};
 struct PreparedComputeDescriptorIndices { std::vector<uint32_t> values; };
+// Immutable logical slots. Physical descriptor indices are selected by the
+// frame's publication, without rebuilding commands on backing replacement.
+struct PreparedPersistentDescriptorIndices {
+    std::vector<std::optional<org::persistent::ViewToken>> slots;
+};
 
+struct PreparedConstantViewBinding {
+    uint32_t index = 0; // Offset within values, independent of destinationOffset.
+    std::optional<org::persistent::ViewToken> view;
+};
 struct PreparedComputeConstants {
     uint32_t rootParameter = 0;
     uint32_t destinationOffset = 0;
     std::vector<uint32_t> values;
+    uint64_t invocationConstantMask = 0;
+    std::vector<PreparedConstantViewBinding> bindingViews;
 };
+
+inline void ValidateComputeConstantPatches(const PreparedComputeConstants& constants) {
+    if (!constants.invocationConstantMask && constants.bindingViews.empty()) return;
+    if (constants.values.size() > 64)
+        throw std::out_of_range("Compute constant patch exceeds recording storage");
+    if (constants.values.size() < 64 && (constants.invocationConstantMask >> constants.values.size()))
+        throw std::out_of_range("Invocation constant mask exceeds values");
+    auto occupied = constants.invocationConstantMask;
+    for (const auto& patch : constants.bindingViews) {
+        if (patch.index >= constants.values.size()) throw std::out_of_range("Descriptor constant patch exceeds values");
+        const auto bit = uint64_t{1} << patch.index;
+        if (occupied & bit) throw std::invalid_argument("Descriptor constant overlaps another patch");
+        occupied |= bit;
+    }
+}
+
+// Descriptor provenance is explicit during command construction. There is no
+// numeric conversion: a scalar equal to a descriptor index remains a scalar.
+struct SymbolicComputeConstant {
+    std::variant<uint32_t,std::optional<org::persistent::ViewToken>> value{uint32_t{0}};
+    SymbolicComputeConstant() = default;
+    SymbolicComputeConstant(uint32_t scalar) : value(scalar) {}
+    SymbolicComputeConstant(org::persistent::ViewToken view) : value(std::optional{view}) {}
+    SymbolicComputeConstant(std::nullopt_t) : value(std::optional<org::persistent::ViewToken>{}) {}
+};
+inline PreparedComputeConstants BuildSymbolicComputeConstants(uint32_t rootParameter, uint32_t destinationOffset,
+    std::span<const SymbolicComputeConstant> source, uint64_t invocationMask = 0) {
+    PreparedComputeConstants result{rootParameter,destinationOffset,{},invocationMask};
+    result.values.resize(source.size());
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (const auto* scalar = std::get_if<uint32_t>(&source[i].value)) result.values[i] = *scalar;
+        else {
+            if (i >= UINT32_MAX) throw std::out_of_range("Symbolic compute constant index overflow");
+            result.bindingViews.push_back({static_cast<uint32_t>(i),std::get<std::optional<org::persistent::ViewToken>>(source[i].value)});
+        }
+    }
+    ValidateComputeConstantPatches(result);
+    return result;
+}
 
 struct PreparedResourceAddressPatch {
     uint64_t address = 0;
@@ -43,7 +112,7 @@ struct PreparedComputeAddressConstants {
 struct PreparedDispatchGroups { uint32_t x = 0, y = 1, z = 1; };
 
 struct PreparedBufferBarrier {
-    org::PreparedResourceReference resource;
+    PreparedCommandResource resource;
     rhi::ResourceAccessType beforeAccess = rhi::ResourceAccessType::Common;
     rhi::ResourceAccessType afterAccess = rhi::ResourceAccessType::Common;
     rhi::ResourceSyncState beforeSync = rhi::ResourceSyncState::None;
@@ -54,14 +123,17 @@ struct PreparedBufferBarrierBatch { std::vector<PreparedBufferBarrier> barriers;
 
 struct PreparedExecuteIndirectCommand {
     rhi::CommandSignatureHandle signature{};
-    org::PreparedResourceReference arguments;
+    PreparedCommandResource arguments;
     uint64_t argumentOffset = 0;
     uint32_t maxCommandCount = 1;
+    std::shared_ptr<const void> signatureOwner;
+    std::optional<PreparedCommandResource> countBuffer;
+    uint64_t countOffset = 0;
 };
 
 struct PreparedSetWorkGraph {
-    org::PreparedWorkGraphReference workGraph;
-    org::PreparedResourceReference backing;
+    std::variant<org::PreparedWorkGraphReference,std::shared_ptr<const rhi::WorkGraphPtr>> workGraph;
+    PreparedCommandResource backing;
     bool initializeBacking = false;
 };
 
@@ -83,13 +155,15 @@ struct PreparedWorkGraphCpuDispatch {
 };
 
 struct PreparedWorkGraphGpuDispatch {
-    org::PreparedResourceReference input;
+    PreparedCommandResource input;
     uint64_t inputAddressOffset = 0;
 };
 
 using PreparedComputeCommand = std::variant<
     PreparedBindComputeProgram,
+    PreparedBindPersistentComputeProgram,
     PreparedComputeDescriptorIndices,
+    PreparedPersistentDescriptorIndices,
     PreparedComputeConstants,
     PreparedComputeAddressConstants,
     PreparedDispatchGroups,
@@ -103,6 +177,55 @@ struct PreparedComputeCommandSequence {
     rhi::PipelineLayoutHandle layout{};
     std::vector<PreparedComputeCommand> commands;
 };
+
+inline void RemapDescriptorIndices(PreparedComputeCommandSequence& sequence, const org::DescriptorIndexRemap& remap) {
+    for (auto& command : sequence.commands) {
+        if (auto* program = std::get_if<PreparedBindComputeProgram>(&command)) org::RemapDescriptorIndices(program->descriptorIndices, remap);
+        else if (auto* indices = std::get_if<PreparedComputeDescriptorIndices>(&command)) org::RemapDescriptorIndices(indices->values, remap);
+    }
+}
+
+// Explicit publication/program-build check, never a frame preparation scan.
+// A persistent template must not accidentally retain compiler indices, captured
+// descriptor indices, unowned native objects or backing-specific GPU addresses.
+inline void ValidatePersistentComputeCommands(const PreparedComputeCommandSequence& sequence) {
+    if (sequence.layout.valid()) throw std::invalid_argument("Persistent sequence requires an owned program layout");
+    const auto stable = [](const PreparedCommandResource& resource) {
+        if (!std::holds_alternative<org::persistent::BindingToken>(resource))
+            throw std::invalid_argument("Persistent command contains a frame-local resource reference");
+    };
+    for (const auto& command : sequence.commands) std::visit([&](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T,PreparedBindComputeProgram> || std::is_same_v<T,PreparedComputeDescriptorIndices>)
+            throw std::invalid_argument("Persistent command contains frame-local program or descriptor bindings");
+        else if constexpr (std::is_same_v<T,PreparedBindPersistentComputeProgram>) {
+            if (!value.program || !value.program->pso.Get().GetHandle().valid()
+                || !value.program->layout.valid() || !value.program->layoutOwner)
+                throw std::invalid_argument("Persistent program has incomplete ownership");
+        } else if constexpr (std::is_same_v<T,PreparedBufferBarrierBatch>) {
+            for (const auto& barrier : value.barriers) stable(barrier.resource);
+        } else if constexpr (std::is_same_v<T,PreparedExecuteIndirectCommand>) {
+            stable(value.arguments);
+            if (value.countBuffer) stable(*value.countBuffer);
+            if (!value.signature.valid() || !value.signatureOwner)
+                throw std::invalid_argument("Persistent indirect command has no signature owner");
+        } else if constexpr (std::is_same_v<T,PreparedSetWorkGraph>) {
+            stable(value.backing);
+            const auto* graph = std::get_if<std::shared_ptr<const rhi::WorkGraphPtr>>(&value.workGraph);
+            if (!graph || !*graph || !(*graph)->Get().GetHandle().valid())
+                throw std::invalid_argument("Persistent command has no work-graph owner");
+        } else if constexpr (std::is_same_v<T,PreparedWorkGraphGpuDispatch>) stable(value.input);
+        else if constexpr (std::is_same_v<T,PreparedWorkGraphCpuDispatch>) {
+            if (!value.records.empty()) throw std::invalid_argument("Persistent command contains invocation records");
+        } else if constexpr (std::is_same_v<T,PreparedPersistentDescriptorIndices>) {
+            if (value.slots.size() > org::shaderapi::kNumResourceDescriptorIndicesRootConstants)
+                throw std::invalid_argument("Persistent descriptor bindings exceed root capacity");
+        } else if constexpr (std::is_same_v<T,PreparedComputeConstants>) ValidateComputeConstantPatches(value);
+        else if constexpr (std::is_same_v<T,PreparedComputeAddressConstants>) {
+            if (!value.addresses.empty()) throw std::invalid_argument("Persistent command contains captured physical addresses");
+        }
+    },command);
+}
 
 // Owner-thread command preparation facade.  Passes describe immutable commands;
 // this object owns the otherwise repetitive dependency collection and packet
@@ -271,7 +394,8 @@ private:
 inline void RecordPreparedComputeCommands(
     const PreparedComputeCommandSequence& data, org::RecordingContext& recording,
     const PreparedWorkGraphCpuDispatch* cpuInvocation = nullptr,
-    std::optional<bool> initializeBacking = {}) {
+    std::optional<bool> initializeBacking = {},
+    std::span<const uint32_t> invocationConstants = {}) {
     auto& commandList = recording.Commands();
     // Descriptor snapshots belong to the execution slot and are installed by
     // admission before any pass records. Frame data must not retain heap
@@ -289,16 +413,48 @@ inline void RecordPreparedComputeCommands(
                         static_cast<uint32_t>(value.descriptorIndices.size()),
                         value.descriptorIndices.data());
                 }
+            } else if constexpr (std::is_same_v<T, PreparedBindPersistentComputeProgram>) {
+                if (!value.program || !value.program->pso.Get().GetHandle().valid()
+                    || !value.program->layout.valid() || !value.program->layoutOwner)
+                    throw std::invalid_argument("Persistent compute program lost its native ownership");
+                commandList.BindLayout(value.program->layout);
+                commandList.BindPipeline(value.program->pso.Get().GetHandle());
             } else if constexpr (std::is_same_v<T, PreparedComputeDescriptorIndices>) {
                 if (!value.values.empty()) commandList.PushConstants(
                     rhi::ShaderStage::Compute, 0,
                     org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
                     static_cast<uint32_t>(value.values.size()), value.values.data());
+            } else if constexpr (std::is_same_v<T, PreparedPersistentDescriptorIndices>) {
+                std::array<uint32_t,org::shaderapi::kNumResourceDescriptorIndicesRootConstants> indices;
+                if (value.slots.size() > indices.size())
+                    throw std::out_of_range("Persistent descriptor bindings exceed root constant capacity");
+                for (size_t i = 0; i != value.slots.size(); ++i)
+                    indices[i] = value.slots[i] ? recording.Resolve(*value.slots[i]).index : UINT32_MAX;
+                if (!value.slots.empty()) commandList.PushConstants(rhi::ShaderStage::Compute,0,
+                    org::shaderapi::kResourceDescriptorIndicesRootParameter,0,
+                    static_cast<uint32_t>(value.slots.size()),indices.data());
             } else if constexpr (std::is_same_v<T, PreparedComputeConstants>) {
+                const auto* constants = value.values.data();
+                std::array<uint32_t, 64> patched;
+                if (value.invocationConstantMask || !value.bindingViews.empty()) {
+                    ValidateComputeConstantPatches(value);
+                    std::copy(value.values.begin(), value.values.end(), patched.begin());
+                    for (const auto& patch : value.bindingViews)
+                        patched[patch.index] = patch.view ? recording.Resolve(*patch.view).index : UINT32_MAX;
+                    auto mask = value.invocationConstantMask;
+                    while (mask) {
+                        const auto index = static_cast<uint32_t>(std::countr_zero(mask));
+                        if (index >= value.values.size() || index >= invocationConstants.size())
+                            throw std::out_of_range("Invocation constant patch has no current value");
+                        patched[index] = invocationConstants[index];
+                        mask &= mask - 1;
+                    }
+                    constants = patched.data();
+                }
                 if (!value.values.empty()) commandList.PushConstants(
                     rhi::ShaderStage::Compute, 0, value.rootParameter,
                     value.destinationOffset, static_cast<uint32_t>(value.values.size()),
-                    value.values.data());
+                    constants);
             } else if constexpr (std::is_same_v<T, PreparedComputeAddressConstants>) {
                 auto constants = value.values;
                 for (const auto& patch : value.addresses) {
@@ -316,7 +472,7 @@ inline void RecordPreparedComputeCommands(
                 barriers.reserve(value.barriers.size());
                 for (const auto& source : value.barriers) {
                     rhi::BufferBarrier barrier{};
-                    barrier.buffer = recording.Resolve(source.resource).GetHandle();
+                    barrier.buffer = ResolveCommandResource(source.resource,recording).GetHandle();
                     barrier.beforeAccess = source.beforeAccess;
                     barrier.afterAccess = source.afterAccess;
                     barrier.beforeSync = source.beforeSync;
@@ -331,11 +487,21 @@ inline void RecordPreparedComputeCommands(
                 }
             } else if constexpr (std::is_same_v<T, PreparedExecuteIndirectCommand>) {
                 commandList.ExecuteIndirect(value.signature,
-                    recording.Resolve(value.arguments).GetHandle(), value.argumentOffset,
-                    {}, 0, value.maxCommandCount);
+                    ResolveCommandResource(value.arguments,recording).GetHandle(), value.argumentOffset,
+                    value.countBuffer ? ResolveCommandResource(*value.countBuffer,recording).GetHandle() : rhi::ResourceHandle{},
+                    value.countOffset, value.maxCommandCount);
             } else if constexpr (std::is_same_v<T, PreparedSetWorkGraph>) {
-                commandList.SetWorkGraph(recording.Resolve(value.workGraph),
-                    recording.Resolve(value.backing).GetHandle(), initializeBacking.value_or(value.initializeBacking));
+                const auto workGraph = std::visit([&](const auto& reference) {
+                    using Reference = std::decay_t<decltype(reference)>;
+                    if constexpr (std::is_same_v<Reference,org::PreparedWorkGraphReference>) return recording.Resolve(reference);
+                    else {
+                        if (!reference || !reference->Get().GetHandle().valid())
+                            throw std::invalid_argument("Persistent work graph lost its native ownership");
+                        return reference->Get().GetHandle();
+                    }
+                },value.workGraph);
+                commandList.SetWorkGraph(workGraph,
+                    ResolveCommandResource(value.backing,recording).GetHandle(), initializeBacking.value_or(value.initializeBacking));
             } else if constexpr (std::is_same_v<T, PreparedWorkGraphCpuDispatch>) {
                 const auto& input = cpuInvocation ? *cpuInvocation : value;
                 if (input.records.empty()) return;
@@ -350,7 +516,7 @@ inline void RecordPreparedComputeCommands(
             } else if constexpr (std::is_same_v<T, PreparedWorkGraphGpuDispatch>) {
                 rhi::WorkGraphDispatchDesc dispatch{};
                 dispatch.dispatchMode = rhi::WorkGraphDispatchMode::MultiNodeGpuInput;
-                dispatch.multiNodeGpuInput.inputBuffer = recording.Resolve(value.input).GetHandle();
+                dispatch.multiNodeGpuInput.inputBuffer = ResolveCommandResource(value.input,recording).GetHandle();
                 dispatch.multiNodeGpuInput.inputAddressOffset = value.inputAddressOffset;
                 commandList.DispatchWorkGraph(dispatch);
             }

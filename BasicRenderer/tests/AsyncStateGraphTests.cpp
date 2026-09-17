@@ -1885,6 +1885,59 @@ int main() {
     Check(rebasedCommit.state->terrain.revision == 20);
     rebasedCommit.RunDeferred();
 
+    // Production worker publication: frame commit only selects a complete,
+    // exact-base successor. Independent results rebase off the owner thread.
+    {
+        RendererStatePublisher workerPublisher(2);
+        std::vector<std::function<void()>> publicationJobs;
+        workerPublisher.SetPreparationScheduler([&](std::function<void()>&& job) {
+            publicationJobs.push_back(std::move(job)); return true;
+        });
+        uint32_t interfaceBuilds = 0;
+        workerPublisher.SetExecutablePreparation([&](const auto& base,auto& state) {
+            Check(state.epoch == base->epoch + 1);
+            ++interfaceBuilds;
+        });
+        Check(workerPublisher.PublishPatch(materialPatch));
+        Check(workerPublisher.PublishPatch(terrainPatch));
+        Check(publicationJobs.size() == 2);
+        auto waiting = workerPublisher.Commit(0);
+        Check(!waiting.committed && waiting.state->epoch == 0);
+        waiting.RunDeferred();
+        auto materialJob = std::move(publicationJobs[0]); materialJob();
+        auto terrainJob = std::move(publicationJobs[1]); terrainJob();
+        auto selected = workerPublisher.Commit(0);
+        Check(selected.committed && selected.state->materials.revision == 10);
+        Check(selected.state->terrain.revision == 0 && interfaceBuilds == 2);
+        const auto held = selected.lease;
+        selected.RunDeferred();
+        auto rebasing = workerPublisher.Commit(1);
+        Check(!rebasing.committed && publicationJobs.size() == 3 && interfaceBuilds == 2);
+        rebasing.RunDeferred();
+        auto rebaseJob = std::move(publicationJobs[2]); rebaseJob();
+        auto joined = workerPublisher.Commit(1);
+        Check(joined.committed && joined.state->epoch == 2 && interfaceBuilds == 3);
+        Check(joined.state->materials.revision == 10 && joined.state->terrain.revision == 20);
+        Check(held->state->terrain.revision == 0);
+        joined.RunDeferred();
+
+        workerPublisher.SetExecutablePreparation([](const auto&,auto&) {
+            throw std::runtime_error("injected executable publication failure");
+        });
+        Check(workerPublisher.PublishPatch(materialPatch));
+        auto failedJob = std::move(publicationJobs.back()); failedJob();
+        auto failed = workerPublisher.Commit(0);
+        Check(!failed.committed && failed.state->epoch == 2);
+        failed.RunDeferred();
+
+        workerPublisher.SetExecutablePreparation({});
+        workerPublisher.SetPreparationScheduler([](std::function<void()>&&) { return false; });
+        Check(!workerPublisher.PublishPatch(materialPatch));
+        auto rejected = workerPublisher.Commit(0);
+        Check(!rejected.committed && rejected.state->epoch == 2);
+        rejected.RunDeferred();
+    }
+
     PublishedStatePatch staleButIndependent;
     staleButIndependent.sourceEpoch = 0;
     PublishedStateFragment geometryFragment;
