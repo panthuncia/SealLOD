@@ -1088,15 +1088,17 @@ void TerrainManager::RequestGraphState()
 	auto awaiter = std::make_shared<br::render::ArtifactAwaiter>(requests->AwaitExact(
 		stateRequest.Handle(), br::render::ArtifactReadiness::CpuReady,
 		TaskLane::Streaming, TaskDomain::GraphControl,
-		[outcome, requests, address, stateRevision](const br::render::ArtifactSnapshot& snapshot) {
-			const bool failed = snapshot.readiness == br::render::ArtifactReadiness::Failed ||
-				snapshot.readiness == br::render::ArtifactReadiness::Cancelled;
-			if (failed) {
-				const auto diagnostic = requests->Diagnose(address);
-				spdlog::error("TerrainManager: graph state revision={} failed: {} {}",
-					stateRevision, diagnostic.error, diagnostic.blockerChain);
-			}
-			outcome->store(failed ? 2 : 1, std::memory_order_release);
+		[outcome](const br::render::ArtifactSnapshot&) {
+			outcome->store(1, std::memory_order_release);
+		},
+		[outcome, requests, address, stateRevision](
+				const br::render::ArtifactTermination& termination) {
+			const auto diagnostic = requests->Diagnose(address);
+			spdlog::error("TerrainManager: graph state revision={} terminated ({}): {} {}",
+				stateRevision, termination.error, diagnostic.error, diagnostic.blockerChain);
+			// ProcessPendingUpdates re-dirties the terrain graph on 2 and
+			// re-submits, which is the right response to a refusal as well.
+			outcome->store(2, std::memory_order_release);
 		}));
 	// Release the previous awaiter off the owner thread: its unsubscription
 	// enters the graph mutex.

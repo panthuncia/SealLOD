@@ -59,9 +59,10 @@ public:
 	}
 	[[nodiscard]] ArtifactAwaiter AwaitExact(ArtifactVersionHandle handle,
 		ArtifactReadiness milestone, TaskLane lane, TaskDomain domain,
-		std::function<void(const ArtifactSnapshot&)> continuation) {
+		std::function<void(const ArtifactSnapshot&)> onReached,
+		std::function<void(const ArtifactTermination&)> onTerminal) {
 		return m_graph.AwaitExact(std::move(handle), milestone, lane, domain,
-			std::move(continuation));
+			std::move(onReached), std::move(onTerminal));
 	}
     [[nodiscard]] AsyncStateGraphStats Stats() const { return m_graph.Stats(); }
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const {

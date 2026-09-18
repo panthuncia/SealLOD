@@ -1139,22 +1139,12 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 			auto awaiter = m_rendererStateRequests->AwaitExact(request.Handle(),
 				br::render::ArtifactReadiness::UploadSubmitted,
 				TaskLane::Streaming, TaskDomain::TextureProcessing,
-				[this, pending](const br::render::ArtifactSnapshot& snapshot) mutable {
+				[this, pending](const br::render::ArtifactSnapshot&) mutable {
 					if (m_workerQuit.load(std::memory_order_acquire)) {
 						FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
 						return;
 					}
-					pending->graphReady = br::render::ArtifactReachedMilestone(
-						snapshot.readiness, br::render::ArtifactReadiness::UploadSubmitted);
-					if (!pending->graphReady) {
-						if (pending->texture) {
-							(void)pending->texture->RejectPreparedImage(
-								pending->bindingRevision, pending->newImage);
-							EnqueueTextureUploadAdvance(pending->texture, "graph_binding_failed");
-						}
-						FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
-						return;
-					}
+					pending->graphReady = true;
 					std::shared_ptr<PixelBuffer> replaced;
 					if (!pending->texture || !pending->texture->PublishPreparedImage(
 						pending->bindingRevision, pending->newImage, &replaced)) {
@@ -1174,6 +1164,16 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 					basic_telemetry::Record("SARP.TextureStreaming.BindingAdoptionLatencyUs",
 						static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
 							std::chrono::steady_clock::now() - pending->queuedAt).count()));
+					FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
+				},
+				[this, pending](const br::render::ArtifactTermination&) mutable {
+					pending->graphReady = false;
+					if (pending->texture &&
+						!m_workerQuit.load(std::memory_order_acquire)) {
+						(void)pending->texture->RejectPreparedImage(
+							pending->bindingRevision, pending->newImage);
+						EnqueueTextureUploadAdvance(pending->texture, "graph_binding_failed");
+					}
 					FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
 				});
 			if (awaiter.subscription != 0) {
@@ -1247,6 +1247,16 @@ void TextureStreamingManager::PublishTextureImageTable()
 			[this](const br::render::ArtifactSnapshot&) {
 				m_textureImageTableBuildInFlight.store(false, std::memory_order_release);
 				// A coalesced successor may be waiting; let the drain publish it.
+				ScheduleDrain();
+			},
+			[this](const br::render::ArtifactTermination& termination) {
+				// A refused or failed root must clear the in-flight flag too,
+				// otherwise no later epoch is ever submitted.
+				m_textureImageTableBuildInFlight.store(false, std::memory_order_release);
+				m_textureImageTableDirty = true;
+				spdlog::warn("TextureStreamingManager: image table epoch terminated: {}",
+					termination.error);
+				basic_telemetry::AddCounter("SARP.TextureStreaming.ImageTableEpochTerminated");
 				ScheduleDrain();
 			});
 		if (awaiter.subscription != 0) {

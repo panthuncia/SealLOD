@@ -441,6 +441,25 @@ private:
     std::function<void()> m_unsubscribe;
 };
 
+// Delivered when an awaited version reaches a terminal state instead of its
+// milestone: it failed, was cancelled, was superseded, or the request that
+// would have produced it was refused. Deliberately not an ArtifactSnapshot.
+// A terminal version has no payload and never will, so a continuation must not
+// be able to reach for one; the two outcomes are different parameters to
+// different callables rather than one value that has to be interrogated.
+struct ArtifactTermination {
+    ArtifactVersionID version;
+    ArtifactReadiness readiness = ArtifactReadiness::Failed;
+    std::string error;
+
+    [[nodiscard]] bool Refused() const noexcept { return refused; }
+    // True only for a version the graph refused to admit at request time, as
+    // opposed to one that was admitted and then failed, was cancelled or was
+    // superseded. Callers that retry a refusal use this to avoid retrying work
+    // that genuinely ran and failed.
+    bool refused = false;
+};
+
 // Move-only registration for one immutable version milestone. Unlike the
 // address/kind observations, this is a correctness primitive: registration and
 // the initial exact-version sample are performed under the same graph lock.
@@ -731,7 +750,8 @@ public:
     // requirement of a sibling request or as an AwaitExact() target. If the drain
     // finds the address already carries another generation for this revision, the
     // predicted version becomes an alias of the installed one; if the request is
-    // rejected, the predicted version is tombstoned and observed as Failed.
+    // refused, the predicted version is archived in a terminal Failed state, so
+    // it fails the dependents that required it and dispatches its awaiters.
     ArtifactRequestResult PostRequest(ArtifactIntent intent, bool coalescible = true);
     std::vector<ArtifactRequestResult> PostIntentBatch(std::vector<ArtifactIntent> intents);
     std::vector<ArtifactRequestResult> RequestBatch(std::vector<ArtifactRequest> requests);
@@ -763,9 +783,15 @@ public:
 	// ownership-transfer event.
 	[[nodiscard]] ArtifactObservation ObserveKind(ArtifactKind kind,
 		std::function<void(std::uint64_t, const ArtifactSnapshot&)> callback);
+	// onTerminal is required, and is the reason this takes two callables rather
+	// than one snapshot: an awaited version can end in a state that will never
+	// carry a payload, and a single continuation made that outcome
+	// indistinguishable from success at the call site. Exactly one of the two
+	// runs, exactly once.
 	[[nodiscard]] ArtifactAwaiter AwaitExact(ArtifactVersionHandle handle,
 		ArtifactReadiness milestone, TaskLane lane, TaskDomain domain,
-		std::function<void(const ArtifactSnapshot&)> continuation);
+		std::function<void(const ArtifactSnapshot&)> onReached,
+		std::function<void(const ArtifactTermination&)> onTerminal);
 
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactKey key) const;
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactVersionID version) const;
@@ -797,7 +823,8 @@ private:
     // preassignedGeneration/preassignedLease carry a handle a posting thread
     // already returned to its caller (see PostRequest). The drain adopts them for
     // a fresh version, records a generation alias when the address already carries
-    // another generation, and tombstones the predicted version on rejection.
+    // another generation, and archives the predicted version as a terminal
+    // Failed one on refusal.
     ArtifactRequestResult RequestInternal(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
         std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex = false,

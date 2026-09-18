@@ -42,14 +42,18 @@ ArtifactRequestResult RendererStateRequestService::RequestExact(ArtifactAddress 
     if (!m_accepting.load(std::memory_order_acquire)) {
         return { ArtifactRequestStatus::ShuttingDown, 0, {} };
     }
-    return m_graph.Request(key, revision, std::move(requirements), std::move(input),
-        inputFingerprint);
+    // Exact requests post like every other submission. They are not coalescible:
+    // an exact request names one version, so latest-wins supersession would be
+    // wrong for it. A refusal is no longer a call-time status; it is delivered
+    // on the returned version, which fails any consumer that required it and
+    // dispatches the terminal branch of any awaiter registered against it.
+    return m_graph.PostRequest({ key, revision, std::move(requirements),
+        std::move(input), inputFingerprint }, /*coalescible*/ false);
 }
 
-// Latest-wins submissions are posted: the caller gets a predicted handle without
-// entering the graph's control mutex, and the drain installs the request. Exact
-// requests (Request/RequestExact) stay synchronous because their callers treat a
-// rejection as a hard error rather than as a terminal artifact state.
+// Every production submission is posted: the caller gets a predicted handle and
+// the drain installs the request. The synchronous entry points on AsyncStateGraph
+// remain for tests and teardown, which need a decision on the calling thread.
 ArtifactRequestResult RendererStateRequestService::SubmitLatest(ArtifactIntent intent) {
     if (!m_accepting.load(std::memory_order_acquire)) {
         return { ArtifactRequestStatus::ShuttingDown, 0, {} };

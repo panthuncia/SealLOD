@@ -47,6 +47,26 @@ void Check(bool condition,
     std::abort();
 }
 
+// For awaiters a test expects to reach their milestone: a terminal dispatch is
+// itself the failure, so it is asserted rather than silently ignored.
+const auto ExpectNoTermination = [](const char* label) {
+    return [label](const ArtifactTermination& termination) {
+        std::fprintf(stderr, "unexpected terminal dispatch: %s (%s)%c", label,
+            termination.error.c_str(), 10);
+        Check(false);
+    };
+};
+
+// The mirror case: an awaiter a test expects to terminate must never be handed
+// a reached snapshot.
+const auto ExpectNoReach = [](const char* label) {
+    return [label](const ArtifactSnapshot&) {
+        std::fprintf(stderr, "unexpected ready dispatch: %s%c", label, 10);
+        Check(false);
+    };
+};
+
+
 struct Value { std::uint64_t value = 0; };
 ArtifactPayload Payload(std::uint64_t value) {
     return ArtifactPayload::Make(std::make_shared<const Value>(Value{ value }));
@@ -563,7 +583,7 @@ int main() {
             TaskLane::Streaming, TaskDomain::General,
             [&sourceReady](const ArtifactSnapshot&) {
                 sourceReady.store(true, std::memory_order_release);
-            });
+            }, ExpectNoTermination("sourceReady"));
         posted.WaitIdle();
         const auto installed = posted.Snapshot(source);
         Check(installed.generation == first.version.generation);
@@ -584,7 +604,7 @@ int main() {
             ArtifactReadiness::GpuReady, TaskLane::Streaming, TaskDomain::General,
             [&aliasReady](const ArtifactSnapshot&) {
                 aliasReady.store(true, std::memory_order_release);
-            });
+            }, ExpectNoTermination("aliasReady"));
         posted.WaitIdle();
         waitFor(aliasReady, "aliasReady");
         Check(posted.Snapshot(aliasedSecond.version).readiness == ArtifactReadiness::GpuReady);
@@ -605,7 +625,7 @@ int main() {
             [&reissuedReady](const ArtifactSnapshot& snapshot) {
                 reissuedReady.store(snapshot.readiness == ArtifactReadiness::GpuReady,
                     std::memory_order_release);
-            });
+            }, ExpectNoTermination("reissuedReady"));
         posted.WaitIdle();
         waitFor(reissuedReady, "reissuedReady");
         Check(posted.Snapshot(reissued.version).readiness == ArtifactReadiness::GpuReady);
@@ -624,19 +644,51 @@ int main() {
         const auto newer = posted.PostRequest({staleAddress, 3, {}, Payload(3), 3});
         const auto stale = posted.PostRequest({staleAddress, 1, {}, Payload(1), 1});
         std::atomic_bool conflictTerminal{false};
+        std::atomic_bool conflictRefused{false};
         auto staleAwaiter = posted.AwaitExact(stale.Handle(), ArtifactReadiness::GpuReady,
             TaskLane::Streaming, TaskDomain::General,
-            [&conflictTerminal](const ArtifactSnapshot& snapshot) {
-                conflictTerminal.store(snapshot.readiness == ArtifactReadiness::Failed,
+            ExpectNoReach("staleReached"),
+            [&conflictTerminal, &conflictRefused](const ArtifactTermination& termination) {
+                conflictRefused.store(termination.Refused() &&
+                    termination.readiness == ArtifactReadiness::Failed,
                     std::memory_order_release);
+                conflictTerminal.store(true, std::memory_order_release);
             });
         posted.WaitIdle();
         Check(posted.Snapshot(stale.version).readiness == ArtifactReadiness::Failed);
         Check(posted.Snapshot(newer.version).readiness == ArtifactReadiness::GpuReady);
         waitFor(conflictTerminal, "conflictTerminal");
-        // A retry of the rejected revision does not inherit the tombstone.
+        // The refusal is delivered as a refusal, not as an ordinary build failure.
+        Check(conflictRefused.load(std::memory_order_acquire));
+        // A retry of the refused revision does not inherit the refusal.
         Check(posted.PostRequest({staleAddress, 1, {}, Payload(1), 1}).version.generation !=
             stale.version.generation);
+
+        // The reason refusals have to be archived versions rather than a side
+        // table: a consumer that chained the predicted handle as a requirement
+        // never registers an awaiter, so the only way it can learn of the
+        // refusal is through dependency selection. With the refusal invisible to
+        // SelectSnapshot this consumer stayed Blocked forever.
+        const ArtifactKey refusedSource{ArtifactKind::Generic, 0xef04, 0};
+        const ArtifactKey refusedConsumer{ArtifactKind::Generic, 0xef05, 0};
+        (void)posted.PostRequest({refusedSource, 4, {}, Payload(4), 4});
+        const auto refused = posted.PostRequest({refusedSource, 2, {}, Payload(2), 2});
+        std::atomic_bool consumerTerminal{false};
+        const auto dependent = posted.PostRequest({refusedConsumer, 1,
+            {Exact(refused.Handle(), ArtifactReadiness::CpuReady)}, Payload(1), 1});
+        auto dependentAwaiter = posted.AwaitExact(dependent.Handle(),
+            ArtifactReadiness::CpuReady, TaskLane::Streaming, TaskDomain::General,
+            ExpectNoReach("dependentReached"),
+            [&consumerTerminal](const ArtifactTermination& termination) {
+                // Propagated, so it is a genuine failure of this version rather
+                // than a refusal of the request that created it.
+                consumerTerminal.store(!termination.Refused() &&
+                    termination.readiness == ArtifactReadiness::Failed,
+                    std::memory_order_release);
+            });
+        posted.WaitIdle();
+        waitFor(consumerTerminal, "consumerTerminal");
+        Check(posted.Snapshot(dependent.version).readiness == ArtifactReadiness::Failed);
 
         // Validation that needs no graph state stays synchronous, so these
         // rejections never become a tombstone the caller has to observe later.
@@ -690,7 +742,7 @@ int main() {
 			const auto value = snapshot.payload.Get<Value>();
 			if (value) awaitedValue.store(value->value, std::memory_order_release);
 			awaitedCallbacks.fetch_add(1, std::memory_order_acq_rel);
-		});
+		}, ExpectNoTermination("awaited"));
 	// Registration is posted to the graph control drain, so the snapshot handed
 	// back is advisory and may be empty. Delivery is what the contract promises.
 	Check(firstAwaiter.subscription != 0);
@@ -701,7 +753,7 @@ int main() {
 		TaskLane::Streaming, TaskDomain::RendererState,
 		[&](const ArtifactSnapshot&) {
 			awaitedCallbacks.fetch_add(1, std::memory_order_acq_rel);
-		});
+		}, ExpectNoTermination("awaitedSecond"));
 	graph.WaitIdle();
 	Check(awaitedCallbacks.load(std::memory_order_acquire) == 2);
 
@@ -715,7 +767,7 @@ int main() {
 			if (snapshot.readiness == ArtifactReadiness::Published) {
 				publishedCallbacks.fetch_add(1, std::memory_order_acq_rel);
 			}
-		});
+		}, ExpectNoTermination("published"));
 	Check(publishedAwaiter.subscription != 0);
 	graph.MarkPublished(awaited.version);
 	graph.WaitIdle();
@@ -733,6 +785,9 @@ int main() {
 	auto cancelledRegistration = graph.AwaitExact(cancelledAwait.Handle(),
 		ArtifactReadiness::GpuReady, TaskLane::Streaming, TaskDomain::RendererState,
 		[&](const ArtifactSnapshot&) {
+			cancelledAwaitCalled.store(true, std::memory_order_release);
+		},
+		[&](const ArtifactTermination&) {
 			cancelledAwaitCalled.store(true, std::memory_order_release);
 		});
 	Check(cancelledRegistration.subscription != 0);

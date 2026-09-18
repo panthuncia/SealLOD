@@ -96,6 +96,13 @@ std::string_view ReadinessName(ArtifactReadiness readiness) {
     return index < std::size(names) ? names[index] : "Unknown";
 }
 
+std::string_view RequestStatusName(ArtifactRequestStatus status) {
+    static constexpr std::string_view names[]{ "Accepted", "AlreadyDesired", "StaleRevision",
+        "ConflictingRevision", "MissingFingerprint", "TypeMismatch", "ShuttingDown" };
+    const auto index = static_cast<std::size_t>(status);
+    return index < std::size(names) ? names[index] : "Unknown";
+}
+
 void HashRequestValue(std::uint64_t& hash, std::uint64_t value) {
     hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
 }
@@ -1687,6 +1694,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         TaskLane lane = TaskLane::Streaming;
         TaskDomain domain = TaskDomain::RendererState;
         std::function<void(const ArtifactSnapshot&)> continuation;
+        std::function<void(const ArtifactTermination&)> terminalContinuation;
         ArtifactLease lease;
         bool cancel = false;
         std::chrono::steady_clock::time_point postedAt =
@@ -1770,9 +1778,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         std::vector<std::pair<ArtifactKey, bool>> blockers;
         std::vector<ArchivedView> archived;
         // Predicted generations of posted requests that resolved to another
-        // generation, and predicted generations that were refused outright.
+        // generation. A refused prediction needs no entry here: it is archived
+        // as an ordinary version in a terminal state.
         std::vector<std::pair<std::uint64_t, std::uint64_t>> aliases;
-        std::vector<std::uint64_t> rejected;
         // Successor versions that are desired but not yet produced.
         std::vector<std::pair<std::uint64_t, std::uint64_t>> pendingSuccessors;
     };
@@ -1795,10 +1803,6 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     [[nodiscard]] ArtifactSnapshot SnapshotFromView(const ArtifactVersionID& version) const {
         const auto view = View(version.address);
         if (!view) return { version.address, version.revision, version.generation };
-        if (std::ranges::find(view->rejected, version.generation) != view->rejected.end()) {
-            return { version.address, version.revision, version.generation,
-                ArtifactReadiness::Failed };
-        }
         auto generation = version.generation;
         for (const auto& [predicted, canonical] : view->aliases) {
             if (predicted == generation) { generation = canonical; break; }
@@ -1889,9 +1893,6 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 if (predicted.address == key)
                     view->aliases.emplace_back(predicted.generation, canonical.generation);
             }
-            for (const auto& [tombstone, status] : rejectedVersions) {
-                if (tombstone.address == key) view->rejected.push_back(tombstone.generation);
-            }
             decltype(readModel)::accessor accessor;
             readModel.insert(accessor, key);
             accessor->second = std::shared_ptr<const AddressView>(std::move(view));
@@ -1924,16 +1925,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     // A posted request predicts its generation before the drain applies it. When
     // the drain finds the (address, revision) already carries another generation,
     // the predicted one is recorded here and every exact lookup normalises through
-    // Canonical(); when the request is rejected outright, the predicted version is
-    // tombstoned so consumers observe a terminal state instead of waiting forever.
+    // Canonical(). A refused prediction is not recorded here: it is archived as
+    // an ordinary version in a terminal state (see StoreRefusedVersion).
     std::unordered_map<StoredVersionKey, StoredVersionKey, StoredVersionKey::Hasher>
         generationAliases;
     std::unordered_map<StoredVersionKey, ArtifactRequestStatus, StoredVersionKey::Hasher>
-        rejectedVersions;
-    // Versions tombstoned since the last drain slice. They are turned into
-    // synthetic Failed snapshots so waiters already registered against a
-    // predicted version are dispatched terminally instead of waiting forever.
-    tbb::concurrent_queue<StoredVersionKey> rejectedSignals;
+        refusalReasons;
     std::unordered_map<ArtifactKey, std::unordered_set<ArtifactKey, ArtifactKey::Hasher>, ArtifactKey::Hasher> waiters;
     // Exact immutable recipes pin versions by identity. Maintaining this index
     // at recipe admission/replacement keeps supersession checks O(1) and avoids
@@ -1987,6 +1984,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 		TaskLane lane = TaskLane::Streaming;
 		TaskDomain domain = TaskDomain::RendererState;
 		std::function<void(const ArtifactSnapshot&)> continuation;
+		std::function<void(const ArtifactTermination&)> terminalContinuation;
 		ArtifactLease lease;
 	};
 	std::unordered_map<StoredVersionKey, std::vector<ExactWaiter>, StoredVersionKey::Hasher> exactWaiters;
@@ -2313,7 +2311,18 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     }
 
     ArtifactSnapshot MakeSnapshot(const Node& node) const {
-        return { node.key, node.producedRevision,
+        // A node that terminates before producing anything still has
+        // producedRevision 0. Reporting version 0 would describe a version
+        // nobody holds: consumers hold handles to the revision they requested,
+        // and the exact-waiter loop matches on that identity, so such a node
+        // would fail silently and never dispatch its awaiters. Terminal
+        // notifications are therefore keyed by the version that terminated.
+        const bool terminal = node.state == ArtifactReadiness::Failed ||
+            node.state == ArtifactReadiness::Cancelled ||
+            node.state == ArtifactReadiness::Superseded;
+        const auto revision = (terminal && node.producedRevision == 0)
+            ? node.desiredRevision : node.producedRevision;
+        return { node.key, revision,
             node.versionGeneration, node.state, node.payload,
             node.gpuSubmissions, node.lease };
     }
@@ -2328,11 +2337,98 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             version.generation });
         return { canonical.address, canonical.revision, canonical.generation };
     }
-    [[nodiscard]] std::optional<ArtifactRequestStatus> RejectedStatus(
+    // Why a refused version is in its terminal state. The refusal itself is an
+    // ordinary archived version (see StoreRefusedVersion), so this map carries
+    // only the reason text and is erased with the version it describes.
+    [[nodiscard]] std::optional<ArtifactRequestStatus> RefusalReason(
         const StoredVersionKey& version) const {
-        const auto found = rejectedVersions.find(version);
-        return found == rejectedVersions.end() ? std::optional<ArtifactRequestStatus>{}
-                                               : found->second;
+        const auto found = refusalReasons.find(version);
+        return found == refusalReasons.end() ? std::optional<ArtifactRequestStatus>{}
+                                             : found->second;
+    }
+
+    // A refused request has already handed its caller a predicted handle, and
+    // that handle may already be an Exact() requirement of a request the caller
+    // posted right after it. Archive the refusal as an ordinary immutable
+    // version in a terminal state rather than recording it in a side table:
+    // dependency selection, the exact-waiter loop, the published read model and
+    // reclaim then all reach it through the paths they already have. A side
+    // table was invisible to SelectSnapshot, which left every dependent of a
+    // refused version Blocked forever instead of taking the terminal edge.
+    void StoreRefusedVersion(const StoredVersionKey& version, ArtifactRequestStatus status,
+        const std::shared_ptr<const void>& lease) {
+        ArtifactSnapshot snapshot{ version.address, version.revision, version.generation,
+            ArtifactReadiness::Failed };
+        versions.insert_or_assign(version, std::move(snapshot));
+        const auto kindIndex = static_cast<std::size_t>(version.address.kind);
+        if (kindIndex < archivedVersionsByKind.size()) ++archivedVersionsByKind[kindIndex];
+        versionsByAddress[version.address].insert_or_assign(
+            std::pair{ version.revision, version.generation }, version);
+        refusalReasons.insert_or_assign(version, status);
+        // The poster is holding a handle to this version. Register its lease as
+        // an accepted version would, or reclaim retires the refusal in the same
+        // drain slice that created it and the caller reads Missing instead of
+        // the terminal state it needs to see.
+        RegisterVersionLease(version, lease);
+        reclaimQueue.push(version);
+        MarkViewDirty(version.address);
+    }
+
+    // Routes one satisfied waiter to exactly one of its two callables. The
+    // terminal argument is built here, on the drain, because the reason lives in
+    // graph state the dispatched task must not reach into.
+    void DispatchExactOutcome(TaskLane lane, TaskDomain domain,
+        const ArtifactSnapshot& snapshot,
+        std::function<void(const ArtifactSnapshot&)> onReached,
+        std::function<void(const ArtifactTermination&)> onTerminal) {
+        const bool terminal = snapshot.readiness == ArtifactReadiness::Failed ||
+            snapshot.readiness == ArtifactReadiness::Cancelled ||
+            snapshot.readiness == ArtifactReadiness::Superseded;
+        if (terminal) {
+            if (!onTerminal) return;
+            auto continuation = std::make_shared<std::function<void(const ArtifactTermination&)>>(
+                std::move(onTerminal));
+            const auto termination = TerminationFor(snapshot);
+            const bool submitted = scheduler.SubmitCpu(scope, lane, domain,
+                "AsyncStateGraph::AwaitExactTerminal",
+                [continuation, termination](const TaskContext& context) {
+                    if (!context.StopRequested()) (*continuation)(termination);
+                });
+            if (!submitted) (*continuation)(termination);
+            return;
+        }
+        if (!onReached) return;
+        auto continuation = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
+            std::move(onReached));
+        const bool submitted = scheduler.SubmitCpu(scope, lane, domain,
+            "AsyncStateGraph::AwaitExactReady",
+            [continuation, snapshot](const TaskContext& context) {
+                if (!context.StopRequested()) (*continuation)(snapshot);
+            });
+        if (!submitted) (*continuation)(snapshot);
+    }
+
+    // Exactly one of a waiter's two callables runs. This builds the argument for
+    // the terminal one; the reason is the refusal status where the version was
+    // refused, the producing node's own error where it ran and failed, and the
+    // readiness name otherwise.
+    [[nodiscard]] ArtifactTermination TerminationFor(const ArtifactSnapshot& snapshot) const {
+        ArtifactTermination termination{ snapshot.Version(), snapshot.readiness };
+        const StoredVersionKey key{ snapshot.key, snapshot.revision, snapshot.generation };
+        if (const auto refused = RefusalReason(key)) {
+            termination.refused = true;
+            termination.error = std::format("request refused ({})",
+                RequestStatusName(*refused));
+            return termination;
+        }
+        if (const auto node = nodes.find(snapshot.key); node != nodes.end() &&
+            node->second.versionGeneration == snapshot.generation &&
+            !node->second.error.empty()) {
+            termination.error = node->second.error;
+            return termination;
+        }
+        termination.error = std::string(ReadinessName(snapshot.readiness));
+        return termination;
     }
 
     // The lease deleter only touches lock-free state, so a posting thread can mint
@@ -2398,14 +2494,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     }
 
 	ArtifactSnapshot SnapshotExactLocked(ArtifactVersionID requestedVersion) const {
-		// A predicted handle resolves to the version the drain installed; a
-		// rejected one is reported as terminal so consumers do not wait forever.
-		const StoredVersionKey predicted{ requestedVersion.address, requestedVersion.revision,
-			requestedVersion.generation };
-		if (const auto rejected = RejectedStatus(predicted)) {
-			return { requestedVersion.address, requestedVersion.revision,
-				requestedVersion.generation, ArtifactReadiness::Failed };
-		}
+		// A predicted handle resolves to the version the drain installed. A
+		// refused one is archived in a terminal state, so it resolves here like
+		// any other version with no special case.
 		const auto version = Canonical(requestedVersion);
 		const auto archived = versions.find({ version.address, version.revision, version.generation });
 		if (archived != versions.end()) {
@@ -2636,6 +2727,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				lease != versionLeases.end() && lease->second.expired()) {
 				versionLeases.erase(lease);
 			}
+			refusalReasons.erase(reclaimed);
             basic_telemetry::AddCounter("SARP.AsyncStateGraph.ReclaimedVersions");
 			if (traceIndividualVersions) {
 				retentionTrace->Record(AsyncStateGraphTraceEventID::VersionReclaimed, reclaimed.address, reclaimed.revision,
@@ -3866,20 +3958,14 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 exactWaiters[canonical].push_back({ entry.subscription,
                     { canonical.address, canonical.revision, canonical.generation },
                     entry.milestone, entry.lane, entry.domain,
-                    std::move(entry.continuation), std::move(entry.lease) });
+                    std::move(entry.continuation), std::move(entry.terminalContinuation),
+                    std::move(entry.lease) });
                 ++exactWaiterCount;
             }
         }
         for (auto& [entry, snapshot] : dispatches) {
-            if (!entry.continuation) continue;
-            auto continuation = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
-                std::move(entry.continuation));
-            const bool submitted = scheduler.SubmitCpu(scope, entry.lane, entry.domain,
-                "AsyncStateGraph::AwaitExactReady",
-                [continuation, snapshot](const TaskContext& context) {
-                    if (!context.StopRequested()) (*continuation)(snapshot);
-                });
-            if (!submitted) (*continuation)(snapshot);
+            DispatchExactOutcome(entry.lane, entry.domain, snapshot,
+                std::move(entry.continuation), std::move(entry.terminalContinuation));
         }
         if (!postedAwaits.empty()) ScheduleDrain();
     }
@@ -4096,11 +4182,6 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 					ArtifactReadiness::Missing, elapsed, { { StableTraceID(phase) } });
 			};
             const auto now = std::chrono::steady_clock::now();
-			StoredVersionKey rejectedVersion;
-			while (rejectedSignals.try_pop(rejectedVersion)) {
-				ready.push_back({ rejectedVersion.address, rejectedVersion.revision,
-					rejectedVersion.generation, ArtifactReadiness::Failed });
-			}
 			for (const auto& publishedVersion : publishedReady) {
 				if (const auto archived = versions.find(publishedVersion); archived != versions.end()) {
 					ready.push_back(archived->second);
@@ -4364,7 +4445,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             callbacks.reserve(readyCallbacks.size());
             for (const auto& [_, callback] : readyCallbacks) callbacks.push_back(callback);
 			hasImmediateWork = !postedAwaits.empty() || !postedIntents.empty() ||
-				!rejectedSignals.empty() || !postedSuspensions.empty() ||
+				!postedSuspensions.empty() ||
 				!pending.empty() || !pendingWaiterWakes.empty() ||
 				!propagatedReady.empty() ||
 				completionCount.load(std::memory_order_acquire) != 0 ||
@@ -4480,21 +4561,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         EnqueueAcceptances(std::move(acceptanceDispatches));
 		for (auto& [action, snapshot] : accepted) if (action) action(snapshot);
 		for (auto& [waiter, snapshot] : exactDispatches) {
-			if (!waiter.continuation) continue;
 			if (auto session = AcquireTrace()) {
 				session->Record(AsyncStateGraphTraceEventID::ExactWaitSatisfied, waiter.version.address,
 					waiter.version.revision, waiter.version.generation, snapshot.readiness,
 					0, { { waiter.subscription, 0 } });
 			}
-			auto continuation = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
-				std::move(waiter.continuation));
-			const bool submitted = scheduler.SubmitCpu(scope, waiter.lane, waiter.domain,
-				"AsyncStateGraph::AwaitExact",
-				[continuation, snapshot](
-					const TaskContext& context) mutable {
-					if (!context.StopRequested()) (*continuation)(snapshot);
-				});
-			if (!submitted) (*continuation)(snapshot);
+			DispatchExactOutcome(waiter.lane, waiter.domain, snapshot,
+				std::move(waiter.continuation), std::move(waiter.terminalContinuation));
 		}
         for (const auto& callback : callbacks) {
             if (callback) for (const auto& snapshot : ready) callback(snapshot);
@@ -4950,12 +5023,12 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                     ? preassignedGeneration
                     : m_impl->ReserveGeneration(requestedVersion)).first;
         }
-        // A predicted handle was already returned to the poster, so a rejection
+        // A predicted handle was already returned to the poster, so a refusal
         // has to be observable on that version. That is only legitimate when the
         // version is not an installed one: a conflicting recipe against a known
         // (address, revision) shares the installed generation through the
         // reservation table, and its handle then denotes that existing version,
-        // exactly as the synchronous status did. Tombstoning it would poison the
+        // exactly as the synchronous status did. Refusing it would poison the
         // healthy version for every other holder.
         // Returns the generation the caller should report. It may erase the
         // reservation for this revision, which invalidates `versionGeneration`,
@@ -4968,13 +5041,16 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                     "SARP.AsyncStateGraph.PostedRequestRejectedOnExistingVersion");
                 return reportedGeneration;
             }
-            const Impl::StoredVersionKey tombstone{ key, desiredRevision, preassignedGeneration };
-            m_impl->rejectedVersions.insert_or_assign(tombstone, status);
-            m_impl->rejectedSignals.push(tombstone);
-            m_impl->MarkViewDirty(key);
+            const Impl::StoredVersionKey refused{ key, desiredRevision, preassignedGeneration };
+            m_impl->StoreRefusedVersion(refused, status, preassignedLease);
+            // propagatedReady feeds this slice's ready set, so waiters already
+            // registered against the predicted version are dispatched terminally
+            // in the same drain that refused it.
+            m_impl->propagatedReady.push_back({ key, desiredRevision, preassignedGeneration,
+                ArtifactReadiness::Failed });
             if (generationCreatedHere) {
                 // Leave no generation behind for this revision: a retry must not
-                // inherit the tombstoned prediction through the reservation.
+                // inherit the refused prediction through the reservation.
                 m_impl->versionGenerations.erase(versionGeneration);
                 m_impl->reservedGenerations.erase(requestedVersion);
             }
@@ -5486,8 +5562,9 @@ ArtifactObservation AsyncStateGraph::ObserveKind(ArtifactKind kind,
 
 ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 	ArtifactReadiness milestone, TaskLane lane, TaskDomain domain,
-	std::function<void(const ArtifactSnapshot&)> continuation) {
-	if (!handle.version || !continuation ||
+	std::function<void(const ArtifactSnapshot&)> onReached,
+	std::function<void(const ArtifactTermination&)> onTerminal) {
+	if (!handle.version || !onReached || !onTerminal ||
 		m_impl->shuttingDown.load(std::memory_order_acquire)) return {};
 	// Registration is posted to the graph control drain instead of taking the
 	// control mutex. It stays a correctness primitive because registration is
@@ -5502,7 +5579,8 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 	operation.milestone = milestone;
 	operation.lane = lane;
 	operation.domain = domain;
-	operation.continuation = std::move(continuation);
+	operation.continuation = std::move(onReached);
+	operation.terminalContinuation = std::move(onTerminal);
 	operation.lease = handle.lease;
 	m_impl->postedAwaits.push(std::move(operation));
 	m_impl->ScheduleDrain();
