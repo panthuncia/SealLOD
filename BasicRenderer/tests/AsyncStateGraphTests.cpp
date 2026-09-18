@@ -36,6 +36,12 @@ namespace {
 void Check(bool condition,
     const std::source_location location = std::source_location::current()) {
     if (condition) return;
+    // Also written to a file: an abort racing another thread's output can lose
+    // the console message, which makes an intermittent failure hard to place.
+    if (auto* sink = std::fopen("check_failure.txt", "a")) {
+        std::fprintf(sink, "check failed at %s:%u\n", location.file_name(), location.line());
+        std::fclose(sink);
+    }
     std::fprintf(stderr, "check failed at %s:%u\n", location.file_name(), location.line());
     std::fflush(stderr);
     std::abort();
@@ -59,6 +65,22 @@ ArtifactSnapshot FragmentSnapshot(PublishedFragmentKind kind, ArtifactAddress ad
 }
 
 int main() {
+    std::set_terminate([] {
+        const char* detail = "unknown";
+        std::string message;
+        if (auto current = std::current_exception()) {
+            try { std::rethrow_exception(current); }
+            catch (const std::exception& exception) { message = exception.what(); detail = message.c_str(); }
+            catch (...) { detail = "non-std exception"; }
+        } else detail = "no active exception";
+        // Also written to a file: an abort racing another thread's output can lose
+    // the console message, which makes an intermittent failure hard to place.
+    if (auto* sink = std::fopen("check_failure.txt", "a")) {
+            std::fprintf(sink, "terminate: %s\n", detail);
+            std::fclose(sink);
+        }
+        std::abort();
+    });
     {
         // A fresh list, and every layout switch, invalidate root arguments.
         // Exercise the shared raster recorder without relying on a previous pass.
@@ -502,6 +524,128 @@ int main() {
         gates.Shutdown();
     }
 
+    // Posted requests return a predicted handle: the generation is allocated by
+    // the caller and adopted by the drain, so the handle is usable immediately as
+    // an exact requirement or an await target.
+    {
+        AsyncStateGraph posted(scheduler, "PostedRequests");
+        posted.RegisterProducer(ArtifactKind::Generic, {
+            TaskLane::Streaming, TaskDomain::General, "PostedProducer",
+            [](const ArtifactBuildContext& context) {
+                return ArtifactBuildResult::Ready(context.input);
+            }
+        });
+        const ArtifactKey source{ArtifactKind::Generic, 0xef01, 0};
+        const ArtifactKey consumer{ArtifactKind::Generic, 0xef02, 0};
+        // Await continuations are dispatched as scheduler tasks, so WaitIdle
+        // returning does not by itself mean the continuation has run.
+        const auto waitFor = [](const std::atomic_bool& flag, const char* label) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!flag.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    std::fprintf(stderr, "await never dispatched: %s%c", label, 10);
+                    Check(false);
+                }
+                std::this_thread::yield();
+            }
+        };
+
+        // A fresh revision adopts the predicted generation verbatim.
+        const auto first = posted.PostRequest({source, 1, {}, Payload(1), 1});
+        Check(first.status == ArtifactRequestStatus::Accepted);
+        Check(first.version.generation != 0);
+        // The sibling consumer is posted before the drain has applied the source.
+        const auto consumed = posted.PostRequest({consumer, 1,
+            {Exact(first.version, ArtifactReadiness::GpuReady)}, Payload(2), 2});
+        Check(consumed.status == ArtifactRequestStatus::Accepted);
+        std::atomic_bool sourceReady{false};
+        auto awaiter = posted.AwaitExact(first.Handle(), ArtifactReadiness::GpuReady,
+            TaskLane::Streaming, TaskDomain::General,
+            [&sourceReady](const ArtifactSnapshot&) {
+                sourceReady.store(true, std::memory_order_release);
+            });
+        posted.WaitIdle();
+        const auto installed = posted.Snapshot(source);
+        Check(installed.generation == first.version.generation);
+        Check(installed.readiness == ArtifactReadiness::GpuReady);
+        // Snapshot by the predicted version resolves, and the sibling requirement
+        // bound to it, so the consumer completed rather than blocking.
+        Check(posted.Snapshot(first.version).generation == first.version.generation);
+        Check(posted.Snapshot(consumer).readiness == ArtifactReadiness::GpuReady);
+        waitFor(sourceReady, "sourceReady");
+
+        // Two posts of the same (address, revision) reserve one generation, so a
+        // consumer comparing its handle with delivered snapshots sees one identity.
+        const auto aliasedFirst = posted.PostRequest({source, 5, {}, Payload(5), 5});
+        const auto aliasedSecond = posted.PostRequest({source, 5, {}, Payload(5), 5});
+        Check(aliasedSecond.version.generation == aliasedFirst.version.generation);
+        std::atomic_bool aliasReady{false};
+        auto aliasAwaiter = posted.AwaitExact(aliasedSecond.Handle(),
+            ArtifactReadiness::GpuReady, TaskLane::Streaming, TaskDomain::General,
+            [&aliasReady](const ArtifactSnapshot&) {
+                aliasReady.store(true, std::memory_order_release);
+            });
+        posted.WaitIdle();
+        waitFor(aliasReady, "aliasReady");
+        Check(posted.Snapshot(aliasedSecond.version).readiness == ArtifactReadiness::GpuReady);
+
+        // Re-requesting a released revision may assign a fresh ABA generation on
+        // the drain; the reserved prediction then becomes an alias and an awaiter
+        // registered against it still fires on the installed version.
+        {
+            (void)posted.PostRequest({source, 7, {}, Payload(7), 7});
+            posted.WaitIdle();
+            posted.Release(source);
+            posted.WaitIdle();
+        }
+        const auto reissued = posted.PostRequest({source, 7, {}, Payload(7), 7});
+        std::atomic_bool reissuedReady{false};
+        auto reissuedAwaiter = posted.AwaitExact(reissued.Handle(),
+            ArtifactReadiness::GpuReady, TaskLane::Streaming, TaskDomain::General,
+            [&reissuedReady](const ArtifactSnapshot& snapshot) {
+                reissuedReady.store(snapshot.readiness == ArtifactReadiness::GpuReady,
+                    std::memory_order_release);
+            });
+        posted.WaitIdle();
+        waitFor(reissuedReady, "reissuedReady");
+        Check(posted.Snapshot(reissued.version).readiness == ArtifactReadiness::GpuReady);
+
+        // A conflicting recipe for a known revision denotes the installed version
+        // (as the synchronous ConflictingRevision status did): it must not poison it.
+        const auto conflicting = posted.PostRequest({source, 5, {}, Payload(99), 99});
+        Check(conflicting.version.generation == aliasedFirst.version.generation);
+        posted.WaitIdle();
+        Check(posted.Snapshot(conflicting.version).readiness == ArtifactReadiness::GpuReady);
+
+        // A rejection of a version nobody else holds is observable on the predicted
+        // version as a terminal state instead of stranding its consumers: revision
+        // 1 posted right after revision 3 of a fresh address is stale.
+        const ArtifactKey staleAddress{ArtifactKind::Generic, 0xef03, 0};
+        const auto newer = posted.PostRequest({staleAddress, 3, {}, Payload(3), 3});
+        const auto stale = posted.PostRequest({staleAddress, 1, {}, Payload(1), 1});
+        std::atomic_bool conflictTerminal{false};
+        auto staleAwaiter = posted.AwaitExact(stale.Handle(), ArtifactReadiness::GpuReady,
+            TaskLane::Streaming, TaskDomain::General,
+            [&conflictTerminal](const ArtifactSnapshot& snapshot) {
+                conflictTerminal.store(snapshot.readiness == ArtifactReadiness::Failed,
+                    std::memory_order_release);
+            });
+        posted.WaitIdle();
+        Check(posted.Snapshot(stale.version).readiness == ArtifactReadiness::Failed);
+        Check(posted.Snapshot(newer.version).readiness == ArtifactReadiness::GpuReady);
+        waitFor(conflictTerminal, "conflictTerminal");
+        // A retry of the rejected revision does not inherit the tombstone.
+        Check(posted.PostRequest({staleAddress, 1, {}, Payload(1), 1}).version.generation !=
+            stale.version.generation);
+
+        // Validation that needs no graph state stays synchronous, so these
+        // rejections never become a tombstone the caller has to observe later.
+        const auto unfingerprinted = posted.PostRequest({source, 6, {}, Payload(6), 0});
+        Check(unfingerprinted.status == ArtifactRequestStatus::MissingFingerprint);
+        Check(!unfingerprinted.version);
+        posted.Shutdown();
+    }
+
     AsyncStateGraph graph(scheduler, "AsyncStateGraphTests");
     RegisterStaticStateProducers(graph);
     graph.RegisterProducer(ArtifactKind::Generic, {
@@ -525,7 +669,9 @@ int main() {
     const auto immediateV1Snapshot = graph.Snapshot(immediateV1.version);
     const auto immediateV2Snapshot = graph.Snapshot(immediateV2.version);
     Check(immediateV1Snapshot.readiness != ArtifactReadiness::Missing);
-    Check(immediateV2Snapshot.readiness == ArtifactReadiness::Blocked);
+    // Requests are applied by the graph control drain, which may already have
+    // started or finished V1 by the time V2 is applied; V2 is never Missing.
+    Check(immediateV2Snapshot.readiness != ArtifactReadiness::Missing);
     graph.WaitIdle();
     Check(graph.Snapshot(immediateV1.version).revision == 1);
     Check(graph.Snapshot(immediateV2.version).revision == 2);
@@ -545,7 +691,9 @@ int main() {
 			if (value) awaitedValue.store(value->value, std::memory_order_release);
 			awaitedCallbacks.fetch_add(1, std::memory_order_acq_rel);
 		});
-	Check(firstAwaiter.snapshot.readiness != ArtifactReadiness::Missing);
+	// Registration is posted to the graph control drain, so the snapshot handed
+	// back is advisory and may be empty. Delivery is what the contract promises.
+	Check(firstAwaiter.subscription != 0);
 	graph.WaitIdle();
 	Check(awaitedCallbacks.load(std::memory_order_acquire) == 1);
 	Check(awaitedValue.load(std::memory_order_acquire) == 1);
@@ -1118,7 +1266,9 @@ int main() {
     Check(graph.Snapshot(serialKey).payload.Get<Value>()->value == 2);
     Check(sameKeyBuildCount.load(std::memory_order_acquire) == 2);
     Check(sameKeyMaxActiveBuilds.load(std::memory_order_acquire) == 1);
+    // Release is posted; its effect is observable once the drain applies it.
     graph.Release(serialKey);
+    graph.WaitIdle();
     Check(graph.Snapshot(serialKey).readiness == ArtifactReadiness::Missing);
 
     const ArtifactKey fingerprinted{ ArtifactKind::Generic, 32, 0 };

@@ -560,10 +560,13 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 		const auto published = texture->GetPublishedBindingSnapshot();
 		const auto address = br::render::ArtifactAddress{
 			br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 };
-		const auto diagnostic = m_rendererStateRequests->Diagnose(address);
+		// Only the desired revision matters here. Diagnose walks the blocker
+		// chain and copies a payload snapshot under the graph's control mutex,
+		// which made owner registration the largest Diagnose caller by far.
+		const auto desiredRevision = m_rendererStateRequests->DesiredRevision(address);
 		if (published.image && published.bindingRevision != 0u &&
 			published.image->HasValidBackingResource() &&
-			diagnostic.desiredRevision < published.bindingRevision) {
+			desiredRevision < published.bindingRevision) {
 				auto input = std::make_shared<br::render::TextureBindingBuildInput>();
 				input->streamingTextureID = streamingTextureID;
 				input->bindingRevision = published.bindingRevision;

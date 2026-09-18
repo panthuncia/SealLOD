@@ -46,14 +46,15 @@ ArtifactRequestResult RendererStateRequestService::RequestExact(ArtifactAddress 
         inputFingerprint);
 }
 
+// Latest-wins submissions are posted: the caller gets a predicted handle without
+// entering the graph's control mutex, and the drain installs the request. Exact
+// requests (Request/RequestExact) stay synchronous because their callers treat a
+// rejection as a hard error rather than as a terminal artifact state.
 ArtifactRequestResult RendererStateRequestService::SubmitLatest(ArtifactIntent intent) {
     if (!m_accepting.load(std::memory_order_acquire)) {
         return { ArtifactRequestStatus::ShuttingDown, 0, {} };
     }
-    auto results = m_graph.SubmitLatestIntentBatch({ std::move(intent) });
-    return results.empty()
-        ? ArtifactRequestResult{ ArtifactRequestStatus::ShuttingDown, 0, {} }
-        : std::move(results.front());
+    return m_graph.PostRequest(std::move(intent));
 }
 
 std::vector<ArtifactRequestResult> RendererStateRequestService::SubmitLatestBatch(
@@ -62,7 +63,7 @@ std::vector<ArtifactRequestResult> RendererStateRequestService::SubmitLatestBatc
         return std::vector<ArtifactRequestResult>(intents.size(),
             ArtifactRequestResult{ ArtifactRequestStatus::ShuttingDown, 0, {} });
     }
-    return m_graph.SubmitLatestIntentBatch(std::move(intents));
+    return m_graph.PostIntentBatch(std::move(intents));
 }
 
 void RendererStateRequestService::PostLatest(ArtifactIntent intent) {
@@ -94,6 +95,9 @@ bool RendererStateRequestService::Invalidate(ArtifactKey key, std::uint64_t revi
 
 void RendererStateRequestService::Cancel(ArtifactKey key) { m_graph.Cancel(key); }
 ArtifactDiagnostic RendererStateRequestService::Diagnose(ArtifactKey key) const { return m_graph.Diagnose(key); }
+std::uint64_t RendererStateRequestService::DesiredRevision(ArtifactKey key) const {
+    return m_graph.DesiredRevision(key);
+}
 
 void RendererStateRequestService::OnArtifactReady(const ArtifactSnapshot& artifact) {
     if (!m_accepting.load(std::memory_order_acquire)) return;
@@ -281,8 +285,11 @@ void RendererStateRequestService::RequestManifest() {
         m_manifestInFlightRevision = manifestRevision;
         m_manifestInFlight = true;
     }
-    const auto status = m_graph.SubmitLatestIntent({ ArtifactKind::FrameManifest, 0, 0 },
-        manifestRevision, {}, ArtifactPayload::Make<ManifestInput>(input), manifestRevision);
+    // Posted: this runs on the single-slot GraphControl domain that also hosts
+    // the graph drain, so a synchronous (waiting) submission here would wait on
+    // a drain that cannot run until this task yields.
+    const auto status = m_graph.PostRequest({ { ArtifactKind::FrameManifest, 0, 0 },
+        manifestRevision, {}, ArtifactPayload::Make<ManifestInput>(input), manifestRevision }).status;
     // ArtifactRequestStatus is not a truth value: Accepted intentionally has
     // the zero enumerator.  Converting it to bool inverted the common path,
     // cleared the in-flight revision, and caused OnArtifactReady to discard

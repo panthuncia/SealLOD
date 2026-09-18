@@ -42,6 +42,7 @@ public:
     void Release(ArtifactKey key) { m_graph.Release(key); }
     void ReleaseBatch(std::span<const ArtifactKey> keys) { m_graph.ReleaseBatch(keys); }
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;
+    [[nodiscard]] std::uint64_t DesiredRevision(ArtifactKey key) const;
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactAddress address) const {
         return m_graph.Snapshot(address);
     }

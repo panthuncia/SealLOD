@@ -126,6 +126,27 @@ public:
         return false;
     }
 
+    // Runs the drain on the calling thread if no consumer is currently running.
+    // A caller that must observe the drain's effect but cannot wait for the
+    // scheduler (its domain may be occupied, or it may be the only thread that
+    // can make progress) uses this instead of blocking. Returns false when
+    // another thread already owns the consumer role, which is then guaranteed to
+    // be making progress.
+    [[nodiscard]] bool TryRunInline() {
+        {
+            std::lock_guard lock(m_mutex);
+            if (m_state == State::Stopping || !m_drain) return false;
+            if (m_state == State::Running) return false;
+            // Idle or Scheduled: take consumer ownership. A task submitted for
+            // the Scheduled state finds Running and returns without draining.
+            ++m_requestedEpoch;
+            m_stats.requestedEpoch = m_requestedEpoch;
+            m_state = State::Running;
+        }
+        RunOwned();
+        return true;
+    }
+
     void Stop() {
         std::lock_guard lock(m_mutex);
         m_state = State::Stopping;
@@ -166,6 +187,22 @@ private:
     }
 
     void Run() noexcept {
+        {
+            std::lock_guard lock(m_mutex);
+            // TryRunInline may have taken consumer ownership after this task was
+            // submitted. Exactly one thread drains at a time; that owner also
+            // observes this task's notification through the epoch. Ownership is
+            // claimed under the same lock as the test: checking first and
+            // claiming afterwards lets an inline caller slip in between and run
+            // the drain concurrently with this task.
+            if (m_state == State::Stopping || m_state == State::Running) return;
+            m_state = State::Running;
+        }
+        RunOwned();
+    }
+
+    // Called with consumer ownership already held (m_state == Running).
+    void RunOwned() noexcept {
         for (;;) {
             Drain drain;
             std::uint64_t observedEpoch = 0;

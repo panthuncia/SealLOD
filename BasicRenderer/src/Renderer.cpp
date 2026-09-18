@@ -3378,7 +3378,14 @@ void Renderer::Update(float elapsedSeconds) {
                             publishedVersions->push_back(fragment.publicationRoot);
                         }
                     }
-                    const bool acknowledgementSubmitted = TaskSchedulerManager::GetInstance().Submit(
+                    // The acknowledgement is deliberately level-triggered: a
+                    // version whose node is not yet in a publishable state is
+                    // skipped by the graph and must be re-acknowledged by the next
+                    // commit. Sending only the delta against the previous commit
+                    // turns such a skip into a permanent loss of publication.
+                    // MarkPublished itself now ignores already-published versions.
+                    const bool acknowledgementSubmitted =
+                        TaskSchedulerManager::GetInstance().Submit(
                         m_rendererStateCommitScope, TaskLane::FrameCritical,
                         TaskDomain::GraphPublication, "RendererStatePublisher::MarkPublished",
                         [stateGraph = m_asyncStateGraph.get(), publishedVersions](

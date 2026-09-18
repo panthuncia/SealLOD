@@ -24,6 +24,8 @@
 
 #include <spdlog/spdlog.h>
 #include <tbb/concurrent_queue.h>
+#include <tbb/concurrent_hash_map.h>
+#include <future>
 
 #include <BasicTelemetry/Telemetry.h>
 
@@ -1034,10 +1036,10 @@ public:
             summary << "| " << domain << " | " << queueTotal << " | "
                 << executionTotal << " |\n";
         }
-        summary << "\n## Graph mutex timing\n\n"
-            << "Counts and timing are accumulated in thread-local storage. Graph containers are not "
-               "inspected inside these timed lock sections. Slow samples (wait or hold >= 2,000 us) "
-               "are also emitted as GraphMutex events.\n\n"
+        summary << "\n## Graph drain phase timing\n\n"
+            << "The graph has no control mutex: these are the phases of the single-consumer "
+               "drain that owns graph state. Wait is always zero; hold is the time that "
+               "consumer spent in the phase.\n\n"
 			<< "| Phase | Count | Total wait (us) | Max wait (us) | Total hold (us) | Max hold (us) | Total hold CPU (us) | Max hold CPU (us) |\n"
 			<< "|---|---:|---:|---:|---:|---:|---:|---:|\n";
         for (std::size_t index = 0; index < mutexAggregates.size(); ++index) {
@@ -1329,6 +1331,13 @@ std::shared_ptr<const GpuSubmissionSet> MakeGpuSubmissionSet(
     return token;
 }
 
+namespace {
+// Set while a graph's drain (and the callbacks it dispatches) runs on the
+// current thread. A synchronous API call made from there must be applied
+// inline: waiting on the drain from inside the drain would never return.
+thread_local const void* t_activeGraphDrain = nullptr;
+}
+
 struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     struct VersionKey {
         ArtifactKey address;
@@ -1478,13 +1487,218 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
     TaskSchedulerManager& scheduler;
     TaskScope scope;
-    mutable std::mutex mutex;
+    // There is no control mutex. Every mutation of the state below runs on the
+    // graph control drain, which SerializedTaskPump guarantees has exactly one
+    // consumer at a time (a scheduler task, or a synchronous caller that took
+    // the consumer role through TryRunInline). Readers never touch it: they are
+    // served from the immutable per-address views the drain publishes.
     AsyncStateGraph* owner = nullptr;
-    // Intents posted by threads that never take the mutex; applied by Drain.
-    tbb::concurrent_queue<ArtifactIntent> postedIntents;
-    // Hash of the renderer owner thread id (0 = none). See SetOwnerThread.
-    std::atomic<std::size_t> ownerThreadHash{ 0 };
-    std::atomic<std::uint64_t> ownerThreadLocks{ 0 };
+    // Requests posted by threads that never take the mutex; applied by Drain.
+    // A posted request carries the generation and lease its caller already
+    // received as a predicted handle (PostRequest).
+    struct PostedRequest {
+        ArtifactIntent intent;
+        bool coalescible = true;
+        std::uint64_t generation = 0;
+        std::shared_ptr<const void> lease;
+        // A non-request mutation (cancel, release, publication mark, producer or
+        // callback registration) travelling in the same ordered queue so it is
+        // applied in the order the producer issued it relative to its requests.
+        std::function<void()> mutation;
+        // Synchronous-tier callers wait for the drain's answer here.
+        std::shared_ptr<std::promise<ArtifactRequestResult>> reply;
+        std::chrono::steady_clock::time_point postedAt =
+            std::chrono::steady_clock::now();
+    };
+    tbb::concurrent_queue<PostedRequest> postedIntents;
+
+    [[nodiscard]] bool OnDrainThread() const noexcept { return t_activeGraphDrain == this; }
+
+    // Synchronous tier: post and wait. Bounded polling so a graph that shuts
+    // down with the request still queued fails the call instead of hanging it.
+    template <class T>
+    T WaitReply(std::future<T>& future, T shuttingDownValue, ArtifactKey what = {},
+        std::uint64_t whatRevision = 0) {
+        basic_telemetry::AddCounter("SARP.AsyncStateGraph.SyncApiCalls");
+        const auto waitStarted = std::chrono::steady_clock::now();
+        bool warned = false;
+        for (;;) {
+            if (future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+                return future.get();
+            // Never block on the drain being scheduled: the graph control domain
+            // has a single slot and may be occupied by work that cannot finish
+            // until this call returns. Run the drain here when no other thread
+            // owns it; otherwise that owner is running and will answer shortly.
+            if (drainPump.TryRunInline()) continue;
+            if (future.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready)
+                return future.get();
+            if (!warned && std::chrono::steady_clock::now() - waitStarted > std::chrono::seconds(5)) {
+                warned = true;
+                const auto pump = drainPump.GetStats();
+                spdlog::error("AsyncStateGraph sync call waiting >5s: key=({},{},{}) rev={} mailbox={} runnerActive={} requested={} drained={} shutting={}",
+                    static_cast<unsigned>(what.kind), what.primaryID, what.variantID, whatRevision,
+                    postedIntents.unsafe_size(), pump.runnerActive, pump.requestedEpoch,
+                    pump.drainedEpoch, shuttingDown.load());
+            }
+            if (shuttingDown.load(std::memory_order_acquire)) {
+                if (future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+                    return future.get();
+                return shuttingDownValue;
+            }
+        }
+    }
+    // GpuSubmissionSet::Cancel() may notify subscribers synchronously; it is
+    // collected here by locked mutations and run after the lock is released.
+    std::vector<std::shared_ptr<const GpuSubmissionSet>> pendingCancellations;
+    std::atomic<std::uint64_t> nextReadyCallback{ 0 };
+
+    // Answers to synchronous callers, released only once the views that reflect
+    // their mutation have been published: a caller that returns from Request and
+    // immediately reads its own handle must not observe the address as Missing.
+    std::vector<std::function<void()>> deferredReplies;
+
+    void FlushDeferredReplies() {
+        if (deferredReplies.empty()) return;
+        auto replies = std::move(deferredReplies);
+        deferredReplies.clear();
+        for (auto& reply : replies) reply();
+    }
+
+    void PostMutation(std::function<void()> mutation) {
+        if (shuttingDown.load(std::memory_order_acquire)) return;
+        PostedRequest posted;
+        posted.mutation = std::move(mutation);
+        postedIntents.push(std::move(posted));
+        ScheduleDrain();
+    }
+
+    // ---- Mutations applied by the drain while it owns the graph state ----
+
+    void CancelLocked(const ArtifactKey& key) {
+        const auto found = nodes.find(key);
+        if (found == nodes.end()) return;
+        RemoveWaiterEdges(found->second);
+        ++found->second.generation;
+        SetDesired(found->second, false);
+        if (const auto archived = versionsByAddress.find(key);
+            archived != versionsByAddress.end()) {
+            for (const auto& [_, version] : archived->second) reclaimQueue.push(version);
+        }
+        ClearSuccessors(found->second);
+        found->second.retryAt.reset();
+        if ((found->second.state == ArtifactReadiness::CpuReady ||
+             found->second.state == ArtifactReadiness::UploadSubmitted) &&
+            found->second.waitingGpuSubmissions && stats.gpuWaiting) --stats.gpuWaiting;
+        if (found->second.waitingGpuSubmissions)
+            pendingCancellations.push_back(std::move(found->second.waitingGpuSubmissions));
+        found->second.gpuSubmissions.reset();
+        found->second.lease.reset();
+        SetState(found->second, ArtifactReadiness::Cancelled);
+        ++stats.cancelled;
+    }
+
+    void ReleaseLocked(const ArtifactKey& key) {
+        const auto found = nodes.find(key);
+        if (found == nodes.end()) return;
+        CancelLocked(key);
+        auto& node = found->second;
+        const auto dependents = waiters.find(key);
+        if (!node.buildInFlight &&
+            (dependents == waiters.end() || dependents->second.empty())) {
+            const auto stateIndex = static_cast<std::size_t>(node.state);
+            if (stateIndex < nodeStateCounts.size() && nodeStateCounts[stateIndex] != 0)
+                --nodeStateCounts[stateIndex];
+            MarkViewDirty(key);
+            nodes.erase(found);
+        }
+    }
+
+    void MarkPublishedLocked(const ArtifactVersionID& requested) {
+        if (!requested) return;
+        const auto version = Canonical(requested);
+        if (auto archived = versions.find({ version.address, version.revision, version.generation });
+            archived != versions.end() &&
+            archived->second.generation == version.generation &&
+            (archived->second.readiness == ArtifactReadiness::UploadSubmitted ||
+             archived->second.readiness == ArtifactReadiness::GpuReady ||
+             archived->second.readiness == ArtifactReadiness::Published)) {
+            if (archived->second.readiness != ArtifactReadiness::Published) {
+                archived->second.readiness = ArtifactReadiness::Published;
+                publishedSignals.push({ version.address, version.revision, version.generation });
+            }
+            reclaimQueue.push({ version.address, version.revision, version.generation });
+        }
+        const auto found = nodes.find(version.address);
+        if (found == nodes.end() || found->second.producedRevision != version.revision ||
+            found->second.versionGeneration != version.generation) return;
+        auto& node = found->second;
+        if (node.state != ArtifactReadiness::UploadSubmitted &&
+            node.state != ArtifactReadiness::GpuReady &&
+            node.state != ArtifactReadiness::Published) return;
+        // Publication acknowledgements re-send every version of every fragment
+        // bundle; storing and waking an already-published node is pure cost.
+        if (node.published && node.state == ArtifactReadiness::Published) return;
+        node.published = true;
+        if (node.state == ArtifactReadiness::GpuReady) SetState(node, ArtifactReadiness::Published);
+        StoreVersion(node);
+        WakeWaiters(version.address);
+    }
+
+    // Address form: every archived generation of the revision plus the cursor.
+    void MarkPublishedRevisionLocked(const ArtifactKey& key, std::uint64_t revision) {
+        if (const auto address = versionsByAddress.find(key); address != versionsByAddress.end()) {
+            std::vector<std::uint64_t> generations;
+            for (auto entry = address->second.lower_bound({ revision, 0 });
+                entry != address->second.end() && entry->first.first == revision; ++entry) {
+                generations.push_back(entry->first.second);
+            }
+            for (const auto generation : generations)
+                MarkPublishedLocked({ key, revision, generation });
+        }
+        const auto found = nodes.find(key);
+        if (found != nodes.end() && found->second.producedRevision == revision)
+            MarkPublishedLocked({ key, revision, found->second.versionGeneration });
+    }
+
+    void RegisterProducerNow(ArtifactKind kind, ArtifactProducerRegistration registration) {
+        std::lock_guard lock(producerRegistrationMutex);
+        const auto previous = Producers();
+        auto table = previous ? std::make_shared<ProducerTable>(*previous)
+                              : std::make_shared<ProducerTable>();
+        (*table)[kind] = std::move(registration);
+        producers.store(std::move(table), std::memory_order_release);
+    }
+
+    void PumpGpuCompletionsLocked() {
+        for (const auto& [key, node] : nodes) {
+            if ((node.state == ArtifactReadiness::CpuReady ||
+                 node.state == ArtifactReadiness::UploadSubmitted) && node.waitingGpuSubmissions) {
+                gpuSignals.push({ key });
+            }
+        }
+    }
+    // Exact-waiter registrations and cancellations posted by producers. They
+    // share one queue so a cancel can never be applied before the registration
+    // it cancels; a cancel that still arrives first is remembered below.
+    struct PostedAwaitOperation {
+        std::uint64_t subscription = 0;
+        ArtifactVersionID version;
+        ArtifactReadiness milestone = ArtifactReadiness::Missing;
+        TaskLane lane = TaskLane::Streaming;
+        TaskDomain domain = TaskDomain::RendererState;
+        std::function<void(const ArtifactSnapshot&)> continuation;
+        ArtifactLease lease;
+        bool cancel = false;
+        std::chrono::steady_clock::time_point postedAt =
+            std::chrono::steady_clock::now();
+    };
+    tbb::concurrent_queue<PostedAwaitOperation> postedAwaits;
+    // Capacity/external completion notifications. The handshake is already
+    // level-triggered (satisfiedSuspensions retains a completion that races
+    // ahead of its registration), so applying them on the drain is safe.
+    tbb::concurrent_queue<std::uint64_t> postedSuspensions;
+    std::unordered_set<std::uint64_t> cancelledAwaitSubscriptions;
+    std::atomic<std::uint64_t> nextPostedAwaitSubscription{ 0 };
     std::unordered_map<ArtifactKey, Node, ArtifactKey::Hasher> nodes;
     // Completed versions are immutable. The mutable address slot above is only
     // the desired/build cursor; ExactSnapshot never resolves through that cursor.
@@ -1494,17 +1708,254 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     using AddressVersionIndex = std::map<std::pair<std::uint64_t, std::uint64_t>, StoredVersionKey>;
     std::unordered_map<ArtifactKey, AddressVersionIndex, ArtifactKey::Hasher> versionsByAddress;
     std::unordered_map<VersionKey, std::uint64_t, VersionKey::Hasher> versionGenerations;
+    // Generation reservations shared between posting threads and the drain, so a
+    // posted re-request of a known (address, revision) predicts the generation
+    // the drain already installed instead of an alias. The drain mirrors every
+    // generation it assigns (including ABA reassignments) into this table.
+    struct VersionKeyHashCompare {
+        static std::size_t hash(const VersionKey& key) { return VersionKey::Hasher{}(key); }
+        static bool equal(const VersionKey& a, const VersionKey& b) { return a == b; }
+    };
+    tbb::concurrent_hash_map<VersionKey, std::uint64_t, VersionKeyHashCompare> reservedGenerations;
+
+    [[nodiscard]] std::uint64_t ReserveGeneration(const VersionKey& key) {
+        decltype(reservedGenerations)::accessor accessor;
+        if (reservedGenerations.insert(accessor, key)) {
+            accessor->second = nextVersionGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
+        }
+        return accessor->second;
+    }
+    void SetReservedGeneration(const VersionKey& key, std::uint64_t generation) {
+        decltype(reservedGenerations)::accessor accessor;
+        reservedGenerations.insert(accessor, key);
+        accessor->second = generation;
+    }
+    // Requirements admitted after an alias was recorded may still carry the
+    // predicted generation; rewrite them once so every later comparison in the
+    // graph (selection, pins, reclaim, completion validation) sees one identity.
+    void CanonicalizeRequirements(std::vector<ArtifactRequirement>& requirements) const {
+        if (generationAliases.empty()) return;
+        for (auto& requirement : requirements) {
+            if (requirement.requiredGeneration == 0) continue;
+            const auto canonical = Canonical(StoredVersionKey{ requirement.key,
+                requirement.minimumRevision, requirement.requiredGeneration });
+            requirement.requiredGeneration = canonical.generation;
+        }
+    }
     std::unordered_map<VersionKey, VersionSignature, VersionKey::Hasher> versionSignatures;
     mutable std::unordered_map<StoredVersionKey, std::weak_ptr<const void>, StoredVersionKey::Hasher> versionLeases;
-    std::uint64_t nextVersionGeneration = 0;
+    // Allocated by posting threads (predicted handles) as well as by the drain,
+    // so generations are handed out without the control mutex.
+    std::atomic<std::uint64_t> nextVersionGeneration{ 0 };
 	std::uint64_t nextCycleVisitEpoch = 0;
     std::uint64_t reclaimedVersions = 0;
+    // Immutable per-address view published by the drain at the end of every
+    // mutation slice. Every read (Snapshot, Diagnose, Stats, Outstanding,
+    // DesiredRevision) is served from here, so readers never touch graph state.
+    struct ArchivedView {
+        std::uint64_t revision = 0;
+        std::uint64_t generation = 0;
+        ArtifactSnapshot snapshot;
+    };
+    struct AddressView {
+        ArtifactSnapshot current;
+        std::uint64_t desiredRevision = 0;
+        std::uint64_t latestRequestedRevision = 0;
+        std::uint64_t versionGeneration = 0;
+        bool desired = false;
+        std::string error;
+        std::chrono::steady_clock::time_point stateSince{};
+        std::shared_ptr<const std::vector<ArtifactRequirement>> requirements;
+        // Readiness of each dependency as the drain resolved it, for Diagnose.
+        std::vector<std::pair<ArtifactKey, bool>> blockers;
+        std::vector<ArchivedView> archived;
+        // Predicted generations of posted requests that resolved to another
+        // generation, and predicted generations that were refused outright.
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> aliases;
+        std::vector<std::uint64_t> rejected;
+        // Successor versions that are desired but not yet produced.
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> pendingSuccessors;
+    };
+    struct AddressKeyHashCompare {
+        static std::size_t hash(const ArtifactKey& key) { return ArtifactKey::Hasher{}(key); }
+        static bool equal(const ArtifactKey& a, const ArtifactKey& b) { return a == b; }
+    };
+    tbb::concurrent_hash_map<ArtifactKey, std::shared_ptr<const AddressView>,
+        AddressKeyHashCompare> readModel;
+    std::unordered_set<ArtifactKey, ArtifactKey::Hasher> dirtyViews;
+    std::atomic<std::shared_ptr<const AsyncStateGraphStats>> publishedStats{ nullptr };
+    std::atomic<std::uint64_t> publishedOutstandingByKind[kArtifactKindCount]{};
+    std::atomic<std::uint64_t> publishedRetryDeadlineMicros{ 0 };
+
+    void MarkViewDirty(const ArtifactKey& key) { dirtyViews.insert(key); }
+
+    // Reader-side resolution of a version against a published view: predicted
+    // generations resolve through the view's aliases, refused ones read as a
+    // terminal Failed state.
+    [[nodiscard]] ArtifactSnapshot SnapshotFromView(const ArtifactVersionID& version) const {
+        const auto view = View(version.address);
+        if (!view) return { version.address, version.revision, version.generation };
+        if (std::ranges::find(view->rejected, version.generation) != view->rejected.end()) {
+            return { version.address, version.revision, version.generation,
+                ArtifactReadiness::Failed };
+        }
+        auto generation = version.generation;
+        for (const auto& [predicted, canonical] : view->aliases) {
+            if (predicted == generation) { generation = canonical; break; }
+        }
+        for (const auto& archived : view->archived) {
+            if (archived.revision == version.revision && archived.generation == generation)
+                return archived.snapshot;
+        }
+        if (view->current.revision == version.revision &&
+            view->current.generation == generation && view->current.revision != 0) {
+            return view->current;
+        }
+        if (view->desiredRevision == version.revision &&
+            view->versionGeneration == generation) {
+            auto snapshot = view->current;
+            snapshot.revision = version.revision;
+            snapshot.generation = generation;
+            return snapshot;
+        }
+        for (const auto& [successorRevision, successorGeneration] : view->pendingSuccessors) {
+            if (successorRevision == version.revision && successorGeneration == generation) {
+                return { version.address, version.revision, generation,
+                    ArtifactReadiness::Blocked };
+            }
+        }
+        return { version.address, version.revision, version.generation };
+    }
+
+    [[nodiscard]] std::shared_ptr<const AddressView> View(const ArtifactKey& key) const {
+        decltype(readModel)::const_accessor accessor;
+        if (!const_cast<decltype(readModel)&>(readModel).find(accessor, key)) return {};
+        return accessor->second;
+    }
+
+    // Drain-side: rebuild the views of every address mutated this slice.
+    void PublishDirtyViews() {
+        if (dirtyViews.empty()) return;
+        for (const auto& key : dirtyViews) {
+            const auto node = nodes.find(key);
+            const auto addressVersions = versionsByAddress.find(key);
+            const bool hasArchive = addressVersions != versionsByAddress.end() &&
+                !addressVersions->second.empty();
+            if (node == nodes.end() && !hasArchive) {
+                // Publish an empty view rather than erasing the entry: this map
+                // is read concurrently, and erasing can rehash under readers,
+                // which the bundled TBB refuses. Readers treat an empty view as
+                // an address the graph does not know.
+                decltype(readModel)::accessor cleared;
+                if (readModel.find(cleared, key)) cleared->second.reset();
+                continue;
+            }
+            auto view = std::make_shared<AddressView>();
+            if (node != nodes.end()) {
+                const auto& value = node->second;
+                view->current = MakeSnapshot(value);
+                view->current.lease.reset();
+                view->desiredRevision = value.desiredRevision;
+                view->latestRequestedRevision = value.latestRequestedRevision;
+                view->versionGeneration = value.versionGeneration;
+                view->desired = value.desired;
+                view->error = value.error;
+                view->stateSince = value.stateSince;
+                view->requirements = std::make_shared<const std::vector<ArtifactRequirement>>(
+                    value.requirements);
+                view->blockers.reserve(value.requirements.size());
+                for (const auto& requirement : value.requirements) {
+                    view->blockers.emplace_back(requirement.key,
+                        DiagnosticRequirementSatisfied(value, requirement));
+                }
+                view->pendingSuccessors.reserve(value.successors.size());
+                for (const auto& successor : value.successors)
+                    view->pendingSuccessors.emplace_back(successor.revision, successor.generation);
+            } else {
+                view->current.key = key;
+            }
+            if (hasArchive) {
+                view->archived.reserve(addressVersions->second.size());
+                for (const auto& [identity, storedKey] : addressVersions->second) {
+                    const auto archived = versions.find(storedKey);
+                    if (archived == versions.end()) continue;
+                    auto snapshot = archived->second;
+                    snapshot.lease.reset();
+                    view->archived.push_back({ identity.first, identity.second,
+                        std::move(snapshot) });
+                }
+            }
+            for (const auto& [predicted, canonical] : generationAliases) {
+                if (predicted.address == key)
+                    view->aliases.emplace_back(predicted.generation, canonical.generation);
+            }
+            for (const auto& [tombstone, status] : rejectedVersions) {
+                if (tombstone.address == key) view->rejected.push_back(tombstone.generation);
+            }
+            decltype(readModel)::accessor accessor;
+            readModel.insert(accessor, key);
+            accessor->second = std::shared_ptr<const AddressView>(std::move(view));
+        }
+        dirtyViews.clear();
+    }
+
+    void PublishStats() {
+        auto snapshot = std::make_shared<AsyncStateGraphStats>(stats);
+        snapshot->controlQueueWaitMicros = controlQueueWaitMicros.load(std::memory_order_relaxed);
+        snapshot->maxControlQueueWaitMicros =
+            maxControlQueueWaitMicros.load(std::memory_order_relaxed);
+        snapshot->archivedVersions = versions.size();
+        snapshot->reclaimedVersions = reclaimedVersions;
+        snapshot->stateCounts = nodeStateCounts;
+        snapshot->exactWaiters = exactWaiterCount;
+        publishedStats.store(std::move(snapshot), std::memory_order_release);
+        for (std::size_t index = 0; index < kArtifactKindCount; ++index) {
+            publishedOutstandingByKind[index].store(outstandingByKind[index],
+                std::memory_order_relaxed);
+        }
+        std::uint64_t earliestRetry = 0;
+        if (!retries.empty()) {
+            earliestRetry = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    retries.top().deadline.time_since_epoch()).count());
+        }
+        publishedRetryDeadlineMicros.store(earliestRetry, std::memory_order_release);
+    }
+    // A posted request predicts its generation before the drain applies it. When
+    // the drain finds the (address, revision) already carries another generation,
+    // the predicted one is recorded here and every exact lookup normalises through
+    // Canonical(); when the request is rejected outright, the predicted version is
+    // tombstoned so consumers observe a terminal state instead of waiting forever.
+    std::unordered_map<StoredVersionKey, StoredVersionKey, StoredVersionKey::Hasher>
+        generationAliases;
+    std::unordered_map<StoredVersionKey, ArtifactRequestStatus, StoredVersionKey::Hasher>
+        rejectedVersions;
+    // Versions tombstoned since the last drain slice. They are turned into
+    // synthetic Failed snapshots so waiters already registered against a
+    // predicted version are dispatched terminally instead of waiting forever.
+    tbb::concurrent_queue<StoredVersionKey> rejectedSignals;
     std::unordered_map<ArtifactKey, std::unordered_set<ArtifactKey, ArtifactKey::Hasher>, ArtifactKey::Hasher> waiters;
     // Exact immutable recipes pin versions by identity. Maintaining this index
     // at recipe admission/replacement keeps supersession checks O(1) and avoids
     // scanning the entire graph while holding its control mutex.
     std::unordered_map<StoredVersionKey, std::uint32_t, StoredVersionKey::Hasher> exactRecipePins;
-    std::unordered_map<ArtifactKind, ArtifactProducerRegistration> producers;
+    // Immutable producer table, replaced under producerRegistrationMutex and
+    // read without any lock. Registration is rare (startup) and must be visible
+    // to every thread the moment it returns: a request that finds no producer
+    // for its kind fails permanently, so this cannot be deferred to the drain.
+    using ProducerTable = std::unordered_map<ArtifactKind, ArtifactProducerRegistration>;
+    std::atomic<std::shared_ptr<const ProducerTable>> producers{ nullptr };
+    std::mutex producerRegistrationMutex;
+
+    [[nodiscard]] std::shared_ptr<const ProducerTable> Producers() const {
+        return producers.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] const ArtifactProducerRegistration* FindProducer(ArtifactKind kind) const {
+        const auto table = Producers();
+        if (!table) return nullptr;
+        const auto found = table->find(kind);
+        return found == table->end() ? nullptr : &found->second;
+    }
     std::deque<ArtifactKey> pending;
 	struct PendingWaiterWake {
 		ArtifactKey dependency{};
@@ -1518,8 +1969,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     static constexpr std::size_t kAcceptanceMailboxCount =
         static_cast<std::size_t>(TaskLane::Count) *
         static_cast<std::size_t>(TaskDomain::Count);
-    std::array<std::deque<AcceptanceDispatch>, kAcceptanceMailboxCount> acceptanceMailboxes;
-    std::array<bool, kAcceptanceMailboxCount> acceptanceMailboxScheduled{};
+    std::array<tbb::concurrent_queue<AcceptanceDispatch>, kAcceptanceMailboxCount> acceptanceMailboxes;
+    std::array<std::atomic_bool, kAcceptanceMailboxCount> acceptanceMailboxScheduled{};
     std::unordered_map<std::uint64_t, StoredVersionKey> suspendedByIdentity;
     std::unordered_set<std::uint64_t> satisfiedSuspensions;
 	std::deque<ArtifactSnapshot> pendingRetirement;
@@ -1529,7 +1980,6 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 	tbb::concurrent_queue<GpuSignal> gpuSignals;
     std::deque<ArtifactKey> gpuRecovery;
     std::unordered_map<std::uint64_t, std::function<void(const ArtifactSnapshot&)>> readyCallbacks;
-    std::uint64_t nextReadyCallback = 0;
 	struct ExactWaiter {
 		std::uint64_t subscription = 0;
 		ArtifactVersionID version;
@@ -1546,6 +1996,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 	std::array<std::uint64_t, kArtifactKindCount> outstandingByKind{};
 	std::uint64_t nextExactWaiter = 0;
     AsyncStateGraphStats stats;
+    std::atomic<std::uint64_t> controlQueueWaitMicros{ 0 };
+    std::atomic<std::uint64_t> maxControlQueueWaitMicros{ 0 };
     br::SerializedTaskPump drainPump;
     std::atomic_bool delayedDrainScheduled{ false };
     std::atomic_bool shuttingDown{ false };
@@ -1638,61 +2090,47 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
     }
 
-    class TimedMutexLock {
+    // Records how long a drain phase owns the graph state. It no longer
+    // acquires anything: the name and the trace phase are kept so the captured
+    // timing table stays comparable with the pre-rework traces (wait is always
+    // zero now).
+    class PhaseScope {
     public:
-        TimedMutexLock(Impl& owner, GraphMutexPhase phase, bool acquire = true)
-            : m_owner(&owner), m_phase(phase), m_lock(owner.mutex, std::defer_lock),
-              m_trace(acquire ? owner.AcquireTrace() : TraceGuard{}) {
-            if (!acquire) return;
-            if (const auto ownerHash = owner.ownerThreadHash.load(std::memory_order_relaxed);
-                ownerHash != 0 && ownerHash == std::hash<std::thread::id>{}(std::this_thread::get_id())) {
-                owner.ownerThreadLocks.fetch_add(1, std::memory_order_relaxed);
-                basic_telemetry::AddCounter("SARP.AsyncStateGraph.OwnerThreadLocks");
-                basic_telemetry::AddCounter(OwnerThreadLockCounterName(phase));
-            }
-            if (m_trace) m_waitStarted = std::chrono::steady_clock::now();
-            m_lock.lock();
-			if (m_trace) {
-				m_acquired = std::chrono::steady_clock::now();
-				m_acquiredCpuMicros = CurrentThreadCpuMicros();
-			}
+        PhaseScope(Impl& owner, GraphMutexPhase phase, bool active = true)
+            : m_phase(phase), m_active(active),
+              m_trace(active ? owner.AcquireTrace() : TraceGuard{}) {
+            if (!m_active || !m_trace) return;
+            m_started = std::chrono::steady_clock::now();
+            m_startedCpuMicros = CurrentThreadCpuMicros();
         }
-        ~TimedMutexLock() { Unlock(); }
-        TimedMutexLock(const TimedMutexLock&) = delete;
-        TimedMutexLock& operator=(const TimedMutexLock&) = delete;
+        ~PhaseScope() { Unlock(); }
+        PhaseScope(const PhaseScope&) = delete;
+        PhaseScope& operator=(const PhaseScope&) = delete;
 
         void Unlock() {
-            if (!m_lock.owns_lock()) return;
-            if (!m_trace) {
-                m_lock.unlock();
-                return;
-            }
+            if (!m_active) return;
+            m_active = false;
+            if (!m_trace) return;
             const auto released = std::chrono::steady_clock::now();
-			const auto releasedCpuMicros = CurrentThreadCpuMicros();
-            m_lock.unlock();
-            const auto waitMicros = static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    m_acquired - m_waitStarted).count());
+            const auto releasedCpuMicros = CurrentThreadCpuMicros();
             const auto holdMicros = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
-                    released - m_acquired).count());
-			const auto holdCpuMicros = releasedCpuMicros >= m_acquiredCpuMicros
-				? releasedCpuMicros - m_acquiredCpuMicros : 0;
-			m_trace->RecordMutex(m_phase, waitMicros, holdMicros, holdCpuMicros, {});
+                    released - m_started).count());
+            const auto holdCpuMicros = releasedCpuMicros >= m_startedCpuMicros
+                ? releasedCpuMicros - m_startedCpuMicros : 0;
+            m_trace->RecordMutex(m_phase, 0, holdMicros, holdCpuMicros, {});
         }
 
     private:
-        Impl* m_owner;
         GraphMutexPhase m_phase;
-        std::chrono::steady_clock::time_point m_waitStarted;
-        std::unique_lock<std::mutex> m_lock;
-        std::chrono::steady_clock::time_point m_acquired;
-		std::uint64_t m_acquiredCpuMicros = 0;
+        bool m_active = false;
+        std::chrono::steady_clock::time_point m_started;
+        std::uint64_t m_startedCpuMicros = 0;
         TraceGuard m_trace;
     };
 
-    [[nodiscard]] TimedMutexLock LockMutex(GraphMutexPhase phase) {
-        return TimedMutexLock(*this, phase);
+    [[nodiscard]] PhaseScope LockMutex(GraphMutexPhase phase) {
+        return PhaseScope(*this, phase);
     }
 
     Impl(TaskSchedulerManager& schedulerIn, std::string_view name)
@@ -1720,18 +2158,15 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             [weak, index](const TaskContext& context) {
                 if (auto self = weak.lock()) self->DrainAcceptanceMailbox(index, context);
             })) return;
-        auto lock = LockMutex(GraphMutexPhase::AcceptanceScheduleFailure);
-        auto& mailbox = acceptanceMailboxes[index];
-        while (!mailbox.empty()) {
-            auto item = std::move(mailbox.front());
-            mailbox.pop_front();
+        AcceptanceDispatch item;
+        while (acceptanceMailboxes[index].try_pop(item)) {
             item.completion.result = ArtifactBuildResult::Failure(
                 "scheduler rejected acceptance mailbox");
             item.completion.queuedAt = std::chrono::steady_clock::now();
-			completions.push(std::move(item.completion));
-			completionCount.fetch_add(1, std::memory_order_release);
+            completions.push(std::move(item.completion));
+            completionCount.fetch_add(1, std::memory_order_release);
         }
-        acceptanceMailboxScheduled[index] = false;
+        acceptanceMailboxScheduled[index].store(false, std::memory_order_release);
         ScheduleDrain();
     }
 
@@ -1740,19 +2175,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         const auto started = std::chrono::steady_clock::now();
         std::size_t appliedCount = 0;
         std::uint64_t mutationDurationNs = 0;
-        bool hasMore = false;
-        do {
-            AcceptanceDispatch item;
-            {
-                auto lock = LockMutex(GraphMutexPhase::AcceptanceDequeue);
-                auto& mailbox = acceptanceMailboxes[index];
-                if (mailbox.empty()) {
-                    acceptanceMailboxScheduled[index] = false;
-                    break;
-                }
-                item = std::move(mailbox.front());
-                mailbox.pop_front();
-            }
+        auto& mailbox = acceptanceMailboxes[index];
+        AcceptanceDispatch item;
+        while (std::chrono::steady_clock::now() - started < yieldDuration && mailbox.try_pop(item)) {
             bool succeeded = !context.StopRequested();
             std::string error;
             if (succeeded) {
@@ -1772,45 +2197,36 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             ++appliedCount;
             if (!succeeded) item.completion.result = ArtifactBuildResult::Failure(std::move(error));
             item.completion.queuedAt = std::chrono::steady_clock::now();
-			completions.push(std::move(item.completion));
-			completionCount.fetch_add(1, std::memory_order_release);
-			{
-				auto lock = LockMutex(GraphMutexPhase::AcceptanceCompletionEnqueue);
-				hasMore = !acceptanceMailboxes[index].empty();
-			}
+            completions.push(std::move(item.completion));
+            completionCount.fetch_add(1, std::memory_order_release);
             if (auto session = AcquireTrace()) {
                 session->Record(AsyncStateGraphTraceEventID::AcceptanceApplied, item.snapshot.key,
                     item.snapshot.revision, item.snapshot.generation,
                     succeeded ? ArtifactReadiness::Preparing : ArtifactReadiness::Failed);
             }
-        } while (hasMore && std::chrono::steady_clock::now() - started < yieldDuration);
+            item = {};
+        }
         basic_telemetry::Record("SARP.AsyncStateGraph.AcceptanceBatchSize", appliedCount);
         basic_telemetry::Record("SARP.AsyncStateGraph.AcceptanceMutationDurationNs",
             mutationDurationNs);
         ScheduleDrain();
-        {
-            auto lock = LockMutex(GraphMutexPhase::AcceptanceDequeue);
-            hasMore = !acceptanceMailboxes[index].empty();
-            if (!hasMore) acceptanceMailboxScheduled[index] = false;
+        // Standard clear-then-recheck handshake against concurrent enqueues.
+        acceptanceMailboxScheduled[index].store(false, std::memory_order_release);
+        if (!mailbox.empty() &&
+            !acceptanceMailboxScheduled[index].exchange(true, std::memory_order_acq_rel)) {
+            ScheduleAcceptanceMailbox(index);
         }
-        if (hasMore) ScheduleAcceptanceMailbox(index);
     }
 
     void EnqueueAcceptances(std::vector<AcceptanceDispatch> dispatches) {
-        std::vector<std::size_t> schedule;
-        {
-            auto lock = LockMutex(GraphMutexPhase::AcceptanceDispatchEnqueue);
-            for (auto& dispatch : dispatches) {
-                const auto index = AcceptanceMailboxIndex(
-                    dispatch.registration.lane, dispatch.registration.domain);
-                acceptanceMailboxes[index].push_back(std::move(dispatch));
-                if (!acceptanceMailboxScheduled[index]) {
-                    acceptanceMailboxScheduled[index] = true;
-                    schedule.push_back(index);
-                }
+        for (auto& dispatch : dispatches) {
+            const auto index = AcceptanceMailboxIndex(
+                dispatch.registration.lane, dispatch.registration.domain);
+            acceptanceMailboxes[index].push(std::move(dispatch));
+            if (!acceptanceMailboxScheduled[index].exchange(true, std::memory_order_acq_rel)) {
+                ScheduleAcceptanceMailbox(index);
             }
         }
-        for (const auto index : schedule) ScheduleAcceptanceMailbox(index);
     }
 
     void ConfigureDrainPump() {
@@ -1829,12 +2245,10 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                             const auto wait = static_cast<std::uint64_t>(
                                 std::chrono::duration_cast<std::chrono::microseconds>(
                                     std::chrono::steady_clock::now() - submittedAt).count());
-                            {
-                                auto lock = self->LockMutex(GraphMutexPhase::DelayedDrainState);
-                                self->stats.controlQueueWaitMicros += wait;
-                                self->stats.maxControlQueueWaitMicros = (std::max)(
-                                    self->stats.maxControlQueueWaitMicros, wait);
-                            }
+                            self->controlQueueWaitMicros.fetch_add(wait, std::memory_order_relaxed);
+                            auto observedMax = self->maxControlQueueWaitMicros.load(std::memory_order_relaxed);
+                            while (wait > observedMax && !self->maxControlQueueWaitMicros.compare_exchange_weak(
+                                observedMax, wait, std::memory_order_relaxed)) {}
                             if (auto session = self->AcquireTrace()) {
                                 session->Record(AsyncStateGraphTraceEventID::GraphControlStarted, {}, 0, 0,
                                     ArtifactReadiness::Missing, static_cast<std::int64_t>(wait));
@@ -1858,6 +2272,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
 	void SetDesired(Node& node, bool desired) {
 		if (node.desired == desired) return;
+		MarkViewDirty(node.key);
 		const auto kind = static_cast<std::size_t>(node.key.kind);
 		if (kind < outstandingByKind.size() && IsOutstandingState(node.state)) {
 			if (desired) ++outstandingByKind[kind];
@@ -1869,6 +2284,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     void SetState(Node& node, ArtifactReadiness state) {
         const auto previous = node.state;
         if (previous == state) return;
+        MarkViewDirty(node.key);
 		const auto previousIndex = static_cast<std::size_t>(previous);
 		const auto nextIndex = static_cast<std::size_t>(state);
 		if (previousIndex < nodeStateCounts.size() && nodeStateCounts[previousIndex] != 0)
@@ -1902,32 +2318,95 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             node.gpuSubmissions, node.lease };
     }
 
+    // Resolves a predicted version to the version the drain actually installed.
+    [[nodiscard]] StoredVersionKey Canonical(const StoredVersionKey& version) const {
+        const auto found = generationAliases.find(version);
+        return found == generationAliases.end() ? version : found->second;
+    }
+    [[nodiscard]] ArtifactVersionID Canonical(const ArtifactVersionID& version) const {
+        const auto canonical = Canonical(StoredVersionKey{ version.address, version.revision,
+            version.generation });
+        return { canonical.address, canonical.revision, canonical.generation };
+    }
+    [[nodiscard]] std::optional<ArtifactRequestStatus> RejectedStatus(
+        const StoredVersionKey& version) const {
+        const auto found = rejectedVersions.find(version);
+        return found == rejectedVersions.end() ? std::optional<ArtifactRequestStatus>{}
+                                               : found->second;
+    }
+
+    // The lease deleter only touches lock-free state, so a posting thread can mint
+    // a lease for a version the drain has not installed yet. RegisterVersionLease
+    // publishes it into the index when the request is applied.
+    [[nodiscard]] std::shared_ptr<const void> MakeLeaseToken(const StoredVersionKey& version) const {
+        auto weak = const_cast<Impl*>(this)->weak_from_this();
+        const auto kindIndex = static_cast<std::size_t>(version.address.kind);
+        if (kindIndex < activeVersionLeasesByKind.size()) {
+            activeVersionLeasesByKind[kindIndex].fetch_add(1, std::memory_order_relaxed);
+        }
+        return std::shared_ptr<const void>(new std::uint8_t(0),
+            [weak, version, kindIndex](const void* value) {
+                delete static_cast<const std::uint8_t*>(value);
+                if (auto graph = weak.lock()) {
+                    if (kindIndex < graph->activeVersionLeasesByKind.size()) {
+                        graph->activeVersionLeasesByKind[kindIndex].fetch_sub(
+                            1, std::memory_order_relaxed);
+                    }
+                    graph->reclaimQueue.push(version);
+                    graph->ScheduleDrain();
+                }
+            });
+    }
+
+    // Waiters and recipe pins registered against a predicted version have to
+    // follow it to the version the drain installed, or they never fire.
+    void MigrateAliasedVersion(const StoredVersionKey& predicted,
+        const StoredVersionKey& canonical) {
+        if (predicted == canonical) return;
+        if (const auto waiting = exactWaiters.find(predicted); waiting != exactWaiters.end()) {
+            auto& destination = exactWaiters[canonical];
+            for (auto& waiter : waiting->second) {
+                waiter.version = { canonical.address, canonical.revision, canonical.generation };
+                destination.push_back(std::move(waiter));
+            }
+            exactWaiters.erase(waiting);
+        }
+        if (const auto pinned = exactRecipePins.find(predicted); pinned != exactRecipePins.end()) {
+            exactRecipePins[canonical] += pinned->second;
+            exactRecipePins.erase(pinned);
+        }
+        if (const auto lease = versionLeases.find(predicted); lease != versionLeases.end()) {
+            if (auto token = lease->second.lock()) RegisterVersionLease(canonical, token);
+        }
+    }
+
+    void RegisterVersionLease(const StoredVersionKey& version,
+        const std::shared_ptr<const void>& token) {
+        if (!token) return;
+        const auto found = versionLeases.find(version);
+        if (found != versionLeases.end() && !found->second.expired()) return;
+        versionLeases.insert_or_assign(version, token);
+    }
+
     ArtifactLease AcquireVersionLease(const StoredVersionKey& version) const {
         if (const auto found = versionLeases.find(version); found != versionLeases.end()) {
             if (auto lease = found->second.lock()) return ArtifactLease{ std::move(lease) };
         }
-        auto weak = const_cast<Impl*>(this)->weak_from_this();
-		const auto kindIndex = static_cast<std::size_t>(version.address.kind);
-		if (kindIndex < activeVersionLeasesByKind.size()) {
-			activeVersionLeasesByKind[kindIndex].fetch_add(1, std::memory_order_relaxed);
-		}
-        auto lease = std::shared_ptr<const void>(new std::uint8_t(0),
-			[weak, version, kindIndex](const void* value) {
-                delete static_cast<const std::uint8_t*>(value);
-				if (auto graph = weak.lock()) {
-					if (kindIndex < graph->activeVersionLeasesByKind.size()) {
-						graph->activeVersionLeasesByKind[kindIndex].fetch_sub(
-							1, std::memory_order_relaxed);
-					}
-					graph->reclaimQueue.push(version);
-					graph->ScheduleDrain();
-				}
-            });
+        auto lease = MakeLeaseToken(version);
         versionLeases.insert_or_assign(version, lease);
         return ArtifactLease{ std::move(lease) };
     }
 
-	ArtifactSnapshot SnapshotExactLocked(ArtifactVersionID version) const {
+	ArtifactSnapshot SnapshotExactLocked(ArtifactVersionID requestedVersion) const {
+		// A predicted handle resolves to the version the drain installed; a
+		// rejected one is reported as terminal so consumers do not wait forever.
+		const StoredVersionKey predicted{ requestedVersion.address, requestedVersion.revision,
+			requestedVersion.generation };
+		if (const auto rejected = RejectedStatus(predicted)) {
+			return { requestedVersion.address, requestedVersion.revision,
+				requestedVersion.generation, ArtifactReadiness::Failed };
+		}
+		const auto version = Canonical(requestedVersion);
 		const auto archived = versions.find({ version.address, version.revision, version.generation });
 		if (archived != versions.end()) {
 			auto snapshot = archived->second;
@@ -1962,6 +2441,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
     void StoreVersion(const Node& node) {
         if (node.producedRevision == 0 || !node.payload.Valid()) return;
+        MarkViewDirty(node.key);
         auto snapshot = MakeSnapshot(node);
         // The archive is storage, not a lifetime owner. Desired nodes,
         // requirements, returned handles, manifests and frame leases own pins.
@@ -2137,6 +2617,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 					candidate.revision, candidate.generation);
 			}
 			const auto reclaimed = candidate;
+			MarkViewDirty(candidate.address);
 			pendingRetirement.push_back(std::move(version->second));
 			version = versions.erase(version);
 			const auto kindIndex = static_cast<std::size_t>(reclaimed.address.kind);
@@ -2179,8 +2660,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             (requirement.invalidation == DependencyInvalidationPolicy::ReadyGate &&
              requirement.minimumRevision != 0)) {
             if (requirement.requiredGeneration != 0) {
-                const auto exact = versions.find({ requirement.key, requirement.minimumRevision,
-                    requirement.requiredGeneration });
+                const auto exact = versions.find(Canonical(StoredVersionKey{ requirement.key,
+                    requirement.minimumRevision, requirement.requiredGeneration }));
                 if (exact != versions.end()) return &exact->second;
             } else {
                 const ArtifactSnapshot* newest = nullptr;
@@ -2759,7 +3240,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             node.latestSuccessorNeeded = false;
             return PromoteSuccessor(node);
         }
-        const auto generation = ++nextVersionGeneration;
+        const auto generation = nextVersionGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
         std::uint64_t fingerprint = node.requestFingerprint;
         HashRequestValue(fingerprint, revision);
 		// This successor is minted internally after a selected Latest edge
@@ -3020,10 +3501,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         const auto found = nodes.find(completion.key);
         if (found == nodes.end() || found->second.generation != completion.generation ||
             !DependenciesStillMatch(completion)) return false;
-        const auto producer = producers.find(found->second.key.kind);
-        if (producer != producers.end() &&
-            producer->second.outputType != std::type_index(typeid(void)) &&
-            result.payload.Type() != producer->second.outputType) return false;
+        const auto* producer = FindProducer(found->second.key.kind);
+        if (producer && producer->outputType != std::type_index(typeid(void)) &&
+            result.payload.Type() != producer->outputType) return false;
 
         ArtifactSnapshot snapshot{ found->second.key, completion.revision,
             found->second.versionGeneration, ArtifactReadiness::Preparing,
@@ -3101,10 +3581,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
         auto& result = completion.result;
         if (result.outcome == ArtifactBuildResult::Outcome::Ready) {
-            const auto producer = producers.find(node.key.kind);
-            if (producer != producers.end() &&
-                producer->second.outputType != std::type_index(typeid(void)) &&
-                result.payload.Type() != producer->second.outputType) {
+            const auto* producer = FindProducer(node.key.kind);
+            if (producer && producer->outputType != std::type_index(typeid(void)) &&
+                result.payload.Type() != producer->outputType) {
                 result = ArtifactBuildResult::Failure("artifact output type mismatch");
             }
         }
@@ -3304,20 +3783,137 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
     }
 
+    void ApplyPostedRequestBatch(std::vector<PostedRequest> batch);
+
+    void ApplySuspensionSatisfied(std::uint64_t identity) {
+        const auto registered = suspendedByIdentity.find(identity);
+        if (registered == suspendedByIdentity.end()) {
+            satisfiedSuspensions.insert(identity);
+            return;
+        }
+        const auto version = registered->second;
+        suspendedByIdentity.erase(registered);
+        const auto found = nodes.find(version.address);
+        if (found != nodes.end() &&
+            found->second.desiredRevision == version.revision &&
+            found->second.generation == version.generation &&
+            found->second.suspension &&
+            found->second.suspension->identity == identity) {
+            found->second.suspension.reset();
+            if (auto session = AcquireTrace()) {
+                session->Record(AsyncStateGraphTraceEventID::SuspensionSatisfied, version.address,
+                    version.revision, version.generation, found->second.state);
+            }
+            QueueNode(found->second);
+        }
+    }
+
+    void ApplyPostedSuspensions() {
+        if (postedSuspensions.empty()) return;
+        auto lock = LockMutex(GraphMutexPhase::SuspensionSatisfied);
+        std::uint64_t identity = 0;
+        std::size_t applied = 0;
+        while (applied < 256 && postedSuspensions.try_pop(identity)) {
+            ApplySuspensionSatisfied(identity);
+            ++applied;
+        }
+    }
+
+    // Applied on the drain, before posted requests, so a waiter registered for a
+    // version is in place no later than the transition it waits for.
+    void ApplyPostedAwaits() {
+        std::vector<PostedAwaitOperation> operations;
+        PostedAwaitOperation operation;
+        while (operations.size() < 256 && postedAwaits.try_pop(operation))
+            operations.push_back(std::move(operation));
+        if (operations.empty()) return;
+        std::vector<std::pair<PostedAwaitOperation, ArtifactSnapshot>> dispatches;
+        {
+            auto lock = LockMutex(GraphMutexPhase::ExactWaiterRegister);
+            const auto now = std::chrono::steady_clock::now();
+            for (auto& entry : operations) {
+                basic_telemetry::Record("SARP.AsyncStateGraph.MailboxApplyLatencyNs",
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            now - entry.postedAt).count()));
+                const StoredVersionKey canonical = Canonical(StoredVersionKey{
+                    entry.version.address, entry.version.revision, entry.version.generation });
+                if (entry.cancel) {
+                    const auto found = exactWaiters.find(canonical);
+                    bool removed = false;
+                    if (found != exactWaiters.end()) {
+                        removed = std::erase_if(found->second,
+                            [&entry](const ExactWaiter& waiter) {
+                                return waiter.subscription == entry.subscription;
+                            }) != 0;
+                        if (removed && exactWaiterCount != 0) --exactWaiterCount;
+                        if (found->second.empty()) exactWaiters.erase(found);
+                    }
+                    // The registration has not been applied yet: remember the
+                    // cancellation so it is dropped when it arrives.
+                    if (!removed) cancelledAwaitSubscriptions.insert(entry.subscription);
+                    continue;
+                }
+                if (cancelledAwaitSubscriptions.erase(entry.subscription) != 0) continue;
+                auto snapshot = SnapshotExactLocked(entry.version);
+                const bool terminal = snapshot.readiness == ArtifactReadiness::Failed ||
+                    snapshot.readiness == ArtifactReadiness::Cancelled ||
+                    snapshot.readiness == ArtifactReadiness::Superseded;
+                if (terminal || ArtifactReachedMilestone(snapshot.readiness, entry.milestone)) {
+                    dispatches.emplace_back(std::move(entry), std::move(snapshot));
+                    continue;
+                }
+                exactWaiters[canonical].push_back({ entry.subscription,
+                    { canonical.address, canonical.revision, canonical.generation },
+                    entry.milestone, entry.lane, entry.domain,
+                    std::move(entry.continuation), std::move(entry.lease) });
+                ++exactWaiterCount;
+            }
+        }
+        for (auto& [entry, snapshot] : dispatches) {
+            if (!entry.continuation) continue;
+            auto continuation = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
+                std::move(entry.continuation));
+            const bool submitted = scheduler.SubmitCpu(scope, entry.lane, entry.domain,
+                "AsyncStateGraph::AwaitExactReady",
+                [continuation, snapshot](const TaskContext& context) {
+                    if (!context.StopRequested()) (*continuation)(snapshot);
+                });
+            if (!submitted) (*continuation)(snapshot);
+        }
+        if (!postedAwaits.empty()) ScheduleDrain();
+    }
+
     void ApplyPostedIntents() {
-        std::vector<ArtifactIntent> batch;
-        ArtifactIntent intent;
-        while (batch.size() < 256 && postedIntents.try_pop(intent)) batch.push_back(std::move(intent));
+        std::vector<PostedRequest> batch;
+        PostedRequest posted;
+        while (batch.size() < 256 && postedIntents.try_pop(posted))
+            batch.push_back(std::move(posted));
         if (batch.empty()) return;
         basic_telemetry::AddCounter("SARP.AsyncStateGraph.PostedIntentsApplied",
             static_cast<std::int64_t>(batch.size()));
         if (owner && !shuttingDown.load(std::memory_order_acquire)) {
-            (void)owner->SubmitLatestIntentBatch(std::move(batch));
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto& entry : batch) {
+                basic_telemetry::Record("SARP.AsyncStateGraph.MailboxApplyLatencyNs",
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            now - entry.postedAt).count()));
+            }
+            basic_telemetry::Record("SARP.AsyncStateGraph.MailboxBatchSize", batch.size());
+            ApplyPostedRequestBatch(std::move(batch));
         }
         if (!postedIntents.empty()) ScheduleDrain();
     }
 
     void Drain() {
+        struct DrainMarker {
+            const void* previous;
+            explicit DrainMarker(const void* self) : previous(t_activeGraphDrain) { t_activeGraphDrain = self; }
+            ~DrainMarker() { t_activeGraphDrain = previous; }
+        } drainMarker(this);
+        ApplyPostedAwaits();
+        ApplyPostedSuspensions();
         ApplyPostedIntents();
         struct PendingGpuSignal {
             ArtifactKey key;
@@ -3500,6 +4096,11 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 					ArtifactReadiness::Missing, elapsed, { { StableTraceID(phase) } });
 			};
             const auto now = std::chrono::steady_clock::now();
+			StoredVersionKey rejectedVersion;
+			while (rejectedSignals.try_pop(rejectedVersion)) {
+				ready.push_back({ rejectedVersion.address, rejectedVersion.revision,
+					rejectedVersion.generation, ArtifactReadiness::Failed });
+			}
 			for (const auto& publishedVersion : publishedReady) {
 				if (const auto archived = versions.find(publishedVersion); archived != versions.end()) {
 					ready.push_back(archived->second);
@@ -3624,6 +4225,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 						const auto stateIndex = static_cast<std::size_t>(completed->second.state);
 						if (stateIndex < nodeStateCounts.size() && nodeStateCounts[stateIndex] != 0)
 							--nodeStateCounts[stateIndex];
+						MarkViewDirty(completedKey);
 						nodes.erase(completed);
                     }
                 }
@@ -3688,8 +4290,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                     SetState(node, ArtifactReadiness::Blocked);
                     continue;
                 }
-                const auto producer = producers.find(node.key.kind);
-                if (producer == producers.end() || !producer->second.producer) {
+                const auto* producer = FindProducer(node.key.kind);
+                if (!producer || !producer->producer) {
                     node.error = "no producer registered";
                     SetState(node, ArtifactReadiness::Failed);
                     ++stats.failed;
@@ -3730,7 +4332,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 				}
 				ArtifactBuildContext context{ node.key, node.desiredRevision, node.generation,
 					std::move(dependencySnapshots), node.input, node.checkpoint, {} };
-                builds.emplace_back(producer->second, std::move(context), node.superseded,
+                builds.emplace_back(*producer, std::move(context), node.superseded,
                     continuation);
 				if (std::chrono::steady_clock::now() - started >= maxDuration) break;
             }
@@ -3761,7 +4363,9 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 			recordApplyPhase("apply_exact_waiters");
             callbacks.reserve(readyCallbacks.size());
             for (const auto& [_, callback] : readyCallbacks) callbacks.push_back(callback);
-			hasImmediateWork = !pending.empty() || !pendingWaiterWakes.empty() ||
+			hasImmediateWork = !postedAwaits.empty() || !postedIntents.empty() ||
+				!rejectedSignals.empty() || !postedSuspensions.empty() ||
+				!pending.empty() || !pendingWaiterWakes.empty() ||
 				!propagatedReady.empty() ||
 				completionCount.load(std::memory_order_acquire) != 0 ||
 				!gpuSignals.empty() || !publishedSignals.empty() || !pendingRetirement.empty();
@@ -3808,7 +4412,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 			}
 			hasImmediateWork = hasImmediateWork || !pendingRetirement.empty() ||
 				!reclaimQueue.empty();
+			// Publish after reclamation, which also dirties addresses, and before
+			// the callbacks below dispatch: a reader woken by one of them already
+			// observes the state that woke it.
+			PublishDirtyViews();
+			PublishStats();
 		}
+		FlushDeferredReplies();
 		if (diagnosticSnapshot) {
 			basic_telemetry::SetGauge("SARP.AsyncStateGraph.Nodes",
 				static_cast<std::int64_t>(diagnosticSnapshot->nodes));
@@ -3917,8 +4527,50 @@ void AsyncStateGraph::PostIntents(std::vector<ArtifactIntent> intents) {
     if (!m_impl || intents.empty() || m_impl->shuttingDown.load(std::memory_order_acquire)) return;
     basic_telemetry::AddCounter("SARP.AsyncStateGraph.PostedIntents",
         static_cast<std::int64_t>(intents.size()));
-    for (auto& intent : intents) m_impl->postedIntents.push(std::move(intent));
+    for (auto& intent : intents)
+        m_impl->postedIntents.push(Impl::PostedRequest{ std::move(intent), true, 0, {} });
     m_impl->ScheduleDrain();
+}
+
+ArtifactRequestResult AsyncStateGraph::PostRequest(ArtifactIntent intent, bool coalescible) {
+    if (!m_impl || m_impl->shuttingDown.load(std::memory_order_acquire)) {
+        return { ArtifactRequestStatus::ShuttingDown, 0, {} };
+    }
+    if (intent.key.kind == ArtifactKind::StaticTransaction && coalescible) {
+        return { ArtifactRequestStatus::TypeMismatch, 0, {} };
+    }
+    // Validate what can be decided without graph state, so these statuses stay
+    // synchronous exactly as they are on the locking path.
+    if (const auto* producer = m_impl->FindProducer(intent.key.kind)) {
+        if (producer->inputType != std::type_index(typeid(void)) &&
+            (!intent.input.Valid() || intent.input.Type() != producer->inputType)) {
+            return { ArtifactRequestStatus::TypeMismatch, 0, {} };
+        }
+    }
+    if (intent.input.Valid() && intent.requestFingerprint == 0) {
+        return { ArtifactRequestStatus::MissingFingerprint, 0, {} };
+    }
+    if (intent.requestFingerprint == 0) {
+        intent.requestFingerprint = CanonicalRequestFingerprint(intent.key,
+            intent.desiredRevision, intent.requirements);
+    }
+    const auto generation = m_impl->ReserveGeneration({ intent.key, intent.desiredRevision });
+    const Impl::StoredVersionKey predicted{ intent.key, intent.desiredRevision, generation };
+    auto lease = m_impl->MakeLeaseToken(predicted);
+    const ArtifactVersionID version{ intent.key, intent.desiredRevision, generation };
+    basic_telemetry::AddCounter("SARP.AsyncStateGraph.PostedRequests");
+    m_impl->postedIntents.push(Impl::PostedRequest{ std::move(intent), coalescible,
+        generation, lease });
+    m_impl->ScheduleDrain();
+    return { ArtifactRequestStatus::Accepted, generation, version, ArtifactLease{ lease } };
+}
+
+std::vector<ArtifactRequestResult> AsyncStateGraph::PostIntentBatch(
+    std::vector<ArtifactIntent> intents) {
+    std::vector<ArtifactRequestResult> results;
+    results.reserve(intents.size());
+    for (auto& intent : intents) results.push_back(PostRequest(std::move(intent), true));
+    return results;
 }
 
 AsyncStateGraph::~AsyncStateGraph() { Shutdown(); }
@@ -4023,21 +4675,80 @@ struct AsyncStateGraph::RequestPreparedState {
 	}
 };
 
+// Applied by the drain, which owns the mutex for the whole batch so that a
+// posted request and the sibling requests posted with it are installed together.
+void AsyncStateGraph::Impl::ApplyPostedRequestBatch(std::vector<PostedRequest> batch) {
+    AsyncStateGraph::RequestDeferredCleanup cleanup;
+    cleanup.Reserve(batch.size());
+    std::vector<AsyncStateGraph::RequestPreparedState> prepared;
+    prepared.reserve(batch.size());
+    for (const auto& entry : batch) prepared.emplace_back(entry.intent.requirements);
+    constexpr std::size_t maxMutationsPerSlice = 16;
+    constexpr auto maxMutationSlice = std::chrono::microseconds(500);
+    for (std::size_t index = 0; index < batch.size();) {
+        auto batchLock = LockMutex(GraphMutexPhase::RequestBatch);
+        const auto deadline = std::chrono::steady_clock::now() + maxMutationSlice;
+        std::size_t applied = 0;
+        do {
+            auto& entry = batch[index];
+            if (entry.mutation) {
+                entry.mutation();
+            } else {
+                auto result = owner->RequestInternal(entry.intent.key, entry.intent.desiredRevision,
+                    std::move(entry.intent.requirements), std::move(entry.intent.input),
+                    entry.intent.requestFingerprint, entry.coalescible, true, &cleanup,
+                    &prepared[index], entry.generation, entry.lease);
+                if (entry.reply) {
+                    deferredReplies.push_back([reply = entry.reply,
+                        result = std::move(result)]() mutable {
+                        reply->set_value(std::move(result));
+                    });
+                }
+            }
+            ++index;
+            ++applied;
+        } while (index < batch.size() && applied < maxMutationsPerSlice &&
+            std::chrono::steady_clock::now() < deadline);
+    }
+    std::vector<std::shared_ptr<const GpuSubmissionSet>> cancellations;
+    {
+        auto lock = LockMutex(GraphMutexPhase::CancelApply);
+        cancellations.swap(pendingCancellations);
+    }
+    for (const auto& cancellation : cancellations) if (cancellation) (void)cancellation->Cancel();
+    FlushDeferredRequestTrace(cleanup);
+}
+
+
 void AsyncStateGraph::RegisterProducer(ArtifactKind kind, ArtifactProducerRegistration registration) {
-    auto lock = m_impl->LockMutex(GraphMutexPhase::RegisterProducer);
-    m_impl->producers[kind] = std::move(registration);
+    m_impl->RegisterProducerNow(kind, std::move(registration));
 }
 
 ArtifactRequestResult AsyncStateGraph::Request(ArtifactKey key, std::uint64_t desiredRevision,
     std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
     std::uint64_t requestFingerprint) {
-    RequestDeferredCleanup cleanup;
-	cleanup.Reserve(1);
-    RequestPreparedState prepared(requirements);
-	auto result = RequestInternal(key, desiredRevision, std::move(requirements), std::move(input),
-		requestFingerprint, false, false, &cleanup, &prepared);
-	m_impl->FlushDeferredRequestTrace(cleanup);
-	return result;
+    if (m_impl->OnDrainThread()) {
+        RequestDeferredCleanup cleanup;
+        cleanup.Reserve(1);
+        RequestPreparedState prepared(requirements);
+        auto result = RequestInternal(key, desiredRevision, std::move(requirements), std::move(input),
+            requestFingerprint, false, false, &cleanup, &prepared);
+        m_impl->FlushDeferredRequestTrace(cleanup);
+        m_impl->PublishDirtyViews();
+        return result;
+    }
+    if (m_impl->shuttingDown.load(std::memory_order_acquire)) {
+        return { ArtifactRequestStatus::ShuttingDown, 0 };
+    }
+    Impl::PostedRequest posted;
+    posted.intent = { key, desiredRevision, std::move(requirements), std::move(input),
+        requestFingerprint };
+    posted.coalescible = false;
+    posted.reply = std::make_shared<std::promise<ArtifactRequestResult>>();
+    auto future = posted.reply->get_future();
+    m_impl->postedIntents.push(std::move(posted));
+    m_impl->ScheduleDrain();
+    return m_impl->WaitReply(future, ArtifactRequestResult{ ArtifactRequestStatus::ShuttingDown, 0 }, key, desiredRevision);
 }
 
 ArtifactRequestStatus AsyncStateGraph::SubmitLatestIntent(ArtifactKey key,
@@ -4046,32 +4757,38 @@ ArtifactRequestStatus AsyncStateGraph::SubmitLatestIntent(ArtifactKey key,
     if (key.kind == ArtifactKind::StaticTransaction) {
         return ArtifactRequestStatus::TypeMismatch;
     }
-    RequestDeferredCleanup cleanup;
-	cleanup.Reserve(1);
-    RequestPreparedState prepared(requirements);
-	auto result = RequestInternal(key, desiredRevision, std::move(requirements), std::move(input),
-		requestFingerprint, true, false, &cleanup, &prepared);
-	m_impl->FlushDeferredRequestTrace(cleanup);
-	return result.status;
+    if (m_impl->OnDrainThread()) {
+        RequestDeferredCleanup cleanup;
+        cleanup.Reserve(1);
+        RequestPreparedState prepared(requirements);
+        auto result = RequestInternal(key, desiredRevision, std::move(requirements), std::move(input),
+            requestFingerprint, true, false, &cleanup, &prepared);
+        m_impl->FlushDeferredRequestTrace(cleanup);
+        m_impl->PublishDirtyViews();
+        return result.status;
+    }
+    if (m_impl->shuttingDown.load(std::memory_order_acquire)) {
+        return ArtifactRequestStatus::ShuttingDown;
+    }
+    Impl::PostedRequest posted;
+    posted.intent = { key, desiredRevision, std::move(requirements), std::move(input),
+        requestFingerprint };
+    posted.coalescible = true;
+    posted.reply = std::make_shared<std::promise<ArtifactRequestResult>>();
+    auto future = posted.reply->get_future();
+    m_impl->postedIntents.push(std::move(posted));
+    m_impl->ScheduleDrain();
+    return m_impl->WaitReply(future,
+        ArtifactRequestResult{ ArtifactRequestStatus::ShuttingDown, 0 }, key, desiredRevision).status;
 }
 
 std::vector<ArtifactRequestResult> AsyncStateGraph::SubmitLatestIntentBatch(
     std::vector<ArtifactIntent> intents) {
     std::vector<ArtifactRequestResult> results(intents.size());
     std::vector<bool> valid(intents.size(), true);
-    std::unordered_set<ArtifactKey, ArtifactKey::Hasher> uniqueAddresses;
-    std::unordered_set<Impl::VersionKey, Impl::VersionKey::Hasher> uniqueVersions;
-    uniqueAddresses.reserve(intents.size());
-    uniqueVersions.reserve(intents.size());
-    RequestDeferredCleanup cleanup;
-    cleanup.Reserve(intents.size());
-    std::vector<RequestPreparedState> prepared;
-    prepared.reserve(intents.size());
-    for (const auto& intent : intents) prepared.emplace_back(intent.requirements);
-
-    // Do immutable validation and canonical hashing before taking the graph
-    // mutex. Keep one result slot per input intent: duplicate addresses still
-    // execute in caller order because latest-wins semantics are observable.
+    // Immutable validation and canonical hashing stay on the calling thread.
+    // Keep one result slot per input intent: duplicate addresses still execute
+    // in caller order because latest-wins semantics are observable.
     for (std::size_t index = 0; index < intents.size(); ++index) {
         auto& intent = intents[index];
         if (intent.key.kind == ArtifactKind::StaticTransaction) {
@@ -4088,83 +4805,92 @@ std::vector<ArtifactRequestResult> AsyncStateGraph::SubmitLatestIntentBatch(
             intent.requestFingerprint = CanonicalRequestFingerprint(intent.key,
                 intent.desiredRevision, intent.requirements);
         }
-        uniqueAddresses.insert(intent.key);
-        uniqueVersions.insert({ intent.key, intent.desiredRevision });
     }
-
-    const auto reserveForBatch = [](auto& container, std::size_t additional) {
-        const auto required = container.size() + additional;
-        const auto currentCapacity = static_cast<std::size_t>(
-            container.bucket_count() * container.max_load_factor());
-        if (required > currentCapacity) {
-            container.reserve((std::max)(required,
-                container.size() + container.size() / 2 + std::size_t{ 16 }));
+    auto apply = [this, intents = std::move(intents), valid = std::move(valid),
+        results = std::move(results)]() mutable {
+        RequestDeferredCleanup cleanup;
+        cleanup.Reserve(intents.size());
+        std::vector<RequestPreparedState> prepared;
+        prepared.reserve(intents.size());
+        for (const auto& intent : intents) prepared.emplace_back(intent.requirements);
+        ++m_impl->stats.intentBatches;
+        for (std::size_t index = 0; index < intents.size(); ++index) {
+            if (!valid[index]) continue;
+            auto& intent = intents[index];
+            results[index] = RequestInternal(intent.key, intent.desiredRevision,
+                std::move(intent.requirements), std::move(intent.input),
+                intent.requestFingerprint, true, true, &cleanup, &prepared[index]);
         }
+        m_impl->FlushDeferredRequestTrace(cleanup);
+        return std::move(results);
     };
-    {
-		auto reserveLock = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
-		++m_impl->stats.intentBatches;
-		reserveForBatch(m_impl->nodes, uniqueAddresses.size());
-		reserveForBatch(m_impl->versionGenerations, uniqueVersions.size());
-		reserveForBatch(m_impl->versionSignatures, uniqueVersions.size());
-	}
-	constexpr std::size_t maxMutationsPerSlice = 16;
-	constexpr auto maxMutationSlice = std::chrono::microseconds(500);
-	for (std::size_t index = 0; index < intents.size();) {
-		auto batchLock = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
-		const auto deadline = std::chrono::steady_clock::now() + maxMutationSlice;
-		std::size_t applied = 0;
-		do {
-			if (valid[index]) {
-				auto& intent = intents[index];
-				results[index] = RequestInternal(intent.key, intent.desiredRevision,
-					std::move(intent.requirements), std::move(intent.input),
-					intent.requestFingerprint, true, true, &cleanup, &prepared[index]);
-			}
-			++index;
-			++applied;
-		} while (index < intents.size() && applied < maxMutationsPerSlice &&
-			std::chrono::steady_clock::now() < deadline);
+    if (m_impl->OnDrainThread()) {
+        auto phase = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
+        auto applied = apply();
+        m_impl->PublishDirtyViews();
+        phase.Unlock();
+        m_impl->ScheduleDrain();
+        return applied;
     }
-	m_impl->FlushDeferredRequestTrace(cleanup);
-    m_impl->ScheduleDrain();
-    return results;
+    if (m_impl->shuttingDown.load(std::memory_order_acquire)) {
+        return std::vector<ArtifactRequestResult>(results.size(),
+            ArtifactRequestResult{ ArtifactRequestStatus::ShuttingDown, 0, {} });
+    }
+    auto reply = std::make_shared<std::promise<std::vector<ArtifactRequestResult>>>();
+    auto future = reply->get_future();
+    m_impl->PostMutation([impl = m_impl.get(), apply = std::move(apply), reply]() mutable {
+        auto applied = apply();
+        impl->deferredReplies.push_back([reply, applied = std::move(applied)]() mutable {
+            reply->set_value(std::move(applied));
+        });
+    });
+    return m_impl->WaitReply(future, std::vector<ArtifactRequestResult>{});
 }
 
 std::vector<ArtifactRequestResult> AsyncStateGraph::RequestBatch(
     std::vector<ArtifactRequest> requests) {
-    std::vector<ArtifactRequestResult> results;
-    results.reserve(requests.size());
-    RequestDeferredCleanup cleanup;
-    cleanup.Reserve(requests.size());
-    std::vector<RequestPreparedState> prepared;
-    prepared.reserve(requests.size());
-    for (const auto& request : requests) prepared.emplace_back(request.requirements);
-	constexpr std::size_t maxMutationsPerSlice = 64;
-	constexpr auto maxMutationSlice = std::chrono::milliseconds(1);
-	for (std::size_t index = 0; index < requests.size();) {
-		auto batchLock = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
-		const auto deadline = std::chrono::steady_clock::now() + maxMutationSlice;
-		std::size_t applied = 0;
-		do {
-			auto& request = requests[index];
-			results.push_back(RequestInternal(request.key, request.desiredRevision,
-				std::move(request.requirements), std::move(request.input),
-				request.requestFingerprint, false, true, &cleanup, &prepared[index]));
-			++index;
-			++applied;
-		} while (index < requests.size() && applied < maxMutationsPerSlice &&
-			std::chrono::steady_clock::now() < deadline);
+    auto apply = [this, requests = std::move(requests)]() mutable {
+        std::vector<ArtifactRequestResult> results;
+        results.reserve(requests.size());
+        RequestDeferredCleanup cleanup;
+        cleanup.Reserve(requests.size());
+        std::vector<RequestPreparedState> prepared;
+        prepared.reserve(requests.size());
+        for (const auto& request : requests) prepared.emplace_back(request.requirements);
+        for (std::size_t index = 0; index < requests.size(); ++index) {
+            auto& request = requests[index];
+            results.push_back(RequestInternal(request.key, request.desiredRevision,
+                std::move(request.requirements), std::move(request.input),
+                request.requestFingerprint, false, true, &cleanup, &prepared[index]));
+        }
+        m_impl->FlushDeferredRequestTrace(cleanup);
+        return results;
+    };
+    if (m_impl->OnDrainThread()) {
+        auto phase = m_impl->LockMutex(GraphMutexPhase::RequestBatch);
+        auto applied = apply();
+        m_impl->PublishDirtyViews();
+        phase.Unlock();
+        m_impl->ScheduleDrain();
+        return applied;
     }
-	m_impl->FlushDeferredRequestTrace(cleanup);
-    m_impl->ScheduleDrain();
-    return results;
+    if (m_impl->shuttingDown.load(std::memory_order_acquire)) return {};
+    auto reply = std::make_shared<std::promise<std::vector<ArtifactRequestResult>>>();
+    auto future = reply->get_future();
+    m_impl->PostMutation([impl = m_impl.get(), apply = std::move(apply), reply]() mutable {
+        auto applied = apply();
+        impl->deferredReplies.push_back([reply, applied = std::move(applied)]() mutable {
+            reply->set_value(std::move(applied));
+        });
+    });
+    return m_impl->WaitReply(future, std::vector<ArtifactRequestResult>{});
 }
 
 ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uint64_t desiredRevision,
     std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
     std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex,
-    RequestDeferredCleanup* deferredCleanup, RequestPreparedState* preparedState) {
+    RequestDeferredCleanup* deferredCleanup, RequestPreparedState* preparedState,
+    std::uint64_t preassignedGeneration, std::shared_ptr<const void> preassignedLease) {
     RequestDeferredCleanup localCleanup;
     if (!deferredCleanup) deferredCleanup = &localCleanup;
     std::optional<RequestPreparedState> localPrepared;
@@ -4183,7 +4909,7 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
     }
     ArtifactRequestResult result;
     {
-        Impl::TimedMutexLock lock(*m_impl, GraphMutexPhase::Request, !callerOwnsMutex);
+        Impl::PhaseScope phase(*m_impl, GraphMutexPhase::Request, !callerOwnsMutex);
         auto requestPhaseStarted = requestTrace
             ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const auto recordRequestPhase = [&](std::string_view phase) {
@@ -4196,10 +4922,9 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             requestTrace->Record(AsyncStateGraphTraceEventID::RequestPhase, key, desiredRevision, 0,
                 ArtifactReadiness::Missing, elapsed, { { StableTraceID(phase) } });
         };
-        const auto producer = m_impl->producers.find(key.kind);
-        if (producer != m_impl->producers.end() &&
-            producer->second.inputType != std::type_index(typeid(void)) &&
-            (!input.Valid() || input.Type() != producer->second.inputType)) {
+        const auto* producer = m_impl->FindProducer(key.kind);
+        if (producer && producer->inputType != std::type_index(typeid(void)) &&
+            (!input.Valid() || input.Type() != producer->inputType)) {
             return { ArtifactRequestStatus::TypeMismatch, 0 };
         }
         if (input.Valid() && requestFingerprint == 0) {
@@ -4214,11 +4939,67 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                 ++m_impl->stats.intentsByKind[kindIndex];
         }
         const Impl::VersionKey requestedVersion{ key, desiredRevision };
+        m_impl->CanonicalizeRequirements(requirements);
+        m_impl->CanonicalizeRequirements(preparedState->requestedRequirements);
+        m_impl->CanonicalizeRequirements(preparedState->signatureRequirements);
         auto versionGeneration = m_impl->versionGenerations.find(requestedVersion);
-        if (versionGeneration == m_impl->versionGenerations.end()) {
-            versionGeneration = m_impl->versionGenerations.emplace(
-                requestedVersion, ++m_impl->nextVersionGeneration).first;
+        const bool generationCreatedHere = versionGeneration == m_impl->versionGenerations.end();
+        if (generationCreatedHere) {
+            versionGeneration = m_impl->versionGenerations.emplace(requestedVersion,
+                preassignedGeneration != 0
+                    ? preassignedGeneration
+                    : m_impl->ReserveGeneration(requestedVersion)).first;
         }
+        // A predicted handle was already returned to the poster, so a rejection
+        // has to be observable on that version. That is only legitimate when the
+        // version is not an installed one: a conflicting recipe against a known
+        // (address, revision) shares the installed generation through the
+        // reservation table, and its handle then denotes that existing version,
+        // exactly as the synchronous status did. Tombstoning it would poison the
+        // healthy version for every other holder.
+        // Returns the generation the caller should report. It may erase the
+        // reservation for this revision, which invalidates `versionGeneration`,
+        // so callers must use the returned value rather than the iterator.
+        const auto rejectPredicted = [&](ArtifactRequestStatus status) -> std::uint64_t {
+            const auto reportedGeneration = versionGeneration->second;
+            if (preassignedGeneration == 0) return reportedGeneration;
+            if (!generationCreatedHere && preassignedGeneration == versionGeneration->second) {
+                basic_telemetry::AddCounter(
+                    "SARP.AsyncStateGraph.PostedRequestRejectedOnExistingVersion");
+                return reportedGeneration;
+            }
+            const Impl::StoredVersionKey tombstone{ key, desiredRevision, preassignedGeneration };
+            m_impl->rejectedVersions.insert_or_assign(tombstone, status);
+            m_impl->rejectedSignals.push(tombstone);
+            m_impl->MarkViewDirty(key);
+            if (generationCreatedHere) {
+                // Leave no generation behind for this revision: a retry must not
+                // inherit the tombstoned prediction through the reservation.
+                m_impl->versionGenerations.erase(versionGeneration);
+                m_impl->reservedGenerations.erase(requestedVersion);
+            }
+            basic_telemetry::AddCounter("SARP.AsyncStateGraph.PostedRequestRejected");
+            return reportedGeneration;
+        };
+        // The address already carries a generation for this revision: the poster's
+        // predicted version becomes an alias of it, so handles it already handed out
+        // (requirements, awaiters) resolve to the installed version.
+        const auto aliasPredicted = [&] {
+            if (preassignedGeneration == 0 ||
+                preassignedGeneration == versionGeneration->second) return;
+            const Impl::StoredVersionKey predictedVersion{ key, desiredRevision,
+                preassignedGeneration };
+            const Impl::StoredVersionKey canonicalVersion{ key, desiredRevision,
+                versionGeneration->second };
+            m_impl->generationAliases.insert_or_assign(predictedVersion, canonicalVersion);
+            m_impl->MarkViewDirty(key);
+            m_impl->MigrateAliasedVersion(predictedVersion, canonicalVersion);
+            basic_telemetry::AddCounter("SARP.AsyncStateGraph.PostedRequestAliased");
+        };
+        // Deliberately not called yet: aliasing a predicted version migrates the
+        // waiters registered against it onto the installed version, which would
+        // strand them if this request is then rejected. Alias only once the
+        // request is accepted (or found already desired).
         const auto traceAcceptedRequest = [&] {
             if (!requestTrace) return;
             for (const auto& requirement : requirements) {
@@ -4252,8 +5033,10 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                     requestTrace->Record(AsyncStateGraphTraceEventID::RequestConflict, key, desiredRevision,
                         versionGeneration->second, node.state);
                 }
+                const auto rejectedGeneration =
+                    rejectPredicted(ArtifactRequestStatus::ConflictingRevision);
                 return { ArtifactRequestStatus::ConflictingRevision, node.generation,
-                    { key, desiredRevision, versionGeneration->second } };
+                    { key, desiredRevision, rejectedGeneration } };
             }
             const bool stillDesired = node.desired && (
                 node.desiredRevision == desiredRevision ||
@@ -4261,12 +5044,18 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
                     return successor.revision == desiredRevision;
                 }));
             if (!stillDesired && desiredRevision < node.latestRequestedRevision) {
+                const auto rejectedGeneration =
+                    rejectPredicted(ArtifactRequestStatus::StaleRevision);
                 return { ArtifactRequestStatus::StaleRevision, node.generation,
-                    { key, desiredRevision, versionGeneration->second } };
+                    { key, desiredRevision, rejectedGeneration } };
             }
             if (stillDesired) {
-                auto versionLease = m_impl->AcquireVersionLease({ key, desiredRevision,
-                    versionGeneration->second });
+                aliasPredicted();
+                const Impl::StoredVersionKey desiredVersion{ key, desiredRevision,
+                    versionGeneration->second };
+                if (preassignedLease)
+                    m_impl->RegisterVersionLease(desiredVersion, preassignedLease);
+                auto versionLease = m_impl->AcquireVersionLease(desiredVersion);
                 if (requestTrace) {
                     requestTrace->Record(AsyncStateGraphTraceEventID::RequestAlreadyDesired, key, desiredRevision,
                         versionGeneration->second, node.state);
@@ -4279,28 +5068,35 @@ ArtifactRequestResult AsyncStateGraph::RequestInternal(ArtifactKey key, std::uin
             // recreate desired state rather than pretending that the version
             // is still desired. Preserve the immutable generation while an
             // archived copy exists; otherwise assign a new ABA generation.
-            const bool archived = std::ranges::any_of(m_impl->versions,
-                [&](const auto& entry) {
-                    return entry.first.address == key &&
-                        entry.first.revision == desiredRevision &&
-                        entry.first.generation == versionGeneration->second;
-                });
+            // The archive is keyed by (address, revision, generation), so this is
+            // a direct lookup. Scanning every archived version here made each
+            // repeated request O(all versions) while holding the graph mutex.
+            const bool archived = m_impl->versions.contains(
+                Impl::StoredVersionKey{ key, desiredRevision, versionGeneration->second });
             if (!archived) {
-                versionGeneration->second = ++m_impl->nextVersionGeneration;
+                versionGeneration->second =
+                    m_impl->nextVersionGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
+                m_impl->SetReservedGeneration(requestedVersion, versionGeneration->second);
             }
         }
         else if (node.latestRequestedRevision != 0 && desiredRevision < node.latestRequestedRevision) {
+            const auto rejectedGeneration =
+                rejectPredicted(ArtifactRequestStatus::StaleRevision);
             return { ArtifactRequestStatus::StaleRevision, node.generation,
-                { key, desiredRevision, versionGeneration->second } };
+                { key, desiredRevision, rejectedGeneration } };
         }
-        auto versionLease = m_impl->AcquireVersionLease({ key, desiredRevision,
-            versionGeneration->second });
+        aliasPredicted();
+        const Impl::StoredVersionKey installedVersion{ key, desiredRevision,
+            versionGeneration->second };
+        if (preassignedLease) m_impl->RegisterVersionLease(installedVersion, preassignedLease);
+        auto versionLease = m_impl->AcquireVersionLease(installedVersion);
         if (knownSignature == m_impl->versionSignatures.end()) {
             m_impl->versionSignatures.emplace(requestedVersion, Impl::VersionSignature{
                 requestFingerprint, input.Type(),
                 std::move(preparedState->signatureRequirements) });
         }
         node.latestRequestedRevision = desiredRevision;
+        m_impl->MarkViewDirty(key);
         ++m_impl->stats.requests;
 
         const bool activeVersionExists = node.desiredRevision != 0;
@@ -4469,15 +5265,15 @@ bool AsyncStateGraph::Invalidate(ArtifactKey key, std::uint64_t desiredRevision)
     if (auto session = m_impl->AcquireTrace()) {
         session->Record(AsyncStateGraphTraceEventID::Invalidated, key, desiredRevision);
     }
-    std::vector<ArtifactRequirement> requirements;
-    ArtifactPayload input;
-    bool foundNode = false;
-    std::uint64_t requestFingerprint = 0;
-    {
-        auto lock = m_impl->LockMutex(GraphMutexPhase::Invalidate);
-        const auto found = m_impl->nodes.find(key);
-        foundNode = found != m_impl->nodes.end();
-        if (foundNode) {
+    if (m_impl->shuttingDown.load(std::memory_order_acquire)) return false;
+    // Posted: the re-request is built from the node's current recipe on the
+    // drain, where that recipe is stable. The return value only reports that the
+    // invalidation was accepted for posting.
+    m_impl->PostMutation([self = this, impl = m_impl.get(), key, desiredRevision] {
+        std::vector<ArtifactRequirement> requirements;
+        ArtifactPayload input;
+        std::uint64_t requestFingerprint = 0;
+        if (const auto found = impl->nodes.find(key); found != impl->nodes.end()) {
             if (!found->second.successors.empty()) {
                 const auto& latest = found->second.successors.back();
                 requirements = latest.requirements;
@@ -4489,93 +5285,33 @@ bool AsyncStateGraph::Invalidate(ArtifactKey key, std::uint64_t desiredRevision)
                 requestFingerprint = found->second.requestFingerprint;
             }
         }
-        ++m_impl->stats.invalidations;
-    }
-    return static_cast<bool>(Request(key, desiredRevision,
-        foundNode ? std::move(requirements) : std::vector<ArtifactRequirement>{}, std::move(input),
-        requestFingerprint));
+        ++impl->stats.invalidations;
+        AsyncStateGraph::RequestDeferredCleanup cleanup;
+        cleanup.Reserve(1);
+        AsyncStateGraph::RequestPreparedState prepared(requirements);
+        (void)self->RequestInternal(key, desiredRevision, std::move(requirements), std::move(input),
+            requestFingerprint, false, true, &cleanup, &prepared);
+        impl->FlushDeferredRequestTrace(cleanup);
+    });
+    return true;
 }
 
 void AsyncStateGraph::Cancel(ArtifactKey key) {
     if (auto session = m_impl->AcquireTrace()) {
         session->Record(AsyncStateGraphTraceEventID::Cancelled, key);
     }
-	std::shared_ptr<const GpuSubmissionSet> cancellation;
-    {
-        auto lock = m_impl->LockMutex(GraphMutexPhase::CancelApply);
-        const auto found = m_impl->nodes.find(key);
-        if (found == m_impl->nodes.end()) return;
-        m_impl->RemoveWaiterEdges(found->second);
-        ++found->second.generation;
-		m_impl->SetDesired(found->second, false);
-		if (const auto archived = m_impl->versionsByAddress.find(key);
-			archived != m_impl->versionsByAddress.end()) {
-			for (const auto& [_, version] : archived->second)
-				m_impl->reclaimQueue.push(version);
-		}
-        m_impl->ClearSuccessors(found->second);
-        found->second.retryAt.reset();
-        if ((found->second.state == ArtifactReadiness::CpuReady ||
-             found->second.state == ArtifactReadiness::UploadSubmitted) &&
-            found->second.waitingGpuSubmissions &&
-            m_impl->stats.gpuWaiting) --m_impl->stats.gpuWaiting;
-		cancellation = std::move(found->second.waitingGpuSubmissions);
-        found->second.gpuSubmissions.reset();
-        found->second.lease.reset();
-        m_impl->SetState(found->second, ArtifactReadiness::Cancelled);
-        ++m_impl->stats.cancelled;
-    }
-	if (cancellation) (void)cancellation->Cancel();
-    m_impl->ScheduleDrain();
+    m_impl->PostMutation([impl = m_impl.get(), key] { impl->CancelLocked(key); });
 }
 
 void AsyncStateGraph::Release(ArtifactKey key) {
     if (auto session = m_impl->AcquireTrace()) {
         session->Record(AsyncStateGraphTraceEventID::Released, key);
     }
-	std::shared_ptr<const GpuSubmissionSet> cancellation;
-    {
-        auto lock = m_impl->LockMutex(GraphMutexPhase::CancelApply);
-        const auto found = m_impl->nodes.find(key);
-        if (found == m_impl->nodes.end()) return;
-        auto& node = found->second;
-		if (const auto archived = m_impl->versionsByAddress.find(key);
-			archived != m_impl->versionsByAddress.end()) {
-			for (const auto& [_, version] : archived->second) {
-				m_impl->reclaimQueue.push(version);
-			}
-		}
-        m_impl->RemoveWaiterEdges(node);
-        ++node.generation;
-		m_impl->SetDesired(node, false);
-        m_impl->ClearSuccessors(node);
-        node.retryAt.reset();
-        if ((node.state == ArtifactReadiness::CpuReady ||
-             node.state == ArtifactReadiness::UploadSubmitted) && node.waitingGpuSubmissions &&
-            m_impl->stats.gpuWaiting) --m_impl->stats.gpuWaiting;
-		cancellation = std::move(node.waitingGpuSubmissions);
-        node.gpuSubmissions.reset();
-        node.lease.reset();
-        m_impl->SetState(node, ArtifactReadiness::Cancelled);
-        ++m_impl->stats.cancelled;
-
-        const auto dependents = m_impl->waiters.find(key);
-        if (!node.buildInFlight &&
-			(dependents == m_impl->waiters.end() || dependents->second.empty())) {
-			const auto stateIndex = static_cast<std::size_t>(node.state);
-			if (stateIndex < m_impl->nodeStateCounts.size() &&
-				m_impl->nodeStateCounts[stateIndex] != 0)
-				--m_impl->nodeStateCounts[stateIndex];
-			m_impl->nodes.erase(found);
-		}
-    }
-	if (cancellation) (void)cancellation->Cancel();
-    m_impl->ScheduleDrain();
+    m_impl->PostMutation([impl = m_impl.get(), key] { impl->ReleaseLocked(key); });
 }
 
 void AsyncStateGraph::ReleaseBatch(std::span<const ArtifactKey> keys) {
     if (keys.empty()) return;
-
     std::vector<ArtifactKey> uniqueKeys;
     uniqueKeys.reserve(keys.size());
     std::unordered_set<ArtifactKey, ArtifactKey::Hasher> seen;
@@ -4587,150 +5323,35 @@ void AsyncStateGraph::ReleaseBatch(std::span<const ArtifactKey> keys) {
         for (const auto& key : uniqueKeys)
             session->Record(AsyncStateGraphTraceEventID::Released, key);
     }
-
-    std::vector<std::shared_ptr<const GpuSubmissionSet>> cancellations;
-    cancellations.reserve(uniqueKeys.size());
-    {
-        auto lock = m_impl->LockMutex(GraphMutexPhase::CancelApply);
-        for (const auto& key : uniqueKeys) {
-            const auto found = m_impl->nodes.find(key);
-            if (found == m_impl->nodes.end()) continue;
-            auto& node = found->second;
-			if (const auto archived = m_impl->versionsByAddress.find(key);
-				archived != m_impl->versionsByAddress.end()) {
-				for (const auto& [_, version] : archived->second) {
-					m_impl->reclaimQueue.push(version);
-				}
-			}
-            m_impl->RemoveWaiterEdges(node);
-            ++node.generation;
-			m_impl->SetDesired(node, false);
-            m_impl->ClearSuccessors(node);
-            node.retryAt.reset();
-            if ((node.state == ArtifactReadiness::CpuReady ||
-                 node.state == ArtifactReadiness::UploadSubmitted) &&
-                node.waitingGpuSubmissions && m_impl->stats.gpuWaiting)
-                --m_impl->stats.gpuWaiting;
-            if (node.waitingGpuSubmissions)
-                cancellations.push_back(std::move(node.waitingGpuSubmissions));
-            node.gpuSubmissions.reset();
-            node.lease.reset();
-            m_impl->SetState(node, ArtifactReadiness::Cancelled);
-            ++m_impl->stats.cancelled;
-
-            const auto dependents = m_impl->waiters.find(key);
-            if (!node.buildInFlight &&
-				(dependents == m_impl->waiters.end() || dependents->second.empty())) {
-				const auto stateIndex = static_cast<std::size_t>(node.state);
-				if (stateIndex < m_impl->nodeStateCounts.size() &&
-					m_impl->nodeStateCounts[stateIndex] != 0)
-					--m_impl->nodeStateCounts[stateIndex];
-				m_impl->nodes.erase(found);
-			}
-        }
-    }
-    for (const auto& cancellation : cancellations)
-        if (cancellation) (void)cancellation->Cancel();
-    m_impl->ScheduleDrain();
+    m_impl->PostMutation([impl = m_impl.get(), uniqueKeys = std::move(uniqueKeys)] {
+        for (const auto& key : uniqueKeys) impl->ReleaseLocked(key);
+    });
 }
 
 void AsyncStateGraph::MarkPublished(ArtifactKey key, std::uint64_t revision) {
     if (auto session = m_impl->AcquireTrace()) {
         session->Record(AsyncStateGraphTraceEventID::Published, key, revision, 0, ArtifactReadiness::Published);
     }
-	std::vector<Impl::StoredVersionKey> publishedVersions;
-    auto lock = m_impl->LockMutex(GraphMutexPhase::MarkPublishedRevision);
-	if (const auto address = m_impl->versionsByAddress.find(key);
-		address != m_impl->versionsByAddress.end()) {
-		for (auto entry = address->second.lower_bound({ revision, 0 });
-			entry != address->second.end() && entry->first.first == revision; ++entry) {
-			const auto archived = m_impl->versions.find(entry->second);
-			if (archived == m_impl->versions.end() ||
-				(archived->second.readiness != ArtifactReadiness::GpuReady &&
-				 archived->second.readiness != ArtifactReadiness::Published)) continue;
-			if (archived->second.readiness != ArtifactReadiness::Published) {
-				archived->second.readiness = ArtifactReadiness::Published;
-				publishedVersions.push_back(entry->second);
-			}
-			m_impl->reclaimQueue.push(entry->second);
-		}
-	}
-    const auto found = m_impl->nodes.find(key);
-    if (found != m_impl->nodes.end() && found->second.producedRevision == revision &&
-        (found->second.state == ArtifactReadiness::UploadSubmitted ||
-         found->second.state == ArtifactReadiness::GpuReady ||
-         found->second.state == ArtifactReadiness::Published)) {
-        found->second.published = true;
-        if (found->second.state == ArtifactReadiness::GpuReady) {
-            m_impl->SetState(found->second, ArtifactReadiness::Published);
-        }
-        m_impl->StoreVersion(found->second);
-        m_impl->WakeWaiters(key);
-    }
-	lock.Unlock();
-	for (const auto& version : publishedVersions) m_impl->publishedSignals.push(version);
-	m_impl->ScheduleDrain();
+    m_impl->PostMutation([impl = m_impl.get(), key, revision] {
+        impl->MarkPublishedRevisionLocked(key, revision);
+    });
 }
 
 void AsyncStateGraph::MarkPublished(ArtifactVersionID version) {
-    const auto snapshot = Snapshot(version);
-    if (snapshot.readiness == ArtifactReadiness::Missing ||
-        snapshot.generation != version.generation) return;
-    MarkPublished(version.address, version.revision);
+    if (!version) return;
+    m_impl->PostMutation([impl = m_impl.get(), version] { impl->MarkPublishedLocked(version); });
 }
 
 void AsyncStateGraph::MarkPublished(std::span<const ArtifactVersionID> versions) {
     if (versions.empty()) return;
-    auto lock = m_impl->LockMutex(GraphMutexPhase::MarkPublishedVersions);
-    for (const auto& version : versions) {
-        if (!version) continue;
-        if (auto archived = m_impl->versions.find({ version.address, version.revision,
-                version.generation });
-            archived != m_impl->versions.end() &&
-            archived->second.generation == version.generation &&
-            (archived->second.readiness == ArtifactReadiness::UploadSubmitted ||
-             archived->second.readiness == ArtifactReadiness::GpuReady ||
-             archived->second.readiness == ArtifactReadiness::Published)) {
-			if (archived->second.readiness != ArtifactReadiness::Published) {
-				archived->second.readiness = ArtifactReadiness::Published;
-				m_impl->publishedSignals.push({ version.address, version.revision, version.generation });
-			}
-            m_impl->reclaimQueue.push({ version.address, version.revision, version.generation });
-        }
-        const auto found = m_impl->nodes.find(version.address);
-        if (found == m_impl->nodes.end() ||
-            found->second.producedRevision != version.revision ||
-            found->second.versionGeneration != version.generation)
-            continue;
-        auto& node = found->second;
-        if (node.state != ArtifactReadiness::UploadSubmitted &&
-            node.state != ArtifactReadiness::GpuReady &&
-            node.state != ArtifactReadiness::Published) continue;
-        node.published = true;
-        if (node.state == ArtifactReadiness::GpuReady) {
-            m_impl->SetState(node, ArtifactReadiness::Published);
-        }
-        m_impl->StoreVersion(node);
-        m_impl->WakeWaiters(version.address);
-    }
-    m_impl->ScheduleDrain();
+    m_impl->PostMutation([impl = m_impl.get(),
+        versions = std::vector<ArtifactVersionID>(versions.begin(), versions.end())] {
+        for (const auto& version : versions) impl->MarkPublishedLocked(version);
+    });
 }
 
 void AsyncStateGraph::PumpGpuCompletions() {
-    std::vector<ArtifactKey> pending;
-    {
-        auto lock = m_impl->LockMutex(GraphMutexPhase::GpuCompletionScan);
-        pending.reserve(m_impl->nodes.size());
-        for (const auto& [key, node] : m_impl->nodes) {
-            if ((node.state == ArtifactReadiness::CpuReady ||
-                 node.state == ArtifactReadiness::UploadSubmitted) &&
-                node.waitingGpuSubmissions) {
-                pending.push_back(key);
-            }
-        }
-    }
-	for (const auto key : pending) m_impl->gpuSignals.push({ key });
-    m_impl->ScheduleDrain();
+    m_impl->PostMutation([impl = m_impl.get()] { impl->PumpGpuCompletionsLocked(); });
 }
 
 std::uint64_t AsyncStateGraph::AllocateSuspensionIdentity() noexcept {
@@ -4743,31 +5364,9 @@ std::uint64_t AsyncStateGraph::AllocateSuspensionIdentity() noexcept {
 
 void AsyncStateGraph::NotifySuspensionSatisfied(std::uint64_t identity) {
     if (identity == 0) return;
-    {
-        auto lock = m_impl->LockMutex(GraphMutexPhase::SuspensionSatisfied);
-        const auto registered = m_impl->suspendedByIdentity.find(identity);
-        if (registered == m_impl->suspendedByIdentity.end()) {
-            // Level-triggered handshake: completion is retained if it races
-            // ahead of Suspend() registration.
-            m_impl->satisfiedSuspensions.insert(identity);
-        } else {
-            const auto version = registered->second;
-            m_impl->suspendedByIdentity.erase(registered);
-            const auto found = m_impl->nodes.find(version.address);
-            if (found != m_impl->nodes.end() &&
-                found->second.desiredRevision == version.revision &&
-                found->second.generation == version.generation &&
-                found->second.suspension &&
-                found->second.suspension->identity == identity) {
-                found->second.suspension.reset();
-                if (auto session = m_impl->AcquireTrace()) {
-                    session->Record(AsyncStateGraphTraceEventID::SuspensionSatisfied, version.address,
-                        version.revision, version.generation, found->second.state);
-                }
-                m_impl->QueueNode(found->second);
-            }
-        }
-    }
+    // Posted: producers signalling capacity or an external operation never wait
+    // on the graph's control mutex. The handshake stays level-triggered.
+    m_impl->postedSuspensions.push(identity);
     m_impl->ScheduleDrain();
 }
 
@@ -4777,48 +5376,36 @@ std::function<void(std::uint64_t)> AsyncStateGraph::MakeSuspensionNotifier() con
         if (identity == 0) return;
         const auto impl = weak.lock();
         if (!impl) return;
-        {
-            auto lock = impl->LockMutex(GraphMutexPhase::SuspensionSatisfied);
-            const auto registered = impl->suspendedByIdentity.find(identity);
-            if (registered == impl->suspendedByIdentity.end()) {
-                impl->satisfiedSuspensions.insert(identity);
-            } else {
-                const auto version = registered->second;
-                impl->suspendedByIdentity.erase(registered);
-                const auto found = impl->nodes.find(version.address);
-                if (found != impl->nodes.end() &&
-                    found->second.desiredRevision == version.revision &&
-                    found->second.generation == version.generation &&
-                    found->second.suspension &&
-                    found->second.suspension->identity == identity) {
-                    found->second.suspension.reset();
-                    impl->QueueNode(found->second);
-                }
-            }
-        }
+        impl->postedSuspensions.push(identity);
         impl->ScheduleDrain();
     };
 }
 
 void AsyncStateGraph::SetReadyCallback(std::function<void(const ArtifactSnapshot&)> callback) {
-    auto lock = m_impl->LockMutex(GraphMutexPhase::ReadyCallbackSet);
-    if (callback) m_impl->readyCallbacks.insert_or_assign(0, std::move(callback));
-    else m_impl->readyCallbacks.erase(0);
+    auto shared = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(std::move(callback));
+    m_impl->PostMutation([impl = m_impl.get(), shared] {
+        if (*shared) impl->readyCallbacks.insert_or_assign(0, std::move(*shared));
+        else impl->readyCallbacks.erase(0);
+    });
 }
 
 std::uint64_t AsyncStateGraph::AddReadyCallback(
     std::function<void(const ArtifactSnapshot&)> callback) {
     if (!callback) return 0;
-    auto lock = m_impl->LockMutex(GraphMutexPhase::ReadyCallbackAdd);
-    const auto subscription = ++m_impl->nextReadyCallback;
-    m_impl->readyCallbacks.emplace(subscription, std::move(callback));
+    const auto subscription =
+        m_impl->nextReadyCallback.fetch_add(1, std::memory_order_relaxed) + 1;
+    auto shared = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(std::move(callback));
+    m_impl->PostMutation([impl = m_impl.get(), subscription, shared] {
+        impl->readyCallbacks.emplace(subscription, std::move(*shared));
+    });
     return subscription;
 }
 
 void AsyncStateGraph::RemoveReadyCallback(std::uint64_t subscription) {
     if (subscription == 0) return;
-    auto lock = m_impl->LockMutex(GraphMutexPhase::ReadyCallbackRemove);
-    m_impl->readyCallbacks.erase(subscription);
+    m_impl->PostMutation([impl = m_impl.get(), subscription] {
+        impl->readyCallbacks.erase(subscription);
+    });
 }
 
 ArtifactObservation AsyncStateGraph::ObserveWithSnapshot(ArtifactKey address,
@@ -4830,8 +5417,18 @@ ArtifactObservation AsyncStateGraph::ObserveWithSnapshot(ArtifactKey address,
             const auto next = sequence->fetch_add(1, std::memory_order_acq_rel) + 1;
             if (callback) callback(next, snapshot);
         });
-    // Register first, then sample. An event racing between these operations is
-    // observed either by the callback or by this level snapshot (usually both).
+    // The callback is installed by the drain. So that no transition between this
+    // call and the installation is lost, the drain re-delivers the address's
+    // current snapshot through the ready path once at install time; the snapshot
+    // returned here is advisory.
+    m_impl->PostMutation([impl = m_impl.get(), address, subscription] {
+        if (!impl->readyCallbacks.contains(subscription)) return;
+        const auto found = impl->nodes.find(address);
+        if (found == impl->nodes.end()) return;
+        auto level = impl->MakeSnapshot(found->second);
+        level.lease.reset();
+        impl->propagatedReady.push_back(std::move(level));
+    });
     auto snapshot = Snapshot(address);
     if (auto session = m_impl->AcquireTrace()) {
         session->Record(AsyncStateGraphTraceEventID::ObservationRegistered, address, snapshot.revision,
@@ -4843,9 +5440,9 @@ ArtifactObservation AsyncStateGraph::ObserveWithSnapshot(ArtifactKey address,
         [weak, subscription] {
             if (subscription == 0) return;
             if (const auto graph = weak.lock()) {
-                auto lock = graph->LockMutex(GraphMutexPhase::ObservationRemove);
-                graph->readyCallbacks.erase(subscription);
-                lock.Unlock();
+                graph->PostMutation([impl = graph.get(), subscription] {
+                    impl->readyCallbacks.erase(subscription);
+                });
                 if (auto session = graph->AcquireTrace()) {
                     session->Record(AsyncStateGraphTraceEventID::ObservationCancelled, {}, 0, 0,
                         ArtifactReadiness::Missing, 0,
@@ -4874,9 +5471,9 @@ ArtifactObservation AsyncStateGraph::ObserveKind(ArtifactKind kind,
 		[weak, subscription] {
 			if (subscription == 0) return;
 			if (const auto graph = weak.lock()) {
-				auto lock = graph->LockMutex(GraphMutexPhase::ObservationRemove);
-				graph->readyCallbacks.erase(subscription);
-				lock.Unlock();
+				graph->PostMutation([impl = graph.get(), subscription] {
+					impl->readyCallbacks.erase(subscription);
+				});
 				if (auto session = graph->AcquireTrace()) {
 					session->Record(AsyncStateGraphTraceEventID::ObservationCancelled, {}, 0, 0,
 						ArtifactReadiness::Missing, 0,
@@ -4892,133 +5489,117 @@ ArtifactAwaiter AsyncStateGraph::AwaitExact(ArtifactVersionHandle handle,
 	std::function<void(const ArtifactSnapshot&)> continuation) {
 	if (!handle.version || !continuation ||
 		m_impl->shuttingDown.load(std::memory_order_acquire)) return {};
-	ArtifactSnapshot snapshot;
-	std::uint64_t subscription = 0;
-	bool dispatchNow = false;
-	{
-		auto lock = m_impl->LockMutex(GraphMutexPhase::ExactWaiterRegister);
-		snapshot = m_impl->SnapshotExactLocked(handle.version);
-		const bool terminal = snapshot.readiness == ArtifactReadiness::Failed ||
-			snapshot.readiness == ArtifactReadiness::Cancelled ||
-			snapshot.readiness == ArtifactReadiness::Superseded;
-		dispatchNow = terminal || ArtifactReachedMilestone(snapshot.readiness, milestone);
-		if (!dispatchNow) {
-			subscription = ++m_impl->nextExactWaiter;
-			m_impl->exactWaiters[{ handle.version.address, handle.version.revision,
-				handle.version.generation }].push_back({
-				subscription, handle.version, milestone, lane, domain,
-					std::move(continuation), std::move(handle.lease) });
-			++m_impl->exactWaiterCount;
-		}
-	}
-	if (dispatchNow) {
-		if (auto session = m_impl->AcquireTrace()) {
-			session->Record(AsyncStateGraphTraceEventID::ExactWaitSatisfied, handle.version.address,
-				handle.version.revision, handle.version.generation, snapshot.readiness,
-				0, { { 0, 1 } });
-		}
-		auto callback = std::make_shared<std::function<void(const ArtifactSnapshot&)>>(
-			std::move(continuation));
-		const bool submitted = m_impl->scheduler.SubmitCpu(m_impl->scope, lane, domain,
-			"AsyncStateGraph::AwaitExactReady",
-			[callback, snapshot](const TaskContext& context) {
-				if (!context.StopRequested()) (*callback)(snapshot);
-			});
-		if (!submitted) (*callback)(snapshot);
-		return { 0, std::move(snapshot), {} };
-	}
+	// Registration is posted to the graph control drain instead of taking the
+	// control mutex. It stays a correctness primitive because registration is
+	// keyed by immutable version: the drain either finds the milestone already
+	// reached and dispatches, or installs the waiter before any later transition
+	// of that version is applied. The snapshot returned here is advisory.
+	const auto subscription =
+		m_impl->nextPostedAwaitSubscription.fetch_add(1, std::memory_order_relaxed) + 1;
+	Impl::PostedAwaitOperation operation;
+	operation.subscription = subscription;
+	operation.version = handle.version;
+	operation.milestone = milestone;
+	operation.lane = lane;
+	operation.domain = domain;
+	operation.continuation = std::move(continuation);
+	operation.lease = handle.lease;
+	m_impl->postedAwaits.push(std::move(operation));
+	m_impl->ScheduleDrain();
 	if (auto session = m_impl->AcquireTrace()) {
 		session->Record(AsyncStateGraphTraceEventID::ExactWaitRegistered, handle.version.address,
-			handle.version.revision, handle.version.generation, snapshot.readiness,
+			handle.version.revision, handle.version.generation, ArtifactReadiness::Missing,
 			0, { { subscription, static_cast<unsigned>(milestone) } });
 	}
 	auto weak = std::weak_ptr<Impl>(m_impl);
-	return { subscription, std::move(snapshot), [weak, subscription, version = handle.version] {
+	return { subscription, {}, [weak, subscription, version = handle.version] {
 		if (subscription == 0) return;
 		if (const auto graph = weak.lock()) {
-			auto lock = graph->LockMutex(GraphMutexPhase::ExactWaiterRemove);
-			const Impl::StoredVersionKey key{
-				version.address, version.revision, version.generation };
-			const auto found = graph->exactWaiters.find(key);
-			if (found == graph->exactWaiters.end()) return;
-			const auto removed = std::erase_if(found->second,
-				[subscription](const Impl::ExactWaiter& waiter) {
-					return waiter.subscription == subscription;
-				});
-			if (removed != 0 && graph->exactWaiterCount != 0)
-				--graph->exactWaiterCount;
-			if (found->second.empty()) graph->exactWaiters.erase(found);
-			lock.Unlock();
+			Impl::PostedAwaitOperation cancellation;
+			cancellation.subscription = subscription;
+			cancellation.version = version;
+			cancellation.cancel = true;
+			graph->postedAwaits.push(std::move(cancellation));
+			graph->ScheduleDrain();
 			if (auto session = graph->AcquireTrace()) {
 				session->Record(AsyncStateGraphTraceEventID::ExactWaitCancelled, version.address,
 					version.revision, version.generation, ArtifactReadiness::Missing,
 					0, { { subscription } });
 			}
-			graph->ScheduleDrain();
 		}
 	} };
 }
 
 ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactKey key) const {
-    auto lock = m_impl->LockMutex(GraphMutexPhase::Snapshot);
-    const auto found = m_impl->nodes.find(key);
-    return found == m_impl->nodes.end() ? ArtifactSnapshot{ key } : m_impl->MakeSnapshot(found->second);
+    const auto view = m_impl->View(key);
+    return view ? view->current : ArtifactSnapshot{ key };
 }
 
 ArtifactSnapshot AsyncStateGraph::Snapshot(ArtifactVersionID version) const {
-    auto lock = m_impl->LockMutex(GraphMutexPhase::Snapshot);
-	return m_impl->SnapshotExactLocked(version);
+    return m_impl->SnapshotFromView(version);
 }
 
 ArtifactDiagnostic AsyncStateGraph::Diagnose(ArtifactKey key) const {
-    auto lock = m_impl->LockMutex(GraphMutexPhase::Diagnose);
-    auto diagnoseTrace = m_impl->AcquireTrace();
-    auto phaseStarted = diagnoseTrace
-        ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    const auto recordPhase = [&](std::string_view phase) {
-        if (!diagnoseTrace) return;
-        const auto now = std::chrono::steady_clock::now();
-        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-            now - phaseStarted).count();
-        phaseStarted = now;
-        if (elapsed < 2'000) return;
-        diagnoseTrace->Record(AsyncStateGraphTraceEventID::DiagnosePhase, key, 0, 0, ArtifactReadiness::Missing,
-            elapsed, { { StableTraceID(phase) } });
-    };
     ArtifactDiagnostic result;
-    const auto found = m_impl->nodes.find(key);
-    if (found == m_impl->nodes.end()) { result.artifact.key = key; return result; }
-    const auto& node = found->second;
-    result.artifact = m_impl->MakeSnapshot(node);
-    result.desiredRevision = node.latestRequestedRevision;
-    result.error = node.error;
+    const auto view = m_impl->View(key);
+    if (!view) { result.artifact.key = key; return result; }
+    result.artifact = view->current;
+    result.desiredRevision = view->latestRequestedRevision;
+    result.error = view->error;
     result.stateAge = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - node.stateSince);
-    for (const auto& requirement : node.requirements) {
-        if (!m_impl->DiagnosticRequirementSatisfied(node, requirement) && requirement.policy != DependencyPolicy::Optional)
-            result.blockers.push_back(requirement);
+        std::chrono::steady_clock::now() - view->stateSince);
+    if (view->requirements) {
+        for (std::size_t index = 0; index < view->requirements->size(); ++index) {
+            const auto& requirement = (*view->requirements)[index];
+            const bool satisfied = index < view->blockers.size()
+                ? view->blockers[index].second : true;
+            if (!satisfied && requirement.policy != DependencyPolicy::Optional)
+                result.blockers.push_back(requirement);
+        }
     }
-    recordPhase("collect_direct_blockers");
+    // Walk the blocker chain across published views; an address that is not
+    // published has no view and terminates the chain.
     std::unordered_set<ArtifactKey, ArtifactKey::Hasher> visited;
-    m_impl->AppendBlockerChain(key, visited, result.blockerChain);
-    recordPhase("append_blocker_chain");
+    std::ostringstream chain;
+    auto current = key;
+    for (unsigned depth = 0; depth < 32; ++depth) {
+        if (!visited.insert(current).second) break;
+        const auto node = m_impl->View(current);
+        if (!node) break;
+        if (depth != 0) chain << " <- ";
+        chain << static_cast<unsigned>(current.kind) << ':' << current.primaryID << ':'
+            << current.variantID << " rev " << node->current.revision << '/'
+            << node->latestRequestedRevision << " state "
+            << static_cast<unsigned>(node->current.readiness);
+        std::optional<ArtifactKey> next;
+        for (std::size_t index = 0; index < node->blockers.size(); ++index) {
+            if (node->blockers[index].second) continue;
+            if (node->requirements && index < node->requirements->size() &&
+                (*node->requirements)[index].policy == DependencyPolicy::Optional) continue;
+            next = node->blockers[index].first;
+            break;
+        }
+        if (!next) break;
+        current = *next;
+    }
+    result.blockerChain = chain.str();
     return result;
+}
+
+std::uint64_t AsyncStateGraph::DesiredRevision(ArtifactKey key) const {
+    const auto view = m_impl->View(key);
+    return view ? view->latestRequestedRevision : 0;
 }
 
 AsyncStateGraphStats AsyncStateGraph::Stats() const {
-    auto lock = m_impl->LockMutex(GraphMutexPhase::Stats);
-    auto result = m_impl->stats;
-    result.archivedVersions = m_impl->versions.size();
-    result.reclaimedVersions = m_impl->reclaimedVersions;
-	result.stateCounts = m_impl->nodeStateCounts;
-    return result;
+    const auto published = m_impl->publishedStats.load(std::memory_order_acquire);
+    return published ? *published : AsyncStateGraphStats{};
 }
 
 std::uint64_t AsyncStateGraph::Outstanding(ArtifactKind kind) const {
-    auto lock = m_impl->LockMutex(GraphMutexPhase::Outstanding);
-	const auto index = static_cast<std::size_t>(kind);
-	return index < m_impl->outstandingByKind.size()
-		? m_impl->outstandingByKind[index] : 0;
+    const auto index = static_cast<std::size_t>(kind);
+    return index < kArtifactKindCount
+        ? m_impl->publishedOutstandingByKind[index].load(std::memory_order_relaxed) : 0;
 }
 
 void AsyncStateGraph::StartTrace(AsyncStateGraphTraceConfig config) {
@@ -5040,13 +5621,12 @@ bool AsyncStateGraph::TraceActive() const {
 }
 
 void AsyncStateGraph::SetOwnerThread() {
-    if (!m_impl) return;
-    m_impl->ownerThreadHash.store(std::hash<std::thread::id>{}(std::this_thread::get_id()),
-        std::memory_order_relaxed);
+    // Retained for source compatibility. The graph has no control mutex for the
+    // renderer owner thread to contend on any more, so there is nothing to mark.
 }
 
 std::uint64_t AsyncStateGraph::OwnerThreadLocks() const {
-    return m_impl ? m_impl->ownerThreadLocks.load(std::memory_order_relaxed) : 0;
+    return 0;
 }
 
 AsyncStateGraphTraceReport AsyncStateGraph::StopTraceAndWriteReport(
@@ -5089,37 +5669,32 @@ void AsyncStateGraph::TraceEvent(AsyncStateGraphTraceEventID event, ArtifactAddr
 }
 
 void AsyncStateGraph::WaitIdle() const {
-    if (!m_impl) return;
-    // Tests, shutdown, and explicit drains define idle as no CPU graph work;
-    // submitted GPU versions remain valid schedulable artifacts. Temporarily
-    // stop the recovery timer so an intentionally incomplete timeline does not
-    // make WaitIdle wait for the GPU.
+    // A retry deadline is the only thing that keeps the graph busy without a
+    // runnable task. The drain publishes the earliest one, so waiting needs no
+    // access to graph state.
     m_impl->pauseGpuRecovery.store(true, std::memory_order_release);
-	for (;;) {
-		m_impl->scope.Wait();
-		std::optional<std::chrono::steady_clock::duration> retryDelay;
-		{
-			auto lock = m_impl->LockMutex(GraphMutexPhase::WaitIdle);
-			const auto now = std::chrono::steady_clock::now();
-			for (const auto& [_, node] : m_impl->nodes) {
-				if (!node.retryAt) continue;
-				const auto remaining = *node.retryAt > now
-					? *node.retryAt - now : std::chrono::steady_clock::duration::zero();
-				if (!retryDelay || remaining < *retryDelay) retryDelay = remaining;
-			}
-		}
-		if (!retryDelay) break;
-		if (*retryDelay > std::chrono::steady_clock::duration::zero())
-			std::this_thread::sleep_for(*retryDelay);
-		m_impl->ScheduleDrain();
-	}
-    m_impl->pauseGpuRecovery.store(false, std::memory_order_release);
-    bool resumeRecovery = false;
-    {
-        auto lock = m_impl->LockMutex(GraphMutexPhase::RecoveryResume);
-        resumeRecovery = !m_impl->gpuRecovery.empty();
+    for (;;) {
+        m_impl->scope.Wait();
+        const auto deadlineMicros =
+            m_impl->publishedRetryDeadlineMicros.load(std::memory_order_acquire);
+        if (deadlineMicros == 0) break;
+        const auto deadline = std::chrono::steady_clock::time_point(
+            std::chrono::microseconds(deadlineMicros));
+        const auto now = std::chrono::steady_clock::now();
+        if (deadline > now) std::this_thread::sleep_for(deadline - now);
+        m_impl->ScheduleDrain();
+        // The drain clears the deadline once the retry is queued; if it does not
+        // change, the next iteration observes the same value and retries again,
+        // which is the pre-existing behaviour of this loop.
+        if (m_impl->publishedRetryDeadlineMicros.load(std::memory_order_acquire) ==
+            deadlineMicros) {
+            m_impl->scope.Wait();
+            if (m_impl->publishedRetryDeadlineMicros.load(std::memory_order_acquire) ==
+                deadlineMicros) break;
+        }
     }
-    if (resumeRecovery) m_impl->ScheduleDrain();
+    m_impl->pauseGpuRecovery.store(false, std::memory_order_release);
+    m_impl->ScheduleDrain();
 }
 
 void AsyncStateGraph::Shutdown() {
@@ -5138,6 +5713,16 @@ void AsyncStateGraph::Shutdown() {
         spdlog::error("AsyncStateGraph shutdown observed unknown task failure");
     }
     auto lock = m_impl->LockMutex(GraphMutexPhase::Shutdown);
+    // The drain is stopped: nothing queued will be applied. Fail synchronous
+    // callers still waiting for an answer instead of leaving them blocked.
+    {
+        Impl::PostedRequest discarded;
+        while (m_impl->postedIntents.try_pop(discarded)) {
+            if (discarded.reply)
+                discarded.reply->set_value({ ArtifactRequestStatus::ShuttingDown, 0 });
+        }
+        m_impl->FlushDeferredReplies();
+    }
     for (auto& [_, node] : m_impl->nodes) {
         if (node.waitingGpuSubmissions) (void)node.waitingGpuSubmissions->Cancel();
     }

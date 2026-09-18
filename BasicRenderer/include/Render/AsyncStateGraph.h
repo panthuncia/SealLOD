@@ -725,6 +725,15 @@ public:
     // order by the graph control drain; a sibling posted in the same batch is
     // referenced by (address, revision) with requiredGeneration = 0.
     void PostIntents(std::vector<ArtifactIntent> intents);
+    // Lock-free submission that still returns a usable handle: the generation is
+    // allocated and leased by the calling thread, and the drain adopts it when it
+    // applies the request. The handle may be used immediately as an Exact()
+    // requirement of a sibling request or as an AwaitExact() target. If the drain
+    // finds the address already carries another generation for this revision, the
+    // predicted version becomes an alias of the installed one; if the request is
+    // rejected, the predicted version is tombstoned and observed as Failed.
+    ArtifactRequestResult PostRequest(ArtifactIntent intent, bool coalescible = true);
+    std::vector<ArtifactRequestResult> PostIntentBatch(std::vector<ArtifactIntent> intents);
     std::vector<ArtifactRequestResult> RequestBatch(std::vector<ArtifactRequest> requests);
     ArtifactRequestResult RequestExpressions(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<DependencyExpression> dependencies, ArtifactPayload input = {},
@@ -761,6 +770,10 @@ public:
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactKey key) const;
     [[nodiscard]] ArtifactSnapshot Snapshot(ArtifactVersionID version) const;
     [[nodiscard]] ArtifactDiagnostic Diagnose(ArtifactKey key) const;
+    // Latest requested revision of an address, without Diagnose's blocker-chain
+    // walk or payload snapshot. Callers that only compare revisions must use
+    // this; Diagnose is a human-readable stall report.
+    [[nodiscard]] std::uint64_t DesiredRevision(ArtifactKey key) const;
     [[nodiscard]] AsyncStateGraphStats Stats() const;
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const;
     void StartTrace(AsyncStateGraphTraceConfig config = {});
@@ -781,11 +794,17 @@ public:
 private:
     struct RequestDeferredCleanup;
     struct RequestPreparedState;
+    // preassignedGeneration/preassignedLease carry a handle a posting thread
+    // already returned to its caller (see PostRequest). The drain adopts them for
+    // a fresh version, records a generation alias when the address already carries
+    // another generation, and tombstones the predicted version on rejection.
     ArtifactRequestResult RequestInternal(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<ArtifactRequirement> requirements, ArtifactPayload input,
         std::uint64_t requestFingerprint, bool coalescibleIntent, bool callerOwnsMutex = false,
         RequestDeferredCleanup* deferredCleanup = nullptr,
-        RequestPreparedState* preparedState = nullptr);
+        RequestPreparedState* preparedState = nullptr,
+        std::uint64_t preassignedGeneration = 0,
+        std::shared_ptr<const void> preassignedLease = {});
     struct Impl;
     std::shared_ptr<Impl> m_impl;
 };
