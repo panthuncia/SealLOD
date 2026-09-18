@@ -26,7 +26,6 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
     std::shared_ptr<Buffer> tessTableConfigsBuffer,
     std::shared_ptr<Buffer> tessTableVerticesBuffer,
     std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-    std::shared_ptr<Buffer> viewRasterInfoBuffer,
     std::shared_ptr<Buffer> indirectArgsBuffer,
     std::shared_ptr<Buffer> telemetryBuffer,
     std::shared_ptr<ResourceGroup> slabResourceGroup,
@@ -42,7 +41,6 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
     , m_tessTableConfigsBuffer(std::move(tessTableConfigsBuffer))
     , m_tessTableVerticesBuffer(std::move(tessTableVerticesBuffer))
     , m_tessTableTrianglesBuffer(std::move(tessTableTrianglesBuffer))
-    , m_viewRasterInfoBuffer(std::move(viewRasterInfoBuffer))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
@@ -132,7 +130,7 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
         builder.BindShaderResource(m_diceQueueBuffer), builder.BindShaderResource(m_diceQueueCounterBuffer),
         builder.BindShaderResource(m_rasterWorkBuffer), builder.BindShaderResource(m_rasterWorkCounterBuffer),
         builder.BindShaderResource(m_tessTableConfigsBuffer), builder.BindShaderResource(m_tessTableVerticesBuffer),
-        builder.BindShaderResource(m_tessTableTrianglesBuffer), builder.BindShaderResource(m_viewRasterInfoBuffer),
+        builder.BindShaderResource(m_tessTableTrianglesBuffer),
         builder.BindIndirectArguments(m_indirectArgsBuffer), builder.BindUnorderedAccess(m_telemetryBuffer)};
 
     for (const auto& visibilityBuffer : m_visibilityBuffers) {
@@ -182,7 +180,8 @@ br::render::PreparedComputeIndirect ReyesPatchRasterizationPass::Prepare(
     data.constants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.diceCounter);
     data.constants[CLOD_REYES_PATCH_RASTER_WORK_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.work);
     data.constants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_DESCRIPTOR_INDEX] = srv(bindings.diceQueue);
-    data.constants[CLOD_REYES_PATCH_RASTER_VIEW_RASTER_INFO_DESCRIPTOR_INDEX] = srv(bindings.viewRasterInfo);
+    data.constants[CLOD_REYES_PATCH_RASTER_VIEW_RASTER_INFO_DESCRIPTOR_INDEX] =
+        ViewRasterInfoTable(preparation).Publish(preparation, m_viewRasterInfoPublisher);
     data.constants[CLOD_REYES_PATCH_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.telemetry, {org::BindlessViewKind::UnorderedAccess}).index;
     data.constants[CLOD_REYES_PATCH_RASTER_PHASE_INDEX] = bindings.phase;
     data.constants[CLOD_REYES_PATCH_RASTER_WORK_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.workCounter);
@@ -207,6 +206,12 @@ void ReyesPatchRasterizationPass::InvocationRevision(const org::PassPrepareConte
     br::render::AppendFrameHeapRevision(preparation, out);
     out.push_back(br::render::PipelineRevision(m_pso));
     out.push_back(br::render::OwnerRevision(m_commandSignature));
+    ViewRasterInfoTable(preparation).AppendRevision(preparation, out);
+}
+
+CLodViewRasterInfoTable ReyesPatchRasterizationPass::ViewRasterInfoTable(const org::PassPrepareContext& preparation) const {
+    const auto& context = CLodPreparationSnapshot(preparation);
+    return BuildCLodVisibilityViewRasterInfo(context.Views(), context.ViewCameraBufferSize(), CLodRasterOutputKind::VisibilityBuffer);
 }
 
 void ReyesPatchRasterizationPass::Record(const ReyesPatchRasterBindings&,

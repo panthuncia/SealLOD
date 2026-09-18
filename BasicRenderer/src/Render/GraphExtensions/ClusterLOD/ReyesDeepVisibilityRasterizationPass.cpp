@@ -57,10 +57,8 @@ ReyesDeepVisibilityRasterizationPass::ReyesDeepVisibilityRasterizationPass(
     , m_deepVisibilityCounterBuffer(std::move(deepVisibilityCounterBuffer))
     , m_deepVisibilityOverflowCounterBuffer(std::move(deepVisibilityOverflowCounterBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
+    , m_viewRasterInfoPublisher(std::string(resourceName))
     , m_patchVisibilityIndexBase(patchVisibilityIndexBase) {
-    m_viewRasterInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodViewRasterInfo), false, false, false, false);
-    m_viewRasterInfoBuffer->SetName(std::string(resourceName));
-    org::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD Reyes deep visibility");
 
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
@@ -136,7 +134,7 @@ ReyesDeepVisibilityRasterBindings ReyesDeepVisibilityRasterizationPass::Declare(
         builder->BindShaderResource(m_rasterWorkBuffer), builder->BindShaderResource(m_rasterWorkCounterBuffer),
         builder->BindShaderResource(m_tessTableConfigsBuffer), builder->BindShaderResource(m_tessTableVerticesBuffer),
         builder->BindShaderResource(m_tessTableTrianglesBuffer), builder->BindIndirectArguments(m_indirectArgsBuffer),
-        builder->BindUnorderedAccess(m_telemetryBuffer), builder->BindShaderResource(m_viewRasterInfoBuffer),
+        builder->BindUnorderedAccess(m_telemetryBuffer),
         builder->BindUnorderedAccess(m_deepVisibilityNodesBuffer), builder->BindUnorderedAccess(m_deepVisibilityCounterBuffer),
         builder->BindUnorderedAccess(m_deepVisibilityOverflowCounterBuffer)};
     for (const auto& visibilityBuffer : m_visibilityBuffers) {
@@ -182,13 +180,16 @@ void ReyesDeepVisibilityRasterizationPass::Update(const UpdateExecutionContext& 
             static_cast<uint64_t>(headPointers->GetHeight());
     }
 
-    std::vector<CLodViewRasterInfo> viewRasterInfo(numViews);
+    CLodViewRasterInfoTable viewRasterInfo(numViews);
     for (const auto& viewInfo : context.Views()) {
         if (!viewInfo.visibilityBuffer) {
             continue;
         }
 
         const auto cameraIndex = viewInfo.cameraBufferIndex;
+        if (cameraIndex >= viewRasterInfo.size()) {
+            continue;
+        }
         CLodViewRasterInfo info{};
         info.scissorMinX = 0u;
         info.scissorMinY = 0u;
@@ -199,9 +200,10 @@ void ReyesDeepVisibilityRasterizationPass::Update(const UpdateExecutionContext& 
             continue;
         }
 
-        info.opaqueVisibilitySRVDescriptorIndex = viewInfo.visibilitySRVIndex;
-        info.deepVisibilityHeadPointerUAVDescriptorIndex =
-            viewInfo.deepVisibilityHeadPointersUAVIndex;
+        viewRasterInfo.BindView(cameraIndex, &CLodViewRasterInfo::opaqueVisibilitySRVDescriptorIndex, viewInfo.visibilityBuffer,
+            { org::BindlessViewKind::ShaderResource });
+        viewRasterInfo.BindView(cameraIndex, &CLodViewRasterInfo::deepVisibilityHeadPointerUAVDescriptorIndex, headPointers,
+            { org::BindlessViewKind::UnorderedAccess });
         info.scissorMaxX = headPointers->GetWidth();
         info.scissorMaxY = headPointers->GetHeight();
         info.viewportScaleX = static_cast<float>(info.scissorMaxX) / static_cast<float>(maxViewWidth);
@@ -227,19 +229,12 @@ void ReyesDeepVisibilityRasterizationPass::Update(const UpdateExecutionContext& 
     m_visibilityBuffers = std::move(visibilityBuffers);
     m_deepVisibilityHeadPointerBuffers = std::move(deepVisibilityHeadPointerBuffers);
 
-    if (m_viewRasterInfos != viewRasterInfo || resourcesChanged) {
-        m_viewRasterInfos = std::move(viewRasterInfo);
-        m_viewRasterInfoBuffer->ResizeStructured(static_cast<uint32_t>(m_viewRasterInfos.size()));
-        UploadBufferData(
-            m_viewRasterInfos.data(),
-            static_cast<uint32_t>(m_viewRasterInfos.size() * sizeof(CLodViewRasterInfo)),
-            org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
-            0);
-        m_declaredResourcesChanged = true;
-    }
-    else {
-        m_declaredResourcesChanged = false;
-    }
+    // Rows carry no descriptors; those are resolved when Prepare publishes
+    // the table.
+    const std::vector<CLodViewRasterInfo> rows(viewRasterInfo.Rows().begin(), viewRasterInfo.Rows().end());
+    m_declaredResourcesChanged = m_viewRasterInfos != rows || resourcesChanged;
+    m_viewRasterInfos = rows;
+    m_viewRasterInfoTable = std::move(viewRasterInfo);
 }
 
 bool ReyesDeepVisibilityRasterizationPass::DeclaredResourcesChanged() const
@@ -265,7 +260,8 @@ br::render::PreparedComputeIndirect ReyesDeepVisibilityRasterizationPass::Prepar
     data.constants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.diceCounter);
     data.constants[CLOD_REYES_PATCH_RASTER_WORK_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.work);
     data.constants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_DESCRIPTOR_INDEX] = srv(bindings.diceQueue);
-    data.constants[CLOD_REYES_PATCH_RASTER_VIEW_RASTER_INFO_DESCRIPTOR_INDEX] = srv(bindings.viewInfo);
+    data.constants[CLOD_REYES_PATCH_RASTER_VIEW_RASTER_INFO_DESCRIPTOR_INDEX] =
+        m_viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher);
     data.constants[CLOD_REYES_PATCH_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
     data.constants[CLOD_REYES_PATCH_RASTER_WORK_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.workCounter);
     data.constants[CLOD_REYES_PATCH_RASTER_PATCH_INDEX_BASE] = bindings.patchVisibilityIndexBase;
@@ -286,6 +282,7 @@ void ReyesDeepVisibilityRasterizationPass::InvocationRevision(const org::PassPre
     br::render::AppendFrameHeapRevision(preparation, out);
     out.push_back(br::render::PipelineRevision(m_pso));
     out.push_back(br::render::OwnerRevision(m_commandSignature));
+    m_viewRasterInfoTable.AppendRevision(preparation, out);
 }
 
 void ReyesDeepVisibilityRasterizationPass::Record(const ReyesDeepVisibilityRasterBindings&,

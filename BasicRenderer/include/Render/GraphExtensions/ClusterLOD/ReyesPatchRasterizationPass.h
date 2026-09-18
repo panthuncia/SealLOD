@@ -6,6 +6,8 @@
 #include <rhi.h>
 
 #include "Interfaces/IDynamicDeclaredResources.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "RenderPasses/PreparedComputeDispatch.h"
@@ -18,7 +20,7 @@ using org::ResourceGroup;
 
 struct ReyesPatchRasterBindings {
     org::ResourceBindingToken visible, transforms, diceQueue, diceCounter, work, workCounter;
-    org::ResourceBindingToken tessConfigs, tessVertices, tessTriangles, viewRasterInfo, indirectArgs, telemetry;
+    org::ResourceBindingToken tessConfigs, tessVertices, tessTriangles, indirectArgs, telemetry;
     uint32_t phase = 0, patchIndexBase = 0;
     bool enabled = false;
 };
@@ -36,7 +38,6 @@ public:
         std::shared_ptr<Buffer> tessTableConfigsBuffer,
         std::shared_ptr<Buffer> tessTableVerticesBuffer,
         std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-        std::shared_ptr<Buffer> viewRasterInfoBuffer,
         std::shared_ptr<Buffer> indirectArgsBuffer,
         std::shared_ptr<Buffer> telemetryBuffer,
         std::shared_ptr<ResourceGroup> slabResourceGroup,
@@ -62,7 +63,10 @@ private:
     std::shared_ptr<Buffer> m_tessTableConfigsBuffer;
     std::shared_ptr<Buffer> m_tessTableVerticesBuffer;
     std::shared_ptr<Buffer> m_tessTableTrianglesBuffer;
-    std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
+    // The per-view table the shader reads; it embeds the visibility UAVs, so
+    // it is published during preparation from the frame's bindings.
+    CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
+    org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Reyes Patch Raster View Raster Info"};
     std::shared_ptr<Buffer> m_indirectArgsBuffer;
     std::shared_ptr<Buffer> m_telemetryBuffer;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;

@@ -7,6 +7,8 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "RenderPasses/PreparedComputeDispatch.h"
@@ -19,7 +21,7 @@ using org::ResourceGroup;
 
 struct ReyesDeepVisibilityRasterBindings {
     org::ResourceBindingToken visible, transforms, diceQueue, diceCounter, work, workCounter;
-    org::ResourceBindingToken tessConfigs, tessVertices, tessTriangles, indirectArgs, telemetry, viewInfo;
+    org::ResourceBindingToken tessConfigs, tessVertices, tessTriangles, indirectArgs, telemetry;
     org::ResourceBindingToken nodes, nodeCounter, overflowCounter;
     std::vector<org::ResourceBindingToken> visibilityBuffers, headPointerBuffers;
     uint32_t patchVisibilityIndexBase = 0u;
@@ -73,12 +75,15 @@ private:
     std::shared_ptr<Buffer> m_deepVisibilityCounterBuffer;
     std::shared_ptr<Buffer> m_deepVisibilityOverflowCounterBuffer;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
-    std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
+    // Built by Update from the view snapshot; its descriptors are resolved and
+    // the table published during preparation.
+    org::PreparedTablePublisher m_viewRasterInfoPublisher;
+    CLodViewRasterInfoTable m_viewRasterInfoTable;
 
     uint32_t m_patchVisibilityIndexBase = 0u;
     uint32_t m_deepVisibilityNodeCapacity = 1u;
 
-    std::vector<CLodViewRasterInfo> m_viewRasterInfos;
+    std::vector<CLodViewRasterInfo> m_viewRasterInfos; // Rows without descriptors (change detection).
     std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
     std::vector<std::shared_ptr<PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
     bool m_declaredResourcesChanged = true;

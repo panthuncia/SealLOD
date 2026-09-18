@@ -83,9 +83,6 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
         traits.usesPhase2OcclusionReplay &&
         SettingsManager::GetInstance().getSettingGetter<bool>("enableOcclusionCulling")() &&
         (phaseIndex == 1u || phaseIndex == 2u);
-    const auto viewDepthSrvIndicesBuffer = enablePatchOcclusion
-        ? (phaseIndex == 1u ? extension.m_viewDepthSrvIndicesBuffer : extension.m_viewDepthSrvIndicesBufferPhase2)
-        : nullptr;
     outPasses.push_back(
         RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, std::string("ReyesBuildRasterWorkPass") + phaseSuffix),
@@ -102,7 +99,7 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
                 phaseIndex,
                 enablePatchOcclusion ? extension.m_visibleClustersBuffer : nullptr,
                 enablePatchOcclusion ? extension.m_visibleClusterTransformIndicesBuffer : nullptr,
-                viewDepthSrvIndicesBuffer,
+                enablePatchOcclusion,
                 enablePatchOcclusion ? extension.m_reyesReplayDiceQueueBuffer : nullptr,
                 enablePatchOcclusion ? extension.m_reyesReplayDiceQueueCounterBuffer : nullptr,
                 enablePatchOcclusion ? extension.m_reyesReplayDiceQueueOverflowBuffer : nullptr,
@@ -160,7 +157,6 @@ std::string CLodVisibilityVariant::AppendFineRasterPassForPhase(
                 extension.m_reyesTessTableConfigsBuffer,
                 extension.m_reyesTessTableVerticesBuffer,
                 extension.m_reyesTessTableTrianglesBuffer,
-                extension.m_viewRasterInfoBuffer,
                 rasterWorkIndirectArgsBuffer,
                 telemetryBuffer,
                 slabGroup,

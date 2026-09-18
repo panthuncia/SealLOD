@@ -319,7 +319,6 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<Buffer> occlusionReplayBuffer,
     std::shared_ptr<Buffer> occlusionReplayStateBuffer,
     std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
-    std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer,
     std::shared_ptr<Buffer> viewRasterInfoBuffer,
     std::shared_ptr<PixelBuffer> shadowDirtyHierarchyTexture,
     std::shared_ptr<ResourceGroup> slabResourceGroup,
@@ -352,7 +351,6 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_occlusionReplayBuffer(std::move(occlusionReplayBuffer))
     , m_occlusionReplayStateBuffer(std::move(occlusionReplayStateBuffer))
     , m_occlusionNodeGpuInputsBuffer(std::move(occlusionNodeGpuInputsBuffer))
-    , m_viewDepthSrvIndicesBuffer(std::move(viewDepthSrvIndicesBuffer))
     , m_viewRasterInfoBuffer(std::move(viewRasterInfoBuffer))
     , m_phase1VisibleClustersCounterBuffer(std::move(phase1VisibleClustersCounterBuffer))
     , m_swWriteBaseCounterBuffer(std::move(swWriteBaseCounterBuffer))
@@ -703,8 +701,7 @@ void HierarchicalDispatchCullingPass::Declare(org::PassBuilder& builder)
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
-            Builtin::SkeletonResources::SkinningInstanceInfo,
-            m_viewRasterInfoBuffer)
+            Builtin::SkeletonResources::SkinningInstanceInfo)
         .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithShaderResource(PublishedStateResourceResolver(
             br::render::PublishedStateSource::ProcessSource(), drawSetIndicesQuery))
@@ -809,8 +806,7 @@ void HierarchicalDispatchCullingPass::Declare(org::PassBuilder& builder)
     }
 
     if (UsesPerViewDepthMapOcclusion(m_rasterOutputKind)) {
-        builder.WithUnorderedAccess(m_viewDepthSrvIndicesBuffer)
-            .WithShaderResource(Builtin::PrimaryCamera::LinearDepthMap);
+        builder.WithShaderResource(Builtin::PrimaryCamera::LinearDepthMap);
     }
 
     if (m_phase1VisibleClustersCounterBuffer && !m_isFirstPass) {
@@ -937,11 +933,9 @@ PassReturn HierarchicalDispatchCullingPass::EmitCommands(
     sharedRootConstants[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX] = commandList.UAVIndex(inputs.m_occlusionReplayBuffer);
     sharedRootConstants[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = commandList.UAVIndex(inputs.m_occlusionReplayStateBuffer);
     sharedRootConstants[CLOD_WG_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = 0u;
-    sharedRootConstants[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = commandList.SRVIndex(inputs.m_viewRasterInfoBuffer);
+    sharedRootConstants[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = configuration.viewRasterInfoTable;
     sharedRootConstants[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] =
-        UsesPerViewDepthMapOcclusion(inputs.m_rasterOutputKind)
-            ? commandList.SRVIndex(inputs.m_viewDepthSrvIndicesBuffer)
-            : 0u;
+        UsesPerViewDepthMapOcclusion(inputs.m_rasterOutputKind) ? configuration.viewDepthTable : 0u;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_CAPACITY] = static_cast<uint32_t>(inputs.m_maxVisibleClusters);
     sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX] =
         inputs.m_dynamicWindBoundsCacheBuffer
@@ -1642,7 +1636,6 @@ br::render::CapturedHierarchicalDispatchCullingInputs HierarchicalDispatchCullin
     result.m_skinnedVoxelRasterWorkCounterBuffer = capture(m_skinnedVoxelRasterWorkCounterBuffer.get());
     result.m_swVisibleClustersCounterBuffer = capture(m_swVisibleClustersCounterBuffer.get());
     result.m_swWriteBaseCounterBuffer = capture(m_swWriteBaseCounterBuffer.get());
-    result.m_viewDepthSrvIndicesBuffer = capture(m_viewDepthSrvIndicesBuffer.get());
     result.m_viewRasterInfoBuffer = capture(m_viewRasterInfoBuffer.get());
     result.m_visibleClusterTransformIndicesBuffer = capture(m_visibleClusterTransformIndicesBuffer.get());
     result.m_visibleClustersBuffer = capture(m_visibleClustersBuffer.get());
@@ -1743,7 +1736,10 @@ HierarchicalDispatchCullingRecipe HierarchicalDispatchCullingPass::BuildRecipe(
     br::render::PreparedComputeCommandBuilder commands(
         preparation,
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    const auto configuration = CaptureCommandConfiguration(commands.Sequence().layout,renderContext->preparedRasterBucketCount);
+    auto configuration = CaptureCommandConfiguration(commands.Sequence().layout,renderContext->preparedRasterBucketCount);
+    configuration.viewRasterInfoTable = ViewRasterInfoTable(preparation).Publish(preparation, m_viewRasterInfoTable);
+    if (UsesPerViewDepthMapOcclusion(m_rasterOutputKind))
+        configuration.viewDepthTable = ViewDepthTable(preparation).Publish(preparation, m_viewDepthTable);
     PreparedComputeCommandSink sink(commands, preparation);
     {
     BT_ZONE_SCOPE("BR.CullingRecipe.CapturePrograms");
@@ -1786,7 +1782,23 @@ std::vector<uint64_t> HierarchicalDispatchCullingPass::RecipeRevision(const org:
         &m_pureComputeReplayClustersPipelineState, &m_pureComputeTraversePipelineState,
         &m_pureComputeLeafPipelineState, &m_pureComputeClusterPipelineState, &m_pureComputeDenseClusterPipelineState})
         revision.push_back(reinterpret_cast<uintptr_t>(pipeline->PeekPayload()));
+    if (preparation.preparationData && preparation.preparationData->Get<UpdateContext>()) {
+        ViewRasterInfoTable(preparation).AppendRevision(preparation, revision);
+        if (UsesPerViewDepthMapOcclusion(m_rasterOutputKind)) ViewDepthTable(preparation).AppendRevision(preparation, revision);
+    }
     return revision;
+}
+
+CLodViewRasterInfoTable HierarchicalDispatchCullingPass::ViewRasterInfoTable(const org::PassPrepareContext& preparation) const
+{
+    // computeCulling.hlsl reads only the scissor rows.
+    const auto& context = CLodPreparationSnapshot(preparation);
+    return BuildCLodVisibilityViewRasterInfo(context.Views(), context.ViewCameraBufferSize(), m_rasterOutputKind, false);
+}
+
+CLodViewDepthTable HierarchicalDispatchCullingPass::ViewDepthTable(const org::PassPrepareContext& preparation) const
+{
+    return BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_isFirstPass);
 }
 
 HierarchicalDispatchCullingInvocation HierarchicalDispatchCullingPass::PrepareInvocation(
@@ -1968,40 +1980,10 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
 
     if (rebuildViewTables || m_cachedViewRasterInfo.empty()) {
         ZoneScopedN("HierarchicalDispatchCullingPass::RebuildViewRasterInfo");
-        const auto numViews = context.ViewCameraBufferSize();
-        std::vector<CLodViewRasterInfo> viewRasterInfo(numViews);
-        for (const auto& viewInfo : context.Views()) {
-            const auto cameraIndex = viewInfo.cameraBufferIndex;
-            if (cameraIndex >= viewRasterInfo.size()) {
-                continue;
-            }
-
-            CLodViewRasterInfo info{};
-            info.scissorMinX = 0;
-            info.scissorMinY = 0;
-
-            if (UsesVirtualShadowOutput(m_rasterOutputKind)) {
-                const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
-                if (viewInfo.shadow && viewInfo.lightType == Components::LightType::Directional) {
-                    info.scissorMaxX = virtualShadowConfig.virtualResolution;
-                    info.scissorMaxY = virtualShadowConfig.virtualResolution;
-                    info.viewportScaleX = 1.0f;
-                    info.viewportScaleY = 1.0f;
-                }
-                viewRasterInfo[cameraIndex] = info;
-                continue;
-            }
-
-            if (viewInfo.visibilityBuffer != nullptr) {
-                info.visibilityUAVDescriptorIndex = viewInfo.visibilityUAVIndex;
-                info.scissorMaxX = viewInfo.visibilityBuffer->GetWidth();
-                info.scissorMaxY = viewInfo.visibilityBuffer->GetHeight();
-                info.viewportScaleX = 1.0f;
-                info.viewportScaleY = 1.0f;
-            }
-
-            viewRasterInfo[cameraIndex] = info;
-        }
+        // Descriptor-free rows for the passes that read the shared buffer
+        // (virtual shadow page jobs); this pass publishes its own table.
+        const auto table = BuildCLodVisibilityViewRasterInfo(context.Views(), context.ViewCameraBufferSize(), m_rasterOutputKind);
+        std::vector<CLodViewRasterInfo> viewRasterInfo(table.Rows().begin(), table.Rows().end());
 
         const bool sizeChanged = m_cachedViewRasterInfo.size() != viewRasterInfo.size();
         m_cachedViewRasterInfo = std::move(viewRasterInfo);
@@ -2013,57 +1995,6 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
                 m_cachedViewRasterInfo.data(),
                 static_cast<uint32_t>(m_cachedViewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
                 org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
-                0);
-        }
-    }
-
-    if (UsesPerViewDepthMapOcclusion(m_rasterOutputKind)) {
-        if (rebuildViewTables || !m_hasUploadedViewDepthSrvIndices) {
-            ZoneScopedN("HierarchicalDispatchCullingPass::RebuildViewDepthSrvIndices");
-            std::vector<CLodViewDepthSRVIndex> viewDepthSrvIndices(CLodMaxViewDepthIndices);
-            const bool useHistoryDepth = m_isFirstPass;
-            for (uint32_t i = 0; i < CLodMaxViewDepthIndices; ++i) {
-                viewDepthSrvIndices[i].cameraBufferIndex = i;
-                viewDepthSrvIndices[i].linearDepthSRVIndex = 0;
-            }
-
-            for (const auto& view : context.Views()) {
-                const uint32_t cameraBufferIndex = view.cameraBufferIndex;
-                if (cameraBufferIndex >= CLodMaxViewDepthIndices) {
-                    continue;
-                }
-
-                const auto linearDepthMap =
-                    !useHistoryDepth || static_cast<bool>(view.depthHistory)
-                    ? view.linearDepthMap
-                    : nullptr;
-                if (!linearDepthMap) {
-                    continue;
-                }
-
-                uint32_t slice = 0;
-                if (view.depthBufferArrayIndex >= 0) {
-                    slice = static_cast<uint32_t>(view.depthBufferArrayIndex);
-                }
-
-                const uint32_t maxSlices = linearDepthMap->GetNumSRVSlices();
-                if (maxSlices == 0) {
-                    continue;
-                }
-
-                slice = (std::min)(slice, maxSlices - 1);
-                viewDepthSrvIndices[cameraBufferIndex].cameraBufferIndex = cameraBufferIndex;
-                if (slice < view.linearDepthSRVIndices.size())
-                    viewDepthSrvIndices[cameraBufferIndex].linearDepthSRVIndex =
-                        view.linearDepthSRVIndices[slice];
-            }
-
-            m_cachedViewDepthSrvIndices = std::move(viewDepthSrvIndices);
-            m_hasUploadedViewDepthSrvIndices = true;
-            UploadBufferData(
-                m_cachedViewDepthSrvIndices.data(),
-                static_cast<uint32_t>(m_cachedViewDepthSrvIndices.size() * sizeof(CLodViewDepthSRVIndex)),
-                org::runtime::UploadTarget::FromShared(m_viewDepthSrvIndicesBuffer),
                 0);
         }
     }

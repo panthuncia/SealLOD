@@ -9,6 +9,8 @@
 
 #include <rhi.h>
 
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "Render/GraphExtensions/ClusterLOD/HierarchicalCullingPass.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
@@ -23,6 +25,8 @@ struct HierarchicalDispatchCullingCommandConfiguration {
     uint32_t expansionFactor = 1, forcedTraversalDepth = 0, pageJobFlags = 0;
     uint32_t receiverSubpageMode = 0, softwareRasterThreshold = 0;
     uint32_t rasterBucketCount = 0;
+    // SRV indices of the per-view tables published for this recipe.
+    uint32_t viewRasterInfoTable = 0xFFFFFFFFu, viewDepthTable = 0u;
     bool telemetry = false, occlusion = false, predictiveInvalidation = false, frustumCulling = true;
 };
 
@@ -75,7 +79,6 @@ public:
         std::shared_ptr<Buffer> occlusionReplayBuffer,
         std::shared_ptr<Buffer> occlusionReplayStateBuffer,
         std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
-        std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer,
         std::shared_ptr<Buffer> viewRasterInfoBuffer,
         std::shared_ptr<PixelBuffer> shadowDirtyHierarchyTexture = nullptr,
         std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
@@ -176,7 +179,6 @@ private:
     std::shared_ptr<Buffer> m_occlusionReplayBuffer;
     std::shared_ptr<Buffer> m_occlusionReplayStateBuffer;
     std::shared_ptr<Buffer> m_occlusionNodeGpuInputsBuffer;
-    std::shared_ptr<Buffer> m_viewDepthSrvIndicesBuffer;
     std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
     std::shared_ptr<Buffer> m_phase1VisibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_swWriteBaseCounterBuffer;
@@ -211,7 +213,12 @@ private:
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     std::vector<uint64_t> m_declaredDrawSetResourceIds;
     std::vector<CLodViewRasterInfo> m_cachedViewRasterInfo;
-    std::vector<CLodViewDepthSRVIndex> m_cachedViewDepthSrvIndices;
+    // Tables this pass's shaders read. They embed descriptors, so they are
+    // published during preparation from the frame's bindings.
+    CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
+    CLodViewDepthTable ViewDepthTable(const org::PassPrepareContext&) const;
+    org::PreparedTablePublisher m_viewRasterInfoTable{"CLod Dispatch Culling View Raster Info"};
+    org::PreparedTablePublisher m_viewDepthTable{"CLod Dispatch Culling View Depth SRV Indices"};
     std::vector<uint32_t> m_zeroTelemetryScratch;
     CLodVoxelRasterQueueDescriptors m_cachedVoxelQueueDescriptors{};
     CLodWorkGraphComputePageJobDescriptors m_cachedPageJobDescriptors{};
@@ -220,7 +227,6 @@ private:
     uint32_t m_sizedPureComputeFrontierCapacity = 0u;
     bool m_hasCachedVoxelQueueDescriptors = false;
     bool m_hasCachedPageJobDescriptors = false;
-    bool m_hasUploadedViewDepthSrvIndices = false;
     bool m_isFirstPass = true;
     bool m_declaredResourcesChanged = true;
     unsigned int m_maxVisibleClusters = 0u;

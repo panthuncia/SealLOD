@@ -55,11 +55,10 @@ struct PreparedViewFrameData {
     std::shared_ptr<org::PixelBuffer> deepVisibilityHeadPointers;
     std::shared_ptr<org::PixelBuffer> linearDepthMap;
     DepthHistorySelection depthHistory;
-    std::vector<std::uint32_t> linearDepthSRVIndices;
     std::int32_t depthBufferArrayIndex = -1;
-    std::uint32_t visibilitySRVIndex = 0xFFFFFFFFu;
-    std::uint32_t visibilityUAVIndex = 0xFFFFFFFFu;
-    std::uint32_t deepVisibilityHeadPointersUAVIndex = 0xFFFFFFFFu;
+    // No descriptor indices: a resource's slots change whenever the render
+    // graph gives it a new backing, so passes resolve them from the frame's
+    // bindings during preparation (see CLodViewTables.h).
 };
 
 struct ViewFamilyBuildInput {

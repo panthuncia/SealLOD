@@ -5,6 +5,8 @@
 
 #include <rhi.h>
 
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "Render/ShaderAPI.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
@@ -24,7 +26,7 @@ struct ReyesSplitFrameData {
 struct ReyesSplitBindings {
     org::ResourceBindingToken visible, inputQueue, inputCounter, outputQueue, outputCounter, outputOverflow;
     org::ResourceBindingToken diceQueue, diceCounter, diceOverflow, tessConfigs, tessVertices, tessTriangles;
-    org::ResourceBindingToken shadowClipmap, shadowDirty, shadowNonRasterable, indirectArgs, telemetry, viewDepthIndices;
+    org::ResourceBindingToken shadowClipmap, shadowDirty, shadowNonRasterable, indirectArgs, telemetry;
     org::ResourceBindingToken replayQueue, replayCounter, replayOverflow;
     uint32_t capacity = 0, maxPassCount = 0, phase = 0, coarseTargetBits = 0;
     bool hasShadowClipmap = false, hasShadowDirty = false, hasShadowNonRasterable = false;
@@ -57,7 +59,7 @@ public:
         uint32_t splitPassIndex,
         uint32_t maxSplitPassCount,
         uint32_t phaseIndex,
-        std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer = nullptr,
+        bool enableViewDepthOcclusion = false,
         std::shared_ptr<Buffer> replaySplitQueueBuffer = nullptr,
         std::shared_ptr<Buffer> replaySplitQueueCounterBuffer = nullptr,
         std::shared_ptr<Buffer> replaySplitQueueOverflowBuffer = nullptr);
@@ -85,7 +87,11 @@ private:
     std::shared_ptr<PixelBuffer> m_shadowDirtyHierarchyTexture;
     std::shared_ptr<PixelBuffer> m_shadowNonRasterableHierarchyTexture;
     std::shared_ptr<Buffer> m_telemetryBuffer;
-    std::shared_ptr<Buffer> m_viewDepthSrvIndicesBuffer;
+    bool m_enableViewDepthOcclusion = false;
+    // Linear-depth SRV per view for patch occlusion; it embeds descriptors, so
+    // it is published during preparation from the frame's bindings. Phase 1
+    // tests against history depth, as the phase-1 culling pass does.
+    org::PreparedTablePublisher m_viewDepthPublisher{"CLod Reyes Split View Depth SRV Indices"};
     std::shared_ptr<Buffer> m_replaySplitQueueBuffer;
     std::shared_ptr<Buffer> m_replaySplitQueueCounterBuffer;
     std::shared_ptr<Buffer> m_replaySplitQueueOverflowBuffer;

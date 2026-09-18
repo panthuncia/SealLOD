@@ -4,6 +4,8 @@
 
 #include <rhi.h>
 
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "RenderPasses/PreparedComputeDispatch.h"
@@ -15,7 +17,7 @@ using org::ResourceGroup;
 
 struct ReyesBuildRasterWorkBindings {
     org::ResourceBindingToken diceQueue, diceCounter, readOffset, tessConfigs, output, outputCounter, indirectArgs, telemetry;
-    org::ResourceBindingToken visibleClusters, visibleTransforms, viewDepthIndices, replayQueue, replayCounter, replayOverflow;
+    org::ResourceBindingToken visibleClusters, visibleTransforms, replayQueue, replayCounter, replayOverflow;
     uint32_t capacity = 0, phase = 0, replayCapacity = 0;
     bool hasReadOffset = false, hasVisibleClusters = false, hasVisibleTransforms = false, hasViewDepthIndices = false;
     bool hasReplayQueue = false, hasReplayCounter = false, hasReplayOverflow = false, useAabbOcclusion = false;
@@ -37,7 +39,7 @@ public:
         uint32_t phaseIndex = 0u,
         std::shared_ptr<Buffer> visibleClustersBuffer = nullptr,
         std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer = nullptr,
-        std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer = nullptr,
+        bool enableViewDepthOcclusion = false,
         std::shared_ptr<Buffer> replayDiceQueueBuffer = nullptr,
         std::shared_ptr<Buffer> replayDiceQueueCounterBuffer = nullptr,
         std::shared_ptr<Buffer> replayDiceQueueOverflowBuffer = nullptr,
@@ -62,7 +64,11 @@ private:
     std::shared_ptr<Buffer> m_telemetryBuffer;
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
     std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_viewDepthSrvIndicesBuffer;
+    bool m_enableViewDepthOcclusion = false;
+    // Linear-depth SRV per view for patch occlusion; it embeds descriptors, so
+    // it is published during preparation from the frame's bindings. Phase 1
+    // tests against history depth, as the phase-1 culling pass does.
+    org::PreparedTablePublisher m_viewDepthPublisher{"CLod Reyes Build Raster Work View Depth SRV Indices"};
     std::shared_ptr<Buffer> m_replayDiceQueueBuffer;
     std::shared_ptr<Buffer> m_replayDiceQueueCounterBuffer;
     std::shared_ptr<Buffer> m_replayDiceQueueOverflowBuffer;

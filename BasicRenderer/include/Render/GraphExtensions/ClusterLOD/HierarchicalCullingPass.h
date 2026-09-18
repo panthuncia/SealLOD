@@ -14,6 +14,8 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "Render/RenderPhase.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "RenderPasses/PreparedComputeCommands.h"
@@ -55,7 +57,7 @@ struct HierarchicalCullingPassInputs {
 
 struct HierarchicalCullingBindings {
     org::ResourceBindingToken visible, transforms, visibleCounter, swCounter, histogram, telemetry;
-    org::ResourceBindingToken viewRasterInfo, replay, replayState, nodeInputs, viewDepthIndices;
+    org::ResourceBindingToken replay, replayState, nodeInputs;
     org::ResourceBindingToken shadowPageTable, shadowPhysicalPages, shadowActiveMetadata;
     org::ResourceBindingToken shadowDynamicPages, shadowDynamicMetadata, shadowDirty;
     org::ResourceBindingToken invalidatedInstances, predictiveCandidates, predictiveCount;
@@ -100,7 +102,6 @@ public:
         std::shared_ptr<Buffer> occlusionReplayBuffer,
         std::shared_ptr<Buffer> occlusionReplayStateBuffer,
         std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
-        std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer,
         std::shared_ptr<Buffer> viewRasterInfoBuffer,
         std::shared_ptr<PixelBuffer> shadowDirtyHierarchyTexture = nullptr,
         std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
@@ -189,7 +190,6 @@ private:
     std::shared_ptr<Buffer> m_occlusionReplayBuffer;
     std::shared_ptr<Buffer> m_occlusionReplayStateBuffer;
     std::shared_ptr<Buffer> m_occlusionNodeGpuInputsBuffer;
-    std::shared_ptr<Buffer> m_viewDepthSrvIndicesBuffer;
     std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidatesBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidateCountBuffer;
@@ -213,8 +213,13 @@ private:
     std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
     std::vector<uint64_t> m_declaredDrawSetResourceIds;
     std::vector<uint64_t> m_declaredVisibilityBufferIds;
-    std::vector<CLodViewRasterInfo> m_cachedViewRasterInfo;
-    std::vector<CLodViewDepthSRVIndex> m_cachedViewDepthSrvIndices;
+    std::vector<CLodViewRasterInfo> m_cachedViewRasterInfo; // Descriptor-free rows shared with page-job passes.
+    // Tables this pass's shaders read. They embed descriptors, so they are
+    // published during preparation from the frame's bindings.
+    CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
+    CLodViewDepthTable ViewDepthTable(const org::PassPrepareContext&) const;
+    org::PreparedTablePublisher m_viewRasterInfoTable{"CLod Culling View Raster Info"};
+    org::PreparedTablePublisher m_viewDepthTable{"CLod Culling View Depth SRV Indices"};
     std::vector<uint32_t> m_zeroTelemetryScratch;
     CLodVoxelRasterQueueDescriptors m_cachedVoxelQueueDescriptors{};
     CLodWorkGraphComputePageJobDescriptors m_cachedPageJobDescriptors{};
@@ -222,7 +227,6 @@ private:
     uint64_t m_lastViewResourceLayoutRevision = 0u;
     bool m_hasCachedVoxelQueueDescriptors = false;
     bool m_hasCachedPageJobDescriptors = false;
-    bool m_hasUploadedViewDepthSrvIndices = false;
     struct WorkGraphInitializationState { std::atomic_bool initialized{false}; };
     std::shared_ptr<WorkGraphInitializationState> m_workGraphInitialization =
         std::make_shared<WorkGraphInitializationState>();

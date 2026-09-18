@@ -34,7 +34,7 @@ ReyesSplitPass::ReyesSplitPass(
     uint32_t splitPassIndex,
     uint32_t maxSplitPassCount,
     uint32_t phaseIndex,
-    std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer,
+    bool enableViewDepthOcclusion,
     std::shared_ptr<Buffer> replaySplitQueueBuffer,
     std::shared_ptr<Buffer> replaySplitQueueCounterBuffer,
     std::shared_ptr<Buffer> replaySplitQueueOverflowBuffer)
@@ -55,7 +55,7 @@ ReyesSplitPass::ReyesSplitPass(
     , m_shadowNonRasterableHierarchyTexture(std::move(shadowNonRasterableHierarchyTexture))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
-    , m_viewDepthSrvIndicesBuffer(std::move(viewDepthSrvIndicesBuffer))
+    , m_enableViewDepthOcclusion(enableViewDepthOcclusion)
     , m_replaySplitQueueBuffer(std::move(replaySplitQueueBuffer))
     , m_replaySplitQueueCounterBuffer(std::move(replaySplitQueueCounterBuffer))
     , m_replaySplitQueueOverflowBuffer(std::move(replaySplitQueueOverflowBuffer))
@@ -121,8 +121,8 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
     bindings.tessTriangles = builder->BindShaderResource(m_tessTableTrianglesBuffer);
     bindings.indirectArgs = builder->BindIndirectArguments(m_indirectArgsBuffer);
     bindings.telemetry = builder->BindUnorderedAccess(m_telemetryBuffer);
-    if (m_viewDepthSrvIndicesBuffer) {
-        bindings.viewDepthIndices = builder->BindShaderResource(m_viewDepthSrvIndicesBuffer);
+    if (m_enableViewDepthOcclusion) {
+        builder->WithShaderResource(Builtin::PrimaryCamera::LinearDepthMap);
         bindings.hasViewDepth = true;
     }
     if (m_replaySplitQueueBuffer) {
@@ -195,7 +195,9 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     c[CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = bindings.hasShadowClipmap ? srv(bindings.shadowClipmap) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty ? srv(bindings.shadowDirty, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowNonRasterable ? srv(bindings.shadowNonRasterable, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
-    c[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.hasViewDepth ? srv(bindings.viewDepthIndices) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.hasViewDepth
+        ? BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).Publish(preparation, m_viewDepthPublisher)
+        : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_DESCRIPTOR_INDEX] = bindings.hasReplayQueue ? uav(bindings.replayQueue) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasReplayCounter ? uav(bindings.replayCounter) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = bindings.hasReplayOverflow ? uav(bindings.replayOverflow) : 0xFFFFFFFFu;
@@ -212,6 +214,8 @@ void ReyesSplitPass::InvocationRevision(const org::PassPrepareContext& preparati
     out.push_back(br::render::PipelineRevision(m_clearCountersPso));
     out.push_back(br::render::PipelineRevision(m_pso));
     out.push_back(br::render::OwnerRevision(m_commandSignature));
+    if (m_enableViewDepthOcclusion)
+        BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).AppendRevision(preparation, out);
 }
 
 void ReyesSplitPass::Record(const ReyesSplitBindings&, const ReyesSplitFrameData& data, org::PassRecordContext& recording) {

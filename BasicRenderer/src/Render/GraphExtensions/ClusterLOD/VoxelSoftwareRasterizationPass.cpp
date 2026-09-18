@@ -55,7 +55,6 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     std::shared_ptr<Buffer> rigidVoxelIndirectArgsBuffer,
     std::shared_ptr<Buffer> skinnedVoxelIndirectArgsBuffer,
     std::shared_ptr<Buffer> telemetryBuffer,
-    std::shared_ptr<Buffer> viewRasterInfoBuffer,
     CLodRasterOutputKind outputKind,
     std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
     std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
@@ -69,7 +68,6 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     , m_voxelWorkCounterBuffers{ std::move(rigidVoxelWorkCounterBuffer), std::move(skinnedVoxelWorkCounterBuffer) }
     , m_voxelIndirectArgsBuffers{ std::move(rigidVoxelIndirectArgsBuffer), std::move(skinnedVoxelIndirectArgsBuffer) }
     , m_telemetryBuffer(std::move(telemetryBuffer))
-    , m_viewRasterInfoBuffer(std::move(viewRasterInfoBuffer))
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
     , m_virtualShadowDynamicPagesTexture(std::move(virtualShadowDynamicPagesTexture))
@@ -181,8 +179,7 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
             m_voxelWorkRecordsBuffers[1],
             m_visibleClustersBuffer,
             m_voxelWorkCounterBuffers[0],
-            m_voxelWorkCounterBuffers[1],
-            m_viewRasterInfoBuffer)
+            m_voxelWorkCounterBuffers[1])
         .WithShaderResource(
             Builtin::CLod::AssemblyTransforms,
             m_visibleClusterTransformIndicesBuffer)
@@ -216,8 +213,7 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
     VoxelRasterBindings bindings{
         builder->BindShaderResource(m_visibleClustersBuffer),
         builder->BindShaderResource(m_visibleClusterTransformIndicesBuffer),
-        {},
-        builder->BindShaderResource(m_viewRasterInfoBuffer)};
+        {}};
     bindings.hasTelemetry = static_cast<bool>(m_telemetryBuffer);
     if (bindings.hasTelemetry) bindings.telemetry = builder->BindUnorderedAccess(m_telemetryBuffer);
     for (uint32_t i = 0; i < 2; ++i) {
@@ -239,47 +235,13 @@ void VoxelSoftwareRasterizationPass::Update(const UpdateExecutionContext& execut
 {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
-    const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
-
+    // Only the declarations are maintained here: the view table the shader
+    // reads is published during preparation.
     std::vector<std::shared_ptr<PixelBuffer>> nextVisibilityBuffers;
-    auto numViews = context.ViewCameraBufferSize();
-    std::vector<CLodViewRasterInfo> viewRasterInfo(numViews);
-
-    for (const auto& viewInfo : context.Views()) {
-        auto cameraIndex = viewInfo.cameraBufferIndex;
-        if (cameraIndex >= viewRasterInfo.size()) continue;
-        CLodViewRasterInfo info{};
-        info.scissorMinX = 0;
-        info.scissorMinY = 0;
-
-        if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-            if (viewInfo.shadow && viewInfo.lightType == Components::LightType::Directional) {
-                info.scissorMaxX = virtualShadowConfig.virtualResolution;
-                info.scissorMaxY = virtualShadowConfig.virtualResolution;
-                info.viewportScaleX = 1.0f;
-                info.viewportScaleY = 1.0f;
-            }
-            viewRasterInfo[cameraIndex] = info;
-            continue;
-        }
-
-        if (!viewInfo.visibilityBuffer) continue;
-
-        info.visibilityUAVDescriptorIndex = viewInfo.visibilityUAVIndex;
-        info.scissorMaxX = viewInfo.visibilityBuffer->GetWidth();
-        info.scissorMaxY = viewInfo.visibilityBuffer->GetHeight();
-        info.viewportScaleX = 1.0f;
-        info.viewportScaleY = 1.0f;
-        viewRasterInfo[cameraIndex] = info;
-        nextVisibilityBuffers.push_back(viewInfo.visibilityBuffer);
-    }
-
-    m_viewRasterInfoBuffer->ResizeStructured(static_cast<uint32_t>(viewRasterInfo.size()));
-    UploadBufferData(
-        viewRasterInfo.data(),
-        static_cast<uint32_t>(viewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
-        org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
-        0);
+    if (m_outputKind != CLodRasterOutputKind::VirtualShadow)
+        for (const auto& viewInfo : context.Views())
+            if (viewInfo.visibilityBuffer && viewInfo.cameraBufferIndex < context.ViewCameraBufferSize())
+                nextVisibilityBuffers.push_back(viewInfo.visibilityBuffer);
 
     m_declaredResourcesChanged = (nextVisibilityBuffers != m_visibilityBuffers);
     m_visibilityBuffers = std::move(nextVisibilityBuffers);
@@ -309,7 +271,8 @@ VoxelRasterFrameData VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBi
     misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = srv(bindings.transforms);
     misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = bindings.hasTelemetry && IsCLodWorkGraphTelemetryEnabled()
         ? uav(bindings.telemetry) : 0xFFFFFFFFu;
-    misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.viewInfo);
+    misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = BuildCLodVisibilityViewRasterInfo(
+        context->Views(), context->ViewCameraBufferSize(), m_outputKind).Publish(preparation, m_viewRasterInfoPublisher);
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =

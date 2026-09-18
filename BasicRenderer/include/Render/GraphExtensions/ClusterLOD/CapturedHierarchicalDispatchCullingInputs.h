@@ -83,7 +83,6 @@ struct CapturedHierarchicalDispatchCullingInputs {
     EmissionBuffer m_skinnedVoxelRasterWorkCounterBuffer;
     EmissionBuffer m_swVisibleClustersCounterBuffer;
     EmissionBuffer m_swWriteBaseCounterBuffer;
-    EmissionBuffer m_viewDepthSrvIndicesBuffer;
     EmissionBuffer m_viewRasterInfoBuffer;
     EmissionBuffer m_visibleClusterTransformIndicesBuffer;
     EmissionBuffer m_visibleClustersBuffer;

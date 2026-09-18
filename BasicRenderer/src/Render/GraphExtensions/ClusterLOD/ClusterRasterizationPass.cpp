@@ -93,9 +93,6 @@ ClusterRasterizationPass::ClusterRasterizationPass(
     m_getShadowsEnabled = settingsManager.getSettingGetter<bool>("enableShadows");
     m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
 
-    m_viewRasterInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodViewRasterInfo), false, false, false, false);
-    m_viewRasterInfoBuffer->SetName("CLodViewRasterInfoBuffer");
-    org::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD rasterization");
 
     rhi::IndirectArg args[] = {
         {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
@@ -139,7 +136,6 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& declar
             m_compactedVisibleClustersBuffer,
             m_compactedVisibleClusterTransformIndicesBuffer,
             m_rasterBucketsHistogramBuffer,
-            m_viewRasterInfoBuffer,
             m_sortedToUnsortedMappingBuffer)
         .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .IsGeometryPass();
@@ -147,7 +143,6 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& declar
         builder->BindShaderResource(m_rasterBucketsHistogramBuffer),
         builder->BindShaderResource(m_compactedVisibleClustersBuffer),
         builder->BindShaderResource(m_compactedVisibleClusterTransformIndicesBuffer),
-        builder->BindShaderResource(m_viewRasterInfoBuffer),
         builder->BindShaderResource(m_sortedToUnsortedMappingBuffer),
         builder->BindIndirectArguments(m_rasterBucketsIndirectArgsBuffer)};
 
@@ -372,10 +367,10 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
         }
     }
 
-    std::vector<CLodViewRasterInfo> viewRasterInfo(numViews);
+    CLodViewRasterInfoTable table(numViews);
     for (const auto& viewInfo : context.Views()) {
         auto cameraIndex = viewInfo.cameraBufferIndex;
-        if (cameraIndex >= viewRasterInfo.size()) continue;
+        if (cameraIndex >= table.size()) continue;
         CLodViewRasterInfo info{};
         info.scissorMinX = 0;
         info.scissorMinY = 0;
@@ -387,15 +382,15 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
                 info.viewportScaleX = 1.0f;
                 info.viewportScaleY = 1.0f;
             }
-            viewRasterInfo[cameraIndex] = info;
+            table[cameraIndex] = info;
             continue;
         }
 
         if (!viewInfo.visibilityBuffer) continue;
 
         if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer) {
-            info.visibilityUAVDescriptorIndex =
-                viewInfo.visibilityUAVIndex;
+            table.BindView(cameraIndex, &CLodViewRasterInfo::visibilityUAVDescriptorIndex, viewInfo.visibilityBuffer,
+                { org::BindlessViewKind::UnorderedAccess });
             info.scissorMaxX = viewInfo.visibilityBuffer->GetWidth();
             info.scissorMaxY = viewInfo.visibilityBuffer->GetHeight();
             visibilityBuffers.push_back(viewInfo.visibilityBuffer);
@@ -403,22 +398,22 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
         else if (m_outputKind == CLodRasterOutputKind::DeepVisibility) {
             auto headPointers = viewInfo.deepVisibilityHeadPointers;
             if (!headPointers) {
-                viewRasterInfo[cameraIndex] = info;
+                table[cameraIndex] = info;
                 continue;
             }
 
-            info.opaqueVisibilitySRVDescriptorIndex =
-                viewInfo.visibilitySRVIndex;
-            info.deepVisibilityHeadPointerUAVDescriptorIndex =
-                headPointers->GetUAVShaderVisibleInfo(0).slot.index;
+            table.BindView(cameraIndex, &CLodViewRasterInfo::opaqueVisibilitySRVDescriptorIndex, viewInfo.visibilityBuffer,
+                { org::BindlessViewKind::ShaderResource });
+            table.BindView(cameraIndex, &CLodViewRasterInfo::deepVisibilityHeadPointerUAVDescriptorIndex, headPointers,
+                { org::BindlessViewKind::UnorderedAccess });
             info.scissorMaxX = headPointers->GetWidth();
             info.scissorMaxY = headPointers->GetHeight();
             visibilityBuffers.push_back(viewInfo.visibilityBuffer);
             deepVisibilityHeadPointerBuffers.push_back(std::move(headPointers));
         }
         else {
-            info.opaqueVisibilitySRVDescriptorIndex =
-                viewInfo.visibilitySRVIndex;
+            table.BindView(cameraIndex, &CLodViewRasterInfo::opaqueVisibilitySRVDescriptorIndex, viewInfo.visibilityBuffer,
+                { org::BindlessViewKind::ShaderResource });
             info.scissorMaxX = rasterDimension(viewInfo.visibilityBuffer->GetWidth());
             info.scissorMaxY = rasterDimension(viewInfo.visibilityBuffer->GetHeight());
             visibilityBuffers.push_back(viewInfo.visibilityBuffer);
@@ -426,7 +421,7 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
 
         info.viewportScaleX = static_cast<float>(info.scissorMaxX) / static_cast<float>(maxViewWidth);
         info.viewportScaleY = static_cast<float>(info.scissorMaxY) / static_cast<float>(maxViewHeight);
-        viewRasterInfo[cameraIndex] = info;
+        table[cameraIndex] = info;
     }
 
     m_passWidth = maxViewWidth;
@@ -451,19 +446,12 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
     m_visibilityBuffers = std::move(visibilityBuffers);
     m_deepVisibilityHeadPointerBuffers = std::move(deepVisibilityHeadPointerBuffers);
 
-    if (m_viewRasterInfos != viewRasterInfo || resourcesChanged) {
-        m_viewRasterInfos = std::move(viewRasterInfo);
-        m_viewRasterInfoBuffer->ResizeStructured(static_cast<uint32_t>(m_viewRasterInfos.size()));
-        UploadBufferData(
-            m_viewRasterInfos.data(),
-            static_cast<uint32_t>(m_viewRasterInfos.size() * sizeof(CLodViewRasterInfo)),
-            org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
-            0);
-        m_declaredResourcesChanged = true;
-    }
-    else {
-        m_declaredResourcesChanged = false;
-    }
+    // Rows carry no descriptors: those are resolved when the recipe publishes
+    // the table, so a resource moving to a new backing needs no redeclaration.
+    const std::vector<CLodViewRasterInfo> rows(table.Rows().begin(), table.Rows().end());
+    m_declaredResourcesChanged = m_viewRasterInfos != rows || resourcesChanged;
+    m_viewRasterInfos = rows;
+    m_viewRasterInfoTable = std::move(table);
 }
 
 bool ClusterRasterizationPass::DeclaredResourcesChanged() const {
@@ -525,11 +513,8 @@ br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::BuildRecipe
         misc[MiscEnablePunctualLights] = context->lighting.punctualLightingEnabled;
         misc[MiscEnableGTAO] = context->lighting.gtaoEnabled;
     }
-    // These indices form one table with the descriptor indices embedded in
-    // m_viewRasterInfoBuffer. Keep the table on one descriptor publication.
-    // Resolving the individual tokens against the accepted binding table while
-    // the embedded entries came from the shared publication split that table
-    // and redirected visibility writes.
+    // The view table and the single-view visibility UAV below are resolved
+    // against this frame's bindings (see CLodViewTables.h).
     misc[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] =
         m_rasterBucketsHistogramBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] =
@@ -537,7 +522,7 @@ br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::BuildRecipe
     misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
         m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] =
-        m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index;
+        m_viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher);
     misc[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] =
         m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index;
     if (data.phase1VisibilityDiagnostics) {
@@ -553,17 +538,15 @@ br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::BuildRecipe
             m_compactedVisibleClustersBuffer->GetSRVInfo(0).slot.index);
         compareView("Transforms", misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX],
             m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index);
-        compareView("ViewInfo", misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX],
-            m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index);
         compareView("Mapping", misc[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX],
             m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index);
         const auto validView = std::ranges::find_if(m_viewRasterInfos,
-            [](const CLodViewRasterInfo& info) {
-                return info.visibilityUAVDescriptorIndex != 0xFFFFFFFFu;
-            });
+            [](const CLodViewRasterInfo& info) { return info.scissorMaxX != 0u; });
         if (validView != m_viewRasterInfos.end()) {
-            basic_telemetry::SetGauge("BasicRenderer.CLod.Phase1.PrimaryVisibilityDescriptorIndex",
-                static_cast<int64_t>(validView->visibilityUAVDescriptorIndex));
+            if (!m_visibilityBuffers.empty())
+                basic_telemetry::SetGauge("BasicRenderer.CLod.Phase1.PrimaryVisibilityDescriptorIndex",
+                    static_cast<int64_t>(ResolveCLodViewDescriptor(preparation, *m_visibilityBuffers.front(),
+                        { org::BindlessViewKind::UnorderedAccess })));
             basic_telemetry::SetGauge("BasicRenderer.CLod.Phase1.PrimaryVisibilityWidth",
                 static_cast<int64_t>(validView->scissorMaxX));
             basic_telemetry::SetGauge("BasicRenderer.CLod.Phase1.PrimaryVisibilityHeight",
@@ -575,8 +558,8 @@ br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::BuildRecipe
     misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_COUNTER_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_DETAILS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer && m_visibilityBuffers.size() == 1u)
-        misc[CLOD_RASTER_SINGLE_VIEW_VISIBILITY_UAV_DESCRIPTOR_INDEX] =
-            m_visibilityBuffers.front()->GetUAVShaderVisibleInfo(0).slot.index;
+        misc[CLOD_RASTER_SINGLE_VIEW_VISIBILITY_UAV_DESCRIPTOR_INDEX] = ResolveCLodViewDescriptor(
+            preparation, *m_visibilityBuffers.front(), { org::BindlessViewKind::UnorderedAccess });
     if (data.phase1VisibilityDiagnostics && bindings.visibilityBuffers.size() == 1u) {
         const auto frozenVisibility = misc[CLOD_RASTER_SINGLE_VIEW_VISIBILITY_UAV_DESCRIPTOR_INDEX];
         const auto liveVisibility =
@@ -686,8 +669,8 @@ std::vector<uint64_t> ClusterRasterizationPass::RecipeRevision(const org::PassPr
         m_rasterBucketsHistogramBuffer->GetSRVInfo(0).slot.index,
         m_compactedVisibleClustersBuffer->GetSRVInfo(0).slot.index,
         m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index,
-        m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index,
         m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index};
+    m_viewRasterInfoTable.AppendRevision(preparation, revision);
     for (uint32_t i = 0; i < context->preparedRasterBucketCount; ++i) {
         const auto flags = context->preparedRasterBucketFlags.at(i);
         const PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer

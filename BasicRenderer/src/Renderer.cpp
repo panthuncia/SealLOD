@@ -3605,7 +3605,6 @@ void Renderer::Update(float elapsedSeconds) {
     br::render::PrimaryCameraFrameUpload primaryCameraUpload{};
     if (m_pViewManager) {
         BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::ViewFamily");
-        m_pViewManager->RefreshDescriptorIndices();
         currentViews->revision = m_pViewManager->GetPublicationRevision();
         currentViews->cameraBufferSize = m_pViewManager->GetCameraBufferSize();
         primaryCameraUpload = m_pViewManager->CapturePrimaryCameraUpload(updateData.frameNumber);
@@ -3637,11 +3636,7 @@ void Renderer::Update(float elapsedSeconds) {
                 .deepVisibilityHeadPointers = view->gpu.clodDeepVisibilityHeadPointers,
                 .linearDepthMap = view->gpu.linearDepthMap,
                 .depthHistory = m_depthHistory.Select(view->id, view->gpu.linearDepthMap),
-                .linearDepthSRVIndices = view->gpu.linearDepthSRVIndices,
                 .depthBufferArrayIndex = view->cameraInfo.depthBufferArrayIndex,
-                .visibilitySRVIndex = view->gpu.visibilitySRVIndex,
-                .visibilityUAVIndex = view->gpu.visibilityUAVIndex,
-                .deepVisibilityHeadPointersUAVIndex = view->gpu.clodDeepVisibilityHeadPointersUAVIndex,
             });
             if (view->gpu.visibilityBuffer)
                 currentViews->retainedResources.push_back(view->gpu.visibilityBuffer);

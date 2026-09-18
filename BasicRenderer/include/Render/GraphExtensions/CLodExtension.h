@@ -108,8 +108,6 @@ private:
     std::shared_ptr<Buffer> m_occlusionReplayBuffer;
     std::shared_ptr<Buffer> m_occlusionReplayStateBuffer;
     std::shared_ptr<Buffer> m_occlusionNodeGpuInputsBuffer;
-    std::shared_ptr<Buffer> m_viewDepthSrvIndicesBuffer;
-    std::shared_ptr<Buffer> m_viewDepthSrvIndicesBufferPhase2;
 
     std::shared_ptr<Buffer> m_histogramIndirectCommand;
     std::shared_ptr<Buffer> m_histogramIndirectCommandPhase2;

@@ -10,6 +10,8 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "RenderPasses/PreparedComputeDispatch.h"
 #include "RenderPasses/PreparedComputeCommands.h"
@@ -41,7 +43,7 @@ inline void RemapDescriptorIndices(ClusterSoftwareRasterFrameData& data, const o
 }
 
 struct ClusterSoftwareRasterBindings {
-    org::ResourceBindingToken histogram, visible, transforms, mapping, viewInfo, indirectArgs;
+    org::ResourceBindingToken histogram, visible, transforms, mapping, indirectArgs;
     org::ResourceBindingToken pageTable, clipmapInfo, physicalPages, dynamicPages, telemetry;
     org::ResourceBindingToken skinMapping, skinHash, skinPositions, skinAllocator, skinWork, skinArgs, skinMembership;
     bool virtualShadow = false, hasTelemetry = false, hasSkinCache = false;
@@ -58,7 +60,6 @@ public:
         std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
         std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
         std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
-        std::shared_ptr<Buffer> viewRasterInfoBuffer,
         CLodRasterOutputKind outputKind,
         std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
         std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
@@ -194,7 +195,7 @@ public:
         constants[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = resolve(bindings.histogram);
         constants[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = resolve(bindings.visible);
         constants[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = resolve(bindings.transforms);
-        constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = resolve(bindings.viewInfo);
+        constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = Constant{UINT32_MAX}; // Published per preparation.
         constants[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = resolve(bindings.mapping);
         return constants;
     }
@@ -263,7 +264,10 @@ private:
     std::shared_ptr<Buffer> m_rasterBucketsHistogramBuffer;
     std::shared_ptr<Buffer> m_rasterBucketsIndirectArgsBuffer;
     std::shared_ptr<Buffer> m_sortedToUnsortedMappingBuffer;
-    std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
+    // The per-view table the shader reads; it embeds the visibility UAVs, so
+    // it is published during preparation from the frame's bindings.
+    CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
+    org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Software Raster View Raster Info"};
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;

@@ -8,6 +8,8 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Resources/PixelBuffer.h"
 
@@ -28,7 +30,7 @@ struct VoxelRasterFrameData {
 };
 
 struct VoxelRasterBindings {
-    org::ResourceBindingToken visible, transforms, telemetry, viewInfo;
+    org::ResourceBindingToken visible, transforms, telemetry;
     std::array<org::ResourceBindingToken, 2> workRecords, workCounters, indirectArgs;
     org::ResourceBindingToken pageTable, clipmapInfo, physicalPages, dynamicPages;
     bool hasTelemetry = false, virtualShadow = false;
@@ -48,7 +50,6 @@ public:
         std::shared_ptr<Buffer> rigidVoxelIndirectArgsBuffer,
         std::shared_ptr<Buffer> skinnedVoxelIndirectArgsBuffer,
         std::shared_ptr<Buffer> telemetryBuffer,
-        std::shared_ptr<Buffer> viewRasterInfoBuffer,
         CLodRasterOutputKind outputKind,
         std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
         std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
@@ -77,7 +78,9 @@ private:
     std::array<std::shared_ptr<Buffer>, 2> m_voxelWorkCounterBuffers;
     std::array<std::shared_ptr<Buffer>, 2> m_voxelIndirectArgsBuffers;
     std::shared_ptr<Buffer> m_telemetryBuffer;
-    std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
+    // The per-view table the shader reads; it embeds the visibility UAVs, so
+    // it is published during preparation from the frame's bindings.
+    org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Voxel Raster View Raster Info"};
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;

@@ -76,7 +76,6 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
     std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
     std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
     std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
-    std::shared_ptr<Buffer> viewRasterInfoBuffer,
     CLodRasterOutputKind outputKind,
     std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
     std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
@@ -90,7 +89,6 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
     , m_rasterBucketsIndirectArgsBuffer(std::move(rasterBucketsIndirectArgsBuffer))
     , m_sortedToUnsortedMappingBuffer(std::move(sortedToUnsortedMappingBuffer))
-    , m_viewRasterInfoBuffer(std::move(viewRasterInfoBuffer))
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
     , m_virtualShadowDynamicPagesTexture(std::move(virtualShadowDynamicPagesTexture))
@@ -252,8 +250,7 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
             m_compactedVisibleClustersBuffer,
             m_compactedVisibleClusterTransformIndicesBuffer,
             m_rasterBucketsHistogramBuffer,
-            m_sortedToUnsortedMappingBuffer,
-            m_viewRasterInfoBuffer)
+            m_sortedToUnsortedMappingBuffer)
         .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithUnorderedAccess(Builtin::DebugVisualization);
     ClusterSoftwareRasterBindings bindings{
@@ -261,7 +258,6 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
         builder->BindShaderResource(m_compactedVisibleClustersBuffer),
         builder->BindShaderResource(m_compactedVisibleClusterTransformIndicesBuffer),
         builder->BindShaderResource(m_sortedToUnsortedMappingBuffer),
-        builder->BindShaderResource(m_viewRasterInfoBuffer),
         builder->BindIndirectArguments(m_rasterBucketsIndirectArgsBuffer)};
 
     if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer) {
@@ -319,49 +315,13 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
 void ClusterSoftwareRasterizationPass::Update(const UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
-    const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
-
+    // Only the declarations are maintained here: the view table the shader
+    // reads is published during preparation (ViewRasterInfoTable).
     std::vector<std::shared_ptr<PixelBuffer>> nextVisibilityBuffers;
-    auto numViews = context.ViewCameraBufferSize();
-    std::vector<CLodViewRasterInfo> viewRasterInfo(numViews);
-
-    for (const auto& viewInfo : context.Views()) {
-        auto cameraIndex = viewInfo.cameraBufferIndex;
-        if (cameraIndex >= viewRasterInfo.size()) continue;
-        CLodViewRasterInfo info{};
-        info.scissorMinX = 0;
-        info.scissorMinY = 0;
-
-        if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-            if (viewInfo.shadow && viewInfo.lightType == Components::LightType::Directional) {
-                info.scissorMaxX = virtualShadowConfig.virtualResolution;
-                info.scissorMaxY = virtualShadowConfig.virtualResolution;
-                info.viewportScaleX = 1.0f;
-                info.viewportScaleY = 1.0f;
-            }
-            viewRasterInfo[cameraIndex] = info;
-            continue;
-        }
-
-        if (viewInfo.visibilityBuffer == nullptr) {
-            continue;
-        }
-
-        info.visibilityUAVDescriptorIndex = viewInfo.visibilityUAVIndex;
-        info.scissorMaxX = viewInfo.visibilityBuffer->GetWidth();
-        info.scissorMaxY = viewInfo.visibilityBuffer->GetHeight();
-        info.viewportScaleX = 1.0f;
-        info.viewportScaleY = 1.0f;
-        viewRasterInfo[cameraIndex] = info;
-        nextVisibilityBuffers.push_back(viewInfo.visibilityBuffer);
-    }
-
-    m_viewRasterInfoBuffer->ResizeStructured(static_cast<uint32_t>(viewRasterInfo.size()));
-    UploadBufferData(
-        viewRasterInfo.data(),
-        static_cast<uint32_t>(viewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
-        org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
-        0);
+    if (m_outputKind != CLodRasterOutputKind::VirtualShadow)
+        for (const auto& viewInfo : context.Views())
+            if (viewInfo.visibilityBuffer && viewInfo.cameraBufferIndex < context.ViewCameraBufferSize())
+                nextVisibilityBuffers.push_back(viewInfo.visibilityBuffer);
 
     m_declaredResourcesChanged = (nextVisibilityBuffers != m_visibilityBuffers);
     m_visibilityBuffers = std::move(nextVisibilityBuffers);
@@ -399,6 +359,8 @@ ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::BuildRecipe(
     auto constants = BuildPrimaryConstants<uint32_t>(bindings,[&](org::ResourceBindingToken token) {
         return preparation.ResolveView(token,{org::BindlessViewKind::ShaderResource}).index;
     });
+    constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] =
+        ViewRasterInfoTable(preparation).Publish(preparation, m_viewRasterInfoPublisher);
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         ApplyVirtualShadowConstants(constants,bindings,
@@ -462,5 +424,11 @@ std::vector<uint64_t> ClusterSoftwareRasterizationPass::RecipeRevision(const org
         revision.push_back(static_cast<uint64_t>(flags));
         revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->PeekPayload() : nullptr));
     }
+    ViewRasterInfoTable(preparation).AppendRevision(preparation, revision);
     return revision;
+}
+
+CLodViewRasterInfoTable ClusterSoftwareRasterizationPass::ViewRasterInfoTable(const org::PassPrepareContext& preparation) const {
+    const auto& context = CLodPreparationSnapshot(preparation);
+    return BuildCLodVisibilityViewRasterInfo(context.Views(), context.ViewCameraBufferSize(), m_outputKind);
 }

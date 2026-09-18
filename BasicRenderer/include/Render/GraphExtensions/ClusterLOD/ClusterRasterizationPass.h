@@ -15,6 +15,8 @@
 #include "RenderPasses/PreparedRenderIndirect.h"
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodViewTables.h"
+#include "Render/PreparedTablePublisher.h"
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
@@ -32,7 +34,7 @@ struct ClusterRasterizationPassInputs {
 };
 
 struct ClusterRasterBindings {
-    org::ResourceBindingToken histogram, visible, transforms, viewInfo, mapping, indirectArgs;
+    org::ResourceBindingToken histogram, visible, transforms, mapping, indirectArgs;
     org::ResourceBindingToken telemetry, mismatchCounter, mismatchDetails;
     org::ResourceBindingToken pageTable, clipmapInfo, physicalPages, dynamicPages;
     org::ResourceBindingToken deepNodes, deepCounter, deepOverflow;
@@ -101,7 +103,11 @@ private:
     bool m_clearGbuffer = true;
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
 
-    std::vector<CLodViewRasterInfo> m_viewRasterInfos;
+    std::vector<CLodViewRasterInfo> m_viewRasterInfos; // Rows without descriptors (change detection).
+    // Built by Update from the view snapshot; its descriptors are resolved and
+    // the table published when the recipe is built.
+    CLodViewRasterInfoTable m_viewRasterInfoTable;
+    org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Raster View Raster Info"};
     std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
     std::vector<std::shared_ptr<PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
 
@@ -137,7 +143,6 @@ private:
 
     std::shared_ptr<rhi::CommandSignaturePtr> m_rasterizationCommandSignature;
 
-    std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
     uint32_t m_passWidth = 1;
     uint32_t m_passHeight = 1;
     uint32_t m_deepVisibilityNodeCapacity = 1;
