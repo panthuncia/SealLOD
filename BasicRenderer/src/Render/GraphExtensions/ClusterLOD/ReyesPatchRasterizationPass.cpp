@@ -7,6 +7,7 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
+#include "Render/ObjectReyesAtlasTelemetry.h"
 #include "Render/TerrainRvtTelemetry.h"
 #include "BuiltinResources.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
@@ -52,7 +53,18 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/reyesPatchRaster.hlsl",
         L"ReyesPatchRasterCS",
-        IsTerrainRvtTelemetryDebugEnabled() ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } } : std::vector<DxcDefine>{},
+        [] {
+            // reyesPatchRaster.hlsl carries both telemetry blocks behind defines
+            // that default to 0, so neither costs anything in a normal run.
+            std::vector<DxcDefine> defines;
+            if (IsTerrainRvtTelemetryDebugEnabled()) {
+                defines.push_back(DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" });
+            }
+            if (IsObjectReyesAtlasTelemetryDebugEnabled()) {
+                defines.push_back(DxcDefine{ L"CLOD_REYES_PATCH_RASTER_ATLAS_DEBUG_TELEMETRY", L"1" });
+            }
+            return defines;
+        }(),
         "CLod.ReyesPatchRaster.PSO");
 
     rhi::IndirectArg dispatchArgs[] = {
@@ -175,6 +187,16 @@ br::render::PreparedComputeIndirect ReyesPatchRasterizationPass::Prepare(
     data.constants[CLOD_REYES_PATCH_RASTER_PHASE_INDEX] = bindings.phase;
     data.constants[CLOD_REYES_PATCH_RASTER_WORK_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.workCounter);
     data.constants[CLOD_REYES_PATCH_RASTER_PATCH_INDEX_BASE] = bindings.patchIndexBase;
+    {
+        // The value baked here must equal the base the material passes use to
+        // recognise a Reyes patch pixel; a mismatch makes patch pixels read as
+        // ordinary clusters.
+        static std::atomic<std::uint32_t> loggedPatchBase{ 0 };
+        if (loggedPatchBase.fetch_add(1, std::memory_order_relaxed) < 8u) {
+            spdlog::info("ReyesPatchRaster recipe: phase={} patchIndexBase={} enabled={}",
+                bindings.phase, bindings.patchIndexBase, bindings.enabled);
+        }
+    }
     data.constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = srv(bindings.tessConfigs);
     data.constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = srv(bindings.tessVertices);
     data.constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = srv(bindings.tessTriangles);

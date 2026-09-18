@@ -78,6 +78,12 @@ public:
                 ++copyQueueCaptures;
             }
 
+            // Captures anchored after a pass interrupt the frame there; captures
+            // of end-of-frame contents run after the graph.
+            const bool afterGraph = capture.passName == org::runtime::kReadbackAfterGraph;
+            const auto where = afterGraph
+                ? RenderGraph::ExternalInsertPoint::End()
+                : RenderGraph::ExternalInsertPoint::After(capture.passName);
             auto& localIndex = localIndexByAnchorPass[capture.passName];
             const std::string passInstanceName =
                 "ReadbackCapture::" +
@@ -97,7 +103,8 @@ public:
                     RenderGraph::ExternalPassDesc::Copy(
                         passInstanceName,
                         std::move(pass))
-                        .At(RenderGraph::ExternalInsertPoint::After(capture.passName))
+                        .At(where)
+                        .InterruptsFrame(!afterGraph)
                         .PreferQueue(QueueKind::Copy)
                         .PinToQueue(static_cast<QueueSlotIndex>(2))
                         .CollectStatistics(false)
@@ -113,7 +120,8 @@ public:
                     RenderGraph::ExternalPassDesc::Render(
                         passInstanceName,
                         std::move(pass))
-                        .At(RenderGraph::ExternalInsertPoint::After(capture.passName))
+                        .At(where)
+                        .InterruptsFrame(!afterGraph)
                         .PinToQueue(static_cast<QueueSlotIndex>(0))
                         .CollectStatistics(false)
                         .RegisterByName(false));

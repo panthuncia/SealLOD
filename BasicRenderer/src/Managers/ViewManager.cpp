@@ -248,6 +248,45 @@ void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<PixelB
     m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
+void ViewManager::RefreshDescriptorIndices() {
+    // A resource between dematerialization and rematerialization has no slots;
+    // reserving them here is what Materialize would do, so the index read now
+    // is the one the next backing publishes under.
+    const auto uavIndex = [](const std::shared_ptr<PixelBuffer>& texture) {
+        if (!texture) return 0xFFFFFFFFu;
+        texture->EnsureVirtualDescriptorSlotsAllocated();
+        return static_cast<uint32_t>(texture->GetUAVShaderVisibleInfo(0).slot.index);
+    };
+    const auto srvIndex = [](const std::shared_ptr<PixelBuffer>& texture, uint32_t slice = 0) {
+        if (!texture) return 0xFFFFFFFFu;
+        texture->EnsureVirtualDescriptorSlotsAllocated();
+        return static_cast<uint32_t>(texture->GetSRVInfo(0, slice).slot.index);
+    };
+    bool changed = false;
+    const auto refresh = [&changed](uint32_t& cached, uint32_t current) {
+        if (cached == current) return;
+        cached = current;
+        changed = true;
+    };
+    for (auto& [_, v] : m_views) {
+        auto& gpu = v.gpu;
+        refresh(gpu.visibilitySRVIndex, srvIndex(gpu.visibilityBuffer));
+        refresh(gpu.visibilityUAVIndex, uavIndex(gpu.visibilityBuffer));
+        if (gpu.clodDeepVisibilityHeadPointers) {
+            refresh(gpu.clodDeepVisibilityHeadPointersUAVIndex, uavIndex(gpu.clodDeepVisibilityHeadPointers));
+        }
+        if (gpu.linearDepthMap) {
+            for (uint32_t slice = 0; slice < gpu.linearDepthSRVIndices.size(); ++slice) {
+                refresh(gpu.linearDepthSRVIndices[slice], srvIndex(gpu.linearDepthMap, slice));
+            }
+        }
+    }
+    if (changed) {
+        ++m_resourceLayoutRevision;
+        m_publicationRevision.fetch_add(1, std::memory_order_release);
+    }
+}
+
 std::shared_ptr<PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPointers(uint64_t viewID)
 {
     auto* v = Get(viewID);

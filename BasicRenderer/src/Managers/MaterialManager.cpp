@@ -1,4 +1,6 @@
 #include "Managers/MaterialManager.h"
+
+#include "Managers/MaterialOwnershipGuards.h"
 #include "../generated/BuiltinResources.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Materials/MaterialTextureStreaming.h"
@@ -376,6 +378,50 @@ namespace {
 	}
 }
 
+// See MaterialOwnershipGuards.h for the two rules these enforce.
+using MaterialAcceptanceScope = br::materials::AcceptanceScope;
+using RegistryLock = br::materials::RegistryLock;
+
+namespace {
+	bool OnMaterialAcceptanceDomain() { return br::materials::OnMaterialAcceptance(); }
+
+	void AssertOnMaterialAcceptance(const char* what) {
+		br::materials::RequireAcceptanceDomain(what);
+	}
+}
+
+void MaterialManager::PostMaterialMutation(std::function<void()> mutation) {
+	if (!mutation) return;
+	// Applied in post order at the head of the next acceptance task, so a
+	// producer's mutations land in the order it issued them.
+	m_postedMaterialMutations.push(std::move(mutation));
+	ScheduleDirtyMaterialFlush();
+}
+
+void MaterialManager::DrainPostedMaterialMutations() {
+	AssertOnMaterialAcceptance("DrainPostedMaterialMutations");
+	// Must be called only from an acceptance task entry point, never while
+	// m_registryMutex is held: the mutations below take that lock themselves
+	// (a posted first use flushes the material, which allocates a slot).
+	br::materials::RequireRegistryLockNotHeld(
+		"posted material mutations drained while the registry lock is held");
+	//
+	// Signature resets first: a slot the registry just recycled must read as
+	// having no uploaded row before any dirty material that now owns it is
+	// flushed.
+	unsigned int slot = 0;
+	while (m_slotsNeedingSignatureReset.try_pop(slot)) {
+		if (slot >= m_materialUploadSignatures.size()) {
+			m_materialUploadSignatures.resize(static_cast<std::size_t>(slot) + 1u);
+		}
+		m_materialUploadSignatures[slot].valid = false;
+	}
+	std::function<void()> mutation;
+	while (m_postedMaterialMutations.try_pop(mutation)) {
+		if (mutation) mutation();
+	}
+}
+
 // TODO: Use LazyDynamicStructuredBuffer and active indices buffer like draw calls? Would reduce number of no-op indirect arguments
 MaterialManager::MaterialManager() {
 	m_snapshotCommitScope = TaskSchedulerManager::GetInstance().CreateScope(
@@ -526,15 +572,15 @@ void MaterialManager::ScheduleStreamingStatsRefresh() const {
 			m_snapshotCommitScope, TaskLane::Streaming, TaskDomain::MaterialAcceptance,
 			"MaterialManager::RefreshStreamingStats",
 			[self](const br::TaskContext& context) {
+				MaterialAcceptanceScope acceptance;
 				self->m_streamingStatsRefreshScheduled.store(false, std::memory_order_release);
 				if (context.StopRequested() || !self->m_textureStreamingManager) return;
 				BT_ZONE_SCOPE("MaterialManager::RefreshStreamingStats");
-				std::vector<std::shared_ptr<Resource>> resources;
+				self->DrainPostedMaterialMutations();
 				const auto trackedRevision = self->m_trackedTexturesRevision.load(std::memory_order_acquire);
-				{
-					std::lock_guard mutationLock(self->m_materialMutationMutex);
-					resources = self->CollectActiveMaterialTextureResources();
-				}
+				// m_trackedMaterialTextures is authoring state owned by this
+				// domain, so collecting from it needs no lock.
+				auto resources = self->CollectActiveMaterialTextureResources();
 				uint64_t sequence = 0;
 				auto stats = self->m_textureStreamingManager->GetTextureStreamingStats(resources, &sequence);
 				std::lock_guard lock(self->m_streamingStatsMutex);
@@ -547,14 +593,19 @@ void MaterialManager::ScheduleStreamingStatsRefresh() const {
 }
 
 void MaterialManager::MarkMaterialDirty(Material& material) {
-	{
-		std::lock_guard mutationLock(m_materialMutationMutex);
-		const uint32_t materialID = material.GetMaterialID();
+	const uint32_t materialID = material.GetMaterialID();
+	if (OnMaterialAcceptanceDomain()) {
 		if (m_dirtyMaterialIDSet.insert(materialID).second) {
 			m_dirtyMaterialIDs.push_back(materialID);
 		}
+		ScheduleDirtyMaterialFlush();
+		return;
 	}
-	ScheduleDirtyMaterialFlush();
+	PostMaterialMutation([this, materialID] {
+		if (m_dirtyMaterialIDSet.insert(materialID).second) {
+			m_dirtyMaterialIDs.push_back(materialID);
+		}
+	});
 }
 
 void MaterialManager::ScheduleDirtyMaterialFlush() {
@@ -566,22 +617,24 @@ void MaterialManager::ScheduleDirtyMaterialFlush() {
 			m_snapshotCommitScope, TaskLane::Streaming, TaskDomain::MaterialAcceptance,
 			"MaterialManager::FlushDirtyMaterials",
 			[this](const br::TaskContext& context) {
+				MaterialAcceptanceScope acceptance;
 				m_dirtyMaterialFlushScheduled.store(false, std::memory_order_release);
 				if (context.StopRequested()) return;
 				FlushDirtyMaterials();
-				bool remaining = false;
-				{
-					std::lock_guard mutationLock(m_materialMutationMutex);
-					remaining = !m_dirtyMaterialIDs.empty();
+				if (!m_dirtyMaterialIDs.empty() || !m_postedMaterialMutations.empty()) {
+					ScheduleDirtyMaterialFlush();
 				}
-				if (remaining) ScheduleDirtyMaterialFlush();
 			});
 	if (!submitted) m_dirtyMaterialFlushScheduled.store(false, std::memory_order_release);
 }
 
 void MaterialManager::FlushDirtyMaterials() {
 	BT_ZONE_SCOPE("MaterialManager::FlushDirtyMaterials");
-	std::lock_guard mutationLock(m_materialMutationMutex);
+	// Authoring state, owned by this domain. The whole flush used to hold the
+	// single mutation mutex, so every import worker asking for a material slot
+	// queued behind it.
+	AssertOnMaterialAcceptance("FlushDirtyMaterials");
+	DrainPostedMaterialMutations();
 	std::vector<uint32_t> dirtyMaterialIDs;
 	dirtyMaterialIDs.swap(m_dirtyMaterialIDs);
 	m_dirtyMaterialIDSet.clear();
@@ -626,8 +679,6 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming::EnqueueFrameTick");
 		m_textureStreamingManager->EnqueueFrameTick(frameIndex);
 	}
-	std::unique_lock mutationLock(m_materialMutationMutex, std::try_to_lock);
-	if (!mutationLock.owns_lock()) return;
 	const auto& lateReadbackPath = MaterialTextureLateReadbackPath();
 	if (!m_traceLateReadbackRequested && frameIndex >= 600u && !lateReadbackPath.empty()) {
 		if (const auto texture = m_traceBaseColorTexture.lock()) {
@@ -658,81 +709,102 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 
 unsigned int MaterialManager::IncrementMaterialUsageCount(
 	Material& material, bool refreshTextureBindings, unsigned int count) {
-	std::lock_guard mutationLock(m_materialMutationMutex);
 	ZoneScopedN("MaterialManager::IncrementMaterialUsageCount");
 	ZoneValue(material.GetMaterialID());
-	//std::lock_guard<std::mutex> lock(m_materialSlotMappingMutex);
+	const uint32_t materialID = material.GetMaterialID();
 	if (count == 0u) {
 		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::CountZeroSlotLookup");
-		return GetMaterialSlot(material.GetMaterialID());
+		return GetMaterialSlot(materialID);
 	}
 
-	uint32_t materialID = material.GetMaterialID();
-	decltype(m_materialIDSlotMapping)::iterator existingSlotIt;
-	bool alreadyResident = false;
+	// Registry work only, in one short critical section: the slot and the usage
+	// count. Building the row, tracking textures and journaling all belong to
+	// the acceptance domain and are handed over below.
+	unsigned int materialSlot = 0;
+	bool firstUse = false;
 	{
-		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::ResidentLookup");
-		existingSlotIt = m_materialIDSlotMapping.find(materialID);
-		alreadyResident =
+		RegistryLock registryLock(m_registryMutex);
+		const auto existingSlotIt = m_materialIDSlotMapping.find(materialID);
+		const bool alreadyResident =
 			existingSlotIt != m_materialIDSlotMapping.end()
 			&& existingSlotIt->second < m_materialUsageCounts.size()
 			&& m_materialUsageCounts[existingSlotIt->second] > 0u;
 		TracyPlot("MaterialManager.IncrementUsage.AlreadyResident", alreadyResident ? int64_t{ 1 } : int64_t{ 0 });
-	}
-
-	unsigned int materialSlot = 0;
-	{
-		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::ResolveMaterialSlot");
 		materialSlot = alreadyResident
 			? existingSlotIt->second
-			: GetMaterialSlot(materialID, refreshTextureBindings
+			: GetMaterialSlotLocked(materialID, refreshTextureBindings
 				? std::optional<PerMaterialCB>{ material.GetData() } : std::nullopt);
-		material.SetOpenPBRMaterialDataIndex(materialSlot);
+		m_materialUsageCounts[materialSlot] += count;
+		firstUse = m_materialUsageCounts[materialSlot] == count;
+	}
+	material.SetOpenPBRMaterialDataIndex(materialSlot);
+
+	const auto activate = [this, materialID, &material] {
 		m_activeMaterialsByID[materialID] = &material;
+	};
+	if (!firstUse) {
+		if (OnMaterialAcceptanceDomain()) activate();
+		else PostMaterialMutation([this, materialID, target = &material] {
+			m_activeMaterialsByID[materialID] = target;
+		});
+		return materialSlot;
 	}
 
-	m_materialUsageCounts[materialSlot] += count;
-	if (m_materialUsageCounts[materialSlot] == 1u) {
-		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse");
+	const auto applyFirstUse = [this, materialID, refreshTextureBindings](Material& target) {
+		m_activeMaterialsByID[materialID] = &target;
 		if (refreshTextureBindings) {
-			ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::FlushDirtyMaterial");
-			FlushDirtyMaterial(material, true);
-		} else {
-			{
-				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::UpdateTextureUsage");
-				UpdateMaterialTextureUsage(material, 1);
-			}
-			{
-				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::TrackTextureAssets");
-				TrackMaterialTextureAssets(material, 1);
-			}
-			{
-				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::MarkDirty");
-				MarkMaterialDirty(material);
-			}
+			// The row is gated on its texture bindings by the graph, so it does
+			// not matter that this now happens a slice later than the caller.
+			FlushDirtyMaterial(target, true);
+			return;
 		}
+		UpdateMaterialTextureUsage(target, 1);
+		TrackMaterialTextureAssets(target, 1);
+		MarkMaterialDirty(target);
+	};
+	if (OnMaterialAcceptanceDomain()) {
+		applyFirstUse(material);
+		return materialSlot;
 	}
+	PostMaterialMutation([this, applyFirstUse, target = &material] { applyFirstUse(*target); });
 	return materialSlot;
 }
 
 void MaterialManager::RegisterMaterialSource(const std::shared_ptr<Material>& material) {
 	if (!material) return;
-	std::lock_guard mutationLock(m_materialMutationMutex);
-	m_ingestedMaterialSourcesByID[material->GetMaterialID()] = material;
+	const auto materialID = material->GetMaterialID();
+	if (OnMaterialAcceptanceDomain()) {
+		m_ingestedMaterialSourcesByID[materialID] = material;
+		return;
+	}
+	// Weak, as the map stores it: posting must not extend the material's life.
+	PostMaterialMutation([this, materialID, weak = std::weak_ptr<Material>(material)] {
+		m_ingestedMaterialSourcesByID[materialID] = weak;
+	});
 }
 
 void MaterialManager::SetDescriptorService(std::shared_ptr<org::runtime::IDescriptorService> descriptors) {
-	std::lock_guard mutationLock(m_materialMutationMutex);
 	if (m_descriptorService == descriptors) return;
 	m_descriptorService = std::move(descriptors);
 	if (m_textureStreamingManager) m_textureStreamingManager->SetDescriptorService(m_descriptorService);
-	for (const auto& [materialID, material] : m_activeMaterialsByID) {
-		if (material && m_dirtyMaterialIDSet.insert(materialID).second) m_dirtyMaterialIDs.push_back(materialID);
+	// Every existing material's descriptor indices are now stale. Re-dirtying
+	// them walks the acceptance domain's own maps, so it runs there.
+	const auto redirtyAll = [this] {
+		for (const auto& [materialID, material] : m_activeMaterialsByID) {
+			if (material && m_dirtyMaterialIDSet.insert(materialID).second)
+				m_dirtyMaterialIDs.push_back(materialID);
+		}
+		for (const auto& [materialID, weakMaterial] : m_ingestedMaterialSourcesByID) {
+			if (!weakMaterial.expired() && m_dirtyMaterialIDSet.insert(materialID).second)
+				m_dirtyMaterialIDs.push_back(materialID);
+		}
+	};
+	if (OnMaterialAcceptanceDomain()) {
+		redirtyAll();
+		ScheduleDirtyMaterialFlush();
+		return;
 	}
-	for (const auto& [materialID, weakMaterial] : m_ingestedMaterialSourcesByID) {
-		if (!weakMaterial.expired() && m_dirtyMaterialIDSet.insert(materialID).second) m_dirtyMaterialIDs.push_back(materialID);
-	}
-	ScheduleDirtyMaterialFlush();
+	PostMaterialMutation(redirtyAll);
 }
 
 MaterialManager::MaterialUsageCapture MaterialManager::CaptureMaterialUsage(
@@ -740,7 +812,9 @@ MaterialManager::MaterialUsageCapture MaterialManager::CaptureMaterialUsage(
 	if (!m_descriptorService) {
 		throw std::runtime_error("MaterialManager: descriptor service unavailable while capturing material usage");
 	}
-	std::lock_guard mutationLock(m_materialMutationMutex);
+	// No manager state is read here beyond the descriptor service, which is
+	// installed once during startup: everything else comes from the Material
+	// itself. This used to serialize against the whole acceptance-domain flush.
 	if (refreshTextureBindings) material.RefreshTextureBindings(m_descriptorService.get());
 	MaterialUsageCapture capture{};
 	auto& entry = capture.entry;
@@ -783,7 +857,10 @@ MaterialManager::ReserveMaterialUsage(
 	std::vector<ReservedBindings> reserved;
 	std::vector<ReservedEntry> entries;
 	{
-		std::lock_guard mutationLock(m_materialMutationMutex);
+		// Registry only. RegisterTextureBinding used to run inside this lock,
+		// which held it across another subsystem's locks for every texture of
+		// every captured material.
+		RegistryLock registryLock(m_registryMutex);
 		std::unordered_set<std::uint32_t> materialIDs;
 		for (const auto& capture : captures) {
 			const auto& entry = capture.entry;
@@ -808,7 +885,7 @@ MaterialManager::ReserveMaterialUsage(
 				m_materialUsageCounts[existing->second] != 0u;
 			if (existing == m_materialIDSlotMapping.end())
 				m_materialReservationOwnedIDs.insert(entry.materialID);
-			const auto slot = GetMaterialSlot(entry.materialID, entry.base);
+			const auto slot = GetMaterialSlotLocked(entry.materialID, entry.base);
 			m_pendingMaterialUsageCounts[entry.materialID] += entry.count;
 			entries.push_back({ entry, slot });
 			result->materialSlots.emplace_back(entry.materialID, slot);
@@ -840,7 +917,10 @@ MaterialManager::ReserveMaterialUsage(
 		[this, weakLifetime, entries = std::move(entries),
 			reserved = std::move(reserved)](bool commit) mutable {
 			if (weakLifetime.expired()) return !commit;
-			std::unique_lock mutationLock(m_materialMutationMutex);
+			// Commit runs in the graph's acceptance callback on
+			// TaskDomain::MaterialAcceptance; rollback can run anywhere, so it
+			// takes the registry lock for the counts it unwinds.
+			RegistryLock registryLock(m_registryMutex);
 			if (!commit) {
 				if (m_textureStreamingManager) {
 					for (const auto& material : reserved)
@@ -859,7 +939,10 @@ MaterialManager::ReserveMaterialUsage(
 						mapping->second < m_materialUsageCounts.size() &&
 						m_materialUsageCounts[mapping->second] == 0 &&
 						m_materialReservationOwnedIDs.erase(materialID) != 0) {
-						m_materialUploadSignatures[mapping->second].valid = false;
+						// Authoring state: hand the reset to the acceptance domain
+						// rather than writing it from whatever thread released
+						// the reservation.
+						m_slotsNeedingSignatureReset.push(mapping->second);
 						m_freeMaterialSlots.push_back(mapping->second);
 						m_materialIDSlotMapping.erase(mapping);
 					}
@@ -889,7 +972,7 @@ MaterialManager::ReserveMaterialUsage(
 					m_trackedMaterialTextures[entry.materialID] = entry.retainedTextureResources;
 					++m_trackedTexturesRevision;
 					const auto sourceRevision = ++m_materialRowSourceRevisions[entry.materialID];
-					if (!ApplyMaterialRowArtifact({ entry.materialID, reservedEntry.slot, sourceRevision,
+					if (!ApplyMaterialRowArtifactLocked({ entry.materialID, reservedEntry.slot, sourceRevision,
 						entry.base, entry.evaluation, entry.openPbr })) return false;
 				}
 			}
@@ -905,7 +988,7 @@ MaterialManager::ReserveMaterialUsage(
 					std::move(material.streamingTextureIDs);
 			}
 			basic_telemetry::AddCounter("SARP.Material.UsageReservation.Committed");
-			mutationLock.unlock();
+			registryLock.Unlock();
 			(void)CommitGpuVisibleSnapshot(true);
 			return true;
 		});
@@ -918,7 +1001,17 @@ MaterialTextureStreamingReadinessStats MaterialManager::GetMaterialTextureStream
 }
 
 bool MaterialManager::ApplyMaterialRowArtifact(const br::render::MaterialRowArtifact& row) {
-	std::lock_guard mutationLock(m_materialMutationMutex);
+	// Reached from the row reservation's acceptance callback, which the graph
+	// dispatches on TaskDomain::MaterialAcceptance.
+	RegistryLock registryLock(m_registryMutex);
+	return ApplyMaterialRowArtifactLocked(row);
+}
+
+bool MaterialManager::ApplyMaterialRowArtifactLocked(const br::render::MaterialRowArtifact& row) {
+	// The slot and usage-count reads below are registry state, so the caller
+	// holds m_registryMutex. It must not drain posted mutations here: those
+	// take that same lock, which is not recursive.
+	MaterialAcceptanceScope acceptance;
 	const auto expected = m_materialRowSourceRevisions.find(row.materialID);
 	if (expected == m_materialRowSourceRevisions.end()) {
 		basic_telemetry::AddCounter("SARP.Material.RowApplyRejected.MissingSource");
@@ -959,8 +1052,14 @@ bool MaterialManager::ApplyMaterialRowArtifact(const br::render::MaterialRowArti
 }
 
 void MaterialManager::UpdateMaterialDataBuffer(Material& material) {
-	std::lock_guard mutationLock(m_materialMutationMutex);
-	FlushDirtyMaterial(material);
+	if (OnMaterialAcceptanceDomain()) {
+		FlushDirtyMaterial(material);
+		return;
+	}
+	// Flushing builds constant buffers, journals a row and submits to the graph;
+	// it belongs to the acceptance domain. Mark dirty and let the flush pick it
+	// up rather than performing that work on the caller's thread.
+	MarkMaterialDirty(material);
 }
 
 void MaterialManager::FlushDirtyMaterial(Material& material, bool refreshTextureBindings) {
@@ -968,16 +1067,24 @@ void MaterialManager::FlushDirtyMaterial(Material& material, bool refreshTexture
 	ZoneValue(material.GetMaterialID());
 	const unsigned int materialSlot = GetMaterialSlot(material.GetMaterialID());
 	material.SetOpenPBRMaterialDataIndex(materialSlot);
-	const bool textureAssetsChanged = MaterialTextureAssetBindingsChanged(material);
+	// Collected once and reused for the change test, the binding registration and
+	// the graph requirements below. Each of those used to walk the material's
+	// textures again, so a single flush built this list three times.
+	const auto textureAssets = CollectMaterialTextureAssets(material);
+	const bool textureAssetsChanged = MaterialTextureAssetBindingsChanged(material, textureAssets);
 	const bool refreshedTextures = refreshTextureBindings || textureAssetsChanged;
 	if (textureAssetsChanged) {
 		{
+			// Untracking reads the stored binding IDs and ignores the asset list,
+			// so there is nothing to collect for it.
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UntrackTextureBindings");
-			TrackMaterialTextureAssets(material, -1);
+			UntrackMaterialTextureAssets(material.GetMaterialID());
 		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::TrackTextureBindings");
-			TrackMaterialTextureAssets(material, 1);
+			TrackMaterialTextureAssets(material.GetMaterialID(), textureAssets,
+				(material.Technique().compileFlags & MaterialCompileFlags::MaterialCompileAlphaTest) != 0u,
+				1);
 		}
 	}
 
@@ -1021,7 +1128,20 @@ void MaterialManager::FlushDirtyMaterial(Material& material, bool refreshTexture
 			!BytewiseEqual(signature.evalData, evalData) ||
 			!BytewiseEqual(signature.openPBRData, openPBRData);
 	}
-	const auto descForAtlasDebug = material.ToCacheDescription();
+	// ToCacheDescription copies every texture path, name and UV set of the
+	// material. Its only consumers are the diagnostic blocks below, all of which
+	// are inert in a normal run, so it is built only when one of them can fire.
+	// A material identified as an atlas-height material purely by its height-map
+	// path, with no trace filter configured, now skips an spdlog::info line it
+	// used to emit; nothing else changes.
+	const bool materialDiagnosticsPossible =
+		!MaterialTextureTraceFilter().empty() ||
+		materialData.objectSurfaceSamplingMode ==
+			static_cast<std::uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight) ||
+		(materialData.geometricDisplacementEnabled != 0u &&
+			(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u);
+	const auto descForAtlasDebug = materialDiagnosticsPossible
+		? material.ToCacheDescription() : MaterialDescription{};
 	if (ShouldTraceMaterialTexture(descForAtlasDebug.baseColor.sourcePath) ||
 		ShouldTraceMaterialTexture(descForAtlasDebug.normal.sourcePath)) {
 		auto textureState = [](const std::shared_ptr<TextureAsset>& texture) {
@@ -1157,7 +1277,41 @@ void MaterialManager::FlushDirtyMaterial(Material& material, bool refreshTexture
 					: "SARP.Material.RowReservation.CommitFailed");
 				return applied;
 			});
+		// A material row must not publish ahead of the textures it references.
+		// This edge is what makes that the graph's job: the row stays Blocked
+		// until every referenced binding reaches UploadSubmitted, and the graph
+		// re-queues the row by itself when a binding publishes a newer version,
+		// so no texture-to-material dirty propagation is needed.
+		//
+		// LatestAtLeast rather than Exact, for the reason the static-import path
+		// documents: a texture successor can be published between this capture
+		// and admission, and an unleased exact requirement would then name a
+		// reclaimed version forever. The descriptor indices in the row are
+		// verified against the selected binding by the producer.
 		std::vector<br::render::ArtifactRequirement> bindingRequirements;
+		std::unordered_set<std::uint32_t> requiredStreamingTextureIDs;
+		for (const auto& texture : textureAssets) {
+			if (!texture) continue;
+			const auto streamingTextureID = texture->GetStreamingTextureID();
+			// A texture with no streaming ID is not registered for streaming and
+			// will never publish a binding, so requiring one would block forever.
+			// Every texture that does have one had a binding registered by
+			// TrackMaterialTextureAssets, so a binding is guaranteed to arrive.
+			if (streamingTextureID == 0u) continue;
+			if (!requiredStreamingTextureIDs.insert(streamingTextureID).second) continue;
+			// Deliberately not skipped when no binding has been published yet:
+			// that is exactly the case this gate exists for. A minimum of 1 means
+			// "any published binding", so a material whose textures have not
+			// loaded stays Blocked instead of publishing against nothing.
+			const auto binding = texture->GetPublishedBindingSnapshot();
+			bindingRequirements.push_back(br::render::LatestAtLeast(
+				br::render::ArtifactAddress{
+					br::render::ArtifactKind::TextureBinding, streamingTextureID, 0 },
+				(std::max<std::uint64_t>)(binding.bindingRevision, 1u),
+				br::render::ArtifactReadiness::UploadSubmitted));
+		}
+		basic_telemetry::Record("SARP.Material.RowTextureDependencies",
+			static_cast<std::uint64_t>(bindingRequirements.size()));
 		std::uint64_t fingerprint = 1469598103934665603ull;
 		const auto mix = [&fingerprint](const auto& value) {
 			for (const auto byte : std::as_bytes(std::span(&value, 1))) {
@@ -1167,6 +1321,15 @@ void MaterialManager::FlushDirtyMaterial(Material& material, bool refreshTexture
 		};
 		mix(input->base); mix(input->evaluation); mix(input->openPbr);
 		fingerprint ^= input->sourceRevision;
+		// The requirement set is part of the request's identity: two requests for
+		// the same revision with different texture closures are a conflict, not a
+		// duplicate, and the graph rejects a mismatched recipe on that basis.
+		for (const auto& requirement : bindingRequirements) {
+			fingerprint ^= requirement.key.primaryID + 0x9e3779b97f4a7c15ull +
+				(fingerprint << 6u) + (fingerprint >> 2u);
+			fingerprint ^= requirement.minimumRevision + 0x9e3779b97f4a7c15ull +
+				(fingerprint << 6u) + (fingerprint >> 2u);
+		}
 		if (!fingerprint) fingerprint = 1;
 		const auto materialID = input->materialID;
 		const auto sourceRevision = input->sourceRevision;
@@ -1272,32 +1435,68 @@ void MaterialManager::RegisterStreamingTexture(const std::shared_ptr<TextureAsse
 }
 
 void MaterialManager::DecrementMaterialUsageCount(const Material& material) {
-	std::lock_guard mutationLock(m_materialMutationMutex);
-	//std::lock_guard<std::mutex> lock(m_materialSlotMappingMutex);
 	const uint32_t materialID = material.GetMaterialID();
-	const unsigned int materialSlot = GetMaterialSlot(materialID);
-	m_materialUsageCounts[materialSlot]--;
-	if (m_materialUsageCounts[materialSlot] == 0) {
-		UpdateMaterialTextureUsage(material, -1);
-		TrackMaterialTextureAssets(material, -1);
+	// Registry half: the count, and slot recycling once it reaches zero.
+	bool reachedZero = false;
+	unsigned int materialSlot = 0;
+	{
+		RegistryLock registryLock(m_registryMutex);
+		materialSlot = GetMaterialSlotLocked(materialID);
+		if (materialSlot < m_materialUsageCounts.size() &&
+			m_materialUsageCounts[materialSlot] != 0u) {
+			m_materialUsageCounts[materialSlot]--;
+			reachedZero = m_materialUsageCounts[materialSlot] == 0u;
+		}
+		if (reachedZero) {
+			// A queued graph admission owns this identity/slot reservation even though
+			// the currently published usage reached zero. Recycle it only when that
+			// reservation commits or is joined and cancelled.
+			if (m_pendingMaterialUsageCounts.contains(materialID)) {
+				m_materialReservationOwnedIDs.insert(materialID);
+			} else {
+				m_freeMaterialSlots.push_back(materialSlot);
+				m_materialIDSlotMapping.erase(materialID);
+			}
+		}
+	}
+	if (!reachedZero) return;
+
+	// Authoring half: texture tracking, the upload signature and the journal.
+	const auto retire = [this, materialID, materialSlot](const Material& target) {
+		UpdateMaterialTextureUsage(target, -1);
+		UntrackMaterialTextureAssets(materialID);
 		if (materialSlot < m_materialUploadSignatures.size()) {
 			m_materialUploadSignatures[materialSlot].valid = false;
 			JournalMaterialRow(materialSlot);
-		}
-		// A queued graph admission owns this identity/slot reservation even though
-		// the currently published usage reached zero. Recycle it only when that
-		// reservation commits or is joined and cancelled.
-		if (m_pendingMaterialUsageCounts.contains(materialID)) {
-			m_materialReservationOwnedIDs.insert(materialID);
-		} else {
-			m_freeMaterialSlots.push_back(materialSlot);
-			m_materialIDSlotMapping.erase(materialID);
 		}
 		m_activeMaterialsByID.erase(materialID);
 		m_ingestedMaterialSourcesByID.erase(materialID);
 		m_dirtyMaterialIDSet.erase(materialID);
 		std::erase(m_dirtyMaterialIDs, materialID);
+	};
+	if (OnMaterialAcceptanceDomain()) {
+		retire(material);
+		return;
 	}
+	// UpdateMaterialTextureUsage only needs the material's texture list, which
+	// the caller owns for the duration of this call, so it is resolved now and
+	// the rest is applied on the acceptance domain.
+	auto textures = CollectMaterialTextureResources(material);
+	PostMaterialMutation([this, materialID, materialSlot, textures = std::move(textures)] {
+		auto& tracked = m_trackedMaterialTextures[materialID];
+		tracked.clear();
+		m_trackedMaterialTextures.erase(materialID);
+		++m_trackedTexturesRevision;
+		UntrackMaterialTextureAssets(materialID);
+		if (materialSlot < m_materialUploadSignatures.size()) {
+			m_materialUploadSignatures[materialSlot].valid = false;
+			JournalMaterialRow(materialSlot);
+		}
+		m_activeMaterialsByID.erase(materialID);
+		m_ingestedMaterialSourcesByID.erase(materialID);
+		m_dirtyMaterialIDSet.erase(materialID);
+		std::erase(m_dirtyMaterialIDs, materialID);
+	});
 }
 
 void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int delta) {
@@ -1319,12 +1518,22 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 }
 
 bool MaterialManager::MaterialTextureAssetBindingsChanged(const Material& material) const {
+	return MaterialTextureAssetBindingsChanged(material, CollectMaterialTextureAssets(material));
+}
+
+bool MaterialManager::MaterialTextureAssetBindingsChanged(const Material& material,
+	const std::vector<std::shared_ptr<TextureAsset>>& textureAssets) const {
 	std::vector<uint32_t> currentTextureIDs;
-	for (const auto& texture : CollectMaterialTextureAssets(material)) {
+	currentTextureIDs.reserve(textureAssets.size());
+	for (const auto& texture : textureAssets) {
 		if (texture && texture->GetStreamingTextureID() != 0u) currentTextureIDs.push_back(texture->GetStreamingTextureID());
 	}
 	const auto trackedIt = m_materialTextureStreamingTextureIDs.find(material.GetMaterialID());
 	return trackedIt == m_materialTextureStreamingTextureIDs.end() || trackedIt->second != currentTextureIDs;
+}
+
+void MaterialManager::UntrackMaterialTextureAssets(std::uint32_t materialID) {
+	TrackMaterialTextureAssets(materialID, {}, false, -1);
 }
 
 void MaterialManager::TrackMaterialTextureAssets(const Material& material, int delta) {
@@ -1469,7 +1678,11 @@ std::shared_ptr<IResourceResolver> MaterialManager::ProvideResolver(ResourceIden
 
 // TODO: C++26 will allow optional references
 unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::optional<PerMaterialCB> data) {
-	std::lock_guard mutationLock(m_materialMutationMutex);
+	RegistryLock registryLock(m_registryMutex);
+	return GetMaterialSlotLocked(materialID, std::move(data));
+}
+
+unsigned int MaterialManager::GetMaterialSlotLocked(unsigned int materialID, std::optional<PerMaterialCB> data) {
 	ZoneScopedN("MaterialManager::GetMaterialSlot");
 	ZoneValue(materialID);
 	unsigned int slot;
@@ -1490,13 +1703,10 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			slot = m_freeMaterialSlots.back();
 			m_freeMaterialSlots.pop_back();
 		}
-		{
-			ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot::ResizeSignatures");
-			if (slot >= m_materialUploadSignatures.size()) {
-				m_materialUploadSignatures.resize(static_cast<size_t>(slot) + 1u);
-			}
-			m_materialUploadSignatures[slot].valid = false;
-		}
+		// The signature belongs to the acceptance domain. Hand the reset over
+		// rather than reaching into it from a worker: a recycled slot must not
+		// present the previous material's row as still uploaded.
+		m_slotsNeedingSignatureReset.push(slot);
 	}
 	else {
 		ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot");
@@ -1506,11 +1716,7 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 			m_materialUsageCounts.push_back(0);
 		}
 		EnsureMaterialBufferCapacity(m_materialSlotsUsed);
-		{
-			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::ResizeSignatures");
-			m_materialUploadSignatures.resize(m_materialSlotsUsed);
-			m_materialUploadSignatures[slot].valid = false;
-		}
+		m_slotsNeedingSignatureReset.push(slot);
 	}
 	{
 		ZoneScopedN("MaterialManager::GetMaterialSlot::StoreMapping");
@@ -1556,20 +1762,21 @@ void MaterialManager::UpdateOpenPBRMaterialDataBuffer(
 void MaterialManager::EnsureMaterialBufferCapacity(unsigned int requiredSlots) {
 	ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity");
 	ZoneValue(requiredSlots);
-	if (requiredSlots <= m_materialBufferCapacity) {
+	const auto currentCapacity = m_materialBufferCapacity.load(std::memory_order_relaxed);
+	if (requiredSlots <= currentCapacity) {
 		TracyPlot("MaterialManager.MaterialBufferGrow", int64_t{ 0 });
 		return;
 	}
 	TracyPlot("MaterialManager.MaterialBufferGrow", int64_t{ 1 });
 
-	unsigned int newCapacity = std::max(kInitialMaterialBufferCapacity, m_materialBufferCapacity);
+	unsigned int newCapacity = std::max(kInitialMaterialBufferCapacity, currentCapacity);
 	while (newCapacity < requiredSlots) {
 		newCapacity *= 2u;
 	}
-	TracyPlot("MaterialManager.MaterialBufferOldCapacity", static_cast<int64_t>(m_materialBufferCapacity));
+	TracyPlot("MaterialManager.MaterialBufferOldCapacity", static_cast<int64_t>(currentCapacity));
 	TracyPlot("MaterialManager.MaterialBufferNewCapacity", static_cast<int64_t>(newCapacity));
 
-	m_materialBufferCapacity = newCapacity;
+	m_materialBufferCapacity.store(newCapacity, std::memory_order_release);
 }
 
 void MaterialManager::EnsureCompileFlagsBufferCapacity(unsigned int requiredSlots) {
@@ -1610,6 +1817,7 @@ void MaterialManager::EnsureCompileFlagsBufferCapacity(unsigned int requiredSlot
 }
 
 bool MaterialManager::TryGetCompileFlagsSlot(MaterialCompileFlags flags, unsigned int& slot) const {
+	RegistryLock registryLock(m_registryMutex);
 	return m_compileFlagsRegistry.TryGet(flags, slot);
 }
 
@@ -1635,13 +1843,17 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 	} durationRecorder{ commitStarted };
 	basic_telemetry::AddCounter("SARP.Material.SnapshotCommitAttempts");
 	if (forceGraphSnapshot) basic_telemetry::AddCounter("SARP.Material.SnapshotCommitForcedAttempts");
-	std::unique_lock mutationLock(m_materialMutationMutex, std::try_to_lock);
-	if (!mutationLock.owns_lock()) {
-		basic_telemetry::AddCounter("SARP.Material.SnapshotCommitMutationLockBusy");
-		return m_materialStateRevision;
-	}
+	// Scheduled onto TaskDomain::MaterialAcceptance, so it owns the journals and
+	// signatures outright; only the compile-flag and raster-bucket reads below
+	// belong to the registry.
+	MaterialAcceptanceScope acceptance;
+	DrainPostedMaterialMutations();
 	BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot");
-	const unsigned int compileFlagsSlotsUsed = m_compileFlagsRegistry.GetSlotsUsed();
+	unsigned int compileFlagsSlotsUsed = 0;
+	{
+		RegistryLock registryLock(m_registryMutex);
+		compileFlagsSlotsUsed = m_compileFlagsRegistry.GetSlotsUsed();
+	}
 	if (m_materialPixelCountBuffer && compileFlagsSlotsUsed > m_materialPixelCountBuffer->Capacity()) {
 		BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot::EnsureCompileFlagsBufferCapacity");
 		EnsureCompileFlagsBufferCapacity(compileFlagsSlotsUsed);
@@ -1663,10 +1875,29 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 	std::vector<MaterialRasterFlags> rasterBucketFlags;
 	{
 		BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot::PublishActiveFlags");
+		// Registry state: import workers acquire and release compile-flag slots
+		// and raster buckets concurrently with this publication.
+		RegistryLock registryLock(m_registryMutex);
 		const auto& registryActiveFlags = m_compileFlagsRegistry.GetActiveFlags();
 		const auto& registryActiveSlots = m_compileFlagsRegistry.GetActiveSlots();
 		::std::vector<br::render::MaterialCompileFlagEntryDTO> captured;
 		captured.reserve(registryActiveFlags.size());
+		// A slot beyond publishedSlots is silently dropped below. Material
+		// evaluation then never dispatches for that compile-flag variant, so
+		// geometry that rasterized correctly is never shaded. Reyes variants are
+		// acquired after their regular counterpart and therefore hold the highest
+		// slots, which makes them the first casualties of this clamp.
+		if (publishedSlots < compileFlagsSlotsUsed) {
+			static std::atomic<std::uint32_t> loggedCompileFlagClamps{ 0 };
+			if (loggedCompileFlagClamps.fetch_add(1, std::memory_order_relaxed) < 32u) {
+				spdlog::warn(
+					"MaterialManager: compile-flag table clamped; slotsUsed={} published={} dropped={} "
+					"slotResidentCapacity={} scanCoveredSlots={}",
+					compileFlagsSlotsUsed, publishedSlots,
+					compileFlagsSlotsUsed - publishedSlots,
+					slotResidentCapacity, scanCoveredSlots);
+			}
+		}
 		const auto activeCount = (std::min)(registryActiveFlags.size(), registryActiveSlots.size());
 		for (std::size_t i = 0; i < activeCount; ++i) {
 			const auto slot = registryActiveSlots[i];
@@ -1679,6 +1910,7 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 	}
 	{
 		BT_ZONE_SCOPE("MaterialManager::CommitGpuVisibleSnapshot::PublishRasterBuckets");
+		RegistryLock registryLock(m_registryMutex);
 		rasterBucketFlags.reserve(m_rasterBucketsUsed);
 		for (unsigned int bucket = 0; bucket < m_rasterBucketsUsed; ++bucket) {
 			rasterBucketFlags.push_back(bucket < m_bucketToRasterFlagMapping.size()
@@ -1919,7 +2151,7 @@ unsigned int MaterialManager::AcquireCompileFlagsSlot(MaterialCompileFlags flags
 	if (count == 0u) {
 		throw std::invalid_argument("AcquireCompileFlagsSlot requires a non-zero count");
 	}
-	std::lock_guard mutationLock(m_materialMutationMutex);
+	RegistryLock registryLock(m_registryMutex);
 	const auto result = m_compileFlagsRegistry.Acquire(flags, count);
 	// This is an authoring mutation only. GPU scratch capacity is reconciled by
 	// CommitGpuVisibleSnapshot, which publishes the matching material revision;
@@ -1929,7 +2161,7 @@ unsigned int MaterialManager::AcquireCompileFlagsSlot(MaterialCompileFlags flags
 
 bool MaterialManager::ReleaseCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count) {
 	ZoneScopedN("MaterialManager::ReleaseCompileFlagsSlot");
-	std::lock_guard mutationLock(m_materialMutationMutex);
+	RegistryLock registryLock(m_registryMutex);
 	if (!m_compileFlagsRegistry.Release(flags, count)) {
 		spdlog::error(
 			"MaterialManager::ReleaseCompileFlagsSlot rejected flags=0x{:X} count={}",
@@ -1940,11 +2172,43 @@ bool MaterialManager::ReleaseCompileFlagsSlot(MaterialCompileFlags flags, unsign
 	return true;
 }
 
+unsigned int MaterialManager::GetRasterBucketCount() const {
+	RegistryLock registryLock(m_registryMutex);
+	return m_rasterBucketsUsed;
+}
+
+unsigned int MaterialManager::GetRasterBucketForFlags(MaterialRasterFlags rasterFlags) const {
+	RegistryLock registryLock(m_registryMutex);
+	return GetRasterBucketForFlagsLocked(rasterFlags);
+}
+
+unsigned int MaterialManager::GetRasterBucketForFlagsLocked(MaterialRasterFlags rasterFlags) const {
+	const auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
+	if (it != m_rasterFlagToBucketMapping.end()) {
+		return it->second;
+	}
+	spdlog::error("Raster flags not found in mapping!");
+	return 0;
+}
+
+MaterialRasterFlags MaterialManager::GetRasterFlagsForBucket(unsigned int bucketIndex) const {
+	RegistryLock registryLock(m_registryMutex);
+	if (bucketIndex < m_bucketToRasterFlagMapping.size()) {
+		return m_bucketToRasterFlagMapping[bucketIndex];
+	}
+	spdlog::error("Bucket index out of range!");
+	return MaterialRasterFlags::MaterialRasterFlagsNone;
+}
+
 unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlags, unsigned int count) {
 	if (count == 0u) {
-		return GetRasterBucketForFlags(rasterFlags);
+		// A lookup is still a read of registry state: another thread may be
+		// inserting a bucket, and rehashing the map underneath this find is a
+		// crash rather than a stale answer.
+		RegistryLock registryLock(m_registryMutex);
+		return GetRasterBucketForFlagsLocked(rasterFlags);
 	}
-	std::lock_guard mutationLock(m_materialMutationMutex);
+	RegistryLock registryLock(m_registryMutex);
 
 	unsigned int slot;
 	auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
@@ -1970,7 +2234,7 @@ unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlag
 }
 
 void MaterialManager::ReleaseRasterBucket(MaterialRasterFlags rasterFlags) {
-	std::lock_guard mutationLock(m_materialMutationMutex);
+	RegistryLock registryLock(m_registryMutex);
 	const auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
 	if (it == m_rasterFlagToBucketMapping.end()) {
 		spdlog::error("Raster flags not found in mapping during release!");

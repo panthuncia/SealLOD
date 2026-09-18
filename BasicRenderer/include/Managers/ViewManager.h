@@ -62,7 +62,8 @@ struct ViewResources {
     std::shared_ptr<PixelBuffer> clodDeepVisibilityHeadPointers = nullptr;
     // Descriptor indices are published atomically with their retained view
     // resources. Frame declarations retain the resources while GPU tables use
-    // these matching immutable bindless indices.
+    // these matching bindless indices; RefreshDescriptorIndices() keeps them
+    // current across backing changes, which rotate the resources' slots.
     uint32_t visibilitySRVIndex = 0xFFFFFFFFu;
     uint32_t visibilityUAVIndex = 0xFFFFFFFFu;
     uint32_t clodDeepVisibilityHeadPointersUAVIndex = 0xFFFFFFFFu;
@@ -193,8 +194,13 @@ public:
                 std::forward<F>(f)(v.id);
     }
 
-    // Descriptor index baking (optional, for convenience)
-    void BakeDescriptorIndices();
+    // Re-reads the descriptor indices of every attached view resource. The
+    // render graph rotates a resource's descriptor slots whenever it gives the
+    // resource a new backing (for example when a persistent alias pool grows),
+    // so indices captured at attach time go stale. Call before capturing a
+    // view family; bumps the layout revision when any index changed so GPU
+    // tables built from the views are rebuilt.
+    void RefreshDescriptorIndices();
 
     // Events
     void SetEvents(ViewEvents events) { m_events = events; }

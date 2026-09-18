@@ -119,6 +119,7 @@
 #include "Render/GeometryBufferStateArtifacts.h"
 #include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/RasterBucketFlags.h"
+#include "Render/ObjectReyesAtlasTelemetry.h"
 #include "Render/TerrainRvtTelemetry.h"
 
 void D3D12DebugCallback(
@@ -3604,6 +3605,7 @@ void Renderer::Update(float elapsedSeconds) {
     br::render::PrimaryCameraFrameUpload primaryCameraUpload{};
     if (m_pViewManager) {
         BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::ViewFamily");
+        m_pViewManager->RefreshDescriptorIndices();
         currentViews->revision = m_pViewManager->GetPublicationRevision();
         currentViews->cameraBufferSize = m_pViewManager->GetCameraBufferSize();
         primaryCameraUpload = m_pViewManager->CapturePrimaryCameraUpload(updateData.frameNumber);
@@ -3937,7 +3939,7 @@ void Renderer::Update(float elapsedSeconds) {
                     const auto cameraRevision = m_frameInputs->PrimaryCameraUpload().revision;
                     const auto expected = primary->cameraInfo;
                     try {
-                        service->RequestReadbackCapture("PrimaryCameraUploadReadback",
+                        service->RequestReadbackCaptureAfterGraph(
                             cameraResource.get(), RangeSpec{},
                             [state = cameraReadbackState, path = cameraReadbackPath, requestFrame,
                                 cameraRevision, expected](ReadbackCaptureResult&& result) {
@@ -4163,8 +4165,7 @@ void Renderer::Update(float elapsedSeconds) {
                 outputPath = nullptr;
                 if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
                     colorOutputReadbackRequested = true;
-                    readbackService->RequestReadbackCapture(
-                        "PresentationReadyPass",
+                    readbackService->RequestReadbackCaptureAfterGraph(
                         m_dynamicPresentationColor.get(),
                         RangeSpec{},
                         [path](ReadbackCaptureResult&& result) {
@@ -5705,7 +5706,10 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         return;
     }
 
-    if (!SettingsManager::GetInstance().getSettingGetter<bool>(ObjectReyesAtlasTelemetryDebugSettingName)()) {
+    // Shares the environment override with the shader define in
+    // ReyesPatchRasterizationPass, so a benchmark run that cannot reach the debug
+    // menu still gets both the compiled-in counters and this readback.
+    if (!IsObjectReyesAtlasTelemetryDebugEnabled()) {
         m_loggedObjectReyesAtlasTelemetryEnabled = false;
         return;
     }
@@ -5717,9 +5721,20 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         m_loggedObjectReyesAtlasTelemetryEnabled = true;
     }
 
-    constexpr uint64_t kCaptureIntervalFrames = 300;
-    if (m_lastObjectReyesAtlasTelemetryRequestFrame != UINT64_MAX &&
-        m_totalFramesRendered - m_lastObjectReyesAtlasTelemetryRequestFrame < kCaptureIntervalFrames) {
+    // The first sample waits one interval: at frame 0 no Reyes geometry has
+    // streamed in, so it only ever reported zeros. Short benchmark runs set
+    // SARP_OBJECT_REYES_ATLAS_TELEMETRY_INTERVAL to sample within their window.
+    static const uint64_t captureIntervalFrames = [] {
+        char* value = nullptr;
+        size_t length = 0;
+        _dupenv_s(&value, &length, "SARP_OBJECT_REYES_ATLAS_TELEMETRY_INTERVAL");
+        const uint64_t frames = value ? std::strtoull(value, nullptr, 10) : 0u;
+        std::free(value);
+        return frames ? frames : 300u;
+    }();
+    const uint64_t lastRequestFrame = m_lastObjectReyesAtlasTelemetryRequestFrame == UINT64_MAX
+        ? 0u : m_lastObjectReyesAtlasTelemetryRequestFrame;
+    if (m_totalFramesRendered - lastRequestFrame < captureIntervalFrames) {
         return;
     }
     if (m_objectReyesAtlasTelemetryPhase1ReadbackPending ||
@@ -5780,7 +5795,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
             return value == 0xFFFFFFFFu ? 0u : value;
         };
         spdlog::info(
-            "SARP Object Reyes atlas shader telemetry: frame={} phase={} phaseIndex={} atlasMaterials={} displacementEnabled={} zeroDescriptor={} sourceSamples={} materialSlot=[{},{}] heightDescriptor=[{},{}] sampler=[{},{}] sourceHeightU16=[{},{}] patchSamples={} patchHeightU16=[{},{}] patchUvU16=([{},{}],[{},{}]) pageUvSets=[{},{}] heightUvSet=[{},{}] invalidHeightUvSet={} rasterWork={} patches={} microTris={}",
+            "SARP Object Reyes atlas shader telemetry: frame={} phase={} phaseIndex={} atlasMaterials={} displacementEnabled={} zeroDescriptor={} sourceSamples={} materialSlot=[{},{}] heightDescriptor=[{},{}] sampler=[{},{}] sourceHeightU16=[{},{}] patchSamples={} patchHeightU16=[{},{}] patchUvU16=([{},{}],[{},{}]) pageUvSets=[{},{}] heightUvSet=[{},{}] invalidHeightUvSet={} rasterWork={} patches={} microTris={} classify=[in={} full={} owned={} dropped={}] overflow=[split={} dice={} rasterWorkPatch={} rasterWorkBatch={} microTri={}] rasterCull=[clip={} preArea={} emptyBounds={} zeroMicroTri={} tinyFallback={} nearPlaneQuad={} windingSwap={}] occlusion=[splitTest={} splitDrop={} diceTest={} diceDrop={}] patchDomain=[invalidSplit={} invalidDice={} diced={} splitCollapse={} deepestSplit={} maxSplitPasses={} dicedTriEst={}]",
             requestedFrame,
             phaseLabel,
             telemetry.phaseIndex,
@@ -5810,13 +5825,58 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
             telemetry.objectReyesAtlasDebugInvalidHeightUvSetCount,
             telemetry.rasterWorkEntryCount,
             telemetry.patchRasterizedPatchCount,
-            telemetry.patchRasterizedMicroTriangleCount);
+            telemetry.patchRasterizedMicroTriangleCount,
+            // reyesClassify.hlsl routes every visible cluster to exactly one of
+            // the full or owned outputs, unless the destination buffer is full,
+            // in which case it returns without emitting anything and the cluster
+            // is never drawn by either path. "dropped" is that loss.
+            telemetry.visibleClusterInputCount,
+            telemetry.fullClusterOutputCount,
+            telemetry.ownedClusterOutputCount,
+            telemetry.visibleClusterInputCount >
+                    telemetry.fullClusterOutputCount + telemetry.ownedClusterOutputCount
+                ? telemetry.visibleClusterInputCount -
+                    (telemetry.fullClusterOutputCount + telemetry.ownedClusterOutputCount)
+                : 0u,
+            telemetry.splitQueueOverflowCounts[0] + telemetry.splitQueueOverflowCounts[1] +
+                telemetry.splitQueueOverflowCounts[2] + telemetry.splitQueueOverflowCounts[3],
+            telemetry.diceQueueOverflowCounts[0] + telemetry.diceQueueOverflowCounts[1] +
+                telemetry.diceQueueOverflowCounts[2] + telemetry.diceQueueOverflowCounts[3],
+            telemetry.rasterWorkOverflowPatchCount,
+            telemetry.rasterWorkOverflowBatchCount,
+            telemetry.rasterMicroTriangleOverflowCount,
+            // patchRasterizedMicroTriangleCount counts micro-triangles handed to
+            // the rasterizer, not visibility-buffer writes. These say how many
+            // were thrown away inside it, which is the difference between "Reyes
+            // ran" and "Reyes produced pixels".
+            telemetry.rasterClipCullCount,
+            telemetry.rasterPreAreaCullCount,
+            telemetry.rasterEmptyBoundsCullCount,
+            telemetry.rasterZeroMicroTriangleCount,
+            telemetry.rasterTinyTriangleFallbackCount,
+            telemetry.rasterNearPlaneClippedQuadCount,
+            telemetry.rasterWindingSwapCount,
+            telemetry.splitOcclusionTestCount,
+            telemetry.splitOcclusionDropCount,
+            telemetry.diceOcclusionTestCount,
+            telemetry.diceOcclusionDropCount,
+            // The patch domain is what maps a diced micro-triangle back onto its
+            // source triangle. A degenerate or out-of-range domain extrapolates
+            // the interpolated positions away from the source geometry, which is
+            // how a micro-triangle ends up projecting off-screen with real area
+            // and no near-plane clip.
+            telemetry.invalidSplitPatchDomainCount,
+            telemetry.invalidDicePatchDomainCount,
+            telemetry.dicedPatchCount,
+            telemetry.splitCollapseFallbackDiceCount,
+            telemetry.deepestSplitLevelReached,
+            telemetry.configuredMaxSplitPassCount,
+            telemetry.dicedTriangleEstimateCount);
     };
 
     if (phase1Resource) {
         m_objectReyesAtlasTelemetryPhase1ReadbackPending = true;
-        readbackService->RequestReadbackCapture(
-            "CLodOpaque::ReyesPatchRasterPass1",
+        readbackService->RequestReadbackCaptureAfterGraph(
             phase1Resource.get(),
             RangeSpec{},
             [this, logTelemetry](ReadbackCaptureResult&& result) mutable {
@@ -5827,8 +5887,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
 
     if (phase2Resource) {
         m_objectReyesAtlasTelemetryPhase2ReadbackPending = true;
-        readbackService->RequestReadbackCapture(
-            "CLodOpaque::ReyesPatchRasterPass2",
+        readbackService->RequestReadbackCaptureAfterGraph(
             phase2Resource.get(),
             RangeSpec{},
             [this, logTelemetry](ReadbackCaptureResult&& result) mutable {
@@ -5900,9 +5959,8 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
     const float mip0TexelWorldSize = basePageWorldSize / static_cast<float>((std::max)(pageSize, 1u));
     const auto forcedFallback = SettingsManager::GetInstance().getSettingGetter<bool>("forceDirectTerrainRvtFallback")();
 
-    readbackService->RequestReadbackCapture(
-        "EvaluateMaterialGroupsPass",
-        statsResource.get(),
+    readbackService->RequestReadbackCaptureAfterGraph(
+            statsResource.get(),
         RangeSpec{},
         [this, requestedFrame](ReadbackCaptureResult&& result) {
             m_terrainRvtStatsReadbackPending = false;
@@ -6027,9 +6085,8 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
         },
         QueueKind::Copy);
 
-    readbackService->RequestReadbackCapture(
-        "EvaluateMaterialGroupsPass",
-        countersResource.get(),
+    readbackService->RequestReadbackCaptureAfterGraph(
+            countersResource.get(),
         RangeSpec{},
         [this,
          requestedFrame,

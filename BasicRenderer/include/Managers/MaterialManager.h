@@ -8,6 +8,8 @@
 #include <cstring>
 #include <unordered_set>
 
+#include <tbb/concurrent_queue.h>
+
 
 #include "Materials/Material.h"
 #include "Managers/TextureStreamingManager.h"
@@ -108,22 +110,12 @@ public:
 		if (m_textureStreamingManager) m_textureStreamingManager->SetRendererStateRequestService(requests, uploads);
 	}
 	void SetDescriptorService(std::shared_ptr<org::runtime::IDescriptorService> descriptors);
-	unsigned int GetRasterBucketCount() const { return m_rasterBucketsUsed; }
-	unsigned int GetRasterBucketForFlags(MaterialRasterFlags rasterFlags) const {
-		auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
-		if (it != m_rasterFlagToBucketMapping.end()) {
-			return it->second;
-		}
-		spdlog::error("Raster flags not found in mapping!");
-		return 0;
-	}
-	MaterialRasterFlags GetRasterFlagsForBucket(unsigned int bucketIndex) const {
-		if (bucketIndex < m_bucketToRasterFlagMapping.size()) {
-			return m_bucketToRasterFlagMapping[bucketIndex];
-		}
-		spdlog::error("Bucket index out of range!");
-		return MaterialRasterFlags::MaterialRasterFlagsNone;
-	}
+	// These read registry state, so they take the registry lock. They are not
+	// on any hot path (the raster-bucket tables are touched at material
+	// admission), which is why they are not served from a published snapshot.
+	unsigned int GetRasterBucketCount() const;
+	unsigned int GetRasterBucketForFlags(MaterialRasterFlags rasterFlags) const;
+	MaterialRasterFlags GetRasterFlagsForBucket(unsigned int bucketIndex) const;
 	bool RequestExternalMaterialTextureReadback(
 		const std::shared_ptr<PixelBuffer>& image,
 		std::wstring outputFile,
@@ -145,7 +137,12 @@ private:
 	void TrackMaterialTextureAssets(std::uint32_t materialID,
 		const std::vector<std::shared_ptr<TextureAsset>>& textureAssets,
 		bool alphaTested, int delta);
+	// Untracking reads the stored binding IDs, so it needs no asset list. The
+	// delta form used to be called with a freshly collected one that it ignored.
+	void UntrackMaterialTextureAssets(std::uint32_t materialID);
 	bool MaterialTextureAssetBindingsChanged(const Material& material) const;
+	bool MaterialTextureAssetBindingsChanged(const Material& material,
+		const std::vector<std::shared_ptr<TextureAsset>>& textureAssets) const;
 	void FlushDirtyMaterial(Material& material, bool refreshTextureBindings = false);
 	void EnsureMaterialBufferCapacity(unsigned int requiredSlots);
 	void EnsureCompileFlagsBufferCapacity(unsigned int requiredSlots);
@@ -173,9 +170,30 @@ private:
 	bool m_textureStreamingFeedbackSuppressed = false;
 	MaterialCompileFlagsSlotRegistry m_compileFlagsRegistry;
 
+	// Two ownership domains, not one lock.
+	//
+	// The slot registry below (ID->slot mapping, free list, usage counts,
+	// compile-flag slots, raster buckets) is guarded by m_registryMutex. Import
+	// workers need a slot the moment they ask for one, so this stays
+	// synchronous; the rule is that a registry critical section never builds
+	// constant buffers, journals a row, registers a texture binding or submits
+	// to the state graph.
+	//
+	// Everything else (dirty set, upload signatures, row revisions, journals,
+	// the active/ingested material maps, texture tracking) is authoring state
+	// owned exclusively by TaskDomain::MaterialAcceptance, which has limit 1.
+	// It takes no lock at all. Off-domain writers post a mutation instead; see
+	// PostMaterialMutation. Read AssertOnMaterialAcceptance as documentation of
+	// which functions rely on that ownership.
+	mutable std::mutex m_registryMutex;
+	// Authoring mutations posted by threads that do not own the acceptance
+	// domain. Drained at the head of every acceptance task, in post order.
+	tbb::concurrent_queue<std::function<void()>> m_postedMaterialMutations;
+	void PostMaterialMutation(std::function<void()> mutation);
+	void DrainPostedMaterialMutations();
+
 	unsigned int m_materialSlotsUsed = 0;
 	std::vector<unsigned int> m_freeMaterialSlots;
-	mutable std::recursive_mutex m_materialMutationMutex;
 	std::vector<unsigned int> m_materialUsageCounts = { };
 	std::unordered_map<std::uint32_t, std::uint64_t> m_pendingMaterialUsageCounts;
 	std::unordered_set<std::uint32_t> m_materialReservationOwnedIDs;
@@ -188,10 +206,28 @@ private:
 	};
 	std::vector<MaterialGpuUploadSignature> m_materialUploadSignatures;
 	void JournalMaterialRow(unsigned int materialSlot);
+	// Registry lock already held. GetMaterialSlot used to re-enter the one
+	// recursive mutex from callers that held it; the registry lock is not
+	// recursive, so nesting is expressed by calling this directly.
+	unsigned int GetMaterialSlotLocked(unsigned int materialID,
+		std::optional<PerMaterialCB> data = std::nullopt);
+	// Registry lock already held.
+	unsigned int GetRasterBucketForFlagsLocked(MaterialRasterFlags rasterFlags) const;
+	// Registry lock already held. The usage reservation's commit applies rows
+	// while it holds that lock, so it cannot go through the public entry point.
+	bool ApplyMaterialRowArtifactLocked(const br::render::MaterialRowArtifact& row);
+	// Slots the registry (re)allocated whose upload signature the acceptance
+	// domain must clear before it trusts it. A recycled slot would otherwise
+	// inherit the previous material's row. Deliberately a lock-free queue: the
+	// drain must never need m_registryMutex, because it runs at points that may
+	// already hold it and applies mutations that take it themselves.
+	tbb::concurrent_queue<unsigned int> m_slotsNeedingSignatureReset;
 	br::render::VersionedGpuBufferJournal m_materialBaseJournal{ sizeof(PerMaterialCB) };
 	br::render::VersionedGpuBufferJournal m_materialEvalJournal{ sizeof(PerMaterialEvalCB) };
 	br::render::VersionedGpuBufferJournal m_materialOpenPbrJournal{ sizeof(PerMaterialOpenPBRCB) };
-	unsigned int m_materialBufferCapacity = 0u;
+	// Written by the registry when it grows, read by the acceptance domain when
+	// it journals a row. Monotonic, so an atomic scalar is the whole contract.
+	std::atomic<unsigned int> m_materialBufferCapacity{ 0u };
 
 	static constexpr unsigned int kBufferGrowthSize = 100;
 	static constexpr unsigned int kInitialMaterialBufferCapacity = 4096;

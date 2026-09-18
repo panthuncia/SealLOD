@@ -1,4 +1,8 @@
 #pragma once
+#include <atomic>
+
+#include <spdlog/spdlog.h>
+
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
@@ -39,6 +43,21 @@ public:
             bindings.hasReyesDiceQueue = true;
         }
         bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
+        // This pass buckets every visibility pixel by material compile-flag
+        // variant. Without the dice queue and patch base it cannot tell a Reyes
+        // patch pixel from an ordinary cluster pixel, and folds the Reyes pixels
+        // into the regular variant, which then shades them as clusters using an
+        // out-of-range cluster index.
+        {
+            static std::atomic<std::uint32_t> loggedHistogramReyes{ 0 };
+            if (loggedHistogramReyes.fetch_add(1, std::memory_order_relaxed) < 8u) {
+                spdlog::info(
+                    "MaterialHistogram Reyes bindings: diceQueue={} patchIndexBase={} diceQueueResource={}",
+                    bindings.hasReyesDiceQueue,
+                    m_patchVisibilityIndexBase,
+                    m_reyesDiceQueueResource != nullptr);
+            }
+        }
 	    b.WithShaderResource(Builtin::PrimaryCamera::VisibilityTexture,
                               //Builtin::PrimaryCamera::VisibleClusterTable,
                               Builtin::PerMeshInstanceBuffer,
@@ -67,6 +86,19 @@ public:
             ? preparation.ResolveView(bindings.reyesDiceQueue, {org::BindlessViewKind::ShaderResource}).index
             : 0xFFFFFFFFu;
         data.constants[VISBUF_REYES_PATCH_INDEX_BASE] = bindings.patchVisibilityIndexBase;
+        {
+            // These are the two values VisUtil.hlsl tests to decide whether a
+            // pixel is a Reyes patch. Logged at recipe-build time because that is
+            // the value actually delivered to the shader, which is not
+            // necessarily what Declare bound.
+            static std::atomic<std::uint32_t> loggedHistRecipe{ 0 };
+            if (loggedHistRecipe.fetch_add(1, std::memory_order_relaxed) < 8u) {
+                spdlog::info("MaterialHistogram recipe: diceQueueDescriptor={} patchIndexBase={} visibleClusters={}",
+                    data.constants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX],
+                    data.constants[VISBUF_REYES_PATCH_INDEX_BASE],
+                    data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX]);
+            }
+        }
         uint32_t voxelMaterialBin = 0xFFFFFFFFu;
         const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
         const auto materialState = published

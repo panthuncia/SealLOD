@@ -272,7 +272,7 @@ struct WindSharedResources {
     {
         if (!readbackService || registeredTypeCount == 0u || residentPlacementCount == 0u || elapsedSeconds < nextTelemetrySeconds) return;
         nextTelemetrySeconds = elapsedSeconds + 2.0f;
-        readbackService->RequestReadbackCapture("ProceduralWind::SimulateInstancesPhase2", allocationCounters.get(), {},
+        readbackService->RequestReadbackCaptureAfterGraph(allocationCounters.get(), {},
             [](ReadbackCaptureResult&& result) {
                 if (result.data.size() < 15u * sizeof(std::uint32_t)) return;
                 std::array<std::uint32_t, 15> c{};
@@ -291,7 +291,7 @@ struct WindSharedResources {
             }, QueueKind::Copy);
         const float currentScale = displacementScale;
         const float currentStrength = state.strength;
-        readbackService->RequestReadbackCapture("ProceduralWind::SimulateInstancesPhase2", diagnostics.get(), {},
+        readbackService->RequestReadbackCaptureAfterGraph(diagnostics.get(), {},
             [currentScale, currentStrength](ReadbackCaptureResult&& result) {
 				if (result.data.size() < 112u * sizeof(std::uint32_t)) return;
 				std::array<std::uint32_t, 112> d{};

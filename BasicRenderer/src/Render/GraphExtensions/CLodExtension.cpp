@@ -1258,6 +1258,28 @@ void CLodExtension::EnsureReyesResourcesInitialized()
     m_reyesAllocatedBudgetBytes = reyesResourceSizing.allocatedBudgetBytes;
     m_reyesBudgetLimited = reyesResourceSizing.budgetLimited;
 
+    // These capacities decide whether a Reyes-routed cluster can be emitted at
+    // all. reyesClassify.hlsl drops a cluster that does not fit the owned-cluster
+    // buffer and does NOT fall back to the full-cluster route, and the visible
+    // cluster has already been claimed from the ordinary raster path, so an
+    // undersized buffer makes displaced objects disappear rather than degrade.
+    // budgetLimited was computed but never reported, so that failure was silent.
+    const auto reyesSizingLevel = reyesResourceSizing.budgetLimited
+        ? spdlog::level::warn : spdlog::level::info;
+    spdlog::log(reyesSizingLevel,
+        "CLod Reyes resource sizing: variant='{}' budgetLimited={} requestedBytes={} allocatedBytes={} "
+        "visibleClusterCapacity={} ownedClusters={} fullClusterOutputs={} splitQueue={} diceQueue={} rasterWork={}",
+        traits.passPrefix,
+        reyesResourceSizing.budgetLimited,
+        reyesResourceSizing.requestedBudgetBytes,
+        reyesResourceSizing.allocatedBudgetBytes,
+        m_visibleClusterCapacity,
+        m_reyesOwnedClusterCapacity,
+        m_reyesFullClusterOutputCapacity,
+        m_reyesSplitQueueCapacity,
+        m_reyesDiceQueueCapacity,
+        m_reyesRasterWorkCapacity);
+
     m_reyesFullClusterOutputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesFullClusterOutputCapacity, sizeof(CLodReyesFullClusterOutput), true, false, false, true);
     m_reyesFullClusterOutputsBuffer->SetName(MakeVariantResourceName(traits, "Reyes Full Cluster Outputs Buffer"));
 

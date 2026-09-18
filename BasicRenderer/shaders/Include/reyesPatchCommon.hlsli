@@ -1444,22 +1444,33 @@ void ReyesEvaluateDisplacedPatchTriangle(
             const float3 patchPosition2WS = mul(float4(patchPosition2, 1.0f), objectModelMatrix).xyz;
             if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
             {
-                Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-                SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
-                const float displacementScale = ReyesGeometricDisplacementGlobalScale(materialInfo);
-                const float displacementRange = materialInfo.geometricDisplacementMax - materialInfo.geometricDisplacementMin;
-                const float displacement0 = (materialInfo.geometricDisplacementMin + displacementRange *
-                    saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv0))) * displacementScale;
-                const float displacement1 = (materialInfo.geometricDisplacementMin + displacementRange *
-                    saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv1))) * displacementScale;
-                const float displacement2 = (materialInfo.geometricDisplacementMin + displacementRange *
-                    saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv2))) * displacementScale;
-                patchPosition0 += patchNormal0 * displacement0 *
-                    CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition0WS);
-                patchPosition1 += patchNormal1 * displacement1 *
-                    CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition1WS);
-                patchPosition2 += patchNormal2 * displacement2 *
-                    CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition2WS);
+                // The height atlas streams in separately from the material's own
+                // textures (HeightAtlasStreamer), so heightMapIndex is 0 whenever
+                // the atlas for this cell is not resident yet or has been evicted.
+                // Index 0 is the "no texture" sentinel every other atlas sampling
+                // site tests for; sampling it here reads an unrelated descriptor
+                // as a Texture2D and the resulting displacement propagates into
+                // the patch bounds that workGraphCulling.hlsl culls against, so
+                // the object disappears instead of merely rendering flat.
+                if (materialInfo.heightMapIndex != 0u)
+                {
+                    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+                    const float displacementScale = ReyesGeometricDisplacementGlobalScale(materialInfo);
+                    const float displacementRange = materialInfo.geometricDisplacementMax - materialInfo.geometricDisplacementMin;
+                    const float displacement0 = (materialInfo.geometricDisplacementMin + displacementRange *
+                        saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv0))) * displacementScale;
+                    const float displacement1 = (materialInfo.geometricDisplacementMin + displacementRange *
+                        saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv1))) * displacementScale;
+                    const float displacement2 = (materialInfo.geometricDisplacementMin + displacementRange *
+                        saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, patchUv2))) * displacementScale;
+                    patchPosition0 += patchNormal0 * displacement0 *
+                        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition0WS);
+                    patchPosition1 += patchNormal1 * displacement1 *
+                        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition1WS);
+                    patchPosition2 += patchNormal2 * displacement2 *
+                        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition2WS);
+                }
             }
             else
             {

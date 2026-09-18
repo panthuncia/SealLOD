@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <array>
+#include <atomic>
 #include <optional>
 #include <unordered_map>
 #include <span>
@@ -73,6 +74,24 @@ public:
             bindings.hasReyesTessTables = true;
         }
         bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
+        // clodResolveCommon.hlsli only decodes a visibility entry as a Reyes patch
+        // when the dice queue is bound and the entry's index is at or above this
+        // base. Without the dice queue, a patch entry is instead read as an
+        // ordinary visible cluster at an index past the end of that table, so
+        // geometry the patch rasterizer wrote is never shaded. Neither condition
+        // reported itself, so log the wiring once per declaration.
+        {
+            static std::atomic<std::uint32_t> loggedReyesResolveBindings{ 0 };
+            const auto logIndex = loggedReyesResolveBindings.fetch_add(1, std::memory_order_relaxed);
+            if (logIndex < 8u) {
+                spdlog::info(
+                    "EvaluateMaterialGroups Reyes resolve bindings: diceQueue={} tessTables={} patchIndexBase={} visibleClusterCapacity={}",
+                    bindings.hasReyesDiceQueue,
+                    bindings.hasReyesTessTables,
+                    m_patchVisibilityIndexBase,
+                    m_inputs.visibleClusterCapacity);
+            }
+        }
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
 
