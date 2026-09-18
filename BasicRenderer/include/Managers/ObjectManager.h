@@ -706,6 +706,9 @@ private:
 	std::vector<std::uint32_t> m_drawRecordVisibilityGenerations;
 	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>> m_skinnedAssemblyPlacements;
 	std::shared_ptr<SortedUnsignedIntBuffer> m_activeSkinnedAssemblyPlacements;
+	// Stages only the changed rows of the skinned placement buffer (contiguous
+	// runs of `indices`) instead of re-uploading the whole table per publish.
+	void StageSkinnedAssemblyPlacementRows(std::vector<std::uint32_t> indices);
 	std::vector<SkinnedAssemblyPlacementGPU> m_skinnedAssemblyPlacementCPU;
 	std::vector<std::uint32_t> m_freeSkinnedAssemblyPlacementIndices;
 	std::vector<std::uint8_t> m_skinnedAssemblyPlacementFree;

@@ -780,6 +780,7 @@ void Renderer::Initialize(
 
     if (auto* uploadService = currentRenderGraph->GetUploadService()) {
             uploadService->Initialize();
+            uploadService->SetOwnerThread();
     }
     if (!m_uploadPolicyService) {
         m_uploadPolicyService = org::runtime::CreateDefaultUploadPolicyService(currentRenderGraph->RetainUploadService());

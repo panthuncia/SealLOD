@@ -2607,12 +2607,35 @@ void ObjectManager::PublishSkinnedPlacementSourceVersionLocked() {
 		basic_telemetry::NowNs() - snapshotStart);
 }
 
+void ObjectManager::StageSkinnedAssemblyPlacementRows(std::vector<std::uint32_t> indices) {
+	if (indices.empty() || !m_skinnedAssemblyPlacements) return;
+	std::sort(indices.begin(), indices.end());
+	indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+	const auto& rows = m_skinnedAssemblyPlacementCPU;
+	std::size_t runStart = 0;
+	while (runStart < indices.size()) {
+		std::size_t runEnd = runStart + 1;
+		while (runEnd < indices.size() && indices[runEnd] == indices[runEnd - 1] + 1u) ++runEnd;
+		const auto first = indices[runStart];
+		const auto count = static_cast<std::size_t>(indices[runEnd - 1] - first + 1u);
+		if (first < rows.size()) {
+			const auto clamped = (std::min)(count, rows.size() - first);
+			m_skinnedAssemblyPlacements->StageRange(first,
+				std::span<const SkinnedAssemblyPlacementGPU>(rows.data() + first, clamped));
+		}
+		runStart = runEnd;
+	}
+}
+
 void ObjectManager::PublishSkinnedAssemblyPlacements(MaterializedStaticImportTransaction& transaction) {
 	if (transaction.skinnedAssemblyPlacements.empty()) return;
 	std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> activeEntries;
 	activeEntries.reserve(transaction.skinnedAssemblyPlacements.size());
+	std::vector<std::uint32_t> changedRows;
+	changedRows.reserve(transaction.skinnedAssemblyPlacements.size());
 	for (auto& pending : transaction.skinnedAssemblyPlacements) {
 		const auto placementIndex = AllocateSkinnedAssemblyPlacement(pending.placement);
+		changedRows.push_back(placementIndex);
 		pending.placement = m_skinnedAssemblyPlacementCPU[placementIndex];
 		for (const auto rowIndex : pending.drawRecordRowIndices) {
 			if (rowIndex < transaction.drawRecordRows.size()) {
@@ -2630,7 +2653,7 @@ void ObjectManager::PublishSkinnedAssemblyPlacements(MaterializedStaticImportTra
 		}
 		activeEntries.push_back({ placementIndex, pending.placement.generation });
 	}
-	m_skinnedAssemblyPlacements->ReplaceData(m_skinnedAssemblyPlacementCPU);
+	StageSkinnedAssemblyPlacementRows(std::move(changedRows));
 	m_activeSkinnedAssemblyPlacements->AppendActiveEntries(activeEntries);
 	m_activeSkinnedAssemblyPlacements->SetLiveSize(m_activeSkinnedAssemblyPlacements->LiveSize() + activeEntries.size());
 	PublishSkinnedPlacementSourceVersionLocked();
@@ -3293,6 +3316,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 	// Material/subset draw records deliberately do not participate in this list.
 	{
 		std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> activePlacements;
+		std::vector<std::uint32_t> changedPlacementRows;
 		for (std::size_t groupIndex = 0; groupIndex < drawInfos.size() && groupIndex < packet.transformRanges.size(); ++groupIndex) {
 			struct TypeBounds {
 				std::uint32_t slot;
@@ -3339,11 +3363,12 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					placement = m_skinnedAssemblyPlacementCPU[placementIndex];
 					drawInfos[groupIndex].skinnedAssemblyPlacementIndices.push_back(placementIndex);
 					activePlacements.push_back({ placementIndex, placement.generation });
+					changedPlacementRows.push_back(placementIndex);
 				}
 			}
 		}
 		if (!activePlacements.empty()) {
-			m_skinnedAssemblyPlacements->ReplaceData(m_skinnedAssemblyPlacementCPU);
+			StageSkinnedAssemblyPlacementRows(std::move(changedPlacementRows));
 			m_activeSkinnedAssemblyPlacements->AppendActiveEntries(activePlacements);
 			m_activeSkinnedAssemblyPlacements->SetLiveSize(m_activeSkinnedAssemblyPlacements->LiveSize() + activePlacements.size());
 			PublishSkinnedPlacementSourceVersionLocked();
@@ -3885,15 +3910,18 @@ ObjectManager::StaticObjectRemovalResult ObjectManager::RemoveStaticObjectsBulk(
 
 	if (totalSkinnedAssemblyPlacements != 0u) {
 		std::size_t invalidated = 0u;
+		std::vector<std::uint32_t> freedRows;
+		freedRows.reserve(totalSkinnedAssemblyPlacements);
 			for (const auto& payload : payloads) {
 			for (const auto placementIndex : payload.skinnedAssemblyPlacementIndices) {
 				if (placementIndex >= m_skinnedAssemblyPlacementCPU.size()) continue;
 				FreeSkinnedAssemblyPlacement(placementIndex);
+				freedRows.push_back(placementIndex);
 				++invalidated;
 			}
 		}
 		if (invalidated != 0u) {
-			m_skinnedAssemblyPlacements->ReplaceData(m_skinnedAssemblyPlacementCPU);
+			StageSkinnedAssemblyPlacementRows(std::move(freedRows));
 			const auto currentLive = m_activeSkinnedAssemblyPlacements->LiveSize();
 			m_activeSkinnedAssemblyPlacements->SetLiveSize(currentLive > invalidated ? currentLive - invalidated : 0u);
 			m_activeSkinnedAssemblyPlacements->AddActiveTombstoneEstimate(invalidated);

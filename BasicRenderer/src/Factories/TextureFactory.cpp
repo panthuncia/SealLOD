@@ -50,16 +50,23 @@ namespace {
         }
 #endif
 
+        // The upload is posted to the render thread's upload instance, so the
+        // source bytes (caller vectors and any RGB->RGBA expansion) must stay
+        // alive until the owner records the copy: the payload owns them.
+        struct TextureUploadPayload {
+            std::vector<rhi::helpers::SubresourceData> srd;
+            std::vector<std::vector<stbi_uc>> expandedImages;
+            std::vector<std::shared_ptr<std::vector<uint8_t>>> fullInitial;
+        };
+        auto payload = std::make_shared<TextureUploadPayload>();
         // Dense SubresourceData table (nullptr entries allowed; skipped by uploader)
-        std::vector<rhi::helpers::SubresourceData> srd(numSubres);
-
-        // Keep any expanded buffers alive until upload helper returns
-        std::vector<std::vector<stbi_uc>> expandedImages;
+        auto& srd = payload->srd;
+        srd.resize(numSubres);
+        auto& expandedImages = payload->expandedImages;
         expandedImages.reserve(numSubres);
-
         // Pad/trim caller-provided data to full subresource count.
-        // This also pins shared_ptr lifetimes through the upload call.
-        std::vector<std::shared_ptr<std::vector<uint8_t>>> fullInitial(numSubres, nullptr);
+        auto& fullInitial = payload->fullInitial;
+        fullInitial.assign(numSubres, nullptr);
         {
             const size_t toCopy = std::min<size_t>(initialData.size(), static_cast<size_t>(numSubres));
             std::copy_n(initialData.begin(), toCopy, fullInitial.begin());
@@ -157,8 +164,9 @@ namespace {
             }
         }
 
+        std::shared_ptr<const std::vector<rhi::helpers::SubresourceData>> subresources(payload, &payload->srd);
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
-        uploadService.UploadTextureSubresources(
+        uploadService.PostTextureSubresources(
             org::runtime::UploadTarget::FromShared(dstTexture),
             desc.format,
             baseW,
@@ -166,13 +174,11 @@ namespace {
             /*depthOrLayers*/ 1,
             static_cast<uint32_t>(mipLevels),
             arraySlices,
-            srd.data(),
-            static_cast<uint32_t>(srd.size()), __FILE__, __LINE__);
+            std::move(subresources), payload, __FILE__, __LINE__);
 #else
-        uploadService.UploadTextureSubresources(
+        uploadService.PostTextureSubresources(
             org::runtime::UploadTarget::FromShared(dstTexture), desc.format, baseW, baseH,
-            1, static_cast<uint32_t>(mipLevels), arraySlices, srd.data(),
-            static_cast<uint32_t>(srd.size()));
+            1, static_cast<uint32_t>(mipLevels), arraySlices, std::move(subresources), payload);
 #endif
     }
 }

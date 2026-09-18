@@ -1216,8 +1216,17 @@ ArtifactBuildResult BuildVersionedGpuBuffer(const ArtifactBuildContext& context,
 				return ArtifactBuildResult::Failure(
 					"versioned buffer paged image does not cover upload range");
 			}
+			// The backing is a pool lease (pool-only owned or retired past the
+			// frame ring, see VersionedGpuBufferBackingPool::Acquire), so no queue
+			// can touch it during the copy; that is what makes the worker path legal.
+			if (backing->retired.load(std::memory_order_acquire)) {
+				return ArtifactBuildResult::Failure(
+					"versioned buffer backing was retired before its upload was queued");
+			}
 			if (auto ticket = input->uploadService->QueueTrackedStreamingUploadSegments(
-				segments, range.size, resource, range.offset)) {
+				segments, range.size,
+				org::WorkerOwnedDestination{ resource, org::WorkerOwnedDestination::Ownership::PooledBackingLease },
+				range.offset)) {
 				tickets.push_back(std::move(ticket));
 			} else {
 				return ArtifactBuildResult::Failure(
