@@ -51,7 +51,7 @@ public:
         const auto* render = preparation.preparationData->Get<RenderContext>();
         const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
         const auto resolution = update ? update->renderResolution : render->renderResolution;
-        return {reinterpret_cast<uintptr_t>(m_pso.GetPayload().get()),
+        return {reinterpret_cast<uintptr_t>(m_pso.PeekPayload()),
             published ? published->materials.revision : 0u, resolution.x, resolution.y};
     }
     org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&,

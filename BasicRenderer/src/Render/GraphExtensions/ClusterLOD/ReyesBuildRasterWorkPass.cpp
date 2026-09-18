@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesBuildRasterWorkPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -175,6 +176,12 @@ br::render::PreparedComputeIndirect ReyesBuildRasterWorkPass::Prepare(
     data.constants[CLOD_REYES_BUILD_RASTER_WORK_USE_AABB_OCCLUSION] = bindings.useAabbOcclusion ? 1u : 0u;
     data.constants[CLOD_REYES_BUILD_RASTER_WORK_TERRAIN_RVT_ENABLED] = 0u;
     return data;
+}
+
+void ReyesBuildRasterWorkPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
 void ReyesBuildRasterWorkPass::Record(const ReyesBuildRasterWorkBindings&,

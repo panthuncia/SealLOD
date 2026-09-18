@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesCreateDispatchArgsPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
@@ -78,6 +79,12 @@ br::render::PreparedComputeDispatch ReyesCreateDispatchArgsPass::Prepare(
     data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_MAX_WORK_ITEM_COUNT] = bindings.maxWorkItemCount;
     data.groupsX = 1;
     return data;
+}
+
+void ReyesCreateDispatchArgsPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(static_cast<uint64_t>(br::render::HandleRevision(PSOManager::GetInstance().GetComputeRootSignature().GetHandle())));
 }
 
 void ReyesCreateDispatchArgsPass::Record(const ReyesCreateDispatchArgsBindings&,

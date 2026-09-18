@@ -5,9 +5,11 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
+#include <string_view>
 #include <filesystem>
 #include <optional>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <deque>
 #include <functional>
@@ -229,6 +231,9 @@ public:
 
 
     const PipelineState& GetDeferredPSO(UINT psoFlags);
+    // Pipeline cache entries live until Cleanup(); passes may cache references
+    // to them keyed on this generation.
+    uint64_t PipelineCacheGeneration() const noexcept { return m_asyncPSOGeneration.load(std::memory_order_acquire); }
 
     PipelineState MakeComputePipeline(rhi::PipelineLayoutHandle layout,
         const wchar_t* shaderPath,
@@ -392,7 +397,7 @@ private:
     ComPtr<IDxcCompiler3> pCompiler;
 	ComPtr<ID3D12PipelineState> debugPSO;
     ComPtr<ID3D12PipelineState> environmentConversionPSO;
-    mutable std::mutex m_cacheMutex;
+    mutable std::shared_mutex m_cacheMutex; // shared: cache lookups; exclusive: inserts, rebuilds
     std::atomic<uint64_t> m_asyncPSOGeneration = 0;
     mutable std::mutex m_livePipelineMutex;
     std::unordered_map<std::string, LivePipelineEntry> m_livePipelines;
@@ -448,9 +453,17 @@ private:
         TCache PSOManager::* cacheMember,
         TPending PSOManager::* pendingMember,
         const TKey& key,
-        std::string taskName,
+        std::string_view taskName,
         TFactory&& factory)
     {
+        {
+            std::shared_lock lock(m_cacheMutex);
+            auto& cache = this->*cacheMember;
+            auto it = cache.find(key);
+            if (it != cache.end()) {
+                return &it->second;
+            }
+        }
         {
             std::scoped_lock lock(m_cacheMutex);
             auto& cache = this->*cacheMember;
@@ -458,7 +471,6 @@ private:
             if (it != cache.end()) {
                 return &it->second;
             }
-
             auto& pending = this->*pendingMember;
             if (!pending.insert(key).second) {
                 return nullptr;
@@ -466,7 +478,8 @@ private:
         }
 
         const uint64_t generation = m_asyncPSOGeneration.load(std::memory_order_acquire);
-        const std::string queueTaskName = taskName;
+        // The cache hit above is the per-frame path; only a miss materializes the name.
+        const std::string queueTaskName(taskName);
         TaskSchedulerManager::GetInstance().Submit(
             // On-demand variants are explicit static/material publication
             // dependencies. Background priority can starve the final variant
@@ -480,7 +493,7 @@ private:
                 pendingMember,
                 key,
                 generation,
-                taskName = std::move(taskName),
+                taskName = std::string(taskName),
                 factory = std::forward<TFactory>(factory)]() mutable {
                 try {
                     PipelineState pipelineState = factory();

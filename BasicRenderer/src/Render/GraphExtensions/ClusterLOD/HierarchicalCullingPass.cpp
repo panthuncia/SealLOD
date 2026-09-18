@@ -801,8 +801,8 @@ std::vector<uint64_t> HierarchicalCullingPass::RecipeRevision(const org::PassPre
     const auto* render = preparation.preparationData ? preparation.preparationData->Get<RenderContext>() : nullptr;
     return {SettingsManager::GetInstance().Revision(),
         reinterpret_cast<uintptr_t>(m_workGraph.get()),
-        reinterpret_cast<uintptr_t>(m_clearPipelineState.GetPayload().get()),
-        reinterpret_cast<uintptr_t>(m_createCommandPipelineState.GetPayload().get()),
+        reinterpret_cast<uintptr_t>(m_clearPipelineState.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_createCommandPipelineState.PeekPayload()),
         render ? render->preparedRasterBucketCount : 0u};
 }
 

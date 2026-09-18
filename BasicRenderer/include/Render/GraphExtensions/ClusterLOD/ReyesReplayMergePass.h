@@ -38,6 +38,7 @@ public:
 
     ReyesReplayMergeBindings Declare(org::PassBuilder& builder);
     void Update(const UpdateExecutionContext& executionContext) override;
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeIndirect Prepare(const ReyesReplayMergeBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesReplayMergeBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);

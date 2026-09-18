@@ -6,6 +6,7 @@
 #include "Render/PersistentRendererPublication.h"
 
 #define _USE_MATH_DEFINES
+#include <optional>
 #include <math.h>
 #include <atlbase.h>
 #include <cstdio>
@@ -3459,6 +3460,9 @@ void Renderer::Update(float elapsedSeconds) {
         resourceManager.UpdatePerFrameBuffer(cameraIndex, m_pLightManager->GetNumLights(), { res.x, res.y }, m_lightClusterSize, static_cast<uint32_t>(m_totalFramesRendered));
     });
 
+    static const basic_telemetry::Callsite captureFrameInputsCallsite("Renderer::Update::CaptureFrameInputs");
+    std::optional<basic_telemetry::Scope> captureFrameInputsScope;
+    captureFrameInputsScope.emplace(captureFrameInputsCallsite);
     const Components::DrawStats& drawStats = world.get<Components::DrawStats>();
     auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     auto outputRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
@@ -3574,6 +3578,7 @@ void Renderer::Update(float elapsedSeconds) {
     auto currentViews = std::make_shared<br::render::PreparedViewFamilyState>();
     br::render::PrimaryCameraFrameUpload primaryCameraUpload{};
     if (m_pViewManager) {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::ViewFamily");
         currentViews->revision = m_pViewManager->GetPublicationRevision();
         currentViews->cameraBufferSize = m_pViewManager->GetCameraBufferSize();
         primaryCameraUpload = m_pViewManager->CapturePrimaryCameraUpload(updateData.frameNumber);
@@ -3645,6 +3650,7 @@ void Renderer::Update(float elapsedSeconds) {
         return result;
     }();
     if (!cameraTelemetryPath.empty()) {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::CameraTelemetryFile");
         std::error_code fileError;
         if (cameraTelemetryPath.has_parent_path())
             std::filesystem::create_directories(cameraTelemetryPath.parent_path(), fileError);
@@ -3697,6 +3703,7 @@ void Renderer::Update(float elapsedSeconds) {
 
     std::shared_ptr<br::render::LightTableBuildInput> desiredLights;
     if (m_pLightManager && m_rendererStateRequests) {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::LightTables");
         const auto lightSourceRevision = (std::max<std::uint64_t>)(
             m_pLightManager->GetPublicationRevision(), 1u);
         const auto lightViewRevision = std::uint64_t{0};
@@ -3765,6 +3772,7 @@ void Renderer::Update(float elapsedSeconds) {
     // the state graph. Accepted frames can now outlive later manager mutations.
     std::shared_ptr<br::render::PoseStateBuildInput> desiredPoses;
     if (m_pSkeletonManager && m_rendererStateRequests) {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::PoseState");
         const auto poseSourceRevision = (std::max<std::uint64_t>)(
             m_pSkeletonManager->GetActiveInstanceRevision(), 1u);
         if (poseSourceRevision != m_lastPoseSourceRevision) {
@@ -3816,6 +3824,7 @@ void Renderer::Update(float elapsedSeconds) {
     }
     updateData.poses = selectedPoses;
     renderSnapshot.poses = std::move(selectedPoses);
+    captureFrameInputsScope.reset();
     runCapturedStage("PublishDeferredBackingResizesLate", []() {
         BT_ZONE_SCOPE("Renderer::Update::PublishDeferredBackingResizesLate");
         (void)PublishReadyDeferredBackingResizes(false);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include "Render/InvocationRevision.h"
 #include <functional>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
@@ -51,6 +52,9 @@ public:
 		return bindings;
 	}
 
+	void InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+		br::render::AppendFrameHeapRevision(preparation, out);
+	}
 	ClearVisibilityFrameData Prepare(const ClearVisibilityBindings& bindings,
 		const org::PassPrepareContext& preparation) const {
 		ClearVisibilityFrameData data{};

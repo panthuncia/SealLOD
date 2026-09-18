@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesPatchRasterizationPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/ViewManager.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -178,6 +179,12 @@ br::render::PreparedComputeIndirect ReyesPatchRasterizationPass::Prepare(
     data.constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = srv(bindings.tessVertices);
     data.constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = srv(bindings.tessTriangles);
     return data;
+}
+
+void ReyesPatchRasterizationPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
 void ReyesPatchRasterizationPass::Record(const ReyesPatchRasterBindings&,

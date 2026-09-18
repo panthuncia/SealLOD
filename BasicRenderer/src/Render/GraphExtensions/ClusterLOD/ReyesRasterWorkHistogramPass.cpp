@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesRasterWorkHistogramPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/MaterialManager.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -72,6 +73,13 @@ ReyesHistogramFrameData ReyesRasterWorkHistogramPass::Prepare(
     data.histogram.constants[CLOD_REYES_RASTER_BUCKET_WORK_COUNTER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.counter, {org::BindlessViewKind::ShaderResource}).index;
     data.histogram.constants[CLOD_REYES_RASTER_BUCKET_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::UnorderedAccess}).index;
     return data;
+}
+
+void ReyesRasterWorkHistogramPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_clearPipeline));
+    out.push_back(br::render::PipelineRevision(m_histogramPipeline));
+    out.push_back(br::render::OwnerRevision(m_histogramCommandSignature));
 }
 
 void ReyesRasterWorkHistogramPass::Record(const ReyesRasterWorkHistogramBindings&,

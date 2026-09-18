@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesRasterWorkCompactAndArgsPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/MaterialManager.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -119,6 +120,15 @@ ReyesCompactFrameData ReyesRasterWorkCompactAndArgsPass::Prepare(
     data.compactedBarrier = preparation.CaptureResource(bindings.compacted);
     data.packedBarrier = preparation.CaptureResource(bindings.packed);
     return data;
+}
+
+void ReyesRasterWorkCompactAndArgsPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_clearPipeline));
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::PipelineRevision(m_packPipeline));
+    out.push_back(br::render::PipelineRevision(m_finalizePackPipeline));
+    out.push_back(br::render::OwnerRevision(m_compactionCommandSignature));
 }
 
 void ReyesRasterWorkCompactAndArgsPass::Record(const ReyesRasterWorkCompactBindings&,

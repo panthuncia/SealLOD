@@ -77,7 +77,7 @@ public:
     }
 
     std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const {
-        return {reinterpret_cast<uintptr_t>(m_pso.GetPayload().get())};
+        return {reinterpret_cast<uintptr_t>(m_pso.PeekPayload())};
     }
     static BuildPixelListInvocation PrepareInvocation(const br::render::PreparedComputeDispatch&,
         const BuildPixelListBindings&, const org::PassPrepareContext& preparation) {

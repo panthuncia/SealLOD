@@ -199,6 +199,10 @@ public:
     [[nodiscard]] std::shared_ptr<const PublishedManifestLease> AcquireLease(
         std::size_t frameSlot, std::shared_ptr<const PublishedRendererState> state = {}) noexcept;
     [[nodiscard]] std::shared_ptr<const PublishedManifestLease> LoadLease() const noexcept;
+    // Sequence of the newest acquired lease; advances before that lease is
+    // published, so a matching cached observation is at most one lease old
+    // only until the store lands (readers recompute on the next call).
+    [[nodiscard]] std::uint64_t LeaseSequence() const noexcept { return m_leaseSequence.load(std::memory_order_acquire); }
     [[nodiscard]] std::uint64_t Epoch() const noexcept;
 	[[nodiscard]] std::shared_ptr<const void> ResolverDependencyIdentity(
 		const PublishedResourceKey& key) const;

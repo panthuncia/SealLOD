@@ -451,16 +451,16 @@ std::vector<uint64_t> ClusterSoftwareRasterizationPass::RecipeRevision(const org
     const auto* context = preparation.preparationData->Get<UpdateContext>();
     std::vector<uint64_t> revision{SettingsManager::GetInstance().Revision(), context->preparedRasterBucketCount,
         reinterpret_cast<uintptr_t>(m_rasterizationCommandSignature.get()),
-        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheClearPipeline.GetPayload().get()),
-        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheBuildPipeline.GetPayload().get()),
-        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheFinalizePipeline.GetPayload().get()),
-        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheSkinPipeline.GetPayload().get()),
-        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheResolvePipeline.GetPayload().get())};
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheClearPipeline.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheBuildPipeline.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheFinalizePipeline.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheSkinPipeline.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheResolvePipeline.PeekPayload())};
     for (uint32_t i = 0; i < context->preparedRasterBucketCount; ++i) {
         const auto flags = context->preparedRasterBucketFlags.at(i);
         const auto* pso = PSOManager::GetInstance().TryGetClusterLODSoftwareRasterPSO(flags, m_outputKind);
         revision.push_back(static_cast<uint64_t>(flags));
-        revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->GetPayload().get() : nullptr));
+        revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->PeekPayload() : nullptr));
     }
     return revision;
 }

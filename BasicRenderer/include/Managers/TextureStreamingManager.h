@@ -150,7 +150,10 @@ public:
 	void UnregisterTextureBindings(const std::vector<uint64_t>& bindingIDs);
 
 	std::shared_ptr<RenderPass> CreateTextureStreamingFeedbackReadbackPass();
-	MaterialTextureStreamingStats GetTextureStreamingStats(const std::vector<std::shared_ptr<Resource>>& activeTextureResources) const;
+	MaterialTextureStreamingStats GetTextureStreamingStats(const std::vector<std::shared_ptr<Resource>>& activeTextureResources,
+		uint64_t* sequence = nullptr) const;
+	// Advances whenever the streaming worker publishes new stats; callers cache on it.
+	uint64_t PublishedStatsSequence() const noexcept;
 	MaterialTextureStreamingReadinessStats GetTextureStreamingReadinessStats() const;
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
@@ -321,6 +324,7 @@ private:
 	std::unordered_set<uint64_t> m_dirtyLiveBindingIDSet;
 	mutable std::mutex m_statsMutex;
 	MaterialTextureStreamingStats m_publishedStats;
+	uint64_t m_publishedStatsSequence = 1;
 	std::chrono::steady_clock::time_point m_lastTextureUpdateStatsLog = {};
 	uint64_t m_textureDirtyReasonFeedback = 0;
 	uint64_t m_textureDirtyReasonIdleCoarsen = 0;

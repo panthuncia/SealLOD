@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesDicePass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -81,6 +82,12 @@ br::render::PreparedComputeIndirect ReyesDicePass::Prepare(
     data.constants[CLOD_REYES_DICE_PHASE_INDEX] = bindings.phase; data.constants[CLOD_REYES_DICE_QUEUE_CAPACITY] = bindings.capacity;
     data.constants[CLOD_REYES_DICE_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = srv(bindings.tessConfigs);
     return data;
+}
+
+void ReyesDicePass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
 void ReyesDicePass::Record(const ReyesDiceBindings&, const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {

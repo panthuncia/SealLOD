@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodStreamingFeedbackSortPass.h"
+#include "Render/InvocationRevision.h"
 
 #include <array>
 
@@ -124,6 +125,17 @@ StreamingFeedbackSortFrameData CLodStreamingFeedbackSortPass::Prepare(
     data.constants[0] = constants(bindings.uavs[0], bindings.uavs[2], bindings.uavs[1], bindings.uavs[3], 0);
     data.constants[1] = constants(bindings.uavs[2], bindings.uavs[0], bindings.uavs[3], bindings.uavs[1], 0);
     return data;
+}
+
+void CLodStreamingFeedbackSortPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_setupPso));
+    out.push_back(br::render::PipelineRevision(m_countPso));
+    out.push_back(br::render::PipelineRevision(m_reducePso));
+    out.push_back(br::render::PipelineRevision(m_scanPso));
+    out.push_back(br::render::PipelineRevision(m_scanAddPso));
+    out.push_back(br::render::PipelineRevision(m_scatterPso));
+    out.push_back(br::render::OwnerRevision(CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature()));
 }
 
 void CLodStreamingFeedbackSortPass::Record(const StreamingFeedbackSortBindings&,

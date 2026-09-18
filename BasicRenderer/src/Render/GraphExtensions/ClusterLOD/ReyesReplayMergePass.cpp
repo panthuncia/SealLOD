@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesReplayMergePass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -85,6 +86,12 @@ br::render::PreparedComputeIndirect ReyesReplayMergePass::Prepare(
     data.constants[CLOD_REYES_REPLAY_MERGE_CAPACITY] = bindings.capacity;
     data.constants[CLOD_REYES_REPLAY_MERGE_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
     return data;
+}
+
+void ReyesReplayMergePass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
 void ReyesReplayMergePass::Record(const ReyesReplayMergeBindings&,

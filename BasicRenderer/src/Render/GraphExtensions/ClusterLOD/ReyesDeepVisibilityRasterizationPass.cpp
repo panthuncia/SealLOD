@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesDeepVisibilityRasterizationPass.h"
+#include "Render/InvocationRevision.h"
 
 #include <algorithm>
 #include <limits>
@@ -279,6 +280,12 @@ br::render::PreparedComputeIndirect ReyesDeepVisibilityRasterizationPass::Prepar
     data.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
     data.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
     return data;
+}
+
+void ReyesDeepVisibilityRasterizationPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
 void ReyesDeepVisibilityRasterizationPass::Record(const ReyesDeepVisibilityRasterBindings&,

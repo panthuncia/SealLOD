@@ -63,6 +63,7 @@ public:
         std::shared_ptr<Buffer> replaySplitQueueOverflowBuffer = nullptr);
 
     ReyesSplitBindings Declare(org::PassBuilder& builder);
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     ReyesSplitFrameData Prepare(const ReyesSplitBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesSplitBindings&, const ReyesSplitFrameData&, org::PassRecordContext&);
 

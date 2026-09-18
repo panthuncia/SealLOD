@@ -451,6 +451,24 @@ const PipelineState& GetOrCreatePipelineState(
     return it->second;
 }
 
+// Per-frame lookups take the shared lock; only a miss creates under the
+// exclusive lock. Node-based caches keep element references stable.
+template <typename TCache, typename TKey, typename TFactory>
+const PipelineState& FindOrCreatePipelineState(
+    std::shared_mutex& mutex,
+    TCache& cache,
+    const TKey& key,
+    TFactory&& factory)
+{
+    {
+        std::shared_lock lock(mutex);
+        auto it = cache.find(key);
+        if (it != cache.end()) return it->second;
+    }
+    std::scoped_lock lock(mutex);
+    return GetOrCreatePipelineState(cache, key, std::forward<TFactory>(factory));
+}
+
 std::string MakePSOKeyId(std::string_view family, const PSOKey& key)
 {
     return std::string(family) + ".flags=" + std::to_string(key.psoFlags) +
@@ -668,8 +686,7 @@ void PSOManager::Cleanup() {
 
 const PipelineState& PSOManager::GetPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_psoCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_psoCache, key, [&]() {
         return RegisterPipeline(
             CreatePSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.Forward", key),
@@ -683,8 +700,7 @@ const PipelineState& PSOManager::GetPSO(UINT psoFlags, MaterialCompileFlags mate
 
 const PipelineState& PSOManager::GetShadowPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_shadowPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_shadowPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateShadowPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.Shadow", key),
@@ -698,8 +714,7 @@ const PipelineState& PSOManager::GetShadowPSO(UINT psoFlags, MaterialCompileFlag
 
 const PipelineState& PSOManager::GetShadowMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_shadowMeshPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_shadowMeshPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateShadowMeshPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.ShadowMesh", key),
@@ -713,8 +728,7 @@ const PipelineState& PSOManager::GetShadowMeshPSO(UINT psoFlags, MaterialCompile
 
 const PipelineState& PSOManager::GetPrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_prePassPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_prePassPSOCache, key, [&]() {
         return RegisterPipeline(
             CreatePrePassPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.PrePass", key),
@@ -728,8 +742,7 @@ const PipelineState& PSOManager::GetPrePassPSO(UINT psoFlags, MaterialCompileFla
 
 const PipelineState& PSOManager::GetMeshPrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_meshPrePassPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_meshPrePassPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateMeshPrePassPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.MeshPrePass", key),
@@ -743,8 +756,7 @@ const PipelineState& PSOManager::GetMeshPrePassPSO(UINT psoFlags, MaterialCompil
 
 const PipelineState& PSOManager::GetPPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_PPLLPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_PPLLPSOCache, key, [&]() {
         return RegisterPipeline(
             CreatePPLLPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.PPLL", key),
@@ -758,8 +770,7 @@ const PipelineState& PSOManager::GetPPLLPSO(UINT psoFlags, MaterialCompileFlags 
 
 const PipelineState& PSOManager::GetMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_meshPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_meshPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateMeshPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.Mesh", key),
@@ -773,8 +784,7 @@ const PipelineState& PSOManager::GetMeshPSO(UINT psoFlags, MaterialCompileFlags 
 
 const PipelineState& PSOManager::GetMeshPPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_meshPPLLPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_meshPPLLPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateMeshPPLLPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.MeshPPLL", key),
@@ -788,8 +798,7 @@ const PipelineState& PSOManager::GetMeshPPLLPSO(UINT psoFlags, MaterialCompileFl
 
 const PipelineState& PSOManager::GetVisibilityBufferPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_visibilityBufferPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_visibilityBufferPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateVisibilityBufferPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.Visibility", key),
@@ -803,8 +812,7 @@ const PipelineState& PSOManager::GetVisibilityBufferPSO(UINT psoFlags, MaterialC
 
 const PipelineState& PSOManager::GetVisibilityBufferMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_visibilityBufferMeshPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_visibilityBufferMeshPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateVisibilityBufferMeshPSO(psoFlags, materialCompileFlags, wireframe),
             MakePSOKeyId("Material.VisibilityMesh", key),
@@ -818,8 +826,7 @@ const PipelineState& PSOManager::GetVisibilityBufferMeshPSO(UINT psoFlags, Mater
 
 const PipelineState& PSOManager::GetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODRasterPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODRasterPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateClusterLODRasterPSO(materialRasterFlags, wireframe),
             MakeRasterPSOKeyId("CLod.Raster", key),
@@ -833,8 +840,7 @@ const PipelineState& PSOManager::GetClusterLODRasterPSO(MaterialRasterFlags mate
 
 const PipelineState& PSOManager::GetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODVirtualShadowRasterPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODVirtualShadowRasterPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateClusterLODVirtualShadowRasterPSO(materialRasterFlags, wireframe),
             MakeRasterPSOKeyId("CLod.VirtualShadowRaster", key),
@@ -848,8 +854,7 @@ const PipelineState& PSOManager::GetClusterLODVirtualShadowRasterPSO(MaterialRas
 
 const PipelineState& PSOManager::GetClusterLODVirtualShadowReyesRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODVirtualShadowReyesRasterPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODVirtualShadowReyesRasterPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateClusterLODVirtualShadowReyesRasterPSO(materialRasterFlags, wireframe),
             MakeRasterPSOKeyId("CLod.VirtualShadowReyesRaster", key),
@@ -863,8 +868,7 @@ const PipelineState& PSOManager::GetClusterLODVirtualShadowReyesRasterPSO(Materi
 
 const PipelineState& PSOManager::GetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODDeepVisibilityRasterPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODDeepVisibilityRasterPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateClusterLODDeepVisibilityRasterPSO(materialRasterFlags, wireframe),
             MakeRasterPSOKeyId("CLod.DeepVisibilityRaster", key),
@@ -878,8 +882,7 @@ const PipelineState& PSOManager::GetClusterLODDeepVisibilityRasterPSO(MaterialRa
 
 const PipelineState& PSOManager::GetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODAVBOITOccupancyPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODAVBOITOccupancyPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateClusterLODAVBOITOccupancyPSO(materialRasterFlags, wireframe),
             MakeRasterPSOKeyId("CLod.AVBOITOccupancy", key),
@@ -893,8 +896,7 @@ const PipelineState& PSOManager::GetClusterLODAVBOITOccupancyPSO(MaterialRasterF
 
 const PipelineState& PSOManager::GetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODAVBOITRasterPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODAVBOITRasterPSOCache, key, [&]() {
         return RegisterPipeline(
             CreateClusterLODAVBOITRasterPSO(materialRasterFlags, wireframe),
             MakeRasterPSOKeyId("CLod.AVBOITRaster", key),
@@ -908,8 +910,7 @@ const PipelineState& PSOManager::GetClusterLODAVBOITRasterPSO(MaterialRasterFlag
 
 const PipelineState& PSOManager::GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
     RasterPSOKey key(materialRasterFlags, wireframe, false, psoFlags);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODAVBOITShadePSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODAVBOITShadePSOCache, key, [&]() {
         return RegisterPipeline(
             CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe, psoFlags),
             MakeRasterPSOKeyId("CLod.AVBOITShade", key),
@@ -924,15 +925,13 @@ const PipelineState& PSOManager::GetClusterLODAVBOITShadePSO(MaterialRasterFlags
 const PipelineState& PSOManager::GetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind) {
     const uint64_t key = static_cast<uint64_t>(materialRasterFlags) |
         (static_cast<uint64_t>(outputKind) << 32u);
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODSoftwareRasterPSOCache, key, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODSoftwareRasterPSOCache, key, [&]() {
         return CreateClusterLODSoftwareRasterPSO(materialRasterFlags, outputKind);
     });
 }
 
 const PipelineState& PSOManager::GetDeferredPSO(UINT psoFlags) {
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_deferredPSOCache, psoFlags, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_deferredPSOCache, psoFlags, [&]() {
         return RegisterPipeline(
             CreateDeferredPSO(psoFlags),
             "Material.Deferred.flags=" + std::to_string(psoFlags),
@@ -945,8 +944,7 @@ const PipelineState& PSOManager::GetDeferredPSO(UINT psoFlags) {
 }
 
 const PipelineState& PSOManager::GetClusterLODDeepVisibilityResolvePSO(UINT psoFlags) {
-    std::scoped_lock lock(m_cacheMutex);
-    return GetOrCreatePipelineState(m_clusterLODDeepVisibilityResolvePSOCache, psoFlags, [&]() {
+    return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODDeepVisibilityResolvePSOCache, psoFlags, [&]() {
         return CreateClusterLODDeepVisibilityResolvePSO(psoFlags);
     });
 }

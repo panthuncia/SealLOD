@@ -498,9 +498,20 @@ std::shared_ptr<RenderPass> MaterialManager::CreateTextureStreamingFeedbackReadb
 }
 
 MaterialTextureStreamingStats MaterialManager::GetMaterialTextureStreamingStats() const {
-	return m_textureStreamingManager
-		? m_textureStreamingManager->GetTextureStreamingStats(CollectActiveMaterialTextureResources())
-		: MaterialTextureStreamingStats{};
+	if (!m_textureStreamingManager) return {};
+	// Called twice per frame from the render thread for the debug menu. The
+	// result only changes when the tracked material textures change or the
+	// streaming worker publishes new stats, so it is recomputed only then.
+	const auto published = m_textureStreamingManager->PublishedStatsSequence();
+	if (m_cachedStreamingStatsTrackedRevision == m_trackedTexturesRevision
+		&& m_cachedStreamingStatsPublishedSequence == published && m_cachedStreamingStatsValid)
+		return m_cachedStreamingStats;
+	uint64_t sequence = published;
+	m_cachedStreamingStats = m_textureStreamingManager->GetTextureStreamingStats(CollectActiveMaterialTextureResources(), &sequence);
+	m_cachedStreamingStatsTrackedRevision = m_trackedTexturesRevision;
+	m_cachedStreamingStatsPublishedSequence = sequence;
+	m_cachedStreamingStatsValid = true;
+	return m_cachedStreamingStats;
 }
 
 void MaterialManager::MarkMaterialDirty(Material& material) {
@@ -841,6 +852,7 @@ MaterialManager::ReserveMaterialUsage(
 				m_materialReservationOwnedIDs.erase(entry.materialID);
 				if (firstUse) {
 					m_trackedMaterialTextures[entry.materialID] = entry.retainedTextureResources;
+					++m_trackedTexturesRevision;
 					const auto sourceRevision = ++m_materialRowSourceRevisions[entry.materialID];
 					if (!ApplyMaterialRowArtifact({ entry.materialID, reservedEntry.slot, sourceRevision,
 						entry.base, entry.evaluation, entry.openPbr })) return false;
@@ -1258,6 +1270,7 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 	if (delta > 0) {
 		auto textures = CollectMaterialTextureResources(material);
 		m_trackedMaterialTextures[materialId] = std::move(textures);
+		++m_trackedTexturesRevision;
 		return;
 	}
 
@@ -1267,6 +1280,7 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 	}
 
 	m_trackedMaterialTextures.erase(trackedIt);
+	++m_trackedTexturesRevision;
 }
 
 bool MaterialManager::MaterialTextureAssetBindingsChanged(const Material& material) const {
@@ -1357,6 +1371,7 @@ void MaterialManager::RefreshMaterialTextureUsage(const Material& material) {
 	auto currentTextures = CollectMaterialTextureResources(material);
 	auto& trackedTextures = m_trackedMaterialTextures[material.GetMaterialID()];
 	trackedTextures = std::move(currentTextures);
+	++m_trackedTexturesRevision;
 }
 
 std::vector<std::shared_ptr<Resource>> MaterialManager::CollectActiveMaterialTextureResources() const {

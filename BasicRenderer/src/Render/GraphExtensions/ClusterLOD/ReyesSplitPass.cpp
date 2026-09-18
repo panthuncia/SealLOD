@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesSplitPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -204,6 +205,13 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     c[UintRootConstant18] = bindings.coarseTargetBits;
     data.clear.constants = data.split.constants;
     return data;
+}
+
+void ReyesSplitPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_clearCountersPso));
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
 void ReyesSplitPass::Record(const ReyesSplitBindings&, const ReyesSplitFrameData& data, org::PassRecordContext& recording) {

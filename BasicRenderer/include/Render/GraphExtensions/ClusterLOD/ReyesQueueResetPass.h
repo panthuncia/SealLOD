@@ -47,6 +47,7 @@ public:
 
     ReyesQueueResetBindings Declare(org::PassBuilder& builder);
     void Initialize();
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputePipelineSequence Prepare(
         const ReyesQueueResetBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesQueueResetBindings&,

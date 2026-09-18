@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesSeedPatchesPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -88,6 +89,12 @@ br::render::PreparedComputeIndirect ReyesSeedPatchesPass::Prepare(
 void ReyesSeedPatchesPass::Update(const UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
+}
+
+void ReyesSeedPatchesPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
 void ReyesSeedPatchesPass::Record(const ReyesSeedPatchesBindings&,

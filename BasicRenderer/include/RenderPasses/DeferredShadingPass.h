@@ -1,6 +1,10 @@
 #pragma once
 
 #include <functional>
+#include "Render/InvocationRevision.h"
+#include <chrono>
+#include <atomic>
+#include <spdlog/spdlog.h>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -87,7 +91,7 @@ public:
 		if (!update && !render) throw std::logic_error("DeferredShadingPass requires frame context");
 		const auto globalFlags = update ? update->globalPSOFlags : render->globalPSOFlags;
 		const auto resolution = update ? update->renderResolution : render->renderResolution;
-		auto& pso = PSOManager::GetInstance().GetDeferredPSO(globalFlags);
+		auto& pso = DeferredPipeline(globalFlags);
 		br::render::PreparedComputeDispatch data{};
 		data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
 		auto program = CaptureProgramBinding(preparation, pso);
@@ -101,11 +105,37 @@ public:
 		data.groupsX = (resolution.x + 7u) / 8u; data.groupsY = (resolution.y + 7u) / 8u;
 		return data;
 	}
+	void InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+		const auto* update = preparation.preparationData->Get<UpdateContext>();
+		const auto* render = preparation.preparationData->Get<RenderContext>();
+		if (!update && !render) return;
+		const auto globalFlags = update ? update->globalPSOFlags : render->globalPSOFlags;
+		const auto resolution = update ? update->renderResolution : render->renderResolution;
+		const auto& lighting = update ? update->lighting : render->lighting;
+		const auto pipeline = br::render::PipelineRevision(DeferredPipeline(globalFlags));
+		const auto layout = br::render::HandleRevision(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
+		out.insert(out.end(), {static_cast<uint64_t>(globalFlags), static_cast<uint64_t>(resolution.x), static_cast<uint64_t>(resolution.y),
+			static_cast<uint64_t>(lighting.shadowsEnabled), static_cast<uint64_t>(lighting.punctualLightingEnabled),
+			static_cast<uint64_t>(lighting.gtaoEnabled), static_cast<uint64_t>(m_skyboxEnabled), pipeline, layout});
+	}
 	static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
 		br::render::RecordPreparedComputeDispatch(data, recording);
 	}
 
 private:
+	const PipelineState& DeferredPipeline(UINT globalFlags) const {
+		auto& manager = PSOManager::GetInstance();
+		const auto generation = manager.PipelineCacheGeneration();
+		if (m_cachedPipeline && m_cachedPipelineFlags == globalFlags && m_cachedPipelineGeneration == generation)
+			return *m_cachedPipeline;
+		m_cachedPipeline = &manager.GetDeferredPSO(globalFlags);
+		m_cachedPipelineFlags = globalFlags;
+		m_cachedPipelineGeneration = generation;
+		return *m_cachedPipeline;
+	}
+	mutable const PipelineState* m_cachedPipeline = nullptr;
+	mutable UINT m_cachedPipelineFlags = 0;
+	mutable uint64_t m_cachedPipelineGeneration = 0;
 
 	bool m_imageBasedLightingEnabled = true;
 	bool m_punctualLightingEnabled = true;

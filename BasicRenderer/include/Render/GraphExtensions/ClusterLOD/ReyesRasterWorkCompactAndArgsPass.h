@@ -37,6 +37,7 @@ public:
         std::shared_ptr<Buffer> indirectArgsBuffer);
 
     ReyesRasterWorkCompactBindings Declare(org::PassBuilder& builder);
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     ReyesCompactFrameData Prepare(const ReyesRasterWorkCompactBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesRasterWorkCompactBindings&, const ReyesCompactFrameData& data, org::PassRecordContext& recording);

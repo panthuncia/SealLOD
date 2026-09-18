@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesClassifyPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -130,6 +131,12 @@ br::render::PreparedComputeIndirect ReyesClassifyPass::Prepare(
     data.constants[CLOD_REYES_CLASSIFY_OWNERSHIP_BITSET_DESCRIPTOR_INDEX] = bindings.hasOwnershipBitset ? uav(bindings.ownershipBitset) : 0xFFFFFFFFu;
     data.constants[CLOD_REYES_CLASSIFY_MODE] = bindings.mode;
     return data;
+}
+
+void ReyesClassifyPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
 void ReyesClassifyPass::Record(const ReyesClassifyBindings&,

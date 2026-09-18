@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesQueueResetPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -136,6 +137,14 @@ br::render::PreparedComputePipelineSequence ReyesQueueResetPass::Prepare(
         data.steps.push_back(std::move(bitset));
     }
     return data;
+}
+
+void ReyesQueueResetPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_clearCountersPso));
+    out.push_back(br::render::PipelineRevision(m_clearOwnershipBitsetPso));
+    out.push_back(static_cast<uint64_t>(m_clearDiceQueueCounter));
+    out.push_back(static_cast<uint64_t>(m_ownershipBitsetWordCount));
 }
 
 void ReyesQueueResetPass::Record(const ReyesQueueResetBindings&,

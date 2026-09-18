@@ -31,6 +31,7 @@ public:
         uint32_t phaseIndex);
 
     ReyesDiceBindings Declare(org::PassBuilder& builder);
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeIndirect Prepare(const ReyesDiceBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesDiceBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
 

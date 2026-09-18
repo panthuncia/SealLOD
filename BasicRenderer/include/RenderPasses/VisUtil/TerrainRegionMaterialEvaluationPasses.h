@@ -34,7 +34,7 @@ namespace TerrainRegionMaterialEval
     inline std::vector<uint64_t> RecipeRevision(const PipelineState& pso, const org::PassPrepareContext& preparation) {
         const auto& context = *preparation.preparationData->Get<UpdateContext>();
         const auto& signatures = CommandSignatureManager::GetInstance();
-        return {reinterpret_cast<uintptr_t>(pso.GetPayload().get()), SettingsManager::GetInstance().Revision(),
+        return {reinterpret_cast<uintptr_t>(pso.PeekPayload()), SettingsManager::GetInstance().Revision(),
             context.publishedRendererState ? context.publishedRendererState->materials.revision : 0u,
             reinterpret_cast<uintptr_t>(signatures.CaptureRawDispatchCommandSignature().get()),
             reinterpret_cast<uintptr_t>(signatures.CaptureMaterialEvaluationCommandSignature().get()),

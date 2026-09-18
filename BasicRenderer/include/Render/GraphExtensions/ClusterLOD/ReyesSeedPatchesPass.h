@@ -34,6 +34,7 @@ public:
         uint32_t phaseIndex);
 
     ReyesSeedPatchesBindings Declare(org::PassBuilder& builder);
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeIndirect Prepare(const ReyesSeedPatchesBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesSeedPatchesBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);

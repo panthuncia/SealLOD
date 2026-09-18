@@ -28,6 +28,7 @@ public:
 
     ReyesCreateDispatchArgsBindings Declare(org::PassBuilder& builder);
     void Initialize();
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeDispatch Prepare(const ReyesCreateDispatchArgsBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesCreateDispatchArgsBindings&,

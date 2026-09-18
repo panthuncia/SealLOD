@@ -51,6 +51,7 @@ public:
     ReyesDeepVisibilityRasterBindings Declare(org::PassBuilder& builder);
     void Update(const UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeIndirect Prepare(const ReyesDeepVisibilityRasterBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesDeepVisibilityRasterBindings&, const br::render::PreparedComputeIndirect& data,

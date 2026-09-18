@@ -2191,17 +2191,31 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 		}
 	}
 	{
+		// Build outside the lock: the render thread reads the published stats
+		// every frame and must never wait for this walk.
+		auto built = BuildTextureStreamingStats();
 		std::lock_guard statsLock(m_statsMutex);
-		m_publishedStats = BuildTextureStreamingStats();
+		m_publishedStats = std::move(built);
+		++m_publishedStatsSequence;
 	}
 
 }
 
-MaterialTextureStreamingStats TextureStreamingManager::GetTextureStreamingStats(
-	const std::vector<std::shared_ptr<Resource>>& activeTextureResources) const
+uint64_t TextureStreamingManager::PublishedStatsSequence() const noexcept
 {
 	std::lock_guard statsLock(m_statsMutex);
-	auto stats = m_publishedStats;
+	return m_publishedStatsSequence;
+}
+
+MaterialTextureStreamingStats TextureStreamingManager::GetTextureStreamingStats(
+	const std::vector<std::shared_ptr<Resource>>& activeTextureResources, uint64_t* sequence) const
+{
+	MaterialTextureStreamingStats stats;
+	{
+		std::lock_guard statsLock(m_statsMutex);
+		stats = m_publishedStats;
+		if (sequence) *sequence = m_publishedStatsSequence;
+	}
 	const std::unordered_set<uint64_t> participatingIDs(
 		stats.participatingPublishedResourceIDs.begin(),
 		stats.participatingPublishedResourceIDs.end());

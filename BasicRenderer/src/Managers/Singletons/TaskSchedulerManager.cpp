@@ -140,23 +140,38 @@ CpuSetSelection SelectCpuSets(bool reserveRenderCpu) {
     if (!getCpuSets(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(storage.data()),
             required, &required, GetCurrentProcess(), 0)) return result;
 
-    struct Candidate { ULONG id; BYTE efficiency; };
+    struct Candidate { ULONG id; BYTE efficiency; BYTE logicalIndex; };
     std::vector<Candidate> candidates;
     for (ULONG offset = 0; offset < required;) {
         auto* info = reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(storage.data() + offset);
         if (info->Type == CpuSetInformation && !info->CpuSet.Parked) {
-            candidates.push_back({ info->CpuSet.Id, info->CpuSet.EfficiencyClass });
+            candidates.push_back({ info->CpuSet.Id, info->CpuSet.EfficiencyClass, info->CpuSet.LogicalProcessorIndex });
         }
         if (info->Size == 0) break;
         offset += info->Size;
     }
     if (candidates.empty()) return result;
-    const auto selected = std::max_element(candidates.begin(), candidates.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.efficiency == rhs.efficiency ? lhs.id < rhs.id : lhs.efficiency < rhs.efficiency;
-    });
-    if (reserveRenderCpu && candidates.size() > 1) result.render = selected->id;
+    // The render thread is pinned by the host to the highest processor allowed
+    // for the process; reserve that processor (not, as before, the lowest one).
+    // Reserving its SMT sibling as well was measured to cost more than it
+    // saved: the workers then oversubscribe the remaining processors.
+    DWORD_PTR processMask = 0, systemMask = 0;
+    (void)GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask);
+    std::optional<BYTE> renderLogical;
+    for (int bit = 63; bit >= 0 && !renderLogical; --bit)
+        if (processMask & (DWORD_PTR{1} << bit)) renderLogical = static_cast<BYTE>(bit);
+    auto selected = candidates.end();
+    if (renderLogical) selected = std::find_if(candidates.begin(), candidates.end(),
+        [&](const auto& candidate) { return candidate.logicalIndex == *renderLogical; });
+    if (selected == candidates.end())
+        selected = std::max_element(candidates.begin(), candidates.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.efficiency == rhs.efficiency ? lhs.id < rhs.id : lhs.efficiency < rhs.efficiency;
+        });
+    const bool reserve = reserveRenderCpu && candidates.size() > 1;
+    if (reserve) result.render = selected->id;
     for (const auto& candidate : candidates) {
-        if (!result.render || candidate.id != *result.render) result.workers.push_back(candidate.id);
+        if (reserve && candidate.id == *result.render) continue;
+        result.workers.push_back(candidate.id);
     }
     return result;
 }
@@ -399,6 +414,8 @@ void TaskSchedulerManager::Initialize(Config config) {
     auto& state = *m_runtimeState;
     const auto cpuSets = SelectCpuSets(config.reserveRenderCpu);
     state.workerCpuSets = cpuSets.workers;
+    spdlog::info("Scheduler CPU sets: workers={} reservedRenderCpuSet={}", state.workerCpuSets.size(),
+        cpuSets.render ? std::to_string(*cpuSets.render) : std::string("none"));
     if (!state.workerCpuSets.empty()) {
         if (const auto setProcessCpuSets = ResolveKernelFunction<SetProcessDefaultCpuSetsFn>("SetProcessDefaultCpuSets")) {
             (void)setProcessCpuSets(GetCurrentProcess(), state.workerCpuSets.data(), static_cast<ULONG>(state.workerCpuSets.size()));

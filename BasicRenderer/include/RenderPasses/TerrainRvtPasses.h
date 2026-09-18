@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "Render/InvocationRevision.h"
 
 #include <algorithm>
 #include <cmath>
@@ -236,6 +237,12 @@ public:
             .WithConstantBuffer(Builtin::PerFrameBuffer);
     }
 
+    void InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+        br::render::AppendFrameHeapRevision(preparation, out);
+        out.push_back(SettingsManager::GetInstance().Revision());
+        out.push_back(br::render::PipelineRevision(m_pso));
+        out.push_back(br::render::HandleRevision(PSOManager::GetInstance().GetComputeRootSignature().GetHandle()));
+    }
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
     {
         const auto* context = preparation.preparationData->Get<UpdateContext>();

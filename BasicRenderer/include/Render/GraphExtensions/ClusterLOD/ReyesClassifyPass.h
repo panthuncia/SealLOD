@@ -45,6 +45,7 @@ public:
         ReyesClassifyMode classifyMode = ReyesClassifyMode::Default);
 
     ReyesClassifyBindings Declare(org::PassBuilder& builder);
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeIndirect Prepare(const ReyesClassifyBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesClassifyBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);

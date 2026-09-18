@@ -379,7 +379,7 @@ public:
             if (context->outputType == OutputType::COLOR) key |= MaterialCompileFlags::MaterialCompileMaterialEvalColorOnly;
             const auto* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(key);
             revision.push_back(static_cast<uint64_t>(flags));
-            revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->GetPayload().get() : nullptr));
+            revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->PeekPayload() : nullptr));
         }
         if (materialState) for (const auto slot : materialState->activeCompileFlagSlots)
             revision.push_back(slot);

@@ -61,6 +61,12 @@ public:
     // selections (content versions and GPU submissions) are unchanged.
     uint64_t DeclarationVersionHint() const noexcept override {
         if (!m_configured || !m_source) return 0;
+        const auto sourceSequence = m_source->LeaseSequence();
+        const auto fallbackGeneration = m_fallback ? m_fallback->generation.load(std::memory_order_acquire) : 0u;
+        const auto selectionGeneration = m_selection ? m_selection->generation.load(std::memory_order_acquire) : 0u;
+        if (m_hintValue && m_hintLeaseSequence == sourceSequence
+            && m_hintFallbackGeneration == fallbackGeneration && m_hintSelectionGeneration == selectionGeneration)
+            return m_hintValue;
         const auto lease = m_source->LoadLease();
         if (!lease) return 0;
         uint64_t hint = 0x70756273746174ull;
@@ -74,9 +80,17 @@ public:
             if (shard) mix(reinterpret_cast<std::uintptr_t>(shard.get()));
             else { mix(lease->sequence); mix(index); }
         }
-        mix(m_fallback ? m_fallback->generation.load(std::memory_order_acquire) : 0u);
-        mix(m_selection ? m_selection->generation.load(std::memory_order_acquire) : 0u);
-        return hint ? hint : 1;
+        mix(fallbackGeneration);
+        mix(selectionGeneration);
+        hint = hint ? hint : 1;
+        // Cache only an observation of the lease the sequence names.
+        if (lease->sequence == sourceSequence) {
+            m_hintLeaseSequence = sourceSequence;
+            m_hintFallbackGeneration = fallbackGeneration;
+            m_hintSelectionGeneration = selectionGeneration;
+            m_hintValue = hint;
+        }
+        return hint;
     }
 
     std::shared_ptr<const org::ResolverDeclarationState> CaptureDeclarationState() const override {
@@ -286,4 +300,6 @@ private:
     std::shared_ptr<LeaseBinding> m_leaseBinding;
     std::shared_ptr<DeclarationCache> m_declarationCache = std::make_shared<DeclarationCache>();
 	std::shared_ptr<const void> m_dependencyIdentity;
+	// DeclarationVersionHint observation (owner thread).
+	mutable uint64_t m_hintLeaseSequence = 0, m_hintFallbackGeneration = 0, m_hintSelectionGeneration = 0, m_hintValue = 0;
 };

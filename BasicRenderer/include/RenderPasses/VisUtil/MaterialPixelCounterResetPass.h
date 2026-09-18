@@ -46,7 +46,7 @@ public:
         const auto* update = preparation.preparationData->Get<UpdateContext>();
         const auto* render = preparation.preparationData->Get<RenderContext>();
         const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
-        return {reinterpret_cast<uintptr_t>(m_pso.GetPayload().get()), published ? published->materials.revision : 0u};
+        return {reinterpret_cast<uintptr_t>(m_pso.PeekPayload()), published ? published->materials.revision : 0u};
     }
     org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&,
         const org::PassPrepareContext&) const { return {}; }

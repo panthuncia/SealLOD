@@ -1785,7 +1785,7 @@ std::vector<uint64_t> HierarchicalDispatchCullingPass::RecipeRevision(const org:
         &m_pureComputeObjectCullPipelineState, &m_pureComputeReplayNodesPipelineState,
         &m_pureComputeReplayClustersPipelineState, &m_pureComputeTraversePipelineState,
         &m_pureComputeLeafPipelineState, &m_pureComputeClusterPipelineState, &m_pureComputeDenseClusterPipelineState})
-        revision.push_back(reinterpret_cast<uintptr_t>(pipeline->GetPayload().get()));
+        revision.push_back(reinterpret_cast<uintptr_t>(pipeline->PeekPayload()));
     return revision;
 }
 

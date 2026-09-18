@@ -702,7 +702,7 @@ std::vector<uint64_t> ClusterRasterizationPass::RecipeRevision(const org::PassPr
                 ? PSOManager::GetInstance().TryGetClusterLODAVBOITShadePSO(flags, m_wireframe, context->globalPSOFlags)
             : PSOManager::GetInstance().TryGetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
         revision.push_back(static_cast<uint64_t>(flags));
-        revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->GetPayload().get() : nullptr));
+        revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->PeekPayload() : nullptr));
     }
     return revision;
 }

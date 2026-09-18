@@ -149,6 +149,11 @@ private:
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
 	std::array<std::shared_ptr<PublishedStateResourceResolver>, 3> m_materialTableResolvers;
 	std::unordered_map<uint32_t, std::vector<std::shared_ptr<Resource>>> m_trackedMaterialTextures;
+	uint64_t m_trackedTexturesRevision = 1;
+	mutable MaterialTextureStreamingStats m_cachedStreamingStats;
+	mutable uint64_t m_cachedStreamingStatsTrackedRevision = 0;
+	mutable uint64_t m_cachedStreamingStatsPublishedSequence = 0;
+	mutable bool m_cachedStreamingStatsValid = false;
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::weak_ptr<Material>> m_ingestedMaterialSourcesByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;

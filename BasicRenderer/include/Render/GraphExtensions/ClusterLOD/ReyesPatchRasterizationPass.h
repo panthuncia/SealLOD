@@ -47,6 +47,7 @@ public:
     ReyesPatchRasterBindings Declare(org::PassBuilder& builder);
     void Update(const UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeIndirect Prepare(const ReyesPatchRasterBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesPatchRasterBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);

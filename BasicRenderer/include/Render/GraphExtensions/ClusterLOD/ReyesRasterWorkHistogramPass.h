@@ -32,6 +32,7 @@ public:
         std::shared_ptr<Buffer> histogramBuffer);
 
     ReyesRasterWorkHistogramBindings Declare(org::PassBuilder& builder);
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     ReyesHistogramFrameData Prepare(const ReyesRasterWorkHistogramBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesRasterWorkHistogramBindings&, const ReyesHistogramFrameData& data, org::PassRecordContext& recording);

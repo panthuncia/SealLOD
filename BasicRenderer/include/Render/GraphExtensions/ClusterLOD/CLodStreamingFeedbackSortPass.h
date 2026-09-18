@@ -42,6 +42,7 @@ public:
         std::shared_ptr<Buffer> reduceScanArgs);
 
     StreamingFeedbackSortBindings Declare(org::PassBuilder& builder);
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     StreamingFeedbackSortFrameData Prepare(const StreamingFeedbackSortBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const StreamingFeedbackSortBindings&,
