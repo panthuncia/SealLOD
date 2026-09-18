@@ -239,10 +239,30 @@ public:
     [[nodiscard]] ArtifactRequestResult RequestCapture(RendererStateRequestService& requests,
         std::shared_ptr<org::runtime::IUploadService> uploads, std::uint64_t revision,
         VersionedGpuBufferJournal::Capture capture);
+    // Posted variants for the renderer owner thread: the intent is queued
+    // without entering the graph mutex. The returned version has generation 0
+    // and is meant for Exact() requirements inside the same posted batch
+    // (bound by address + revision). A zero revision means nothing was posted.
+    [[nodiscard]] ArtifactVersionID PostContentSnapshot(
+        RendererStateRequestService& requests,
+        std::shared_ptr<org::runtime::IUploadService> uploads,
+        std::span<const std::byte> bytes, std::uint64_t elementCount,
+        std::uint64_t capacity = 0);
+    [[nodiscard]] ArtifactVersionID PostCapture(RendererStateRequestService& requests,
+        std::shared_ptr<org::runtime::IUploadService> uploads, std::uint64_t revision,
+        VersionedGpuBufferJournal::Capture capture);
     void Acknowledge(std::shared_ptr<const PublishedGpuBufferVersion> version);
     [[nodiscard]] const Config& Configuration() const noexcept { return m_config; }
 
 private:
+    [[nodiscard]] ArtifactIntent MakeSnapshotIntent(
+        std::shared_ptr<org::runtime::IUploadService> uploads, std::uint64_t revision,
+        std::span<const std::byte> bytes, std::uint64_t elementCount, std::uint64_t capacity);
+    [[nodiscard]] std::uint64_t ContentRevision(std::span<const std::byte> bytes,
+        std::uint64_t elementCount, std::uint64_t capacity);
+    [[nodiscard]] ArtifactIntent MakeCaptureIntent(
+        std::shared_ptr<org::runtime::IUploadService> uploads, std::uint64_t revision,
+        VersionedGpuBufferJournal::Capture capture);
     Config m_config;
     std::shared_ptr<VersionedGpuBufferBackingPool> m_backingPool;
     std::mutex m_mutex;

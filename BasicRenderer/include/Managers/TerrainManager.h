@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -167,4 +168,8 @@ private:
 	bool m_terrainGraphDirty = false;
 	bool m_terrainGraphRequestPending = false;
 	bool m_terrainGraphActive = false;
+	// 0 = building, 1 = built, 2 = failed/cancelled; written by the awaiter's
+	// continuation on a worker, read on the owner thread.
+	std::shared_ptr<std::atomic<int>> m_terrainGraphOutcome;
+	std::shared_ptr<br::render::ArtifactAwaiter> m_terrainGraphAwaiter;
 };

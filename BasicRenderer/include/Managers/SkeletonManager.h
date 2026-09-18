@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Render/VersionedGpuBufferArtifacts.h"
+
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -61,6 +63,11 @@ public:
 	std::vector<ActiveInstanceView> GetActiveInstanceViews() const;
 	uint64_t GetActiveInstanceRevision() const noexcept { return m_activeInstanceRevision; }
     std::vector<std::shared_ptr<const std::vector<std::byte>>> CapturePoseTableImages() const;
+    // Journal capture of the immutable inverse-bind table for the posted pose
+    // publication; no CPU copy and no hash.
+    br::render::VersionedGpuBufferJournal::Capture CaptureInverseBindGraphState() const;
+    void AcknowledgeInverseBindGraphState(
+        const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version);
 	TransientWindRegion ReserveTransientWindRegion(uint32_t matrixCapacity) override;
 	void EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity) override;
 
@@ -135,6 +142,13 @@ private:
     };
     std::vector<InstanceEntry> m_iterationList;
     bool m_iterationListDirty = true;
+    // Instances whose palette was uploaded last frame: the only ones whose
+    // previous/current offsets need resynchronising in BeginFrame.
+    std::vector<const Skeleton*> m_uploadedLastFrame;
+    std::vector<Skeleton*> m_animatedScratch;
+    std::vector<DirectX::XMMATRIX> m_skinScratch;
+    std::vector<DirectX::XMMATRIX> m_inverseSkinScratch;
+    std::vector<org::runtime::UploadRegion> m_uploadRegionScratch;
 
     // Free-list for instance slots
     std::vector<uint32_t> m_freeInstanceSlots;

@@ -131,12 +131,13 @@ public:
 	void Shutdown();
 	void EnqueueFrameTick(uint64_t frameIndex);
 	void EnqueueTextureUploadAdvance(const std::shared_ptr<TextureAsset>& texture, const char* reason = "external");
-	std::size_t DrainPendingBindingChanges();
+	// Binding adoption and image-table publication are owned by the streaming
+	// worker and the state graph; the renderer thread only observes the
+	// published texture-image fragment through its lease.
 	void AcknowledgePublishedImageTable(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 	std::shared_ptr<Resource> ResolvePublishedImageTableResourceForDiagnostics() const;
 	std::shared_ptr<Resource> PublishedImageTableReadbackAnchorForDiagnostics() const;
-	void RetirePatchedBindingResources();
 	bool RequestExternalMaterialTextureReadback(
 		const std::shared_ptr<PixelBuffer>& image,
 		std::wstring outputFile,
@@ -192,20 +193,10 @@ private:
 		std::shared_ptr<PixelBuffer> previousImage;
 		std::shared_ptr<PixelBuffer> newImage;
 		TextureStreamingGPUInfo metadata{};
-		std::vector<std::shared_ptr<PixelBuffer>> supersededImages;
 		std::shared_ptr<const br::render::TextureTransferArtifact> transfer;
-		bool requiresExactGraphPublication = true;
 		bool graphRequested = false;
-		bool waitingForGraphWake = false;
 		bool graphReady = false;
 		br::render::ArtifactVersionID graphVersion{};
-	};
-	struct MainThreadBindingOwner {
-		uint32_t streamingTextureID = 0;
-		std::weak_ptr<TextureAsset> texture;
-		BindingChangedCallback callback;
-		uint64_t appliedBindingRevision = 0;
-		uint64_t appliedImageResourceID = 0;
 	};
 	void ApplyRegisterCommand(WorkerCommand&& command);
 	void ApplyUnregisterCommand(uint64_t bindingID);
@@ -213,8 +204,6 @@ private:
 	void FinishBindingMailboxRequest(uint32_t streamingTextureID, const std::shared_ptr<TextureAsset>& texture);
 	void QueueCommand(WorkerCommand&& command);
 	void EnqueueTextureMetadataRefresh(const std::shared_ptr<TextureAsset>& texture, const char* reason);
-	void MarkLiveTextureBindingsDirty(uint32_t streamingTextureID);
-	std::size_t RefreshDirtyLiveBindings();
 	void PollCompletedReadbackSlots(uint64_t& lastProcessedFence);
 	void EnsureTextureUploadAdvanced(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
 	void FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture);
@@ -244,14 +233,17 @@ private:
 	std::uint64_t m_textureImageTableLogicalExtent = 1;
 	bool m_textureImageTableDirty = false;
 	br::render::ArtifactVersionHandle m_textureImageTableHandle;
+	// Set while the newest submitted table root has not reached UploadSubmitted;
+	// cleared by that root's awaiter so the worker never polls the graph.
+	std::atomic<bool> m_textureImageTableBuildInFlight{ false };
+	std::mutex m_textureImageTableAwaiterMutex;
+	br::render::ArtifactAwaiter m_textureImageTableAwaiter;
 	std::uint32_t m_framesInFlight = 1;
 	std::uint64_t m_lastTextureImageTableAdmissionRetirementEpoch = 0;
 	std::atomic<std::uint64_t> m_textureImageTableAcknowledgedEpoch{ 0 };
 	std::shared_ptr<DynamicStructuredBuffer<uint32_t>> m_textureStreamingFeedbackBuffer;
-	// Orders worker metadata publication against main-thread adoption writes.  The
-	// buffer has its own call-level lock, but that alone cannot prevent an older
-	// adoption snapshot from overwriting a newer worker revision.
-	std::mutex m_gpuMetadataPublicationMutex;
+	// The image-table journal, hold chunks and bootstrap metadata buffer have a
+	// single writer: the serialized worker drain (m_commandPump).
 	std::unordered_map<uint64_t, std::weak_ptr<TextureAsset>> m_textureAssetsByImageResourceID;
 	std::unordered_map<uint32_t, std::weak_ptr<TextureAsset>> m_streamingTexturesByID;
 	std::unordered_map<uint32_t, uint64_t> m_textureStreamingMetadataRevisions;
@@ -274,13 +266,6 @@ private:
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	std::shared_ptr<org::runtime::IUploadService> m_uploadService;
 	std::shared_ptr<org::runtime::IDescriptorService> m_descriptorService;
-	br::render::ArtifactObservation m_graphBindingObservation;
-	struct ObservedGraphBindingState {
-		br::render::ArtifactVersionID version{};
-		br::render::ArtifactReadiness readiness = br::render::ArtifactReadiness::Missing;
-	};
-	std::mutex m_graphBindingStateMutex;
-	std::unordered_map<uint32_t, ObservedGraphBindingState> m_observedGraphBindingStates;
 	std::mutex m_graphBindingAwaiterMutex;
 	std::unordered_map<uint32_t, br::render::ArtifactAwaiter> m_graphBindingAwaiters;
 	std::mutex m_bindingMailboxMutex;
@@ -314,14 +299,6 @@ private:
 	std::mutex m_readbackSlotMutex;
 	std::vector<ReadbackSlot> m_readbackSlots;
 	uint32_t m_readbackSlotCursor = 0;
-	tbb::concurrent_queue<PendingBindingChange> m_pendingBindingChanges;
-	std::vector<std::shared_ptr<PixelBuffer>> m_imagesPendingOwnerPatchRetirement;
-	std::mutex m_liveBindingMutex;
-	std::unordered_map<uint64_t, MainThreadBindingOwner> m_liveBindingsByID;
-	std::unordered_map<uint32_t, std::vector<uint64_t>> m_liveBindingIDsByStreamingTextureID;
-	std::unordered_map<uint32_t, uint32_t> m_activeBindingOwnerCountsByStreamingTextureID;
-	std::vector<uint64_t> m_dirtyLiveBindingIDs;
-	std::unordered_set<uint64_t> m_dirtyLiveBindingIDSet;
 	mutable std::mutex m_statsMutex;
 	MaterialTextureStreamingStats m_publishedStats;
 	uint64_t m_publishedStatsSequence = 1;

@@ -1,5 +1,8 @@
 #include "Managers/SkeletonManager.h"
 
+#include <BasicTelemetry/Telemetry.h>
+#include <optional>
+
 #include "Animation/Skeleton.h"
 #include "Resources/Buffers/BufferView.h"
 #include "Render/Runtime/IUploadService.h"
@@ -37,7 +40,8 @@ void DispatchUpload(org::runtime::IUploadService& uploadService, const void* dat
 }
 
 void UploadMatrixSpans(org::runtime::IUploadService& uploadService,
-    const std::shared_ptr<DynamicBuffer>& target, std::vector<MatrixUploadSpan>& spans) {
+    const std::shared_ptr<DynamicBuffer>& target, std::vector<MatrixUploadSpan>& spans,
+    std::vector<org::runtime::UploadRegion>& regions) {
     std::erase_if(spans, [](const MatrixUploadSpan& span) {
         return span.data == nullptr || span.matrixCount == 0;
     });
@@ -49,41 +53,21 @@ void UploadMatrixSpans(org::runtime::IUploadService& uploadService,
         return a.offsetBytes < b.offsetBytes;
     });
 
-    std::vector<DirectX::XMMATRIX> staging;
-    for (size_t groupStart = 0; groupStart < spans.size();) {
-        size_t groupEnd = groupStart + 1;
-        size_t groupEndOffset = spans[groupStart].offsetBytes +
-            static_cast<size_t>(spans[groupStart].matrixCount) * sizeof(DirectX::XMMATRIX);
-
-        while (groupEnd < spans.size() && spans[groupEnd].offsetBytes == groupEndOffset) {
-            groupEndOffset += static_cast<size_t>(spans[groupEnd].matrixCount) * sizeof(DirectX::XMMATRIX);
-            ++groupEnd;
-        }
-
-        const auto& first = spans[groupStart];
-        if (groupEnd == groupStart + 1) {
-            DispatchUpload(uploadService, first.data,
-                static_cast<size_t>(first.matrixCount) * sizeof(DirectX::XMMATRIX),
-                org::runtime::UploadTarget::FromShared(target),
-                first.offsetBytes, __FILE__, __LINE__);
-        }
-        else {
-            const size_t matrixCount = (groupEndOffset - first.offsetBytes) / sizeof(DirectX::XMMATRIX);
-            staging.clear();
-            staging.reserve(matrixCount);
-            for (size_t i = groupStart; i < groupEnd; ++i) {
-                const auto& span = spans[i];
-                staging.insert(staging.end(), span.data, span.data + span.matrixCount);
-            }
-
-            DispatchUpload(uploadService, staging.data(),
-                staging.size() * sizeof(DirectX::XMMATRIX),
-                org::runtime::UploadTarget::FromShared(target),
-                first.offsetBytes, __FILE__, __LINE__);
-        }
-
-        groupStart = groupEnd;
+    // One batched upload per palette buffer: the upload service merges
+    // contiguous regions into single queue entries and shares one heap
+    // allocation and map for the whole batch, so no CPU-side staging copy.
+    regions.clear();
+    regions.reserve(spans.size());
+    for (const auto& span : spans) {
+        regions.push_back({ span.data,
+            static_cast<size_t>(span.matrixCount) * sizeof(DirectX::XMMATRIX),
+            span.offsetBytes });
     }
+#if BUILD_TYPE == BUILD_TYPE_DEBUG
+    uploadService.UploadDataBatch(org::runtime::UploadTarget::FromShared(target), regions, __FILE__, __LINE__);
+#else
+    uploadService.UploadDataBatch(org::runtime::UploadTarget::FromShared(target), regions);
+#endif
 }
 
 } // namespace
@@ -245,12 +229,18 @@ void SkeletonManager::BeginFrame(uint64_t frameNumber) {
 	if (m_lastBegunFrame == frameNumber) {
 		return;
 	}
+	BT_ZONE_SCOPE("SkeletonManager::BeginFrame");
+	BT_ZONE_VALUE(static_cast<int64_t>(m_uploadedLastFrame.size()));
 	m_lastBegunFrame = frameNumber;
 
 	// A CPU palette only gains history when a new pose is uploaded below. Until
 	// then previous == current, preventing a stopped animation from emitting the
-	// same motion vector repeatedly.
-	for (auto& [skeleton, rec] : m_instances) {
+	// same motion vector repeatedly. Only instances uploaded last frame can have
+	// previous != current, so only they are rewritten.
+	for (const Skeleton* skeleton : m_uploadedLastFrame) {
+		auto found = m_instances.find(skeleton);
+		if (found == m_instances.end()) continue;
+		auto& rec = found->second;
 		rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
 		SkinningInstanceGPUInfo info{};
 		info.transformOffsetMatrices = rec.transformOffsetMatrices;
@@ -266,6 +256,7 @@ void SkeletonManager::BeginFrame(uint64_t frameNumber) {
 		info.previousTransformOffsetMatrices = rec.previousTransformOffsetMatrices;
 		m_instanceInfo->UpdateAt(rec.instanceSlot, info);
 	}
+	m_uploadedLastFrame.clear();
 
 	if (m_transientWindRegion.valid) {
 		const uint32_t currentIndex = static_cast<uint32_t>(frameNumber & 1u);
@@ -431,19 +422,27 @@ void SkeletonManager::RebuildIterationList() {
 }
 
 void SkeletonManager::TickAnimations(float elapsedSeconds) {
+    BT_ZONE_SCOPE("SkeletonManager::TickAnimations");
     if (m_iterationListDirty) {
         RebuildIterationList();
     }
 
-    TaskSchedulerManager::GetInstance().ParallelFor("SkeletonTick", m_iterationList.size(),
+    // Externally posed skeletons (every SARP actor) are advanced by the scene
+    // bridge; only clip-driven skeletons need a tick. Dirty state comes from
+    // SetExternalPose / UpdateTransforms themselves, never from ticking.
+    m_animatedScratch.clear();
+    for (auto& entry : m_iterationList) {
+        if (!entry.skeleton->HasExternalPose()) m_animatedScratch.push_back(entry.skeleton);
+    }
+    if (m_animatedScratch.empty()) return;
+    TaskSchedulerManager::GetInstance().ParallelFor("SkeletonTick", m_animatedScratch.size(),
         [this, elapsedSeconds](size_t i) {
-            auto& entry = m_iterationList[i];
-            entry.skeleton->UpdateTransforms(elapsedSeconds);
-            entry.record->dirty = true;
+            m_animatedScratch[i]->UpdateTransforms(elapsedSeconds);
         });
 }
 
 void SkeletonManager::UpdateAllDirtyInstances() {
+    BT_ZONE_SCOPE("SkeletonManager::UpdateAllDirtyInstances");
     if (m_iterationListDirty) {
         RebuildIterationList();
     }
@@ -451,31 +450,43 @@ void SkeletonManager::UpdateAllDirtyInstances() {
     struct PendingSkeletonUpload {
         Skeleton* skeleton = nullptr;
         InstanceRecord* record = nullptr;
-        std::vector<DirectX::XMMATRIX> skinMatrices;
-        std::vector<DirectX::XMMATRIX> inverseSkinMatrices;
+        size_t scratchOffset = 0; // into m_skinScratch / m_inverseSkinScratch
     };
 
     std::vector<PendingSkeletonUpload> pending;
     pending.reserve(m_iterationList.size());
+    size_t totalBones = 0;
     for (auto& entry : m_iterationList) {
         if (!entry.record->transformsView) {
             continue;
         }
         if (entry.record->dirty || entry.skeleton->IsPoseDirty()) {
-            pending.push_back({ entry.skeleton, entry.record, {}, {} });
+            pending.push_back({ entry.skeleton, entry.record, totalBones });
+            totalBones += entry.record->boneCount;
         }
     }
 
     if (pending.empty()) {
         return;
     }
+    BT_ZONE_VALUE(static_cast<int64_t>(pending.size()));
+    std::optional<basic_telemetry::Scope> phaseScope;
+    static const basic_telemetry::Callsite skinCallsite("SkeletonManager::UpdateAllDirtyInstances::Skin");
+    static const basic_telemetry::Callsite uploadCallsite("SkeletonManager::UpdateAllDirtyInstances::Upload");
+    static const basic_telemetry::Callsite infoCallsite("SkeletonManager::UpdateAllDirtyInstances::InstanceInfo");
+    phaseScope.emplace(skinCallsite);
 
+    // One arena for every palette built this frame; reused across frames.
+    if (m_skinScratch.size() < totalBones) m_skinScratch.resize(totalBones);
+    if (m_inverseSkinScratch.size() < totalBones) m_inverseSkinScratch.resize(totalBones);
+    DirectX::XMMATRIX* const skinScratch = m_skinScratch.data();
+    DirectX::XMMATRIX* const inverseSkinScratch = m_inverseSkinScratch.data();
     TaskSchedulerManager::GetInstance().ParallelFor("SkeletonUpload", pending.size(),
-        [&pending](size_t i) {
+        [&pending, skinScratch, inverseSkinScratch](size_t i) {
             auto& upload = pending[i];
             auto& rec = *upload.record;
-            upload.skinMatrices.resize(rec.boneCount);
-            upload.inverseSkinMatrices.resize(rec.boneCount);
+            auto* skinMatrices = skinScratch + upload.scratchOffset;
+            auto* inverseSkinMatrices = inverseSkinScratch + upload.scratchOffset;
 
             const auto boneMatrices = upload.skeleton->GetBoneMatrices();
             const auto inverseBindMatrices = rec.base->GetInverseBindMatrices();
@@ -485,8 +496,8 @@ void SkeletonManager::UpdateAllDirtyInstances() {
                     DirectX::XMMatrixMultiply(inverseBindMatrices[boneIndex], boneMatrices[boneIndex]);
                 // Match UpdateInstanceTransforms: GPU buffers store matrices in the
                 // shader-native row-vector layout, so shader consumers load directly.
-                upload.skinMatrices[boneIndex] = DirectX::XMMatrixTranspose(skinMatrix);
-                upload.inverseSkinMatrices[boneIndex] = DirectX::XMMatrixTranspose(
+                skinMatrices[boneIndex] = DirectX::XMMatrixTranspose(skinMatrix);
+                inverseSkinMatrices[boneIndex] = DirectX::XMMatrixTranspose(
                     DirectX::XMMatrixInverse(nullptr, skinMatrix));
             }
         });
@@ -505,19 +516,21 @@ void SkeletonManager::UpdateAllDirtyInstances() {
 		rec.transformOffsetMatrices = rec.transformOffsetsMatrices[rec.currentTransformIndex];
         boneMatrixSpans.push_back({
 			static_cast<size_t>(rec.transformOffsetMatrices) * sizeof(DirectX::XMMATRIX),
-            upload.skinMatrices.data(),
+            skinScratch + upload.scratchOffset,
             rec.boneCount
         });
         inverseSkinSpans.push_back({
             rec.inverseSkinView->GetOffset(),
-            upload.inverseSkinMatrices.data(),
+            inverseSkinScratch + upload.scratchOffset,
             rec.boneCount
         });
     }
 
-    UploadMatrixSpans(UploadService(), m_boneTransforms, boneMatrixSpans);
-    UploadMatrixSpans(UploadService(), m_inverseSkinMatrices, inverseSkinSpans);
+    phaseScope.emplace(uploadCallsite);
+    UploadMatrixSpans(UploadService(), m_boneTransforms, boneMatrixSpans, m_uploadRegionScratch);
+    UploadMatrixSpans(UploadService(), m_inverseSkinMatrices, inverseSkinSpans, m_uploadRegionScratch);
 
+    phaseScope.emplace(infoCallsite);
     for (auto& upload : pending) {
 		auto& rec = *upload.record;
 		SkinningInstanceGPUInfo info = (*m_instanceInfo)[rec.instanceSlot];
@@ -529,7 +542,17 @@ void SkeletonManager::UpdateAllDirtyInstances() {
 		rec.hasTransformHistory = true;
         upload.record->dirty = false;
         upload.skeleton->ClearPoseDirty();
+        m_uploadedLastFrame.push_back(upload.skeleton);
     }
+}
+
+br::render::VersionedGpuBufferJournal::Capture SkeletonManager::CaptureInverseBindGraphState() const {
+    return m_inverseBindMatrices->CaptureVersionedGraphState();
+}
+
+void SkeletonManager::AcknowledgeInverseBindGraphState(
+    const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version) {
+    if (version) m_inverseBindMatrices->AcknowledgeVersionedGraphState(version);
 }
 
 std::shared_ptr<Resource> SkeletonManager::ProvideResource(ResourceIdentifier const& key) {

@@ -588,6 +588,9 @@ public:
 	void AcknowledgePublishedBufferState(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
+	// Owner-thread entry: seals nothing itself, it schedules PublishDesiredBufferState
+	// on a worker so the renderer thread never enters the state-graph mutex.
+	void ScheduleDesiredBufferStatePublish();
 	br::render::ArtifactVersionHandle DesiredBufferStateHandle() const;
 	DesiredObjectBufferStateCut DesiredBufferStateCut() const;
 	std::shared_ptr<SortedUnsignedIntBuffer> TryGetActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
@@ -752,6 +755,8 @@ private:
 	std::mutex m_deferredRetireMutex;
 	std::deque<DeferredBufferRangeRetire> m_deferredRetireQueue;
 	TaskScope m_deferredRetireScope;
+	TaskScope m_desiredPublishScope;
+	std::atomic_bool m_desiredPublishScheduled{ false };
 	std::atomic_bool m_deferredRetireDrainScheduled{ false };
 	std::atomic_bool m_deferredRetireStop{ false };
 	std::atomic<std::uint64_t> m_deferredRetireCompletedFrame{ 0 };

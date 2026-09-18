@@ -799,6 +799,9 @@ void Renderer::Initialize(
         "RendererPresentationTail");
     m_asyncStateGraph = std::make_unique<br::render::AsyncStateGraph>(
         TaskSchedulerManager::GetInstance(), "RendererStateGraph");
+    // The renderer thread observes published leases only; any graph lock it
+    // takes is a design regression and is counted (SARP.AsyncStateGraph.OwnerThreadLocks).
+    m_asyncStateGraph->SetOwnerThread();
     if (m_pendingAsyncStateGraphTrace) {
         m_asyncStateGraph->StartTrace(*m_pendingAsyncStateGraphTrace);
     }
@@ -3349,8 +3352,12 @@ void Renderer::Update(float elapsedSeconds) {
                     };
                     acknowledgeTables(m_lightTableFamilies,
                         commit.state->lights.payload.Get<br::render::PublishedLightTableState>());
-                    acknowledgeTables(m_poseTableFamilies,
-                        commit.state->poses.payload.Get<br::render::PublishedPoseState>());
+                    const auto poseState = commit.state->poses.payload.Get<br::render::PublishedPoseState>();
+                    acknowledgeTables(m_poseTableFamilies, poseState);
+                    if (poseState && m_pSkeletonManager) {
+                        for (const auto& version : poseState->tableVersions)
+                            m_pSkeletonManager->AcknowledgeInverseBindGraphState(version);
+                    }
                 }
                 if (m_rendererStateRequests) {
                     m_rendererStateRequests->RefreshPublication();
@@ -3470,11 +3477,17 @@ void Renderer::Update(float elapsedSeconds) {
     updateData.publishedRendererState = m_context.publishedRendererState;
     updateData.publishedManifestLease = m_context.publishedManifestLease;
     updateData.drawStats = drawStats;
-    updateData.materialTextureStreamingStats = m_pMaterialManager
-        ? m_pMaterialManager->GetMaterialTextureStreamingStats()
-        : MaterialTextureStreamingStats{};
+    {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::StreamingStats");
+        updateData.materialTextureStreamingStats = m_pMaterialManager
+            ? m_pMaterialManager->GetMaterialTextureStreamingStats()
+            : MaterialTextureStreamingStats{};
+    }
     updateData.environmentWork = m_environmentWorkServices;
-    m_environmentWorkServices.PublishTelemetry();
+    {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::EnvironmentTelemetry");
+        m_environmentWorkServices.PublishTelemetry();
+    }
     updateData.clodRayTracingSystem = m_clodRayTracingSystem;
     updateData.terrainRegionMaterialEvaluationEnabled =
         SettingsManager::GetInstance().getSettingGetter<bool>(
@@ -3553,7 +3566,11 @@ void Renderer::Update(float elapsedSeconds) {
     // The executable-frame request owns the logical render snapshot used by
     // transitional packets. It must never reinterpret UpdateContext as the
     // differently-laid-out RenderContext during delayed recording.
+    std::optional<basic_telemetry::Scope> snapshotCopyScope;
+    static const basic_telemetry::Callsite snapshotCopyCallsite("Renderer::Update::CaptureFrameInputs::SnapshotCopy");
+    snapshotCopyScope.emplace(snapshotCopyCallsite);
     auto renderSnapshot = m_context;
+    snapshotCopyScope.reset();
     renderSnapshot.publishedRendererState = updateData.publishedRendererState;
     renderSnapshot.publishedManifestLease = updateData.publishedManifestLease;
     renderSnapshot.primaryCamera = updateData.primaryCamera;
@@ -3701,6 +3718,10 @@ void Renderer::Update(float elapsedSeconds) {
     renderSnapshot.preparedRasterBucketCount = updateData.preparedRasterBucketCount;
     renderSnapshot.preparedRasterBucketFlags = updateData.preparedRasterBucketFlags;
 
+    // Frame-input artifacts are posted, never submitted: the owner thread
+    // does not enter the state-graph mutex. Buffer snapshots precede the
+    // fragment intents that reference them by revision.
+    std::vector<br::render::ArtifactIntent> frameIntents;
     std::shared_ptr<br::render::LightTableBuildInput> desiredLights;
     if (m_pLightManager && m_rendererStateRequests) {
         BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::LightTables");
@@ -3745,14 +3766,14 @@ void Renderer::Update(float elapsedSeconds) {
             for (std::size_t i = 0; i < desiredLights->tableImages.size() && i < strides.size(); ++i) {
                 const auto& image = desiredLights->tableImages[i];
                 const auto count = image ? image->size() / strides[i] : 0;
-                const auto request = m_lightTableFamilies[i]->RequestContentSnapshot(
+                const auto version = m_lightTableFamilies[i]->PostContentSnapshot(
                     *m_rendererStateRequests, uploads,
                     image ? std::span<const std::byte>(*image) : std::span<const std::byte>{},
                     count, (std::max<std::uint64_t>)(count, 1));
-                if (request) lightRequirements.push_back(br::render::Exact(request.Handle()));
+                if (version.revision != 0) lightRequirements.push_back(br::render::Exact(version));
             }
         }
-        (void)m_rendererStateRequests->SubmitLatest({
+        frameIntents.push_back({
             { br::render::ArtifactKind::LightTable, 0, 0 }, desiredLights->revision,
             std::move(lightRequirements),
             br::render::ArtifactPayload::Make<br::render::LightTableBuildInput>(desiredLights),
@@ -3779,21 +3800,16 @@ void Renderer::Update(float elapsedSeconds) {
         m_lastPoseSourceRevision = poseSourceRevision;
         desiredPoses = std::make_shared<br::render::PoseStateBuildInput>();
         desiredPoses->activeInstanceRevision = poseSourceRevision;
-        desiredPoses->tableImages = m_pSkeletonManager->CapturePoseTableImages();
+        // The inverse-bind table is the only pose table with a versioned
+        // consumer; it is captured from the buffer's journal (no CPU copy, no
+        // hash) and posted. The frame-written palettes are graph resources.
         std::vector<br::render::ArtifactRequirement> poseRequirements;
         if (auto uploads = currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr) {
-            const std::array<std::uint32_t, 4> strides{
-                sizeof(DirectX::XMMATRIX), sizeof(DirectX::XMMATRIX), sizeof(DirectX::XMMATRIX),
-                sizeof(SkinningInstanceGPUInfo) };
-            for (std::size_t i = 0; i < 1 && i < desiredPoses->tableImages.size(); ++i) {
-                const auto& image = desiredPoses->tableImages[i];
-                const auto count = image ? image->size() / strides[i] : 0;
-                const auto request = m_poseTableFamilies[i]->RequestContentSnapshot(
-                    *m_rendererStateRequests, uploads,
-                    image ? std::span<const std::byte>(*image) : std::span<const std::byte>{},
-                    count, (std::max<std::uint64_t>)(count, 1));
-                if (request) poseRequirements.push_back(br::render::Exact(request.Handle()));
-            }
+            auto capture = m_pSkeletonManager->CaptureInverseBindGraphState();
+            const auto revision = capture.writeSequence;
+            const auto version = m_poseTableFamilies[0]->PostCapture(
+                *m_rendererStateRequests, uploads, revision, std::move(capture));
+            if (version.revision != 0) poseRequirements.push_back(br::render::Exact(version));
         }
         for (const auto& instance : m_pSkeletonManager->GetActiveInstanceViews()) {
             if (!instance.skeleton) continue;
@@ -3809,12 +3825,15 @@ void Renderer::Update(float elapsedSeconds) {
             if (auto resource = m_pSkeletonManager->ProvideResource(key))
                 desiredPoses->retainedResources.push_back(std::move(resource));
         }
-        (void)m_rendererStateRequests->SubmitLatest({
+        frameIntents.push_back({
             { br::render::ArtifactKind::PoseState, 0, 0 }, desiredPoses->activeInstanceRevision,
             std::move(poseRequirements),
             br::render::ArtifactPayload::Make<br::render::PoseStateBuildInput>(desiredPoses),
             desiredPoses->activeInstanceRevision });
         }
+    }
+    if (!frameIntents.empty() && m_rendererStateRequests) {
+        m_rendererStateRequests->PostLatestBatch(std::move(frameIntents));
     }
     auto selectedPoses = updateData.publishedRendererState
         ? updateData.publishedRendererState->poses.payload.Get<br::render::PublishedPoseState>()
@@ -3841,7 +3860,7 @@ void Renderer::Update(float elapsedSeconds) {
 			m_pMaterialManager->ScheduleGpuVisibleSnapshotCommit();
         }
 		if (m_pObjectManager) {
-			m_pObjectManager->PublishDesiredBufferState();
+			m_pObjectManager->ScheduleDesiredBufferStatePublish();
 		}
         if (m_pIndirectCommandBufferManager && m_pObjectManager) {
 			m_pIndirectCommandBufferManager->PublishDesiredState(

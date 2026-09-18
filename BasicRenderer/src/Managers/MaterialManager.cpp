@@ -499,47 +499,135 @@ std::shared_ptr<RenderPass> MaterialManager::CreateTextureStreamingFeedbackReadb
 
 MaterialTextureStreamingStats MaterialManager::GetMaterialTextureStreamingStats() const {
 	if (!m_textureStreamingManager) return {};
-	// Called twice per frame from the render thread for the debug menu. The
-	// result only changes when the tracked material textures change or the
-	// streaming worker publishes new stats, so it is recomputed only then.
+	// Called twice per frame from the render thread for the debug menu. Walking
+	// every tracked material texture took milliseconds during streaming, so the
+	// walk runs on the material acceptance task and this returns the latest
+	// completed result (at most one refresh behind).
 	const auto published = m_textureStreamingManager->PublishedStatsSequence();
-	if (m_cachedStreamingStatsTrackedRevision == m_trackedTexturesRevision
-		&& m_cachedStreamingStatsPublishedSequence == published && m_cachedStreamingStatsValid)
-		return m_cachedStreamingStats;
-	uint64_t sequence = published;
-	m_cachedStreamingStats = m_textureStreamingManager->GetTextureStreamingStats(CollectActiveMaterialTextureResources(), &sequence);
-	m_cachedStreamingStatsTrackedRevision = m_trackedTexturesRevision;
-	m_cachedStreamingStatsPublishedSequence = sequence;
-	m_cachedStreamingStatsValid = true;
-	return m_cachedStreamingStats;
+	MaterialTextureStreamingStats stats;
+	bool stale = false;
+	{
+		std::lock_guard lock(m_streamingStatsMutex);
+		stale = !m_cachedStreamingStatsValid ||
+			m_cachedStreamingStatsTrackedRevision != m_trackedTexturesRevision.load(std::memory_order_acquire) ||
+			m_cachedStreamingStatsPublishedSequence != published;
+		stats = m_cachedStreamingStats;
+	}
+	if (stale) ScheduleStreamingStatsRefresh();
+	return stats;
+}
+
+void MaterialManager::ScheduleStreamingStatsRefresh() const {
+	bool expected = false;
+	if (!m_streamingStatsRefreshScheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+	auto* self = const_cast<MaterialManager*>(this);
+	const bool submitted = m_snapshotCommitScope.Valid() &&
+		TaskSchedulerManager::GetInstance().Submit(
+			m_snapshotCommitScope, TaskLane::Streaming, TaskDomain::MaterialAcceptance,
+			"MaterialManager::RefreshStreamingStats",
+			[self](const br::TaskContext& context) {
+				self->m_streamingStatsRefreshScheduled.store(false, std::memory_order_release);
+				if (context.StopRequested() || !self->m_textureStreamingManager) return;
+				BT_ZONE_SCOPE("MaterialManager::RefreshStreamingStats");
+				std::vector<std::shared_ptr<Resource>> resources;
+				const auto trackedRevision = self->m_trackedTexturesRevision.load(std::memory_order_acquire);
+				{
+					std::lock_guard mutationLock(self->m_materialMutationMutex);
+					resources = self->CollectActiveMaterialTextureResources();
+				}
+				uint64_t sequence = 0;
+				auto stats = self->m_textureStreamingManager->GetTextureStreamingStats(resources, &sequence);
+				std::lock_guard lock(self->m_streamingStatsMutex);
+				self->m_cachedStreamingStats = std::move(stats);
+				self->m_cachedStreamingStatsTrackedRevision = trackedRevision;
+				self->m_cachedStreamingStatsPublishedSequence = sequence;
+				self->m_cachedStreamingStatsValid = true;
+			});
+	if (!submitted) m_streamingStatsRefreshScheduled.store(false, std::memory_order_release);
 }
 
 void MaterialManager::MarkMaterialDirty(Material& material) {
+	{
+		std::lock_guard mutationLock(m_materialMutationMutex);
+		const uint32_t materialID = material.GetMaterialID();
+		if (m_dirtyMaterialIDSet.insert(materialID).second) {
+			m_dirtyMaterialIDs.push_back(materialID);
+		}
+	}
+	ScheduleDirtyMaterialFlush();
+}
+
+void MaterialManager::ScheduleDirtyMaterialFlush() {
+	bool expected = false;
+	if (!m_dirtyMaterialFlushScheduled.compare_exchange_strong(
+		expected, true, std::memory_order_acq_rel)) return;
+	const bool submitted = m_snapshotCommitScope.Valid() &&
+		TaskSchedulerManager::GetInstance().Submit(
+			m_snapshotCommitScope, TaskLane::Streaming, TaskDomain::MaterialAcceptance,
+			"MaterialManager::FlushDirtyMaterials",
+			[this](const br::TaskContext& context) {
+				m_dirtyMaterialFlushScheduled.store(false, std::memory_order_release);
+				if (context.StopRequested()) return;
+				FlushDirtyMaterials();
+				bool remaining = false;
+				{
+					std::lock_guard mutationLock(m_materialMutationMutex);
+					remaining = !m_dirtyMaterialIDs.empty();
+				}
+				if (remaining) ScheduleDirtyMaterialFlush();
+			});
+	if (!submitted) m_dirtyMaterialFlushScheduled.store(false, std::memory_order_release);
+}
+
+void MaterialManager::FlushDirtyMaterials() {
+	BT_ZONE_SCOPE("MaterialManager::FlushDirtyMaterials");
 	std::lock_guard mutationLock(m_materialMutationMutex);
-	const uint32_t materialID = material.GetMaterialID();
-	if (m_dirtyMaterialIDSet.insert(materialID).second) {
-		m_dirtyMaterialIDs.push_back(materialID);
+	std::vector<uint32_t> dirtyMaterialIDs;
+	dirtyMaterialIDs.swap(m_dirtyMaterialIDs);
+	m_dirtyMaterialIDSet.clear();
+	TracyPlot("MaterialManager.DirtyMaterialCount", static_cast<int64_t>(dirtyMaterialIDs.size()));
+	const auto flushStart = std::chrono::steady_clock::now();
+	std::size_t flushed = 0;
+	for (const uint32_t materialID : dirtyMaterialIDs) {
+		ZoneScopedN("MaterialManager::FlushDirtyMaterials::Material");
+		ZoneValue(materialID);
+		Material* material = nullptr;
+		if (const auto materialIt = m_activeMaterialsByID.find(materialID);
+			materialIt != m_activeMaterialsByID.end()) {
+			material = materialIt->second;
+		}
+		std::shared_ptr<Material> ingestedOwner;
+		if (!material) {
+			if (const auto source = m_ingestedMaterialSourcesByID.find(materialID);
+				source != m_ingestedMaterialSourcesByID.end()) {
+				ingestedOwner = source->second.lock();
+				material = ingestedOwner.get();
+			}
+		}
+		if (!material) continue;
+		FlushDirtyMaterial(*material, false);
+		++flushed;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (!dirtyMaterialIDs.empty() && now - m_lastMaterialUpdateStatsLog >= std::chrono::seconds(1)) {
+		m_lastMaterialUpdateStatsLog = now;
+		spdlog::debug(
+			"MaterialManager::FlushDirtyMaterials stats: elapsed_us={} dirtyMaterials visited={} flushed={} activeMaterials={}",
+			std::chrono::duration_cast<std::chrono::microseconds>(now - flushStart).count(),
+			dirtyMaterialIDs.size(), flushed, m_activeMaterialsByID.size());
 	}
 }
 
 void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
+	ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates");
+	// The frame tick is a queue notification; it must not wait behind the
+	// acceptance-domain flush that holds the mutation mutex.
+	if (m_textureStreamingManager) {
+		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming::EnqueueFrameTick");
+		m_textureStreamingManager->EnqueueFrameTick(frameIndex);
+	}
 	std::unique_lock mutationLock(m_materialMutationMutex, std::try_to_lock);
 	if (!mutationLock.owns_lock()) return;
-	ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates");
-	const auto updateStart = std::chrono::steady_clock::now();
-	const auto streamingStart = std::chrono::steady_clock::now();
-	if (m_textureStreamingManager) {
-		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming");
-		{
-			BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming::EnqueueFrameTick");
-			m_textureStreamingManager->EnqueueFrameTick(frameIndex);
-		}
-		// Ordinary material bindings are latest-state candidates, not exact graph
-		// versions. Drain all ready candidates as one cooperative batch. The drain
-		// never waits: candidates whose transfer has not completed stay coalesced.
-		(void)m_textureStreamingManager->DrainPendingBindingChanges();
-	}
-	const auto streamingEnd = std::chrono::steady_clock::now();
 	const auto& lateReadbackPath = MaterialTextureLateReadbackPath();
 	if (!m_traceLateReadbackRequested && frameIndex >= 600u && !lateReadbackPath.empty()) {
 		if (const auto texture = m_traceBaseColorTexture.lock()) {
@@ -564,62 +652,8 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 		}
 	}
 
-	std::vector<uint32_t> dirtyMaterialIDs;
-	{
-		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::CollectDirtyMaterials");
-		dirtyMaterialIDs.swap(m_dirtyMaterialIDs);
-		m_dirtyMaterialIDSet.clear();
-		TracyPlot("MaterialManager.DirtyMaterialCount", static_cast<int64_t>(dirtyMaterialIDs.size()));
-	}
-	const auto dirtyMaterialStart = std::chrono::steady_clock::now();
-	std::size_t dirtyMaterialsVisited = 0;
-	std::size_t dirtyMaterialsFlushed = 0;
-	{
-		BT_ZONE_SCOPE("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials");
-		for (const uint32_t materialID : dirtyMaterialIDs) {
-			ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials::Material");
-			ZoneValue(materialID);
-			++dirtyMaterialsVisited;
-			Material* material = nullptr;
-			if (const auto materialIt = m_activeMaterialsByID.find(materialID);
-				materialIt != m_activeMaterialsByID.end()) {
-				material = materialIt->second;
-			}
-			std::shared_ptr<Material> ingestedOwner;
-			if (!material) {
-				if (const auto source = m_ingestedMaterialSourcesByID.find(materialID);
-					source != m_ingestedMaterialSourcesByID.end()) {
-					ingestedOwner = source->second.lock();
-					material = ingestedOwner.get();
-				}
-			}
-			if (!material) continue;
-
-			FlushDirtyMaterial(*material, false);
-			++dirtyMaterialsFlushed;
-		}
-	}
-	const auto dirtyMaterialEnd = std::chrono::steady_clock::now();
-
-	const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
-		std::chrono::steady_clock::now() - updateStart).count();
-	const auto streamingUs = std::chrono::duration_cast<std::chrono::microseconds>(streamingEnd - streamingStart).count();
-	const auto dirtyMaterialUs = std::chrono::duration_cast<std::chrono::microseconds>(dirtyMaterialEnd - dirtyMaterialStart).count();
-	const auto now = std::chrono::steady_clock::now();
-	const bool hadWork =
-		dirtyMaterialsVisited != 0 ||
-		elapsedUs >= 2000;
-	if (hadWork && now - m_lastMaterialUpdateStatsLog >= std::chrono::seconds(1)) {
-		m_lastMaterialUpdateStatsLog = now;
-		spdlog::debug(
-			"MaterialManager::ProcessPendingMaterialUpdates stats: elapsed_us={} textureStreaming_us={} dirtyMaterial_us={} dirtyMaterials visited={} flushed={} activeMaterials={}",
-			elapsedUs,
-			streamingUs,
-			dirtyMaterialUs,
-			dirtyMaterialsVisited,
-			dirtyMaterialsFlushed,
-			m_activeMaterialsByID.size());
-	}
+	// Dirty material rows are flushed on the material acceptance domain
+	// (ScheduleDirtyMaterialFlush); nothing else here touches the state graph.
 }
 
 unsigned int MaterialManager::IncrementMaterialUsageCount(
@@ -698,6 +732,7 @@ void MaterialManager::SetDescriptorService(std::shared_ptr<org::runtime::IDescri
 	for (const auto& [materialID, weakMaterial] : m_ingestedMaterialSourcesByID) {
 		if (!weakMaterial.expired() && m_dirtyMaterialIDSet.insert(materialID).second) m_dirtyMaterialIDs.push_back(materialID);
 	}
+	ScheduleDirtyMaterialFlush();
 }
 
 MaterialManager::MaterialUsageCapture MaterialManager::CaptureMaterialUsage(

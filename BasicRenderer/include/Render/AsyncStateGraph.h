@@ -720,6 +720,11 @@ public:
         std::uint64_t requestFingerprint = 0);
     std::vector<ArtifactRequestResult> SubmitLatestIntentBatch(
         std::vector<ArtifactIntent> intents);
+    // Lock-free intent submission for threads that must never enter the graph
+    // mutex (the renderer owner thread). Intents are queued and applied in
+    // order by the graph control drain; a sibling posted in the same batch is
+    // referenced by (address, revision) with requiredGeneration = 0.
+    void PostIntents(std::vector<ArtifactIntent> intents);
     std::vector<ArtifactRequestResult> RequestBatch(std::vector<ArtifactRequest> requests);
     ArtifactRequestResult RequestExpressions(ArtifactKey key, std::uint64_t desiredRevision,
         std::vector<DependencyExpression> dependencies, ArtifactPayload input = {},
@@ -760,6 +765,11 @@ public:
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const;
     void StartTrace(AsyncStateGraphTraceConfig config = {});
     [[nodiscard]] bool TraceActive() const;
+    // Declares the calling thread as the renderer owner thread. That thread must
+    // never enter the graph mutex (it only observes published leases); every
+    // lock it does take is counted as SARP.AsyncStateGraph.OwnerThreadLocks.
+    void SetOwnerThread();
+    [[nodiscard]] std::uint64_t OwnerThreadLocks() const;
     AsyncStateGraphTraceReport StopTraceAndWriteReport(const std::filesystem::path& outputDirectory);
     void TraceEvent(AsyncStateGraphTraceEventID event, ArtifactAddress address,
         std::uint64_t revision = 0, std::uint64_t generation = 0,

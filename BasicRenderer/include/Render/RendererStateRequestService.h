@@ -33,6 +33,10 @@ public:
         std::uint64_t inputFingerprint = 0);
     ArtifactRequestResult SubmitLatest(ArtifactIntent intent);
     std::vector<ArtifactRequestResult> SubmitLatestBatch(std::vector<ArtifactIntent> intents);
+    // Fire-and-forget submission that never enters the graph mutex; for the
+    // renderer owner thread. See AsyncStateGraph::PostIntents.
+    void PostLatest(ArtifactIntent intent);
+    void PostLatestBatch(std::vector<ArtifactIntent> intents);
     bool Invalidate(ArtifactKey key, std::uint64_t revision);
     void Cancel(ArtifactKey key);
     void Release(ArtifactKey key) { m_graph.Release(key); }
@@ -101,6 +105,9 @@ private:
     };
     void MarkManifestDirty();
     void RequestManifest();
+    // Manifest requests enter the graph; owner-thread callers schedule them on
+    // the graph control domain instead of submitting inline.
+    void ScheduleRequestManifest();
     static ArtifactBuildResult BuildManifest(const ArtifactBuildContext& context);
 
     AsyncStateGraph& m_graph;
@@ -119,6 +126,7 @@ private:
     std::shared_ptr<PublicationNodeCache> m_publicationNodes =
         std::make_shared<PublicationNodeCache>();
     std::atomic_bool m_accepting{ true };
+    TaskScope m_manifestScope;
 };
 
 } // namespace br::render

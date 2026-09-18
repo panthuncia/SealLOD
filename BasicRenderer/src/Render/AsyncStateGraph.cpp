@@ -230,6 +230,8 @@ enum class GraphMutexPhase : std::uint8_t {
     Snapshot, Diagnose, Stats, Outstanding, WaitIdle, RecoveryResume, Shutdown, Count
 };
 
+std::string_view OwnerThreadLockCounterName(GraphMutexPhase phase);
+
 constexpr std::string_view GraphMutexPhaseName(GraphMutexPhase phase) {
     switch (phase) {
     case GraphMutexPhase::AcceptanceScheduleFailure: return "AcceptanceScheduleFailure";
@@ -268,6 +270,20 @@ constexpr std::string_view GraphMutexPhaseName(GraphMutexPhase phase) {
     case GraphMutexPhase::Count: break;
     }
     return "Unknown";
+}
+
+std::string_view OwnerThreadLockCounterName(GraphMutexPhase phase) {
+    static const auto names = [] {
+        std::array<std::string, static_cast<std::size_t>(GraphMutexPhase::Count)> result;
+        for (std::size_t index = 0; index < result.size(); ++index) {
+            result[index] = std::string("SARP.AsyncStateGraph.OwnerThreadLocks.") +
+                std::string(GraphMutexPhaseName(static_cast<GraphMutexPhase>(index)));
+        }
+        return result;
+    }();
+    const auto index = static_cast<std::size_t>(phase);
+    return index < names.size() ? std::string_view(names[index])
+        : std::string_view("SARP.AsyncStateGraph.OwnerThreadLocks.Unknown");
 }
 
 struct GraphMutexCounts {
@@ -1463,6 +1479,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
     TaskSchedulerManager& scheduler;
     TaskScope scope;
     mutable std::mutex mutex;
+    AsyncStateGraph* owner = nullptr;
+    // Intents posted by threads that never take the mutex; applied by Drain.
+    tbb::concurrent_queue<ArtifactIntent> postedIntents;
+    // Hash of the renderer owner thread id (0 = none). See SetOwnerThread.
+    std::atomic<std::size_t> ownerThreadHash{ 0 };
+    std::atomic<std::uint64_t> ownerThreadLocks{ 0 };
     std::unordered_map<ArtifactKey, Node, ArtifactKey::Hasher> nodes;
     // Completed versions are immutable. The mutable address slot above is only
     // the desired/build cursor; ExactSnapshot never resolves through that cursor.
@@ -1622,6 +1644,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             : m_owner(&owner), m_phase(phase), m_lock(owner.mutex, std::defer_lock),
               m_trace(acquire ? owner.AcquireTrace() : TraceGuard{}) {
             if (!acquire) return;
+            if (const auto ownerHash = owner.ownerThreadHash.load(std::memory_order_relaxed);
+                ownerHash != 0 && ownerHash == std::hash<std::thread::id>{}(std::this_thread::get_id())) {
+                owner.ownerThreadLocks.fetch_add(1, std::memory_order_relaxed);
+                basic_telemetry::AddCounter("SARP.AsyncStateGraph.OwnerThreadLocks");
+                basic_telemetry::AddCounter(OwnerThreadLockCounterName(phase));
+            }
             if (m_trace) m_waitStarted = std::chrono::steady_clock::now();
             m_lock.lock();
 			if (m_trace) {
@@ -3276,7 +3304,21 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         }
     }
 
+    void ApplyPostedIntents() {
+        std::vector<ArtifactIntent> batch;
+        ArtifactIntent intent;
+        while (batch.size() < 256 && postedIntents.try_pop(intent)) batch.push_back(std::move(intent));
+        if (batch.empty()) return;
+        basic_telemetry::AddCounter("SARP.AsyncStateGraph.PostedIntentsApplied",
+            static_cast<std::int64_t>(batch.size()));
+        if (owner && !shuttingDown.load(std::memory_order_acquire)) {
+            (void)owner->SubmitLatestIntentBatch(std::move(batch));
+        }
+        if (!postedIntents.empty()) ScheduleDrain();
+    }
+
     void Drain() {
+        ApplyPostedIntents();
         struct PendingGpuSignal {
             ArtifactKey key;
             std::uint64_t generation = 0;
@@ -3867,7 +3909,16 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
 AsyncStateGraph::AsyncStateGraph(TaskSchedulerManager& scheduler, std::string_view name)
     : m_impl(std::make_shared<Impl>(scheduler, name)) {
+    m_impl->owner = this;
     m_impl->ConfigureDrainPump();
+}
+
+void AsyncStateGraph::PostIntents(std::vector<ArtifactIntent> intents) {
+    if (!m_impl || intents.empty() || m_impl->shuttingDown.load(std::memory_order_acquire)) return;
+    basic_telemetry::AddCounter("SARP.AsyncStateGraph.PostedIntents",
+        static_cast<std::int64_t>(intents.size()));
+    for (auto& intent : intents) m_impl->postedIntents.push(std::move(intent));
+    m_impl->ScheduleDrain();
 }
 
 AsyncStateGraph::~AsyncStateGraph() { Shutdown(); }
@@ -4986,6 +5037,16 @@ void AsyncStateGraph::StartTrace(AsyncStateGraphTraceConfig config) {
 
 bool AsyncStateGraph::TraceActive() const {
     return m_impl && m_impl->trace.load(std::memory_order_acquire) != nullptr;
+}
+
+void AsyncStateGraph::SetOwnerThread() {
+    if (!m_impl) return;
+    m_impl->ownerThreadHash.store(std::hash<std::thread::id>{}(std::this_thread::get_id()),
+        std::memory_order_relaxed);
+}
+
+std::uint64_t AsyncStateGraph::OwnerThreadLocks() const {
+    return m_impl ? m_impl->ownerThreadLocks.load(std::memory_order_relaxed) : 0;
 }
 
 AsyncStateGraphTraceReport AsyncStateGraph::StopTraceAndWriteReport(

@@ -231,6 +231,10 @@ private:
 
     std::map<size_t, MemoryBlock> m_blocksByOffset;
     std::set<std::pair<size_t, size_t>> m_freeBlocks; // (size, offset)
+    // Last published probe (the K largest free blocks). Readers that find the
+    // allocator busy use it instead of waiting behind a worker allocation.
+    mutable std::mutex m_probeCacheMutex;
+    mutable AllocationProbe m_cachedProbe;
 
     std::weak_ptr<ViewedDynamicBufferBase> m_cachedWeakPtr;
     bool m_weakPtrCached = false;

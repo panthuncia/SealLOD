@@ -388,6 +388,7 @@ size_t CapacityHintBytes(size_t rows, size_t stride, size_t minimumHeadroomBytes
 void ObjectManager::StartDeferredRetireWorker() {
 	m_deferredRetireStop.store(false, std::memory_order_release);
 	m_deferredRetireScope = TaskSchedulerManager::GetInstance().CreateScope("ObjectManager::DeferredRetire");
+	m_desiredPublishScope = TaskSchedulerManager::GetInstance().CreateScope("ObjectManager::DesiredPublish");
 }
 
 void ObjectManager::SetRendererStateServices(
@@ -499,6 +500,21 @@ std::uint64_t ObjectManager::SealDesiredBufferStateLocked() {
 	basic_telemetry::SetGauge("SARP.VersionedBuffer.Object.MutationCoverageCaptured",
 		static_cast<std::int64_t>(cut.coveredMutationGeneration));
 	return m_objectBufferSnapshotGeneration;
+}
+
+void ObjectManager::ScheduleDesiredBufferStatePublish() {
+	bool expected = false;
+	if (!m_desiredPublishScheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+	const bool submitted = m_desiredPublishScope.Valid() &&
+		TaskSchedulerManager::GetInstance().Submit(
+			m_desiredPublishScope, TaskLane::FrameCritical, TaskDomain::GpuBufferBuild,
+			"ObjectManager::PublishDesiredBufferState",
+			[this](const br::TaskContext& context) {
+				m_desiredPublishScheduled.store(false, std::memory_order_release);
+				if (context.StopRequested()) return;
+				(void)PublishDesiredBufferState();
+			});
+	if (!submitted) m_desiredPublishScheduled.store(false, std::memory_order_release);
 }
 
 std::uint64_t ObjectManager::PublishDesiredBufferState() {
@@ -1997,23 +2013,27 @@ ObjectManager::StaticImportResourceProbe ObjectManager::CreateStaticImportResour
 	ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe");
 	StaticImportResourceProbe probe;
 	{
-		ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe::SnapshotNormalMatrix");
+		BT_ZONE_SCOPE("ObjectManager::CreateStaticImportResourceProbe::SnapshotNormalMatrix");
 		probe.normalMatrix = m_normalMatrixBuffer->SnapshotAllocationProbe();
+		BT_ZONE_VALUE(static_cast<int64_t>(probe.normalMatrix.freeBlocks.size()));
 		TracyPlot("ObjectManager.StaticImportResourceProbe.NormalMatrixFreeBlocks", static_cast<int64_t>(probe.normalMatrix.freeBlocks.size()));
 	}
 	{
-		ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe::SnapshotPerObject");
+		BT_ZONE_SCOPE("ObjectManager::CreateStaticImportResourceProbe::SnapshotPerObject");
 		probe.perObject = m_perObjectBuffers->SnapshotAllocationProbe();
+		BT_ZONE_VALUE(static_cast<int64_t>(probe.perObject.freeBlocks.size()));
 		TracyPlot("ObjectManager.StaticImportResourceProbe.PerObjectFreeBlocks", static_cast<int64_t>(probe.perObject.freeBlocks.size()));
 	}
 	{
-		ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe::SnapshotInstanceTransform");
+		BT_ZONE_SCOPE("ObjectManager::CreateStaticImportResourceProbe::SnapshotInstanceTransform");
 		probe.instanceTransform = m_perInstanceTransformBuffers->SnapshotAllocationProbe();
+		BT_ZONE_VALUE(static_cast<int64_t>(probe.instanceTransform.freeBlocks.size()));
 		TracyPlot("ObjectManager.StaticImportResourceProbe.InstanceTransformFreeBlocks", static_cast<int64_t>(probe.instanceTransform.freeBlocks.size()));
 	}
 	{
-		ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe::SnapshotInstanceDrawRecord");
+		BT_ZONE_SCOPE("ObjectManager::CreateStaticImportResourceProbe::SnapshotInstanceDrawRecord");
 		probe.instanceDrawRecord = m_instanceDrawRecordBuffers->SnapshotAllocationProbe();
+		BT_ZONE_VALUE(static_cast<int64_t>(probe.instanceDrawRecord.freeBlocks.size()));
 		TracyPlot("ObjectManager.StaticImportResourceProbe.InstanceDrawRecordFreeBlocks", static_cast<int64_t>(probe.instanceDrawRecord.freeBlocks.size()));
 	}
 	return probe;

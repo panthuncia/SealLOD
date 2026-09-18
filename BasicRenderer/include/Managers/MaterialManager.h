@@ -132,6 +132,11 @@ private:
 	MaterialManager();
 	TaskScope m_snapshotCommitScope;
 	std::atomic_bool m_snapshotCommitScheduled{ false };
+	// Dirty-material rows are rebuilt and journaled on the serialized material
+	// acceptance domain, never on the renderer thread.
+	std::atomic_bool m_dirtyMaterialFlushScheduled{ false };
+	void ScheduleDirtyMaterialFlush();
+	void FlushDirtyMaterials();
 	std::atomic_bool m_forceSnapshotCommit{ false };
 	std::uint64_t m_materialRowsAppliedSinceGraphSnapshot = 0;
 	void UpdateMaterialTextureUsage(const Material& material, int delta);
@@ -149,11 +154,16 @@ private:
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
 	std::array<std::shared_ptr<PublishedStateResourceResolver>, 3> m_materialTableResolvers;
 	std::unordered_map<uint32_t, std::vector<std::shared_ptr<Resource>>> m_trackedMaterialTextures;
-	uint64_t m_trackedTexturesRevision = 1;
+	std::atomic<uint64_t> m_trackedTexturesRevision{ 1 };
+	// Debug statistics: rebuilt off-thread when their inputs change; the owner
+	// thread only copies the latest result.
+	mutable std::mutex m_streamingStatsMutex;
 	mutable MaterialTextureStreamingStats m_cachedStreamingStats;
 	mutable uint64_t m_cachedStreamingStatsTrackedRevision = 0;
 	mutable uint64_t m_cachedStreamingStatsPublishedSequence = 0;
 	mutable bool m_cachedStreamingStatsValid = false;
+	mutable std::atomic_bool m_streamingStatsRefreshScheduled{ false };
+	void ScheduleStreamingStatsRefresh() const;
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::weak_ptr<Material>> m_ingestedMaterialSourcesByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;

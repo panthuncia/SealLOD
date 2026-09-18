@@ -19,6 +19,7 @@ namespace br::render {
 RendererStateRequestService::RendererStateRequestService(
     AsyncStateGraph& graph, RendererStatePublisher& publisher)
     : m_graph(graph), m_publisher(publisher) {
+    m_manifestScope = TaskSchedulerManager::GetInstance().CreateScope("RendererStateRequestService::Manifest");
     m_graph.RegisterProducer(ArtifactKind::FrameManifest, {
         TaskLane::Streaming, TaskDomain::GraphPublication,
         "RendererStateRequestService::BuildManifest", &RendererStateRequestService::BuildManifest });
@@ -62,6 +63,29 @@ std::vector<ArtifactRequestResult> RendererStateRequestService::SubmitLatestBatc
             ArtifactRequestResult{ ArtifactRequestStatus::ShuttingDown, 0, {} });
     }
     return m_graph.SubmitLatestIntentBatch(std::move(intents));
+}
+
+void RendererStateRequestService::PostLatest(ArtifactIntent intent) {
+    if (!m_accepting.load(std::memory_order_acquire)) return;
+    std::vector<ArtifactIntent> intents;
+    intents.push_back(std::move(intent));
+    m_graph.PostIntents(std::move(intents));
+}
+
+void RendererStateRequestService::PostLatestBatch(std::vector<ArtifactIntent> intents) {
+    if (!m_accepting.load(std::memory_order_acquire)) return;
+    m_graph.PostIntents(std::move(intents));
+}
+
+void RendererStateRequestService::ScheduleRequestManifest() {
+    if (!m_accepting.load(std::memory_order_acquire)) return;
+    const bool submitted = m_manifestScope.Valid() && TaskSchedulerManager::GetInstance().Submit(
+        m_manifestScope, TaskLane::FrameCritical, TaskDomain::GraphControl,
+        "RendererStateRequestService::RequestManifest",
+        [this](const br::TaskContext& context) {
+            if (!context.StopRequested()) RequestManifest();
+        });
+    if (!submitted) basic_telemetry::AddCounter("SARP.RendererStateManifest.ScheduleRejected");
 }
 
 bool RendererStateRequestService::Invalidate(ArtifactKey key, std::uint64_t revision) {
@@ -188,8 +212,9 @@ void RendererStateRequestService::RefreshPublication() {
     // RequestManifest performs both the dirty-generation and single-in-flight
     // checks. Calling it for every level-triggered newer root is required when
     // dirtyGeneration already exceeds submittedGeneration: that is precisely
-    // the case left after a candidate was enqueued and then committed.
-    if (needsManifest) RequestManifest();
+    // the case left after a candidate was enqueued and then committed. It is
+    // scheduled because this is the renderer owner thread.
+    if (needsManifest) ScheduleRequestManifest();
 }
 
 void RendererStateRequestService::MarkManifestDirty() {
@@ -201,7 +226,8 @@ void RendererStateRequestService::MarkManifestDirty() {
         basic_telemetry::SetGauge("SARP.RendererStateManifest.DirtyGeneration",
             static_cast<std::int64_t>(m_manifestDirtyGeneration));
     }
-    RequestManifest();
+    // Reached from the publisher's rejection callback on the owner thread.
+    ScheduleRequestManifest();
 }
 
 void RendererStateRequestService::RequestManifest() {
@@ -613,6 +639,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
 
 void RendererStateRequestService::Stop() {
     if (!m_accepting.exchange(false, std::memory_order_acq_rel)) return;
+    if (m_manifestScope.Valid()) m_manifestScope.CancelAndWait();
     std::lock_guard lock(m_mutex);
     m_manifestInFlight = false;
     m_manifestInFlightRevision = 0;

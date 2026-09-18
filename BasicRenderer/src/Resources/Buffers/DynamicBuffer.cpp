@@ -677,10 +677,30 @@ bool DynamicBuffer::TryAllocateRangesBatch(
 
 DynamicBuffer::AllocationProbe DynamicBuffer::SnapshotAllocationProbe() const
 {
-    std::lock_guard lock(m_allocationMutex);
+    // The probe only needs the largest free blocks: admission simulates the
+    // best-fit search against them, conservatively. Copying every free block
+    // scaled with fragmentation, and waiting for the allocator parked the
+    // caller behind worker-side allocations. A busy allocator yields the last
+    // published probe instead (stale by at most one allocation batch, which the
+    // real reservation on the worker re-checks anyway).
+    constexpr std::size_t kLargestBlocks = 8;
+    std::unique_lock lock(m_allocationMutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        BT_ZONE_SCOPE("DynamicBuffer::SnapshotAllocationProbe::AllocatorBusy");
+        std::lock_guard cacheLock(m_probeCacheMutex);
+        return m_cachedProbe;
+    }
     AllocationProbe probe;
-    probe.freeBlocks.reserve(m_freeBlocks.size());
-    probe.freeBlocks.assign(m_freeBlocks.begin(), m_freeBlocks.end());
+    probe.freeBlocks.reserve(kLargestBlocks);
+    for (auto it = m_freeBlocks.rbegin(); it != m_freeBlocks.rend() && probe.freeBlocks.size() < kLargestBlocks; ++it) {
+        probe.freeBlocks.push_back(*it);
+    }
+    lock.unlock();
+    std::reverse(probe.freeBlocks.begin(), probe.freeBlocks.end()); // ascending, as lower_bound expects
+    {
+        std::lock_guard cacheLock(m_probeCacheMutex);
+        m_cachedProbe = probe;
+    }
     return probe;
 }
 

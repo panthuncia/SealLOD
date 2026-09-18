@@ -695,16 +695,11 @@ VersionedBufferFamily::VersionedBufferFamily(Config config)
     }
 }
 
-ArtifactRequestResult VersionedBufferFamily::RequestSnapshot(
-    RendererStateRequestService& requests,
-    std::shared_ptr<org::runtime::IUploadService> uploads,
-    std::uint64_t revision, std::span<const std::byte> bytes,
-    std::uint64_t elementCount, std::uint64_t capacity) {
-    if (!uploads || revision == 0 || bytes.size() != elementCount * m_config.elementStride) {
-        return { ArtifactRequestStatus::ConflictingRevision, 0, {} };
-    }
+ArtifactIntent VersionedBufferFamily::MakeSnapshotIntent(
+    std::shared_ptr<org::runtime::IUploadService> uploads, std::uint64_t revision,
+    std::span<const std::byte> bytes, std::uint64_t elementCount, std::uint64_t capacity) {
     auto input = std::make_shared<VersionedGpuBufferBuildInput>();
-	input->uploadOwner = std::move(uploads);
+    input->uploadOwner = std::move(uploads);
     input->uploadService = input->uploadOwner.get();
     input->debugName = m_config.debugName;
     input->writeSequence = revision;
@@ -731,8 +726,20 @@ ArtifactRequestResult VersionedBufferFamily::RequestSnapshot(
         fingerprint *= 1099511628211ull;
     }
     if (fingerprint == 0) fingerprint = 1;
-    return requests.SubmitLatest({ m_config.address, revision, {},
-        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint });
+    return { m_config.address, revision, {},
+        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint };
+}
+
+ArtifactRequestResult VersionedBufferFamily::RequestSnapshot(
+    RendererStateRequestService& requests,
+    std::shared_ptr<org::runtime::IUploadService> uploads,
+    std::uint64_t revision, std::span<const std::byte> bytes,
+    std::uint64_t elementCount, std::uint64_t capacity) {
+    if (!uploads || revision == 0 || bytes.size() != elementCount * m_config.elementStride) {
+        return { ArtifactRequestStatus::ConflictingRevision, 0, {} };
+    }
+    return requests.SubmitLatest(MakeSnapshotIntent(std::move(uploads), revision, bytes,
+        elementCount, capacity));
 }
 
 ArtifactRequestResult VersionedBufferFamily::RequestGpuWritten(
@@ -764,11 +771,8 @@ ArtifactRequestResult VersionedBufferFamily::RequestGpuWritten(
         fingerprint != 0u ? fingerprint : 1u });
 }
 
-ArtifactRequestResult VersionedBufferFamily::RequestContentSnapshot(
-    RendererStateRequestService& requests,
-    std::shared_ptr<org::runtime::IUploadService> uploads,
-    std::span<const std::byte> bytes, std::uint64_t elementCount,
-    std::uint64_t capacity) {
+std::uint64_t VersionedBufferFamily::ContentRevision(std::span<const std::byte> bytes,
+    std::uint64_t elementCount, std::uint64_t capacity) {
     std::uint64_t contentFingerprint = 1469598103934665603ull;
     for (const auto value : bytes) {
         contentFingerprint ^= static_cast<std::uint8_t>(value);
@@ -785,8 +789,60 @@ ArtifactRequestResult VersionedBufferFamily::RequestContentSnapshot(
         }
         contentRevision = m_lastContentRevision;
     }
-    return RequestSnapshot(requests, std::move(uploads), contentRevision, bytes,
-        elementCount, capacity);
+    return contentRevision;
+}
+
+ArtifactRequestResult VersionedBufferFamily::RequestContentSnapshot(
+    RendererStateRequestService& requests,
+    std::shared_ptr<org::runtime::IUploadService> uploads,
+    std::span<const std::byte> bytes, std::uint64_t elementCount,
+    std::uint64_t capacity) {
+    return RequestSnapshot(requests, std::move(uploads),
+        ContentRevision(bytes, elementCount, capacity), bytes, elementCount, capacity);
+}
+
+ArtifactVersionID VersionedBufferFamily::PostContentSnapshot(
+    RendererStateRequestService& requests,
+    std::shared_ptr<org::runtime::IUploadService> uploads,
+    std::span<const std::byte> bytes, std::uint64_t elementCount,
+    std::uint64_t capacity) {
+    if (!uploads || bytes.size() != elementCount * m_config.elementStride) return {};
+    const auto revision = ContentRevision(bytes, elementCount, capacity);
+    if (revision == 0) return {};
+    requests.PostLatest(MakeSnapshotIntent(std::move(uploads), revision, bytes,
+        elementCount, capacity));
+    return { m_config.address, revision, 0 };
+}
+
+ArtifactIntent VersionedBufferFamily::MakeCaptureIntent(
+    std::shared_ptr<org::runtime::IUploadService> uploads, std::uint64_t revision,
+    VersionedGpuBufferJournal::Capture capture) {
+    auto input = std::make_shared<VersionedGpuBufferBuildInput>();
+    input->uploadOwner = std::move(uploads);
+    input->uploadService = input->uploadOwner.get();
+    input->debugName = m_config.debugName;
+    input->writeSequence = capture.writeSequence;
+    input->elementStride = m_config.elementStride;
+    input->elementCount = capture.elementCount;
+    input->capacity = capture.capacity;
+    input->unorderedAccess = m_config.unorderedAccess;
+    input->indirectArguments = m_config.indirectArguments;
+    input->catalogOwner = m_config.catalogOwner;
+    input->catalogUsage = m_config.catalogUsage;
+    input->catalogVariant = m_config.catalogVariant;
+    input->backingPool = m_backingPool;
+    input->previous = std::move(capture.previous);
+    input->writes = std::move(capture.writes);
+    input->image = std::move(capture.image);
+    input->journalBaseSequence = capture.journalBaseSequence;
+    std::uint64_t fingerprint = revision ^ (capture.elementCount << 1u) ^
+        (capture.capacity << 7u) ^ (m_config.catalogVariant << 17u) ^ 0x5642464a4f5552ull;
+    for (const auto& write : input->writes) {
+        fingerprint ^= write.sequence ^ (write.byteOffset << 3u) ^ (write.byteSize << 11u);
+    }
+    if (fingerprint == 0) fingerprint = 1;
+    return { m_config.address, revision, {},
+        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint };
 }
 
 ArtifactRequestResult VersionedBufferFamily::RequestCapture(
@@ -807,37 +863,26 @@ ArtifactRequestResult VersionedBufferFamily::RequestCapture(
             m_lastJournalHandle.version,
             m_lastJournalHandle.lease };
     }
-    auto input = std::make_shared<VersionedGpuBufferBuildInput>();
-	input->uploadOwner = std::move(uploads);
-    input->uploadService = input->uploadOwner.get();
-    input->debugName = m_config.debugName;
-    input->writeSequence = capture.writeSequence;
-    input->elementStride = m_config.elementStride;
-    input->elementCount = capture.elementCount;
-    input->capacity = capture.capacity;
-    input->unorderedAccess = m_config.unorderedAccess;
-    input->indirectArguments = m_config.indirectArguments;
-    input->catalogOwner = m_config.catalogOwner;
-    input->catalogUsage = m_config.catalogUsage;
-    input->catalogVariant = m_config.catalogVariant;
-    input->backingPool = m_backingPool;
-    input->previous = std::move(capture.previous);
-    input->writes = std::move(capture.writes);
-	input->image = std::move(capture.image);
-	input->journalBaseSequence = capture.journalBaseSequence;
-    std::uint64_t fingerprint = revision ^ (capture.elementCount << 1u) ^
-        (capture.capacity << 7u) ^ (m_config.catalogVariant << 17u) ^ 0x5642464a4f5552ull;
-    for (const auto& write : input->writes) {
-        fingerprint ^= write.sequence ^ (write.byteOffset << 3u) ^ (write.byteSize << 11u);
-    }
-    if (fingerprint == 0) fingerprint = 1;
-    auto result = requests.SubmitLatest({ m_config.address, revision, {},
-        ArtifactPayload::Make<VersionedGpuBufferBuildInput>(std::move(input)), fingerprint });
+    auto result = requests.SubmitLatest(MakeCaptureIntent(std::move(uploads), revision,
+        std::move(capture)));
     if (result) {
         m_lastJournalRevision = revision;
         m_lastJournalHandle = result.Handle();
     }
     return result;
+}
+
+ArtifactVersionID VersionedBufferFamily::PostCapture(
+    RendererStateRequestService& requests,
+    std::shared_ptr<org::runtime::IUploadService> uploads,
+    std::uint64_t revision, VersionedGpuBufferJournal::Capture capture) {
+    if (!uploads || revision == 0 || capture.writeSequence != revision) return {};
+    std::lock_guard familyLock(m_mutex);
+    if (revision == m_lastJournalRevision) return { m_config.address, revision, 0 };
+    requests.PostLatest(MakeCaptureIntent(std::move(uploads), revision, std::move(capture)));
+    m_lastJournalRevision = revision;
+    m_lastJournalHandle = {};
+    return { m_config.address, revision, 0 };
 }
 
 void VersionedBufferFamily::Acknowledge(

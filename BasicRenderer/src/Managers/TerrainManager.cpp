@@ -829,10 +829,8 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
 				graphBinding.address = { br::render::ArtifactKind::TextureBinding,
 					pending.texture->GetStreamingTextureID(), 0 };
 				m_graphTextureBindings.push_back(std::move(graphBinding));
-				const auto observation = static_cast<br::render::RendererStateRequestService*>(
-					m_rendererStateRequests)->Snapshot(m_graphTextureBindings.back().address);
-				readyGraphBindings += br::render::ArtifactReachedMilestone(
-					observation.readiness, br::render::ArtifactReadiness::UploadSubmitted);
+				// Readiness is observed through the terrain root's requirements; a
+				// per-binding graph query here was owner-thread lock traffic for a log line.
 			}
             LogTerrainTextureState(
                 bindingID != 0u ? "register-binding-after" : "register-binding-skipped",
@@ -1082,25 +1080,42 @@ void TerrainManager::RequestGraphState()
 		return;
 	}
 	m_terrainGraphDirty = false;
+	// Observe the outcome through the graph's own completion path; the owner
+	// thread polls one atomic instead of taking the graph mutex every frame.
+	auto outcome = std::make_shared<std::atomic<int>>(0);
+	m_terrainGraphOutcome = outcome;
+	const auto address = br::render::ArtifactAddress{ br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration };
+	auto awaiter = std::make_shared<br::render::ArtifactAwaiter>(requests->AwaitExact(
+		stateRequest.Handle(), br::render::ArtifactReadiness::CpuReady,
+		TaskLane::Streaming, TaskDomain::GraphControl,
+		[outcome, requests, address, stateRevision](const br::render::ArtifactSnapshot& snapshot) {
+			const bool failed = snapshot.readiness == br::render::ArtifactReadiness::Failed ||
+				snapshot.readiness == br::render::ArtifactReadiness::Cancelled;
+			if (failed) {
+				const auto diagnostic = requests->Diagnose(address);
+				spdlog::error("TerrainManager: graph state revision={} failed: {} {}",
+					stateRevision, diagnostic.error, diagnostic.blockerChain);
+			}
+			outcome->store(failed ? 2 : 1, std::memory_order_release);
+		}));
+	// Release the previous awaiter off the owner thread: its unsubscription
+	// enters the graph mutex.
+	if (auto previous = std::move(m_terrainGraphAwaiter)) {
+		(void)TaskSchedulerManager::GetInstance().Submit(TaskLane::Background, TaskDomain::Cleanup,
+			"TerrainManager::ReleaseGraphAwaiter", [previous]() mutable { previous.reset(); });
+	}
+	m_terrainGraphAwaiter = std::move(awaiter);
 	m_terrainGraphRequestPending = true;
 	m_terrainGraphStableFrames = 0;
 }
 
 void TerrainManager::ProcessPendingUpdates()
 {
-	if (m_terrainGraphRequestPending && m_rendererStateRequests) {
-		auto* requests = static_cast<br::render::RendererStateRequestService*>(m_rendererStateRequests);
-		const br::render::ArtifactAddress address{
-			br::render::ArtifactKind::TerrainState, 0, m_terrainGeneration };
-		const auto snapshot = requests->Snapshot(address);
-		if (snapshot.readiness == br::render::ArtifactReadiness::Failed ||
-			snapshot.readiness == br::render::ArtifactReadiness::Cancelled) {
-			const auto diagnostic = requests->Diagnose(address);
-			spdlog::error("TerrainManager: graph state revision={} failed: {} {}",
-				m_terrainStateRevision, diagnostic.error, diagnostic.blockerChain);
-			m_terrainGraphRequestPending = false;
-			m_terrainGraphDirty = true;
-		}
+	if (m_terrainGraphRequestPending && m_terrainGraphOutcome &&
+		m_terrainGraphOutcome->load(std::memory_order_acquire) == 2) {
+		m_terrainGraphOutcome.reset();
+		m_terrainGraphRequestPending = false;
+		m_terrainGraphDirty = true;
 	}
 	// Row and texture-binding updates may arrive while an earlier terrain root is
 	// still building. Do not let that pending root suppress its successor: the
