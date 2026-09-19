@@ -20,7 +20,6 @@
 #include "ShaderBuffers.h"
 
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 template<class T> class DynamicStructuredBuffer;
 class SortedUnsignedIntBuffer;
 struct PreparedImGuiDrawData;

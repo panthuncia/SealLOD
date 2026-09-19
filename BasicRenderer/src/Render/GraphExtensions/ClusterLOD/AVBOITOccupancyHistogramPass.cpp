@@ -12,10 +12,10 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITOccupancyHistogramRootConstants.h"
 
 AVBOITOccupancyHistogramPass::AVBOITOccupancyHistogramPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<PixelBuffer> occupancyTexture,
-    std::shared_ptr<PixelBuffer> occupancySliceMaskTexture,
-    std::shared_ptr<Buffer> occupancyHistogramBuffer)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::PixelBuffer> occupancyTexture,
+    std::shared_ptr<org::PixelBuffer> occupancySliceMaskTexture,
+    std::shared_ptr<org::Buffer> occupancyHistogramBuffer)
     : m_configBuffer(std::move(configBuffer))
     , m_occupancyTexture(std::move(occupancyTexture))
     , m_occupancySliceMaskTexture(std::move(occupancySliceMaskTexture))
@@ -39,7 +39,7 @@ AVBOITOccupancyHistogramBindings AVBOITOccupancyHistogramPass::Declare(org::Pass
         builder.BindUnorderedAccess(m_occupancyHistogramBuffer) };
 }
 
-void AVBOITOccupancyHistogramPass::Update(const UpdateExecutionContext& executionContext)
+void AVBOITOccupancyHistogramPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
 

@@ -9,7 +9,7 @@ struct ScreenSpaceReflectionsFrameData {
     std::shared_ptr<const br::render::ScreenSpaceReflectionsGenerationService> service;
     Components::Camera camera;
     rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    std::shared_ptr<PixelBuffer> hdr, depth, normals, motion, environment, brdf, output;
+    std::shared_ptr<org::PixelBuffer> hdr, depth, normals, motion, environment, brdf, output;
 };
 
 class ScreenSpaceReflectionsPass
@@ -30,12 +30,12 @@ public:
             Builtin::BRDFLUT,
             Builtin::PostProcessing::ScreenSpaceReflections);
 
-        ResourceState outState{
+        org::ResourceState outState{
         .access = rhi::ResourceAccessType::Common, 
         .layout = rhi::ResourceLayout::Common, 
         .sync = rhi::ResourceSyncState::All};
 
-		ResourceIdentifierAndRange outResource(Builtin::PostProcessing::ScreenSpaceReflections, {});
+		org::ResourceIdentifierAndRange outResource(Builtin::PostProcessing::ScreenSpaceReflections, {});
 
         builder->WithInternalTransition(
             outResource,
@@ -43,13 +43,13 @@ public:
     }
 
     void Initialize() {
-        m_pHDRTarget = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::Color::HDRColorTarget);
-        m_pDepthTexture = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::PrimaryCamera::DepthTexture);
-		m_pNormals = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::Surface::NormalRoughness);
-		m_pMotionVectors = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::Surface::Motion);
-		m_pEnvironmentCubemap = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::Environment::CurrentPrefilteredCubemap);
-        m_pBRDFLUT = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::BRDFLUT);
-		m_pSSSROutput = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::PostProcessing::ScreenSpaceReflections);
+        m_pHDRTarget = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::Color::HDRColorTarget);
+        m_pDepthTexture = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::PrimaryCamera::DepthTexture);
+		m_pNormals = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::Surface::NormalRoughness);
+		m_pMotionVectors = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::Surface::Motion);
+		m_pEnvironmentCubemap = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::Environment::CurrentPrefilteredCubemap);
+        m_pBRDFLUT = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::BRDFLUT);
+		m_pSSSROutput = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::PostProcessing::ScreenSpaceReflections);
     }
 
     ScreenSpaceReflectionsFrameData Prepare(const org::PassPrepareContext& preparation) {
@@ -71,7 +71,7 @@ public:
 
 private:
 
-    std::shared_ptr<PixelBuffer> m_pHDRTarget, m_pMotionVectors, m_pDepthTexture,
+    std::shared_ptr<org::PixelBuffer> m_pHDRTarget, m_pMotionVectors, m_pDepthTexture,
         m_pNormals, m_pEnvironmentCubemap, m_pBRDFLUT, m_pSSSROutput;
     std::shared_ptr<const br::render::ScreenSpaceReflectionsGenerationService> m_service;
 };

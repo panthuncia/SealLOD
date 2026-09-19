@@ -9,9 +9,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapClearDirtyBitsBindings {
     org::ResourceBindingToken pageTable;
@@ -24,12 +22,12 @@ class VirtualShadowMapClearDirtyBitsPass final : public org::TypedRenderGraphPas
     br::render::PreparedComputeDispatch, VirtualShadowMapClearDirtyBitsBindings> {
 public:
     VirtualShadowMapClearDirtyBitsPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> allocationRequestsBuffer,
-        std::shared_ptr<Buffer> allocationCountBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer,
-        std::shared_ptr<Buffer> dirtyFlagsBuffer,
-        std::shared_ptr<Buffer> statsBuffer);
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> allocationRequestsBuffer,
+        std::shared_ptr<org::Buffer> allocationCountBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer,
+        std::shared_ptr<org::Buffer> dirtyFlagsBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer);
 
     VirtualShadowMapClearDirtyBitsBindings Declare(org::PassBuilder& builder);
     void Initialize();
@@ -40,8 +38,8 @@ public:
     void ShutdownPass();
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_dirtyFlagsBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_dirtyFlagsBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
 };

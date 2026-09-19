@@ -2,6 +2,6 @@
 
 #include "Resources/Buffers/DynamicBufferBase.h"
 
-std::shared_ptr<ViewedDynamicBufferBase> BufferView::GetBuffer() const {
+std::shared_ptr<org::ViewedDynamicBufferBase> org::BufferView::GetBuffer() const {
 	return m_buffer.lock();
 }

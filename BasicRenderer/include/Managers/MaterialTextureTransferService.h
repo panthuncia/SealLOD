@@ -16,13 +16,11 @@
 #include "Managers/SerializedTaskPump.h"
 
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 namespace org { class Resource; }
-using org::Resource;
 namespace br::render {
 struct GpuSubmissionSet;
 struct TextureTransferArtifact {
-	std::shared_ptr<PixelBuffer> image;
+	std::shared_ptr<org::PixelBuffer> image;
 	std::uint64_t generation = 0;
 	std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
 };
@@ -37,23 +35,23 @@ public:
 	void Shutdown();
 
 	std::shared_ptr<const br::render::TextureTransferArtifact> EnqueueUpload(
-		const std::shared_ptr<PixelBuffer>& image,
-		TextureDescription description,
+		const std::shared_ptr<org::PixelBuffer>& image,
+		org::TextureDescription description,
 		TextureFactory::TextureInitialData initialData);
 	std::shared_ptr<const br::render::TextureTransferArtifact> EnsureShaderReady(
-		const std::shared_ptr<PixelBuffer>& image);
+		const std::shared_ptr<org::PixelBuffer>& image);
 	void RequestReadback(
-		const std::shared_ptr<PixelBuffer>& image,
+		const std::shared_ptr<org::PixelBuffer>& image,
 		std::wstring outputFile,
 		std::function<void()> callback);
 
 	// O(1) render-thread kick. Recording, submission, and completion publication
 	// run in the service task scope.
 	void Pump();
-	bool IsShaderReady(const std::shared_ptr<PixelBuffer>& image) const;
+	bool IsShaderReady(const std::shared_ptr<org::PixelBuffer>& image) const;
 	std::shared_ptr<const br::render::GpuSubmissionSet> ShaderReadySubmission(
-		const std::shared_ptr<PixelBuffer>& image) const;
-	bool HasFailed(const std::shared_ptr<PixelBuffer>& image) const;
+		const std::shared_ptr<org::PixelBuffer>& image) const;
+	bool HasFailed(const std::shared_ptr<org::PixelBuffer>& image) const;
 
 private:
 	enum class State : uint8_t { Pending, InFlight, Ready, Failed };
@@ -71,8 +69,8 @@ private:
 		std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
 	};
 	struct Request {
-		std::shared_ptr<PixelBuffer> image;
-		TextureDescription description;
+		std::shared_ptr<org::PixelBuffer> image;
+		org::TextureDescription description;
 		TextureFactory::TextureInitialData initialData;
 		bool upload = false;
 	};
@@ -81,9 +79,9 @@ private:
 		rhi::CommandAllocatorPtr allocator;
 		rhi::CommandListPtr commandList;
 		std::vector<rhi::ResourcePtr> stagingResources;
-		std::vector<std::shared_ptr<PixelBuffer>> images;
+		std::vector<std::shared_ptr<org::PixelBuffer>> images;
 		struct ReadbackCompletion {
-			std::shared_ptr<Resource> buffer;
+			std::shared_ptr<org::Resource> buffer;
 			std::vector<rhi::CopyableFootprint> footprints;
 			uint32_t width = 0;
 			uint32_t height = 0;
@@ -96,13 +94,13 @@ private:
 		std::vector<ReadbackCompletion> readbacks;
 	};
 	struct ReadbackRequest {
-		std::shared_ptr<PixelBuffer> image;
+		std::shared_ptr<org::PixelBuffer> image;
 		std::wstring outputFile;
 		std::function<void()> callback;
 	};
 	static void SaveReadbackToDds(InFlightBatch::ReadbackCompletion completion);
 	std::shared_ptr<const br::render::TextureTransferArtifact> EnsureTransferRecordLocked(
-		const std::shared_ptr<PixelBuffer>& image);
+		const std::shared_ptr<org::PixelBuffer>& image);
 	static void PublishTransferState(const std::shared_ptr<TransferState>& transfer,
 		State state, std::uint64_t fenceValue = 0, std::string error = {});
 
@@ -110,7 +108,7 @@ private:
 	void RejectPendingWork();
 	void PumpWorker();
 	static rhi::TextureBarrier MakeWholeTextureBarrier(
-		const PixelBuffer& image,
+		const org::PixelBuffer& image,
 		rhi::ResourceAccessType beforeAccess,
 		rhi::ResourceAccessType afterAccess,
 		rhi::ResourceLayout beforeLayout,

@@ -14,9 +14,9 @@
 
 struct RayTracedReflectionsFrameData {
     std::shared_ptr<br::render::CLodRayTracingSystem> service;
-    std::shared_ptr<PixelBuffer> output;
-    std::shared_ptr<Buffer> pageSources, buildInfos, clasData, clasAddresses;
-    std::shared_ptr<Buffer> blasData, blasAddresses, tlasInstances;
+    std::shared_ptr<org::PixelBuffer> output;
+    std::shared_ptr<org::Buffer> pageSources, buildInfos, clasData, clasAddresses;
+    std::shared_ptr<org::Buffer> blasData, blasAddresses, tlasInstances;
     org::PreparedProgramBinding setup{}, tlasSetup{};
     rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
     uint32_t pageSourceCount = 0, buildClusterCapacity = 0;
@@ -35,7 +35,7 @@ struct RayTracedReflectionsBindings {
 class RayTracedReflectionsPass
     : public org::TypedRenderGraphPass<RayTracedReflectionsPass,
           RayTracedReflectionsFrameData, RayTracedReflectionsBindings>,
-      public IDynamicDeclaredResources {
+      public org::IDynamicDeclaredResources {
 public:
     RayTracedReflectionsPass() {
         auto& manager = PSOManager::GetInstance();
@@ -66,23 +66,23 @@ public:
             bindings.hasServiceResources = true;
         }
         builder.WithInternalTransition(
-            ResourceIdentifierAndRange(Builtin::PostProcessing::ScreenSpaceReflections, {}),
-            ResourceState{.access = rhi::ResourceAccessType::Common,
+            org::ResourceIdentifierAndRange(Builtin::PostProcessing::ScreenSpaceReflections, {}),
+            org::ResourceState{.access = rhi::ResourceAccessType::Common,
                 .layout = rhi::ResourceLayout::Common,
                 .sync = rhi::ResourceSyncState::All});
         return bindings;
     }
 
     void Initialize() {
-        m_output = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(
+        m_output = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(
             Builtin::PostProcessing::ScreenSpaceReflections);
     }
 
-    void Update(const UpdateExecutionContext& execution) override {
+    void Update(const org::UpdateExecutionContext& execution) override {
         const auto* context = execution.hostData->Get<UpdateContext>();
         auto service = context ? context->clodRayTracingSystem : nullptr;
-        std::shared_ptr<Buffer> pageSources, buildInfos, clasData, clasAddresses;
-        std::shared_ptr<Buffer> blasData, blasAddresses, tlasInstances;
+        std::shared_ptr<org::Buffer> pageSources, buildInfos, clasData, clasAddresses;
+        std::shared_ptr<org::Buffer> blasData, blasAddresses, tlasInstances;
         if (service) {
             std::scoped_lock lock(service->FrameOperationMutex());
             pageSources = service->GetPageSourceBuffer();
@@ -167,7 +167,7 @@ public:
                 static_cast<uint32_t>(program.descriptorIndices.size()),
                 program.descriptorIndices.data());
         };
-        auto barrier = [&](const std::shared_ptr<Buffer>& buffer,
+        auto barrier = [&](const std::shared_ptr<org::Buffer>& buffer,
             rhi::ResourceAccessType before, rhi::ResourceAccessType after,
             rhi::ResourceSyncState beforeSync, rhi::ResourceSyncState afterSync) {
             if (!buffer) return;
@@ -246,10 +246,10 @@ public:
     }
 
 private:
-    PipelineState m_setupPso, m_tlasSetupPso;
-    std::shared_ptr<PixelBuffer> m_output;
+    org::PipelineState m_setupPso, m_tlasSetupPso;
+    std::shared_ptr<org::PixelBuffer> m_output;
     std::shared_ptr<br::render::CLodRayTracingSystem> m_service;
-    std::shared_ptr<Buffer> m_pageSources, m_buildInfos, m_clasData, m_clasAddresses;
-    std::shared_ptr<Buffer> m_blasData, m_blasAddresses, m_tlasInstances;
+    std::shared_ptr<org::Buffer> m_pageSources, m_buildInfos, m_clasData, m_clasAddresses;
+    std::shared_ptr<org::Buffer> m_blasData, m_blasAddresses, m_tlasInstances;
     bool m_declaredResourcesChanged = true;
 };

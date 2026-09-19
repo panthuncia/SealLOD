@@ -18,7 +18,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-class SortedUnsignedIntBuffer : public BufferBase, public IHasMemoryMetadata, public IDeferredBackingResizeClient {
+class SortedUnsignedIntBuffer : public org::BufferBase, public org::IHasMemoryMetadata, public org::IDeferredBackingResizeClient {
 public:
     struct ActiveDrawSetEntry {
         uint32_t drawRecordIndex = 0;
@@ -193,21 +193,21 @@ private:
     ActiveMutationCallback m_activeMutationCallback;
     uint64_t m_earliestModifiedIndex; // To avoid updating the entire buffer every time
 
-    std::vector<EntityComponentBundle> m_metadataBundles;
+    std::vector<org::EntityComponentBundle> m_metadataBundles;
 
     inline static std::string m_name = "SortedUnsignedIntBuffer";
 
     bool m_UAV = false;
     bool m_activeEntryMode = false;
     bool m_graphManaged = false;
-    AsyncBufferBackingResizeState m_asyncResizeState;
+    org::AsyncBufferBackingResizeState m_asyncResizeState;
     uint64_t m_pendingResizeCapacity = 0;
     bool m_pendingResizeValid = false;
 
     void CreateBuffer(uint64_t capacity);
 
     void GrowBuffer(uint64_t newSize);
-    void ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> newDataBuffer, uint64_t newCapacity);
+    void ApplyResizeBacking(std::unique_ptr<org::GpuBufferBacking> newDataBuffer, uint64_t newCapacity);
     void EnsureCapacityForSize(uint64_t requiredSize);
 
     void SyncUploadPolicyState() {
@@ -223,7 +223,7 @@ private:
 
     void StageOrUpload(const void* data, size_t size, size_t offset);
 
-    void ApplyMetadataComponentBundle(const EntityComponentBundle& bundle) override {
+    void ApplyMetadataComponentBundle(const org::EntityComponentBundle& bundle) override {
         m_metadataBundles.emplace_back(bundle);
         ApplyMetadataToBacking(bundle);
     }

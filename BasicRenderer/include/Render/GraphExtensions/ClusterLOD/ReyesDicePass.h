@@ -9,7 +9,6 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
 struct ReyesDiceBindings {
     org::ResourceBindingToken queue, counter, readOffset, tessConfigs, indirectArgs, telemetry;
@@ -21,12 +20,12 @@ class ReyesDicePass final : public org::TypedRenderGraphPass<ReyesDicePass,
     br::render::PreparedComputeIndirect, ReyesDiceBindings> {
 public:
     ReyesDicePass(
-        std::shared_ptr<Buffer> diceQueueBuffer,
-        std::shared_ptr<Buffer> diceQueueCounterBuffer,
-        std::shared_ptr<Buffer> diceQueueReadOffsetBuffer,
-        std::shared_ptr<Buffer> tessTableConfigsBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer,
-        std::shared_ptr<Buffer> telemetryBuffer,
+        std::shared_ptr<org::Buffer> diceQueueBuffer,
+        std::shared_ptr<org::Buffer> diceQueueCounterBuffer,
+        std::shared_ptr<org::Buffer> diceQueueReadOffsetBuffer,
+        std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer,
+        std::shared_ptr<org::Buffer> telemetryBuffer,
         uint32_t maxDiceQueueEntries,
         uint32_t phaseIndex);
 
@@ -36,14 +35,14 @@ public:
     static void Record(const ReyesDiceBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
 
 private:
-    std::shared_ptr<Buffer> m_diceQueueBuffer;
-    std::shared_ptr<Buffer> m_diceQueueCounterBuffer;
-    std::shared_ptr<Buffer> m_diceQueueReadOffsetBuffer;
-    std::shared_ptr<Buffer> m_tessTableConfigsBuffer;
-    std::shared_ptr<Buffer> m_indirectArgsBuffer;
-    std::shared_ptr<Buffer> m_telemetryBuffer;
+    std::shared_ptr<org::Buffer> m_diceQueueBuffer;
+    std::shared_ptr<org::Buffer> m_diceQueueCounterBuffer;
+    std::shared_ptr<org::Buffer> m_diceQueueReadOffsetBuffer;
+    std::shared_ptr<org::Buffer> m_tessTableConfigsBuffer;
+    std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_telemetryBuffer;
     uint32_t m_maxDiceQueueEntries = 0u;
     uint32_t m_phaseIndex = 0u;
-    PipelineState m_pso;
+    org::PipelineState m_pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

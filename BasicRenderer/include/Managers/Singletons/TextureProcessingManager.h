@@ -29,7 +29,7 @@ struct TextureProcessingJobHandle {
 	std::string conditionedCachePath;
 	std::shared_ptr<TextureSourceData> preparedSourceData;
 	std::shared_ptr<TextureSourceData> result;
-	std::shared_ptr<PixelBuffer> uploadedImage;
+	std::shared_ptr<org::PixelBuffer> uploadedImage;
 	bool loadedFromCache = false;
 	bool requiresGpuCompression = false;
 	bool completedOnGpu = false;
@@ -79,7 +79,7 @@ public:
 	void CompleteGpuProcessing(
 		const std::shared_ptr<TextureProcessingJobHandle>& handle,
 		std::shared_ptr<TextureSourceData> result,
-		std::shared_ptr<PixelBuffer> uploadedImage = {},
+		std::shared_ptr<org::PixelBuffer> uploadedImage = {},
 		bool writeCacheArtifact = true);
 	void FailProcessing(const std::shared_ptr<TextureProcessingJobHandle>& handle, std::string error);
 

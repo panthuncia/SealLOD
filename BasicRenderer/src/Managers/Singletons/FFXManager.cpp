@@ -57,14 +57,14 @@ void FFXManager::Shutdown() {
 
 void FFXManager::EvaluateSSSR(rhi::CommandList& commandList,
     const Components::Camera* currentCamera,
-    PixelBuffer* pHDRTarget,
-    PixelBuffer* pDepthTexture,
-    PixelBuffer* pNormals,
-    PixelBuffer* pMetallicRoughness,
-    PixelBuffer* pMotionVectors,
-    PixelBuffer* pEnvironmentCubemap,
-    PixelBuffer* pBRDFLUT,
-    PixelBuffer* pReflectionsTarget) {
+    org::PixelBuffer* pHDRTarget,
+    org::PixelBuffer* pDepthTexture,
+    org::PixelBuffer* pNormals,
+    org::PixelBuffer* pMetallicRoughness,
+    org::PixelBuffer* pMotionVectors,
+    org::PixelBuffer* pEnvironmentCubemap,
+    org::PixelBuffer* pBRDFLUT,
+    org::PixelBuffer* pReflectionsTarget) {
     std::scoped_lock evaluateLock(m_evaluateMutex);
 
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();

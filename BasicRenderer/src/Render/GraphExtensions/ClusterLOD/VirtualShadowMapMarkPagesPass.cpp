@@ -12,14 +12,14 @@
 #include "Render/ShaderAPI.h"
 
 VirtualShadowMapMarkPagesPass::VirtualShadowMapMarkPagesPass(
-    std::shared_ptr<Buffer> tileWorkBuffer,
-    std::shared_ptr<Buffer> tileCountBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> markClipmapDataBuffer,
-    std::shared_ptr<Buffer> markedBlocksMaskBuffer,
-    std::shared_ptr<Buffer> markedBlocksListBuffer,
-    std::shared_ptr<Buffer> markedBlocksCountBuffer,
-    std::shared_ptr<Buffer> receiverSubpageMaskBuffer)
+    std::shared_ptr<org::Buffer> tileWorkBuffer,
+    std::shared_ptr<org::Buffer> tileCountBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> markClipmapDataBuffer,
+    std::shared_ptr<org::Buffer> markedBlocksMaskBuffer,
+    std::shared_ptr<org::Buffer> markedBlocksListBuffer,
+    std::shared_ptr<org::Buffer> markedBlocksCountBuffer,
+    std::shared_ptr<org::Buffer> receiverSubpageMaskBuffer)
     : m_tileWorkBuffer(std::move(tileWorkBuffer))
     , m_tileCountBuffer(std::move(tileCountBuffer))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
@@ -79,7 +79,7 @@ VirtualShadowMapMarkPagesBindings VirtualShadowMapMarkPagesPass::Declare(org::Pa
 
 
 
-void VirtualShadowMapMarkPagesPass::Update(const UpdateExecutionContext& executionContext)
+void VirtualShadowMapMarkPagesPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
     m_activeClipmapCount = (std::min)(

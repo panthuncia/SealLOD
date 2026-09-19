@@ -40,14 +40,14 @@ public:
             ? 0u : inputs.mipIndex + (inputs.isUpsample ? 1u : 0u);
         if (!inputs.isUpsample) {
             const auto source = inputs.mipIndex == 0
-                ? Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ 0, 1 })
-                : Subresources(Builtin::PostProcessing::BloomTexture, Mip{ inputs.mipIndex, 1 });
+                ? Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 })
+                : Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ inputs.mipIndex, 1 });
             return {builder.BindShaderResource(source),
-                builder.BindRenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, Mip{targetMip, 1})),
+                builder.BindRenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1})),
                 sourceMip, targetMip, false};
         }
-        return {builder.BindShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{sourceMip, 1})),
-            builder.BindRenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, Mip{targetMip, 1})),
+        return {builder.BindShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1})),
+            builder.BindRenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1})),
             sourceMip, targetMip, true};
     }
 
@@ -95,13 +95,13 @@ public:
     }
 
 private:
-    PipelineState m_downsamplePso;
-    PipelineState m_upsamplePso;
+    org::PipelineState m_downsamplePso;
+    org::PipelineState m_upsamplePso;
 
 
-    void CreatePSOForBackend(BackendInstanceId backendInstance) {
+    void CreatePSOForBackend(org::BackendInstanceId backendInstance) {
         auto& deviceManager = DeviceManager::GetInstance();
-        auto dev = backendInstance == BackendInstanceId::Primary
+        auto dev = backendInstance == org::BackendInstanceId::Primary
             ? deviceManager.GetDevice() : deviceManager.GetPeerDevice();
         if (!dev) return;
 
@@ -220,9 +220,9 @@ private:
     }
 
     void CreatePSO() {
-        CreatePSOForBackend(BackendInstanceId::Primary);
+        CreatePSOForBackend(org::BackendInstanceId::Primary);
         if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
-            CreatePSOForBackend(BackendInstanceId::Peer);
+            CreatePSOForBackend(org::BackendInstanceId::Peer);
         }
     }
 };

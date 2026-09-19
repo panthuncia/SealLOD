@@ -7,9 +7,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapBuildPageListsBindings {
     org::ResourceBindingToken pageTable, pageMetadata, allocationCount;
@@ -20,12 +18,12 @@ class VirtualShadowMapBuildPageListsPass final : public org::TypedRenderGraphPas
     br::render::PreparedComputeDispatch, VirtualShadowMapBuildPageListsBindings> {
 public:
     VirtualShadowMapBuildPageListsPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> allocationCountBuffer,
-        std::shared_ptr<Buffer> freePhysicalPagesBuffer,
-        std::shared_ptr<Buffer> reusablePhysicalPagesBuffer,
-        std::shared_ptr<Buffer> pageListHeaderBuffer);
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> allocationCountBuffer,
+        std::shared_ptr<org::Buffer> freePhysicalPagesBuffer,
+        std::shared_ptr<org::Buffer> reusablePhysicalPagesBuffer,
+        std::shared_ptr<org::Buffer> pageListHeaderBuffer);
 
     VirtualShadowMapBuildPageListsBindings Declare(org::PassBuilder& builder);
     void Initialize();
@@ -36,11 +34,11 @@ public:
     void ShutdownPass();
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_allocationCountBuffer;
-    std::shared_ptr<Buffer> m_freePhysicalPagesBuffer;
-    std::shared_ptr<Buffer> m_reusablePhysicalPagesBuffer;
-    std::shared_ptr<Buffer> m_pageListHeaderBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_allocationCountBuffer;
+    std::shared_ptr<org::Buffer> m_freePhysicalPagesBuffer;
+    std::shared_ptr<org::Buffer> m_reusablePhysicalPagesBuffer;
+    std::shared_ptr<org::Buffer> m_pageListHeaderBuffer;
 };

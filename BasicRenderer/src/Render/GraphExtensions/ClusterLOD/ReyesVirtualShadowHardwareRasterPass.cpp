@@ -15,22 +15,22 @@
 #include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
 ReyesVirtualShadowHardwareRasterPass::ReyesVirtualShadowHardwareRasterPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
-    std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
-    std::shared_ptr<Buffer> packedRasterWorkGroupsBuffer,
-    std::shared_ptr<Buffer> compactedRasterWorkIndicesBuffer,
-    std::shared_ptr<Buffer> rasterWorkBuffer,
-    std::shared_ptr<Buffer> diceQueueBuffer,
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> tessTableVerticesBuffer,
-    std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-    std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
-    std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
-    std::shared_ptr<ResourceGroup> slabResourceGroup)
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> rasterBucketsHistogramBuffer,
+    std::shared_ptr<org::Buffer> rasterBucketsIndirectArgsBuffer,
+    std::shared_ptr<org::Buffer> packedRasterWorkGroupsBuffer,
+    std::shared_ptr<org::Buffer> compactedRasterWorkIndicesBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkBuffer,
+    std::shared_ptr<org::Buffer> diceQueueBuffer,
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture,
+    std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
     , m_rasterBucketsIndirectArgsBuffer(std::move(rasterBucketsIndirectArgsBuffer))
@@ -109,7 +109,7 @@ ReyesShadowHardwareBindings ReyesVirtualShadowHardwareRasterPass::Declare(org::P
     return bindings;
 }
 
-void ReyesVirtualShadowHardwareRasterPass::Update(const UpdateExecutionContext& executionContext) {
+void ReyesVirtualShadowHardwareRasterPass::Update(const org::UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
@@ -174,7 +174,7 @@ ReyesShadowHardwareFrameData ReyesVirtualShadowHardwareRasterPass::Prepare(
     data.constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.viewInfo);
     data.constants[CLOD_RASTER_REYES_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
     data.constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-        uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+        uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
     data.constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
     data.constants[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] =
         uav(bindings.physicalPages);

@@ -12,9 +12,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 class VirtualShadowCasterRegistry;
 
 struct VirtualShadowMapSetupBindings {
@@ -28,23 +26,23 @@ class VirtualShadowMapSetupPass final : public org::TypedRenderGraphPass<Virtual
     br::render::PreparedComputeDispatch, VirtualShadowMapSetupBindings> {
 public:
     VirtualShadowMapSetupPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> allocationCountBuffer,
-        std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> markClipmapDataBuffer,
-        std::shared_ptr<Buffer> compactMainCameraBuffer,
-        std::shared_ptr<Buffer> compactShadowCameraBuffer,
-        std::shared_ptr<Buffer> statsBuffer,
-        std::shared_ptr<Buffer> runtimeStateBuffer,
-        std::shared_ptr<Buffer> fallbackCandidateCountBuffer,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> allocationCountBuffer,
+        std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> markClipmapDataBuffer,
+        std::shared_ptr<org::Buffer> compactMainCameraBuffer,
+        std::shared_ptr<org::Buffer> compactShadowCameraBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer,
+        std::shared_ptr<org::Buffer> runtimeStateBuffer,
+        std::shared_ptr<org::Buffer> fallbackCandidateCountBuffer,
         std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters,
         bool forceResetResources);
 
     VirtualShadowMapSetupBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapSetupBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapSetupBindings&,
@@ -52,18 +50,18 @@ public:
     void ShutdownPass();
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_allocationCountBuffer;
-    std::shared_ptr<Buffer> m_dirtyPageFlagsBuffer;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_markClipmapDataBuffer;
-    std::shared_ptr<Buffer> m_compactMainCameraBuffer;
-    std::shared_ptr<Buffer> m_compactShadowCameraBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
-    std::shared_ptr<Buffer> m_runtimeStateBuffer;
-    std::shared_ptr<Buffer> m_fallbackCandidateCountBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_allocationCountBuffer;
+    std::shared_ptr<org::Buffer> m_dirtyPageFlagsBuffer;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_markClipmapDataBuffer;
+    std::shared_ptr<org::Buffer> m_compactMainCameraBuffer;
+    std::shared_ptr<org::Buffer> m_compactShadowCameraBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
+    std::shared_ptr<org::Buffer> m_runtimeStateBuffer;
+    std::shared_ptr<org::Buffer> m_fallbackCandidateCountBuffer;
     std::shared_ptr<VirtualShadowCasterRegistry> m_virtualShadowCasters;
     bool m_forceResetResources = false;
     bool m_resetResources = false;

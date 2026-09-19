@@ -55,7 +55,7 @@ public:
         auto* builder = &declaration;
         builder
             ->WithShaderResource(Builtin::CameraBuffer,
-                Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
+                Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }))
             // Needs UAV, since compute will read-modify-write (manual blend)
             .WithUnorderedAccess(Builtin::Color::HDRColorTarget);
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -92,7 +92,7 @@ public:
     const Params& GetParams() const { return m_params; }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
     Params m_params;
 

@@ -95,7 +95,7 @@ namespace {
 
     bool MakeStreamlineVulkanTextureResource(
         rhi::Device device,
-        PixelBuffer* texture,
+        org::PixelBuffer* texture,
         rhi::DescriptorSlot viewSlot,
         VkImageLayout layout,
         sl::Resource& resource)
@@ -423,7 +423,7 @@ void UpscalingManager::Setup() {
     }
 }
 
-void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
     if (backend != rhi::Backend::D3D12 && backend != rhi::Backend::Vulkan) {
         spdlog::warn("UpscalingManager::EvaluateDLSS called on unsupported backend {}; skipping.", static_cast<uint32_t>(backend));
@@ -644,7 +644,7 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     if (!EnsureFSRContext()) {
         spdlog::warn("UpscalingManager::EvaluateFSR3 skipped dispatch because the FSR context is not initialized");
         return;
@@ -703,7 +703,7 @@ void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     UINT mipSlice = 0;
     UINT arraySlice = 0;
     UINT dstSubresource = CalcSubresource(
@@ -793,7 +793,7 @@ void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     SyncSettingsFromSettingsManager();
     const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(m_upscalingMode, m_dlssSupported);
     EvaluateCaptured(effectiveMode, commandList, camera, frameNumber, elapsedSeconds,
@@ -802,8 +802,8 @@ void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components:
 
 void UpscalingManager::EvaluateCaptured(UpscalingMode mode, rhi::CommandList& commandList,
     const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds,
-    PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget,
-    PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+    org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget,
+    org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     std::scoped_lock evaluateLock(m_evaluateMutex);
     const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(mode, m_dlssSupported);
     switch (effectiveMode)

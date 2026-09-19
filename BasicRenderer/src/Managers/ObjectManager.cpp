@@ -70,7 +70,7 @@ DirectX::XMFLOAT4X4 ComputeNormalMatrixStorage(const DirectX::XMMATRIX& modelMat
 	return stored;
 }
 
-Components::ObjectDrawInfo::BufferRange ToBufferRange(const DynamicBuffer::PagedAllocation& page) {
+Components::ObjectDrawInfo::BufferRange ToBufferRange(const org::DynamicBuffer::PagedAllocation& page) {
 	return Components::ObjectDrawInfo::BufferRange{
 		page.offset,
 		page.allocationSize,
@@ -286,18 +286,18 @@ void PrepareStaticGroupsBulkPlanInPlace(
 ObjectManager::ObjectManager() {
 	m_visibilityGenerationJournal.Initialize({}, 0, 0);
 	auto& resourceManager = ::ResourceManager::GetInstance();
-	m_perObjectBuffers = DynamicBuffer::CreateShared(sizeof(PerObjectCB), 10000, "perObjectBuffers<PerObjectCB>");
-	m_perInstanceTransformBuffers = DynamicBuffer::CreateShared(sizeof(PerInstanceTransformCB), 10000, "perInstanceTransformBuffers<PerInstanceTransformCB>");
-	m_instanceDrawRecordBuffers = DynamicBuffer::CreateShared(sizeof(InstanceDrawRecordCB), 10000, "instanceDrawRecordBuffers<InstanceDrawRecordCB>");
+	m_perObjectBuffers = org::DynamicBuffer::CreateShared(sizeof(PerObjectCB), 10000, "perObjectBuffers<PerObjectCB>");
+	m_perInstanceTransformBuffers = org::DynamicBuffer::CreateShared(sizeof(PerInstanceTransformCB), 10000, "perInstanceTransformBuffers<PerInstanceTransformCB>");
+	m_instanceDrawRecordBuffers = org::DynamicBuffer::CreateShared(sizeof(InstanceDrawRecordCB), 10000, "instanceDrawRecordBuffers<InstanceDrawRecordCB>");
 	m_skinnedAssemblyPlacements = DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>::CreateShared(1024, "skinnedAssemblyPlacements");
 	m_activeSkinnedAssemblyPlacements = SortedUnsignedIntBuffer::CreateActiveDrawSetShared(1024, "activeSkinnedAssemblyPlacements");
 	m_publishedSkinnedPlacementRecords =
 		std::make_shared<const std::vector<SkinnedAssemblyPlacementGPU>>();
 	m_publishedActiveSkinnedPlacementEntries =
 		std::make_shared<const std::vector<br::render::PublishedActiveSkinnedPlacement>>();
-	m_masterIndirectCommandsBuffer = DynamicBuffer::CreateShared(sizeof(DispatchMeshIndirectCommand), 10000, "masterIndirectCommandsBuffer<IndirectCommand>");
+	m_masterIndirectCommandsBuffer = org::DynamicBuffer::CreateShared(sizeof(DispatchMeshIndirectCommand), 10000, "masterIndirectCommandsBuffer<IndirectCommand>");
 
-	m_normalMatrixBuffer = DynamicBuffer::CreateShared(sizeof(DirectX::XMFLOAT4X4), 10000, "normalMatrixBuffer");
+	m_normalMatrixBuffer = org::DynamicBuffer::CreateShared(sizeof(DirectX::XMFLOAT4X4), 10000, "normalMatrixBuffer");
 
 	org::memory::SetResourceUsageHint(*m_perObjectBuffers, "PerMesh, PerMeshInstance, PerObject");
 	org::memory::SetResourceUsageHint(*m_perInstanceTransformBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
@@ -400,13 +400,13 @@ void ObjectManager::SetRendererStateServices(
 	if (!requests || !m_uploadService || !m_graphBufferBindings.empty()) return;
 
 	const std::array definitions{
-		std::tuple{ ResourceIdentifier{ Builtin::PerObjectBuffer }, m_perObjectBuffers,
+		std::tuple{ org::ResourceIdentifier{ Builtin::PerObjectBuffer }, m_perObjectBuffers,
 			br::render::kObjectPerObjectVariant, static_cast<std::uint32_t>(sizeof(PerObjectCB)) },
-		std::tuple{ ResourceIdentifier{ Builtin::PerInstanceTransformBuffer }, m_perInstanceTransformBuffers,
+		std::tuple{ org::ResourceIdentifier{ Builtin::PerInstanceTransformBuffer }, m_perInstanceTransformBuffers,
 			br::render::kObjectInstanceTransformVariant, static_cast<std::uint32_t>(sizeof(PerInstanceTransformCB)) },
-		std::tuple{ ResourceIdentifier{ Builtin::InstanceDrawRecordBuffer }, m_instanceDrawRecordBuffers,
+		std::tuple{ org::ResourceIdentifier{ Builtin::InstanceDrawRecordBuffer }, m_instanceDrawRecordBuffers,
 			br::render::kObjectDrawRecordVariant, static_cast<std::uint32_t>(sizeof(InstanceDrawRecordCB)) },
-		std::tuple{ ResourceIdentifier{ Builtin::NormalMatrixBuffer }, m_normalMatrixBuffer,
+		std::tuple{ org::ResourceIdentifier{ Builtin::NormalMatrixBuffer }, m_normalMatrixBuffer,
 			br::render::kObjectNormalMatrixVariant, static_cast<std::uint32_t>(sizeof(DirectX::XMFLOAT4X4)) }
 	};
 	const auto source = br::render::PublishedStateSource::ProcessSource();
@@ -438,8 +438,8 @@ void ObjectManager::SetRendererStateServices(
 	m_skinnedPlacementBackingPool = std::make_shared<br::render::VersionedGpuBufferBackingPool>();
 	m_activeSkinnedPlacementBackingPool = std::make_shared<br::render::VersionedGpuBufferBackingPool>();
 	PublishSkinnedPlacementSourceVersionLocked();
-	const auto registerPlacementResolver = [&](ResourceIdentifier identifier, std::uint64_t variant,
-		const std::shared_ptr<Resource>& bootstrap) {
+	const auto registerPlacementResolver = [&](org::ResourceIdentifier identifier, std::uint64_t variant,
+		const std::shared_ptr<org::Resource>& bootstrap) {
 		m_graphBufferResolvers.emplace(identifier,
 			std::make_shared<PublishedStateResourceResolver>(source,
 				br::render::PublishedResourceKey{
@@ -985,7 +985,7 @@ void ObjectManager::DeferredRetireDrain(const br::TaskContext& context) {
 }
 
 void ObjectManager::EnqueueDeferredBufferRangeRetire(
-	const std::shared_ptr<DynamicBuffer>& buffer,
+	const std::shared_ptr<org::DynamicBuffer>& buffer,
 	std::uint64_t offset,
 	std::uint64_t size,
 	std::uint64_t retireFrame)
@@ -1001,7 +1001,7 @@ void ObjectManager::EnqueueDeferredBufferRangeRetire(
 }
 
 void ObjectManager::EnqueueDeferredBufferRangeRetires(
-	const std::shared_ptr<DynamicBuffer>& buffer,
+	const std::shared_ptr<org::DynamicBuffer>& buffer,
 	const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges,
 	std::uint64_t retireFrame)
 {
@@ -2072,23 +2072,23 @@ ObjectManager::StaticImportResourceProbeStatus ObjectManager::ProbeStaticImportT
 		const std::size_t perObjectBytes = transformRows * sizeof(PerObjectCB);
 		const std::size_t instanceTransformBytes = transformRows * sizeof(PerInstanceTransformCB);
 		const std::size_t instanceDrawRecordBytes = drawRecordRows * sizeof(InstanceDrawRecordCB);
-		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(probe.normalMatrix, normalMatrixBytes)) {
+		if (!org::DynamicBuffer::CanConsumeAllocationProbeBytes(probe.normalMatrix, normalMatrixBytes)) {
 			return StaticImportResourceProbeStatus::PendingNormalMatrix;
 		}
-		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(probe.perObject, perObjectBytes)) {
+		if (!org::DynamicBuffer::CanConsumeAllocationProbeBytes(probe.perObject, perObjectBytes)) {
 			return StaticImportResourceProbeStatus::PendingPerObject;
 		}
-		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(probe.instanceTransform, instanceTransformBytes)) {
+		if (!org::DynamicBuffer::CanConsumeAllocationProbeBytes(probe.instanceTransform, instanceTransformBytes)) {
 			return StaticImportResourceProbeStatus::PendingInstanceTransform;
 		}
-		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(probe.instanceDrawRecord, instanceDrawRecordBytes)) {
+		if (!org::DynamicBuffer::CanConsumeAllocationProbeBytes(probe.instanceDrawRecord, instanceDrawRecordBytes)) {
 			return StaticImportResourceProbeStatus::PendingDrawRecord;
 		}
 
-		const bool consumedNormalMatrix = DynamicBuffer::TryConsumeAllocationProbeBytes(probe.normalMatrix, normalMatrixBytes);
-		const bool consumedPerObject = DynamicBuffer::TryConsumeAllocationProbeBytes(probe.perObject, perObjectBytes);
-		const bool consumedInstanceTransform = DynamicBuffer::TryConsumeAllocationProbeBytes(probe.instanceTransform, instanceTransformBytes);
-		const bool consumedInstanceDrawRecord = DynamicBuffer::TryConsumeAllocationProbeBytes(probe.instanceDrawRecord, instanceDrawRecordBytes);
+		const bool consumedNormalMatrix = org::DynamicBuffer::TryConsumeAllocationProbeBytes(probe.normalMatrix, normalMatrixBytes);
+		const bool consumedPerObject = org::DynamicBuffer::TryConsumeAllocationProbeBytes(probe.perObject, perObjectBytes);
+		const bool consumedInstanceTransform = org::DynamicBuffer::TryConsumeAllocationProbeBytes(probe.instanceTransform, instanceTransformBytes);
+		const bool consumedInstanceDrawRecord = org::DynamicBuffer::TryConsumeAllocationProbeBytes(probe.instanceDrawRecord, instanceDrawRecordBytes);
 		assert(consumedNormalMatrix);
 		assert(consumedPerObject);
 		assert(consumedInstanceTransform);
@@ -2184,15 +2184,15 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 			continue;
 		}
 
-		std::vector<DynamicBuffer::PagedAllocation> normalRanges;
-		std::vector<DynamicBuffer::PagedAllocation> perObjectRanges;
-		std::vector<DynamicBuffer::PagedAllocation> instanceTransformRanges;
-		std::vector<DynamicBuffer::PagedAllocation> drawRecordRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> normalRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> perObjectRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> instanceTransformRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> drawRecordRanges;
 		if (!m_normalMatrixBuffer->TryAllocateRangesBatch(
 				build.transformCounts,
 				sizeof(DirectX::XMFLOAT4X4),
 				normalRanges,
-				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
+				org::DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
 			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
 			++pendingCount;
 			continue;
@@ -2201,7 +2201,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 				build.transformCounts,
 				sizeof(PerObjectCB),
 				perObjectRanges,
-				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
+				org::DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
 			m_normalMatrixBuffer->DeallocatePages(normalRanges);
 			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
 			++pendingCount;
@@ -2211,7 +2211,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 				build.transformCounts,
 				sizeof(PerInstanceTransformCB),
 				instanceTransformRanges,
-				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
+				org::DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
 			m_normalMatrixBuffer->DeallocatePages(normalRanges);
 			m_perObjectBuffers->DeallocatePages(perObjectRanges);
 			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
@@ -2222,7 +2222,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 				build.drawRecordCounts,
 				sizeof(InstanceDrawRecordCB),
 				drawRecordRanges,
-				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
+				org::DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
 			m_normalMatrixBuffer->DeallocatePages(normalRanges);
 			m_perObjectBuffers->DeallocatePages(perObjectRanges);
 			m_perInstanceTransformBuffers->DeallocatePages(instanceTransformRanges);
@@ -2328,16 +2328,16 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 		const auto transformCount = perObjectRows.size();
 		const auto perObjectRange = groupIndex < reservation.perObjectRanges.size()
 			? reservation.perObjectRanges[groupIndex]
-			: DynamicBuffer::PagedAllocation{};
+			: org::DynamicBuffer::PagedAllocation{};
 		const auto instanceTransformRange = groupIndex < reservation.instanceTransformRanges.size()
 			? reservation.instanceTransformRanges[groupIndex]
-			: DynamicBuffer::PagedAllocation{};
+			: org::DynamicBuffer::PagedAllocation{};
 		const auto normalRange = groupIndex < reservation.normalMatrixRanges.size()
 			? reservation.normalMatrixRanges[groupIndex]
-			: DynamicBuffer::PagedAllocation{};
+			: org::DynamicBuffer::PagedAllocation{};
 		const auto drawRecordRange = groupIndex < reservation.instanceDrawRecordRanges.size()
 			? reservation.instanceDrawRecordRanges[groupIndex]
-			: DynamicBuffer::PagedAllocation{};
+			: org::DynamicBuffer::PagedAllocation{};
 
 		if (drawInfo) {
 			drawInfo->perObjectCBRange = ToBufferRange(perObjectRange);
@@ -2351,8 +2351,8 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 			drawInfo->drawInfo.indices.reserve(transformCount * meshTemplates.size());
 		} else {
 			const auto addRecipeRange = [&removalPayload](
-				const std::shared_ptr<DynamicBuffer>& buffer,
-				const DynamicBuffer::PagedAllocation& allocation,
+				const std::shared_ptr<org::DynamicBuffer>& buffer,
+				const org::DynamicBuffer::PagedAllocation& allocation,
 				StaticObjectRemovalPayload::BufferKind kind) {
 				const auto range = ToBufferRange(allocation);
 				if (buffer && range.IsValid() &&
@@ -2762,8 +2762,8 @@ void ObjectManager::StageStaticImportTransactionUploads(
 	bool includeDrawRecords)
 {
 	ZoneScopedN("ObjectManager::StageStaticImportTransactionUploads");
-	const auto firstValidRange = [](const std::vector<DynamicBuffer::PagedAllocation>& ranges)
-		-> const DynamicBuffer::PagedAllocation* {
+	const auto firstValidRange = [](const std::vector<org::DynamicBuffer::PagedAllocation>& ranges)
+		-> const org::DynamicBuffer::PagedAllocation* {
 		for (const auto& range : ranges) if (range.IsValid()) return &range;
 		return nullptr;
 	};
@@ -3003,7 +3003,7 @@ void ObjectManager::CancelStaticImportTransaction(StaticImportReservation reserv
 	ZoneScopedN("ObjectManager::CancelStaticImportTransaction");
 	const auto frame = retireFrame == 0 ? MakeDeferredRetireFrame() : retireFrame;
 	std::vector<DeferredBufferRangeRetire> retires;
-	const auto addRanges = [&retires, frame](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<DynamicBuffer::PagedAllocation>& ranges) {
+	const auto addRanges = [&retires, frame](const std::shared_ptr<org::DynamicBuffer>& buffer, const std::vector<org::DynamicBuffer::PagedAllocation>& ranges) {
 		if (!buffer) {
 			return;
 		}
@@ -3138,7 +3138,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 	const auto resizeBegin = std::chrono::steady_clock::now();
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportPacket::PublishResizes");
-		(void)PublishReadyDeferredBackingResizes(false);
+		(void)org::PublishReadyDeferredBackingResizes(false);
 	}
 	m_stats.staticDirectResizePublishUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - resizeBegin).count());
@@ -3188,9 +3188,9 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 	packetPerObjectRows.reserve(static_cast<size_t>(packet.transformRows));
 	packetNormalRows.reserve(static_cast<size_t>(packet.transformRows));
 
-	std::vector<DynamicBuffer::PagedAllocation> normalMatrixRanges;
-	std::vector<DynamicBuffer::PagedAllocation> perObjectRanges;
-	std::vector<DynamicBuffer::PagedAllocation> instanceTransformRanges;
+	std::vector<org::DynamicBuffer::PagedAllocation> normalMatrixRanges;
+	std::vector<org::DynamicBuffer::PagedAllocation> perObjectRanges;
+	std::vector<org::DynamicBuffer::PagedAllocation> instanceTransformRanges;
 	const auto pageUploadBegin = std::chrono::steady_clock::now();
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages");
@@ -3258,7 +3258,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 				std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - normalPatchBegin).count());
 		}
 
-		const auto firstValidRange = [](const std::vector<DynamicBuffer::PagedAllocation>& ranges) -> const DynamicBuffer::PagedAllocation* {
+		const auto firstValidRange = [](const std::vector<org::DynamicBuffer::PagedAllocation>& ranges) -> const org::DynamicBuffer::PagedAllocation* {
 			for (const auto& range : ranges) {
 				if (range.IsValid()) {
 					return &range;
@@ -3401,7 +3401,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 			}
 		}
 
-		std::vector<DynamicBuffer::PagedAllocation> instanceDrawRecordRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> instanceDrawRecordRanges;
 		{
 			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::AllocateDrawRecordRangesBatch");
 			instanceDrawRecordRanges = m_instanceDrawRecordBuffers->AllocateRangesBatch(
@@ -3611,7 +3611,7 @@ ObjectManager::StaticObjectRemovalPayload ObjectManager::BuildStaticObjectRemova
 	payload.skinnedAssemblyPlacementIndices.reserve(skinnedPlacementCount);
 
 	const auto addRange = [&payload](
-		const std::shared_ptr<DynamicBuffer>& buffer,
+		const std::shared_ptr<org::DynamicBuffer>& buffer,
 		const Components::ObjectDrawInfo::BufferRange& range,
 		StaticObjectRemovalPayload::BufferKind kind)
 	{
@@ -3620,7 +3620,7 @@ ObjectManager::StaticObjectRemovalPayload ObjectManager::BuildStaticObjectRemova
 		}
 	};
 	const auto addRanges = [&addRange](
-		const std::shared_ptr<DynamicBuffer>& buffer,
+		const std::shared_ptr<org::DynamicBuffer>& buffer,
 		const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges,
 		StaticObjectRemovalPayload::BufferKind kind)
 	{
@@ -3629,8 +3629,8 @@ ObjectManager::StaticObjectRemovalPayload ObjectManager::BuildStaticObjectRemova
 		}
 	};
 	const auto addView = [&payload](
-		const std::shared_ptr<DynamicBuffer>& buffer,
-		const std::shared_ptr<BufferView>& view,
+		const std::shared_ptr<org::DynamicBuffer>& buffer,
+		const std::shared_ptr<org::BufferView>& view,
 		StaticObjectRemovalPayload::BufferKind kind)
 	{
 		if (!buffer || !view) {
@@ -3810,7 +3810,7 @@ ObjectManager::StaticObjectRemovalResult ObjectManager::RemoveStaticObjectsBulk(
 	tombstoneDrawRecordIndices.reserve(totalDrawRecordIndices);
 
 	const auto retireOrDeallocateRange = [this, &options, &pageDeallocUs, &deferredRetires](
-		const std::shared_ptr<DynamicBuffer>& buffer,
+		const std::shared_ptr<org::DynamicBuffer>& buffer,
 		std::uint64_t offset,
 		std::uint64_t size)
 	{
@@ -3831,12 +3831,12 @@ ObjectManager::StaticObjectRemovalResult ObjectManager::RemoveStaticObjectsBulk(
 		pageDeallocUs += static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
 	};
-	const auto retireOrDeallocateView = [&retireOrDeallocateRange](const std::shared_ptr<DynamicBuffer>& buffer, const std::shared_ptr<BufferView>& view) {
+	const auto retireOrDeallocateView = [&retireOrDeallocateRange](const std::shared_ptr<org::DynamicBuffer>& buffer, const std::shared_ptr<org::BufferView>& view) {
 		if (buffer && view) {
 			retireOrDeallocateRange(buffer, view->GetOffset(), view->GetSize());
 		}
 	};
-	const auto retireOrDeallocateOwnedRanges = [this, &options, &pageDeallocUs](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
+	const auto retireOrDeallocateOwnedRanges = [this, &options, &pageDeallocUs](const std::shared_ptr<org::DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
 		if (!buffer) {
 			return;
 		}
@@ -4043,12 +4043,12 @@ ObjectManager::StaticVisibilityUpdateResult ObjectManager::SetStaticObjectsVisib
 	return spans;
 }
 
-void ObjectManager::UpdatePerObjectBuffer(BufferView* view, PerObjectCB& data) {
+void ObjectManager::UpdatePerObjectBuffer(org::BufferView* view, PerObjectCB& data) {
 	std::lock_guard<std::mutex> lock(m_objectUpdateMutex);
 	m_perObjectBuffers->UpdateView(view, &data);
 }
 
-void ObjectManager::UpdateNormalMatrixBuffer(BufferView* view, void* data) {
+void ObjectManager::UpdateNormalMatrixBuffer(org::BufferView* view, void* data) {
 	std::lock_guard<std::mutex> lock(m_normalMatrixUpdateMutex);
 	m_normalMatrixBuffer->UpdateView(view, data);
 }
@@ -4077,12 +4077,12 @@ void ObjectManager::EndNormalMatrixBulkWrite(size_t dirtyOffset, size_t dirtySiz
 	m_normalMatrixBuffer->EndBulkWrite(dirtyOffset, dirtySize);
 }
 
-std::shared_ptr<Resource> ObjectManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> ObjectManager::ProvideResource(org::ResourceIdentifier const& key) {
 	return m_resources[key];
 }
 
-std::vector<ResourceIdentifier> ObjectManager::GetSupportedKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> ObjectManager::GetSupportedKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources)
 		keys.push_back(key);
@@ -4090,13 +4090,13 @@ std::vector<ResourceIdentifier> ObjectManager::GetSupportedKeys() {
 	return keys;
 }
 
-std::shared_ptr<IResourceResolver> ObjectManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> ObjectManager::ProvideResolver(org::ResourceIdentifier const& key) {
 	const auto it = m_graphBufferResolvers.find(key);
 	return it != m_graphBufferResolvers.end() ? it->second : nullptr;
 }
 
-std::vector<ResourceIdentifier> ObjectManager::GetSupportedResolverKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> ObjectManager::GetSupportedResolverKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_graphBufferResolvers.size());
 	for (const auto& [key, _] : m_graphBufferResolvers) keys.push_back(key);
 	return keys;

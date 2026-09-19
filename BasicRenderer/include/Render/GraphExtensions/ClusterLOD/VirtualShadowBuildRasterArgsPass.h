@@ -13,7 +13,6 @@
 #include "../../../../shaders/PerPassRootConstants/clodVirtualShadowBuildArgsRootConstants.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
 struct VirtualShadowBuildRasterArgsBindings {
     org::ResourceBindingToken histogram, offsets, arguments;
@@ -23,9 +22,9 @@ class VirtualShadowBuildRasterArgsPass : public org::TypedRenderGraphPass<Virtua
     br::render::PreparedComputeDispatch, VirtualShadowBuildRasterArgsBindings> {
 public:
     VirtualShadowBuildRasterArgsPass(
-        std::shared_ptr<Buffer> histogramBuffer,
-        std::shared_ptr<Buffer> offsetsBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer,
+        std::shared_ptr<org::Buffer> histogramBuffer,
+        std::shared_ptr<org::Buffer> offsetsBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer,
         bool runWhenComputeSWRasterEnabledOnly = false)
         : m_histogramBuffer(std::move(histogramBuffer))
         , m_offsetsBuffer(std::move(offsetsBuffer))
@@ -48,7 +47,7 @@ public:
             declaration.BindUnorderedAccess(m_indirectArgsBuffer)};
     }
 
-    void Update(const UpdateExecutionContext& executionContext) override
+    void Update(const org::UpdateExecutionContext& executionContext) override
     {
         if (m_runWhenComputeSWRasterEnabledOnly &&
             !CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)())) {
@@ -97,9 +96,9 @@ public:
     }
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<Buffer> m_histogramBuffer;
-    std::shared_ptr<Buffer> m_offsetsBuffer;
-    std::shared_ptr<Buffer> m_indirectArgsBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_histogramBuffer;
+    std::shared_ptr<org::Buffer> m_offsetsBuffer;
+    std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
 };

@@ -18,7 +18,7 @@ struct EnvironmentConversionBindings {
 };
 
 class EnvironmentConversionPass : public org::TypedRenderGraphPass<EnvironmentConversionPass,
-    br::render::PreparedEnvironmentDispatch, EnvironmentConversionBindings>, public IDynamicDeclaredResources {
+    br::render::PreparedEnvironmentDispatch, EnvironmentConversionBindings>, public org::IDynamicDeclaredResources {
 public:
     EnvironmentConversionPass() {
 
@@ -40,7 +40,7 @@ public:
 
 
 
-    void Update(const UpdateExecutionContext& context) override {
+    void Update(const org::UpdateExecutionContext& context) override {
         const auto* input = context.hostData->Get<UpdateContext>();
         m_work = input->environmentWork.conversion;
         auto pending = m_work.Pending();
@@ -86,7 +86,7 @@ private:
     mutable br::render::EnvironmentConversionWorkQueue::Snapshot m_pending;
     mutable bool m_declaredResourcesChanged = true;
 
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
     void CreateEnvironmentConversionPSO() {
         auto dev = DeviceManager::GetInstance().GetDevice();
@@ -135,7 +135,7 @@ private:
             throw std::runtime_error("EnvConvert: PSO failed");
         }
         pipeline->SetName("EnvConvert.ComputePSO");
-        m_pso = PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
             compiled.resourceDescriptorSlots, layout, soLayout.layout);
     }
 };

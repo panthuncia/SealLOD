@@ -12,11 +12,8 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 
 struct ReyesShadowHardwareFrameData {
     struct Bucket {
@@ -40,52 +37,52 @@ struct ReyesShadowHardwareBindings {
 };
 
 class ReyesVirtualShadowHardwareRasterPass final : public org::TypedRenderGraphPass<ReyesVirtualShadowHardwareRasterPass,
-    ReyesShadowHardwareFrameData, ReyesShadowHardwareBindings>, public IDynamicDeclaredResources {
+    ReyesShadowHardwareFrameData, ReyesShadowHardwareBindings>, public org::IDynamicDeclaredResources {
 public:
     ReyesVirtualShadowHardwareRasterPass(
-        std::shared_ptr<Buffer> visibleClustersBuffer,
-        std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
-        std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
-        std::shared_ptr<Buffer> packedRasterWorkGroupsBuffer,
-        std::shared_ptr<Buffer> compactedRasterWorkIndicesBuffer,
-        std::shared_ptr<Buffer> rasterWorkBuffer,
-        std::shared_ptr<Buffer> diceQueueBuffer,
-        std::shared_ptr<Buffer> tessTableConfigsBuffer,
-        std::shared_ptr<Buffer> tessTableVerticesBuffer,
-        std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-        std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-        std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-        std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
-        std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-        std::shared_ptr<Buffer> telemetryBuffer,
-        std::shared_ptr<ResourceGroup> slabResourceGroup);
+        std::shared_ptr<org::Buffer> visibleClustersBuffer,
+        std::shared_ptr<org::Buffer> rasterBucketsHistogramBuffer,
+        std::shared_ptr<org::Buffer> rasterBucketsIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> packedRasterWorkGroupsBuffer,
+        std::shared_ptr<org::Buffer> compactedRasterWorkIndicesBuffer,
+        std::shared_ptr<org::Buffer> rasterWorkBuffer,
+        std::shared_ptr<org::Buffer> diceQueueBuffer,
+        std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+        std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+        std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
+        std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+        std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+        std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture,
+        std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> telemetryBuffer,
+        std::shared_ptr<org::ResourceGroup> slabResourceGroup);
     ~ReyesVirtualShadowHardwareRasterPass();
 
     ReyesShadowHardwareBindings Declare(org::PassBuilder& builder);
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
     ReyesShadowHardwareFrameData Prepare(const ReyesShadowHardwareBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesShadowHardwareBindings&, const ReyesShadowHardwareFrameData& data, org::PassRecordContext& recording);
 
 private:
-    std::shared_ptr<Buffer> m_visibleClustersBuffer;
-    std::shared_ptr<Buffer> m_rasterBucketsHistogramBuffer;
-    std::shared_ptr<Buffer> m_rasterBucketsIndirectArgsBuffer;
-    std::shared_ptr<Buffer> m_packedRasterWorkGroupsBuffer;
-    std::shared_ptr<Buffer> m_compactedRasterWorkIndicesBuffer;
-    std::shared_ptr<Buffer> m_rasterWorkBuffer;
-    std::shared_ptr<Buffer> m_diceQueueBuffer;
-    std::shared_ptr<Buffer> m_tessTableConfigsBuffer;
-    std::shared_ptr<Buffer> m_tessTableVerticesBuffer;
-    std::shared_ptr<Buffer> m_tessTableTrianglesBuffer;
-    std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
-    std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_telemetryBuffer;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
-    std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
+    std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_rasterBucketsHistogramBuffer;
+    std::shared_ptr<org::Buffer> m_rasterBucketsIndirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_packedRasterWorkGroupsBuffer;
+    std::shared_ptr<org::Buffer> m_compactedRasterWorkIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_rasterWorkBuffer;
+    std::shared_ptr<org::Buffer> m_diceQueueBuffer;
+    std::shared_ptr<org::Buffer> m_tessTableConfigsBuffer;
+    std::shared_ptr<org::Buffer> m_tessTableVerticesBuffer;
+    std::shared_ptr<org::Buffer> m_tessTableTrianglesBuffer;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPageTableTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowDynamicPagesTexture;
+    std::shared_ptr<org::Buffer> m_virtualShadowClipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_telemetryBuffer;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::Buffer> m_viewRasterInfoBuffer;
 
     std::vector<CLodViewRasterInfo> m_viewRasterInfos;
     std::shared_ptr<rhi::CommandSignaturePtr> m_rasterizationCommandSignature;

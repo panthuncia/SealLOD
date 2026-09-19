@@ -8,9 +8,9 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITDepthWarpRootConstants.h"
 
 AVBOITDepthWarpPass::AVBOITDepthWarpPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<Buffer> occupancyHistogramBuffer,
-    std::shared_ptr<Buffer> depthWarpLUTBuffer)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::Buffer> occupancyHistogramBuffer,
+    std::shared_ptr<org::Buffer> depthWarpLUTBuffer)
     : m_configBuffer(std::move(configBuffer))
     , m_occupancyHistogramBuffer(std::move(occupancyHistogramBuffer))
     , m_depthWarpLUTBuffer(std::move(depthWarpLUTBuffer))

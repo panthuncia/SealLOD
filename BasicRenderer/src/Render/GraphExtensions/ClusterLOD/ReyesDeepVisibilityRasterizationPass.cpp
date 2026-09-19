@@ -25,21 +25,21 @@ constexpr uint32_t kDeepVisibilityAverageFragmentsPerPixel = 5u;
 }
 
 ReyesDeepVisibilityRasterizationPass::ReyesDeepVisibilityRasterizationPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> diceQueueBuffer,
-    std::shared_ptr<Buffer> diceQueueCounterBuffer,
-    std::shared_ptr<Buffer> rasterWorkBuffer,
-    std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> tessTableVerticesBuffer,
-    std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
-    std::shared_ptr<Buffer> deepVisibilityNodesBuffer,
-    std::shared_ptr<Buffer> deepVisibilityCounterBuffer,
-    std::shared_ptr<Buffer> deepVisibilityOverflowCounterBuffer,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> diceQueueBuffer,
+    std::shared_ptr<org::Buffer> diceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityNodesBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityCounterBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityOverflowCounterBuffer,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
     std::string_view resourceName,
     uint32_t patchVisibilityIndexBase)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
@@ -151,14 +151,14 @@ ReyesDeepVisibilityRasterBindings ReyesDeepVisibilityRasterizationPass::Declare(
     return bindings;
 }
 
-void ReyesDeepVisibilityRasterizationPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesDeepVisibilityRasterizationPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
 
     const auto numViews = context.ViewCameraBufferSize();
-    std::vector<std::shared_ptr<PixelBuffer>> visibilityBuffers;
-    std::vector<std::shared_ptr<PixelBuffer>> deepVisibilityHeadPointerBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> visibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> deepVisibilityHeadPointerBuffers;
 
     uint32_t maxViewWidth = 1u;
     uint32_t maxViewHeight = 1u;

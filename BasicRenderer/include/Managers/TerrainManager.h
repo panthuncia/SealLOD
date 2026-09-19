@@ -95,7 +95,7 @@ struct TerrainMaterialDesc
     float regionSizeWorld = kDefaultTerrainRegionSizeWorld;
 };
 
-class TerrainManager : public IResourceProvider
+class TerrainManager : public org::IResourceProvider
 {
 public:
     static std::unique_ptr<TerrainManager> CreateUnique();
@@ -116,10 +116,10 @@ public:
 	bool TryActivatePublishedTerrainState(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-    std::vector<ResourceIdentifier> GetSupportedKeys() override;
-    std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-    std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+    std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+    std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+    std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 
 private:
     TerrainManager();
@@ -144,7 +144,7 @@ private:
     std::shared_ptr<DynamicStructuredBuffer<TerrainRegionGPU>> m_regions;
     // Four exact Skyrim UNORM8 paint weights are stored in each GPU word.
     std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> m_weightBlocks;
-    std::shared_ptr<ResourceGroup> m_textureGroup;
+    std::shared_ptr<org::ResourceGroup> m_textureGroup;
     std::vector<std::shared_ptr<TextureAsset>> m_layerTextures;
     std::vector<TerrainLayerGPU> m_layerData;
 	std::vector<TerrainStochasticLayerGPU> m_stochasticLayerData;

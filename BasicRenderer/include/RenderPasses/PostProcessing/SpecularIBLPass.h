@@ -44,11 +44,11 @@ public:
         if (m_gtaoEnabled) {
             builder.WithShaderResource(Builtin::GTAO::OutputAOTerm);
         }
-        return {builder.BindRenderTarget(ResourceIdentifier{Builtin::Color::HDRColorTarget})};
+        return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget})};
     }
 
     void Initialize() {
-		RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
+		RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
     }
 
     br::render::PreparedFullscreenDraw Prepare(const SpecularIBLBindings& bindings,
@@ -79,7 +79,7 @@ public:
 
 private:
 
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
     bool m_gtaoEnabled = true;
 
@@ -157,7 +157,7 @@ private:
             throw std::runtime_error("Failed to create SpecularIBL PSO (RHI)");
         }
         pipeline->SetName("SpecularIBL.PSO");
-        m_pso = PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
             compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
             soLayout.layout);
     }

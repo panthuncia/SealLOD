@@ -17,16 +17,13 @@
 #include "Interfaces/IResourceProvider.h"
 
 namespace org { class BufferView; }
-using org::BufferView;
 namespace org { class DynamicBuffer; }
-using org::DynamicBuffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 namespace org::runtime { class IUploadService; }
 
-class EnvironmentManager : public IResourceProvider {
+class EnvironmentManager : public org::IResourceProvider {
 public:
-	using RequestReadbackFn = std::function<void(std::shared_ptr<PixelBuffer>, std::wstring, std::function<void()>, bool)>;
+	using RequestReadbackFn = std::function<void(std::shared_ptr<org::PixelBuffer>, std::wstring, std::function<void()>, bool)>;
 
 	static std::unique_ptr<EnvironmentManager> CreateUnique(std::shared_ptr<org::runtime::IUploadService> uploadService) {
 		return std::unique_ptr<EnvironmentManager>(new EnvironmentManager(std::move(uploadService)));
@@ -50,18 +47,18 @@ public:
 
 	void SetFromHDRI(Environment* e, std::string hdriPath);
 
-	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-	std::vector<ResourceIdentifier> GetSupportedKeys() override;
-	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+	std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+	std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 
 private:
 	explicit EnvironmentManager(std::shared_ptr<org::runtime::IUploadService> uploadService);
 	std::shared_ptr<org::runtime::IUploadService> m_uploadService;
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::IResourceResolver>, org::ResourceIdentifier::Hasher> m_resolvers;
 
-	std::shared_ptr<LazyDynamicStructuredBuffer<EnvironmentInfo>> m_environmentInfoBuffer;
+	std::shared_ptr<org::LazyDynamicStructuredBuffer<EnvironmentInfo>> m_environmentInfoBuffer;
 	std::mutex m_environmentInfoBufferMutex; // Mutex for thread safety
 
 	unsigned int m_skyboxResolution = 2048;
@@ -72,10 +69,10 @@ private:
 	br::render::EnvironmentWorkServices m_workServices;
 	std::shared_ptr<std::mutex> m_environmentUpdateMutex = std::make_shared<std::mutex>(); // Mutex for thread safety
 
-	std::shared_ptr<ResourceGroup> m_workingEnvironmentCubemapGroup; // Temporary group for prefiltered cubemap generation
-	std::shared_ptr<ResourceGroup> m_workingHDRIGroup; // Temporary group for prefiltered cubemap generation
+	std::shared_ptr<org::ResourceGroup> m_workingEnvironmentCubemapGroup; // Temporary group for prefiltered cubemap generation
+	std::shared_ptr<org::ResourceGroup> m_workingHDRIGroup; // Temporary group for prefiltered cubemap generation
 
-	std::shared_ptr<ResourceGroup> m_environmentPrefilteredCubemapGroup;
+	std::shared_ptr<org::ResourceGroup> m_environmentPrefilteredCubemapGroup;
 	RequestReadbackFn m_requestReadback;
 
 	friend class Environment;

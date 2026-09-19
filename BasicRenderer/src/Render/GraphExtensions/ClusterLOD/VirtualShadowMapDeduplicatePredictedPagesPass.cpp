@@ -11,15 +11,15 @@
 #include "Render/ShaderAPI.h"
 
 VirtualShadowMapDeduplicatePredictedPagesPass::VirtualShadowMapDeduplicatePredictedPagesPass(
-    std::shared_ptr<Buffer> predictiveRawPagesBuffer,
-    std::shared_ptr<Buffer> predictiveRawPageCountBuffer,
-    std::shared_ptr<Buffer> predictedScratchBitsetBuffer,
-    std::shared_ptr<Buffer> predictedPagesBuffer,
-    std::shared_ptr<Buffer> predictedPageCountBuffer,
-    std::shared_ptr<Buffer> statsBuffer,
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> dirtyFlagsBuffer,
+    std::shared_ptr<org::Buffer> predictiveRawPagesBuffer,
+    std::shared_ptr<org::Buffer> predictiveRawPageCountBuffer,
+    std::shared_ptr<org::Buffer> predictedScratchBitsetBuffer,
+    std::shared_ptr<org::Buffer> predictedPagesBuffer,
+    std::shared_ptr<org::Buffer> predictedPageCountBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> dirtyFlagsBuffer,
     uint32_t physicalPageCount)
     : m_predictiveRawPagesBuffer(std::move(predictiveRawPagesBuffer))
     , m_predictiveRawPageCountBuffer(std::move(predictiveRawPageCountBuffer))
@@ -86,7 +86,7 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapDeduplicatePredicted
     c[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_OUTPUT_PAGES_DESCRIPTOR_INDEX] = uav(bindings.pages);
     c[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_OUTPUT_PAGE_COUNT_DESCRIPTOR_INDEX] = uav(bindings.pageCount);
     c[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
-    c[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+    c[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
     c[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
     c[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
     c[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PHYSICAL_PAGE_COUNT] = bindings.physicalPageCount;

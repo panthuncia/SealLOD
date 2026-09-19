@@ -21,9 +21,7 @@
 #include "../../../../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 
 struct ClusterPageJobRasterFrameData {
     std::vector<br::render::PreparedComputeIndirect> dispatches;
@@ -39,21 +37,21 @@ class ClusterSoftwareRasterPageJobRasterPass : public org::TypedRenderGraphPass<
     ClusterPageJobRasterFrameData, ClusterPageJobRasterBindings> {
 public:
     ClusterSoftwareRasterPageJobRasterPass(
-        std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
-        std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> viewRasterInfoBuffer,
-        std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-        std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-        std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
-        std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-        std::shared_ptr<Buffer> rigidPageJobCountBuffer,
-        std::shared_ptr<Buffer> rigidPageJobRecordsBuffer,
-        std::shared_ptr<Buffer> rigidPageJobIndirectArgsBuffer,
-        std::shared_ptr<Buffer> skinnedPageJobCountBuffer,
-        std::shared_ptr<Buffer> skinnedPageJobRecordsBuffer,
-        std::shared_ptr<Buffer> skinnedPageJobIndirectArgsBuffer,
-        std::shared_ptr<Buffer> virtualShadowStatsBuffer,
-        std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
+        std::shared_ptr<org::Buffer> compactedVisibleClustersBuffer,
+        std::shared_ptr<org::Buffer> compactedVisibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> viewRasterInfoBuffer,
+        std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+        std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+        std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture,
+        std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> rigidPageJobCountBuffer,
+        std::shared_ptr<org::Buffer> rigidPageJobRecordsBuffer,
+        std::shared_ptr<org::Buffer> rigidPageJobIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> skinnedPageJobCountBuffer,
+        std::shared_ptr<org::Buffer> skinnedPageJobRecordsBuffer,
+        std::shared_ptr<org::Buffer> skinnedPageJobIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> virtualShadowStatsBuffer,
+        std::shared_ptr<org::ResourceGroup> slabResourceGroup = nullptr,
         bool runWhenComputeSWRasterEnabledOnly = false)
         : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
         , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
@@ -182,7 +180,7 @@ public:
             srv(bindings.compactedVisibleClusterTransformIndices);
         misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.viewRasterInfo);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-            uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+            uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = uav(bindings.physicalPages);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
@@ -215,20 +213,20 @@ public:
     }
 
 private:
-    PipelineState m_rigidPso;
-    PipelineState m_skinnedPso;
+    org::PipelineState m_rigidPso;
+    org::PipelineState m_skinnedPso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
-    std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
-    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
-    std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
-    std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
-    std::array<std::shared_ptr<Buffer>, 2> m_pageJobCountBuffers;
-    std::array<std::shared_ptr<Buffer>, 2> m_pageJobRecordsBuffers;
-    std::array<std::shared_ptr<Buffer>, 2> m_pageJobIndirectArgsBuffers;
-    std::shared_ptr<Buffer> m_virtualShadowStatsBuffer;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_viewRasterInfoBuffer;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPageTableTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowDynamicPagesTexture;
+    std::shared_ptr<org::Buffer> m_virtualShadowClipmapInfoBuffer;
+    std::array<std::shared_ptr<org::Buffer>, 2> m_pageJobCountBuffers;
+    std::array<std::shared_ptr<org::Buffer>, 2> m_pageJobRecordsBuffers;
+    std::array<std::shared_ptr<org::Buffer>, 2> m_pageJobIndirectArgsBuffers;
+    std::shared_ptr<org::Buffer> m_virtualShadowStatsBuffer;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
 };

@@ -22,12 +22,12 @@ EnvironmentManager::EnvironmentManager(std::shared_ptr<org::runtime::IUploadServ
 	auto& resourceManager = ::ResourceManager::GetInstance();
 	m_skyboxResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("skyboxResolution")();
 	m_reflectionCubemapResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("reflectionCubemapResolution")();
-	m_environmentInfoBuffer = LazyDynamicStructuredBuffer<EnvironmentInfo>::CreateShared(1, "environmentsBuffer", 0, true);
+	m_environmentInfoBuffer = org::LazyDynamicStructuredBuffer<EnvironmentInfo>::CreateShared(1, "environmentsBuffer", 0, true);
 	org::memory::SetResourceUsageHint(*m_environmentInfoBuffer, "Environment Info");
 
-	m_workingEnvironmentCubemapGroup = std::make_shared<ResourceGroup>("EnvironmentCubemapGroup");
-	m_workingHDRIGroup = std::make_shared<ResourceGroup>("WorkingHDRIGroup");
-	m_environmentPrefilteredCubemapGroup = std::make_shared<ResourceGroup>("EnvironmentPrefilteredCubemapGroup");
+	m_workingEnvironmentCubemapGroup = std::make_shared<org::ResourceGroup>("EnvironmentCubemapGroup");
+	m_workingHDRIGroup = std::make_shared<org::ResourceGroup>("WorkingHDRIGroup");
+	m_environmentPrefilteredCubemapGroup = std::make_shared<org::ResourceGroup>("EnvironmentPrefilteredCubemapGroup");
 
 	m_resources[Builtin::Environment::InfoBuffer] = m_environmentInfoBuffer;
 
@@ -44,13 +44,13 @@ std::unique_ptr<Environment> EnvironmentManager::CreateEnvironment(std::wstring 
 	std::unique_ptr<Environment> env = std::make_unique<Environment>(this, name);
 	env->SetEnvironmentBufferView(view);
 
-	ImageDimensions dims;
+	org::ImageDimensions dims;
 	dims.height = m_reflectionCubemapResolution;
 	dims.width = m_reflectionCubemapResolution;
 	dims.rowPitch = m_reflectionCubemapResolution * 4;
 	dims.slicePitch = m_reflectionCubemapResolution * m_reflectionCubemapResolution * 4;
 
-	TextureDescription prefilteredDesc;
+	org::TextureDescription prefilteredDesc;
 	for (int i = 0; i < 6; i++) {
 		prefilteredDesc.imageDimensions.push_back(dims);
 	}
@@ -61,9 +61,9 @@ std::unique_ptr<Environment> EnvironmentManager::CreateEnvironment(std::wstring 
 	prefilteredDesc.generateMipMaps = true;
 	prefilteredDesc.hasUAV = true;
 
-	auto prefilteredEnvironmentCubemap = PixelBuffer::CreateShared(prefilteredDesc);
+	auto prefilteredEnvironmentCubemap = org::PixelBuffer::CreateShared(prefilteredDesc);
 	org::memory::SetResourceUsageHint(*prefilteredEnvironmentCubemap, "Environment lighting");
-	auto sampler = Sampler::GetDefaultSampler();
+	auto sampler = org::Sampler::GetDefaultSampler();
 	auto prefilteredEnvironment = TextureAsset::CreateShared(prefilteredDesc, prefilteredEnvironmentCubemap, sampler, TextureFileMeta());
 	prefilteredEnvironment->SetName("Environment prefiltered cubemap");
 
@@ -99,8 +99,8 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 		auto factory = TextureFactory::CreateUnique(m_uploadService);
 		skyHDR->EnsureUploaded(*factory);
 
-		TextureDescription skyboxDesc;
-		ImageDimensions dims;
+		org::TextureDescription skyboxDesc;
+		org::ImageDimensions dims;
 		res = m_skyboxResolution;
 		dims.height = m_skyboxResolution;
 		dims.width = m_skyboxResolution;
@@ -114,9 +114,9 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 		skyboxDesc.format = rhi::Format::R16G16B16A16_Float;
 		skyboxDesc.hasUAV = true;
 
-		auto envCubemap = PixelBuffer::CreateShared(skyboxDesc);
+		auto envCubemap = org::PixelBuffer::CreateShared(skyboxDesc);
 		org::memory::SetResourceUsageHint(*envCubemap, "Environment lighting");
-		auto sampler = Sampler::GetDefaultSampler();
+		auto sampler = org::Sampler::GetDefaultSampler();
 		skybox = TextureAsset::CreateShared(skyboxDesc, envCubemap, sampler, TextureFileMeta());
 		skybox->SetName("Environment cubemap");
 
@@ -145,13 +145,13 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 
 	//Re-create environment cubemap at full res
 	m_environmentPrefilteredCubemapGroup->RemoveResource(e->GetEnvironmentPrefilteredCubemap().get());
-	ImageDimensions dims;
+	org::ImageDimensions dims;
 	dims.height = res;
 	dims.width = res;
 	dims.rowPitch = res * 4;
 	dims.slicePitch = res * res * 4;
 
-	TextureDescription prefilteredDesc;
+	org::TextureDescription prefilteredDesc;
 	for (int i = 0; i < 6; i++) {
 		prefilteredDesc.imageDimensions.push_back(dims);
 	}
@@ -161,9 +161,9 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 	prefilteredDesc.generateMipMaps = true;
 	prefilteredDesc.hasUAV = true;
 
-	auto prefilteredEnvironmentCubemap = PixelBuffer::CreateShared(prefilteredDesc);
+	auto prefilteredEnvironmentCubemap = org::PixelBuffer::CreateShared(prefilteredDesc);
 	org::memory::SetResourceUsageHint(*prefilteredEnvironmentCubemap, "Environment lighting");
-	auto sampler = Sampler::GetDefaultSampler();
+	auto sampler = org::Sampler::GetDefaultSampler();
 	auto prefilteredEnvironment = TextureAsset::CreateShared(prefilteredDesc, prefilteredEnvironmentCubemap, sampler, TextureFileMeta());
 	prefilteredEnvironment->SetName("Environment prefiltered cubemap");
 	e->SetEnvironmentPrefilteredCubemap(prefilteredEnvironment);
@@ -186,12 +186,12 @@ void EnvironmentManager::RemoveEnvironment(Environment* e) {
 	m_workingEnvironmentCubemapGroup->RemoveResource(e->GetEnvironmentCubemap()->ImagePtr().get());
 }
 
-std::shared_ptr<Resource> EnvironmentManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> EnvironmentManager::ProvideResource(org::ResourceIdentifier const& key) {
 	return m_resources[key];
 }
 
-std::vector<ResourceIdentifier> EnvironmentManager::GetSupportedKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> EnvironmentManager::GetSupportedKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources)
 		keys.push_back(key);
@@ -199,14 +199,14 @@ std::vector<ResourceIdentifier> EnvironmentManager::GetSupportedKeys() {
 	return keys;
 }
 
-std::vector<ResourceIdentifier> EnvironmentManager::GetSupportedResolverKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> EnvironmentManager::GetSupportedResolverKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resolvers.size());
 	for (auto const& [k, _] : m_resolvers)
 		keys.push_back(k);
 	return keys;
 }
-std::shared_ptr<IResourceResolver> EnvironmentManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> EnvironmentManager::ProvideResolver(org::ResourceIdentifier const& key) {
 	auto it = m_resolvers.find(key);
 	if (it == m_resolvers.end()) return nullptr;
 	return it->second;

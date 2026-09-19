@@ -8,15 +8,15 @@
 #include "Render/RenderContext.h"
 
 AVBOITIntegratePass::AVBOITIntegratePass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<Buffer> fitStateBuffer,
-    std::shared_ptr<PixelBuffer> occupancyTexture,
-    std::shared_ptr<PixelBuffer> coverageTexture,
-    std::shared_ptr<PixelBuffer> occupancySliceMaskTexture,
-    std::shared_ptr<PixelBuffer> scalarExtinctionTexture,
-    std::shared_ptr<PixelBuffer> chromaticExtinctionTexture,
-    std::shared_ptr<PixelBuffer> integratedTransmittanceTexture,
-    std::shared_ptr<PixelBuffer> zeroTransmittanceSliceTexture)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::Buffer> fitStateBuffer,
+    std::shared_ptr<org::PixelBuffer> occupancyTexture,
+    std::shared_ptr<org::PixelBuffer> coverageTexture,
+    std::shared_ptr<org::PixelBuffer> occupancySliceMaskTexture,
+    std::shared_ptr<org::PixelBuffer> scalarExtinctionTexture,
+    std::shared_ptr<org::PixelBuffer> chromaticExtinctionTexture,
+    std::shared_ptr<org::PixelBuffer> integratedTransmittanceTexture,
+    std::shared_ptr<org::PixelBuffer> zeroTransmittanceSliceTexture)
     : m_configBuffer(std::move(configBuffer))
     , m_fitStateBuffer(std::move(fitStateBuffer))
     , m_occupancyTexture(std::move(occupancyTexture))
@@ -56,7 +56,7 @@ AVBOITIntegrateBindings AVBOITIntegratePass::Declare(org::PassBuilder& builder)
     return bindings;
 }
 
-void AVBOITIntegratePass::Update(const UpdateExecutionContext& executionContext)
+void AVBOITIntegratePass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
     m_declaredResourcesChanged = false;

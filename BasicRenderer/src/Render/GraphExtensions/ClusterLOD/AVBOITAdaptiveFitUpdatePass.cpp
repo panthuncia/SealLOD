@@ -7,9 +7,9 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITAdaptiveFitRootConstants.h"
 
 AVBOITAdaptiveFitUpdatePass::AVBOITAdaptiveFitUpdatePass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<Buffer> occupancyHistogramBuffer,
-    std::shared_ptr<Buffer> fitStateBuffer)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::Buffer> occupancyHistogramBuffer,
+    std::shared_ptr<org::Buffer> fitStateBuffer)
     : m_configBuffer(std::move(configBuffer))
     , m_occupancyHistogramBuffer(std::move(occupancyHistogramBuffer))
     , m_fitStateBuffer(std::move(fitStateBuffer))

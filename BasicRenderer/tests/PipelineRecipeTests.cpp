@@ -120,7 +120,7 @@ void TestResolverSnapshotLifetime()
     std::weak_ptr<const org::ResolverDeclarationState> lifetime;
     std::shared_ptr<const org::ResolverDeclarationState> retained;
     {
-        auto group = std::make_shared<ResourceGroup>("LifetimeTest");
+        auto group = std::make_shared<org::ResourceGroup>("LifetimeTest");
         ResourceGroupResolver resolver(group);
         auto first = resolver.CaptureDeclarationState();
         Require(first == resolver.CaptureDeclarationState(), "unchanged group must reuse its snapshot");
@@ -1357,17 +1357,17 @@ void TestInvalidRecipes()
     Require(!missingBinning.Validate().valid, "RVT without binning must fail validation");
 
     auto duplicateExtensions = br::pipeline::MakeBasicRendererDemoPipeline();
-    duplicateExtensions.AddExtension("duplicate", [] { return std::unique_ptr<RenderGraph::IRenderGraphExtension>{}; });
-    duplicateExtensions.AddExtension("duplicate", [] { return std::unique_ptr<RenderGraph::IRenderGraphExtension>{}; });
+    duplicateExtensions.AddExtension("duplicate", [] { return std::unique_ptr<org::RenderGraph::IRenderGraphExtension>{}; });
+    duplicateExtensions.AddExtension("duplicate", [] { return std::unique_ptr<org::RenderGraph::IRenderGraphExtension>{}; });
     Require(!duplicateExtensions.Validate().valid, "duplicate extension ids must fail validation");
 
-    TextureDescription environmentDescription;
+    org::TextureDescription environmentDescription;
     environmentDescription.format = rhi::Format::R16G16B16A16_Float;
     environmentDescription.imageDimensions.push_back({ 4u, 4u, 0u, 0u });
     environmentDescription.isCubemap = true;
     environmentDescription.arraySize = 6u;
     environmentDescription.hasSRV = false;
-    auto incompatibleEnvironment = PixelBuffer::CreateSharedUnmaterialized(environmentDescription);
+    auto incompatibleEnvironment = org::PixelBuffer::CreateSharedUnmaterialized(environmentDescription);
     auto incompatibleBinding = br::pipeline::MakeBasicRendererDemoPipeline();
     incompatibleBinding.Bindings().Bind(
         br::pipeline::Slots::EnvironmentCubemap,

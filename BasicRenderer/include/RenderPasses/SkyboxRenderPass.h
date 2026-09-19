@@ -22,7 +22,7 @@ public:
 		builder->WithShaderResource(Builtin::Environment::CurrentCubemap);
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            builder->BindShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 })),
+            builder->BindShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
             builder->BindShaderResource(Builtin::CameraBuffer),
             builder->BindShaderResource(Builtin::Environment::InfoBuffer),
             builder->BindUnorderedAccess(Builtin::Color::HDRColorTarget),
@@ -56,7 +56,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
     void CreatePSO() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(

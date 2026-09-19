@@ -64,10 +64,10 @@ public:
         return {builder->BindShaderResource(m_lineBuffer),
             builder->BindConstantBuffer(Builtin::PerFrameBuffer),
             builder->BindShaderResource(Builtin::CameraBuffer),
-            builder->BindRenderTarget(ResourceIdentifier{Builtin::PresentationColor})};
+            builder->BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
     }
 
-    void Update(const UpdateExecutionContext&) override
+    void Update(const org::UpdateExecutionContext&) override
     {
         BuildLines();
         if (m_drawRanges.empty()) return;
@@ -522,6 +522,6 @@ private:
     std::vector<DrawRange> m_drawRanges;
     std::shared_ptr<br::render::DebugSceneSnapshotService> m_snapshots;
     std::shared_ptr<rhi::PipelinePtr> m_pso;
-    PipelineResources m_resourceDescriptorBindings;
+    org::PipelineResources m_resourceDescriptorBindings;
     bool m_loggedLineDiagnostics = false;
 };

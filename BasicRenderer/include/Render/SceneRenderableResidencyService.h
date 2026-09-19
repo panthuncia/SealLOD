@@ -5,7 +5,7 @@
 #include "Materials/Material.h"
 #include "ShaderBuffers.h"
 
-class BufferView;
+namespace org { class BufferView; }
 class MaterialManager;
 class Mesh;
 class MeshInstance;
@@ -29,8 +29,8 @@ public:
     unsigned int AcquireRasterBucket(MaterialRasterFlags flags, unsigned int count = 1u) const;
     void ReleaseRasterBucket(MaterialRasterFlags flags) const;
 
-    std::unique_ptr<BufferView> AllocateMeshOverride(const PerMeshCB& data) const;
-    void ReleaseMeshOverride(std::unique_ptr<BufferView>& view) const;
+    std::unique_ptr<org::BufferView> AllocateMeshOverride(const PerMeshCB& data) const;
+    void ReleaseMeshOverride(std::unique_ptr<org::BufferView>& view) const;
     bool MaterializeMesh(std::shared_ptr<Mesh>& mesh, bool reordered) const;
     bool MaterializeInstance(MeshInstance& instance, bool reordered) const;
     void ReleaseInstance(MeshInstance& instance) const;

@@ -7,9 +7,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapExpandPredictedPagesBindings {
     org::ResourceBindingToken candidates, candidateCount, rawPages, rawCount, clipmapInfo;
@@ -21,16 +19,16 @@ class VirtualShadowMapExpandPredictedPagesPass final : public org::TypedRenderGr
     br::render::PreparedComputePipelineSequence, VirtualShadowMapExpandPredictedPagesBindings> {
 public:
     VirtualShadowMapExpandPredictedPagesPass(
-        std::shared_ptr<Buffer> predictiveCandidatesBuffer,
-        std::shared_ptr<Buffer> predictiveCandidateCountBuffer,
-        std::shared_ptr<Buffer> predictiveRawPagesBuffer,
-        std::shared_ptr<Buffer> predictiveRawPageCountBuffer,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> scratchBitsetBuffer,
-        std::shared_ptr<Buffer> statsBuffer,
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> pageViewInfoBuffer,
+        std::shared_ptr<org::Buffer> predictiveCandidatesBuffer,
+        std::shared_ptr<org::Buffer> predictiveCandidateCountBuffer,
+        std::shared_ptr<org::Buffer> predictiveRawPagesBuffer,
+        std::shared_ptr<org::Buffer> predictiveRawPageCountBuffer,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> scratchBitsetBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> pageViewInfoBuffer,
         uint32_t physicalPageCount);
 
     VirtualShadowMapExpandPredictedPagesBindings Declare(org::PassBuilder& builder);
@@ -40,18 +38,18 @@ public:
         const br::render::PreparedComputePipelineSequence&, org::PassRecordContext&);
 
 private:
-    PipelineState m_stampContentGenerationPso;
-    PipelineState m_pso;
-    PipelineState m_resetCandidateCountPso;
-    std::shared_ptr<Buffer> m_predictiveCandidatesBuffer;
-    std::shared_ptr<Buffer> m_predictiveCandidateCountBuffer;
-    std::shared_ptr<Buffer> m_predictiveRawPagesBuffer;
-    std::shared_ptr<Buffer> m_predictiveRawPageCountBuffer;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_scratchBitsetBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_pageViewInfoBuffer;
+    org::PipelineState m_stampContentGenerationPso;
+    org::PipelineState m_pso;
+    org::PipelineState m_resetCandidateCountPso;
+    std::shared_ptr<org::Buffer> m_predictiveCandidatesBuffer;
+    std::shared_ptr<org::Buffer> m_predictiveCandidateCountBuffer;
+    std::shared_ptr<org::Buffer> m_predictiveRawPagesBuffer;
+    std::shared_ptr<org::Buffer> m_predictiveRawPageCountBuffer;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_scratchBitsetBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_pageViewInfoBuffer;
     uint32_t m_physicalPageCount = 0u;
 };

@@ -11,9 +11,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapAdmitPagesBindings {
     org::ResourceBindingToken pageTable, dirtyPageFlags, pageMetadata, clipmapInfo, compactShadowCameras, stats;
@@ -26,13 +24,13 @@ class VirtualShadowMapAdmitPagesPass final : public org::TypedRenderGraphPass<Vi
     br::render::PreparedComputePipelineSequence, VirtualShadowMapAdmitPagesBindings> {
 public:
     VirtualShadowMapAdmitPagesPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-        std::vector<std::shared_ptr<Buffer>> upgradeInputBuffers,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> compactShadowCamerasBuffer,
-        std::shared_ptr<Buffer> statsBuffer,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+        std::vector<std::shared_ptr<org::Buffer>> upgradeInputBuffers,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> compactShadowCamerasBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer,
         VirtualShadowUpgradeQueue upgradeQueue);
 
     VirtualShadowMapAdmitPagesBindings Declare(org::PassBuilder& builder);
@@ -42,14 +40,14 @@ public:
         const br::render::PreparedComputePipelineSequence&, org::PassRecordContext&);
 
 private:
-    PipelineState m_pso;
-    PipelineState m_applyUpgradesPso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_dirtyPageFlagsBuffer;
-    std::vector<std::shared_ptr<Buffer>> m_upgradeInputBuffers;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_compactShadowCamerasBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
+    org::PipelineState m_pso;
+    org::PipelineState m_applyUpgradesPso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_dirtyPageFlagsBuffer;
+    std::vector<std::shared_ptr<org::Buffer>> m_upgradeInputBuffers;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_compactShadowCamerasBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
     VirtualShadowUpgradeQueue m_upgradeQueue;
 };

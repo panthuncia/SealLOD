@@ -7,7 +7,6 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
 struct VirtualShadowMapBuildMarkTilesBindings {
     org::ResourceBindingToken tileWork;
@@ -18,12 +17,12 @@ class VirtualShadowMapBuildMarkTilesPass final : public org::TypedRenderGraphPas
     br::render::PreparedComputeDispatch, VirtualShadowMapBuildMarkTilesBindings> {
 public:
     VirtualShadowMapBuildMarkTilesPass(
-        std::shared_ptr<Buffer> tileWorkBuffer,
-        std::shared_ptr<Buffer> tileCountBuffer);
+        std::shared_ptr<org::Buffer> tileWorkBuffer,
+        std::shared_ptr<org::Buffer> tileCountBuffer);
 
     VirtualShadowMapBuildMarkTilesBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapBuildMarkTilesBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapBuildMarkTilesBindings&,
@@ -31,7 +30,7 @@ public:
     void ShutdownPass();
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<Buffer> m_tileWorkBuffer;
-    std::shared_ptr<Buffer> m_tileCountBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_tileWorkBuffer;
+    std::shared_ptr<org::Buffer> m_tileCountBuffer;
 };

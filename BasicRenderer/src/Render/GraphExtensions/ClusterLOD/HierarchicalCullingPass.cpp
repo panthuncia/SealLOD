@@ -118,43 +118,43 @@ std::vector<uint64_t> CollectDeclaredDrawSetResourceIds(
 HierarchicalCullingPass::HierarchicalCullingPass(
     std::string stablePassIdentifier,
     HierarchicalCullingPassInputs inputs,
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> voxelRasterWorkBuffer,
-    std::shared_ptr<Buffer> voxelRasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> skinnedVoxelRasterWorkBuffer,
-    std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> swVisibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> voxelRasterWorkBuffer,
+    std::shared_ptr<org::Buffer> voxelRasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> skinnedVoxelRasterWorkBuffer,
+    std::shared_ptr<org::Buffer> skinnedVoxelRasterWorkCounterBuffer,
     uint32_t voxelRasterWorkCapacity,
-    std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
-    std::shared_ptr<Buffer> pageJobVisibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> histogramIndirectCommand,
-    std::shared_ptr<Buffer> workGraphTelemetryBuffer,
-    std::shared_ptr<Buffer> occlusionReplayBuffer,
-    std::shared_ptr<Buffer> occlusionReplayStateBuffer,
-    std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
-    std::shared_ptr<Buffer> viewRasterInfoBuffer,
-    std::shared_ptr<PixelBuffer> shadowDirtyHierarchyTexture,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
-    std::shared_ptr<Buffer> phase1VisibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> swWriteBaseCounterBuffer,
-    std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidatesBuffer,
-    std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
-    std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
-    std::shared_ptr<PixelBuffer> shadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
-    std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer,
-    std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture,
-    std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer,
-    std::shared_ptr<Buffer> reyesDiceQueueBuffer,
-    std::shared_ptr<Buffer> reyesDiceQueueCounterBuffer,
-    std::shared_ptr<Buffer> reyesDiceQueueOverflowBuffer,
-    std::shared_ptr<Buffer> reyesTessTableConfigsBuffer,
-    std::shared_ptr<Buffer> reyesTessTableVerticesBuffer,
-    std::shared_ptr<Buffer> reyesTessTableTrianglesBuffer,
-    std::shared_ptr<Buffer> reyesTelemetryBuffer,
+    std::shared_ptr<org::Buffer> pageJobVisibleClustersBuffer,
+    std::shared_ptr<org::Buffer> pageJobVisibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> pageJobVisibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> histogramIndirectCommand,
+    std::shared_ptr<org::Buffer> workGraphTelemetryBuffer,
+    std::shared_ptr<org::Buffer> occlusionReplayBuffer,
+    std::shared_ptr<org::Buffer> occlusionReplayStateBuffer,
+    std::shared_ptr<org::Buffer> occlusionNodeGpuInputsBuffer,
+    std::shared_ptr<org::Buffer> viewRasterInfoBuffer,
+    std::shared_ptr<org::PixelBuffer> shadowDirtyHierarchyTexture,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::Buffer> phase1VisibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> swWriteBaseCounterBuffer,
+    std::shared_ptr<org::Buffer> shadowPredictiveInvalidationCandidatesBuffer,
+    std::shared_ptr<org::Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
+    std::shared_ptr<org::Buffer> shadowInvalidatedInstancesBitsetBuffer,
+    std::shared_ptr<org::PixelBuffer> shadowPageTableTexture,
+    std::shared_ptr<org::PixelBuffer> shadowPhysicalPagesTexture,
+    std::shared_ptr<org::Buffer> shadowActiveBlockMetadataBuffer,
+    std::shared_ptr<org::PixelBuffer> shadowDynamicPhysicalPagesTexture,
+    std::shared_ptr<org::Buffer> shadowDynamicActiveBlockMetadataBuffer,
+    std::shared_ptr<org::Buffer> reyesDiceQueueBuffer,
+    std::shared_ptr<org::Buffer> reyesDiceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> reyesDiceQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> reyesTessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> reyesTessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> reyesTessTableTrianglesBuffer,
+    std::shared_ptr<org::Buffer> reyesTelemetryBuffer,
     uint32_t reyesDiceQueueCapacity) {
     m_workGraphMode = inputs.workGraphMode;
     m_rasterOutputKind = inputs.rasterOutputKind;
@@ -181,7 +181,7 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     }
     m_workGraph = std::make_shared<rhi::WorkGraphPtr>(std::move(initialWorkGraph));
     auto memSize = (*m_workGraph)->GetRequiredScratchMemorySize();
-    m_scratchBuffer = Buffer::CreateShared(
+    m_scratchBuffer = org::Buffer::CreateShared(
         rhi::HeapType::DeviceLocal,
         memSize,
         true);
@@ -269,8 +269,8 @@ size_t HierarchicalCullingPass::ReloadAllWorkGraphs()
 void HierarchicalCullingPass::ReloadWorkGraph()
 {
     rhi::WorkGraphPtr replacement;
-    PipelineState createCommandPipeline;
-    PipelineState clearPipeline;
+    org::PipelineState createCommandPipeline;
+    org::PipelineState clearPipeline;
     CreatePipelines(
         DeviceManager::GetInstance().GetDevice(),
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
@@ -282,7 +282,7 @@ void HierarchicalCullingPass::ReloadWorkGraph()
     }
     const uint64_t replacementScratchSize = replacement->GetRequiredScratchMemorySize();
     if (replacementScratchSize != (*m_workGraph)->GetRequiredScratchMemorySize()) {
-        m_scratchBuffer = Buffer::CreateShared(
+        m_scratchBuffer = org::Buffer::CreateShared(
             rhi::HeapType::DeviceLocal,
             replacementScratchSize,
             true);
@@ -294,7 +294,7 @@ void HierarchicalCullingPass::ReloadWorkGraph()
 }
 
 HierarchicalCullingBindings HierarchicalCullingPass::Declare(org::PassBuilder& builder) {
-    const ResourceState computeReadState{
+    const org::ResourceState computeReadState{
         rhi::ResourceAccessType::ShaderResource,
         rhi::ResourceLayout::ShaderResource,
         rhi::ResourceSyncState::ComputeShading
@@ -581,7 +581,7 @@ void HierarchicalCullingPass::Initialize() {
 	RegisterSRV(Builtin::CLod::NodeSkinningInfos);
 	RegisterSRV(Builtin::CLod::NodeBoneIndices);
     if (UsesWorkGraphSWRaster(m_workGraphMode) && UsesVirtualShadowOutput(m_rasterOutputKind)) {
-        RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
+        RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
     }
 }
 
@@ -601,7 +601,7 @@ br::render::PreparedComputeCommandSequence HierarchicalCullingPass::BuildRecipe(
     auto capture = [&](const auto& resource) {
         return preparedCommands.Capture(resource);
     };
-    auto bind = [&](const PipelineState& pipeline) {
+    auto bind = [&](const org::PipelineState& pipeline) {
         preparedCommands.Bind(pipeline);
     };
     auto constants = [&](const uint32_t* values) {
@@ -617,11 +617,11 @@ br::render::PreparedComputeCommandSequence HierarchicalCullingPass::BuildRecipe(
     const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) {
         return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index;
     };
-    auto barriers = [&](std::initializer_list<std::shared_ptr<Buffer>> resources,
+    auto barriers = [&](std::initializer_list<std::shared_ptr<org::Buffer>> resources,
         rhi::ResourceAccessType beforeAccess, rhi::ResourceAccessType afterAccess) {
         preparedCommands.Barriers(resources, beforeAccess, afterAccess);
     };
-    auto clear = [&](org::ResourceBindingToken token, const std::shared_ptr<Buffer>& buffer, uint32_t count = 1u) {
+    auto clear = [&](org::ResourceBindingToken token, const std::shared_ptr<org::Buffer>& buffer, uint32_t count = 1u) {
         if (!buffer) return;
         bind(m_clearPipelineState);
         uint32_t values[NumMiscUintRootConstants]{};
@@ -694,7 +694,7 @@ br::render::PreparedComputeCommandSequence HierarchicalCullingPass::BuildRecipe(
 
     if (bindings.hasVirtualShadow) {
         root[CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX] =
-            uav(bindings.shadowPageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+            uav(bindings.shadowPageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
         root[CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] = srv(bindings.shadowActiveMetadata);
     }
     if (bindings.hasShadowRaster) {
@@ -719,7 +719,7 @@ br::render::PreparedComputeCommandSequence HierarchicalCullingPass::BuildRecipe(
         ? ViewDepthTable(preparation).Publish(preparation, m_viewDepthTable) : 0u;
     root[CLOD_WG_VISIBLE_CLUSTERS_CAPACITY] = static_cast<uint32_t>(m_maxVisibleClusters);
     root[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty
-        ? srv(bindings.shadowDirty, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull)) : 0u;
+        ? srv(bindings.shadowDirty, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)) : 0u;
     root[CLOD_WG_SHADOW_INVALIDATED_INSTANCES_DESCRIPTOR_INDEX] = bindings.hasInvalidated
         ? srv(bindings.invalidatedInstances) : 0u;
     root[CLOD_WG_SHADOW_PREDICTIVE_INVALIDATION_CANDIDATES_DESCRIPTOR_INDEX] = bindings.hasPredictive
@@ -747,7 +747,7 @@ br::render::PreparedComputeCommandSequence HierarchicalCullingPass::BuildRecipe(
     }
 
     br::render::PreparedBufferBarrierBatch outputBarriers;
-    auto appendOutput = [&](const std::shared_ptr<Buffer>& resource,
+    auto appendOutput = [&](const std::shared_ptr<org::Buffer>& resource,
         rhi::ResourceAccessType after) {
         if (resource) outputBarriers.barriers.push_back({capture(resource),
             rhi::ResourceAccessType::UnorderedAccess, after,
@@ -841,7 +841,7 @@ HierarchicalCullingInvocation HierarchicalCullingPass::PrepareInvocation(
     return invocation;
 }
 
-void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionContext) {
+void HierarchicalCullingPass::Update(const org::UpdateExecutionContext& executionContext) {
     ZoneScopedN("HierarchicalCullingPass::Update");
 
     auto* updateContext = executionContext.hostData ? executionContext.hostData->Get<UpdateContext>() : nullptr;
@@ -897,7 +897,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
             m_visibilityBuffers.clear();
             const auto table = BuildCLodVisibilityViewRasterInfo(context.Views(), context.ViewCameraBufferSize(), m_rasterOutputKind);
             std::vector<CLodViewRasterInfo> viewRasterInfo(table.Rows().begin(), table.Rows().end());
-            std::vector<std::pair<uint32_t, std::shared_ptr<PixelBuffer>>> visibilityBuffersByCameraIndex;
+            std::vector<std::pair<uint32_t, std::shared_ptr<org::PixelBuffer>>> visibilityBuffersByCameraIndex;
             if (UsesWorkGraphSWRaster(m_workGraphMode) && !UsesVirtualShadowOutput(m_rasterOutputKind))
                 for (const auto& viewInfo : context.Views())
                     if (viewInfo.visibilityBuffer && viewInfo.cameraBufferIndex < viewRasterInfo.size())
@@ -1068,7 +1068,7 @@ bool HierarchicalCullingPass::DeclaredResourcesChanged() const {
     return m_declaredResourcesChanged;
 }
 
-std::shared_ptr<Resource> HierarchicalCullingPass::ProvideResource(ResourceIdentifier const& key)
+std::shared_ptr<org::Resource> HierarchicalCullingPass::ProvideResource(org::ResourceIdentifier const& key)
 {
     if (key == m_workGraphComputePageJobDescriptorResourceId) {
         return m_workGraphComputePageJobDescriptorsBuffer;
@@ -1081,10 +1081,10 @@ std::shared_ptr<Resource> HierarchicalCullingPass::ProvideResource(ResourceIdent
     return nullptr;
 }
 
-std::vector<ResourceIdentifier> HierarchicalCullingPass::GetSupportedKeys()
+std::vector<org::ResourceIdentifier> HierarchicalCullingPass::GetSupportedKeys()
 {
-    std::vector<ResourceIdentifier> keys{
-        ResourceIdentifier{ m_workGraphComputePageJobDescriptorResourceId }
+    std::vector<org::ResourceIdentifier> keys{
+        org::ResourceIdentifier{ m_workGraphComputePageJobDescriptorResourceId }
     };
     if (m_voxelRasterQueueDescriptorsBuffer) {
         keys.emplace_back(m_voxelRasterQueueDescriptorResourceId);
@@ -1096,8 +1096,8 @@ void HierarchicalCullingPass::CreatePipelines(
     rhi::Device device,
     rhi::PipelineLayoutHandle globalRootSignature,
     rhi::WorkGraphPtr& outGraph,
-    PipelineState& outCreateCommandPipeline,
-    PipelineState& outClearPipeline)
+    org::PipelineState& outCreateCommandPipeline,
+    org::PipelineState& outClearPipeline)
 {
     WorkGraphFeatureInfo workGraphFeatureInfo{};
     const rhi::Result workGraphFeatureResult = device.QueryFeatureInfo(&workGraphFeatureInfo.header);
@@ -1134,7 +1134,7 @@ void HierarchicalCullingPass::CreatePipelines(
     };
     auto compiled = PSOManager::GetInstance().CompileShaderLibrary(libInfo, defines);
     m_pipelineResources = compiled.resourceDescriptorSlots;
-    const ResourceIdentifier voxelDescriptorId{ m_voxelRasterQueueDescriptorResourceId };
+    const org::ResourceIdentifier voxelDescriptorId{ m_voxelRasterQueueDescriptorResourceId };
     const bool shaderRequestsVoxelDescriptor = std::ranges::find(
         m_pipelineResources.mandatoryResourceDescriptorSlots,
         voxelDescriptorId) != m_pipelineResources.mandatoryResourceDescriptorSlots.end();

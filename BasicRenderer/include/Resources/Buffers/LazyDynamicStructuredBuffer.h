@@ -635,5 +635,3 @@ private:
 
 } // namespace org
 
-using org::LazyDynamicStructuredBuffer;
-using org::LazyDynamicStructuredBufferBase;

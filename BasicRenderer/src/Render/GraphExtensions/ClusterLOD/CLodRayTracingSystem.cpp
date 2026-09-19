@@ -70,7 +70,7 @@ uint64_t AlignUp(uint64_t value, uint64_t alignment) noexcept
     return (value + mask) & ~mask;
 }
 
-void SetBufferNameAndUsage(const std::shared_ptr<Buffer>& buffer, const char* name, std::string_view usage)
+void SetBufferNameAndUsage(const std::shared_ptr<org::Buffer>& buffer, const char* name, std::string_view usage)
 {
     buffer->SetName(name);
     org::memory::SetResourceUsageHint(*buffer, std::string(usage));
@@ -370,7 +370,7 @@ void CLodRayTracingSystem::UpdateGpuResources(rhi::Device device, const RayTraci
             continue;
         }
 
-        std::shared_ptr<Buffer> slab = m_snapshot.pagePool->GetSlab(source.slabIndex);
+        std::shared_ptr<org::Buffer> slab = m_snapshot.pagePool->GetSlab(source.slabIndex);
         if (!slab) {
             continue;
         }
@@ -618,7 +618,7 @@ void CLodRayTracingSystem::EnsureRayTracingPipeline(rhi::Device device, const Ra
     }
 
     if (!m_hasTlasSrvSlot) {
-        const auto& heap = DescriptorHeapManager::GetInstance().GetCBVSRVUAVHeap();
+        const auto& heap = org::DescriptorHeapManager::GetInstance().GetCBVSRVUAVHeap();
         if (!heap) {
             return;
         }
@@ -680,7 +680,7 @@ void CLodRayTracingSystem::EnsureRayTracingPipeline(rhi::Device device, const Ra
             return;
         }
 
-        m_rayTracingPso = PipelineState(std::move(pso), library.resourceIDsHash, library.resourceDescriptorSlots);
+        m_rayTracingPso = org::PipelineState(std::move(pso), library.resourceIDsHash, library.resourceDescriptorSlots);
     }
 
     m_shaderGroupHandleSize = rayTracingFeatures.shaderGroupHandleSize;
@@ -733,7 +733,7 @@ void CLodRayTracingSystem::EnsureRayTracingPipeline(rhi::Device device, const Ra
 }
 
 void CLodRayTracingSystem::ExecuteTraceRays(rhi::Device device, rhi::CommandList commandList,
-    PixelBuffer& output, uint32_t outputUAVIndex, uint32_t width, uint32_t height) {
+    org::PixelBuffer& output, uint32_t outputUAVIndex, uint32_t width, uint32_t height) {
     if (!device || !commandList || !HasRayTracingPipeline() || !m_shaderTableBuffer || width == 0u || height == 0u) {
         return;
     }

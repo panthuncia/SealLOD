@@ -192,7 +192,7 @@ namespace TerrainRvt
         return { DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } };
     }
 
-    inline br::render::PreparedComputeDispatch PrepareDispatch(const org::PassPrepareContext& preparation, const PipelineState& pso,
+    inline br::render::PreparedComputeDispatch PrepareDispatch(const org::PassPrepareContext& preparation, const org::PipelineState& pso,
         uint32_t groupsX, uint32_t groupsY = 1u, uint32_t groupsZ = 1u)
     {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
@@ -269,7 +269,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 struct TerrainRvtMarkVisibilityMaterialPagesBindings {
@@ -362,10 +362,10 @@ public:
     }
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
-    std::shared_ptr<GloballyIndexedResource> m_visibleClustersResource;
-    std::shared_ptr<GloballyIndexedResource> m_visibleClustersCounterResource;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::GloballyIndexedResource> m_visibleClustersResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_visibleClustersCounterResource;
     uint32_t m_visibleClusterCapacity = 0u;
 };
 
@@ -412,7 +412,7 @@ public:
         data.resourceHeap = context->textureDescriptorHeap.GetHandle();
         data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
         data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-        auto append = [&](PipelineState& pso, uint32_t x, uint32_t y) {
+        auto append = [&](org::PipelineState& pso, uint32_t x, uint32_t y) {
 
             br::render::PreparedComputePipelineSequence::Step step{};
 
@@ -435,8 +435,8 @@ public:
     }
 
 private:
-    PipelineState m_clearPso;
-    PipelineState m_resolvePso;
+    org::PipelineState m_clearPso;
+    org::PipelineState m_resolvePso;
 };
 
 class TerrainRvtClearFeedbackRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtClearFeedbackRequestsPass, br::render::PreparedComputeDispatch> {
@@ -473,7 +473,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 class TerrainRvtBuildHeightResidentCachePass final : public org::TypedRenderGraphPass<TerrainRvtBuildHeightResidentCachePass, br::render::PreparedComputeDispatch> {
@@ -513,7 +513,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 class TerrainRvtBuildGenerateDispatchArgsPass final : public org::TypedRenderGraphPass<TerrainRvtBuildGenerateDispatchArgsPass, br::render::PreparedComputeDispatch> {
@@ -547,7 +547,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 class TerrainRvtGeneratePagesPass final : public org::TypedRenderGraphPass<TerrainRvtGeneratePagesPass, br::render::PreparedComputeIndirect> {
@@ -592,7 +592,7 @@ public:
 
     void Initialize()
     {
-        m_argsBuffer = m_resourceRegistryView->RequestPtr<Resource>(Builtin::Terrain::RvtGenerateDispatchArgs);
+        m_argsBuffer = m_resourceRegistryView->RequestPtr<org::Resource>(Builtin::Terrain::RvtGenerateDispatchArgs);
     }
 
     br::render::PreparedComputeIndirect Prepare(const org::PassPrepareContext& preparation)
@@ -620,8 +620,8 @@ public:
     }
 
 private:
-    PipelineState m_pso;
-    Resource* m_argsBuffer = nullptr;
+    org::PipelineState m_pso;
+    org::Resource* m_argsBuffer = nullptr;
 };
 
 class TerrainRvtFinalizeGeneratedPagesPass final : public org::TypedRenderGraphPass<TerrainRvtFinalizeGeneratedPagesPass, br::render::PreparedComputeDispatchSequence> {
@@ -674,5 +674,5 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };

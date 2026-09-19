@@ -10,10 +10,10 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITEarlyDepthBuildRootConstants.h"
 
 AVBOITEarlyDepthBuildPass::AVBOITEarlyDepthBuildPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<PixelBuffer> zeroTransmittanceSliceTexture,
-    std::shared_ptr<Buffer> tileCommandsBuffer,
-    std::shared_ptr<Buffer> tileCountBuffer)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::PixelBuffer> zeroTransmittanceSliceTexture,
+    std::shared_ptr<org::Buffer> tileCommandsBuffer,
+    std::shared_ptr<org::Buffer> tileCountBuffer)
     : m_configBuffer(std::move(configBuffer))
     , m_zeroTransmittanceSliceTexture(std::move(zeroTransmittanceSliceTexture))
     , m_tileCommandsBuffer(std::move(tileCommandsBuffer))
@@ -33,7 +33,7 @@ AVBOITEarlyDepthBuildBindings AVBOITEarlyDepthBuildPass::Declare(org::PassBuilde
     return {builder.BindShaderResource(m_configBuffer), builder.BindShaderResource(m_zeroTransmittanceSliceTexture), builder.BindUnorderedAccess(m_tileCommandsBuffer), builder.BindUnorderedAccess(m_tileCountBuffer)};
 }
 
-void AVBOITEarlyDepthBuildPass::Update(const UpdateExecutionContext& executionContext)
+void AVBOITEarlyDepthBuildPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
 

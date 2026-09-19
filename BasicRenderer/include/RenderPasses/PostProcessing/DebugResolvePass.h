@@ -19,7 +19,7 @@ public:
 	DebugResolveBindings Declare(org::PassBuilder& builder) {
 		builder.WithShaderResource(Builtin::DebugVisualization, Builtin::CameraBuffer);
 		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
-		return {builder.BindRenderTarget(ResourceIdentifier{Builtin::PresentationColor})};
+		return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
 	}
 
 	br::render::PreparedFullscreenDraw Prepare(const DebugResolveBindings& bindings,
@@ -43,7 +43,7 @@ public:
 	}
 
 private:
-	PipelineState m_pso;
+	org::PipelineState m_pso;
 
 	void CreatePSO() {
 		auto dev = DeviceManager::GetInstance().GetDevice();
@@ -115,7 +115,7 @@ private:
 			throw std::runtime_error("Failed to create DebugResolve PSO");
 		}
 		pipeline->SetName("DebugResolve.PSO");
-		m_pso = PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+		m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
             compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
             soLayout.layout);
 	}

@@ -463,7 +463,7 @@ uint32_t CalcFullMipCount(uint32_t width, uint32_t height) {
 	return levels;
 }
 
-uint32_t CalcMipCountFromDescription(const TextureDescription& desc) {
+uint32_t CalcMipCountFromDescription(const org::TextureDescription& desc) {
 	if (desc.imageDimensions.empty()) {
 		return 1u;
 	}
@@ -525,7 +525,7 @@ const char* ToString(ConditionedCacheResidencyClass value) {
 	}
 }
 
-bool ShouldPreserveAlphaCoverage(const TextureFileMeta& meta, const TextureDescription& desc) {
+bool ShouldPreserveAlphaCoverage(const TextureFileMeta& meta, const org::TextureDescription& desc) {
 	if (!meta.processing.isParticipatingMaterialTexture || meta.alphaIsAllOpaque) {
 		return false;
 	}
@@ -825,7 +825,7 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromConditionedCacheFilePath(c
 			throw std::runtime_error("conditioned texture cache payload ended before expected subresource data");
 		}
 
-		ImageDimensions dims{};
+		org::ImageDimensions dims{};
 		dims.width = static_cast<uint32_t>(mipWidth);
 		dims.height = static_cast<uint32_t>(mipHeight);
 		dims.rowPitch = rowPitch;
@@ -854,7 +854,7 @@ bool TryBuildConditionedCacheResidentUpload(
 	uint32_t topMip,
 	bool allowRTV,
 	bool allowUAV,
-	TextureDescription& outDesc,
+	org::TextureDescription& outDesc,
 	DirectStorageTextureSubresourceRangeCopy& outRange,
 	uint32_t& outClampedTopMip,
 	std::string& outError)
@@ -921,7 +921,7 @@ bool TryBuildConditionedCacheResidentUpload(
 				return false;
 			}
 
-			ImageDimensions dims{};
+			org::ImageDimensions dims{};
 			dims.width = static_cast<uint32_t>(mipWidth);
 			dims.height = static_cast<uint32_t>(mipHeight);
 			dims.rowPitch = rowPitch;
@@ -940,7 +940,7 @@ bool TryBuildConditionedCacheResidentUpload(
 	return true;
 }
 
-uint32_t ComputeDefaultStreamingBootstrapTopMip(const TextureDescription& desc, uint32_t totalMipCount) {
+uint32_t ComputeDefaultStreamingBootstrapTopMip(const org::TextureDescription& desc, uint32_t totalMipCount) {
 	if (desc.imageDimensions.empty() || totalMipCount <= 1u) {
 		return 0u;
 	}
@@ -994,7 +994,7 @@ std::shared_ptr<TextureSourceData> ClipTextureSourceDataTopMip(
 }
 
 uint32_t InferTextureSourceTopMip(
-	const TextureDescription& desc,
+	const org::TextureDescription& desc,
 	uint32_t fullWidth,
 	uint32_t fullHeight,
 	uint32_t totalMipCount)
@@ -1003,7 +1003,7 @@ uint32_t InferTextureSourceTopMip(
 		return 0u;
 	}
 
-	const ImageDimensions& firstMip = desc.imageDimensions.front();
+	const org::ImageDimensions& firstMip = desc.imageDimensions.front();
 	for (uint32_t mip = 0u; mip < totalMipCount; ++mip) {
 		const uint32_t expectedWidth = (std::max)(1u, fullWidth >> mip);
 		const uint32_t expectedHeight = (std::max)(1u, fullHeight >> mip);
@@ -1045,18 +1045,18 @@ std::shared_ptr<TextureSourceData> ShapeTextureSourceDataForResidentTopMip(
 	return ClipTextureSourceDataTopMip(sourceData, relativeTopMip);
 }
 
-std::shared_ptr<PixelBuffer> CreatePlaceholderTexture(
+std::shared_ptr<org::PixelBuffer> CreatePlaceholderTexture(
 	const TextureFactory& factory,
 	const TextureProcessingSettings& settings)
 {
-	TextureDescription desc{};
+	org::TextureDescription desc{};
 	desc.channels = 4;
 	desc.format = settings.preferSRGB
 		? rhi::Format::R8G8B8A8_UNorm_sRGB
 		: rhi::Format::R8G8B8A8_UNorm;
 	desc.generateMipMaps = false;
 
-	ImageDimensions dims{};
+	org::ImageDimensions dims{};
 	dims.width = 1;
 	dims.height = 1;
 	dims.rowPitch = 4;
@@ -1109,13 +1109,13 @@ std::mutex& ProcessingPlaceholderCacheMutex()
 	return mutex;
 }
 
-std::array<std::shared_ptr<PixelBuffer>, kPlaceholderVariantCount>& ProcessingPlaceholderCache()
+std::array<std::shared_ptr<org::PixelBuffer>, kPlaceholderVariantCount>& ProcessingPlaceholderCache()
 {
-	static std::array<std::shared_ptr<PixelBuffer>, kPlaceholderVariantCount> placeholders{};
+	static std::array<std::shared_ptr<org::PixelBuffer>, kPlaceholderVariantCount> placeholders{};
 	return placeholders;
 }
 
-std::shared_ptr<PixelBuffer> GetSharedProcessingPlaceholderTexture(
+std::shared_ptr<org::PixelBuffer> GetSharedProcessingPlaceholderTexture(
 	const TextureFactory& factory,
 	const TextureProcessingSettings& settings)
 {
@@ -1204,7 +1204,7 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromDDSFilePath(const std::str
 	for (size_t imageIndex = 0; imageIndex < image.GetImageCount(); ++imageIndex) {
 		const DirectX::Image& src = images[imageIndex];
 
-		ImageDimensions dims{};
+		org::ImageDimensions dims{};
 		dims.width = static_cast<uint32_t>(src.width);
 		dims.height = static_cast<uint32_t>(src.height);
 		dims.rowPitch = src.rowPitch;
@@ -1275,7 +1275,7 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromWICFilePath(const std::str
 
 	for (size_t imageIndex = 0; imageIndex < image.GetImageCount(); ++imageIndex) {
 		const DirectX::Image& src = images[imageIndex];
-		ImageDimensions dims{};
+		org::ImageDimensions dims{};
 		dims.width = static_cast<uint32_t>(src.width);
 		dims.height = static_cast<uint32_t>(src.height);
 		dims.rowPitch = src.rowPitch;
@@ -1356,7 +1356,7 @@ std::shared_ptr<TextureReloadJobHandle> RequestReloadSourceDataAsync(
 	return handle;
 }
 
-std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
+std::shared_ptr<org::PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	const std::string& path,
 	bool preferSRGB,
 	uint32_t topMip,
@@ -1409,7 +1409,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 		return {};
 	}
 
-	TextureDescription desc{};
+	org::TextureDescription desc{};
 	desc.format = rhi::helpers::ToRHI(preferSRGB ? DirectX::MakeSRGB(metadata.format) : DirectX::MakeLinear(metadata.format));
 	desc.channels = static_cast<unsigned short>(rhi::helpers::FormatChannelCount(desc.format));
 	if (rhi::helpers::IsBlockCompressed(desc.format)) {
@@ -1456,7 +1456,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 
 		const uint32_t mipIndex = static_cast<uint32_t>(imageIndex % fullMipCount);
 		if (mipIndex >= clampedTopMip) {
-			ImageDimensions dims{};
+			org::ImageDimensions dims{};
 			dims.width = static_cast<uint32_t>(srcImage.width);
 			dims.height = static_cast<uint32_t>(srcImage.height);
 			dims.rowPitch = srcImage.rowPitch;
@@ -1482,7 +1482,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 		return {};
 	}
 
-	auto pixelBuffer = PixelBuffer::CreateShared(desc);
+	auto pixelBuffer = org::PixelBuffer::CreateShared(desc);
 	if (!pixelBuffer) {
 		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 		return {};
@@ -1502,7 +1502,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	return pixelBuffer;
 }
 
-std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
+std::shared_ptr<org::PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 	const std::string& path,
 	uint32_t topMip,
 	bool allowRTV,
@@ -1521,7 +1521,7 @@ std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 		return {};
 	}
 
-	TextureDescription desc{};
+	org::TextureDescription desc{};
 	DirectStorageTextureSubresourceRangeCopy range{};
 	uint32_t clampedTopMip = 0u;
 	std::string error;
@@ -1533,7 +1533,7 @@ std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 		return {};
 	}
 
-	auto pixelBuffer = PixelBuffer::CreateShared(desc);
+	auto pixelBuffer = org::PixelBuffer::CreateShared(desc);
 	if (!pixelBuffer) {
 		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 		return {};
@@ -1624,7 +1624,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 				throw std::runtime_error("failed to encode DDS header for DirectStorage GPU-direct texture upload");
 			}
 
-			TextureDescription desc{};
+			org::TextureDescription desc{};
 			desc.format = rhi::helpers::ToRHI(preferSRGB ? DirectX::MakeSRGB(metadata.format) : DirectX::MakeLinear(metadata.format));
 			desc.channels = static_cast<unsigned short>(rhi::helpers::FormatChannelCount(desc.format));
 			if (rhi::helpers::IsBlockCompressed(desc.format)) {
@@ -1674,7 +1674,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 
 				const uint32_t mipIndex = static_cast<uint32_t>(imageIndex % fullMipCount);
 				if (mipIndex >= clampedTopMip) {
-					ImageDimensions dims{};
+					org::ImageDimensions dims{};
 					dims.width = static_cast<uint32_t>(srcImage.width);
 					dims.height = static_cast<uint32_t>(srcImage.height);
 					dims.rowPitch = srcImage.rowPitch;
@@ -1700,7 +1700,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 				throw std::runtime_error("no texture regions were produced for DirectStorage GPU-direct texture upload");
 			}
 
-			auto uploadedImage = PixelBuffer::CreateShared(desc);
+			auto uploadedImage = org::PixelBuffer::CreateShared(desc);
 			if (!uploadedImage) {
 				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 				throw std::runtime_error("failed to create resident PixelBuffer for DirectStorage GPU-direct texture upload");
@@ -1780,7 +1780,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 		handle->state.store(TextureDirectStorageReloadJobState::CreatingResource, std::memory_order_release);
 
 		try {
-			TextureDescription desc{};
+			org::TextureDescription desc{};
 			DirectStorageTextureSubresourceRangeCopy range{};
 			uint32_t clampedTopMip = 0u;
 			std::string preflightError;
@@ -1809,10 +1809,10 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 				throw std::runtime_error("conditioned texture cache DirectStorage upload was canceled before resource creation");
 			}
 
-			std::shared_ptr<PixelBuffer> uploadedImage;
+			std::shared_ptr<org::PixelBuffer> uploadedImage;
 			{
 				ZoneScopedN("TextureAsset::BeginUploadConditionedCacheFilePathDirectToVRAMAsync::CreatePixelBuffer");
-				uploadedImage = PixelBuffer::CreateShared(desc);
+				uploadedImage = org::PixelBuffer::CreateShared(desc);
 			}
 			if (!uploadedImage) {
 				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
@@ -1899,7 +1899,7 @@ uint32_t TextureAsset::NextStreamingTextureID() {
 	return nextID.fetch_add(1u, std::memory_order_relaxed);
 }
 
-void TextureAsset::UpdateSourceShapeFromDescription(const TextureDescription& desc, uint32_t totalMipCountHint) {
+void TextureAsset::UpdateSourceShapeFromDescription(const org::TextureDescription& desc, uint32_t totalMipCountHint) {
 	if (desc.imageDimensions.empty()) {
 		return;
 	}
@@ -2395,7 +2395,7 @@ void TextureAsset::NoteTextureSeen(uint64_t frameIndex) {
 	m_streamingState.lastSeenFrame = frameIndex;
 }
 
-void TextureAsset::AdoptUploadedImage(std::shared_ptr<PixelBuffer> image) {
+void TextureAsset::AdoptUploadedImage(std::shared_ptr<org::PixelBuffer> image) {
 	const uint32_t desiredResidentTopMip = GetDesiredResidentTopMip();
 	if (image && !image->HasValidBackingResource()) {
 		image.reset();
@@ -2422,8 +2422,8 @@ void TextureAsset::AdoptUploadedImage(std::shared_ptr<PixelBuffer> image) {
 
 bool TextureAsset::PublishPreparedImage(
 	uint64_t bindingRevision,
-	const std::shared_ptr<PixelBuffer>& image,
-	std::shared_ptr<PixelBuffer>* replacedPublishedImage)
+	const std::shared_ptr<org::PixelBuffer>& image,
+	std::shared_ptr<org::PixelBuffer>* replacedPublishedImage)
 {
 	std::scoped_lock lock(m_uploadAdvanceMutex);
 	if (m_streamingState.bindingRevision != bindingRevision || m_image != image || !image ||
@@ -2444,7 +2444,7 @@ bool TextureAsset::PublishPreparedImage(
 
 bool TextureAsset::RejectPreparedImage(
 	uint64_t bindingRevision,
-	const std::shared_ptr<PixelBuffer>& image)
+	const std::shared_ptr<org::PixelBuffer>& image)
 {
 	std::scoped_lock lock(m_uploadAdvanceMutex);
 	if (m_streamingState.bindingRevision != bindingRevision || m_image != image) {
@@ -2670,7 +2670,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 			}
 			else if (state == TextureDirectStorageReloadJobState::Ready) {
 				ZoneScopedN("TextureAsset::EnsureUploaded::TryAdvanceAsyncDirectStorageReload::AdoptReadyImage");
-				std::shared_ptr<PixelBuffer> uploadedImage;
+				std::shared_ptr<org::PixelBuffer> uploadedImage;
 				{
 					ZoneScopedN("TextureAsset::EnsureUploaded::TryAdvanceAsyncDirectStorageReload::CopyReadyImage");
 					std::scoped_lock lock(m_directStorageReloadHandle->mutex);
@@ -3244,7 +3244,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 			if (state == TextureProcessingJobState::Ready) {
 				ZoneScopedN("TextureAsset::EnsureUploaded::PollProcessingHandle::Ready");
 				std::shared_ptr<TextureSourceData> result;
-				std::shared_ptr<PixelBuffer> uploadedImage;
+				std::shared_ptr<org::PixelBuffer> uploadedImage;
 				bool loadedFromCache = false;
 				bool completedOnGpu = false;
 				std::string conditionedCachePath;

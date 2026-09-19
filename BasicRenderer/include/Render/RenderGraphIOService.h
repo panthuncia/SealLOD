@@ -19,8 +19,8 @@ public:
         br::ReadbackManager&, ITextureStreamingFeedbackService&) noexcept;
 
     void SetRegistry(org::ResourceRegistry&);
-    void GatherStructuralPasses(std::vector<RenderGraph::ExternalPassDesc>&);
-    void GatherFramePasses(std::vector<RenderGraph::ExternalPassDesc>&);
+    void GatherStructuralPasses(std::vector<org::RenderGraph::ExternalPassDesc>&);
+    void GatherFramePasses(std::vector<org::RenderGraph::ExternalPassDesc>&);
 
 private:
     TextureFactory* m_textures;

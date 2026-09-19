@@ -7,9 +7,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapBuildActiveBlocksBindings {
     org::ResourceBindingToken pageTable;
@@ -22,9 +20,9 @@ class VirtualShadowMapBuildActiveBlocksPass final : public org::TypedRenderGraph
     br::render::PreparedComputeDispatch, VirtualShadowMapBuildActiveBlocksBindings> {
 public:
     VirtualShadowMapBuildActiveBlocksPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> activeBlockMetadataBuffer,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> activeBlockMetadataBuffer,
         bool dynamicPages = false);
 
     VirtualShadowMapBuildActiveBlocksBindings Declare(org::PassBuilder& builder);
@@ -36,9 +34,9 @@ public:
     void ShutdownPass() {}
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_activeBlockMetadataBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_activeBlockMetadataBuffer;
     bool m_dynamicPages = false;
 };

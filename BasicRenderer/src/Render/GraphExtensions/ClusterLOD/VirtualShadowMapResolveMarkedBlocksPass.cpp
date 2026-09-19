@@ -10,16 +10,16 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapResolveMarkedBlocksPass::VirtualShadowMapResolveMarkedBlocksPass(
-    std::shared_ptr<Buffer> markedBlocksMaskBuffer,
-    std::shared_ptr<Buffer> markedBlocksListBuffer,
-    std::shared_ptr<Buffer> markedBlocksCountBuffer,
-    std::shared_ptr<Buffer> allocationRequestsBuffer,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> markClipmapDataBuffer,
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
-    std::shared_ptr<Buffer> statsBuffer)
+    std::shared_ptr<org::Buffer> markedBlocksMaskBuffer,
+    std::shared_ptr<org::Buffer> markedBlocksListBuffer,
+    std::shared_ptr<org::Buffer> markedBlocksCountBuffer,
+    std::shared_ptr<org::Buffer> allocationRequestsBuffer,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> markClipmapDataBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::shared_ptr<org::Buffer> directionalPageViewInfoBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer)
     : m_markedBlocksMaskBuffer(std::move(markedBlocksMaskBuffer))
     , m_markedBlocksListBuffer(std::move(markedBlocksListBuffer))
     , m_markedBlocksCountBuffer(std::move(markedBlocksCountBuffer))
@@ -52,7 +52,7 @@ VirtualShadowMapResolveMarkedBlocksBindings VirtualShadowMapResolveMarkedBlocksP
 
 void VirtualShadowMapResolveMarkedBlocksPass::Initialize() {}
 
-void VirtualShadowMapResolveMarkedBlocksPass::Update(const UpdateExecutionContext& executionContext)
+void VirtualShadowMapResolveMarkedBlocksPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
     m_activeClipmapCount = (std::min)(
@@ -78,7 +78,7 @@ br::render::PreparedComputeDispatch VirtualShadowMapResolveMarkedBlocksPass::Pre
     data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_COUNT_DESCRIPTOR_INDEX] = srv(bindings.count);
     data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUESTS_DESCRIPTOR_INDEX] = uav(bindings.requests);
     data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUEST_COUNT_DESCRIPTOR_INDEX] = uav(bindings.requestCount);
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
     data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
     data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = uav(bindings.pageViewInfo);
     data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);

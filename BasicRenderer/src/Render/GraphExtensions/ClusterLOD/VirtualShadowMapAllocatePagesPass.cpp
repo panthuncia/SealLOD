@@ -13,17 +13,17 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapAllocatePagesPass::VirtualShadowMapAllocatePagesPass(
-    std::shared_ptr<Buffer> allocationRequestsBuffer,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<Buffer> freePhysicalPagesBuffer,
-    std::shared_ptr<Buffer> reusablePhysicalPagesBuffer,
-    std::shared_ptr<Buffer> pageListHeaderBuffer,
-    std::shared_ptr<Buffer> statsBuffer)
+    std::shared_ptr<org::Buffer> allocationRequestsBuffer,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::shared_ptr<org::Buffer> freePhysicalPagesBuffer,
+    std::shared_ptr<org::Buffer> reusablePhysicalPagesBuffer,
+    std::shared_ptr<org::Buffer> pageListHeaderBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer)
     : m_allocationRequestsBuffer(std::move(allocationRequestsBuffer))
     , m_allocationCountBuffer(std::move(allocationCountBuffer))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
@@ -84,7 +84,7 @@ br::render::PreparedComputeIndirect VirtualShadowMapAllocatePagesPass::Prepare(
     const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index; };
     data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_REQUESTS_DESCRIPTOR_INDEX] = srv(bindings.requests);
     data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_REQUEST_COUNT_DESCRIPTOR_INDEX] = srv(bindings.requestCount);
-    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
     data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
     data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
     data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_FREE_PAGES_DESCRIPTOR_INDEX] = srv(bindings.freePages);

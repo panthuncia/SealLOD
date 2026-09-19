@@ -124,7 +124,7 @@ namespace AssimpLoader {
         const std::filesystem::path& sourceFilePath,
         const std::string& texPath,          // "*0" for embedded or file path
         const TextureProcessingSettings& processingSettings,
-        std::shared_ptr<Sampler> sampler,
+        std::shared_ptr<org::Sampler> sampler,
         bool preferSRGB
     )
     {
@@ -176,8 +176,8 @@ namespace AssimpLoader {
                 const unsigned int height = aiTex->mHeight;
                 const unsigned int channels = 4;
 
-                TextureDescription desc;
-                ImageDimensions dims;
+                org::TextureDescription desc;
+                org::ImageDimensions dims;
                 dims.width = width;
                 dims.height = height;
                 dims.rowPitch = width * 4;
@@ -311,7 +311,7 @@ namespace AssimpLoader {
 							samplerDesc.maxLod = FLT_MAX;
 
 
-                            std::shared_ptr<Sampler> sampler = Sampler::CreateSampler(samplerDesc);
+                            std::shared_ptr<org::Sampler> sampler = org::Sampler::CreateSampler(samplerDesc);
 
                             // Not loaded yet, load now
                             try {

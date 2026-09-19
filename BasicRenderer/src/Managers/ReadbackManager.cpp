@@ -19,7 +19,7 @@ namespace br {
 namespace {
 
 void SaveCubemapReadbackToDds(
-    const std::shared_ptr<Resource>& readbackBuffer,
+    const std::shared_ptr<org::Resource>& readbackBuffer,
     const std::vector<rhi::CopyableFootprint>& fps,
     uint32_t width,
     uint32_t height,
@@ -75,7 +75,7 @@ void SaveCubemapReadbackToDds(
 }
 
 void SaveTextureReadbackToDds(
-    const std::shared_ptr<Resource>& readbackBuffer,
+    const std::shared_ptr<org::Resource>& readbackBuffer,
     const std::vector<rhi::CopyableFootprint>& fps,
     uint32_t width,
     uint32_t height,
@@ -151,7 +151,7 @@ void ReadbackManager::Initialize(rhi::Timeline readbackFence) {
     }
 }
 
-void ReadbackManager::RequestReadback(std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap) {
+void ReadbackManager::RequestReadback(std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap) {
     std::scoped_lock lock(m_state->mutex);
     if (!m_state->accepting) return;
     m_state->queuedReadbacks.push_back(ReadbackInfo{
@@ -186,7 +186,7 @@ void ReadbackManager::ReadbackPass::Declare(org::PassBuilder& builder)
     std::scoped_lock lock(m_state->mutex);
     for (const auto& readback : m_state->queuedReadbacks)
         if (readback.texture) builder.WithCopySource(readback.texture);
-    builder.PreferQueue(QueueKind::Graphics);
+    builder.PreferQueue(org::QueueKind::Graphics);
 }
 
 ReadbackManager::ReadbackFrameData ReadbackManager::ReadbackPass::Prepare(
@@ -218,7 +218,7 @@ ReadbackManager::ReadbackFrameData ReadbackManager::ReadbackPass::Prepare(
         range.planeCount = 1;
         const auto info = device.GetCopyableFootprints(
             range, footprints.data(), static_cast<uint32_t>(footprints.size()));
-        auto buffer = Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
+        auto buffer = org::Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
         buffer->SetName("Readback");
         preparation.Retain(buffer);
         const auto source = preparation.CaptureResource(input.texture->GetGlobalResourceID());
@@ -260,9 +260,9 @@ ReadbackManager::ReadbackFrameData ReadbackManager::ReadbackPass::Prepare(
         std::shared_ptr<State> state;
         std::vector<ReadbackInfo> inputs;
         mutable std::vector<ReadbackRequest> requests;
-        ExternalTimelinePoint signal{};
+        org::ExternalTimelinePoint signal{};
         mutable std::atomic<bool> resolved{false};
-        std::span<const ExternalTimelinePoint> SignalsAfterCompletion() const override {
+        std::span<const org::ExternalTimelinePoint> SignalsAfterCompletion() const override {
             return {&signal, 1u};
         }
         void Submitted(org::SubmissionContext) const override {
@@ -305,7 +305,7 @@ void ReadbackManager::ReadbackPass::Record(
 void ReadbackManager::SaveCubemapToDDS(
     rhi::Device& device,
     org::imm::ImmediateCommandList& commandList,
-    std::shared_ptr<PixelBuffer> cubemap,
+    std::shared_ptr<org::PixelBuffer> cubemap,
     const std::wstring& outputFile,
     uint64_t fenceValue)
 {
@@ -329,7 +329,7 @@ void ReadbackManager::SaveCubemapToDDS(
     auto info = device.GetCopyableFootprints(fr, fps.data(), static_cast<uint32_t>(fps.size()));
     assert(info.count == numSubresources);
 
-    auto readbackBuffer = Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
+    auto readbackBuffer = org::Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
     readbackBuffer->SetName("Readback");
 
     for (uint32_t mipLevel = 0; mipLevel < numMipLevels; ++mipLevel) {
@@ -378,7 +378,7 @@ void ReadbackManager::SaveCubemapToDDS(
 void ReadbackManager::SaveTextureToDDS(
     rhi::Device& device,
     org::imm::ImmediateCommandList& commandList,
-    PixelBuffer* texture,
+    org::PixelBuffer* texture,
     const std::wstring& outputFile,
     uint64_t fenceValue)
 {
@@ -405,7 +405,7 @@ void ReadbackManager::SaveTextureToDDS(
     const auto height = texture->GetHeight();
     const auto dxgiFmt = rhi::ToDxgi(texture->GetFormat());
 
-    auto readbackBuffer = Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
+    auto readbackBuffer = org::Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
     readbackBuffer->SetName("Readback");
 
     for (uint32_t mipLevel = 0; mipLevel < numMipLevels; ++mipLevel) {

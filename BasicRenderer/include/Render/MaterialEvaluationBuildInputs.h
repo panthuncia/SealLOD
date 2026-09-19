@@ -5,7 +5,7 @@
 
 class PSOManager;
 class CommandSignatureManager;
-class GloballyIndexedResource;
+namespace org { class GloballyIndexedResource; }
 namespace org { class ResourceGroup; }
 
 // Immutable graph-generation selection for material evaluation. Device-scoped
@@ -14,13 +14,13 @@ struct MaterialEvaluationBuildInputs {
     PSOManager* pipelines = nullptr;
     CommandSignatureManager* commandSignatures = nullptr;
     std::shared_ptr<org::ResourceGroup> clodSlabResources;
-    std::shared_ptr<GloballyIndexedResource> visibleClusters;
-    std::shared_ptr<GloballyIndexedResource> visibleClusterCounter;
-    std::shared_ptr<GloballyIndexedResource> visibleClusterTransformIndices;
-    std::shared_ptr<GloballyIndexedResource> reyesDiceQueue;
-    std::shared_ptr<GloballyIndexedResource> reyesTessTableConfigs;
-    std::shared_ptr<GloballyIndexedResource> reyesTessTableVertices;
-    std::shared_ptr<GloballyIndexedResource> reyesTessTableTriangles;
+    std::shared_ptr<org::GloballyIndexedResource> visibleClusters;
+    std::shared_ptr<org::GloballyIndexedResource> visibleClusterCounter;
+    std::shared_ptr<org::GloballyIndexedResource> visibleClusterTransformIndices;
+    std::shared_ptr<org::GloballyIndexedResource> reyesDiceQueue;
+    std::shared_ptr<org::GloballyIndexedResource> reyesTessTableConfigs;
+    std::shared_ptr<org::GloballyIndexedResource> reyesTessTableVertices;
+    std::shared_ptr<org::GloballyIndexedResource> reyesTessTableTriangles;
     std::uint32_t visibleClusterCapacity = 0;
 
     bool IsValid() const noexcept {

@@ -9,7 +9,6 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
 struct StreamingFeedbackSortFrameData {
     rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
@@ -30,16 +29,16 @@ class CLodStreamingFeedbackSortPass final : public org::TypedRenderGraphPass<CLo
     StreamingFeedbackSortFrameData, StreamingFeedbackSortBindings> {
 public:
     CLodStreamingFeedbackSortPass(
-        std::shared_ptr<Buffer> requestKeys,
-        std::shared_ptr<Buffer> requests,
-        std::shared_ptr<Buffer> requestCounter,
-        std::shared_ptr<Buffer> keyScratch,
-        std::shared_ptr<Buffer> payloadScratch,
-        std::shared_ptr<Buffer> sumTable,
-        std::shared_ptr<Buffer> reduceTable,
-        std::shared_ptr<Buffer> constants,
-        std::shared_ptr<Buffer> countScatterArgs,
-        std::shared_ptr<Buffer> reduceScanArgs);
+        std::shared_ptr<org::Buffer> requestKeys,
+        std::shared_ptr<org::Buffer> requests,
+        std::shared_ptr<org::Buffer> requestCounter,
+        std::shared_ptr<org::Buffer> keyScratch,
+        std::shared_ptr<org::Buffer> payloadScratch,
+        std::shared_ptr<org::Buffer> sumTable,
+        std::shared_ptr<org::Buffer> reduceTable,
+        std::shared_ptr<org::Buffer> constants,
+        std::shared_ptr<org::Buffer> countScatterArgs,
+        std::shared_ptr<org::Buffer> reduceScanArgs);
 
     StreamingFeedbackSortBindings Declare(org::PassBuilder& builder);
     void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
@@ -49,21 +48,21 @@ public:
         const StreamingFeedbackSortFrameData& data, org::PassRecordContext& recording);
 
 private:
-    PipelineState m_setupPso;
-    PipelineState m_countPso;
-    PipelineState m_reducePso;
-    PipelineState m_scanPso;
-    PipelineState m_scanAddPso;
-    PipelineState m_scatterPso;
+    org::PipelineState m_setupPso;
+    org::PipelineState m_countPso;
+    org::PipelineState m_reducePso;
+    org::PipelineState m_scanPso;
+    org::PipelineState m_scanAddPso;
+    org::PipelineState m_scatterPso;
 
-    std::shared_ptr<Buffer> m_requestKeys;
-    std::shared_ptr<Buffer> m_requests;
-    std::shared_ptr<Buffer> m_requestCounter;
-    std::shared_ptr<Buffer> m_keyScratch;
-    std::shared_ptr<Buffer> m_payloadScratch;
-    std::shared_ptr<Buffer> m_sumTable;
-    std::shared_ptr<Buffer> m_reduceTable;
-    std::shared_ptr<Buffer> m_constants;
-    std::shared_ptr<Buffer> m_countScatterArgs;
-    std::shared_ptr<Buffer> m_reduceScanArgs;
+    std::shared_ptr<org::Buffer> m_requestKeys;
+    std::shared_ptr<org::Buffer> m_requests;
+    std::shared_ptr<org::Buffer> m_requestCounter;
+    std::shared_ptr<org::Buffer> m_keyScratch;
+    std::shared_ptr<org::Buffer> m_payloadScratch;
+    std::shared_ptr<org::Buffer> m_sumTable;
+    std::shared_ptr<org::Buffer> m_reduceTable;
+    std::shared_ptr<org::Buffer> m_constants;
+    std::shared_ptr<org::Buffer> m_countScatterArgs;
+    std::shared_ptr<org::Buffer> m_reduceScanArgs;
 };

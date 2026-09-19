@@ -170,7 +170,7 @@ public:
     }
 
     void Initialize() {
-        m_materialEvalCmds = m_resourceRegistryView->RequestPtr<Resource>("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+        m_materialEvalCmds = m_resourceRegistryView->RequestPtr<org::Resource>("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
     }
 
     // Shared production selection over an immutable publication. Program capture
@@ -360,16 +360,16 @@ public:
         data.argumentsReference = preparation.CaptureResource(m_materialEvalCmds->GetGlobalResourceID());
         const bool terrainEvaluation = context->terrainRegionMaterialEvaluationEnabled;
         const auto outputType = context->outputType;
-        const auto* buffer = dynamic_cast<BufferBase*>(m_materialEvalCmds);
+        const auto* buffer = dynamic_cast<org::BufferBase*>(m_materialEvalCmds);
         std::optional<std::array<uint32_t,NumMiscUintRootConstants>> constants;
         VisitCommands(*materialState,terrainEvaluation,outputType,buffer ? buffer->GetBufferSize() : UINT64_MAX,
             [&](MaterialCompileFlags, MaterialCompileFlags shaderKey, uint32_t, uint64_t argOffset) {
-            const PipelineState* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(shaderKey);
+            const org::PipelineState* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(shaderKey);
             if (!pso) return;
             if (!constants) constants = BuildConstants<uint32_t>(bindings,{},
                 [&](org::ResourceBindingToken token) { return preparation.ResolveView(token,{org::BindlessViewKind::ShaderResource}).index; });
             auto capture = preparation;
-            capture.captureDescriptorIndices = [this, &preparation](const PipelineResources& resources) {
+            capture.captureDescriptorIndices = [this, &preparation](const org::PipelineResources& resources) {
                 return CaptureMaterialResourceDescriptorIndices(resources, preparation);
             };
             auto program = capture.CaptureProgramBinding(*pso);
@@ -429,9 +429,9 @@ private:
     // preparation capture hook: the recipe revision only tracks indices it saw
     // captured, so a material publication that rotates these buffers would
     // otherwise leave a stale recipe (everything renders black).
-    std::vector<unsigned int> CaptureMaterialResourceDescriptorIndices(const PipelineResources& resources,
+    std::vector<unsigned int> CaptureMaterialResourceDescriptorIndices(const org::PipelineResources& resources,
         const org::PassPrepareContext& preparation) const {
-        auto resolve = [&](const ResourceIdentifier& binding, bool optional) {
+        auto resolve = [&](const org::ResourceIdentifier& binding, bool optional) {
             return preparation.captureDescriptorIndex ? preparation.captureDescriptorIndex(binding, optional)
                 : m_resourceDescriptorIndexHelper->GetResourceDescriptorIndex(binding, optional);
         };
@@ -447,13 +447,13 @@ private:
     }
 
     bool m_terrainRvtEnabled = false;
-    Resource* m_materialEvalCmds;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
-    std::shared_ptr<GloballyIndexedResource> m_visibleClusterResource;
-    std::shared_ptr<GloballyIndexedResource> m_visibleClusterTransformIndicesResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesDiceQueueResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesTessTableConfigsResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesTessTableVerticesResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesTessTableTrianglesResource;
+    org::Resource* m_materialEvalCmds;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterTransformIndicesResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesDiceQueueResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesTessTableConfigsResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesTessTableVerticesResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesTessTableTrianglesResource;
     uint32_t m_patchVisibilityIndexBase = 0u;
 };

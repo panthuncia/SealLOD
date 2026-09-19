@@ -32,4 +32,3 @@ private:
 
 } // namespace org
 
-using org::BufferView;

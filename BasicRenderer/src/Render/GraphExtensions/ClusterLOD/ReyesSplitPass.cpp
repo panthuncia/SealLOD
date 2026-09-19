@@ -13,31 +13,31 @@
 #include "Utilities/Utilities.h"
 
 ReyesSplitPass::ReyesSplitPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> inputSplitQueueBuffer,
-    std::shared_ptr<Buffer> inputSplitQueueCounterBuffer,
-    std::shared_ptr<Buffer> outputSplitQueueBuffer,
-    std::shared_ptr<Buffer> outputSplitQueueCounterBuffer,
-    std::shared_ptr<Buffer> outputSplitQueueOverflowBuffer,
-    std::shared_ptr<Buffer> diceQueueBuffer,
-    std::shared_ptr<Buffer> diceQueueCounterBuffer,
-    std::shared_ptr<Buffer> diceQueueOverflowBuffer,
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> tessTableVerticesBuffer,
-    std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-    std::shared_ptr<Buffer> shadowClipmapInfoBuffer,
-    std::shared_ptr<PixelBuffer> shadowDirtyHierarchyTexture,
-    std::shared_ptr<PixelBuffer> shadowNonRasterableHierarchyTexture,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> inputSplitQueueBuffer,
+    std::shared_ptr<org::Buffer> inputSplitQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> outputSplitQueueBuffer,
+    std::shared_ptr<org::Buffer> outputSplitQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> outputSplitQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> diceQueueBuffer,
+    std::shared_ptr<org::Buffer> diceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> diceQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
+    std::shared_ptr<org::Buffer> shadowClipmapInfoBuffer,
+    std::shared_ptr<org::PixelBuffer> shadowDirtyHierarchyTexture,
+    std::shared_ptr<org::PixelBuffer> shadowNonRasterableHierarchyTexture,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t maxSplitQueueEntries,
     uint32_t splitPassIndex,
     uint32_t maxSplitPassCount,
     uint32_t phaseIndex,
     bool enableViewDepthOcclusion,
-    std::shared_ptr<Buffer> replaySplitQueueBuffer,
-    std::shared_ptr<Buffer> replaySplitQueueCounterBuffer,
-    std::shared_ptr<Buffer> replaySplitQueueOverflowBuffer)
+    std::shared_ptr<org::Buffer> replaySplitQueueBuffer,
+    std::shared_ptr<org::Buffer> replaySplitQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> replaySplitQueueOverflowBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_inputSplitQueueBuffer(std::move(inputSplitQueueBuffer))
     , m_inputSplitQueueCounterBuffer(std::move(inputSplitQueueCounterBuffer))
@@ -193,8 +193,8 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     c[CLOD_REYES_SPLIT_QUEUE_CAPACITY] = bindings.capacity;
     c[CLOD_REYES_SPLIT_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
     c[CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = bindings.hasShadowClipmap ? srv(bindings.shadowClipmap) : 0xFFFFFFFFu;
-    c[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty ? srv(bindings.shadowDirty, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
-    c[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowNonRasterable ? srv(bindings.shadowNonRasterable, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty ? srv(bindings.shadowDirty, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowNonRasterable ? srv(bindings.shadowNonRasterable, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.hasViewDepth
         ? BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).Publish(preparation, m_viewDepthPublisher)
         : 0xFFFFFFFFu;

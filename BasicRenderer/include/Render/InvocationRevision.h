@@ -22,7 +22,7 @@ inline uint64_t HandleRevision(const Handle& handle) noexcept {
 
 // Identity of the immutable pipeline payload; a recompiled or hot-reloaded
 // pipeline publishes a new payload object.
-inline uint64_t PipelineRevision(const PipelineState& pipeline) {
+inline uint64_t PipelineRevision(const org::PipelineState& pipeline) {
     return reinterpret_cast<uintptr_t>(pipeline.PeekPayload());
 }
 

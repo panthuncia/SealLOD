@@ -23,10 +23,10 @@ public:
 
     ~MeshInstance();
 
-	BufferView* GetPerMeshInstanceBufferView() { return m_perMeshInstanceBufferView.get(); }
+	org::BufferView* GetPerMeshInstanceBufferView() { return m_perMeshInstanceBufferView.get(); }
 
-	void SetBufferViews(std::unique_ptr<BufferView> perMeshInstanceBufferView);
-    void SetBufferViewUsingBaseMesh(std::unique_ptr<BufferView> perMeshInstanceBufferView);
+	void SetBufferViews(std::unique_ptr<org::BufferView> perMeshInstanceBufferView);
+    void SetBufferViewUsingBaseMesh(std::unique_ptr<org::BufferView> perMeshInstanceBufferView);
 
     void SetSkeleton(std::shared_ptr<Skeleton> skeleton);
     void SyncSkinningStateFromSkeleton();
@@ -75,15 +75,15 @@ public:
     uint32_t GetPerMeshBufferIndex() const { return m_perMeshInstanceBufferData.perMeshBufferIndex; }
 	void SetSkinningInstanceSlot(uint32_t slot);
 
-    std::unique_ptr<BufferView>& GetPerMeshOverrideBufferView() { return m_perMeshOverrideBufferView; }
-    void SetPerMeshOverrideBufferView(std::unique_ptr<BufferView> view) { m_perMeshOverrideBufferView = std::move(view); }
+    std::unique_ptr<org::BufferView>& GetPerMeshOverrideBufferView() { return m_perMeshOverrideBufferView; }
+    void SetPerMeshOverrideBufferView(std::unique_ptr<org::BufferView> view) { m_perMeshOverrideBufferView = std::move(view); }
 
-    void SetCLodBufferViews(std::unique_ptr<BufferView> perMeshInstanceClodOffsetsView) {
+    void SetCLodBufferViews(std::unique_ptr<org::BufferView> perMeshInstanceClodOffsetsView) {
         m_perMeshInstanceClodOffsetsView = std::move(perMeshInstanceClodOffsetsView);
     }
 
 
-    const BufferView* GetCLodOffsetsView() const {
+    const org::BufferView* GetCLodOffsetsView() const {
         return m_perMeshInstanceClodOffsetsView.get();
     }
 
@@ -105,10 +105,10 @@ private:
     MeshManager* m_pCurrentMeshManager = nullptr;
     br::render::PoseInstanceRegistrationService* m_poseRegistration = nullptr;
     std::weak_ptr<std::atomic_bool> m_poseRegistrationLifetime;
-    std::unique_ptr<BufferView> m_perMeshInstanceBufferView;
-    std::unique_ptr<BufferView> m_perMeshOverrideBufferView;
+    std::unique_ptr<org::BufferView> m_perMeshInstanceBufferView;
+    std::unique_ptr<org::BufferView> m_perMeshOverrideBufferView;
 
-    std::unique_ptr<BufferView> m_perMeshInstanceClodOffsetsView = nullptr;
+    std::unique_ptr<org::BufferView> m_perMeshInstanceClodOffsetsView = nullptr;
 
 	float m_animationSpeed = 1.0f;
 };

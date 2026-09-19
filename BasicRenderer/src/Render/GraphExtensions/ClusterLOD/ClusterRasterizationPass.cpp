@@ -27,34 +27,34 @@ constexpr uint32_t kDeepVisibilityAverageFragmentsPerPixel = 5u;
 
 ClusterRasterizationPass::ClusterRasterizationPass(
     ClusterRasterizationPassInputs inputs,
-    std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
-    std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
-    std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
-    std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
-    std::shared_ptr<Buffer> deepVisibilityNodesBuffer,
-    std::shared_ptr<Buffer> deepVisibilityCounterBuffer,
-    std::shared_ptr<Buffer> deepVisibilityOverflowCounterBuffer,
-    std::shared_ptr<Buffer> AVBOITConfigBuffer,
-    std::shared_ptr<PixelBuffer> AVBOITOccupancyTexture,
-    std::shared_ptr<PixelBuffer> AVBOITScalarExtinctionTexture,
-    std::shared_ptr<PixelBuffer> AVBOITChromaticExtinctionTexture,
-    std::shared_ptr<PixelBuffer> AVBOITIntegratedTransmittanceTexture,
-    std::shared_ptr<PixelBuffer> AVBOITZeroTransmittanceSliceTexture,
-    std::shared_ptr<PixelBuffer> AVBOITAccumulationTexture,
-    std::shared_ptr<PixelBuffer> AVBOITNormalizationTexture,
-    std::shared_ptr<PixelBuffer> AVBOITShadingExtinctionTexture,
-    std::shared_ptr<Buffer> visibleClustersResolveBuffer,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
-    std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-    std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-    std::shared_ptr<PixelBuffer> AVBOITOccupancySliceMaskTexture,
-    std::shared_ptr<PixelBuffer> AVBOITEarlyDepthTexture,
-    std::shared_ptr<Buffer> telemetryBuffer,
-    std::shared_ptr<Buffer> sourceGroupMismatchCounterBuffer,
-    std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer,
-    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture)
+    std::shared_ptr<org::Buffer> compactedVisibleClustersBuffer,
+    std::shared_ptr<org::Buffer> compactedVisibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> rasterBucketsHistogramBuffer,
+    std::shared_ptr<org::Buffer> rasterBucketsIndirectArgsBuffer,
+    std::shared_ptr<org::Buffer> sortedToUnsortedMappingBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityNodesBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityCounterBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityOverflowCounterBuffer,
+    std::shared_ptr<org::Buffer> AVBOITConfigBuffer,
+    std::shared_ptr<org::PixelBuffer> AVBOITOccupancyTexture,
+    std::shared_ptr<org::PixelBuffer> AVBOITScalarExtinctionTexture,
+    std::shared_ptr<org::PixelBuffer> AVBOITChromaticExtinctionTexture,
+    std::shared_ptr<org::PixelBuffer> AVBOITIntegratedTransmittanceTexture,
+    std::shared_ptr<org::PixelBuffer> AVBOITZeroTransmittanceSliceTexture,
+    std::shared_ptr<org::PixelBuffer> AVBOITAccumulationTexture,
+    std::shared_ptr<org::PixelBuffer> AVBOITNormalizationTexture,
+    std::shared_ptr<org::PixelBuffer> AVBOITShadingExtinctionTexture,
+    std::shared_ptr<org::Buffer> visibleClustersResolveBuffer,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+    std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+    std::shared_ptr<org::PixelBuffer> AVBOITOccupancySliceMaskTexture,
+    std::shared_ptr<org::PixelBuffer> AVBOITEarlyDepthTexture,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> sourceGroupMismatchCounterBuffer,
+    std::shared_ptr<org::Buffer> sourceGroupMismatchDetailsBuffer,
+    std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture)
     : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
     , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
@@ -302,21 +302,21 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& declar
 
 void ClusterRasterizationPass::Initialize() {
     if (m_outputKind == CLodRasterOutputKind::AVBOITShading) {
-        RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
+        RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
     }
     if (m_outputKind == CLodRasterOutputKind::AVBOITShading && m_getShadowsEnabled && m_getShadowsEnabled()) {
-        RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
+        RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
     }
 }
 
-void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionContext) {
+void ClusterRasterizationPass::Update(const org::UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
 
     auto numViews = context.ViewCameraBufferSize();
-    std::vector<std::shared_ptr<PixelBuffer>> visibilityBuffers;
-    std::vector<std::shared_ptr<PixelBuffer>> deepVisibilityHeadPointerBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> visibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> deepVisibilityHeadPointerBuffers;
 
     uint32_t maxViewWidth = 1;
     uint32_t maxViewHeight = 1;
@@ -582,7 +582,7 @@ br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::BuildRecipe
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-            uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+            uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = uav(bindings.physicalPages);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = uav(bindings.dynamicPages);
@@ -611,7 +611,7 @@ br::render::PreparedRenderIndirectSequence ClusterRasterizationPass::BuildRecipe
     const auto commandLayout = PSOManager::GetInstance().GetRootSignature().GetHandle();
     for (uint32_t i = 0; i < numBuckets; ++i) {
         const auto flags = context->preparedRasterBucketFlags.at(i);
-        const PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
+        const org::PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
             ? PSOManager::GetInstance().TryGetClusterLODRasterPSO(flags, m_wireframe, m_visibilityBuffers.size() == 1u)
             : m_outputKind == CLodRasterOutputKind::VirtualShadow
                 ? PSOManager::GetInstance().TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
@@ -673,7 +673,7 @@ std::vector<uint64_t> ClusterRasterizationPass::RecipeRevision(const org::PassPr
     m_viewRasterInfoTable.AppendRevision(preparation, revision);
     for (uint32_t i = 0; i < context->preparedRasterBucketCount; ++i) {
         const auto flags = context->preparedRasterBucketFlags.at(i);
-        const PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
+        const org::PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
             ? PSOManager::GetInstance().TryGetClusterLODRasterPSO(flags, m_wireframe, m_visibilityBuffers.size() == 1u)
             : m_outputKind == CLodRasterOutputKind::VirtualShadow
                 ? PSOManager::GetInstance().TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)

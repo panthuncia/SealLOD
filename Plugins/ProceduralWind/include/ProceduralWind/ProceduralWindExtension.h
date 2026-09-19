@@ -5,10 +5,10 @@
 
 namespace br::wind {
 
-class ProceduralWindExtension final : public RenderGraph::IRenderGraphExtension {
+class ProceduralWindExtension final : public org::RenderGraph::IRenderGraphExtension {
 public:
     explicit ProceduralWindExtension(std::shared_ptr<ProceduralWindRuntime> runtime);
-    void GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& out) override;
+    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& out) override;
 
 private:
     std::shared_ptr<ProceduralWindRuntime> m_runtime;

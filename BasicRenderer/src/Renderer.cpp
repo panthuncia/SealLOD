@@ -404,8 +404,8 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.renderGraphBatchTraceEnabled = sm.getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
     orgSettings.renderGraphLightweightCompileSummaryEnabled = sm.getSettingGetter<bool>("renderGraphLightweightCompileSummaryEnabled")();
     orgSettings.readOnlyUniformTransitionElisionEnabled = true;
-    orgSettings.autoAliasMode = static_cast<uint8_t>(sm.getSettingGetter<AutoAliasMode>("autoAliasMode")());
-    orgSettings.autoAliasPackingStrategy = static_cast<uint8_t>(sm.getSettingGetter<AutoAliasPackingStrategy>("autoAliasPackingStrategy")());
+    orgSettings.autoAliasMode = static_cast<uint8_t>(sm.getSettingGetter<org::AutoAliasMode>("autoAliasMode")());
+    orgSettings.autoAliasPackingStrategy = static_cast<uint8_t>(sm.getSettingGetter<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy")());
     orgSettings.autoAliasEnableLogging = sm.getSettingGetter<bool>("autoAliasEnableLogging")();
     orgSettings.autoAliasLogExclusionReasons = sm.getSettingGetter<bool>("autoAliasLogExclusionReasons")();
     orgSettings.autoAliasBuildDebugData = sm.getSettingGetter<bool>("autoAliasBuildDebugData")();
@@ -572,7 +572,7 @@ void Renderer::Initialize(
         m_pipelineReplacementDebugBreakHandler = [] { __debugbreak(); };
     }
 #endif
-    BufferBase::ScopedBackingMutation initializationBackingMutation;
+    org::BufferBase::ScopedBackingMutation initializationBackingMutation;
     m_hwnd = hwnd;
 
     auto& settingsManager = SettingsManager::GetInstance();
@@ -618,14 +618,14 @@ void Renderer::Initialize(
     SetSettings();
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
     RendererECSManager::GetInstance().Initialize();
-    TrackedEntityToken::Hooks trackedEntityHooks{};
+    org::TrackedEntityToken::Hooks trackedEntityHooks{};
     trackedEntityHooks.createEntity = [](flecs::entity existing) {
             auto& ecsManager = RendererECSManager::GetInstance();
             if (!ecsManager.IsAlive()) {
-                return TrackedEntityToken{};
+                return org::TrackedEntityToken{};
             }
 
-            TrackedEntityToken token = TrackedEntityToken::CreateDeferred();
+            org::TrackedEntityToken token = org::TrackedEntityToken::CreateDeferred();
             const flecs::entity_t existingId = existing.id();
             auto deferredState = token.deferredState;
             ecsManager.EnqueueDeferredWorldOperation([deferredState, existingId](flecs::world& world) mutable {
@@ -636,7 +636,7 @@ void Renderer::Initialize(
                     entity = world.entity();
                 }
 
-                if (!TrackedEntityToken::ResolveDeferredState(
+                if (!org::TrackedEntityToken::ResolveDeferredState(
                     deferredState,
                     world,
                     entity.id(),
@@ -645,7 +645,7 @@ void Renderer::Initialize(
                     if (entity.is_alive()) {
                         entity.destruct();
                     }
-                    TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
+                    org::TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
                     return;
                 }
 
@@ -655,7 +655,7 @@ void Renderer::Initialize(
 
                 if (destroyRequested && entity.is_alive()) {
                     entity.destruct();
-                    TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
+                    org::TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
                 }
             });
             return std::move(token);
@@ -666,7 +666,7 @@ void Renderer::Initialize(
     trackedEntityHooks.isMainThread = []() {
         return RendererECSManager::GetInstance().IsMainThread();
     };
-    trackedEntityHooks.enqueueAttachBundle = [](flecs::entity_t id, EntityComponentBundle bundle) {
+    trackedEntityHooks.enqueueAttachBundle = [](flecs::entity_t id, org::EntityComponentBundle bundle) {
         auto& ecsManager = RendererECSManager::GetInstance();
         if (!ecsManager.IsAlive()) {
             return;
@@ -700,21 +700,21 @@ void Renderer::Initialize(
             entity.destruct();
         }
     };
-    TrackedEntityToken::SetHooks(std::move(trackedEntityHooks));
+    org::TrackedEntityToken::SetHooks(std::move(trackedEntityHooks));
 
-    Resource::ECSEntityHooks resourceEntityHooks{};
-    resourceEntityHooks.createEntity = []() -> Resource::ECSEntityHandle {
+    org::Resource::ECSEntityHooks resourceEntityHooks{};
+    resourceEntityHooks.createEntity = []() -> org::Resource::ECSEntityHandle {
 		auto& ecsManager = RendererECSManager::GetInstance();
 		if (!ecsManager.IsAlive()) {
 			return {};
 		}
 
 		if (!ecsManager.IsMainThread()) {
-			auto handle = Resource::ECSEntityHandle::CreateDeferred();
+			auto handle = org::Resource::ECSEntityHandle::CreateDeferred();
                 auto deferredState = handle.deferredState;
                 ecsManager.EnqueueDeferredWorldOperation([deferredState](flecs::world& world) mutable {
 					flecs::entity entity = world.entity();
-                    Resource::ECSEntityHandle deferredHandle;
+                    org::Resource::ECSEntityHandle deferredHandle;
                     deferredHandle.deferredState = deferredState;
                     if (!deferredHandle.Resolve(world, entity.id())) {
                         deferredHandle.MarkDestroyed();
@@ -725,12 +725,12 @@ void Renderer::Initialize(
 
         auto& world = RendererECSManager::GetInstance().GetWorld();
         auto entity = world.entity();
-        Resource::ECSEntityHandle handle{};
+        org::Resource::ECSEntityHandle handle{};
         handle.world = &world;
         handle.id = entity.id();
         return handle;
     };
-    resourceEntityHooks.destroyEntity = [](const Resource::ECSEntityHandle& handle) {
+    resourceEntityHooks.destroyEntity = [](const org::Resource::ECSEntityHandle& handle) {
         auto& ecsManager = RendererECSManager::GetInstance();
         if (!ecsManager.IsAlive()) {
             return;
@@ -752,7 +752,7 @@ void Renderer::Initialize(
         handle.RequestDestroy();
             auto deferredState = handle.deferredState;
             ecsManager.EnqueueDeferredWorldOperation([deferredState](flecs::world&) mutable {
-                Resource::ECSEntityHandle deferredHandle;
+                org::Resource::ECSEntityHandle deferredHandle;
                 deferredHandle.deferredState = deferredState;
 				flecs::world* world = nullptr;
 				flecs::entity_t id = 0;
@@ -770,10 +770,10 @@ void Renderer::Initialize(
     resourceEntityHooks.isRuntimeAlive = []() {
         return RendererECSManager::GetInstance().IsAlive();
     };
-    Resource::SetEntityHooks(std::move(resourceEntityHooks));
+    org::Resource::SetEntityHooks(std::move(resourceEntityHooks));
 
     if (!currentRenderGraph) {
-		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
+		currentRenderGraph = std::make_unique<org::RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}
@@ -841,7 +841,7 @@ void Renderer::Initialize(
     m_rendererStatePublisher->SetCandidateRejectedCallback([this](std::uint64_t epoch) {
         if (m_rendererStateRequests) m_rendererStateRequests->OnCandidateRejected(epoch);
     });
-    SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
+    org::SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
         return TaskSchedulerManager::GetInstance().Submit(
             TaskLane::Background, TaskDomain::Cleanup, taskName, std::move(task));
     });
@@ -849,7 +849,7 @@ void Renderer::Initialize(
     spdlog::info("Renderer initialization: initializing PSO manager");
     PSOManager::GetInstance().initialize();
     spdlog::info("Renderer initialization: initializing deletion manager");
-    DeletionManager::GetInstance().Initialize();
+    org::DeletionManager::GetInstance().Initialize();
 	spdlog::info("Renderer initialization: initializing command signatures");
 	CommandSignatureManager::GetInstance().Initialize();
     spdlog::info("Renderer initialization: command signatures initialized");
@@ -893,7 +893,7 @@ void Renderer::Initialize(
 	m_pEnvironmentManager = EnvironmentManager::CreateUnique(currentRenderGraph->RetainUploadService());
 	m_pEnvironmentManager->SetWorkServices(m_environmentWorkServices);
     CreateDefaultEnvironmentResources();
-    m_pEnvironmentManager->SetRequestReadbackFn([this](std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap) {
+    m_pEnvironmentManager->SetRequestReadbackFn([this](std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap) {
         if (!m_pReadbackManager) {
             return;
         }
@@ -908,7 +908,7 @@ void Renderer::Initialize(
         currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
     m_pMaterialManager->SetDescriptorService(currentRenderGraph->RetainDescriptorService());
     m_pMaterialManager->SetRequestTextureReadbackFn(
-        [this](std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
+        [this](std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
             if (m_pMaterialManager &&
                 m_pMaterialManager->RequestExternalMaterialTextureReadback(
                     texture, outputFile, callback)) {
@@ -1194,7 +1194,7 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool 
     snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;
     snapshot.shaderCompileTasks = taskStats.shaderCompileQueued + taskStats.shaderCompileActive;
     if (includeExpensiveDiagnostics) {
-        const auto deferredReleaseStats = DescriptorHeapManager::GetInstance().GetDeferredReleaseStats();
+        const auto deferredReleaseStats = org::DescriptorHeapManager::GetInstance().GetDeferredReleaseStats();
         snapshot.deferredGpuReleaseCount = deferredReleaseStats.releaseCount;
         snapshot.deferredGpuReleaseResourceCount = deferredReleaseStats.resourceCount;
         snapshot.blockedGpuReleaseCount = deferredReleaseStats.blockedReleaseCount;
@@ -1202,7 +1202,7 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool 
         snapshot.deviceErrorGpuReleaseTimelineCount = deferredReleaseStats.deviceErrorTimelineCount;
         snapshot.incompleteGpuReleaseTimelineCount = deferredReleaseStats.incompleteTimelineCount;
         snapshot.deferredGpuReleaseResourceIDs = std::move(deferredReleaseStats.resourceIDs);
-        const auto deletionStats = DeletionManager::GetInstance().GetStats();
+        const auto deletionStats = org::DeletionManager::GetInstance().GetStats();
         snapshot.deletionQueueObjectCount = deletionStats.objectCount;
         snapshot.deletionQueueAllocationCount = deletionStats.allocationCount;
         snapshot.deletionQueueTrackedAllocationCount = deletionStats.trackedAllocationCount;
@@ -1681,7 +1681,7 @@ void Renderer::RunRenderResourceSyncStage() {
 
     {
         BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::ScanObjectDirtyRanges");
-        const auto appendRanges = [](std::vector<std::pair<size_t, size_t>>& ranges, const std::vector<std::shared_ptr<BufferView>>& views, size_t stride) {
+        const auto appendRanges = [](std::vector<std::pair<size_t, size_t>>& ranges, const std::vector<std::shared_ptr<org::BufferView>>& views, size_t stride) {
             for (const auto& view : views) {
                 if (!view) {
                     continue;
@@ -1982,14 +1982,14 @@ void Renderer::CreateGlobalResources() {
 
 void Renderer::CreateDefaultEnvironmentResources() {
     auto makeFallbackCubemap = [](uint32_t resolution, bool generateMipMaps, const char* name) {
-        TextureDescription desc;
+        org::TextureDescription desc;
         desc.channels = 4;
         desc.isCubemap = true;
         desc.format = rhi::Format::R8G8B8A8_UNorm;
         desc.hasSRV = true;
         desc.generateMipMaps = generateMipMaps;
 
-        ImageDimensions dims;
+        org::ImageDimensions dims;
         dims.width = resolution;
         dims.height = resolution;
         dims.rowPitch = resolution * 4;
@@ -1998,7 +1998,7 @@ void Renderer::CreateDefaultEnvironmentResources() {
             desc.imageDimensions.push_back(dims);
         }
 
-        auto cubemap = PixelBuffer::CreateShared(desc);
+        auto cubemap = org::PixelBuffer::CreateShared(desc);
         cubemap->SetName(name);
         return cubemap;
     };
@@ -2296,8 +2296,8 @@ void Renderer::SetSettings() {
         "renderGraphVramDumpEnabled",
         ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_VRAM_DUMP"));
     settingsManager.registerSetting<bool>("renderGraphQueueSyncTraceEnabled", false);
-	settingsManager.registerSetting<AutoAliasMode>("autoAliasMode", AutoAliasMode::Balanced);
-    settingsManager.registerSetting<AutoAliasPackingStrategy>("autoAliasPackingStrategy", AutoAliasPackingStrategy::GreedySweepLine);
+	settingsManager.registerSetting<org::AutoAliasMode>("autoAliasMode", org::AutoAliasMode::Balanced);
+    settingsManager.registerSetting<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy", org::AutoAliasPackingStrategy::GreedySweepLine);
     settingsManager.registerSetting<bool>("autoAliasEnableLogging", false);
     settingsManager.registerSetting<bool>("autoAliasLogExclusionReasons", false);
     settingsManager.registerSetting<bool>("autoAliasBuildDebugData", false);
@@ -2835,11 +2835,11 @@ void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
     // Wrap swapchain images for render-graph tracking
     m_backbufferResources.resize(m_numFramesInFlight);
     for (UINT n = 0; n < m_numFramesInFlight; n++) {
-        m_backbufferResources[n] = std::make_shared<ExternalTextureResource>(
+        m_backbufferResources[n] = std::make_shared<org::ExternalTextureResource>(
             renderTargets[n], x_res, y_res, rhi::Format::R8G8B8A8_UNorm);
         m_backbufferResources[n]->SetName("Backbuffer " + std::to_string(n));
     }
-    m_dynamicBackbuffer = std::make_shared<DynamicResource>(m_backbufferResources[0]);
+    m_dynamicBackbuffer = std::make_shared<org::DynamicResource>(m_backbufferResources[0]);
     m_dynamicBackbuffer->SetName("Backbuffer");
 
     CreateRTVs();
@@ -2881,7 +2881,7 @@ void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
 void Renderer::CreateTextures() {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     // Create HDR color target
-    TextureDescription hdrDesc;
+    org::TextureDescription hdrDesc;
     hdrDesc.arraySize = 1;
     hdrDesc.channels = 4; // RGBA
     hdrDesc.isCubemap = false;
@@ -2890,12 +2890,12 @@ void Renderer::CreateTextures() {
     hdrDesc.hasNonShaderVisibleUAV = true;
     hdrDesc.format = rhi::Format::R16G16B16A16_Float; // HDR format
     hdrDesc.generateMipMaps = false; // For bloom downsampling
-    ImageDimensions dims;
+    org::ImageDimensions dims;
     dims.height = resolution.y;
     dims.width = resolution.x;
     hdrDesc.imageDimensions.push_back(dims);
     hdrDesc.allowAlias = true;
-    auto hdrColorTarget = PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
+    auto hdrColorTarget = org::PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
     hdrColorTarget->SetName("Primary Camera HDR Color Target");
     org::memory::SetResourceUsageHint(*hdrColorTarget, "Primary color buffers");
 	m_coreResourceProvider.m_HDRColorTarget = hdrColorTarget;
@@ -2908,7 +2908,7 @@ void Renderer::CreateTextures() {
     // mip chain so removing bloom also removes that allocation.
     hdrDesc.generateMipMaps = false;
     hdrDesc.allowAlias = true;
-	auto upscaledHDRColorTarget = PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
+	auto upscaledHDRColorTarget = org::PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
 	upscaledHDRColorTarget->SetName("Upscaled HDR Color Target");
     org::memory::SetResourceUsageHint(*upscaledHDRColorTarget, "Upscaled color buffers");
 	m_coreResourceProvider.m_upscaledHDRColorTarget = upscaledHDRColorTarget;
@@ -2916,7 +2916,7 @@ void Renderer::CreateTextures() {
     // Scene recording targets a logical-frame-owned LDR surface.  Only the
     // presentation copy depends on the acquired swapchain image, so compiled
     // scene work can eventually be planned and recorded before acquisition.
-    TextureDescription presentationDesc{};
+    org::TextureDescription presentationDesc{};
     presentationDesc.arraySize = 1;
     presentationDesc.channels = 4;
     presentationDesc.hasRTV = true;
@@ -2927,17 +2927,17 @@ void Renderer::CreateTextures() {
     m_presentationColorResources.clear();
     m_presentationColorResources.reserve(m_numFramesInFlight);
     for (uint32_t slot = 0; slot < m_numFramesInFlight; ++slot) {
-        auto target = PixelBuffer::CreateSharedUnmaterialized(presentationDesc);
+        auto target = org::PixelBuffer::CreateSharedUnmaterialized(presentationDesc);
         target->SetName("Frame Presentation Color " + std::to_string(slot));
         org::memory::SetResourceUsageHint(*target, "Frame presentation surfaces");
         m_presentationColorResources.push_back(std::move(target));
     }
     if (!m_presentationColorResources.empty()) {
-        m_dynamicPresentationColor = std::make_shared<DynamicResource>(m_presentationColorResources.front());
+        m_dynamicPresentationColor = std::make_shared<org::DynamicResource>(m_presentationColorResources.front());
         m_dynamicPresentationColor->SetName("Frame Presentation Color");
     }
 
-    TextureDescription motionVectors;
+    org::TextureDescription motionVectors;
     motionVectors.arraySize = 1;
     motionVectors.channels = 2;
     motionVectors.isCubemap = false;
@@ -2948,10 +2948,10 @@ void Renderer::CreateTextures() {
     motionVectors.hasUAV = true;
     motionVectors.hasNonShaderVisibleUAV = true;
     motionVectors.srvFormat = rhi::Format::R16G16_Float;
-    ImageDimensions motionVectorsDims = { resolution.x, resolution.y, 0, 0 };
+    org::ImageDimensions motionVectorsDims = { resolution.x, resolution.y, 0, 0 };
     motionVectors.imageDimensions.push_back(motionVectorsDims);
 	motionVectors.allowAlias = true;
-    auto dilatedMotionVectorsBuffer = PixelBuffer::CreateSharedUnmaterialized(motionVectors);
+    auto dilatedMotionVectorsBuffer = org::PixelBuffer::CreateSharedUnmaterialized(motionVectors);
     dilatedMotionVectorsBuffer->SetName("Dilated Motion Vectors");
     org::memory::SetResourceUsageHint(*dilatedMotionVectorsBuffer, "Upscaling resources");
 	m_coreResourceProvider.m_gbufferDilatedMotionVectors = dilatedMotionVectorsBuffer;
@@ -3142,10 +3142,10 @@ void Renderer::Update(float elapsedSeconds) {
     // Clear the renderer-side alias so any early return applies backpressure
     // instead of rendering the preceding logical frame twice.
     m_frameInputs.reset();
-    BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
+    org::BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
 
 	std::vector<PSOManager::PipelineRetirementPoint> pipelineRetirementPoints;
-	for (const auto& point : DescriptorHeapManager::GetInstance().GetQueueFenceSnapshot()) {
+	for (const auto& point : org::DescriptorHeapManager::GetInstance().GetQueueFenceSnapshot()) {
 		pipelineRetirementPoints.push_back({ point.timeline, point.value });
 	}
 	PSOManager::GetInstance().PublishPendingLivePipelines(std::move(pipelineRetirementPoints));
@@ -3169,7 +3169,7 @@ void Renderer::Update(float elapsedSeconds) {
         // Publication is opportunistic at the frame boundary. Waiting here
         // defeats the asynchronous resize path and can park the render thread
         // behind backing creation for tens of milliseconds.
-        (void)PublishReadyDeferredBackingResizes(false);
+        (void)org::PublishReadyDeferredBackingResizes(false);
     });
 
     if (!IsSceneReadyForFrame()) {
@@ -3292,7 +3292,7 @@ void Renderer::Update(float elapsedSeconds) {
                 : 0u;
             m_pObjectManager->PublishDeferredRetireCompletedFrame(safeFrameNumber, retireDelayFrames);
         }
-        DescriptorHeapManager::GetInstance().ProcessDeferredReleases(m_preparationFrameIndex);
+        org::DescriptorHeapManager::GetInstance().ProcessDeferredReleases(m_preparationFrameIndex);
         RendererECSManager::GetInstance().FlushDeferredWorldOperations();
 
 		// Retire upload pages only after the previous use of this frame slot has
@@ -3851,7 +3851,7 @@ void Renderer::Update(float elapsedSeconds) {
     captureFrameInputsScope.reset();
     runCapturedStage("PublishDeferredBackingResizesLate", []() {
         BT_ZONE_SCOPE("Renderer::Update::PublishDeferredBackingResizesLate");
-        (void)PublishReadyDeferredBackingResizes(false);
+        (void)org::PublishReadyDeferredBackingResizes(false);
     });
 
     runCapturedStage("FlushUploadPolicies", [&]() {
@@ -3891,7 +3891,7 @@ void Renderer::Update(float elapsedSeconds) {
         std::make_shared<const RenderContext>(std::move(renderSnapshot)),
         primaryCameraUpload);
 
-    UpdateExecutionContext context{};
+    org::UpdateExecutionContext context{};
     context.resolverCaptureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease,
         m_context.publishedRendererState ? m_context.publishedRendererState->bindingBundle : nullptr);
     context.frameIndex = m_preparationFrameIndex;
@@ -3935,9 +3935,9 @@ void Renderer::Update(float elapsedSeconds) {
                     const auto expected = primary->cameraInfo;
                     try {
                         service->RequestReadbackCaptureAfterGraph(
-                            cameraResource.get(), RangeSpec{},
+                            cameraResource.get(), org::RangeSpec{},
                             [state = cameraReadbackState, path = cameraReadbackPath, requestFrame,
-                                cameraRevision, expected](ReadbackCaptureResult&& result) {
+                                cameraRevision, expected](org::ReadbackCaptureResult&& result) {
                             CameraInfo camera{};
                             if (result.data.size() >= sizeof(camera))
                                 std::memcpy(&camera, result.data.data(), sizeof(camera));
@@ -4006,14 +4006,14 @@ void Renderer::Update(float elapsedSeconds) {
                 if (auto* service = currentRenderGraph->GetReadbackService()) {
                     gpuWorkReadbackRequested = true;
                     const auto captureResource = [&](const char* label, const char* anchor,
-                        std::shared_ptr<Resource> resource,
+                        std::shared_ptr<org::Resource> resource,
                         std::shared_ptr<const br::render::PublishedGpuBufferVersion> version = {}) {
                         if (!resource) return;
                         // DynamicResource is a mutable indirection used by the
                         // frame graph for slot rotation. Capture the backing
                         // resource selected at acceptance time so an async
                         // frame cannot observe a later slot's contents.
-                        if (auto* dynamic = dynamic_cast<DynamicResource*>(resource.get())) {
+                        if (auto* dynamic = dynamic_cast<org::DynamicResource*>(resource.get())) {
                             if (auto backing = dynamic->GetResource()) resource = std::move(backing);
                         }
                         const auto frame = m_totalFramesRendered;
@@ -4031,10 +4031,10 @@ void Renderer::Update(float elapsedSeconds) {
                         const auto indirectDrawRecordsRevision = indirectState
                             ? indirectState->drawRecordsRoot.revision : 0u;
                         const auto path = directory / (std::string(label) + ".bin");
-                        service->RequestReadbackCapture(anchor, resource.get(), RangeSpec{},
+                        service->RequestReadbackCapture(anchor, resource.get(), org::RangeSpec{},
                             [path, frame, drawRecordsRevision, indirectRevision,
                                 desiredDrawRecordsRevision, indirectDrawRecordsRevision,
-                                version = std::move(version)](ReadbackCaptureResult&& result) {
+                                version = std::move(version)](org::ReadbackCaptureResult&& result) {
                                 std::ofstream output(path, std::ios::binary | std::ios::trunc);
                                 output.write(reinterpret_cast<const char*>(result.data.data()),
                                     static_cast<std::streamsize>(result.data.size()));
@@ -4067,7 +4067,7 @@ void Renderer::Update(float elapsedSeconds) {
                                     << "row_pitch=" << result.layouts.front().rowPitch << '\n';
                             });
                     };
-                    const auto capture = [&](const char* label, const char* anchor, ResourceIdentifier id) {
+                    const auto capture = [&](const char* label, const char* anchor, org::ResourceIdentifier id) {
                         captureResource(label, anchor, currentRenderGraph->RequestResourcePtr(id, true));
                     };
                     // Preserve the visibility target at the two phase-1 producer
@@ -4162,8 +4162,8 @@ void Renderer::Update(float elapsedSeconds) {
                     colorOutputReadbackRequested = true;
                     readbackService->RequestReadbackCaptureAfterGraph(
                         m_dynamicPresentationColor.get(),
-                        RangeSpec{},
-                        [path](ReadbackCaptureResult&& result) {
+                        org::RangeSpec{},
+                        [path](org::ReadbackCaptureResult&& result) {
                             BT_ZONE_SCOPE("Renderer::ColorOutputReadback::Analyze");
                             std::ofstream output(path, std::ios::binary | std::ios::trunc);
                             if (output && !result.data.empty()) {
@@ -4286,7 +4286,7 @@ void Renderer::Update(float elapsedSeconds) {
                         const auto requestTable = [readbackService, &path, published](
                             const char* label,
                             const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& table,
-                            Resource* captureResource = nullptr) {
+                            org::Resource* captureResource = nullptr) {
                             if (!table || !table->resource || !table->image) return;
                             auto tablePath = path;
                             tablePath += std::filesystem::path(fmt::format(".{}.bin", label));
@@ -4356,8 +4356,8 @@ void Renderer::Update(float elapsedSeconds) {
                             }
                             readbackService->RequestReadbackCapture(
                                 "EvaluateMaterialGroupsPass",
-                                captureResource ? captureResource : table->resource.get(), RangeSpec{},
-                                [tablePath, expected, resourceID, label](ReadbackCaptureResult&& result) {
+                                captureResource ? captureResource : table->resource.get(), org::RangeSpec{},
+                                [tablePath, expected, resourceID, label](org::ReadbackCaptureResult&& result) {
                                     std::ofstream output(tablePath, std::ios::binary | std::ios::trunc);
                                     if (output && !result.data.empty()) {
                                         output.write(reinterpret_cast<const char*>(result.data.data()),
@@ -4391,10 +4391,10 @@ void Renderer::Update(float elapsedSeconds) {
                                 ? m_pMaterialManager->GetTextureStreamingManager() : nullptr;
                             const auto boundTextureTable = textureStreaming
                                 ? textureStreaming->ResolvePublishedImageTableResourceForDiagnostics()
-                                : std::shared_ptr<Resource>{};
+                                : std::shared_ptr<org::Resource>{};
 							const auto readbackAnchor = textureStreaming
 								? textureStreaming->PublishedImageTableReadbackAnchorForDiagnostics()
-								: std::shared_ptr<Resource>{};
+								: std::shared_ptr<org::Resource>{};
                             // Request the resolver-selected published backing directly.  The
                             // logical bootstrap resource is only the resolver fallback; passing
                             // it to the readback service captures that stale backing rather than
@@ -4405,14 +4405,14 @@ void Renderer::Update(float elapsedSeconds) {
                         }
 
                         const auto requestTexture = [readbackService, &path](
-                            const char* label, const std::shared_ptr<Resource>& texture) {
+                            const char* label, const std::shared_ptr<org::Resource>& texture) {
                             if (!texture) return;
                             auto texturePath = path;
                             texturePath += std::filesystem::path(fmt::format(".{}.bin", label));
                             const auto resourceID = texture->GetGlobalResourceID();
                             readbackService->RequestReadbackCapture(
-                                "EvaluateMaterialGroupsPass", texture.get(), RangeSpec{},
-                                [texturePath, resourceID, label](ReadbackCaptureResult&& result) {
+                                "EvaluateMaterialGroupsPass", texture.get(), org::RangeSpec{},
+                                [texturePath, resourceID, label](org::ReadbackCaptureResult&& result) {
                                     std::ofstream output(texturePath, std::ios::binary | std::ios::trunc);
                                     if (output && !result.data.empty()) {
                                         output.write(reinterpret_cast<const char*>(result.data.data()),
@@ -4673,7 +4673,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     auto& world = RendererECSManager::GetInstance().GetWorld();
     const auto visibilityTag = world.component<CLodExtensionVisibilityBufferTag>();
 
-    std::shared_ptr<Resource> telemetryResource;
+    std::shared_ptr<org::Resource> telemetryResource;
     world.query_builder<const Components::Resource>()
         .with<CLodWorkGraphTelemetryBufferTag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -4684,7 +4684,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             }
         });
 
-    std::shared_ptr<Resource> visibleCounterResource;
+    std::shared_ptr<org::Resource> visibleCounterResource;
     world.query_builder<const Components::Resource>()
         .with<VisibleClustersCounterTag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -4695,7 +4695,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             }
         });
 
-    std::shared_ptr<Resource> visibleRecordsResource;
+    std::shared_ptr<org::Resource> visibleRecordsResource;
     world.query_builder<const Components::Resource>()
         .with<VisibleClustersBufferTag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -4704,7 +4704,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             if (!visibleRecordsResource) visibleRecordsResource = component.resource.lock();
         });
 
-    std::shared_ptr<Resource> rasterArgsResource;
+    std::shared_ptr<org::Resource> rasterArgsResource;
     world.query_builder<const Components::Resource>()
         .with<CLodPrimaryPhase1RasterIndirectArgsTag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -4715,7 +4715,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             }
         });
 
-    std::shared_ptr<Resource> replayStateResource;
+    std::shared_ptr<org::Resource> replayStateResource;
     world.query_builder<const Components::Resource>()
         .with<CLodOcclusionReplayStateBufferTag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -4865,8 +4865,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     readbackService->RequestReadbackCapture(
         "CLodOpaque::RasterizeClustersPass2",
         telemetryResource.get(),
-        RangeSpec{},
-        [this, requestedFrame, primaryActiveSetWorkloads, primaryActiveSetMembers](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame, primaryActiveSetWorkloads, primaryActiveSetMembers](org::ReadbackCaptureResult&& result) {
             m_clodTelemetryReadbackPending = false;
 
             constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
@@ -5165,8 +5165,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     readbackService->RequestReadbackCapture(
         "CLodOpaque::RasterizeClustersPass1",
         rasterArgsResource.get(),
-        RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
             m_clodRasterArgsReadbackPending = false;
 
             const size_t commandCount = result.data.size() / sizeof(RasterizeClustersCommand);
@@ -5226,8 +5226,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     readbackService->RequestReadbackCapture(
         "CLodOpaque::HierarchicalCullingPass2",
         visibleCounterResource.get(),
-        RangeSpec{},
-        [this, requestedFrame, visibleTransformAudit](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame, visibleTransformAudit](org::ReadbackCaptureResult&& result) {
             m_clodVisibleCounterReadbackPending = false;
 
             if (result.data.size() < sizeof(uint32_t)) {
@@ -5254,8 +5254,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     readbackService->RequestReadbackCapture(
         "CLodOpaque::HierarchicalCullingPass2",
         visibleRecordsResource.get(),
-        RangeSpec{},
-        [this, requestedFrame, visibleTransformAudit](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame, visibleTransformAudit](org::ReadbackCaptureResult&& result) {
             m_clodVisibleRecordsReadbackPending = false;
             {
                 std::lock_guard lock(visibleTransformAudit->mutex);
@@ -5267,8 +5267,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     readbackService->RequestReadbackCapture(
         "CLodOpaque::HierarchicalCullingPass2",
         replayStateResource.get(),
-        RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
             m_clodReplayStateReadbackPending = false;
 
             if (result.data.size() < sizeof(CLodReplayBufferState)) {
@@ -5337,8 +5337,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     }
     auto& world = RendererECSManager::GetInstance().GetWorld();
     const auto shadowTag = world.component<CLodExtensionShadowTag>();
-    std::shared_ptr<Resource> statsResource;
-    std::shared_ptr<Resource> workTelemetryResource;
+    std::shared_ptr<org::Resource> statsResource;
+    std::shared_ptr<org::Resource> workTelemetryResource;
     world.query_builder<const Components::Resource>()
         .with<CLodVirtualShadowStatsTag>()
         .with<CLodExtensionTypeTag>(shadowTag)
@@ -5367,8 +5367,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     readbackService->RequestReadbackCapture(
         "DeferredShadingPass",
         statsResource.get(),
-        RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
             m_clodVirtualShadowTelemetryReadbackPending = false;
             if (result.data.size() < sizeof(CLodVirtualShadowStats)) {
                 spdlog::error(
@@ -5542,8 +5542,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
         readbackService->RequestReadbackCapture(
             "CLodShadow::RasterizeClustersPass1",
             workTelemetryResource.get(),
-            RangeSpec{},
-            [requestedFrame](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [requestedFrame](org::ReadbackCaptureResult&& result) {
                 constexpr size_t telemetryBytes =
                     sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
                 if (result.data.size() < telemetryBytes) {
@@ -5567,8 +5567,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
             // at either raster pass can observe only graphics or only compute.
             "CLodShadow::VirtualShadowComposePagesPass",
             workTelemetryResource.get(),
-            RangeSpec{},
-            [this, requestedFrame](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, requestedFrame](org::ReadbackCaptureResult&& result) {
                 m_clodVirtualShadowWorkTelemetryReadbackPending = false;
                 constexpr size_t telemetryBytes =
                     sizeof(uint32_t) *
@@ -5655,7 +5655,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     }
 
     struct CasterTelemetryResource {
-        std::shared_ptr<Resource> resource;
+        std::shared_ptr<org::Resource> resource;
         std::string providerId;
         std::string completionPassName;
     };
@@ -5674,8 +5674,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
         readbackService->RequestReadbackCapture(
             telemetry.completionPassName,
             telemetry.resource.get(),
-            RangeSpec{},
-            [this, requestedFrame, providerId = telemetry.providerId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, requestedFrame, providerId = telemetry.providerId](org::ReadbackCaptureResult&& result) {
                 if (m_virtualShadowCasterTelemetryReadbacksPending != 0u) {
                     --m_virtualShadowCasterTelemetryReadbacksPending;
                 }
@@ -5745,7 +5745,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
     auto& world = RendererECSManager::GetInstance().GetWorld();
     const auto visibilityTag = world.component<CLodExtensionVisibilityBufferTag>();
 
-    std::shared_ptr<Resource> phase1Resource;
+    std::shared_ptr<org::Resource> phase1Resource;
     world.query_builder<const Components::Resource>()
         .with<CLodReyesTelemetryBufferPhase1Tag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -5756,7 +5756,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
             }
         });
 
-    std::shared_ptr<Resource> phase2Resource;
+    std::shared_ptr<org::Resource> phase2Resource;
     world.query_builder<const Components::Resource>()
         .with<CLodReyesTelemetryBufferPhase2Tag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -5774,7 +5774,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
     const uint64_t requestedFrame = m_totalFramesRendered;
     m_lastObjectReyesAtlasTelemetryRequestFrame = requestedFrame;
 
-    auto logTelemetry = [requestedFrame](const char* phaseLabel, ReadbackCaptureResult&& result) {
+    auto logTelemetry = [requestedFrame](const char* phaseLabel, org::ReadbackCaptureResult&& result) {
         if (result.data.size() < sizeof(CLodReyesTelemetry)) {
             spdlog::warn(
                 "SARP Object Reyes atlas shader telemetry: frame={} phase={} payload too small ({} bytes).",
@@ -5873,8 +5873,8 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         m_objectReyesAtlasTelemetryPhase1ReadbackPending = true;
         readbackService->RequestReadbackCaptureAfterGraph(
             phase1Resource.get(),
-            RangeSpec{},
-            [this, logTelemetry](ReadbackCaptureResult&& result) mutable {
+            org::RangeSpec{},
+            [this, logTelemetry](org::ReadbackCaptureResult&& result) mutable {
                 m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;
                 logTelemetry("phase1", std::move(result));
             });
@@ -5884,8 +5884,8 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         m_objectReyesAtlasTelemetryPhase2ReadbackPending = true;
         readbackService->RequestReadbackCaptureAfterGraph(
             phase2Resource.get(),
-            RangeSpec{},
-            [this, logTelemetry](ReadbackCaptureResult&& result) mutable {
+            org::RangeSpec{},
+            [this, logTelemetry](org::ReadbackCaptureResult&& result) mutable {
                 m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;
                 logTelemetry("phase2", std::move(result));
             });
@@ -5956,8 +5956,8 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
 
     readbackService->RequestReadbackCaptureAfterGraph(
             statsResource.get(),
-        RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
             m_terrainRvtStatsReadbackPending = false;
 
             if (result.data.size() < sizeof(TerrainRvtTelemetryStatsReadback)) {
@@ -6078,11 +6078,11 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 stats.generationPageTableXor,
                 stats.generationPhysicalPageXor);
         },
-        QueueKind::Copy);
+        org::QueueKind::Copy);
 
     readbackService->RequestReadbackCaptureAfterGraph(
             countersResource.get(),
-        RangeSpec{},
+        org::RangeSpec{},
         [this,
          requestedFrame,
          pageSize,
@@ -6098,7 +6098,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
          maxClipLevels,
          maxGeneratedPagesPerFrame,
          mipCount,
-         forcedFallback](ReadbackCaptureResult&& result) {
+         forcedFallback](org::ReadbackCaptureResult&& result) {
             m_terrainRvtCountersReadbackPending = false;
 
             constexpr size_t counterBytes = sizeof(uint32_t) * 4u;
@@ -6134,7 +6134,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 mipCount,
                 forcedFallback ? 1 : 0);
         },
-        QueueKind::Copy);
+        org::QueueKind::Copy);
 }
 
 void Renderer::Render() {
@@ -6274,7 +6274,7 @@ void Renderer::Render() {
 
     }
 
-    PassExecutionContext passExecutionContext{};
+    org::PassExecutionContext passExecutionContext{};
     passExecutionContext.device = deviceManager.GetDevice();
     passExecutionContext.frameIndex = m_context.frameIndex;
     passExecutionContext.executionSlot = renderedFrameIndex;
@@ -6672,7 +6672,7 @@ void Renderer::Cleanup() {
     if (m_pReadbackManager) {
         m_pReadbackManager->Cleanup();
     }
-    SetAsyncBufferBackingResizeScheduler({});
+    org::SetAsyncBufferBackingResizeScheduler({});
     TaskSchedulerManager::GetInstance().Cleanup();
     ::ResourceManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
@@ -6737,8 +6737,8 @@ void Renderer::Cleanup() {
 	FFXManager::GetInstance().Shutdown();
 	UpscalingManager::GetInstance().Shutdown();
     RendererECSManager::GetInstance().FlushDeferredWorldOperations();
-    TrackedEntityToken::ResetHooks();
-    Resource::ResetEntityHooks();
+    org::TrackedEntityToken::ResetHooks();
+    org::Resource::ResetEntityHooks();
     // The ingestion source store borrows the renderer ECS world. Release that
     // association before the singleton destroys the world so late availability
     // checks cannot observe a dangling source boundary.
@@ -6748,7 +6748,7 @@ void Renderer::Cleanup() {
 	// runtime descriptor/backing services alive through their final release.
     if (retiringDescriptors) retiringDescriptors->Cleanup();
     retiringDescriptors.reset();
-	RenderGraph::ShutdownRuntime();
+	org::RenderGraph::ShutdownRuntime();
 	spdlog::info("Cleaning up swap chain");
     m_swapChain.Reset();
 	spdlog::info("Cleaning up device manager");
@@ -6841,8 +6841,8 @@ std::shared_ptr<Scene> Renderer::AppendScene(std::shared_ptr<Scene> scene) {
 	}
 
 	{
-		BufferBase::ScopedBackingMutation appendBackingMutation;
-		(void)PublishReadyDeferredBackingResizes(true);
+		org::BufferBase::ScopedBackingMutation appendBackingMutation;
+		(void)org::PublishReadyDeferredBackingResizes(true);
 	}
 	org::runtime::FlushUploadPolicies();
 	if (m_pMaterialManager) {
@@ -7062,7 +7062,7 @@ void Renderer::CreateRenderGraph() {
     // Render-graph queue timelines are recreated below. Descriptor retirement
     // snapshots contain non-owning timeline handles, so consume all pending
     // releases and clear the snapshot while those timelines are still alive.
-    DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+    org::DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
 	PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
 
     // TODO: Find a better way to handle resources like this
@@ -7079,7 +7079,7 @@ void Renderer::CreateRenderGraph() {
 
         if (!currentRenderGraph)
         {
-		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
+		currentRenderGraph = std::make_unique<org::RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}
@@ -7167,14 +7167,14 @@ void Renderer::CreateRenderGraph() {
     // DeletionManager. If it is left until normal frame maintenance, those
     // native objects survive for numFramesInFlight + 1 frames and can retain
     // stale graph backing through the rebuilt graph's first frames.
-    DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+    org::DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
 	PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
 
     // Everything released above is GPU-idle, so it is safe (and important) to
     // release its native objects before materializing the candidate graph.
     // Otherwise two complete alias-pool generations overlap for the normal
     // frames-in-flight retirement delay and can exhaust VRAM.
-    DeletionManager::GetInstance().DrainAll();
+    org::DeletionManager::GetInstance().DrainAll();
     }
     probeGraphBuildPhase("CreateRenderGraph after ResetForRebuild");
 
@@ -7201,7 +7201,7 @@ void Renderer::CreateRenderGraph() {
         m_pViewManager->GetCullingCameraBuffer(), m_numFramesInFlight);
 
     auto& depth = primaryCameraEntity.get<Components::DepthMap>();
-    std::shared_ptr<PixelBuffer> depthTexture = depth.depthMap;
+    std::shared_ptr<org::PixelBuffer> depthTexture = depth.depthMap;
 
     const bool terrainRvtEnabled = m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>();
     m_materialEvaluationInputs = {};
@@ -7219,7 +7219,7 @@ void Renderer::CreateRenderGraph() {
                 .build()
                 .each([&](flecs::entity entity) {
                     if (const auto resource = entity.try_get<Components::Resource>(); resource) {
-                        if (auto retained = std::static_pointer_cast<GloballyIndexedResource>(
+                        if (auto retained = std::static_pointer_cast<org::GloballyIndexedResource>(
                                 resource->resource.lock())) {
                             accept(entity, std::move(retained));
                         }
@@ -7290,14 +7290,14 @@ void Renderer::CreateRenderGraph() {
                     spdlog::warn("Renderer: no valid environment is active. Using fallback blank cubemaps.");
                     m_warnedUsingFallbackEnvironment = true;
                 }
-                const auto registerEnvironment = [&](ResourceIdentifier resourceId, std::shared_ptr<Resource> fallback) {
+                const auto registerEnvironment = [&](org::ResourceIdentifier resourceId, std::shared_ptr<org::Resource> fallback) {
                     if (const auto* binding = m_pipelineRecipe.Bindings().Find(resourceId)) {
                         const auto& contract = binding->contract;
                         if (contract.initialAccess != rhi::ResourceAccessType::None ||
                             contract.initialLayout != rhi::ResourceLayout::Undefined ||
                             contract.initialSync != rhi::ResourceSyncState::None) {
                             if (auto* tracker = binding->resource->GetStateTracker()) {
-                                tracker->Reset(RangeSpec{}, ResourceState{ contract.initialAccess, contract.initialLayout, contract.initialSync });
+                                tracker->Reset(org::RangeSpec{}, org::ResourceState{ contract.initialAccess, contract.initialLayout, contract.initialSync });
                             }
                         }
                         newGraph->RegisterResource(resourceId, binding->resource);
@@ -7326,13 +7326,13 @@ void Renderer::CreateRenderGraph() {
                 break; // These techniques own ordered graph extensions.
             case CanonicalSurfaceResources: {
                 const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-                TextureDescription desc;
+                org::TextureDescription desc;
                 desc.channels = 2;
                 desc.format = rhi::Format::R32G32_UInt;
                 desc.hasRTV = desc.hasSRV = desc.hasUAV = desc.hasNonShaderVisibleUAV = true;
                 desc.allowAlias = true;
                 desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
-                auto visibilityBuffer = PixelBuffer::CreateSharedUnmaterialized(desc);
+                auto visibilityBuffer = org::PixelBuffer::CreateSharedUnmaterialized(desc);
                 visibilityBuffer->SetName("Visibility Buffer");
                 org::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
                 newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
@@ -7492,10 +7492,10 @@ void Renderer::CreateRenderGraph() {
     if (const auto* persistent = std::getenv("SARP_PERSISTENT_GRAPH"); persistent && persistent[0] == '1') {
         // Segment placement is explicit: passes whose touched-resource set is
         // only known per frame cannot live in the persistent main executable.
-        newGraph->SetPersistentSegment("Builtin::Uploads", RenderGraph::PersistentSegmentKind::Pre);
-        newGraph->SetPersistentSegment("CLod::AsyncUpload", RenderGraph::PersistentSegmentKind::Tail);
-        newGraph->SetPersistentSegment("Builtin::Readbacks", RenderGraph::PersistentSegmentKind::Tail);
-        newGraph->SetPersistentSegment("CLod::StreamingReadbackCopy", RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentSegment("Builtin::Uploads", org::RenderGraph::PersistentSegmentKind::Pre);
+        newGraph->SetPersistentSegment("CLod::AsyncUpload", org::RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentSegment("Builtin::Readbacks", org::RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentSegment("CLod::StreamingReadbackCopy", org::RenderGraph::PersistentSegmentKind::Tail);
         newGraph->SetPersistentExecutionEnabled(true);
         spdlog::info("Persistent render graph execution enabled (SARP_PERSISTENT_GRAPH=1)");
     }

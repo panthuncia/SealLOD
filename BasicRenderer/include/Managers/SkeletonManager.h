@@ -17,10 +17,9 @@
 
 class Skeleton; // base skeleton asset or instance
 namespace org { class BufferView; }
-using org::BufferView;
 namespace org::runtime { class IUploadService; }
 
-class SkeletonManager : public IResourceProvider, public br::render::IWindPaletteService {
+class SkeletonManager : public org::IResourceProvider, public br::render::IWindPaletteService {
 public:
 	using TransientWindRegion = br::render::TransientWindRegion;
 	struct ActiveInstanceView {
@@ -72,10 +71,10 @@ public:
 	void EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity) override;
 
     // IResourceProvider
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-    std::vector<ResourceIdentifier> GetSupportedKeys() override;
-    std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-    std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+    std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+    std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+    std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 
 private:
     explicit SkeletonManager(std::shared_ptr<org::runtime::IUploadService> uploadService,
@@ -83,7 +82,7 @@ private:
     org::runtime::IUploadService& UploadService() const;
 
     struct BaseRecord {
-        std::unique_ptr<BufferView> invBindView;
+        std::unique_ptr<org::BufferView> invBindView;
         uint32_t boneCount = 0;
         uint32_t refCount = 0;
         // cached matrix offset (index, not bytes)
@@ -91,8 +90,8 @@ private:
     };
 
     struct InstanceRecord {
-        std::unique_ptr<BufferView> transformsView;
-        std::unique_ptr<BufferView> inverseSkinView;
+        std::unique_ptr<org::BufferView> transformsView;
+        std::unique_ptr<org::BufferView> inverseSkinView;
         uint32_t boneCount = 0;
         uint32_t refCount = 0;
 
@@ -114,20 +113,20 @@ private:
     void RebuildIterationList();
 
     // Global packed buffers
-    std::shared_ptr<DynamicBuffer> m_inverseBindMatrices;  // float4x4[]
-    std::shared_ptr<DynamicBuffer> m_boneTransforms;       // float4x4[]
-    std::shared_ptr<DynamicBuffer> m_inverseSkinMatrices;  // float4x4[]
+    std::shared_ptr<org::DynamicBuffer> m_inverseBindMatrices;  // float4x4[]
+    std::shared_ptr<org::DynamicBuffer> m_boneTransforms;       // float4x4[]
+    std::shared_ptr<org::DynamicBuffer> m_inverseSkinMatrices;  // float4x4[]
 	std::shared_ptr<DynamicStructuredBuffer<SkinningInstanceGPUInfo>> m_instanceInfo; // slot -> offsets/count
-	std::unique_ptr<BufferView> m_transientWindTransformsView;
-	std::unique_ptr<BufferView> m_transientWindInverseSkinView;
+	std::unique_ptr<org::BufferView> m_transientWindTransformsView;
+	std::unique_ptr<org::BufferView> m_transientWindInverseSkinView;
 	TransientWindRegion m_transientWindRegion{};
 	uint32_t m_transientWindAllocationBaseMatrices = 0;
 	uint64_t m_lastBegunFrame = std::numeric_limits<uint64_t>::max();
 	uint64_t m_activeInstanceRevision = 0;
 
     // Resource provider map
-    std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
-    std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
+    std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
+    std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::IResourceResolver>, org::ResourceIdentifier::Hasher> m_resolvers;
     std::shared_ptr<std::atomic_bool> m_lifetimeToken;
     std::shared_ptr<org::runtime::IUploadService> m_uploadService;
 

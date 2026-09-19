@@ -10,10 +10,10 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 RasterBucketCreateCommandPass::RasterBucketCreateCommandPass(
-    std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> histogramIndirectCommand,
-    std::shared_ptr<Buffer> occlusionReplayStateBuffer,
-    std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> histogramIndirectCommand,
+    std::shared_ptr<org::Buffer> occlusionReplayStateBuffer,
+    std::shared_ptr<org::Buffer> occlusionNodeGpuInputsBuffer,
     uint32_t visibleClustersCapacity,
     bool runWhenComputeSWRasterEnabledOnly,
     bool patchReplayNodeInputs)
@@ -70,7 +70,7 @@ br::render::PreparedComputeDispatch RasterBucketCreateCommandPass::Prepare(
     return data;
 }
 
-void RasterBucketCreateCommandPass::Update(const UpdateExecutionContext& executionContext) {
+void RasterBucketCreateCommandPass::Update(const org::UpdateExecutionContext& executionContext) {
     const auto* context = executionContext.hostData->Get<UpdateContext>();
     m_numBuckets = context->preparedRasterBucketCount;
     m_enabled = !m_runWhenComputeSWRasterEnabledOnly ||

@@ -50,7 +50,7 @@ public:
 			Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
 			Builtin::Noise::BlueNoise2D)
-			.WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
+			.WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }))
 			.WithUnorderedAccess(Builtin::Color::HDRColorTarget,
 				Builtin::DebugVisualization,
 				Builtin::Surface::Motion);
@@ -79,9 +79,9 @@ public:
 	}
 
 	void Initialize() {
-		RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
+		RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
 		if (m_shadowsEnabled) {
-			RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
+			RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
 		}
 	}
 
@@ -123,7 +123,7 @@ public:
 	}
 
 private:
-	const PipelineState& DeferredPipeline(UINT globalFlags) const {
+	const org::PipelineState& DeferredPipeline(UINT globalFlags) const {
 		auto& manager = PSOManager::GetInstance();
 		const auto generation = manager.PipelineCacheGeneration();
 		if (m_cachedPipeline && m_cachedPipelineFlags == globalFlags && m_cachedPipelineGeneration == generation)
@@ -133,7 +133,7 @@ private:
 		m_cachedPipelineGeneration = generation;
 		return *m_cachedPipeline;
 	}
-	mutable const PipelineState* m_cachedPipeline = nullptr;
+	mutable const org::PipelineState* m_cachedPipeline = nullptr;
 	mutable UINT m_cachedPipelineFlags = 0;
 	mutable uint64_t m_cachedPipelineGeneration = 0;
 

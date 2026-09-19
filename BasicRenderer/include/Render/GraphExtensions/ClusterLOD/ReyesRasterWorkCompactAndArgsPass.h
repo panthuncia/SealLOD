@@ -9,7 +9,6 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
 struct ReyesCompactFrameData {
     br::render::PreparedComputeDispatch clear, finalize;
@@ -26,38 +25,38 @@ class ReyesRasterWorkCompactAndArgsPass final : public org::TypedRenderGraphPass
     ReyesCompactFrameData, ReyesRasterWorkCompactBindings> {
 public:
     ReyesRasterWorkCompactAndArgsPass(
-        std::shared_ptr<Buffer> rasterWorkBuffer,
-        std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-        std::shared_ptr<Buffer> indirectCommand,
-        std::shared_ptr<Buffer> histogramBuffer,
-        std::shared_ptr<Buffer> offsetsBuffer,
-        std::shared_ptr<Buffer> writeCursorBuffer,
-        std::shared_ptr<Buffer> compactedRasterWorkIndicesBuffer,
-        std::shared_ptr<Buffer> packedRasterWorkGroupsBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer);
+        std::shared_ptr<org::Buffer> rasterWorkBuffer,
+        std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+        std::shared_ptr<org::Buffer> indirectCommand,
+        std::shared_ptr<org::Buffer> histogramBuffer,
+        std::shared_ptr<org::Buffer> offsetsBuffer,
+        std::shared_ptr<org::Buffer> writeCursorBuffer,
+        std::shared_ptr<org::Buffer> compactedRasterWorkIndicesBuffer,
+        std::shared_ptr<org::Buffer> packedRasterWorkGroupsBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer);
 
     ReyesRasterWorkCompactBindings Declare(org::PassBuilder& builder);
     void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     ReyesCompactFrameData Prepare(const ReyesRasterWorkCompactBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesRasterWorkCompactBindings&, const ReyesCompactFrameData& data, org::PassRecordContext& recording);
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
-    PipelineState m_pso;
-    PipelineState m_packPipeline;
-    PipelineState m_finalizePackPipeline;
-    PipelineState m_clearPipeline;
+    org::PipelineState m_pso;
+    org::PipelineState m_packPipeline;
+    org::PipelineState m_finalizePackPipeline;
+    org::PipelineState m_clearPipeline;
     std::shared_ptr<rhi::CommandSignaturePtr> m_compactionCommandSignature;
 
-    std::shared_ptr<Buffer> m_rasterWorkBuffer;
-    std::shared_ptr<Buffer> m_rasterWorkCounterBuffer;
-    std::shared_ptr<Buffer> m_indirectCommand;
-    std::shared_ptr<Buffer> m_histogramBuffer;
-    std::shared_ptr<Buffer> m_offsetsBuffer;
-    std::shared_ptr<Buffer> m_writeCursorBuffer;
-    std::shared_ptr<Buffer> m_compactedRasterWorkIndicesBuffer;
-    std::shared_ptr<Buffer> m_packedRasterWorkGroupsBuffer;
-    std::shared_ptr<Buffer> m_indirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_rasterWorkBuffer;
+    std::shared_ptr<org::Buffer> m_rasterWorkCounterBuffer;
+    std::shared_ptr<org::Buffer> m_indirectCommand;
+    std::shared_ptr<org::Buffer> m_histogramBuffer;
+    std::shared_ptr<org::Buffer> m_offsetsBuffer;
+    std::shared_ptr<org::Buffer> m_writeCursorBuffer;
+    std::shared_ptr<org::Buffer> m_compactedRasterWorkIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_packedRasterWorkGroupsBuffer;
+    std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
     uint32_t m_numBuckets = 0;
 };

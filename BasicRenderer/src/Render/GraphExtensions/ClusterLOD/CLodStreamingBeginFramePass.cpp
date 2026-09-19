@@ -15,15 +15,15 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
-    std::function<UploadInstance*()> getUploadInstance,
-    std::shared_ptr<Buffer> loadCounter,
-    std::shared_ptr<Buffer> loadRequestKeys,
-    std::shared_ptr<Buffer> usedGroupsCounter,
-    std::shared_ptr<Buffer> sourceGroupMismatchCounter,
-    std::shared_ptr<Buffer> nonResidentBits,
-    std::shared_ptr<Buffer> activeGroupsBits,
-    std::shared_ptr<Buffer> runtimeState,
-    std::function<bool(std::vector<uint32_t>&, uint32_t&, UploadInstance*)> queueNonResidentBitsUpload,
+    std::function<org::UploadInstance*()> getUploadInstance,
+    std::shared_ptr<org::Buffer> loadCounter,
+    std::shared_ptr<org::Buffer> loadRequestKeys,
+    std::shared_ptr<org::Buffer> usedGroupsCounter,
+    std::shared_ptr<org::Buffer> sourceGroupMismatchCounter,
+    std::shared_ptr<org::Buffer> nonResidentBits,
+    std::shared_ptr<org::Buffer> activeGroupsBits,
+    std::shared_ptr<org::Buffer> runtimeState,
+    std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> queueNonResidentBitsUpload,
     std::function<bool(std::vector<uint32_t>&, uint32_t&)> getActiveGroupsBitsUpload,
     std::function<void()> scheduleStreamingReadbacks,
     std::function<void()> processStreamingRequests)
@@ -86,7 +86,7 @@ br::render::PreparedComputeDispatchSequence CLodStreamingBeginFramePass::Prepare
     return data;
 }
 
-void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& executionContext) {
+void CLodStreamingBeginFramePass::Update(const org::UpdateExecutionContext& executionContext) {
     ZoneScopedN("CLodStreamingBeginFramePass::Update");
 
     auto* updateContext = executionContext.hostData ? executionContext.hostData->Get<UpdateContext>() : nullptr;
@@ -95,7 +95,7 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
     }
 
     // Retire upload-heap pages from completed frames.
-    UploadInstance* uploadInstance = m_getUploadInstance ? m_getUploadInstance() : nullptr;
+    org::UploadInstance* uploadInstance = m_getUploadInstance ? m_getUploadInstance() : nullptr;
     if (uploadInstance) {
         ZoneScopedN("CLodStreamingBeginFramePass::ProcessDeferredReleases");
         uploadInstance->ProcessDeferredReleases(static_cast<uint8_t>(executionContext.frameIndex));

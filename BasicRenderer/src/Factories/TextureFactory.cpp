@@ -33,8 +33,8 @@
 namespace {
     void UploadTextureData(
         org::runtime::IUploadService& uploadService,
-        const std::shared_ptr<Resource>& dstTexture,
-        const TextureDescription& desc,
+        const std::shared_ptr<org::Resource>& dstTexture,
+        const org::TextureDescription& desc,
         const std::vector<std::shared_ptr<std::vector<uint8_t>>>& initialData,
         unsigned int mipLevels)
     {
@@ -416,7 +416,7 @@ namespace {
         return levels;
     }
 
-    uint32_t GetTextureMipLevelCount(const TextureDescription& desc) noexcept
+    uint32_t GetTextureMipLevelCount(const org::TextureDescription& desc) noexcept
     {
         if (desc.imageDimensions.empty()) {
             return 1u;
@@ -431,7 +431,7 @@ namespace {
         return 1u;
     }
 
-    void ExpandDescriptionToFullMipChain(TextureDescription& desc)
+    void ExpandDescriptionToFullMipChain(org::TextureDescription& desc)
     {
         if (desc.imageDimensions.empty()) {
             return;
@@ -489,7 +489,7 @@ namespace {
         return levels;
     }
 
-    void ResizeDescriptionMipChain(TextureDescription& desc, uint32_t mipLevels)
+    void ResizeDescriptionMipChain(org::TextureDescription& desc, uint32_t mipLevels)
     {
         if (desc.imageDimensions.empty() || mipLevels == 0u) {
             return;
@@ -524,7 +524,7 @@ namespace {
         }
     }
 
-    bool ShouldPreserveAlphaCoverage(const TextureFileMeta& meta, const TextureDescription& desc)
+    bool ShouldPreserveAlphaCoverage(const TextureFileMeta& meta, const org::TextureDescription& desc)
     {
         if (!meta.processing.isParticipatingMaterialTexture || meta.alphaIsAllOpaque) {
             return false;
@@ -541,11 +541,11 @@ namespace {
         }
     }
 
-    std::shared_ptr<Buffer> CreateRawByteAddressBuffer(uint64_t bufferSize, bool unorderedAccess, std::string_view debugName)
+    std::shared_ptr<org::Buffer> CreateRawByteAddressBuffer(uint64_t bufferSize, bool unorderedAccess, std::string_view debugName)
     {
-        auto buffer = Buffer::CreateSharedUnmaterialized(rhi::HeapType::DeviceLocal, bufferSize, unorderedAccess);
+        auto buffer = org::Buffer::CreateSharedUnmaterialized(rhi::HeapType::DeviceLocal, bufferSize, unorderedAccess);
 
-        BufferBase::DescriptorRequirements requirements{};
+        org::BufferBase::DescriptorRequirements requirements{};
         requirements.createSRV = true;
         requirements.createUAV = unorderedAccess;
         requirements.srvDesc = rhi::SrvDesc{
@@ -578,9 +578,9 @@ namespace {
         return buffer;
     }
 
-    TextureDescription BuildBc7CompressedDescription(const TextureSourceData& preparedSourceData, const TextureFileMeta& meta)
+    org::TextureDescription BuildBc7CompressedDescription(const TextureSourceData& preparedSourceData, const TextureFileMeta& meta)
     {
-        TextureDescription desc = preparedSourceData.desc;
+        org::TextureDescription desc = preparedSourceData.desc;
         desc.format = meta.preferSRGB ? rhi::Format::BC7_UNorm_sRGB : rhi::Format::BC7_UNorm;
         desc.channels = 4;
         desc.generateMipMaps = false;
@@ -598,7 +598,7 @@ namespace {
         return desc;
     }
 
-    std::vector<rhi::CopyableFootprint> BuildBc7CompressionFootprints(const TextureDescription& desc, uint64_t& totalBytes)
+    std::vector<rhi::CopyableFootprint> BuildBc7CompressionFootprints(const org::TextureDescription& desc, uint64_t& totalBytes)
     {
         if (desc.imageDimensions.empty()) {
             throw std::runtime_error("BuildBc7CompressionSubresources: texture description has no image dimensions");
@@ -639,9 +639,9 @@ namespace {
     }
 
     std::shared_ptr<TextureSourceData> BuildCompressedSourceDataFromReadback(
-        const TextureDescription& desc,
+        const org::TextureDescription& desc,
         bool hasFullMipChain,
-        const ReadbackCaptureResult& readback)
+        const org::ReadbackCaptureResult& readback)
     {
         if (readback.layouts.size() != desc.imageDimensions.size()) {
             throw std::runtime_error("BuildCompressedSourceDataFromReadback: readback layout count does not match texture subresources");
@@ -689,8 +689,8 @@ namespace {
     }
 }
 
-std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
-    TextureDescription desc,
+std::shared_ptr<org::PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
+    org::TextureDescription desc,
     TextureInitialData initialData,
     std::string_view debugName,
     bool preserveAlphaCoverage,
@@ -764,7 +764,7 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
             desc.uavFormat = rhi::Format::Unknown;
         }
     }
-    auto pb = PixelBuffer::CreateShared(desc);
+    auto pb = org::PixelBuffer::CreateShared(desc);
 	org::memory::SetResourceUsageHint(*pb, "Non-material texture assets");
 
     if (!debugName.empty()) {
@@ -847,7 +847,7 @@ bool TextureFactory::SubmitBC7CompressionJob(
     const bool preserveAlphaCoverage = ShouldPreserveAlphaCoverage(requestMeta, preparedSourceData->desc);
     const uint32_t preparedMipLevels = GetTextureMipLevelCount(preparedSourceData->desc);
 
-    TextureDescription workingDesc = preparedSourceData->desc;
+    org::TextureDescription workingDesc = preparedSourceData->desc;
     workingDesc.format = rhi::helpers::stripSrgb(workingDesc.format);
     workingDesc.generateMipMaps = preserveAlphaCoverage && preparedMipLevels == 1u && requestMeta.processing.requestMipChain;
     workingDesc.hasUAV = false;
@@ -893,8 +893,8 @@ bool TextureFactory::SubmitBC7CompressionJob(
         ResizeDescriptionMipChain(compressionLayoutSource.desc, compressedMipLevels);
     }
 
-    TextureDescription compressedDesc = BuildBc7CompressedDescription(compressionLayoutSource, requestMeta);
-    auto compressedTexture = PixelBuffer::CreateShared(compressedDesc);
+    org::TextureDescription compressedDesc = BuildBc7CompressedDescription(compressionLayoutSource, requestMeta);
+    auto compressedTexture = org::PixelBuffer::CreateShared(compressedDesc);
     org::memory::SetResourceUsageHint(*compressedTexture, "Texture processing compressed outputs");
     if (!jobName.empty()) {
         compressedTexture->SetName(jobName + "[BC7]");
@@ -949,7 +949,7 @@ bool TextureFactory::SubmitBC7CompressionJob(
     return true;
 }
 
-bool TextureFactory::MipmappingPass::TryGetValueType(const PixelBuffer& tex, MipmapValueType& outValueType)
+bool TextureFactory::MipmappingPass::TryGetValueType(const org::PixelBuffer& tex, MipmapValueType& outValueType)
 {
     const auto& desc = tex.GetDescription();
     const rhi::Format format = desc.uavFormat != rhi::Format::Unknown
@@ -989,7 +989,7 @@ bool TextureFactory::MipmappingPass::TryGetValueType(const PixelBuffer& tex, Mip
     }
 }
 
-PipelineState TextureFactory::MipmappingPass::CreatePipeline(MipmapValueType valueType, bool isArray) const
+org::PipelineState TextureFactory::MipmappingPass::CreatePipeline(MipmapValueType valueType, bool isArray) const
 {
     auto& psoManager = PSOManager::GetInstance();
     auto& layout = psoManager.GetComputeRootSignature();
@@ -1027,9 +1027,9 @@ PipelineState TextureFactory::MipmappingPass::CreatePipeline(MipmapValueType val
         debugName);
 }
 
-PipelineState& TextureFactory::MipmappingPass::GetOrCreateAlphaPipeline(
+org::PipelineState& TextureFactory::MipmappingPass::GetOrCreateAlphaPipeline(
     const wchar_t* entryPoint,
-    PipelineState& pso,
+    org::PipelineState& pso,
     bool& hasPso,
     const char* debugName)
 {
@@ -1046,7 +1046,7 @@ PipelineState& TextureFactory::MipmappingPass::GetOrCreateAlphaPipeline(
     return pso;
 }
 
-PipelineState& TextureFactory::MipmappingPass::GetOrCreatePipeline(MipmapValueType valueType, bool isArray)
+org::PipelineState& TextureFactory::MipmappingPass::GetOrCreatePipeline(MipmapValueType valueType, bool isArray)
 {
     switch (valueType) {
     case MipmapValueType::Float1:
@@ -1095,7 +1095,7 @@ PipelineState& TextureFactory::MipmappingPass::GetOrCreatePipeline(MipmapValueTy
     throw std::runtime_error("MipmappingPass: unsupported pipeline variant");
 }
 
-void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage) {
+void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage) {
     if (!tex) return;
 
     if (tex->IsBlockCompressed()) {
@@ -1178,7 +1178,7 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<PixelBuffe
     j.dispatchThreadGroupCountXY[1] = tg[1];
 
     // Each publication owns its immutable CPU-written range through retirement.
-    j.constantsBuffer = LazyDynamicStructuredBuffer<MipmapSpdConstants>::CreateShared(1, "Mipmap job constants");
+    j.constantsBuffer = org::LazyDynamicStructuredBuffer<MipmapSpdConstants>::CreateShared(1, "Mipmap job constants");
     j.constantsView = j.constantsBuffer->Add();
     j.constantsIndex = static_cast<uint32_t>(j.constantsView->GetOffset() / sizeof(MipmapSpdConstants));
     j.cpuConstants = c;
@@ -1222,13 +1222,13 @@ void TextureFactory::MipmappingPass::Declare(org::PassBuilder& declaration)
 
         // SPD reads only mip0. Alpha coverage mode reads each previous mip in sequence.
         if (j.preserveAlphaCoverage) {
-            builder->WithShaderResource(Subresources(tex, Mip{ 0, j.mipsToGenerate }));
+            builder->WithShaderResource(Subresources(tex, org::Mip{ 0, j.mipsToGenerate }));
         }
         else {
-            builder->WithShaderResource(Subresources(tex, Mip{ 0, 1 }));
+            builder->WithShaderResource(Subresources(tex, org::Mip{ 0, 1 }));
         }
         if (j.mipsToGenerate > 0) {
-            builder->WithUnorderedAccess(Subresources(tex, FromMip{ 1 }));
+            builder->WithUnorderedAccess(Subresources(tex, org::FromMip{ 1 }));
         }
 
         // Counter is UAV for the dispatch
@@ -1268,10 +1268,10 @@ br::render::PreparedComputePipelineSequence TextureFactory::MipmappingPass::Prep
         if (!j.texture) continue;
 
         if (j.preserveAlphaCoverage) {
-            PipelineState& resetPso = GetOrCreateAlphaPipeline(L"AlphaMipResetStatsCS", m_psoAlphaReset, m_hasPsoAlphaReset, "AlphaMip[ResetStats]");
-            PipelineState& downsamplePso = GetOrCreateAlphaPipeline(L"AlphaMipDownsampleCS", m_psoAlphaDownsample, m_hasPsoAlphaDownsample, "AlphaMip[Downsample]");
-            PipelineState& resolvePso = GetOrCreateAlphaPipeline(L"AlphaMipResolveScaleCS", m_psoAlphaResolveScale, m_hasPsoAlphaResolveScale, "AlphaMip[ResolveScale]");
-            PipelineState& applyPso = GetOrCreateAlphaPipeline(L"AlphaMipApplyScaleCS", m_psoAlphaApplyScale, m_hasPsoAlphaApplyScale, "AlphaMip[ApplyScale]");
+            org::PipelineState& resetPso = GetOrCreateAlphaPipeline(L"AlphaMipResetStatsCS", m_psoAlphaReset, m_hasPsoAlphaReset, "AlphaMip[ResetStats]");
+            org::PipelineState& downsamplePso = GetOrCreateAlphaPipeline(L"AlphaMipDownsampleCS", m_psoAlphaDownsample, m_hasPsoAlphaDownsample, "AlphaMip[Downsample]");
+            org::PipelineState& resolvePso = GetOrCreateAlphaPipeline(L"AlphaMipResolveScaleCS", m_psoAlphaResolveScale, m_hasPsoAlphaResolveScale, "AlphaMip[ResolveScale]");
+            org::PipelineState& applyPso = GetOrCreateAlphaPipeline(L"AlphaMipApplyScaleCS", m_psoAlphaApplyScale, m_hasPsoAlphaApplyScale, "AlphaMip[ApplyScale]");
 
             const auto reset = preparation.CaptureProgramBinding(resetPso);
             const auto downsample = preparation.CaptureProgramBinding(downsamplePso);
@@ -1316,10 +1316,10 @@ br::render::PreparedComputePipelineSequence TextureFactory::MipmappingPass::Prep
             // Pick SRV (2D vs array)
             const uint32_t srcSrvIndex =
                 j.isArray
-                ? j.texture->GetSRVInfo(SRVViewType::Texture2DArray, 0).slot.index
+                ? j.texture->GetSRVInfo(org::SRVViewType::Texture2DArray, 0).slot.index
                 : j.texture->GetSRVInfo(0).slot.index;
 
-            PipelineState& pso = GetOrCreatePipeline(j.valueType, j.isArray);
+            org::PipelineState& pso = GetOrCreatePipeline(j.valueType, j.isArray);
 
             const auto binding = preparation.CaptureProgramBinding(pso);
 
@@ -1350,12 +1350,12 @@ void TextureFactory::BC7CompressionPass::EnqueueJob(const std::shared_ptr<BC7Com
     m_declaredResourcesChanged = true;
 }
 
-void TextureFactory::BC7CompressionPass::Update(const UpdateExecutionContext& context)
+void TextureFactory::BC7CompressionPass::Update(const org::UpdateExecutionContext& context)
 {
     (void)context;
 }
 
-PipelineState TextureFactory::BC7CompressionPass::CreatePipeline() const
+org::PipelineState TextureFactory::BC7CompressionPass::CreatePipeline() const
 {
     auto& psoManager = PSOManager::GetInstance();
     return psoManager.MakeComputePipeline(
@@ -1366,7 +1366,7 @@ PipelineState TextureFactory::BC7CompressionPass::CreatePipeline() const
         "BC7Compression[Mode6]");
 }
 
-PipelineState& TextureFactory::BC7CompressionPass::GetOrCreatePipeline()
+org::PipelineState& TextureFactory::BC7CompressionPass::GetOrCreatePipeline()
 {
     if (!m_hasPsoMode6) {
         m_psoMode6 = CreatePipeline();
@@ -1395,7 +1395,7 @@ void TextureFactory::BC7CompressionPass::Declare(org::PassBuilder& builder)
         }
 
         for (const auto& subresource : job->subresources) {
-            builder.WithShaderResource(Subresources(job->workingTexture, Mip{subresource.mip, 1}, Slice{subresource.slice, 1}));
+            builder.WithShaderResource(Subresources(job->workingTexture, org::Mip{subresource.mip, 1}, org::Slice{subresource.slice, 1}));
         }
         builder.WithUnorderedAccess(job->blockBuffer);
     }
@@ -1478,7 +1478,7 @@ void TextureFactory::BC7CompressionCopyPass::EnqueueJob(const std::shared_ptr<BC
     m_declaredResourcesChanged = true;
 }
 
-void TextureFactory::BC7CompressionCopyPass::Update(const UpdateExecutionContext& context)
+void TextureFactory::BC7CompressionCopyPass::Update(const org::UpdateExecutionContext& context)
 {
     (void)context;
 }
@@ -1569,7 +1569,7 @@ void TextureFactory::BC7CompressionReadbackPass::EnqueueJob(const std::shared_pt
     m_declaredResourcesChanged = true;
 }
 
-void TextureFactory::BC7CompressionReadbackPass::Update(const UpdateExecutionContext& context)
+void TextureFactory::BC7CompressionReadbackPass::Update(const org::UpdateExecutionContext& context)
 {
     (void)context;
 }
@@ -1582,7 +1582,7 @@ void TextureFactory::BC7CompressionReadbackPass::Declare(org::PassBuilder& build
         return;
     }
 
-    builder.PreferQueue(QueueKind::Copy);
+    builder.PreferQueue(org::QueueKind::Copy);
     for (const auto& job : m_pending) {
         if (!job || !job->compressedTexture) {
             continue;
@@ -1614,20 +1614,20 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
     public:
         Reservation(std::shared_ptr<org::runtime::IReadbackService> service,
             std::shared_ptr<rhi::TimelinePtr> timeline,
-            std::vector<ReadbackCaptureRequest> requests,
+            std::vector<org::ReadbackCaptureRequest> requests,
             std::vector<std::shared_ptr<BC7CompressionJob>> jobs,
             uint32_t frameIndex)
             : m_service(service), m_timeline(std::move(timeline)),
               m_requests(std::move(requests)), m_jobs(std::move(jobs)),
               m_frameIndex(frameIndex), m_signal{m_timeline->Get(), 1u} {}
-        std::span<const ExternalTimelinePoint> SignalsAfterCompletion() const override {
+        std::span<const org::ExternalTimelinePoint> SignalsAfterCompletion() const override {
             return {&m_signal, 1u};
         }
         void Submitted(org::SubmissionContext) const override {
             if (m_resolved.exchange(true)) return;
             for (auto& request : m_requests) {
                 const auto token = m_service->EnqueueCapture(std::move(request));
-                m_service->FinalizeCapture(token, QueueKind::Copy, m_timeline, 1u);
+                m_service->FinalizeCapture(token, org::QueueKind::Copy, m_timeline, 1u);
             }
             for (const auto& job : m_jobs) {
                 job->stageFrameIndex.store(m_frameIndex, std::memory_order_release);
@@ -1647,16 +1647,16 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
     private:
         std::shared_ptr<org::runtime::IReadbackService> m_service;
         std::shared_ptr<rhi::TimelinePtr> m_timeline;
-        mutable std::vector<ReadbackCaptureRequest> m_requests;
+        mutable std::vector<org::ReadbackCaptureRequest> m_requests;
         std::vector<std::shared_ptr<BC7CompressionJob>> m_jobs;
         uint32_t m_frameIndex;
-        ExternalTimelinePoint m_signal{};
+        org::ExternalTimelinePoint m_signal{};
         mutable std::atomic<bool> m_resolved{false};
     };
 
     auto timeline = std::make_shared<rhi::TimelinePtr>();
     DeviceManager::GetInstance().GetDevice().CreateTimeline(*timeline);
-    std::vector<ReadbackCaptureRequest> requests;
+    std::vector<org::ReadbackCaptureRequest> requests;
     std::vector<std::shared_ptr<BC7CompressionJob>> admitted;
     std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
     for (const auto& job : m_pending) {
@@ -1675,7 +1675,7 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
         range.arraySize = 1; range.planeCount = 1;
         const auto info = DeviceManager::GetInstance().GetDevice().GetCopyableFootprints(
             range, footprints.data(), static_cast<uint32_t>(footprints.size()));
-        auto readback = Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
+        auto readback = org::Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
         if (!job->debugName.empty()) readback->SetName(job->debugName + "[BC7Readback]");
         preparation.Retain(readback);
         const auto source = preparation.CaptureResource(job->compressedTexture->GetGlobalResourceID());
@@ -1684,8 +1684,8 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
             frame.copies.push_back({source, readback->GetAPIResource().GetHandle(),
                 footprints[index], subresource.mip, subresource.slice});
         }
-        ReadbackCaptureRequest request{};
-        request.desc.kind = ReadbackResourceKind::Texture;
+        org::ReadbackCaptureRequest request{};
+        request.desc.kind = org::ReadbackResourceKind::Texture;
         request.desc.resourceId = job->compressedTexture->GetGlobalResourceID();
         request.readbackBuffer = readback;
         request.layouts = footprints;
@@ -1694,7 +1694,7 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
         request.width = job->compressedTexture->GetWidth();
         request.height = job->compressedTexture->GetHeight();
         request.depth = 1;
-        request.callback = [job](ReadbackCaptureResult&& result) {
+        request.callback = [job](org::ReadbackCaptureResult&& result) {
             try {
                 auto data = BuildCompressedSourceDataFromReadback(
                     job->compressedTexture->GetDescription(), job->outputHasFullMipChain, result);
@@ -1733,8 +1733,8 @@ void TextureFactory::BC7CompressionReadbackPass::Record(
     }
 }
 
-std::shared_ptr<PixelBuffer> TextureFactory::CreateMaterialResidentPixelBuffer(
-	TextureDescription desc,
+std::shared_ptr<org::PixelBuffer> TextureFactory::CreateMaterialResidentPixelBuffer(
+	org::TextureDescription desc,
 	TextureInitialData initialData,
 	std::string_view debugName,
 	uint32_t maxMipLevels) const
@@ -1765,7 +1765,7 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateMaterialResidentPixelBuffer(
 	desc.hasUAV = false;
 	desc.hasNonShaderVisibleUAV = false;
 	desc.initialLayout = rhi::ResourceLayout::Common;
-	auto image = PixelBuffer::CreateShared(desc);
+	auto image = org::PixelBuffer::CreateShared(desc);
 	org::memory::SetResourceUsageHint(*image, "Material textures");
 	if (!debugName.empty()) image->SetName(std::string(debugName));
 	if (!debugName.empty()) org::memory::SetResourceMemoryIdentifier(*image, std::string(debugName));

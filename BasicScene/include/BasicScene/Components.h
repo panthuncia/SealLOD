@@ -15,7 +15,6 @@
 
 class MeshInstance;
 namespace org { class DynamicGloballyIndexedResource; }
-using org::DynamicGloballyIndexedResource;
 class TextureAsset;
 class Mesh;
 

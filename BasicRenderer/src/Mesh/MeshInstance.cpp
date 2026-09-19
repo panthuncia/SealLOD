@@ -89,7 +89,7 @@ void MeshInstance::SyncSkinningStateFromSkeleton() {
     }
 }
 
-void MeshInstance::SetBufferViews(std::unique_ptr<BufferView> perMeshInstanceBufferView) {
+void MeshInstance::SetBufferViews(std::unique_ptr<org::BufferView> perMeshInstanceBufferView) {
 	m_perMeshInstanceBufferView = std::move(perMeshInstanceBufferView);
 	if (!m_perMeshInstanceBufferView) {
         return; // nothing to update
@@ -101,7 +101,7 @@ void MeshInstance::SetBufferViews(std::unique_ptr<BufferView> perMeshInstanceBuf
 	}
 }
 
-void MeshInstance::SetBufferViewUsingBaseMesh(std::unique_ptr<BufferView> perMeshInstanceBufferView) {
+void MeshInstance::SetBufferViewUsingBaseMesh(std::unique_ptr<org::BufferView> perMeshInstanceBufferView) {
 	m_perMeshInstanceBufferView = std::move(perMeshInstanceBufferView);
     InitializeBoundsFromMesh_();
 

@@ -9,9 +9,9 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 ReyesCreateDispatchArgsPass::ReyesCreateDispatchArgsPass(
-    std::shared_ptr<Buffer> sourceCounterBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> sourceBaseCounterBuffer,
+    std::shared_ptr<org::Buffer> sourceCounterBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> sourceBaseCounterBuffer,
     uint32_t threadsPerGroup,
     uint32_t maxWorkItemCount)
     : m_sourceCounterBuffer(std::move(sourceCounterBuffer))
@@ -50,7 +50,7 @@ void ReyesCreateDispatchArgsPass::Initialize()
 
 
 
-void ReyesCreateDispatchArgsPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesCreateDispatchArgsPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
 }

@@ -71,18 +71,18 @@ void ClusterSoftwareRasterizationPass::Record(
 }
 
 ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
-    std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
-    std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
-    std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
-    std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
+    std::shared_ptr<org::Buffer> compactedVisibleClustersBuffer,
+    std::shared_ptr<org::Buffer> compactedVisibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> rasterBucketsHistogramBuffer,
+    std::shared_ptr<org::Buffer> rasterBucketsIndirectArgsBuffer,
+    std::shared_ptr<org::Buffer> sortedToUnsortedMappingBuffer,
     CLodRasterOutputKind outputKind,
-    std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
-    std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture,
+    std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
     bool runWhenComputeSWRasterEnabledOnly)
     : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
     , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
@@ -312,12 +312,12 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
     return bindings;
 }
 
-void ClusterSoftwareRasterizationPass::Update(const UpdateExecutionContext& executionContext) {
+void ClusterSoftwareRasterizationPass::Update(const org::UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     // Only the declarations are maintained here: the view table the shader
     // reads is published during preparation (ViewRasterInfoTable).
-    std::vector<std::shared_ptr<PixelBuffer>> nextVisibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> nextVisibilityBuffers;
     if (m_outputKind != CLodRasterOutputKind::VirtualShadow)
         for (const auto& viewInfo : context.Views())
             if (viewInfo.visibilityBuffer && viewInfo.cameraBufferIndex < context.ViewCameraBufferSize())
@@ -365,7 +365,7 @@ ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::BuildRecipe(
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         ApplyVirtualShadowConstants(constants,bindings,
             {config.pageTableResolution,config.virtualResolution,m_dynamicWindSkinCacheHashEntryCount,
-                m_dynamicWindSkinCachePositionCapacity,static_cast<uint32_t>(UAVViewType::Texture2DArrayFull)},srv,uav);
+                m_dynamicWindSkinCachePositionCapacity,static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)},srv,uav);
     }
     const auto numBuckets = context->preparedRasterBucketCount;
     frame.bucketCount = numBuckets;

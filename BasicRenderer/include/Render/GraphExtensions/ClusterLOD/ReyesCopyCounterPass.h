@@ -6,7 +6,6 @@
 #include "Resources/Buffers/Buffer.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
 struct ReyesCounterCopyBindings {
     org::ResourceBindingToken source;
@@ -17,7 +16,7 @@ class ReyesCopyCounterPass final
     : public org::TypedRenderGraphPass<ReyesCopyCounterPass,
         org::EmptyPassFrameData, ReyesCounterCopyBindings> {
 public:
-    ReyesCopyCounterPass(std::shared_ptr<Buffer> sourceCounterBuffer, std::shared_ptr<Buffer> destCounterBuffer)
+    ReyesCopyCounterPass(std::shared_ptr<org::Buffer> sourceCounterBuffer, std::shared_ptr<org::Buffer> destCounterBuffer)
         : m_sourceCounterBuffer(std::move(sourceCounterBuffer))
         , m_destCounterBuffer(std::move(destCounterBuffer))
     {
@@ -25,7 +24,7 @@ public:
 
     ReyesCounterCopyBindings Declare(org::PassBuilder& builder)
     {
-        builder.PreferQueue(QueueKind::Copy);
+        builder.PreferQueue(org::QueueKind::Copy);
         return {builder.BindCopySource(m_sourceCounterBuffer),
             builder.BindCopyDestination(m_destCounterBuffer)};
     }
@@ -39,6 +38,6 @@ public:
     }
 
 private:
-    std::shared_ptr<Buffer> m_sourceCounterBuffer;
-    std::shared_ptr<Buffer> m_destCounterBuffer;
+    std::shared_ptr<org::Buffer> m_sourceCounterBuffer;
+    std::shared_ptr<org::Buffer> m_destCounterBuffer;
 };

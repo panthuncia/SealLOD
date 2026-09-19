@@ -38,14 +38,14 @@
 #include "Managers/Singletons/DeviceManager.h"
 #endif
 
-inline void TagPassTechnique(RenderGraph* graph, std::string_view passName, std::string_view techniquePath) {
+inline void TagPassTechnique(org::RenderGraph* graph, std::string_view passName, std::string_view techniquePath) {
     graph->SetPassTechnique(std::string(passName), std::string(techniquePath));
 }
 
-void CreateDebugVisualizationResources(RenderGraph* graph) {
+void CreateDebugVisualizationResources(org::RenderGraph* graph) {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
 
-    TextureDescription debugVisDesc;
+    org::TextureDescription debugVisDesc;
     debugVisDesc.channels = 2;
     debugVisDesc.format = rhi::Format::R32G32_UInt;
     debugVisDesc.hasUAV = true;
@@ -54,16 +54,16 @@ void CreateDebugVisualizationResources(RenderGraph* graph) {
     debugVisDesc.srvFormat = rhi::Format::R32G32_UInt;
     debugVisDesc.hasNonShaderVisibleUAV = true;
     debugVisDesc.allowAlias = true;
-    ImageDimensions debugVisDims = { resolution.x, resolution.y, 0, 0 };
+    org::ImageDimensions debugVisDims = { resolution.x, resolution.y, 0, 0 };
     debugVisDesc.imageDimensions.push_back(debugVisDims);
-    auto debugVisTex = PixelBuffer::CreateSharedUnmaterialized(debugVisDesc);
+    auto debugVisTex = org::PixelBuffer::CreateSharedUnmaterialized(debugVisDesc);
     debugVisTex->SetName("Debug Visualization");
     org::memory::SetResourceUsageHint(*debugVisTex, "Debug");
     graph->RegisterResource(Builtin::DebugVisualization, debugVisTex);
 }
 
-void BuildBRDFIntegrationPass(RenderGraph* graph) {
-	TextureDescription brdfDesc;
+void BuildBRDFIntegrationPass(org::RenderGraph* graph) {
+	org::TextureDescription brdfDesc;
     brdfDesc.arraySize = 1;
     brdfDesc.channels = 2;
     brdfDesc.isCubemap = false;
@@ -74,9 +74,9 @@ void BuildBRDFIntegrationPass(RenderGraph* graph) {
     brdfDesc.srvFormat = rhi::Format::R16G16_Float;
 	brdfDesc.hasUAV = true;
 	brdfDesc.uavFormat = rhi::Format::R16G16_Float;
-    ImageDimensions dims = { 512, 512, 0, 0 };
+    org::ImageDimensions dims = { 512, 512, 0, 0 };
     brdfDesc.imageDimensions.push_back(dims);
-    auto brdfIntegrationTexture = PixelBuffer::CreateSharedUnmaterialized(brdfDesc);
+    auto brdfIntegrationTexture = org::PixelBuffer::CreateSharedUnmaterialized(brdfDesc);
     brdfIntegrationTexture->SetName("BRDF Integration Texture");
     org::memory::SetResourceUsageHint(*brdfIntegrationTexture, "Environment lighting");
     brdfIntegrationTexture->EnableIdleDematerialization(120);
@@ -86,10 +86,10 @@ void BuildBRDFIntegrationPass(RenderGraph* graph) {
 }
 
 inline void RegisterVisUtilResources(
-    RenderGraph* graph,
+    org::RenderGraph* graph,
     bool terrainRvt,
     bool registerCommonResources = true,
-    std::unordered_map<std::string, std::shared_ptr<Resource>>* persistentTerrainRvtResources = nullptr)
+    std::unordered_map<std::string, std::shared_ptr<org::Resource>>* persistentTerrainRvtResources = nullptr)
 {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     const uint32_t maxPixels = resolution.x * resolution.y;
@@ -100,7 +100,7 @@ inline void RegisterVisUtilResources(
     if (registerCommonResources) {
 
     // Total pixel count buffer (uint[1])
-    auto totalPixelCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto totalPixelCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         1,
         sizeof(uint32_t),
         true,
@@ -114,7 +114,7 @@ inline void RegisterVisUtilResources(
 
 	// PixelRef: packed pixel coordinates followed by the cached 64-bit visibility key.
     struct PixelRefPOD { uint32_t pixelXY; uint32_t visibilityKey[2]; };
-    auto pixelListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto pixelListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         maxPixels,
         sizeof(PixelRefPOD),
         true,
@@ -127,7 +127,7 @@ inline void RegisterVisUtilResources(
     graph->RegisterResource("Builtin::VisUtil::PixelListBuffer", pixelListBuffer);
 
     constexpr uint32_t maxTerrainRegions = 65536u;
-    auto terrainRegionPixelCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionPixelCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         maxTerrainRegions,
         sizeof(uint32_t),
         true,
@@ -139,7 +139,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionPixelCountBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionPixelCountBuffer", terrainRegionPixelCountBuffer);
 
-    auto terrainRegionOffsetBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionOffsetBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         maxTerrainRegions,
         sizeof(uint32_t),
         true,
@@ -151,7 +151,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionOffsetBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionOffsetBuffer", terrainRegionOffsetBuffer);
 
-    auto terrainRegionWriteCursorBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionWriteCursorBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         maxTerrainRegions,
         sizeof(uint32_t),
         true,
@@ -163,7 +163,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionWriteCursorBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionWriteCursorBuffer", terrainRegionWriteCursorBuffer);
 
-    auto terrainRegionBlockSumsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionBlockSumsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         (maxTerrainRegions + 1023u) / 1024u,
         sizeof(uint32_t),
         true,
@@ -175,7 +175,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionBlockSumsBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionBlockSumsBuffer", terrainRegionBlockSumsBuffer);
 
-    auto terrainRegionScannedBlockSumsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionScannedBlockSumsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         (maxTerrainRegions + 1023u) / 1024u,
         sizeof(uint32_t),
         true,
@@ -187,7 +187,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionScannedBlockSumsBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionScannedBlockSumsBuffer", terrainRegionScannedBlockSumsBuffer);
 
-    auto terrainRegionTotalPixelCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionTotalPixelCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         1,
         sizeof(uint32_t),
         true,
@@ -199,7 +199,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionTotalPixelCountBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionTotalPixelCountBuffer", terrainRegionTotalPixelCountBuffer);
 
-    auto terrainRegionActiveListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionActiveListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         maxTerrainRegions,
         sizeof(uint32_t),
         true,
@@ -211,7 +211,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionActiveListBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionActiveListBuffer", terrainRegionActiveListBuffer);
 
-    auto terrainRegionActiveCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionActiveCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         1,
         sizeof(uint32_t),
         true,
@@ -223,7 +223,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionActiveCountBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionActiveCountBuffer", terrainRegionActiveCountBuffer);
 
-    auto terrainRegionPixelListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionPixelListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         maxPixels,
         sizeof(PixelRefPOD),
         true,
@@ -235,7 +235,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionPixelListBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TerrainRegionPixelListBuffer", terrainRegionPixelListBuffer);
 
-    auto terrainRegionMaterialEvalCommandBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionMaterialEvalCommandBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         maxTerrainRegions,
         sizeof(TerrainRegionMaterialEvaluationIndirectCommand),
         true,
@@ -247,7 +247,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRegionMaterialEvalCommandBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer", terrainRegionMaterialEvalCommandBuffer);
 
-    auto terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         1,
         sizeof(D3D12_DISPATCH_ARGUMENTS),
         true,
@@ -422,7 +422,7 @@ inline void RegisterVisUtilResources(
     };
 
     const uint32_t terrainRvtPageTableEntries = TerrainRvt::MaxPageTableEntries();
-    auto terrainRvtInfoBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtInfoBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         1,
         sizeof(TerrainRvtInfoPOD),
         true,
@@ -434,7 +434,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtInfoBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtInfo, terrainRvtInfoBuffer);
 
-    auto terrainRvtClipInfosBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtClipInfosBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         TerrainRvt::MaxClipInfoCount(),
         sizeof(TerrainRvtClipInfoPOD),
         true,
@@ -446,7 +446,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtClipInfosBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtClipInfos, terrainRvtClipInfosBuffer);
 
-    auto terrainRvtPageTableBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtPageTableBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
         sizeof(uint32_t),
         true,
@@ -458,7 +458,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtPageTableBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtPageTable, terrainRvtPageTableBuffer);
 
-    auto terrainRvtPageKeysBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtPageKeysBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
         sizeof(TerrainRvtPageTagPOD),
         true,
@@ -470,7 +470,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtPageKeysBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtPageKeys, terrainRvtPageKeysBuffer);
 
-    auto terrainRvtPhysicalPageOwnerBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtPhysicalPageOwnerBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         TerrainRvt::MaxPhysicalPages(),
         sizeof(uint32_t) * 4u,
         true,
@@ -482,7 +482,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtPhysicalPageOwnerBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtPhysicalPageOwner, terrainRvtPhysicalPageOwnerBuffer);
 
-    auto terrainRvtPhysicalPageAtlasBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtPhysicalPageAtlasBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         TerrainRvt::MaxPhysicalPages(),
         sizeof(TerrainRvtPhysicalPageAtlasInfoPOD),
         true,
@@ -494,7 +494,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtPhysicalPageAtlasBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtPhysicalPageAtlas, terrainRvtPhysicalPageAtlasBuffer);
 
-    auto terrainRvtHeightResidentCacheBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtHeightResidentCacheBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
         sizeof(TerrainRvtHeightResidentCacheEntryPOD),
         true,
@@ -506,7 +506,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtHeightResidentCacheBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtHeightResidentCache, terrainRvtHeightResidentCacheBuffer);
 
-    auto terrainRvtRequestMasksBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtRequestMasksBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
         sizeof(uint32_t),
         true,
@@ -518,7 +518,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtRequestMasksBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtRequestMasks, terrainRvtRequestMasksBuffer);
 
-    auto terrainRvtRequestListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtRequestListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
         sizeof(TerrainRvtPageRequestPOD),
         true,
@@ -530,7 +530,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtRequestListBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtRequestList, terrainRvtRequestListBuffer);
 
-    auto terrainRvtCountersBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtCountersBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         TerrainRvt::CounterCount,
         sizeof(uint32_t),
         true,
@@ -542,7 +542,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtCountersBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtCounters, terrainRvtCountersBuffer);
 
-    auto terrainRvtGenerationListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtGenerationListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         TerrainRvt::MaxPhysicalPages(),
         sizeof(TerrainRvtGenerationRequestPOD),
         true,
@@ -554,7 +554,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtGenerationListBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtGenerationList, terrainRvtGenerationListBuffer);
 
-    auto terrainRvtStatsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtStatsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         1,
         sizeof(TerrainRvtStatsPOD),
         true,
@@ -566,7 +566,7 @@ inline void RegisterVisUtilResources(
     org::memory::SetResourceUsageHint(*terrainRvtStatsBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtStats, terrainRvtStatsBuffer);
 
-    auto terrainRvtGenerateDispatchArgsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto terrainRvtGenerateDispatchArgsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         1,
         sizeof(D3D12_DISPATCH_ARGUMENTS),
         true,
@@ -599,7 +599,7 @@ inline void RegisterVisUtilResources(
         terrainRvtAtlasBytes,
         static_cast<double>(terrainRvtAtlasBytes) / (1024.0 * 1024.0));
     auto createTerrainRvtAtlas = [&](std::string_view name, const char* debugName, rhi::Format format, uint32_t channels) {
-        TextureDescription desc;
+        org::TextureDescription desc;
         desc.arraySize = TerrainRvt::AtlasPoolCount();
         desc.channels = channels;
         desc.isCubemap = false;
@@ -612,7 +612,7 @@ inline void RegisterVisUtilResources(
         desc.uavFormat = format;
         desc.allowAlias = false;
         desc.imageDimensions.push_back({ terrainRvtAtlasSide, terrainRvtAtlasHeight, 0, 0 });
-        auto texture = PixelBuffer::CreateSharedUnmaterialized(desc);
+        auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
         texture->SetName(debugName);
         org::memory::SetResourceUsageHint(*texture, "Terrain RVT");
         graph->RegisterResource(name, texture);
@@ -642,7 +642,7 @@ inline void RegisterVisUtilResources(
     }
 }
 
-inline void BuildVisibilityMaterialBinningPipeline(RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs)
+inline void BuildVisibilityMaterialBinningPipeline(org::RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs)
 {
     graph->BuildPass<MaterialUAVResetPass>("MaterialPixelCounterResetPass");
     TagPassTechnique(graph, "MaterialPixelCounterResetPass", "Primary Visibility::GBuffer Construction::Material Groups");
@@ -658,7 +658,7 @@ inline void BuildVisibilityMaterialBinningPipeline(RenderGraph* graph, const Mat
     TagPassTechnique(graph, "BuildMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Material Groups");
 }
 
-inline void BuildTerrainRvtPipeline(RenderGraph* graph)
+inline void BuildTerrainRvtPipeline(org::RenderGraph* graph)
 {
     graph->BuildPass<TerrainRvtFrameResetPass>("TerrainRvtFrameResetPass");
     TagPassTechnique(graph, "TerrainRvtFrameResetPass", "Primary Visibility::Terrain RVT");
@@ -676,7 +676,7 @@ inline void BuildTerrainRvtPipeline(RenderGraph* graph)
     TagPassTechnique(graph, "TerrainRvtClearFeedbackRequestsPass", "Primary Visibility::Terrain RVT");
 }
 
-inline void BuildTerrainRegionMaterialEvaluationPipeline(RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs)
+inline void BuildTerrainRegionMaterialEvaluationPipeline(org::RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs)
 {
     graph->BuildPass<TerrainRegionCounterResetPass>("TerrainRegionCounterResetPass");
     TagPassTechnique(graph, "TerrainRegionCounterResetPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
@@ -696,14 +696,14 @@ inline void BuildTerrainRegionMaterialEvaluationPipeline(RenderGraph* graph, con
     TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 }
 
-inline void BuildMaterialEvaluationPipeline(RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs, bool terrainRvt)
+inline void BuildMaterialEvaluationPipeline(org::RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs, bool terrainRvt)
 {
     graph->BuildPass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", inputs, terrainRvt);
     TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
 }
 
 void BuildCanonicalSurfacePipeline(
-    RenderGraph* graph,
+    org::RenderGraph* graph,
     const MaterialEvaluationBuildInputs& inputs,
     bool visibilityMaterialBinning,
     bool terrainRvt,
@@ -809,11 +809,11 @@ void BuildCanonicalSurfacePipeline(
     }
 }
 
-void RegisterGTAOResources(RenderGraph* graph) {
+void RegisterGTAOResources(org::RenderGraph* graph) {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     constexpr uint64_t gtaoAliasPoolID = 1;
 
-    TextureDescription workingDepthsDesc;
+    org::TextureDescription workingDepthsDesc;
     workingDepthsDesc.arraySize = 1;
     workingDepthsDesc.channels = 1;
     workingDepthsDesc.isCubemap = false;
@@ -822,14 +822,14 @@ void RegisterGTAOResources(RenderGraph* graph) {
     workingDepthsDesc.format = rhi::Format::R32_Float;
     workingDepthsDesc.generateMipMaps = true;
     workingDepthsDesc.allowAlias = true;
-    ImageDimensions dims1 = { resolution.x, resolution.y, 0, 0 };
+    org::ImageDimensions dims1 = { resolution.x, resolution.y, 0, 0 };
     workingDepthsDesc.imageDimensions.push_back(dims1);
-    auto workingDepths = PixelBuffer::CreateSharedUnmaterialized(workingDepthsDesc);
+    auto workingDepths = org::PixelBuffer::CreateSharedUnmaterialized(workingDepthsDesc);
     //workingDepths->SetAliasingPool(gtaoAliasPoolID);
     org::memory::SetResourceUsageHint(*workingDepths, "GTAO resources");
     workingDepths->SetName("GTAO Working Depths");
 
-    TextureDescription workingEdgesDesc;
+    org::TextureDescription workingEdgesDesc;
     workingEdgesDesc.arraySize = 1;
     workingEdgesDesc.channels = 1;
     workingEdgesDesc.isCubemap = false;
@@ -839,11 +839,11 @@ void RegisterGTAOResources(RenderGraph* graph) {
     workingEdgesDesc.generateMipMaps = false;
     workingEdgesDesc.imageDimensions.push_back(dims1);
 	workingEdgesDesc.allowAlias = true;
-    auto workingEdges = PixelBuffer::CreateSharedUnmaterialized(workingEdgesDesc);
+    auto workingEdges = org::PixelBuffer::CreateSharedUnmaterialized(workingEdgesDesc);
     org::memory::SetResourceUsageHint(*workingEdges, "GTAO resources");
     workingEdges->SetName("GTAO Working Edges");
 
-    TextureDescription workingAOTermDesc;
+    org::TextureDescription workingAOTermDesc;
     workingAOTermDesc.arraySize = 1;
     workingAOTermDesc.channels = 1;
     workingAOTermDesc.isCubemap = false;
@@ -853,13 +853,13 @@ void RegisterGTAOResources(RenderGraph* graph) {
     workingAOTermDesc.generateMipMaps = false;
     workingAOTermDesc.imageDimensions.push_back(dims1);
     workingAOTermDesc.allowAlias = true;
-    auto workingAOTerm1 = PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
+    auto workingAOTerm1 = org::PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
     workingAOTerm1->SetName("GTAO Working AO Term 1");
     org::memory::SetResourceUsageHint(*workingAOTerm1, "GTAO resources");
-    auto workingAOTerm2 = PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
+    auto workingAOTerm2 = org::PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
     workingAOTerm2->SetName("GTAO Working AO Term 2");
     org::memory::SetResourceUsageHint(*workingAOTerm2, "GTAO resources");
-    std::shared_ptr<PixelBuffer> outputAO = PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
+    std::shared_ptr<org::PixelBuffer> outputAO = org::PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
     //outputAO->SetAliasingPool(gtaoAliasPoolID);
     outputAO->SetName("GTAO Output AO Term");
     org::memory::SetResourceUsageHint(*outputAO, "GTAO resources");
@@ -871,7 +871,7 @@ void RegisterGTAOResources(RenderGraph* graph) {
     graph->RegisterResource(Builtin::GTAO::WorkingEdges, workingEdges);
 }
 
-void BuildGTAOPipeline(RenderGraph* graph, const Components::Camera* currentCamera) {
+void BuildGTAOPipeline(org::RenderGraph* graph, const Components::Camera* currentCamera) {
     auto GTAOConstantBuffer = CreateIndexedConstantBuffer(sizeof(GTAOInfo),"GTAO constants");
 
     graph->RegisterResource("Builtin::GTAO::ConstantsBuffer", GTAOConstantBuffer);
@@ -886,9 +886,9 @@ void BuildGTAOPipeline(RenderGraph* graph, const Components::Camera* currentCame
     TagPassTechnique(graph, "GTAODenoisePass", "Post Process::GTAO");
 }
 
-void BuildLightClusteringPipeline(RenderGraph* graph) {
+void BuildLightClusteringPipeline(org::RenderGraph* graph) {
     // light pages counter
-    auto lightPagesCounter = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto lightPagesCounter = org::Buffer::CreateUnmaterializedStructuredBuffer(
         1,
         sizeof(unsigned int),
         true,
@@ -905,7 +905,7 @@ void BuildLightClusteringPipeline(RenderGraph* graph) {
     TagPassTechnique(graph, "LightCullingPass", "Lighting::Clustered Lighting");
 }
 
-void BuildEnvironmentPipeline(RenderGraph* graph) {
+void BuildEnvironmentPipeline(org::RenderGraph* graph) {
     graph->BuildPass<EnvironmentConversionPass>("Environment Conversion Pass");
     TagPassTechnique(graph, "Environment Conversion Pass", "Environment Lighting::Capture & Filtering");
 
@@ -916,17 +916,17 @@ void BuildEnvironmentPipeline(RenderGraph* graph) {
     TagPassTechnique(graph, "Environment Prefilter Pass", "Environment Lighting::Capture & Filtering");
 }
 
-void BuildLinearDepthDownsamplePass(RenderGraph* graph) {
+void BuildLinearDepthDownsamplePass(org::RenderGraph* graph) {
     graph->BuildPass<DownsamplePass>("LinearDepthDownsamplePass");
     TagPassTechnique(graph, "LinearDepthDownsamplePass", "Depth::Linear Depth");
 }
 
-void BuildLinearDepthHistoryCopyPass(RenderGraph* graph, br::render::IDepthHistoryService* historyService) {
+void BuildLinearDepthHistoryCopyPass(org::RenderGraph* graph, br::render::IDepthHistoryService* historyService) {
     graph->BuildPass<LinearDepthHistoryCopyPass>("LinearDepthHistoryCopyPass", historyService);
     TagPassTechnique(graph, "LinearDepthHistoryCopyPass", "Post Process::Depth History");
 }
 
-void BuildPrimaryPass(RenderGraph* graph, Environment* currentEnvironment, bool hasBoundEnvironment = false) {
+void BuildPrimaryPass(org::RenderGraph* graph, Environment* currentEnvironment, bool hasBoundEnvironment = false) {
 
 	bool gtaoEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")();
 	bool meshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
@@ -949,7 +949,7 @@ void BuildPrimaryPass(RenderGraph* graph, Environment* currentEnvironment, bool 
     TagPassTechnique(graph, "Forward render pass", "Lighting::Primary Shading");
 }
 
-void BuildPPLLPipeline(RenderGraph* graph) {
+void BuildPPLLPipeline(org::RenderGraph* graph) {
 	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
 	bool useMeshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
 	bool indirect = SettingsManager::GetInstance().getSettingGetter<bool>("enableIndirectDraws")();
@@ -961,8 +961,8 @@ void BuildPPLLPipeline(RenderGraph* graph) {
     static const size_t aveFragsPerPixel = 5;
     auto numPPLLNodes = resolution.x * resolution.y * aveFragsPerPixel;
     static const size_t PPLLNodeSize = 24; // two uints, four floats
-    TextureDescription desc;
-    ImageDimensions dimensions;
+    org::TextureDescription desc;
+    org::ImageDimensions dimensions;
     dimensions.width = resolution.x;
     dimensions.height = resolution.y;
     dimensions.rowPitch = resolution.x * sizeof(unsigned int);
@@ -1037,10 +1037,10 @@ void BuildPPLLPipeline(RenderGraph* graph) {
     //graph->BuildRenderPass<PPLLResolvePass>("PPLLResolvePass");
 }
 
-void BuildBloomPipeline(RenderGraph* graph) {
+void BuildBloomPipeline(org::RenderGraph* graph) {
 	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
 
-    TextureDescription bloomDesc;
+    org::TextureDescription bloomDesc;
     bloomDesc.arraySize = 1;
     bloomDesc.channels = 4;
     bloomDesc.isCubemap = false;
@@ -1052,7 +1052,7 @@ void BuildBloomPipeline(RenderGraph* graph) {
     // This remains separate from the single-mip Streamline output, but can
     // participate in the render graph's enhanced-barrier aliasing model.
     bloomDesc.allowAlias = true;
-    auto bloomTexture = PixelBuffer::CreateSharedUnmaterialized(bloomDesc);
+    auto bloomTexture = org::PixelBuffer::CreateSharedUnmaterialized(bloomDesc);
     bloomTexture->SetName("Bloom Texture");
     org::memory::SetResourceUsageHint(*bloomTexture, "Post-Processing resources");
     graph->RegisterResource(Builtin::PostProcessing::BloomTexture, bloomTexture);
@@ -1089,12 +1089,12 @@ void BuildBloomPipeline(RenderGraph* graph) {
     // full-resolution HDR read/modify/write pass.
 }
 
-inline void CreateCanonicalSurfaceResources(RenderGraph* graph)
+inline void CreateCanonicalSurfaceResources(org::RenderGraph* graph)
 {
     const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-    const ImageDimensions dimensions{ resolution.x, resolution.y, 0, 0 };
+    const org::ImageDimensions dimensions{ resolution.x, resolution.y, 0, 0 };
     const auto createTexture = [&](std::string_view id, const char* name, rhi::Format format) {
-        TextureDescription desc;
+        org::TextureDescription desc;
         desc.channels = 4;
         desc.format = format;
         desc.hasRTV = true;
@@ -1106,7 +1106,7 @@ inline void CreateCanonicalSurfaceResources(RenderGraph* graph)
         desc.hasNonShaderVisibleUAV = true;
         desc.allowAlias = true;
         desc.imageDimensions.push_back(dimensions);
-        auto texture = PixelBuffer::CreateSharedUnmaterialized(desc);
+        auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
         texture->SetName(name);
         org::memory::SetResourceUsageHint(*texture, "SARP canonical surface contract v1");
         graph->RegisterResource(id, std::move(texture));
@@ -1124,7 +1124,7 @@ inline void CreateCanonicalSurfaceResources(RenderGraph* graph)
 
     // SARPSurfaceRecordV1 is deliberately duplicated as a fixed 32-byte stride here;
     // the renderer library does not depend on SARP's public module headers.
-    auto records = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto records = org::Buffer::CreateUnmaterializedStructuredBuffer(
         resolution.x * resolution.y, 32u, true, false, false, rhi::HeapType::DeviceLocal);
     records->SetAllowAlias(true);
     records->SetName("SARP Surface Records");
@@ -1132,10 +1132,10 @@ inline void CreateCanonicalSurfaceResources(RenderGraph* graph)
     graph->RegisterResource(Builtin::Surface::Records, std::move(records));
 }
 
-void BuildSSRPasses(RenderGraph* graph) {
+void BuildSSRPasses(org::RenderGraph* graph) {
 	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
 
-    TextureDescription ssrDesc;
+    org::TextureDescription ssrDesc;
     ssrDesc.arraySize = 1;
     ssrDesc.channels = 4;
     ssrDesc.isCubemap = false;
@@ -1147,10 +1147,10 @@ void BuildSSRPasses(RenderGraph* graph) {
 	ssrDesc.hasUAV = true;
 	ssrDesc.uavFormat = rhi::Format::R16G16B16A16_Float;
 	ssrDesc.hasNonShaderVisibleUAV = true; // For ClearUnorderedAccessView
-    ImageDimensions dims = { resolution.x, resolution.y, 0, 0 };
+    org::ImageDimensions dims = { resolution.x, resolution.y, 0, 0 };
     ssrDesc.imageDimensions.push_back(dims);
     ssrDesc.allowAlias = true;
-    auto ssrTexture = PixelBuffer::CreateSharedUnmaterialized(ssrDesc);
+    auto ssrTexture = org::PixelBuffer::CreateSharedUnmaterialized(ssrDesc);
     ssrTexture->SetName("SSR Texture");
     org::memory::SetResourceUsageHint(*ssrTexture, "Post-Processing resources");
 	graph->RegisterResource(Builtin::PostProcessing::ScreenSpaceReflections, ssrTexture);
@@ -1162,10 +1162,10 @@ void BuildSSRPasses(RenderGraph* graph) {
     TagPassTechnique(graph, "Specular IBL & SSR Composite Pass", "Post Process::Screen-Space Reflections");
 }
 
-void BuildRayTracedReflectionPasses(RenderGraph* graph) {
+void BuildRayTracedReflectionPasses(org::RenderGraph* graph) {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
 
-    TextureDescription rtReflectionDesc;
+    org::TextureDescription rtReflectionDesc;
     rtReflectionDesc.arraySize = 1;
     rtReflectionDesc.channels = 4;
     rtReflectionDesc.isCubemap = false;
@@ -1180,7 +1180,7 @@ void BuildRayTracedReflectionPasses(RenderGraph* graph) {
     rtReflectionDesc.imageDimensions.push_back({ resolution.x, resolution.y, 0, 0 });
     rtReflectionDesc.allowAlias = true;
 
-    auto rtReflectionTexture = PixelBuffer::CreateSharedUnmaterialized(rtReflectionDesc);
+    auto rtReflectionTexture = org::PixelBuffer::CreateSharedUnmaterialized(rtReflectionDesc);
     rtReflectionTexture->SetName("Ray Traced Reflections Texture");
     org::memory::SetResourceUsageHint(*rtReflectionTexture, "Post-Processing resources");
     graph->RegisterResource(Builtin::PostProcessing::ScreenSpaceReflections, rtReflectionTexture);

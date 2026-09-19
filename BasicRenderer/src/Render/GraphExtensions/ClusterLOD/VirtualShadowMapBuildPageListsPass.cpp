@@ -13,12 +13,12 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapBuildPageListsPass::VirtualShadowMapBuildPageListsPass(
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> freePhysicalPagesBuffer,
-    std::shared_ptr<Buffer> reusablePhysicalPagesBuffer,
-    std::shared_ptr<Buffer> pageListHeaderBuffer)
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> freePhysicalPagesBuffer,
+    std::shared_ptr<org::Buffer> reusablePhysicalPagesBuffer,
+    std::shared_ptr<org::Buffer> pageListHeaderBuffer)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
     , m_allocationCountBuffer(std::move(allocationCountBuffer))
@@ -61,7 +61,7 @@ br::render::PreparedComputeDispatch VirtualShadowMapBuildPageListsPass::Prepare(
     data.descriptorIndices = std::move(program.descriptorIndices);
     const auto srv = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource, variant}).index; };
     const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_DESCRIPTOR_INDEX] = srv(bindings.pageTable, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull));
+    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_DESCRIPTOR_INDEX] = srv(bindings.pageTable, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull));
     data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_METADATA_DESCRIPTOR_INDEX] = srv(bindings.pageMetadata);
     data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_FREE_PAGES_DESCRIPTOR_INDEX] = uav(bindings.freePages);
     data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_REUSABLE_PAGES_DESCRIPTOR_INDEX] = uav(bindings.reusablePages);

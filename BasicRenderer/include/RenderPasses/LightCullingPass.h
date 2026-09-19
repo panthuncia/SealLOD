@@ -25,7 +25,7 @@ public:
 	void Initialize() {
 
 		m_lightPagesCounterHandle = m_resourceRegistryView->RequestHandle(Builtin::Light::PagesCounter);
-		m_pLightPagesCounter = m_resourceRegistryView->Resolve<Buffer>(m_lightPagesCounterHandle);
+		m_pLightPagesCounter = m_resourceRegistryView->Resolve<org::Buffer>(m_lightPagesCounterHandle);
 	}
 
 	br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
@@ -51,7 +51,7 @@ public:
 		br::render::RecordPreparedComputeDispatch(data, recording);
 	}
 
-	void Update(const UpdateExecutionContext& context) override {
+	void Update(const org::UpdateExecutionContext& context) override {
 		// Reset UAV counter
 		uint32_t zero = 0;
 		UploadBufferData(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromHandle(m_lightPagesCounterHandle), 0);
@@ -59,8 +59,8 @@ public:
 
 private:
 
-	Buffer* m_pLightPagesCounter = nullptr;
-	ResourceRegistry::RegistryHandle m_lightPagesCounterHandle;
+	org::Buffer* m_pLightPagesCounter = nullptr;
+	org::ResourceRegistry::RegistryHandle m_lightPagesCounterHandle;
 
 	void CreatePSO() {
 		m_PSO = PSOManager::GetInstance().MakeComputePipeline(
@@ -71,5 +71,5 @@ private:
 			"Light Culling CS");
 	}
 
-	PipelineState m_PSO;
+	org::PipelineState m_PSO;
 };

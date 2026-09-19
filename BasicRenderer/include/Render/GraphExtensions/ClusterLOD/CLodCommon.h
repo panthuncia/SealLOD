@@ -1500,7 +1500,7 @@ inline uint32_t CLodVoxelRasterWorkCapacity(uint32_t maxVisibleClusters)
     return std::max(1u, maxVisibleClusters /** 16u*/);
 }
 
-inline std::shared_ptr<Buffer> CreateAliasedUnmaterializedStructuredBuffer(
+inline std::shared_ptr<org::Buffer> CreateAliasedUnmaterializedStructuredBuffer(
     uint32_t numElements,
     uint32_t elementSize,
     bool unorderedAccess = true,
@@ -1508,7 +1508,7 @@ inline std::shared_ptr<Buffer> CreateAliasedUnmaterializedStructuredBuffer(
     bool createNonShaderVisibleUAV = false,
     bool allowAlias = true)
 {
-    auto buffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         numElements,
         elementSize,
         unorderedAccess,
@@ -1523,7 +1523,7 @@ inline std::shared_ptr<Buffer> CreateAliasedUnmaterializedStructuredBuffer(
     return buffer;
 }
 
-inline std::shared_ptr<Buffer> CreateAliasedUnmaterializedRawBuffer(
+inline std::shared_ptr<org::Buffer> CreateAliasedUnmaterializedRawBuffer(
     uint64_t bufferSizeBytes,
     bool unorderedAccess = true,
     bool createNonShaderVisibleUAV = false,
@@ -1533,9 +1533,9 @@ inline std::shared_ptr<Buffer> CreateAliasedUnmaterializedRawBuffer(
         throw std::runtime_error("Raw buffer requires a non-zero byte size that is divisible by 4");
     }
 
-    auto buffer = Buffer::CreateSharedUnmaterialized(rhi::HeapType::DeviceLocal, bufferSizeBytes, unorderedAccess);
+    auto buffer = org::Buffer::CreateSharedUnmaterialized(rhi::HeapType::DeviceLocal, bufferSizeBytes, unorderedAccess);
 
-    BufferBase::DescriptorRequirements requirements{};
+    org::BufferBase::DescriptorRequirements requirements{};
     requirements.createSRV = true;
     requirements.createUAV = unorderedAccess;
     requirements.createNonShaderVisibleUAV = unorderedAccess && createNonShaderVisibleUAV;

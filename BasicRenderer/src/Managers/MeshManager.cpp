@@ -136,25 +136,25 @@ MeshManager::MeshManager() {
 		}
 	}
 
-	m_perMeshBuffers = DynamicBuffer::CreateShared(sizeof(PerMeshCB), 1, "PerMeshBuffers");
-	m_perMeshInstanceBuffers = DynamicBuffer::CreateShared(sizeof(PerMeshInstanceCB), 1, "perMeshInstanceBuffers");
+	m_perMeshBuffers = org::DynamicBuffer::CreateShared(sizeof(PerMeshCB), 1, "PerMeshBuffers");
+	m_perMeshInstanceBuffers = org::DynamicBuffer::CreateShared(sizeof(PerMeshInstanceCB), 1, "perMeshInstanceBuffers");
 
 	// Cluster LOD data
-	m_perMeshInstanceClodOffsets = DynamicBuffer::CreateShared(sizeof(MeshInstanceClodOffsets), 10000, "perMeshInstanceClodOffsets");
-	m_clodSharedGroupChunks = DynamicBuffer::CreateShared(sizeof(ClusterLODGroupChunk), 10000, "clodSharedGroupChunks");
-	m_clodMeshMetadata = DynamicBuffer::CreateShared(sizeof(CLodMeshMetadata), 10000, "clodMeshMetadata");
-	m_clodHierarchyLevelInfos = DynamicBuffer::CreateShared(sizeof(CLodHierarchyLevelInfo), 10000, "clodHierarchyLevelInfos");
-	m_clusterLODGroups = DynamicBuffer::CreateShared(sizeof(ClusterLODGroup), 10000, "clusterLODGroups");
-	m_clusterLODSegments = DynamicBuffer::CreateShared(sizeof(ClusterLODGroupSegment), 10000, "clusterLODSegments");
+	m_perMeshInstanceClodOffsets = org::DynamicBuffer::CreateShared(sizeof(MeshInstanceClodOffsets), 10000, "perMeshInstanceClodOffsets");
+	m_clodSharedGroupChunks = org::DynamicBuffer::CreateShared(sizeof(ClusterLODGroupChunk), 10000, "clodSharedGroupChunks");
+	m_clodMeshMetadata = org::DynamicBuffer::CreateShared(sizeof(CLodMeshMetadata), 10000, "clodMeshMetadata");
+	m_clodHierarchyLevelInfos = org::DynamicBuffer::CreateShared(sizeof(CLodHierarchyLevelInfo), 10000, "clodHierarchyLevelInfos");
+	m_clusterLODGroups = org::DynamicBuffer::CreateShared(sizeof(ClusterLODGroup), 10000, "clusterLODGroups");
+	m_clusterLODSegments = org::DynamicBuffer::CreateShared(sizeof(ClusterLODGroupSegment), 10000, "clusterLODSegments");
 	//m_clusterLODMeshletBounds = DynamicBuffer::CreateShared(sizeof(BoundingSphere), 10000, "clusterLODMeshletBounds", false, true);
-	m_clusterLODNodes = DynamicBuffer::CreateShared(sizeof(ClusterLODNode), 10000, "clusterLODNodes");
-	m_clusterLODNodeSkinningInfos = DynamicBuffer::CreateShared(sizeof(ClusterLODNodeSkinningInfo), 10000, "clusterLODNodeSkinningInfos");
-	m_clusterLODNodeBoneIndices = DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODNodeBoneIndices");
-	m_clusterLODAssemblyTransforms = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyTransform), 10000, "clusterLODAssemblyTransforms");
-	m_clusterLODAssemblyInstances = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyInstance), 10000, "clusterLODAssemblyInstances");
-	m_clusterLODAssemblyBoneRemaps = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyBoneRemap), 10000, "clusterLODAssemblyBoneRemaps");
-	m_clusterLODAssemblyBoneRemapIndices = DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODAssemblyBoneRemapIndices");
-	m_clodGroupPageMap = DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
+	m_clusterLODNodes = org::DynamicBuffer::CreateShared(sizeof(ClusterLODNode), 10000, "clusterLODNodes");
+	m_clusterLODNodeSkinningInfos = org::DynamicBuffer::CreateShared(sizeof(ClusterLODNodeSkinningInfo), 10000, "clusterLODNodeSkinningInfos");
+	m_clusterLODNodeBoneIndices = org::DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODNodeBoneIndices");
+	m_clusterLODAssemblyTransforms = org::DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyTransform), 10000, "clusterLODAssemblyTransforms");
+	m_clusterLODAssemblyInstances = org::DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyInstance), 10000, "clusterLODAssemblyInstances");
+	m_clusterLODAssemblyBoneRemaps = org::DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyBoneRemap), 10000, "clusterLODAssemblyBoneRemaps");
+	m_clusterLODAssemblyBoneRemapIndices = org::DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODAssemblyBoneRemapIndices");
+	m_clodGroupPageMap = org::DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
 
 	m_clodSharedGroupChunks->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
 	m_clodGroupPageMap->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
@@ -669,18 +669,18 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 
 	const auto& pageDiskLocators = mesh->GetCLodPageDiskLocators();
 
-	std::unique_ptr<BufferView> postSkinningView = nullptr;
-	std::unique_ptr<BufferView> preSkinningView = nullptr;
+	std::unique_ptr<org::BufferView> postSkinningView = nullptr;
+	std::unique_ptr<org::BufferView> preSkinningView = nullptr;
 	size_t vertexByteSize = mesh->GetPerMeshCBData().vertexByteSize;
-	std::vector<std::unique_ptr<BufferView>> clodPreSkinningChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodPostSkinningChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodMeshletVertexChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodCompressedPositionChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodCompressedNormalChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodCompressedMeshletVertexChunkViews;
- 	std::vector<std::unique_ptr<BufferView>> clodMeshletChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodMeshletTriangleChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodMeshletBoundsChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodPreSkinningChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodPostSkinningChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodMeshletVertexChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodCompressedPositionChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodCompressedNormalChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodCompressedMeshletVertexChunkViews;
+ 	std::vector<std::unique_ptr<org::BufferView>> clodMeshletChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodMeshletTriangleChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodMeshletBoundsChunkViews;
 
 	const bool hasDiskBackedGroupChunks = !pageDiskLocators.empty() && mesh->HasCLodDiskStreamingSource();
 	const bool hasCLodHierarchy = mesh->IsCLodMesh() &&
@@ -765,8 +765,8 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	auto clusterLODSegmentsView = m_clusterLODSegments->AddData(mesh->GetCLodSegments().data(), mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment), sizeof(ClusterLODGroupSegment));
 	
 	auto clusterLODNodesView = m_clusterLODNodes->AddData(mesh->GetCLodNodes().data(), mesh->GetCLodNodes().size() * sizeof(ClusterLODNode), sizeof(ClusterLODNode));
-	std::unique_ptr<BufferView> clusterLODNodeSkinningInfosView = nullptr;
-	std::unique_ptr<BufferView> clusterLODNodeBoneIndicesView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODNodeSkinningInfosView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODNodeBoneIndicesView = nullptr;
 	if (requiresNodeSkinningSidecar) {
 		clusterLODNodeSkinningInfosView = m_clusterLODNodeSkinningInfos->AddData(
 			nodeSkinningInfos.data(),
@@ -779,28 +779,28 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			(hasNodeBoneIndices ? nodeBoneIndices.size() : 1u) * sizeof(uint32_t),
 			sizeof(uint32_t));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyTransformsView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODAssemblyTransformsView = nullptr;
 	if (!mesh->GetCLodAssemblyTransforms().empty()) {
 		clusterLODAssemblyTransformsView = m_clusterLODAssemblyTransforms->AddData(
 			mesh->GetCLodAssemblyTransforms().data(),
 			mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform),
 			sizeof(ClusterLODAssemblyTransform));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODAssemblyInstancesView = nullptr;
 	if (!mesh->GetCLodAssemblyInstances().empty()) {
 		clusterLODAssemblyInstancesView = m_clusterLODAssemblyInstances->AddData(
 			mesh->GetCLodAssemblyInstances().data(),
 			mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance),
 			sizeof(ClusterLODAssemblyInstance));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapIndicesView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODAssemblyBoneRemapIndicesView = nullptr;
 	if (!mesh->GetCLodAssemblyBoneRemapIndices().empty()) {
 		clusterLODAssemblyBoneRemapIndicesView = m_clusterLODAssemblyBoneRemapIndices->AddData(
 			mesh->GetCLodAssemblyBoneRemapIndices().data(),
 			mesh->GetCLodAssemblyBoneRemapIndices().size() * sizeof(uint32_t),
 			sizeof(uint32_t));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODAssemblyBoneRemapsView = nullptr;
 	if (!mesh->GetCLodAssemblyBoneRemaps().empty()) {
 		// CLOD wind skinning keeps vertex joint indices local to each assembly transform.
 		// Validate the local-to-expanded-joint tables at the CPU/GPU upload boundary so
@@ -924,7 +924,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			materializedGroupChunks[groupIndex] = chunk;
 		}
 
-		std::unique_ptr<BufferView> sharedGroupChunksView = nullptr;
+		std::unique_ptr<org::BufferView> sharedGroupChunksView = nullptr;
 		if (!materializedGroupChunks.empty())
 		{
 			sharedGroupChunksView = m_clodSharedGroupChunks->AddData(
@@ -1016,7 +1016,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			sharedState->coarsestRanges = summary.coarsestRanges;
 		}
 
-		std::unique_ptr<BufferView> hierarchyLevelInfoView = nullptr;
+		std::unique_ptr<org::BufferView> hierarchyLevelInfoView = nullptr;
 		uint32_t hierarchyLevelInfoBase = 0;
 		const auto& lodNodeRanges = mesh->GetCLodLodNodeRanges();
 		const auto& lodLevelRoots = mesh->GetCLodLodLevelRoots();
@@ -1044,7 +1044,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		}
 
 		// Allocate a contiguous range in the GroupPageMap buffer.
-		std::unique_ptr<BufferView> pageMapView = nullptr;
+		std::unique_ptr<org::BufferView> pageMapView = nullptr;
 		uint32_t pageMapGlobalBase = 0;
 		if (totalPageMapEntries > 0) {
 			ZoneScopedN("MeshManager::AddMesh::InitializePageMap");
@@ -2014,20 +2014,20 @@ void MeshManager::SetRendererStateServices(br::render::RendererStateRequestServi
 	m_geometryFramesInFlight = (std::max)(framesInFlight, 1u);
 	if (!service || !m_geometryUploadService || !m_graphBufferBindings.empty()) return;
 	const std::array definitions{
-		std::tuple{ ResourceIdentifier{ Builtin::PerMeshBuffer }, m_perMeshBuffers, 1ull, uint32_t(sizeof(PerMeshCB)) },
-		std::tuple{ ResourceIdentifier{ Builtin::PerMeshInstanceBuffer }, m_perMeshInstanceBuffers, 2ull, uint32_t(sizeof(PerMeshInstanceCB)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::Offsets }, m_perMeshInstanceClodOffsets, 3ull, uint32_t(sizeof(MeshInstanceClodOffsets)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::MeshMetadata }, m_clodMeshMetadata, 5ull, uint32_t(sizeof(CLodMeshMetadata)) },
-		std::tuple{ ResourceIdentifier{ CLodLevelInfosBufferId }, m_clodHierarchyLevelInfos, 6ull, uint32_t(sizeof(CLodHierarchyLevelInfo)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::Groups }, m_clusterLODGroups, 7ull, uint32_t(sizeof(ClusterLODGroup)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::Segments }, m_clusterLODSegments, 8ull, uint32_t(sizeof(ClusterLODGroupSegment)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::Nodes }, m_clusterLODNodes, 9ull, uint32_t(sizeof(ClusterLODNode)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::NodeSkinningInfos }, m_clusterLODNodeSkinningInfos, 10ull, uint32_t(sizeof(ClusterLODNodeSkinningInfo)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::NodeBoneIndices }, m_clusterLODNodeBoneIndices, 11ull, uint32_t(sizeof(uint32_t)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::AssemblyTransforms }, m_clusterLODAssemblyTransforms, 12ull, uint32_t(sizeof(ClusterLODAssemblyTransform)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::AssemblyInstances }, m_clusterLODAssemblyInstances, 13ull, uint32_t(sizeof(ClusterLODAssemblyInstance)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemaps }, m_clusterLODAssemblyBoneRemaps, 14ull, uint32_t(sizeof(ClusterLODAssemblyBoneRemap)) },
-		std::tuple{ ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemapIndices }, m_clusterLODAssemblyBoneRemapIndices, 15ull, uint32_t(sizeof(uint32_t)) }
+		std::tuple{ org::ResourceIdentifier{ Builtin::PerMeshBuffer }, m_perMeshBuffers, 1ull, uint32_t(sizeof(PerMeshCB)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::PerMeshInstanceBuffer }, m_perMeshInstanceBuffers, 2ull, uint32_t(sizeof(PerMeshInstanceCB)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::Offsets }, m_perMeshInstanceClodOffsets, 3ull, uint32_t(sizeof(MeshInstanceClodOffsets)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::MeshMetadata }, m_clodMeshMetadata, 5ull, uint32_t(sizeof(CLodMeshMetadata)) },
+		std::tuple{ org::ResourceIdentifier{ CLodLevelInfosBufferId }, m_clodHierarchyLevelInfos, 6ull, uint32_t(sizeof(CLodHierarchyLevelInfo)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::Groups }, m_clusterLODGroups, 7ull, uint32_t(sizeof(ClusterLODGroup)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::Segments }, m_clusterLODSegments, 8ull, uint32_t(sizeof(ClusterLODGroupSegment)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::Nodes }, m_clusterLODNodes, 9ull, uint32_t(sizeof(ClusterLODNode)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::NodeSkinningInfos }, m_clusterLODNodeSkinningInfos, 10ull, uint32_t(sizeof(ClusterLODNodeSkinningInfo)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::NodeBoneIndices }, m_clusterLODNodeBoneIndices, 11ull, uint32_t(sizeof(uint32_t)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyTransforms }, m_clusterLODAssemblyTransforms, 12ull, uint32_t(sizeof(ClusterLODAssemblyTransform)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyInstances }, m_clusterLODAssemblyInstances, 13ull, uint32_t(sizeof(ClusterLODAssemblyInstance)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemaps }, m_clusterLODAssemblyBoneRemaps, 14ull, uint32_t(sizeof(ClusterLODAssemblyBoneRemap)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemapIndices }, m_clusterLODAssemblyBoneRemapIndices, 15ull, uint32_t(sizeof(uint32_t)) }
 	};
 	// GroupChunks and GroupPageMap are mutable CLOD residency state, not immutable
 	// mesh topology. CLodStreamingSystem owns their stable backing and updates it
@@ -3780,37 +3780,37 @@ void MeshManager::GetCLodRayTracingResidencySnapshot(CLodRayTracingResidencySnap
 	}
 }
 
-void MeshManager::UpdatePerMeshBuffer(std::unique_ptr<BufferView>& view, PerMeshCB& data) {
+void MeshManager::UpdatePerMeshBuffer(std::unique_ptr<org::BufferView>& view, PerMeshCB& data) {
 	if (!view || !view->GetBuffer()) {
 		return;
 	}
 	view->GetBuffer()->UpdateView(view.get(), &data);
 }
 
-std::unique_ptr<BufferView> MeshManager::AllocatePerMeshOverrideBuffer(const PerMeshCB& data) {
+std::unique_ptr<org::BufferView> MeshManager::AllocatePerMeshOverrideBuffer(const PerMeshCB& data) {
 	return m_perMeshBuffers->AddData(&data, sizeof(PerMeshCB), sizeof(PerMeshCB));
 }
 
-void MeshManager::ReleasePerMeshOverrideBuffer(std::unique_ptr<BufferView>& view) {
+void MeshManager::ReleasePerMeshOverrideBuffer(std::unique_ptr<org::BufferView>& view) {
 	if (view != nullptr) {
 		m_perMeshBuffers->Deallocate(view.get());
 		view.reset();
 	}
 }
 
-void MeshManager::UpdatePerMeshInstanceBuffer(std::unique_ptr<BufferView>& view, PerMeshInstanceCB& data) {
+void MeshManager::UpdatePerMeshInstanceBuffer(std::unique_ptr<org::BufferView>& view, PerMeshInstanceCB& data) {
 	if (!view || !view->GetBuffer()) {
 		return;
 	}
 	view->GetBuffer()->UpdateView(view.get(), &data);
 }
 
-std::shared_ptr<Resource> MeshManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> MeshManager::ProvideResource(org::ResourceIdentifier const& key) {
 	return m_resources[key];
 }
 
-std::vector<ResourceIdentifier> MeshManager::GetSupportedKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> MeshManager::GetSupportedKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources)
 		keys.push_back(key);
@@ -3818,13 +3818,13 @@ std::vector<ResourceIdentifier> MeshManager::GetSupportedKeys() {
 	return keys;
 }
 
-std::shared_ptr<IResourceResolver> MeshManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> MeshManager::ProvideResolver(org::ResourceIdentifier const& key) {
 	const auto it = m_graphBufferResolvers.find(key);
 	return it != m_graphBufferResolvers.end() ? it->second : nullptr;
 }
 
-std::vector<ResourceIdentifier> MeshManager::GetSupportedResolverKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> MeshManager::GetSupportedResolverKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_graphBufferResolvers.size());
 	for (const auto& [key, _] : m_graphBufferResolvers) keys.push_back(key);
 	return keys;

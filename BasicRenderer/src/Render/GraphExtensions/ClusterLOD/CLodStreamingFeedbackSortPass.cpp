@@ -14,16 +14,16 @@
 #include "../shaders/PerPassRootConstants/clodStreamingFeedbackSortRootConstants.h"
 
 CLodStreamingFeedbackSortPass::CLodStreamingFeedbackSortPass(
-    std::shared_ptr<Buffer> requestKeys,
-    std::shared_ptr<Buffer> requests,
-    std::shared_ptr<Buffer> requestCounter,
-    std::shared_ptr<Buffer> keyScratch,
-    std::shared_ptr<Buffer> payloadScratch,
-    std::shared_ptr<Buffer> sumTable,
-    std::shared_ptr<Buffer> reduceTable,
-    std::shared_ptr<Buffer> constants,
-    std::shared_ptr<Buffer> countScatterArgs,
-    std::shared_ptr<Buffer> reduceScanArgs)
+    std::shared_ptr<org::Buffer> requestKeys,
+    std::shared_ptr<org::Buffer> requests,
+    std::shared_ptr<org::Buffer> requestCounter,
+    std::shared_ptr<org::Buffer> keyScratch,
+    std::shared_ptr<org::Buffer> payloadScratch,
+    std::shared_ptr<org::Buffer> sumTable,
+    std::shared_ptr<org::Buffer> reduceTable,
+    std::shared_ptr<org::Buffer> constants,
+    std::shared_ptr<org::Buffer> countScatterArgs,
+    std::shared_ptr<org::Buffer> reduceScanArgs)
     : m_requestKeys(std::move(requestKeys))
     , m_requests(std::move(requests))
     , m_requestCounter(std::move(requestCounter))
@@ -80,7 +80,7 @@ StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBu
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     StreamingFeedbackSortBindings bindings;
     bindings.requestCounter = declaration.BindShaderResource(m_requestCounter);
-    const std::shared_ptr<Buffer> uavs[] = {m_requestKeys, m_requests, m_keyScratch, m_payloadScratch,
+    const std::shared_ptr<org::Buffer> uavs[] = {m_requestKeys, m_requests, m_keyScratch, m_payloadScratch,
         m_sumTable, m_reduceTable, m_constants};
     for (size_t i = 0; i < std::size(uavs); ++i) bindings.uavs[i] = declaration.BindUnorderedAccess(uavs[i]);
     bindings.countScatterUav = declaration.BindUnorderedAccess(m_countScatterArgs);

@@ -13,15 +13,15 @@
 #include "../shaders/PerPassRootConstants/clodReyesRasterWorkBucketRootConstants.h"
 
 ReyesRasterWorkCompactAndArgsPass::ReyesRasterWorkCompactAndArgsPass(
-    std::shared_ptr<Buffer> rasterWorkBuffer,
-    std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> indirectCommand,
-    std::shared_ptr<Buffer> histogramBuffer,
-    std::shared_ptr<Buffer> offsetsBuffer,
-    std::shared_ptr<Buffer> writeCursorBuffer,
-    std::shared_ptr<Buffer> compactedRasterWorkIndicesBuffer,
-    std::shared_ptr<Buffer> packedRasterWorkGroupsBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer)
+    std::shared_ptr<org::Buffer> rasterWorkBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> indirectCommand,
+    std::shared_ptr<org::Buffer> histogramBuffer,
+    std::shared_ptr<org::Buffer> offsetsBuffer,
+    std::shared_ptr<org::Buffer> writeCursorBuffer,
+    std::shared_ptr<org::Buffer> compactedRasterWorkIndicesBuffer,
+    std::shared_ptr<org::Buffer> packedRasterWorkGroupsBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer)
     : m_rasterWorkBuffer(std::move(rasterWorkBuffer))
     , m_rasterWorkCounterBuffer(std::move(rasterWorkCounterBuffer))
     , m_indirectCommand(std::move(indirectCommand))
@@ -85,7 +85,7 @@ ReyesCompactFrameData ReyesRasterWorkCompactAndArgsPass::Prepare(
     ReyesCompactFrameData data{};
     const auto numBuckets = bindings.numBuckets;
     if (numBuckets == 0u) return data;
-    const auto capture = [&](auto& dispatch, const PipelineState& pipeline) {
+    const auto capture = [&](auto& dispatch, const org::PipelineState& pipeline) {
         dispatch.resourceHeap = context.textureDescriptorHeap.GetHandle();
         dispatch.samplerHeap = context.samplerDescriptorHeap.GetHandle();
         auto binding = preparation.CaptureProgramBinding(pipeline);
@@ -143,7 +143,7 @@ void ReyesRasterWorkCompactAndArgsPass::Record(const ReyesRasterWorkCompactBindi
     br::render::RecordPreparedComputeDispatch(data.finalize, recording);
 }
 
-void ReyesRasterWorkCompactAndArgsPass::Update(const UpdateExecutionContext& executionContext) {
+void ReyesRasterWorkCompactAndArgsPass::Update(const org::UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     m_numBuckets = context.preparedRasterBucketCount;

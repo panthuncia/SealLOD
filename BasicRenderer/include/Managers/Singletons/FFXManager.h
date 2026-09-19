@@ -20,24 +20,22 @@
 
 
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 struct RenderContext;
 namespace org { class Buffer; }
-using org::Buffer;
 
 class FFXManager {
 public:
     static FFXManager& GetInstance();
     void EvaluateSSSR(rhi::CommandList& commandList, 
         const Components::Camera* currentCamera,
-        PixelBuffer* pHDRTarget, 
-        PixelBuffer* pDepthTexture, 
-        PixelBuffer* pNormals, 
-        PixelBuffer* pMetallicRoughness, 
-        PixelBuffer* pMotionVectors, 
-        PixelBuffer* pEnvironmentCubemap, 
-        PixelBuffer* pBRDFLUT, 
-        PixelBuffer* pReflectionsTarget);
+        org::PixelBuffer* pHDRTarget, 
+        org::PixelBuffer* pDepthTexture, 
+        org::PixelBuffer* pNormals, 
+        org::PixelBuffer* pMetallicRoughness, 
+        org::PixelBuffer* pMotionVectors, 
+        org::PixelBuffer* pEnvironmentCubemap, 
+        org::PixelBuffer* pBRDFLUT, 
+        org::PixelBuffer* pReflectionsTarget);
     void Shutdown();
 
     bool InitFFX();

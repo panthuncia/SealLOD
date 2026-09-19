@@ -15,9 +15,7 @@
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 
 struct ReyesDeepVisibilityRasterBindings {
     org::ResourceBindingToken visible, transforms, diceQueue, diceCounter, work, workCounter;
@@ -29,29 +27,29 @@ struct ReyesDeepVisibilityRasterBindings {
 };
 
 class ReyesDeepVisibilityRasterizationPass final : public org::TypedRenderGraphPass<ReyesDeepVisibilityRasterizationPass,
-    br::render::PreparedComputeIndirect, ReyesDeepVisibilityRasterBindings>, public IDynamicDeclaredResources {
+    br::render::PreparedComputeIndirect, ReyesDeepVisibilityRasterBindings>, public org::IDynamicDeclaredResources {
 public:
     ReyesDeepVisibilityRasterizationPass(
-        std::shared_ptr<Buffer> visibleClustersBuffer,
-        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> diceQueueBuffer,
-        std::shared_ptr<Buffer> diceQueueCounterBuffer,
-        std::shared_ptr<Buffer> rasterWorkBuffer,
-        std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-        std::shared_ptr<Buffer> tessTableConfigsBuffer,
-        std::shared_ptr<Buffer> tessTableVerticesBuffer,
-        std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer,
-        std::shared_ptr<Buffer> telemetryBuffer,
-        std::shared_ptr<Buffer> deepVisibilityNodesBuffer,
-        std::shared_ptr<Buffer> deepVisibilityCounterBuffer,
-        std::shared_ptr<Buffer> deepVisibilityOverflowCounterBuffer,
-        std::shared_ptr<ResourceGroup> slabResourceGroup,
+        std::shared_ptr<org::Buffer> visibleClustersBuffer,
+        std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> diceQueueBuffer,
+        std::shared_ptr<org::Buffer> diceQueueCounterBuffer,
+        std::shared_ptr<org::Buffer> rasterWorkBuffer,
+        std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+        std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+        std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+        std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer,
+        std::shared_ptr<org::Buffer> telemetryBuffer,
+        std::shared_ptr<org::Buffer> deepVisibilityNodesBuffer,
+        std::shared_ptr<org::Buffer> deepVisibilityCounterBuffer,
+        std::shared_ptr<org::Buffer> deepVisibilityOverflowCounterBuffer,
+        std::shared_ptr<org::ResourceGroup> slabResourceGroup,
         std::string_view resourceName,
         uint32_t patchVisibilityIndexBase);
 
     ReyesDeepVisibilityRasterBindings Declare(org::PassBuilder& builder);
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
     void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeIndirect Prepare(const ReyesDeepVisibilityRasterBindings&,
@@ -60,21 +58,21 @@ public:
         org::PassRecordContext& recording);
 
 private:
-    std::shared_ptr<Buffer> m_visibleClustersBuffer;
-    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_diceQueueBuffer;
-    std::shared_ptr<Buffer> m_diceQueueCounterBuffer;
-    std::shared_ptr<Buffer> m_rasterWorkBuffer;
-    std::shared_ptr<Buffer> m_rasterWorkCounterBuffer;
-    std::shared_ptr<Buffer> m_tessTableConfigsBuffer;
-    std::shared_ptr<Buffer> m_tessTableVerticesBuffer;
-    std::shared_ptr<Buffer> m_tessTableTrianglesBuffer;
-    std::shared_ptr<Buffer> m_indirectArgsBuffer;
-    std::shared_ptr<Buffer> m_telemetryBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityNodesBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityCounterBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityOverflowCounterBuffer;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_visibleClusterTransformIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_diceQueueBuffer;
+    std::shared_ptr<org::Buffer> m_diceQueueCounterBuffer;
+    std::shared_ptr<org::Buffer> m_rasterWorkBuffer;
+    std::shared_ptr<org::Buffer> m_rasterWorkCounterBuffer;
+    std::shared_ptr<org::Buffer> m_tessTableConfigsBuffer;
+    std::shared_ptr<org::Buffer> m_tessTableVerticesBuffer;
+    std::shared_ptr<org::Buffer> m_tessTableTrianglesBuffer;
+    std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_telemetryBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityNodesBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityCounterBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityOverflowCounterBuffer;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     // Built by Update from the view snapshot; its descriptors are resolved and
     // the table published during preparation.
     org::PreparedTablePublisher m_viewRasterInfoPublisher;
@@ -84,9 +82,9 @@ private:
     uint32_t m_deepVisibilityNodeCapacity = 1u;
 
     std::vector<CLodViewRasterInfo> m_viewRasterInfos; // Rows without descriptors (change detection).
-    std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
-    std::vector<std::shared_ptr<PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
     bool m_declaredResourcesChanged = true;
-    PipelineState m_pso;
+    org::PipelineState m_pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

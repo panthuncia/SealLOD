@@ -26,7 +26,6 @@
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowUpgradeService.h"
 
 namespace org { class UploadInstance; }
-using org::UploadInstance;
 
 struct CLodActiveGroupsSnapshot {
     std::vector<uint32_t> bits;
@@ -67,21 +66,21 @@ public:
     void SetPriorityMode(CLodPriorityMode mode) { m_priorityMode = mode; }
     CLodPriorityMode GetPriorityMode() const { return m_priorityMode; }
 
-    void Initialize(RenderGraph& rg);
+    void Initialize(org::RenderGraph& rg);
     void Shutdown();
     void ShutdownGraphResources();
     void QuiesceGraphResourceAccess();
-    void OnRegistryReset(ResourceRegistry* reg);
-    void GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
-    void GatherStructuralTailPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
-    void GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
-    std::shared_ptr<Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
-    std::shared_ptr<Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
-    void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<Buffer>> buffers);
+    void OnRegistryReset(org::ResourceRegistry* reg);
+    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+    void GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+    std::shared_ptr<org::Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
+    std::shared_ptr<org::Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
+    void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<org::Buffer>> buffers);
     VirtualShadowUpgradeQueue GetVirtualShadowUpgradeQueue() const { return m_virtualShadowUpgradeQueue; }
     void SetVirtualShadowFallbackFeedbackResources(
-        std::shared_ptr<Buffer> dependencies,
-        std::shared_ptr<Buffer> dependencyCount);
+        std::shared_ptr<org::Buffer> dependencies,
+        std::shared_ptr<org::Buffer> dependencyCount);
 
 private:
     struct VirtualShadowDependency;
@@ -359,16 +358,16 @@ private:
         uint32_t expectedPageCount,
         ICLodGeometryStorage* meshManager) const;
 
-    std::shared_ptr<Buffer> m_streamingNonResidentBits;
-    std::shared_ptr<Buffer> m_streamingActiveGroupsBits;
-    std::shared_ptr<Buffer> m_streamingLoadRequestKeys;
-    std::shared_ptr<Buffer> m_streamingLoadRequests;
-    std::shared_ptr<Buffer> m_streamingLoadCounter;
-    std::shared_ptr<Buffer> m_streamingRuntimeState;
-    std::shared_ptr<Buffer> m_usedGroupsCounter;
-    std::shared_ptr<Buffer> m_usedGroupsBuffer;
-    std::shared_ptr<Buffer> m_sourceGroupMismatchCounter;
-    std::shared_ptr<Buffer> m_sourceGroupMismatchDetails;
+    std::shared_ptr<org::Buffer> m_streamingNonResidentBits;
+    std::shared_ptr<org::Buffer> m_streamingActiveGroupsBits;
+    std::shared_ptr<org::Buffer> m_streamingLoadRequestKeys;
+    std::shared_ptr<org::Buffer> m_streamingLoadRequests;
+    std::shared_ptr<org::Buffer> m_streamingLoadCounter;
+    std::shared_ptr<org::Buffer> m_streamingRuntimeState;
+    std::shared_ptr<org::Buffer> m_usedGroupsCounter;
+    std::shared_ptr<org::Buffer> m_usedGroupsBuffer;
+    std::shared_ptr<org::Buffer> m_sourceGroupMismatchCounter;
+    std::shared_ptr<org::Buffer> m_sourceGroupMismatchDetails;
 
     std::vector<uint32_t> m_streamingNonResidentBitsCpu;
     std::vector<uint32_t> m_streamingActiveGroupsBitsCpu;
@@ -572,7 +571,7 @@ private:
         Published,
     };
     struct VirtualShadowUpgradeUploadSlot {
-        std::shared_ptr<Buffer> buffer;
+        std::shared_ptr<org::Buffer> buffer;
         void* mapped = nullptr;
         uint64_t mappedBackingGeneration = 0u;
         std::atomic<VirtualShadowUpgradeUploadState> state{
@@ -600,8 +599,8 @@ private:
     VirtualShadowUpgradeQueue m_virtualShadowUpgradeQueue;
     std::vector<uint32_t> m_virtualShadowResidencyGenerationByGroup;
     CLodVirtualShadowUpgradeQueueStats m_virtualShadowUpgradeStats;
-    std::shared_ptr<Buffer> m_virtualShadowFallbackDependenciesBuffer;
-    std::shared_ptr<Buffer> m_virtualShadowFallbackDependencyCountBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowFallbackDependenciesBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowFallbackDependencyCountBuffer;
 
     std::vector<MeshManager::CLodStreamingDomainEvent> m_streamingDomainEventScratch;
     std::vector<uint32_t> m_childGroupsScratch;
@@ -653,14 +652,14 @@ private:
 
     struct ReadbackStagingSlot {
         enum class State : uint8_t { Free, Recording, Submitted, Decoding };
-        std::shared_ptr<Buffer> counterStaging;
-        std::shared_ptr<Buffer> requestsStaging;
-        std::shared_ptr<Buffer> usedGroupsCounterStaging;
-        std::shared_ptr<Buffer> usedGroupsBufferStaging;
-        std::shared_ptr<Buffer> sourceGroupMismatchCounterStaging;
-        std::shared_ptr<Buffer> sourceGroupMismatchDetailsStaging;
-        std::shared_ptr<Buffer> virtualShadowDependencyCountStaging;
-        std::shared_ptr<Buffer> virtualShadowDependenciesStaging;
+        std::shared_ptr<org::Buffer> counterStaging;
+        std::shared_ptr<org::Buffer> requestsStaging;
+        std::shared_ptr<org::Buffer> usedGroupsCounterStaging;
+        std::shared_ptr<org::Buffer> usedGroupsBufferStaging;
+        std::shared_ptr<org::Buffer> sourceGroupMismatchCounterStaging;
+        std::shared_ptr<org::Buffer> sourceGroupMismatchDetailsStaging;
+        std::shared_ptr<org::Buffer> virtualShadowDependencyCountStaging;
+        std::shared_ptr<org::Buffer> virtualShadowDependenciesStaging;
         uint64_t fenceValue = 0;
         std::atomic<State> state{State::Free};
 
@@ -738,5 +737,5 @@ private:
 
     // Dedicated upload instance + copy queue for async CLod streaming uploads.
     std::unique_ptr<CLodUploadStream> m_uploadStream;
-    QueueSlotIndex m_uploadQueueSlot{};
+    org::QueueSlotIndex m_uploadQueueSlot{};
 };

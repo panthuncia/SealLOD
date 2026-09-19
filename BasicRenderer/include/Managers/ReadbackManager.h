@@ -20,9 +20,9 @@ public:
 
     void Initialize(rhi::Timeline readbackFence);
 
-    void RequestReadback(std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap);
+    void RequestReadback(std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap);
 
-    std::shared_ptr<RenderPass> GetReadbackPass() const { return m_readbackPass; }
+    std::shared_ptr<org::RenderPass> GetReadbackPass() const { return m_readbackPass; }
 
     void ProcessReadbackRequests();
 
@@ -40,13 +40,13 @@ private:
     };
     struct ReadbackInfo {
         bool cubemap = false;
-        std::shared_ptr<PixelBuffer> texture;
+        std::shared_ptr<org::PixelBuffer> texture;
         std::wstring outputFile;
         std::function<void()> callback;
     };
 
     struct ReadbackRequest {
-        std::shared_ptr<Resource> readbackBuffer;
+        std::shared_ptr<org::Resource> readbackBuffer;
         std::vector<rhi::CopyableFootprint> layouts;
         uint64_t totalSize = 0;
         std::wstring outputFile;
@@ -64,7 +64,7 @@ private:
 
     class ReadbackPass
         : public org::TypedRenderGraphPass<ReadbackPass, ReadbackFrameData>,
-          public IDynamicDeclaredResources {
+          public org::IDynamicDeclaredResources {
     public:
         explicit ReadbackPass(std::shared_ptr<State> state)
             : m_state(std::move(state)) {
@@ -89,14 +89,14 @@ private:
     void SaveCubemapToDDS(
         rhi::Device& device,
         org::imm::ImmediateCommandList& commandList,
-        std::shared_ptr<PixelBuffer> cubemap,
+        std::shared_ptr<org::PixelBuffer> cubemap,
         const std::wstring& outputFile,
         uint64_t fenceValue);
 
     void SaveTextureToDDS(
         rhi::Device& device,
         org::imm::ImmediateCommandList& commandList,
-        PixelBuffer* texture,
+        org::PixelBuffer* texture,
         const std::wstring& outputFile,
         uint64_t fenceValue);
 

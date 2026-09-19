@@ -10,9 +10,9 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapBuildActiveBlocksPass::VirtualShadowMapBuildActiveBlocksPass(
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<Buffer> activeBlockMetadataBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> activeBlockMetadataBuffer,
     bool dynamicPages)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_clipmapInfoBuffer(std::move(clipmapInfoBuffer))
@@ -50,7 +50,7 @@ br::render::PreparedComputeDispatch VirtualShadowMapBuildActiveBlocksPass::Prepa
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
     data.constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.pageTable,
-        {org::BindlessViewKind::ShaderResource, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull)}).index;
+        {org::BindlessViewKind::ShaderResource, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}).index;
     data.constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_CLIPMAP_INFO_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.clipmapInfo,
         {org::BindlessViewKind::ShaderResource}).index;
     data.constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_OUTPUT_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.output,

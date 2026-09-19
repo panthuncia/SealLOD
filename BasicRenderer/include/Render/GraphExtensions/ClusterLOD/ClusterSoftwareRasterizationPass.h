@@ -20,9 +20,7 @@
 #include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 
 struct ClusterSoftwareRasterFrameData {
     br::render::PreparedComputeIndirectSequence raster;
@@ -52,21 +50,21 @@ struct ClusterSoftwareRasterBindings {
 class ClusterSoftwareRasterizationPass
     : public org::TypedRenderGraphPass<ClusterSoftwareRasterizationPass,
           uint32_t, ClusterSoftwareRasterBindings, ClusterSoftwareRasterFrameData>,
-      public IDynamicDeclaredResources {
+      public org::IDynamicDeclaredResources {
 public:
     ClusterSoftwareRasterizationPass(
-        std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
-        std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
-        std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
-        std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
+        std::shared_ptr<org::Buffer> compactedVisibleClustersBuffer,
+        std::shared_ptr<org::Buffer> compactedVisibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> rasterBucketsHistogramBuffer,
+        std::shared_ptr<org::Buffer> rasterBucketsIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> sortedToUnsortedMappingBuffer,
         CLodRasterOutputKind outputKind,
-        std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-        std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-        std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
-        std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-        std::shared_ptr<Buffer> telemetryBuffer,
-        std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
+        std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+        std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+        std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture,
+        std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> telemetryBuffer,
+        std::shared_ptr<org::ResourceGroup> slabResourceGroup = nullptr,
         bool runWhenComputeSWRasterEnabledOnly = false);
     ~ClusterSoftwareRasterizationPass();
 
@@ -241,7 +239,7 @@ public:
     }
 
     ClusterSoftwareRasterBindings Declare(org::PassBuilder& builder);
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
     std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const;
     uint32_t PrepareInvocation(const ClusterSoftwareRasterFrameData&, const ClusterSoftwareRasterBindings&,
@@ -254,34 +252,34 @@ public:
 private:
     std::shared_ptr<rhi::CommandSignaturePtr> m_rasterizationCommandSignature;
     std::shared_ptr<rhi::CommandSignaturePtr> m_dynamicWindSkinCacheDispatchCommandSignature;
-    PipelineState m_dynamicWindSkinCacheBuildPipeline;
-    PipelineState m_dynamicWindSkinCacheSkinPipeline;
-    PipelineState m_dynamicWindSkinCacheFinalizePipeline;
-    PipelineState m_dynamicWindSkinCacheResolvePipeline;
-    PipelineState m_dynamicWindSkinCacheClearPipeline;
-    std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
-    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_rasterBucketsHistogramBuffer;
-    std::shared_ptr<Buffer> m_rasterBucketsIndirectArgsBuffer;
-    std::shared_ptr<Buffer> m_sortedToUnsortedMappingBuffer;
+    org::PipelineState m_dynamicWindSkinCacheBuildPipeline;
+    org::PipelineState m_dynamicWindSkinCacheSkinPipeline;
+    org::PipelineState m_dynamicWindSkinCacheFinalizePipeline;
+    org::PipelineState m_dynamicWindSkinCacheResolvePipeline;
+    org::PipelineState m_dynamicWindSkinCacheClearPipeline;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_rasterBucketsHistogramBuffer;
+    std::shared_ptr<org::Buffer> m_rasterBucketsIndirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBuffer;
     // The per-view table the shader reads; it embeds the visibility UAVs, so
     // it is published during preparation from the frame's bindings.
     CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
     org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Software Raster View Raster Info"};
-    std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
-    std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_telemetryBuffer;
-    std::shared_ptr<Buffer> m_dynamicWindSkinCacheMappingBuffer;
-    std::shared_ptr<Buffer> m_dynamicWindSkinCacheHashBuffer;
-    std::shared_ptr<Buffer> m_dynamicWindSkinCachePositionsBuffer;
-    std::shared_ptr<Buffer> m_dynamicWindSkinCacheAllocatorBuffer;
-    std::shared_ptr<Buffer> m_dynamicWindSkinCacheWorkRecordsBuffer;
-    std::shared_ptr<Buffer> m_dynamicWindSkinCacheIndirectArgsBuffer;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPageTableTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowDynamicPagesTexture;
+    std::shared_ptr<org::Buffer> m_virtualShadowClipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_telemetryBuffer;
+    std::shared_ptr<org::Buffer> m_dynamicWindSkinCacheMappingBuffer;
+    std::shared_ptr<org::Buffer> m_dynamicWindSkinCacheHashBuffer;
+    std::shared_ptr<org::Buffer> m_dynamicWindSkinCachePositionsBuffer;
+    std::shared_ptr<org::Buffer> m_dynamicWindSkinCacheAllocatorBuffer;
+    std::shared_ptr<org::Buffer> m_dynamicWindSkinCacheWorkRecordsBuffer;
+    std::shared_ptr<org::Buffer> m_dynamicWindSkinCacheIndirectArgsBuffer;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
-    std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
     bool m_declaredResourcesChanged = true;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     uint32_t m_dynamicWindSkinCacheHashEntryCount = 0u;

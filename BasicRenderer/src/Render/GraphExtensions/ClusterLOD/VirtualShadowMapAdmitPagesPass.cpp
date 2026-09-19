@@ -14,13 +14,13 @@
 #include "../shaders/PerPassRootConstants/clodVirtualShadowApplyUpgradesRootConstants.h"
 
 VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::vector<std::shared_ptr<Buffer>> upgradeInputBuffers,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<Buffer> compactShadowCamerasBuffer,
-    std::shared_ptr<Buffer> statsBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::vector<std::shared_ptr<org::Buffer>> upgradeInputBuffers,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> compactShadowCamerasBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer,
     VirtualShadowUpgradeQueue upgradeQueue)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
@@ -97,7 +97,7 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapAdmitPagesPass::Prep
         std::array<unsigned int, NumMiscUintRootConstants> c{};
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUTS_DESCRIPTOR_INDEX] = srv(bindings.upgradeInputs[inputIndex]);
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUT_COUNT] = work.inputCount;
-        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyPageFlags);
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
@@ -108,7 +108,7 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapAdmitPagesPass::Prep
     for (uint32_t phaseIteration = 0; phaseIteration < 2; ++phaseIteration) {
         for (uint32_t clipmapIndex = 0; clipmapIndex < CLodVirtualShadowMaxSupportedClipmapCount; ++clipmapIndex) {
             std::array<unsigned int, NumMiscUintRootConstants> c{};
-            c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+            c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
             c[CLOD_VIRTUAL_SHADOW_ADMIT_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyPageFlags);
             c[CLOD_VIRTUAL_SHADOW_ADMIT_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
             c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;

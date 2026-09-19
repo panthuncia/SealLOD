@@ -463,7 +463,7 @@ std::shared_ptr<BufferBackingArtifact> VersionedGpuBufferBackingPool::Acquire(
         basic_telemetry::AddCounter("SARP.VersionedBuffer.BackingRingExhausted");
         return {};
     }
-    Resource::ScopedECSRegistrationSuppression suppressECS;
+    org::Resource::ScopedECSRegistrationSuppression suppressECS;
     auto resource = CreateIndexedStructuredBuffer(
         static_cast<std::uint32_t>((std::max<std::uint64_t>)(capacityClass, 1u)),
         elementStride, unorderedAccess, indirectArguments);

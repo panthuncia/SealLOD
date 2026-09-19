@@ -13,13 +13,13 @@
 
 ReyesReplayMergePass::ReyesReplayMergePass(
     ReyesReplayMergeKind kind,
-    std::shared_ptr<Buffer> sourceQueueBuffer,
-    std::shared_ptr<Buffer> sourceQueueCounterBuffer,
-    std::shared_ptr<Buffer> destQueueBuffer,
-    std::shared_ptr<Buffer> destQueueCounterBuffer,
-    std::shared_ptr<Buffer> destQueueOverflowBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> sourceQueueBuffer,
+    std::shared_ptr<org::Buffer> sourceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> destQueueBuffer,
+    std::shared_ptr<org::Buffer> destQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> destQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t destQueueCapacity)
     : m_kind(kind)
     , m_sourceQueueBuffer(std::move(sourceQueueBuffer))
@@ -61,7 +61,7 @@ ReyesReplayMergeBindings ReyesReplayMergePass::Declare(org::PassBuilder& builder
         builder.BindUnorderedAccess(m_telemetryBuffer), m_destQueueCapacity};
 }
 
-void ReyesReplayMergePass::Update(const UpdateExecutionContext& executionContext)
+void ReyesReplayMergePass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
 }

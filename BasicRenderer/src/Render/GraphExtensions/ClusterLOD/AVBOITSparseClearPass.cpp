@@ -8,12 +8,12 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITIntegrateRootConstants.h"
 
 AVBOITSparseClearPass::AVBOITSparseClearPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<PixelBuffer> occupancyTexture,
-    std::shared_ptr<PixelBuffer> occupancySliceMaskTexture,
-    std::shared_ptr<PixelBuffer> scalarExtinctionTexture,
-    std::shared_ptr<PixelBuffer> chromaticExtinctionTexture,
-    std::shared_ptr<PixelBuffer> zeroTransmittanceSliceTexture)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::PixelBuffer> occupancyTexture,
+    std::shared_ptr<org::PixelBuffer> occupancySliceMaskTexture,
+    std::shared_ptr<org::PixelBuffer> scalarExtinctionTexture,
+    std::shared_ptr<org::PixelBuffer> chromaticExtinctionTexture,
+    std::shared_ptr<org::PixelBuffer> zeroTransmittanceSliceTexture)
     : m_configBuffer(std::move(configBuffer))
     , m_occupancyTexture(std::move(occupancyTexture))
     , m_occupancySliceMaskTexture(std::move(occupancySliceMaskTexture))

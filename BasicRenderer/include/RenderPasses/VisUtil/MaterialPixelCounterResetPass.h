@@ -55,5 +55,5 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };

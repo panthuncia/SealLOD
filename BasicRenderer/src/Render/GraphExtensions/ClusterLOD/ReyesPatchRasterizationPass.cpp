@@ -17,18 +17,18 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> diceQueueBuffer,
-    std::shared_ptr<Buffer> diceQueueCounterBuffer,
-    std::shared_ptr<Buffer> rasterWorkBuffer,
-    std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> tessTableVerticesBuffer,
-    std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> diceQueueBuffer,
+    std::shared_ptr<org::Buffer> diceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
     uint32_t maxDiceQueueEntries,
     uint32_t phaseIndex,
     uint32_t patchVisibilityIndexBase)
@@ -145,12 +145,12 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
     return bindings;
 }
 
-void ReyesPatchRasterizationPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesPatchRasterizationPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
 
-    std::vector<std::shared_ptr<PixelBuffer>> nextVisibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> nextVisibilityBuffers;
     for (const auto& view : context.Views())
         if (view.visibilityBuffer) nextVisibilityBuffers.push_back(view.visibilityBuffer);
 

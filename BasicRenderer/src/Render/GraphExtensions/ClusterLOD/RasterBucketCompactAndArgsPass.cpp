@@ -18,21 +18,21 @@
 #include "../shaders/PerPassRootConstants/clodCompactionRootConstants.h"
 
 RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> compactedBaseCounterBuffer,
-    std::shared_ptr<Buffer> readBaseCounterBuffer,
-    std::shared_ptr<Buffer> indirectCommand,
-    std::shared_ptr<Buffer> histogramBuffer,
-    std::shared_ptr<Buffer> offsetsBuffer,
-    std::shared_ptr<Buffer> writeCursorBuffer,
-    std::shared_ptr<Buffer> compactedClustersBuffer,
-    std::shared_ptr<Buffer> compactedClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
-    std::shared_ptr<Buffer> reyesOwnershipBitsetBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> compactedBaseCounterBuffer,
+    std::shared_ptr<org::Buffer> readBaseCounterBuffer,
+    std::shared_ptr<org::Buffer> indirectCommand,
+    std::shared_ptr<org::Buffer> histogramBuffer,
+    std::shared_ptr<org::Buffer> offsetsBuffer,
+    std::shared_ptr<org::Buffer> writeCursorBuffer,
+    std::shared_ptr<org::Buffer> compactedClustersBuffer,
+    std::shared_ptr<org::Buffer> compactedClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> sortedToUnsortedMappingBuffer,
+    std::shared_ptr<org::Buffer> reyesOwnershipBitsetBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint64_t maxVisibleClusters,
     bool appendToExisting,
     bool readReverse,
@@ -234,7 +234,7 @@ void RasterBucketCompactAndArgsPass::Record(const RasterBucketCompactAndArgsBind
         recording.Resolve(data.indirectCommand).GetHandle(), 0, {}, 0, 1);
 }
 
-void RasterBucketCompactAndArgsPass::Update(const UpdateExecutionContext& executionContext) {
+void RasterBucketCompactAndArgsPass::Update(const org::UpdateExecutionContext& executionContext) {
     const bool nextEnabled = !m_runWhenComputeSWRasterEnabledOnly ||
         CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)());
     m_declaredResourcesChanged = nextEnabled != m_enabled;

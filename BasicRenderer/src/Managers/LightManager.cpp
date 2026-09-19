@@ -23,7 +23,7 @@ LightManager::LightManager() {
     auto& resourceManager = ::ResourceManager::GetInstance();
 
 	m_activeLightIndices = SortedUnsignedIntBuffer::CreateShared(1, "activeLightIndices");
-    m_lightBuffer = LazyDynamicStructuredBuffer<LightInfo>::CreateShared(10, "lightBuffer<LightInfo>");
+    m_lightBuffer = org::LazyDynamicStructuredBuffer<LightInfo>::CreateShared(10, "lightBuffer<LightInfo>");
     m_spotViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "spotViewInfo<uint>");
     m_pointViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "pointViewInfo<uint>");
     m_directionalViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "direcitonalViewInfo<uint>");
@@ -41,11 +41,11 @@ LightManager::LightManager() {
 	getDirectionalVirtualShadowSourceAngleDegrees = SettingsManager::GetInstance().getSettingGetter<float>(
 		CLodDirectionalVirtualShadowSourceAngleDegreesSettingName);
 
-	m_pLightViewInfoResourceGroup = std::make_shared<ResourceGroup>("LightViewInfo");
+	m_pLightViewInfoResourceGroup = std::make_shared<org::ResourceGroup>("LightViewInfo");
 	m_pLightViewInfoResourceGroup->AddResource(m_spotViewInfo);
 	m_pLightViewInfoResourceGroup->AddResource(m_pointViewInfo);
 
-	m_pLightBufferResourceGroup = std::make_shared<ResourceGroup>("LightBufferResourceGroup");
+	m_pLightBufferResourceGroup = std::make_shared<org::ResourceGroup>("LightBufferResourceGroup");
 	m_pLightBufferResourceGroup->AddResource(m_lightBuffer);
 	m_pLightBufferResourceGroup->AddResource(m_activeLightIndices);
 
@@ -59,7 +59,7 @@ LightManager::LightManager() {
 
 	static const size_t avgPagesPerCluster = 10;
 	m_lightPagePoolSize = numClusters * avgPagesPerCluster;
-	m_pLightPagesBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+	m_pLightPagesBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
 		static_cast<uint32_t>(m_lightPagePoolSize),
 		sizeof(LightPage),
 		true,
@@ -79,7 +79,7 @@ LightManager::LightManager() {
 	m_resources[Builtin::Light::ActiveLightIndices] = m_activeLightIndices;
 
     const auto publishedSource = br::render::PublishedStateSource::ProcessSource();
-    const auto addPublished = [&](ResourceIdentifier key, std::shared_ptr<Resource> fallback,
+    const auto addPublished = [&](org::ResourceIdentifier key, std::shared_ptr<org::Resource> fallback,
         std::uint64_t variant) {
         m_resolvers[key] = std::make_shared<PublishedStateResourceResolver>(publishedSource,
             br::render::PublishedResourceKey{ br::render::PublishedFragmentKind::Lights,
@@ -103,7 +103,7 @@ LightManager::LightManager() {
 }
 
 LightManager::~LightManager() {
-	auto& deletionManager = DeletionManager::GetInstance();
+	auto& deletionManager = org::DeletionManager::GetInstance();
 }
 
 namespace {
@@ -593,18 +593,18 @@ std::vector<std::shared_ptr<const std::vector<std::byte>>> LightManager::Capture
     return result;
 }
 
-void LightManager::UpdateLightBufferView(BufferView* view, const LightInfo& data) {
+void LightManager::UpdateLightBufferView(org::BufferView* view, const LightInfo& data) {
 	std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
 	m_lightBuffer->UpdateView(view, &data);
 	m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
-std::shared_ptr<Resource> LightManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> LightManager::ProvideResource(org::ResourceIdentifier const& key) {
 	return m_resources[key];
 }
 
-std::vector<ResourceIdentifier> LightManager::GetSupportedKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> LightManager::GetSupportedKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources)
 		keys.push_back(key);
@@ -612,14 +612,14 @@ std::vector<ResourceIdentifier> LightManager::GetSupportedKeys() {
 	return keys;
 }
 
-std::vector<ResourceIdentifier> LightManager::GetSupportedResolverKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> LightManager::GetSupportedResolverKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resolvers.size());
 	for (auto const& [k, _] : m_resolvers)
 		keys.push_back(k);
 	return keys;
 }
-std::shared_ptr<IResourceResolver> LightManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> LightManager::ProvideResolver(org::ResourceIdentifier const& key) {
 	auto it = m_resolvers.find(key);
 	if (it == m_resolvers.end()) return nullptr;
 	return it->second;

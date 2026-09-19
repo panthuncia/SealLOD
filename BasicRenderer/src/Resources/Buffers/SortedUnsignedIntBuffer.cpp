@@ -137,7 +137,7 @@ void SortedUnsignedIntBuffer::RequestAsyncReserveCapacity(uint64_t requiredSize)
     const auto resourceID = GetGlobalResourceID();
     m_pendingResizeCapacity = (std::max)(m_pendingResizeCapacity, newCapacity);
     m_pendingResizeValid = true;
-    m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+    m_asyncResizeState.Request(org::AsyncBufferBackingResizeRequest{
         .resourceID = resourceID,
         .heapType = rhi::HeapType::DeviceLocal,
         .byteSize = newCapacity * stride,
@@ -147,7 +147,7 @@ void SortedUnsignedIntBuffer::RequestAsyncReserveCapacity(uint64_t requiredSize)
 }
 
 bool SortedUnsignedIntBuffer::PublishReadyAsyncResize(bool wait) {
-    if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
+    if (!org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
         return false;
     }
     if (!m_pendingResizeValid && !m_asyncResizeState.HasPending()) {
@@ -429,7 +429,7 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
     auto device = DeviceManager::GetInstance().GetDevice();
     m_capacity = capacity;
     const auto stride = ElementStride();
-    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity * stride, GetGlobalResourceID(), m_UAV);
+    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity * stride, GetGlobalResourceID(), m_UAV);
     SetBacking(std::move(newDataBuffer), capacity * stride);
     EnsureCpuShadowSize(GetBufferSize());
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
@@ -441,7 +441,7 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
 	AssignDescriptorSlots();
 }
 
-void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> newDataBuffer, uint64_t newCapacity) {
+void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<org::GpuBufferBacking> newDataBuffer, uint64_t newCapacity) {
     const uint64_t previousCapacity = m_capacity;
     const auto stride = ElementStride();
     spdlog::debug(
@@ -491,7 +491,7 @@ void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBackin
 
 void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
     const auto stride = ElementStride();
-    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV);
+    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV);
     ApplyResizeBacking(std::move(newDataBuffer), newSize);
 }
 
@@ -514,7 +514,7 @@ void SortedUnsignedIntBuffer::EnsureCapacityForSize(uint64_t requiredSize) {
         m_capacity = newCapacity;
         return;
     }
-    if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
+    if (!org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
         RequestAsyncReserveCapacity(newCapacity);
         return;
     }
@@ -523,7 +523,7 @@ void SortedUnsignedIntBuffer::EnsureCapacityForSize(uint64_t requiredSize) {
 
 void SortedUnsignedIntBuffer::AssignDescriptorSlots()
 {
-    BufferBase::DescriptorRequirements requirements{};
+    org::BufferBase::DescriptorRequirements requirements{};
 
     const uint32_t numElements = static_cast<uint32_t>(ResidentCapacity());
 

@@ -118,7 +118,7 @@ struct PerResourceMemInfo {
 using PerResourceMemIndex = std::unordered_map<uint64_t, PerResourceMemInfo>;
 
 static void BuildMemorySnapshotFromRecords(
-    ui::MemorySnapshot& out,
+    org::ui::MemorySnapshot& out,
     const std::vector<org::memory::ResourceMemoryRecord>& records,
     PerResourceMemIndex* outIndex /*= nullptr*/)
 {
@@ -144,7 +144,7 @@ static void BuildMemorySnapshotFromRecords(
 
         minorBuckets[cat] += bytes;
 
-        ui::MemoryResourceRow row{};
+        org::ui::MemoryResourceRow row{};
         row.bytes = bytes;
         row.uid = record.resourceID;
 
@@ -211,7 +211,7 @@ public:
         rhi::CommandList commandList, rhi::DescriptorSlot rtv,
         DirectX::XMUINT2 outputResolution);
     bool HandleInput(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-	void SetRenderGraph(RenderGraph* renderGraph) { m_renderGraph = renderGraph; }
+	void SetRenderGraph(org::RenderGraph* renderGraph) { m_renderGraph = renderGraph; }
     void Cleanup() {
         if (m_imguiBackend == rhi::Backend::Vulkan) {
 #if BASICRENDERER_HAS_IMGUI_VULKAN
@@ -384,7 +384,7 @@ private:
     SceneExplorerNodeSnapshot m_sceneExplorerRootSnapshot{};
     std::unordered_map<uint64_t, SceneExplorerPendingEdit> m_sceneExplorerPendingEdits;
 
-	RenderGraph* m_renderGraph = nullptr;
+	org::RenderGraph* m_renderGraph = nullptr;
 
     struct CLodCaptureStats {
         uint32_t visibleClusterCount = 0;
@@ -937,13 +937,13 @@ private:
     std::function<bool()> getReshapeTexelAddressing;
     std::function<void(bool)> setReshapeTexelAddressing;
 
-    AutoAliasMode m_autoAliasMode = AutoAliasMode::Balanced;
-    std::function<AutoAliasMode()> getAutoAliasMode;
-    std::function<void(AutoAliasMode)> setAutoAliasMode;
+    org::AutoAliasMode m_autoAliasMode = org::AutoAliasMode::Balanced;
+    std::function<org::AutoAliasMode()> getAutoAliasMode;
+    std::function<void(org::AutoAliasMode)> setAutoAliasMode;
 
-    AutoAliasPackingStrategy m_autoAliasPackingStrategy = AutoAliasPackingStrategy::GreedySweepLine;
-    std::function<AutoAliasPackingStrategy()> getAutoAliasPackingStrategy;
-    std::function<void(AutoAliasPackingStrategy)> setAutoAliasPackingStrategy;
+    org::AutoAliasPackingStrategy m_autoAliasPackingStrategy = org::AutoAliasPackingStrategy::GreedySweepLine;
+    std::function<org::AutoAliasPackingStrategy()> getAutoAliasPackingStrategy;
+    std::function<void(org::AutoAliasPackingStrategy)> setAutoAliasPackingStrategy;
 
     bool m_autoAliasLogExclusionReasons = false;
     std::function<bool()> getAutoAliasLogExclusionReasons;
@@ -1724,13 +1724,13 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_reshapeTexelAddressing = getReshapeTexelAddressing();
     observerSetting(m_reshapeTexelAddressing, "reshapeTexelAddressing");
 
-    getAutoAliasMode = settingsManager.getSettingGetter<AutoAliasMode>("autoAliasMode");
-    setAutoAliasMode = settingsManager.getSettingSetter<AutoAliasMode>("autoAliasMode");
+    getAutoAliasMode = settingsManager.getSettingGetter<org::AutoAliasMode>("autoAliasMode");
+    setAutoAliasMode = settingsManager.getSettingSetter<org::AutoAliasMode>("autoAliasMode");
     m_autoAliasMode = getAutoAliasMode();
     observerSetting(m_autoAliasMode, "autoAliasMode");
 
-    getAutoAliasPackingStrategy = settingsManager.getSettingGetter<AutoAliasPackingStrategy>("autoAliasPackingStrategy");
-    setAutoAliasPackingStrategy = settingsManager.getSettingSetter<AutoAliasPackingStrategy>("autoAliasPackingStrategy");
+    getAutoAliasPackingStrategy = settingsManager.getSettingGetter<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy");
+    setAutoAliasPackingStrategy = settingsManager.getSettingSetter<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy");
     m_autoAliasPackingStrategy = getAutoAliasPackingStrategy();
     observerSetting(m_autoAliasPackingStrategy, "autoAliasPackingStrategy");
 
@@ -1854,15 +1854,15 @@ static bool PassUsesResourceAdapter(const void* passAndRes, uint64_t resourceId,
     };
     switch (passKind) {
     case 1: { // Compute
-        auto& pr = *reinterpret_cast<const RenderGraph::ComputePassAndResources*>(passAndRes);
+        auto& pr = *reinterpret_cast<const org::RenderGraph::ComputePassAndResources*>(passAndRes);
         return checkRequirements(pr.resources);
     }
     case 2: { // Copy
-        auto& pr = *reinterpret_cast<const RenderGraph::CopyPassAndResources*>(passAndRes);
+        auto& pr = *reinterpret_cast<const org::RenderGraph::CopyPassAndResources*>(passAndRes);
         return checkRequirements(pr.resources);
     }
     default: { // Render (0)
-        auto& pr = *reinterpret_cast<const RenderGraph::RenderPassAndResources*>(passAndRes);
+        auto& pr = *reinterpret_cast<const org::RenderGraph::RenderPassAndResources*>(passAndRes);
         return checkRequirements(pr.resources);
     }
     }
@@ -2684,18 +2684,18 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 		ImGui::End();
 	}
 	if (showMemoryIntrospection) {
-        static ui::MemoryIntrospectionWidget g_memWidget;
+        static org::ui::MemoryIntrospectionWidget g_memWidget;
 
         std::vector<org::memory::ResourceMemoryRecord> memoryRecords;
     if (m_renderGraph) {
         m_renderGraph->GetMemorySnapshotProvider().BuildSnapshot(memoryRecords);
     }
 
-        ui::MemorySnapshot snap;
+        org::ui::MemorySnapshot snap;
         PerResourceMemIndex memIndex;
         BuildMemorySnapshotFromRecords(snap, memoryRecords, &memIndex);
 
-		ui::FrameGraphSnapshot fgSnap;
+		org::ui::FrameGraphSnapshot fgSnap;
         if (m_renderGraph) {
             m_renderGraph->BuildMemoryIntrospectionFrameGraphSnapshot(fgSnap, memoryRecords);
         }
@@ -2883,14 +2883,14 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
     
     if (showRG) {
 		ImGui::Begin("Render Graph Inspector", nullptr);
-		RGInspectorOptions opts;
+		org::RGInspectorOptions opts;
         if ((m_imguiBackend == rhi::Backend::D3D12 || m_imguiBackend == rhi::Backend::Vulkan) && g_pd3dSrvDescHeap) {
             opts.imguiAllocDescriptor = [this]() { return AllocateImGuiDescriptor(); };
             opts.imguiFreeDescriptor = [this](uint32_t idx) { FreeImGuiDescriptor(idx); };
             opts.imguiGpuHandle = [this](uint32_t idx) { return GetImGuiGpuDescriptorHandle(idx); };
             opts.imguiHeapHandle = GetImGuiHeapHandle();
         }
-        RGInspector::Show(m_renderGraph->GetBatches(),
+        org::RGInspector::Show(m_renderGraph->GetBatches(),
             m_renderGraph->GetQueueRegistry(),
             PassUsesResourceAdapter,
             [this](uint64_t resourceId) -> std::string {
@@ -2899,12 +2899,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 if (!resource) return {};
                 return resource->GetName();
             },
-            [this](uint64_t resourceId) -> Resource* {
+            [this](uint64_t resourceId) -> org::Resource* {
                 if (!m_renderGraph) return nullptr;
                 auto resource = m_renderGraph->GetResourceByID(resourceId);
                 return resource ? resource.get() : nullptr;
             },
-            [this](const std::string& passName, Resource* resource, const RangeSpec& range, ReadbackCaptureCallback callback) {
+            [this](const std::string& passName, org::Resource* resource, const org::RangeSpec& range, org::ReadbackCaptureCallback callback) {
                 if (!m_renderGraph) {
                     return;
                 }
@@ -3645,20 +3645,20 @@ inline void Menu::TryFinalizeCLodVirtualShadowCapture(uint64_t captureId) {
 inline void Menu::DrawCLodTelemetryWindow() {
     ImGui::Begin("CLod Work Graph Telemetry", nullptr);
 
-    Resource* clodTelemetryResource = nullptr;
-    Resource* shadowClodTelemetryResource = nullptr;
-    Resource* reyesTelemetryPhase1Resource = nullptr;
-    Resource* reyesTelemetryPhase2Resource = nullptr;
-    Resource* shadowReyesTelemetryPhase1Resource = nullptr;
-    Resource* clodVisibleClustersResource = nullptr;
-    Resource* clodVisibleCounterResource = nullptr;
-    Resource* shadowClodVisibleClustersResource = nullptr;
-    Resource* shadowClodVisibleCounterResource = nullptr;
-    Resource* shadowVirtualShadowStatsResource = nullptr;
-    Resource* shadowVirtualShadowRuntimeStateResource = nullptr;
-    Resource* alphaNodeCounterResource = nullptr;
-    Resource* alphaOverflowCounterResource = nullptr;
-    Resource* alphaStatsResource = nullptr;
+    org::Resource* clodTelemetryResource = nullptr;
+    org::Resource* shadowClodTelemetryResource = nullptr;
+    org::Resource* reyesTelemetryPhase1Resource = nullptr;
+    org::Resource* reyesTelemetryPhase2Resource = nullptr;
+    org::Resource* shadowReyesTelemetryPhase1Resource = nullptr;
+    org::Resource* clodVisibleClustersResource = nullptr;
+    org::Resource* clodVisibleCounterResource = nullptr;
+    org::Resource* shadowClodVisibleClustersResource = nullptr;
+    org::Resource* shadowClodVisibleCounterResource = nullptr;
+    org::Resource* shadowVirtualShadowStatsResource = nullptr;
+    org::Resource* shadowVirtualShadowRuntimeStateResource = nullptr;
+    org::Resource* alphaNodeCounterResource = nullptr;
+    org::Resource* alphaOverflowCounterResource = nullptr;
+    org::Resource* alphaStatsResource = nullptr;
     {
         m_telemetryQuery.each([&](flecs::entity, const Components::Resource& resourceComponent) {
             if (clodTelemetryResource == nullptr) {
@@ -3832,8 +3832,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
             readbackService->RequestReadbackCapture(
                 "CLodOpaque::RasterizeClustersPass2",
                 clodTelemetryResource,
-                RangeSpec{},
-                [this](ReadbackCaptureResult&& result) {
+                org::RangeSpec{},
+                [this](org::ReadbackCaptureResult&& result) {
                 m_clodTelemetry.capturePending = false;
 
                 constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
@@ -3929,8 +3929,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 readbackService->RequestReadbackCapture(
                     "CLodOpaque::HierarchicalCullingPass2",
                     clodVisibleCounterResource,
-                    RangeSpec{},
-                    [this, captureId](ReadbackCaptureResult&& result) {
+                    org::RangeSpec{},
+                    [this, captureId](org::ReadbackCaptureResult&& result) {
                     if (!m_clodTelemetry.captureStatsPending || m_clodTelemetry.captureStatsId != captureId) {
                         return;
                     }
@@ -3949,8 +3949,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 readbackService->RequestReadbackCapture(
                     "CLodOpaque::HierarchicalCullingPass2",
                     clodVisibleClustersResource,
-                    RangeSpec{},
-                    [this, captureId](ReadbackCaptureResult&& result) {
+                    org::RangeSpec{},
+                    [this, captureId](org::ReadbackCaptureResult&& result) {
                     if (!m_clodTelemetry.captureStatsPending || m_clodTelemetry.captureStatsId != captureId) {
                         return;
                     }
@@ -4001,8 +4001,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
             readbackService->RequestReadbackCapture(
                 "CLodShadow::RasterizeClustersPass1",
                 shadowClodTelemetryResource,
-                RangeSpec{},
-                [this](ReadbackCaptureResult&& result) {
+                org::RangeSpec{},
+                [this](org::ReadbackCaptureResult&& result) {
                 m_shadowClodTelemetry.capturePending = false;
 
                 constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
@@ -4098,8 +4098,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 readbackService->RequestReadbackCapture(
                     "CLodShadow::HierarchicalCullingPass1",
                     shadowClodVisibleCounterResource,
-                    RangeSpec{},
-                    [this, captureId](ReadbackCaptureResult&& result) {
+                    org::RangeSpec{},
+                    [this, captureId](org::ReadbackCaptureResult&& result) {
                     if (!m_shadowClodTelemetry.captureStatsPending || m_shadowClodTelemetry.captureStatsId != captureId) {
                         return;
                     }
@@ -4118,8 +4118,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 readbackService->RequestReadbackCapture(
                     "CLodShadow::HierarchicalCullingPass1",
                     shadowClodVisibleClustersResource,
-                    RangeSpec{},
-                    [this, captureId](ReadbackCaptureResult&& result) {
+                    org::RangeSpec{},
+                    [this, captureId](org::ReadbackCaptureResult&& result) {
                     if (!m_shadowClodTelemetry.captureStatsPending || m_shadowClodTelemetry.captureStatsId != captureId) {
                         return;
                     }
@@ -4168,8 +4168,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
         readbackService->RequestReadbackCapture(
             "CLodShadow::VirtualShadowClearDirtyBitsPass",
             shadowVirtualShadowStatsResource,
-            RangeSpec{},
-            [this, captureId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, captureId](org::ReadbackCaptureResult&& result) {
                 if (!m_shadowVirtualShadowTelemetry.capturePending || m_shadowVirtualShadowTelemetry.captureId != captureId) {
                     return;
                 }
@@ -4188,8 +4188,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
         readbackService->RequestReadbackCapture(
             "CLodShadow::VirtualShadowSetupPass",
             shadowVirtualShadowRuntimeStateResource,
-            RangeSpec{},
-            [this, captureId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, captureId](org::ReadbackCaptureResult&& result) {
                 if (!m_shadowVirtualShadowTelemetry.capturePending || m_shadowVirtualShadowTelemetry.captureId != captureId) {
                     return;
                 }
@@ -4232,8 +4232,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
         readbackService->RequestReadbackCapture(
             "CLodOpaque::ReyesPatchRasterPass1",
             reyesTelemetryPhase1Resource,
-            RangeSpec{},
-            [this, captureId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, captureId](org::ReadbackCaptureResult&& result) {
                 if (!m_clodReyesTelemetryCapturePending || m_clodReyesTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -4252,8 +4252,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
         readbackService->RequestReadbackCapture(
             "CLodOpaque::ReyesPatchRasterPass2",
             reyesTelemetryPhase2Resource,
-            RangeSpec{},
-            [this, captureId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, captureId](org::ReadbackCaptureResult&& result) {
                 if (!m_clodReyesTelemetryCapturePending || m_clodReyesTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -4293,8 +4293,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
         readbackService->RequestReadbackCapture(
             "CLodShadow::VirtualShadowClearDirtyBitsPass",
             shadowReyesTelemetryPhase1Resource,
-            RangeSpec{},
-            [this, captureId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, captureId](org::ReadbackCaptureResult&& result) {
                 if (!m_shadowClodReyesTelemetryCapturePending || m_shadowClodReyesTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -4351,8 +4351,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
         readbackService->RequestReadbackCapture(
             "CLodAlpha::DeepVisibilityResolvePass",
             alphaNodeCounterResource,
-            RangeSpec{},
-            [this, captureId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, captureId](org::ReadbackCaptureResult&& result) {
                 if (!m_clodAlphaTelemetryCapturePending || m_clodAlphaTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -4371,8 +4371,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
         readbackService->RequestReadbackCapture(
             "CLodAlpha::DeepVisibilityResolvePass",
             alphaOverflowCounterResource,
-            RangeSpec{},
-            [this, captureId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, captureId](org::ReadbackCaptureResult&& result) {
                 if (!m_clodAlphaTelemetryCapturePending || m_clodAlphaTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -4391,8 +4391,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
         readbackService->RequestReadbackCapture(
             "CLodAlpha::DeepVisibilityResolvePass",
             alphaStatsResource,
-            RangeSpec{},
-            [this, captureId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, captureId](org::ReadbackCaptureResult&& result) {
                 if (!m_clodAlphaTelemetryCapturePending || m_clodAlphaTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -6357,7 +6357,7 @@ inline void Menu::DrawAutoAliasPlannerWindow() {
     int autoAliasModeIndex = static_cast<int>(m_autoAliasMode);
     if (ImGui::Combo("Mode", &autoAliasModeIndex, kAutoAliasModeNames, IM_ARRAYSIZE(kAutoAliasModeNames))) {
         autoAliasModeIndex = std::clamp(autoAliasModeIndex, 0, static_cast<int>(IM_ARRAYSIZE(kAutoAliasModeNames) - 1));
-        m_autoAliasMode = static_cast<AutoAliasMode>(autoAliasModeIndex);
+        m_autoAliasMode = static_cast<org::AutoAliasMode>(autoAliasModeIndex);
         setAutoAliasMode(m_autoAliasMode);
     }
 
@@ -6369,7 +6369,7 @@ inline void Menu::DrawAutoAliasPlannerWindow() {
     int packingStrategyIndex = static_cast<int>(m_autoAliasPackingStrategy);
     if (ImGui::Combo("Packing Strategy", &packingStrategyIndex, kPackingStrategyNames, IM_ARRAYSIZE(kPackingStrategyNames))) {
         packingStrategyIndex = std::clamp(packingStrategyIndex, 0, static_cast<int>(IM_ARRAYSIZE(kPackingStrategyNames) - 1));
-        m_autoAliasPackingStrategy = static_cast<AutoAliasPackingStrategy>(packingStrategyIndex);
+        m_autoAliasPackingStrategy = static_cast<org::AutoAliasPackingStrategy>(packingStrategyIndex);
         setAutoAliasPackingStrategy(m_autoAliasPackingStrategy);
     }
 
@@ -6474,7 +6474,7 @@ inline void Menu::DrawAutoAliasPlannerWindow() {
                         continue;
                     }
 
-                    std::vector<RenderGraph::AutoAliasPoolRangeDebug> ranges = pool.ranges;
+                    std::vector<org::RenderGraph::AutoAliasPoolRangeDebug> ranges = pool.ranges;
                     std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) {
                         if (a.startByte != b.startByte) {
                             return a.startByte < b.startByte;

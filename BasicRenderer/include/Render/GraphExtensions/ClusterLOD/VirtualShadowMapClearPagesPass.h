@@ -7,9 +7,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapClearPagesBindings {
     org::ResourceBindingToken staticPages, dynamicPages, dirtyFlags, pageTable;
@@ -21,14 +19,14 @@ class VirtualShadowMapClearPagesPass final : public org::TypedRenderGraphPass<Vi
     br::render::PreparedComputeDispatch, VirtualShadowMapClearPagesBindings> {
 public:
     VirtualShadowMapClearPagesPass(
-        std::shared_ptr<PixelBuffer> staticPagesTexture,
-        std::shared_ptr<PixelBuffer> dynamicPagesTexture,
-        std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> pageViewInfoBuffer,
-        std::shared_ptr<Buffer> statsBuffer);
+        std::shared_ptr<org::PixelBuffer> staticPagesTexture,
+        std::shared_ptr<org::PixelBuffer> dynamicPagesTexture,
+        std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> pageViewInfoBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer);
 
     VirtualShadowMapClearPagesBindings Declare(org::PassBuilder& builder);
     void Initialize();
@@ -39,13 +37,13 @@ public:
     void ShutdownPass();
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_staticPagesTexture;
-    std::shared_ptr<PixelBuffer> m_dynamicPagesTexture;
-    std::shared_ptr<Buffer> m_dirtyPageFlagsBuffer;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_pageViewInfoBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_staticPagesTexture;
+    std::shared_ptr<org::PixelBuffer> m_dynamicPagesTexture;
+    std::shared_ptr<org::Buffer> m_dirtyPageFlagsBuffer;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_pageViewInfoBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
 };

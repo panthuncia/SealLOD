@@ -41,7 +41,7 @@ struct DownsampleMapBindings {
 struct DownsampleBindings { std::vector<DownsampleMapBindings> maps; };
 
 class DownsamplePass : public org::TypedRenderGraphPass<DownsamplePass,
-    br::render::PreparedComputePipelineSequence, DownsampleBindings>, public IDynamicDeclaredResources {
+    br::render::PreparedComputePipelineSequence, DownsampleBindings>, public org::IDynamicDeclaredResources {
 public:
 
     DownsamplePass()
@@ -59,8 +59,8 @@ public:
         for (auto& [resourceID, map] : m_perMapInfo) {
             (void)resourceID;
             auto source = declaration.BindShaderResource(
-                Subresources(map.sourceMap, Mip{0, 1}));
-            declaration.WithUnorderedAccess(Subresources(map.sourceMap, FromMip{1}));
+                Subresources(map.sourceMap, org::Mip{0, 1}));
+            declaration.WithUnorderedAccess(Subresources(map.sourceMap, org::FromMip{1}));
             auto counter = declaration.BindUnorderedAccess(map.pCounterResource);
             auto constants = declaration.BindShaderResource(map.constantsBuffer);
             auto frozenConstants = map.constants;
@@ -77,7 +77,7 @@ public:
         return bindings;
     }
 
-    void Update(const UpdateExecutionContext& executionContext) override {
+    void Update(const org::UpdateExecutionContext& executionContext) override {
         auto* updateContext = executionContext.hostData->Get<UpdateContext>();
         if (!updateContext) {
             if (!m_activeDepthMaps.empty()) {
@@ -125,7 +125,7 @@ public:
                 {org::BindlessViewKind::UnorderedAccess}).index;
             item.constants[UintRootConstant1] = map.isArrayLike
                 ? preparation.ResolveView(map.source, {org::BindlessViewKind::ShaderResource,
-                    static_cast<uint32_t>(SRVViewType::Texture2DArray)}).index
+                    static_cast<uint32_t>(org::SRVViewType::Texture2DArray)}).index
                 : preparation.ResolveView(map.source,
                     {org::BindlessViewKind::ShaderResource}).index;
             item.constants[UintRootConstant2] = preparation.ResolveView(map.constants,
@@ -160,30 +160,30 @@ private:
     };
 
     struct PerMapInfo {
-        std::shared_ptr<LazyDynamicStructuredBuffer<spdConstants>> constantsBuffer;
+        std::shared_ptr<org::LazyDynamicStructuredBuffer<spdConstants>> constantsBuffer;
         uint64_t sourceResourceID;
-		std::shared_ptr<PixelBuffer> sourceMap;
+		std::shared_ptr<org::PixelBuffer> sourceMap;
 		bool isArrayLike;
         unsigned int constantsIndex;
-		std::shared_ptr<BufferView> pConstantsBufferView;
+		std::shared_ptr<org::BufferView> pConstantsBufferView;
 		unsigned int dispatchThreadGroupCountXY[2];
         unsigned int dispatchThreadGroupCountZ;
-        std::shared_ptr<GloballyIndexedResource> pCounterResource;
+        std::shared_ptr<org::GloballyIndexedResource> pCounterResource;
         uint64_t sourceBackingGeneration;
         spdConstants constants{};
     };
 	std::unordered_map<uint64_t, PerMapInfo> m_perMapInfo;
-    std::unordered_map<uint64_t, std::shared_ptr<PixelBuffer>> m_activeDepthMaps;
+    std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>> m_activeDepthMaps;
 
 
-    PipelineState downsamplePassPSO;
-	PipelineState downsampleArrayPSO;
+    org::PipelineState downsamplePassPSO;
+	org::PipelineState downsampleArrayPSO;
     bool m_declaredResourcesChanged = true;
 
-    static std::unordered_map<uint64_t, std::shared_ptr<PixelBuffer>> CollectActiveDepthMaps(
+    static std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>> CollectActiveDepthMaps(
         std::span<const PreparedViewFrameData> views)
     {
-        std::unordered_map<uint64_t, std::shared_ptr<PixelBuffer>> activeDepthMaps;
+        std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>> activeDepthMaps;
 
         for (const auto& view : views) {
             if (!view.linearDepthMap) continue;
@@ -195,8 +195,8 @@ private:
     }
 
     static bool HaveSameActiveDepthMaps(
-        const std::unordered_map<uint64_t, std::shared_ptr<PixelBuffer>>& lhs,
-        const std::unordered_map<uint64_t, std::shared_ptr<PixelBuffer>>& rhs)
+        const std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>>& lhs,
+        const std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>>& rhs)
     {
         if (lhs.size() != rhs.size()) {
             return false;
@@ -218,7 +218,7 @@ private:
         return true;
     }
 
-    static uint32_t GetSliceCount(const PixelBuffer& map)
+    static uint32_t GetSliceCount(const org::PixelBuffer& map)
     {
         const auto& desc = map.GetDescription();
         if (desc.isCubemap) {
@@ -237,7 +237,7 @@ private:
 		}
 	}
 
-    void CreateOrUpdateMapInfo(uint64_t resourceID, const std::shared_ptr<PixelBuffer>& linearDepthMap) {
+    void CreateOrUpdateMapInfo(uint64_t resourceID, const std::shared_ptr<org::PixelBuffer>& linearDepthMap) {
         if (!linearDepthMap) {
             return;
         }
@@ -282,7 +282,7 @@ private:
         constants.workGroupOffset[1] = workGroupOffset[1];
 
         // A new backing generation gets a new immutable constants allocation.
-        auto constantsBuffer = LazyDynamicStructuredBuffer<spdConstants>::CreateShared(1, "Downsample map constants");
+        auto constantsBuffer = org::LazyDynamicStructuredBuffer<spdConstants>::CreateShared(1, "Downsample map constants");
         auto constantsView = constantsBuffer->Add();
         constantsBuffer->UpdateView(constantsView.get(), &constants);
 
@@ -303,7 +303,7 @@ private:
         m_perMapInfo[resourceID] = std::move(mapInfo);
     }
 
-    void SyncMapInfos(const std::unordered_map<uint64_t, std::shared_ptr<PixelBuffer>>& activeDepthMaps) {
+    void SyncMapInfos(const std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>>& activeDepthMaps) {
         std::vector<uint64_t> stale;
         stale.reserve(m_perMapInfo.size());
         for (const auto& [resourceID, mapInfo] : m_perMapInfo) {

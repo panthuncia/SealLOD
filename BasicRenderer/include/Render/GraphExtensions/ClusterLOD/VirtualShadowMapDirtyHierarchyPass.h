@@ -7,9 +7,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapDirtyHierarchyBindings {
     org::ResourceBindingToken pageTable;
@@ -21,9 +19,9 @@ class VirtualShadowMapDirtyHierarchyPass final : public org::TypedRenderGraphPas
     br::render::PreparedComputeDispatchSequence, VirtualShadowMapDirtyHierarchyBindings> {
 public:
     VirtualShadowMapDirtyHierarchyPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<PixelBuffer> dirtyHierarchyTexture,
-        std::shared_ptr<Buffer> clipmapInfoBuffer);
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::PixelBuffer> dirtyHierarchyTexture,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer);
 
     VirtualShadowMapDirtyHierarchyBindings Declare(org::PassBuilder& builder);
     br::render::PreparedComputeDispatchSequence Prepare(const VirtualShadowMapDirtyHierarchyBindings&,
@@ -32,8 +30,8 @@ public:
         const br::render::PreparedComputeDispatchSequence&, org::PassRecordContext&);
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<PixelBuffer> m_dirtyHierarchyTexture;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::PixelBuffer> m_dirtyHierarchyTexture;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
 };

@@ -24,7 +24,7 @@ struct EnvironmentFilterBindings {
 };
 
 class EnvironmentFilterPass : public org::TypedRenderGraphPass<EnvironmentFilterPass,
-    br::render::PreparedEnvironmentDispatch, EnvironmentFilterBindings>, public IDynamicDeclaredResources {
+    br::render::PreparedEnvironmentDispatch, EnvironmentFilterBindings>, public org::IDynamicDeclaredResources {
 public:
     EnvironmentFilterPass() {
         CreatePrefilterPSO();
@@ -45,7 +45,7 @@ public:
 
 
 
-    void Update(const UpdateExecutionContext& context) override {
+    void Update(const org::UpdateExecutionContext& context) override {
         const auto* input = context.hostData->Get<UpdateContext>();
         m_work = input->environmentWork.prefilter;
         auto pending = m_work.Pending();
@@ -95,7 +95,7 @@ private:
     mutable br::render::EnvironmentPrefilterWorkQueue::Snapshot m_pending;
     mutable bool m_declaredResourcesChanged = true;
 
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
     void CreatePrefilterPSO() {
         auto dev = DeviceManager::GetInstance().GetDevice();
@@ -148,7 +148,7 @@ private:
             throw std::runtime_error("EnvFilter: PSO failed");
         }
         pipeline->SetName("EnvFilter.ComputePSO");
-        m_pso = PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
             compiled.resourceDescriptorSlots, layout, soLayout.layout);
     }
 };

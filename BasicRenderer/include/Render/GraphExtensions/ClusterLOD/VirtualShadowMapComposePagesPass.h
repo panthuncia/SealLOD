@@ -7,9 +7,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapComposePagesBindings {
     org::ResourceBindingToken staticPages, dynamicPages, pageTable, pageMetadata, stats;
@@ -19,11 +17,11 @@ class VirtualShadowMapComposePagesPass final : public org::TypedRenderGraphPass<
     br::render::PreparedComputeDispatch, VirtualShadowMapComposePagesBindings> {
 public:
     VirtualShadowMapComposePagesPass(
-        std::shared_ptr<PixelBuffer> staticPagesTexture,
-        std::shared_ptr<PixelBuffer> dynamicPagesTexture,
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> statsBuffer);
+        std::shared_ptr<org::PixelBuffer> staticPagesTexture,
+        std::shared_ptr<org::PixelBuffer> dynamicPagesTexture,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer);
 
     VirtualShadowMapComposePagesBindings Declare(org::PassBuilder& builder);
     void Initialize() {}
@@ -34,10 +32,10 @@ public:
     void ShutdownPass() {}
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_staticPagesTexture;
-    std::shared_ptr<PixelBuffer> m_dynamicPagesTexture;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_staticPagesTexture;
+    std::shared_ptr<org::PixelBuffer> m_dynamicPagesTexture;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
 };

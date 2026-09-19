@@ -248,7 +248,7 @@ public:
     }
 
     [[nodiscard]] org::PreparedResourceReference Capture(
-        const std::shared_ptr<Resource>& resource)
+        const std::shared_ptr<org::Resource>& resource)
     {
         return resource
             ? m_preparation.CaptureResource(resource->GetGlobalResourceID())
@@ -261,31 +261,31 @@ public:
     }
 
     [[nodiscard]] org::PreparedProgramReference CaptureProgram(
-        const PipelineState& pipeline)
+        const org::PipelineState& pipeline)
     {
         return m_preparation.CaptureProgram(pipeline);
     }
 
     [[nodiscard]] org::PreparedProgramBinding CaptureProgramBinding(
-        const PipelineState& pipeline)
+        const org::PipelineState& pipeline)
     {
         return m_preparation.CaptureProgramBinding(pipeline);
     }
 
     [[nodiscard]] org::PreparedProgramBinding CaptureProgramBinding(
-        std::shared_ptr<const PipelineStatePayload> payload)
+        std::shared_ptr<const org::PipelineStatePayload> payload)
     {
         return m_preparation.CaptureProgramBinding(std::move(payload));
     }
 
-    void Bind(const PipelineState& pipeline)
+    void Bind(const org::PipelineState& pipeline)
     {
         auto binding = m_preparation.CaptureProgramBinding(pipeline);
         m_sequence.commands.emplace_back(PreparedBindComputeProgram{
             binding.program, std::move(binding.descriptorIndices)});
     }
 
-    void Bind(const PipelineState& pipeline, std::vector<uint32_t> descriptorIndices)
+    void Bind(const org::PipelineState& pipeline, std::vector<uint32_t> descriptorIndices)
     {
         m_sequence.commands.emplace_back(PreparedBindComputeProgram{
             CaptureProgram(pipeline), std::move(descriptorIndices)});
@@ -326,7 +326,7 @@ public:
     }
 
     void Barriers(
-        std::initializer_list<std::shared_ptr<Buffer>> resources,
+        std::initializer_list<std::shared_ptr<org::Buffer>> resources,
         rhi::ResourceAccessType beforeAccess,
         rhi::ResourceAccessType afterAccess,
         rhi::ResourceSyncState beforeSync = rhi::ResourceSyncState::ComputeShading,

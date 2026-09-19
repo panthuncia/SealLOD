@@ -88,7 +88,7 @@ VkFormat ToVkFormat(rhi::Format format) {
     }
 }
 
-uint32_t ComputeMipCount(const TextureDescription& description) {
+uint32_t ComputeMipCount(const org::TextureDescription& description) {
     const uint32_t layers = (description.isCubemap ? 6u : 1u) * (std::max)(1u, description.arraySize);
     if (layers == 0u || description.imageDimensions.empty()) {
         return 1u;
@@ -98,7 +98,7 @@ uint32_t ComputeMipCount(const TextureDescription& description) {
     return static_cast<uint32_t>((std::max)(size_t(1), mipCount));
 }
 
-VkImageUsageFlags BuildVkImageUsage(const TextureDescription& description) {
+VkImageUsageFlags BuildVkImageUsage(const org::TextureDescription& description) {
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (description.hasUAV || description.hasNonShaderVisibleUAV) {
         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
@@ -112,7 +112,7 @@ VkImageUsageFlags BuildVkImageUsage(const TextureDescription& description) {
     return usage;
 }
 
-VkImageCreateInfo BuildVkImageCreateInfo(const TextureDescription& description) {
+VkImageCreateInfo BuildVkImageCreateInfo(const org::TextureDescription& description) {
     VkImageCreateInfo createInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     createInfo.imageType = VK_IMAGE_TYPE_2D;
     createInfo.format = ToVkFormat(description.format);
@@ -132,7 +132,7 @@ VkImageCreateInfo BuildVkImageCreateInfo(const TextureDescription& description) 
     return createInfo;
 }
 
-VkImageCreateInfo BuildVkImageCreateInfo(rhi::Resource resource, const TextureDescription& description) {
+VkImageCreateInfo BuildVkImageCreateInfo(rhi::Resource resource, const org::TextureDescription& description) {
     rhi::VulkanResourceInfo resourceInfo{};
     if (!rhi::vulkan::get_resource_info(resource, resourceInfo) || resourceInfo.resource == nullptr) {
         return BuildVkImageCreateInfo(description);
@@ -181,7 +181,7 @@ bool CreateUpscaleContextVulkan(ffx::Context& context, rhi::Device device, ffx::
     return api::CreateContext(context, nullptr, createUpscaling, backendDesc) == ffx::ReturnCode::Ok;
 }
 
-FfxApiResource GetApiResourceVulkan(PixelBuffer* resource, FfxApiResourceState state) {
+FfxApiResource GetApiResourceVulkan(org::PixelBuffer* resource, FfxApiResourceState state) {
     const rhi::Resource apiResource = resource->GetAPIResource();
     const VkImage nativeImage = rhi::vulkan::get_resource(apiResource);
     const VkImageCreateInfo createInfo = BuildVkImageCreateInfo(apiResource, resource->GetDescription());
@@ -233,7 +233,7 @@ bool CreateHostBackendInterfaceVulkan(FfxInterface& backendInterface, void*& scr
     return true;
 }
 
-FfxResource GetHostResourceVulkan(PixelBuffer* resource, const wchar_t* name, FfxResourceStates state) {
+FfxResource GetHostResourceVulkan(org::PixelBuffer* resource, const wchar_t* name, FfxResourceStates state) {
     if (!LoadVulkanBackend()) {
         return {};
     }
@@ -256,7 +256,7 @@ bool CreateUpscaleContextVulkan(ffx::Context&, rhi::Device, ffx::CreateContextDe
     return false;
 }
 
-FfxApiResource GetApiResourceVulkan(PixelBuffer*, FfxApiResourceState) {
+FfxApiResource GetApiResourceVulkan(org::PixelBuffer*, FfxApiResourceState) {
     spdlog::warn("FidelityFX Vulkan upscaling resource access is unavailable because Vulkan headers are not available in this build.");
     return {};
 }
@@ -271,7 +271,7 @@ bool CreateHostBackendInterfaceVulkan(FfxInterface&, void*&, rhi::Device, size_t
     return false;
 }
 
-FfxResource GetHostResourceVulkan(PixelBuffer*, const wchar_t*, FfxResourceStates) {
+FfxResource GetHostResourceVulkan(org::PixelBuffer*, const wchar_t*, FfxResourceStates) {
     spdlog::warn("FidelityFX Vulkan host resource access is unavailable because Vulkan headers are not available in this build.");
     return {};
 }

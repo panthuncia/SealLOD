@@ -100,9 +100,9 @@ namespace {
 		return path;
 	}
 
-	uint64_t ComputeTextureResidentBytes(const TextureDescription& desc) {
+	uint64_t ComputeTextureResidentBytes(const org::TextureDescription& desc) {
 		uint64_t totalBytes = 0;
-		for (const ImageDimensions& dims : desc.imageDimensions) {
+		for (const org::ImageDimensions& dims : desc.imageDimensions) {
 			totalBytes += dims.slicePitch;
 		}
 		return totalBytes;
@@ -333,12 +333,12 @@ namespace {
 		return result;
 	}
 
-	std::vector<std::shared_ptr<Resource>> CollectMaterialTextureResources(const Material& material) {
-		std::vector<std::shared_ptr<Resource>> textures;
+	std::vector<std::shared_ptr<org::Resource>> CollectMaterialTextureResources(const Material& material) {
+		std::vector<std::shared_ptr<org::Resource>> textures;
 		std::unordered_set<uint64_t> seenResourceIds;
 
 		material.ForEachReferencedTexture([&](const std::shared_ptr<TextureAsset>& texture) {
-			std::shared_ptr<Resource> image = texture ? texture->ImagePtr() : nullptr;
+			std::shared_ptr<org::Resource> image = texture ? texture->ImagePtr() : nullptr;
 			if (!image) {
 				return;
 			}
@@ -496,7 +496,7 @@ MaterialManager::MaterialManager() {
 	m_materialStartupFallbacks[2]->SetName("StartupFallback::PerMaterialOpenPBRDataBuffer");
 	const auto publishedSource = br::render::PublishedStateSource::ProcessSource();
 	const auto makeMaterialResolver = [&](std::uint64_t variant,
-		const std::shared_ptr<Resource>& fallback) {
+		const std::shared_ptr<org::Resource>& fallback) {
 		return std::make_shared<PublishedStateResourceResolver>(publishedSource,
 			br::render::PublishedResourceKey{
 				br::render::PublishedFragmentKind::Materials,
@@ -536,7 +536,7 @@ void MaterialManager::ShutdownTextureStreaming() {
 		m_textureStreamingManager->Shutdown();
 	}
 }
-std::shared_ptr<RenderPass> MaterialManager::CreateTextureStreamingFeedbackReadbackPass() {
+std::shared_ptr<org::RenderPass> MaterialManager::CreateTextureStreamingFeedbackReadbackPass() {
 	if (!m_textureStreamingManager || m_textureStreamingFeedbackSuppressed) {
 		return {};
 	}
@@ -1152,7 +1152,7 @@ void MaterialManager::FlushDirtyMaterial(Material& material, bool refreshTexture
 			const auto prepared = texture->PreparedImagePtr();
 			const auto streaming = texture->GetStreamingState();
 			const auto pending = texture->GetPendingDebugInfo();
-			const auto srv = [](const std::shared_ptr<PixelBuffer>& image) {
+			const auto srv = [](const std::shared_ptr<org::PixelBuffer>& image) {
 				return image && image->HasValidBackingResource()
 					? image->GetSRVInfo(0).slot.index
 					: UINT32_MAX;
@@ -1618,8 +1618,8 @@ void MaterialManager::RefreshMaterialTextureUsage(const Material& material) {
 	++m_trackedTexturesRevision;
 }
 
-std::vector<std::shared_ptr<Resource>> MaterialManager::CollectActiveMaterialTextureResources() const {
-	std::vector<std::shared_ptr<Resource>> textures;
+std::vector<std::shared_ptr<org::Resource>> MaterialManager::CollectActiveMaterialTextureResources() const {
+	std::vector<std::shared_ptr<org::Resource>> textures;
 	std::unordered_set<uint64_t> seenResourceIds;
 	for (const auto& [_, trackedTextures] : m_trackedMaterialTextures) {
 		for (const auto& texture : trackedTextures) {
@@ -1634,7 +1634,7 @@ std::vector<std::shared_ptr<Resource>> MaterialManager::CollectActiveMaterialTex
 	return textures;
 }
 
-std::shared_ptr<Resource> MaterialManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> MaterialManager::ProvideResource(org::ResourceIdentifier const& key) {
 	auto it = m_resources.find(key);
 	if (it != m_resources.end()) {
 		return it->second;
@@ -1642,8 +1642,8 @@ std::shared_ptr<Resource> MaterialManager::ProvideResource(ResourceIdentifier co
 	return m_textureStreamingManager ? m_textureStreamingManager->ProvideResource(key) : nullptr;
 }
 
-std::vector<ResourceIdentifier> MaterialManager::GetSupportedKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> MaterialManager::GetSupportedKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources) {
 		keys.push_back(key);
@@ -1655,8 +1655,8 @@ std::vector<ResourceIdentifier> MaterialManager::GetSupportedKeys() {
 	return keys;
 }
 
-std::vector<ResourceIdentifier> MaterialManager::GetSupportedResolverKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> MaterialManager::GetSupportedResolverKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resolvers.size());
 	for (auto const& [key, _] : m_resolvers) {
 		keys.push_back(key);
@@ -1668,7 +1668,7 @@ std::vector<ResourceIdentifier> MaterialManager::GetSupportedResolverKeys() {
 	return keys;
 }
 
-std::shared_ptr<IResourceResolver> MaterialManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> MaterialManager::ProvideResolver(org::ResourceIdentifier const& key) {
 	auto it = m_resolvers.find(key);
 	if (it != m_resolvers.end()) {
 		return it->second;
@@ -1822,7 +1822,7 @@ bool MaterialManager::TryGetCompileFlagsSlot(MaterialCompileFlags flags, unsigne
 }
 
 bool MaterialManager::RequestExternalMaterialTextureReadback(
-	const std::shared_ptr<PixelBuffer>& image,
+	const std::shared_ptr<org::PixelBuffer>& image,
 	std::wstring outputFile,
 	std::function<void()> callback)
 {

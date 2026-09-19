@@ -31,10 +31,10 @@ namespace
         return errorPixels / denom;
     }
 
-    TextureDescription CreateCLodDeepVisibilityHeadPointerDesc(const PixelBuffer& visibilityBuffer)
+    org::TextureDescription CreateCLodDeepVisibilityHeadPointerDesc(const org::PixelBuffer& visibilityBuffer)
     {
-        TextureDescription desc;
-        ImageDimensions dims;
+        org::TextureDescription desc;
+        org::ImageDimensions dims;
         dims.width = visibilityBuffer.GetWidth();
         dims.height = visibilityBuffer.GetHeight();
         desc.imageDimensions.push_back(dims);
@@ -49,7 +49,7 @@ namespace
         return desc;
     }
 
-    bool CLodHeadPointerMatchesVisibility(const PixelBuffer& headPointers, const PixelBuffer& visibilityBuffer)
+    bool CLodHeadPointerMatchesVisibility(const org::PixelBuffer& headPointers, const org::PixelBuffer& visibilityBuffer)
     {
         return headPointers.GetWidth() == visibilityBuffer.GetWidth() &&
             headPointers.GetHeight() == visibilityBuffer.GetHeight();
@@ -85,13 +85,13 @@ namespace
 
 ViewManager::ViewManager() {
     auto& resourceManager = ::ResourceManager::GetInstance();
-    m_cameraBuffer = LazyDynamicStructuredBuffer<CameraInfo>::CreateShared(1, "cameraBuffer<ViewManager>");
-    m_cullingCameraBuffer = LazyDynamicStructuredBuffer<CullingCameraInfo>::CreateShared(1, "cullingCameraBuffer<ViewManager>");
+    m_cameraBuffer = org::LazyDynamicStructuredBuffer<CameraInfo>::CreateShared(1, "cameraBuffer<ViewManager>");
+    m_cullingCameraBuffer = org::LazyDynamicStructuredBuffer<CullingCameraInfo>::CreateShared(1, "cullingCameraBuffer<ViewManager>");
     m_primaryCameraBufferView = m_cameraBuffer->Add();
     m_primaryCullingCameraBufferView = m_cullingCameraBuffer->Add();
     org::memory::SetResourceUsageHint(*m_cameraBuffer, "Camera and view buffers");
 	org::memory::SetResourceUsageHint(*m_cullingCameraBuffer, "Camera and view buffers");
-    m_linearDepthGroup = std::make_shared<ResourceGroup>("LinearDepthMaps");
+    m_linearDepthGroup = std::make_shared<org::ResourceGroup>("LinearDepthMaps");
 
     // Register provided resources
     m_resources[Builtin::CameraBuffer] = m_cameraBuffer;
@@ -190,8 +190,8 @@ void ViewManager::DestroyView(uint64_t viewID) {
 }
 
 void ViewManager::AttachDepth(uint64_t viewID,
-    std::shared_ptr<PixelBuffer> depth,
-    std::shared_ptr<PixelBuffer> linearDepth) {
+    std::shared_ptr<org::PixelBuffer> depth,
+    std::shared_ptr<org::PixelBuffer> linearDepth) {
     auto* v = Get(viewID);
     if (!v) return;
     const auto previousLinearDepth = v->gpu.linearDepthMap;
@@ -221,7 +221,7 @@ void ViewManager::AttachDepth(uint64_t viewID,
     m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
-void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<PixelBuffer> visibilityBuffer) {
+void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<org::PixelBuffer> visibilityBuffer) {
     auto* v = Get(viewID);
     if (!v) return;
     v->gpu.visibilityBuffer = visibilityBuffer;
@@ -233,7 +233,7 @@ void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<PixelB
     m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
-std::shared_ptr<PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPointers(uint64_t viewID)
+std::shared_ptr<org::PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPointers(uint64_t viewID)
 {
     auto* v = Get(viewID);
     if (!v || !v->gpu.visibilityBuffer) {
@@ -249,7 +249,7 @@ std::shared_ptr<PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPointers(u
         return v->gpu.clodDeepVisibilityHeadPointers;
     }
 
-    auto headPointerTexture = PixelBuffer::CreateSharedUnmaterialized(
+    auto headPointerTexture = org::PixelBuffer::CreateSharedUnmaterialized(
         CreateCLodDeepVisibilityHeadPointerDesc(*v->gpu.visibilityBuffer));
     headPointerTexture->SetName("CLod Deep Visibility Head Pointers " + std::to_string(viewID));
     // These textures are created outside of RenderGraph::AddResource(), but later update code
@@ -317,28 +317,28 @@ uint32_t ViewManager::ShadowViewCameraBufferIndex(uint64_t viewID) const {
     return view ? view->gpu.cameraBufferIndex : 0xFFFFFFFFu;
 }
 
-std::shared_ptr<Resource> ViewManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> ViewManager::ProvideResource(org::ResourceIdentifier const& key) {
     auto it = m_resources.find(key);
     if (it == m_resources.end()) return nullptr;
     return it->second;
 }
 
-std::vector<ResourceIdentifier> ViewManager::GetSupportedKeys() {
-    std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> ViewManager::GetSupportedKeys() {
+    std::vector<org::ResourceIdentifier> keys;
     keys.reserve(m_resources.size());
     for (auto const& [k, _] : m_resources)
         keys.push_back(k);
     return keys;
 }
 
-std::vector<ResourceIdentifier> ViewManager::GetSupportedResolverKeys() {
-    std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> ViewManager::GetSupportedResolverKeys() {
+    std::vector<org::ResourceIdentifier> keys;
     keys.reserve(m_resolvers.size());
     for (auto const& [k, _] : m_resolvers)
         keys.push_back(k);
 	return keys;
 }
-std::shared_ptr<IResourceResolver> ViewManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> ViewManager::ProvideResolver(org::ResourceIdentifier const& key) {
 	auto it = m_resolvers.find(key);
 	if (it == m_resolvers.end()) return nullptr;
 	return it->second;

@@ -33,10 +33,9 @@ namespace br::render { class RendererStateRequestService; class VersionedGpuBuff
 
 class TextureFactory;
 namespace org { class CopyPass; }
-using org::CopyPass;
 
 // Manages buffers for per-material-compile-flag work (e.g., visibility buffer per-material)
-class MaterialManager : public IResourceProvider, public ITextureStreamingFeedbackService {
+class MaterialManager : public org::IResourceProvider, public ITextureStreamingFeedbackService {
 public:
 	~MaterialManager();
 	static std::unique_ptr<MaterialManager> CreateUnique() {
@@ -71,14 +70,14 @@ public:
 		if (m_textureStreamingManager)
 			m_textureStreamingManager->AcknowledgePublishedImageTable(published);
 	}
-	std::shared_ptr<RenderPass> CreateTextureStreamingFeedbackReadbackPass() override;
+	std::shared_ptr<org::RenderPass> CreateTextureStreamingFeedbackReadbackPass() override;
 	void SetTextureStreamingFeedbackSuppressed(bool suppressed) { m_textureStreamingFeedbackSuppressed = suppressed; }
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
 	MaterialTextureStreamingReadinessStats GetMaterialTextureStreamingReadinessStats() const;
 	void RegisterStreamingTexture(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
 	TextureStreamingManager* GetTextureStreamingManager() const { return m_textureStreamingManager.get(); }
 	using RequestTextureReadbackFn =
-		std::function<void(std::shared_ptr<PixelBuffer>, std::wstring, std::function<void()>)>;
+		std::function<void(std::shared_ptr<org::PixelBuffer>, std::wstring, std::function<void()>)>;
 	void SetRequestTextureReadbackFn(RequestTextureReadbackFn fn) {
 		m_requestTextureReadback = std::move(fn);
 	}
@@ -87,10 +86,10 @@ public:
 	void MarkMaterialDirty(Material& material);
 	void UpdateOpenPBRMaterialDataBuffer(unsigned int materialSlot, const PerMaterialOpenPBRCB& data);
 
-	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-	std::vector<ResourceIdentifier> GetSupportedKeys() override;
-	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+	std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+	std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 
 	std::uint64_t CommitGpuVisibleSnapshot(bool forceGraphSnapshot = false);
 	void ScheduleGpuVisibleSnapshotCommit(bool forceGraphSnapshot = false);
@@ -117,7 +116,7 @@ public:
 	unsigned int GetRasterBucketForFlags(MaterialRasterFlags rasterFlags) const;
 	MaterialRasterFlags GetRasterFlagsForBucket(unsigned int bucketIndex) const;
 	bool RequestExternalMaterialTextureReadback(
-		const std::shared_ptr<PixelBuffer>& image,
+		const std::shared_ptr<org::PixelBuffer>& image,
 		std::wstring outputFile,
 		std::function<void()> callback);
 private:
@@ -146,11 +145,11 @@ private:
 	void FlushDirtyMaterial(Material& material, bool refreshTextureBindings = false);
 	void EnsureMaterialBufferCapacity(unsigned int requiredSlots);
 	void EnsureCompileFlagsBufferCapacity(unsigned int requiredSlots);
-	std::vector<std::shared_ptr<Resource>> CollectActiveMaterialTextureResources() const;
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
+	std::vector<std::shared_ptr<org::Resource>> CollectActiveMaterialTextureResources() const;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::IResourceResolver>, org::ResourceIdentifier::Hasher> m_resolvers;
 	std::array<std::shared_ptr<PublishedStateResourceResolver>, 3> m_materialTableResolvers;
-	std::unordered_map<uint32_t, std::vector<std::shared_ptr<Resource>>> m_trackedMaterialTextures;
+	std::unordered_map<uint32_t, std::vector<std::shared_ptr<org::Resource>>> m_trackedMaterialTextures;
 	std::atomic<uint64_t> m_trackedTexturesRevision{ 1 };
 	// Debug statistics: rebuilt off-thread when their inputs change; the owner
 	// thread only copies the latest result.

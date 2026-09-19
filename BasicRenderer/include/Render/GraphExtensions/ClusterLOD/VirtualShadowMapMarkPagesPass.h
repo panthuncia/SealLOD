@@ -13,9 +13,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
     struct VirtualShadowMarkFrameData {
         rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
@@ -42,17 +40,17 @@ class VirtualShadowMapMarkPagesPass final : public org::TypedRenderGraphPass<Vir
     VirtualShadowMarkFrameData, VirtualShadowMapMarkPagesBindings> {
 public:
     VirtualShadowMapMarkPagesPass(
-        std::shared_ptr<Buffer> tileWorkBuffer,
-        std::shared_ptr<Buffer> tileCountBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer,
-        std::shared_ptr<Buffer> markClipmapDataBuffer,
-        std::shared_ptr<Buffer> markedBlocksMaskBuffer,
-        std::shared_ptr<Buffer> markedBlocksListBuffer,
-        std::shared_ptr<Buffer> markedBlocksCountBuffer,
-        std::shared_ptr<Buffer> receiverSubpageMaskBuffer);
+        std::shared_ptr<org::Buffer> tileWorkBuffer,
+        std::shared_ptr<org::Buffer> tileCountBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer,
+        std::shared_ptr<org::Buffer> markClipmapDataBuffer,
+        std::shared_ptr<org::Buffer> markedBlocksMaskBuffer,
+        std::shared_ptr<org::Buffer> markedBlocksListBuffer,
+        std::shared_ptr<org::Buffer> markedBlocksCountBuffer,
+        std::shared_ptr<org::Buffer> receiverSubpageMaskBuffer);
 
     VirtualShadowMapMarkPagesBindings Declare(org::PassBuilder& builder);
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     VirtualShadowMarkFrameData Prepare(const VirtualShadowMapMarkPagesBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapMarkPagesBindings&,
@@ -60,18 +58,18 @@ public:
 
 private:
 
-    PipelineState m_pso;
-    PipelineState m_clearPso;
-    PipelineState m_clearUint2Pso;
+    org::PipelineState m_pso;
+    org::PipelineState m_clearPso;
+    org::PipelineState m_clearUint2Pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
-    std::shared_ptr<Buffer> m_tileWorkBuffer;
-    std::shared_ptr<Buffer> m_tileCountBuffer;
-    std::shared_ptr<Buffer> m_indirectArgsBuffer;
-    std::shared_ptr<Buffer> m_markClipmapDataBuffer;
-    std::shared_ptr<Buffer> m_markedBlocksMaskBuffer;
-    std::shared_ptr<Buffer> m_markedBlocksListBuffer;
-    std::shared_ptr<Buffer> m_markedBlocksCountBuffer;
-    std::shared_ptr<Buffer> m_receiverSubpageMaskBuffer;
+    std::shared_ptr<org::Buffer> m_tileWorkBuffer;
+    std::shared_ptr<org::Buffer> m_tileCountBuffer;
+    std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_markClipmapDataBuffer;
+    std::shared_ptr<org::Buffer> m_markedBlocksMaskBuffer;
+    std::shared_ptr<org::Buffer> m_markedBlocksListBuffer;
+    std::shared_ptr<org::Buffer> m_markedBlocksCountBuffer;
+    std::shared_ptr<org::Buffer> m_receiverSubpageMaskBuffer;
     uint32_t m_activeClipmapCount = 0u;
     uint32_t m_receiverSubpageMode = 0u;
 };

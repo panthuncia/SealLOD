@@ -27,7 +27,7 @@ public:
         m_gtaoConstantsHandle = m_resourceRegistryView->RequestHandle("Builtin::GTAO::ConstantsBuffer");
     }
 
-    void Update(const UpdateExecutionContext& updateExecutionContext) override {
+    void Update(const org::UpdateExecutionContext& updateExecutionContext) override {
         const auto* updateContext = updateExecutionContext.hostData->Get<UpdateContext>();
         if (updateContext == nullptr || !updateContext->hasPrimaryCamera) {
             return;
@@ -57,7 +57,7 @@ public:
             .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            builder.BindShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 })),
+            builder.BindShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
             builder.BindUnorderedAccess(Builtin::GTAO::WorkingDepths) };
     }
 
@@ -93,9 +93,9 @@ public:
 
 private:
 
-    PipelineState PrefilterDepths16x16PSO;
+    org::PipelineState PrefilterDepths16x16PSO;
     uint32_t m_samplerIndex = 0;
-    ResourceRegistry::RegistryHandle m_gtaoConstantsHandle;
+    org::ResourceRegistry::RegistryHandle m_gtaoConstantsHandle;
 
     void CreatePointClampSampler()
     {

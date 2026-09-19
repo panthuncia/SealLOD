@@ -12,13 +12,13 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapGatherStatsPass::VirtualShadowMapGatherStatsPass(
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> allocationIndirectArgsBuffer,
-    std::shared_ptr<Buffer> pageListHeaderBuffer,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<Buffer> statsBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> allocationIndirectArgsBuffer,
+    std::shared_ptr<org::Buffer> pageListHeaderBuffer,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer,
     bool capturePreAllocateState)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_allocationCountBuffer(std::move(allocationCountBuffer))
@@ -61,7 +61,7 @@ br::render::PreparedComputeDispatch VirtualShadowMapGatherStatsPass::Prepare(
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
     const auto srv = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource, variant}).index; };
-    data.constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_PAGE_TABLE_DESCRIPTOR_INDEX] = srv(bindings.pageTable, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull));
+    data.constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_PAGE_TABLE_DESCRIPTOR_INDEX] = srv(bindings.pageTable, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull));
     data.constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_ALLOCATION_COUNT_DESCRIPTOR_INDEX] = srv(bindings.allocationCount);
     data.constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_ALLOCATION_INDIRECT_ARGS_DESCRIPTOR_INDEX] = srv(bindings.allocationArgs);
     data.constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_PAGE_LIST_HEADER_DESCRIPTOR_INDEX] = srv(bindings.header);

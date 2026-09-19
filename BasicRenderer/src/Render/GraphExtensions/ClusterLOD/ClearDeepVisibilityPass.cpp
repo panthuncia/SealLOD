@@ -10,9 +10,9 @@
 #include "Resources/PixelBuffer.h"
 
 ClearDeepVisibilityPass::ClearDeepVisibilityPass(
-    std::shared_ptr<Buffer> deepVisibilityCounterBuffer,
-    std::shared_ptr<Buffer> deepVisibilityOverflowCounterBuffer,
-    std::shared_ptr<Buffer> deepVisibilityStatsBuffer)
+    std::shared_ptr<org::Buffer> deepVisibilityCounterBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityOverflowCounterBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityStatsBuffer)
     : m_deepVisibilityCounterBuffer(std::move(deepVisibilityCounterBuffer))
     , m_deepVisibilityOverflowCounterBuffer(std::move(deepVisibilityOverflowCounterBuffer))
     , m_deepVisibilityStatsBuffer(std::move(deepVisibilityStatsBuffer)) {
@@ -34,7 +34,7 @@ ClearDeepVisibilityBindings ClearDeepVisibilityPass::Declare(org::PassBuilder& d
 
 
 
-void ClearDeepVisibilityPass::Update(const UpdateExecutionContext& executionContext)
+void ClearDeepVisibilityPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
@@ -51,7 +51,7 @@ void ClearDeepVisibilityPass::Update(const UpdateExecutionContext& executionCont
         UploadBufferData(&zeroStats, sizeof(CLodDeepVisibilityStats), org::runtime::UploadTarget::FromShared(m_deepVisibilityStatsBuffer), 0);
     }
 
-    std::vector<std::shared_ptr<PixelBuffer>> headPointerTextures;
+    std::vector<std::shared_ptr<org::PixelBuffer>> headPointerTextures;
     for (const auto& view : context.Views())
         if (view.visibilityBuffer && view.deepVisibilityHeadPointers)
             headPointerTextures.push_back(view.deepVisibilityHeadPointers);

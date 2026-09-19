@@ -21,9 +21,7 @@
 #include "../../../../shaders/PerPassRootConstants/clodVirtualShadowBlockExpandRootConstants.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 
 enum class VirtualShadowBlockExpandMode : uint8_t
 {
@@ -48,22 +46,22 @@ class VirtualShadowBlockExpandPass : public org::TypedRenderGraphPass<VirtualSha
 public:
     VirtualShadowBlockExpandPass(
         VirtualShadowBlockExpandMode mode,
-        std::shared_ptr<Buffer> sourceVisibleClustersBuffer,
-        std::shared_ptr<Buffer> sourceVisibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> sourceHistogramBuffer,
-        std::shared_ptr<Buffer> sourceIndirectArgsBuffer,
-        std::shared_ptr<Buffer> expandedHistogramBuffer,
-        std::shared_ptr<Buffer> expandedOffsetsBuffer,
-        std::shared_ptr<Buffer> expandedWriteCursorBuffer,
-        std::shared_ptr<Buffer> expandedVisibleClustersBuffer,
-        std::shared_ptr<Buffer> expandedVisibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-        std::shared_ptr<Buffer> virtualShadowActiveBlockMetadataBuffer,
-        std::shared_ptr<Buffer> virtualShadowDynamicActiveBlockMetadataBuffer,
-        std::shared_ptr<Buffer> virtualShadowBlockClusterCoverageBuffer,
-        std::shared_ptr<Buffer> virtualShadowStatsBuffer,
+        std::shared_ptr<org::Buffer> sourceVisibleClustersBuffer,
+        std::shared_ptr<org::Buffer> sourceVisibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> sourceHistogramBuffer,
+        std::shared_ptr<org::Buffer> sourceIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> expandedHistogramBuffer,
+        std::shared_ptr<org::Buffer> expandedOffsetsBuffer,
+        std::shared_ptr<org::Buffer> expandedWriteCursorBuffer,
+        std::shared_ptr<org::Buffer> expandedVisibleClustersBuffer,
+        std::shared_ptr<org::Buffer> expandedVisibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> virtualShadowActiveBlockMetadataBuffer,
+        std::shared_ptr<org::Buffer> virtualShadowDynamicActiveBlockMetadataBuffer,
+        std::shared_ptr<org::Buffer> virtualShadowBlockClusterCoverageBuffer,
+        std::shared_ptr<org::Buffer> virtualShadowStatsBuffer,
         uint32_t expandedRecordCapacity,
-        std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
+        std::shared_ptr<org::ResourceGroup> slabResourceGroup = nullptr,
         bool runWhenComputeSWRasterEnabledOnly = false)
         : m_mode(mode)
         , m_sourceVisibleClustersBuffer(std::move(sourceVisibleClustersBuffer))
@@ -192,7 +190,7 @@ public:
         return bindings;
     }
 
-    void Update(const UpdateExecutionContext& executionContext) override
+    void Update(const org::UpdateExecutionContext& executionContext) override
     {
         if (m_runWhenComputeSWRasterEnabledOnly &&
             !CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)())) {
@@ -300,25 +298,25 @@ public:
 
 private:
     VirtualShadowBlockExpandMode m_mode = VirtualShadowBlockExpandMode::Histogram;
-    PipelineState m_rigidPso;
-    PipelineState m_skinnedPso;
-    PipelineState m_clearPso;
+    org::PipelineState m_rigidPso;
+    org::PipelineState m_skinnedPso;
+    org::PipelineState m_clearPso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
-    std::shared_ptr<Buffer> m_sourceVisibleClustersBuffer;
-    std::shared_ptr<Buffer> m_sourceVisibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_sourceHistogramBuffer;
-    std::shared_ptr<Buffer> m_sourceIndirectArgsBuffer;
-    std::shared_ptr<Buffer> m_expandedHistogramBuffer;
-    std::shared_ptr<Buffer> m_expandedOffsetsBuffer;
-    std::shared_ptr<Buffer> m_expandedWriteCursorBuffer;
-    std::shared_ptr<Buffer> m_expandedVisibleClustersBuffer;
-    std::shared_ptr<Buffer> m_expandedVisibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_virtualShadowActiveBlockMetadataBuffer;
-    std::shared_ptr<Buffer> m_virtualShadowDynamicActiveBlockMetadataBuffer;
-    std::shared_ptr<Buffer> m_virtualShadowBlockClusterCoverageBuffer;
-    std::shared_ptr<Buffer> m_virtualShadowStatsBuffer;
+    std::shared_ptr<org::Buffer> m_sourceVisibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_sourceVisibleClusterTransformIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_sourceHistogramBuffer;
+    std::shared_ptr<org::Buffer> m_sourceIndirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_expandedHistogramBuffer;
+    std::shared_ptr<org::Buffer> m_expandedOffsetsBuffer;
+    std::shared_ptr<org::Buffer> m_expandedWriteCursorBuffer;
+    std::shared_ptr<org::Buffer> m_expandedVisibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_expandedVisibleClusterTransformIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowClipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowActiveBlockMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowDynamicActiveBlockMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowBlockClusterCoverageBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowStatsBuffer;
     uint32_t m_expandedRecordCapacity = 0u;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
 };

@@ -9,12 +9,12 @@
 #include "Resources/Buffers/Buffer.h"
 
 namespace {
-	std::shared_ptr<Buffer> CreatePagePoolSlabBuffer(uint64_t byteSize, const std::string& name)
+	std::shared_ptr<org::Buffer> CreatePagePoolSlabBuffer(uint64_t byteSize, const std::string& name)
 	{
-		auto buffer = Buffer::CreateShared(rhi::HeapType::DeviceLocal, byteSize, false);
+		auto buffer = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, byteSize, false);
 		buffer->SetName(name);
 
-		BufferBase::DescriptorRequirements requirements{};
+		org::BufferBase::DescriptorRequirements requirements{};
 		requirements.createSRV = true;
 		requirements.srvDesc = rhi::SrvDesc{
 			.dimension = rhi::SrvDim::Buffer,
@@ -30,9 +30,9 @@ namespace {
 		return buffer;
 	}
 
-	std::shared_ptr<Buffer> CreatePageTableBuffer(uint32_t pageCount, const std::string& name)
+	std::shared_ptr<org::Buffer> CreatePageTableBuffer(uint32_t pageCount, const std::string& name)
 	{
-		auto buffer = Buffer::CreateUnmaterializedStructuredBuffer(
+		auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
 			pageCount,
 			static_cast<uint32_t>(sizeof(PageTableEntry)),
 			false,
@@ -60,7 +60,7 @@ PagePool::PagePool(const Config& config)
 	org::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
 
 	// Resource group for slab buffers (render graph auto-invalidation).
-	m_slabResourceGroup = std::make_shared<ResourceGroup>(m_config.debugName + "::Slabs");
+	m_slabResourceGroup = std::make_shared<org::ResourceGroup>(m_config.debugName + "::Slabs");
 
 	for (uint32_t classIndex = 0u;
 		classIndex < static_cast<uint32_t>(m_config.pageSizes.size());
@@ -198,7 +198,7 @@ uint32_t PagePool::GetSlabCount() const {
 	return static_cast<uint32_t>(m_slabs.size());
 }
 
-std::shared_ptr<Buffer> PagePool::GetSlab(uint32_t slabIndex) const {
+std::shared_ptr<org::Buffer> PagePool::GetSlab(uint32_t slabIndex) const {
 	assert(slabIndex < m_slabs.size());
 	return m_slabs[slabIndex].buffer;
 }
@@ -228,7 +228,7 @@ uint64_t PagePool::PageToSlabByteOffset(uint32_t globalPageID) const {
 		m_slabs[slabIndex].pageSize;
 }
 
-std::shared_ptr<Buffer> PagePool::GetPageTableBuffer() const {
+std::shared_ptr<org::Buffer> PagePool::GetPageTableBuffer() const {
 	return m_pageTableBuffer;
 }
 

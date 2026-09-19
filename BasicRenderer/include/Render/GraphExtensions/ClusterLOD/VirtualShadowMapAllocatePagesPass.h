@@ -9,9 +9,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapAllocatePagesBindings {
     org::ResourceBindingToken requests, requestCount, indirectArgs, clipmapInfo, pageTable;
@@ -23,17 +21,17 @@ class VirtualShadowMapAllocatePagesPass final : public org::TypedRenderGraphPass
     br::render::PreparedComputeIndirect, VirtualShadowMapAllocatePagesBindings> {
 public:
     VirtualShadowMapAllocatePagesPass(
-        std::shared_ptr<Buffer> allocationRequestsBuffer,
-        std::shared_ptr<Buffer> allocationCountBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-        std::shared_ptr<Buffer> freePhysicalPagesBuffer,
-        std::shared_ptr<Buffer> reusablePhysicalPagesBuffer,
-        std::shared_ptr<Buffer> pageListHeaderBuffer,
-        std::shared_ptr<Buffer> statsBuffer);
+        std::shared_ptr<org::Buffer> allocationRequestsBuffer,
+        std::shared_ptr<org::Buffer> allocationCountBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+        std::shared_ptr<org::Buffer> freePhysicalPagesBuffer,
+        std::shared_ptr<org::Buffer> reusablePhysicalPagesBuffer,
+        std::shared_ptr<org::Buffer> pageListHeaderBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer);
 
     VirtualShadowMapAllocatePagesBindings Declare(org::PassBuilder& builder);
     br::render::PreparedComputeIndirect Prepare(const VirtualShadowMapAllocatePagesBindings&,
@@ -42,17 +40,17 @@ public:
         const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
-    std::shared_ptr<Buffer> m_allocationRequestsBuffer;
-    std::shared_ptr<Buffer> m_allocationCountBuffer;
-    std::shared_ptr<Buffer> m_indirectArgsBuffer;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_dirtyPageFlagsBuffer;
-    std::shared_ptr<Buffer> m_freePhysicalPagesBuffer;
-    std::shared_ptr<Buffer> m_reusablePhysicalPagesBuffer;
-    std::shared_ptr<Buffer> m_pageListHeaderBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
+    std::shared_ptr<org::Buffer> m_allocationRequestsBuffer;
+    std::shared_ptr<org::Buffer> m_allocationCountBuffer;
+    std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_dirtyPageFlagsBuffer;
+    std::shared_ptr<org::Buffer> m_freePhysicalPagesBuffer;
+    std::shared_ptr<org::Buffer> m_reusablePhysicalPagesBuffer;
+    std::shared_ptr<org::Buffer> m_pageListHeaderBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
 };

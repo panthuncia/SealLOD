@@ -11,16 +11,16 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapExpandPredictedPagesPass::VirtualShadowMapExpandPredictedPagesPass(
-    std::shared_ptr<Buffer> predictiveCandidatesBuffer,
-    std::shared_ptr<Buffer> predictiveCandidateCountBuffer,
-    std::shared_ptr<Buffer> predictiveRawPagesBuffer,
-    std::shared_ptr<Buffer> predictiveRawPageCountBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<Buffer> scratchBitsetBuffer,
-    std::shared_ptr<Buffer> statsBuffer,
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> pageViewInfoBuffer,
+    std::shared_ptr<org::Buffer> predictiveCandidatesBuffer,
+    std::shared_ptr<org::Buffer> predictiveCandidateCountBuffer,
+    std::shared_ptr<org::Buffer> predictiveRawPagesBuffer,
+    std::shared_ptr<org::Buffer> predictiveRawPageCountBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> scratchBitsetBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> pageViewInfoBuffer,
     uint32_t physicalPageCount)
     : m_predictiveCandidatesBuffer(std::move(predictiveCandidatesBuffer))
     , m_predictiveCandidateCountBuffer(std::move(predictiveCandidateCountBuffer))
@@ -92,12 +92,12 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapExpandPredictedPages
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_SCRATCH_BITSET_DESCRIPTOR_INDEX] = uav(bindings.scratch);
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
-    constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+    constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PHYSICAL_PAGE_COUNT] = bindings.physicalPageCount;
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = uav(bindings.pageViewInfo);
-    const auto append = [&](const PipelineState& pso, uint32_t groups, bool barrierBefore) {
+    const auto append = [&](const org::PipelineState& pso, uint32_t groups, bool barrierBefore) {
         br::render::PreparedComputePipelineSequence::Step step{};
         auto program = preparation.CaptureProgramBinding(pso);
         step.program = program.program;

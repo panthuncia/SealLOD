@@ -17,14 +17,14 @@ public:
     void GatherVirtualShadowPreparationPasses(
         const VirtualShadowCasterBuildContext&, VirtualShadowPassBuilder& builder) override
     {
-        RenderGraph::ExternalPassDesc pass{};
+        org::RenderGraph::ExternalPassDesc pass{};
         pass.name = m_id + "::Prepare";
         builder.Add(std::move(pass));
     }
     void GatherVirtualShadowRasterPasses(
         const VirtualShadowCasterBuildContext&, VirtualShadowPassBuilder& builder) override
     {
-        RenderGraph::ExternalPassDesc pass{};
+        org::RenderGraph::ExternalPassDesc pass{};
         pass.name = m_id + "::Raster";
         builder.Add(std::move(pass));
     }
@@ -55,7 +55,7 @@ void RunCasterExtensionCases()
         throw std::runtime_error("duplicate virtual-shadow provider ID was accepted");
     }
 
-    std::vector<RenderGraph::ExternalPassDesc> passes;
+    std::vector<org::RenderGraph::ExternalPassDesc> passes;
     VirtualShadowCasterBuildContext context{};
     VirtualShadowPassBuilder builder(passes, "CoreRaster", "FinalizeFallback");
     empty.GatherRasterPasses(context, builder);

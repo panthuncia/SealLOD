@@ -9,19 +9,19 @@
 #include "Resources/GloballyIndexedResource.h"
 
 AVBOITSetupPass::AVBOITSetupPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<Buffer> fitStateBuffer,
-    std::shared_ptr<Buffer> depthWarpLUTBuffer,
-    std::shared_ptr<PixelBuffer> occupancyTexture,
-    std::shared_ptr<PixelBuffer> coverageTexture,
-    std::shared_ptr<PixelBuffer> occupancySliceMaskTexture,
-    std::shared_ptr<PixelBuffer> scalarExtinctionTexture,
-    std::shared_ptr<PixelBuffer> chromaticExtinctionTexture,
-    std::shared_ptr<PixelBuffer> integratedTransmittanceTexture,
-    std::shared_ptr<PixelBuffer> zeroTransmittanceSliceTexture,
-    std::shared_ptr<PixelBuffer> accumulationTexture,
-    std::shared_ptr<PixelBuffer> normalizationTexture,
-    std::shared_ptr<PixelBuffer> shadingExtinctionTexture)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::Buffer> fitStateBuffer,
+    std::shared_ptr<org::Buffer> depthWarpLUTBuffer,
+    std::shared_ptr<org::PixelBuffer> occupancyTexture,
+    std::shared_ptr<org::PixelBuffer> coverageTexture,
+    std::shared_ptr<org::PixelBuffer> occupancySliceMaskTexture,
+    std::shared_ptr<org::PixelBuffer> scalarExtinctionTexture,
+    std::shared_ptr<org::PixelBuffer> chromaticExtinctionTexture,
+    std::shared_ptr<org::PixelBuffer> integratedTransmittanceTexture,
+    std::shared_ptr<org::PixelBuffer> zeroTransmittanceSliceTexture,
+    std::shared_ptr<org::PixelBuffer> accumulationTexture,
+    std::shared_ptr<org::PixelBuffer> normalizationTexture,
+    std::shared_ptr<org::PixelBuffer> shadingExtinctionTexture)
     : m_configBuffer(std::move(configBuffer))
     , m_fitStateBuffer(std::move(fitStateBuffer))
     , m_depthWarpLUTBuffer(std::move(depthWarpLUTBuffer))
@@ -82,16 +82,16 @@ AVBOITSetupBindings AVBOITSetupPass::Declare(org::PassBuilder& builder)
         {org::BindlessViewKind::ShaderResource});
     m_config.scalarExtinctionUAVDescriptorIndex = index(m_scalarExtinctionTexture,
         {org::BindlessViewKind::UnorderedAccess,
-            static_cast<uint32_t>(UAVViewType::Texture2DArrayFull)});
+            static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)});
     m_config.chromaticExtinctionUAVDescriptorIndex = index(m_chromaticExtinctionTexture,
         {org::BindlessViewKind::UnorderedAccess,
-            static_cast<uint32_t>(UAVViewType::Texture2DArrayFull)});
+            static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)});
     m_config.integratedTransmittanceUAVDescriptorIndex = index(m_integratedTransmittanceTexture,
         {org::BindlessViewKind::UnorderedAccess,
-            static_cast<uint32_t>(UAVViewType::Texture2DArrayFull)});
+            static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)});
     m_config.shadingTransmittanceSRVDescriptorIndex = index(m_integratedTransmittanceTexture,
         {org::BindlessViewKind::ShaderResource,
-            static_cast<uint32_t>(SRVViewType::Texture2DArrayFull)});
+            static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
     m_config.zeroTransmittanceSliceUAVDescriptorIndex = index(m_zeroTransmittanceSliceTexture,
         {org::BindlessViewKind::UnorderedAccess});
     m_config.sliceCount = CLodAVBOITDefaultSliceCount;
@@ -106,7 +106,7 @@ AVBOITSetupBindings AVBOITSetupPass::Declare(org::PassBuilder& builder)
     return bindings;
 }
 
-void AVBOITSetupPass::Update(const UpdateExecutionContext& executionContext)
+void AVBOITSetupPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     if (!m_configBuffer) {
         return;

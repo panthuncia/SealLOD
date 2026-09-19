@@ -39,7 +39,7 @@ PerViewLinearDepthCopyBindings PerViewLinearDepthCopyPass::Declare(org::PassBuil
 void PerViewLinearDepthCopyPass::Initialize() {
 }
 
-void PerViewLinearDepthCopyPass::Update(const UpdateExecutionContext& executionContext) {
+void PerViewLinearDepthCopyPass::Update(const org::UpdateExecutionContext& executionContext) {
     const auto* context = executionContext.hostData->Get<UpdateContext>();
     std::vector<ViewSnapshot> views;
     for (const auto& view : context->Views()) {

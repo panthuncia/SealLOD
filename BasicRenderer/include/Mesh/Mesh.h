@@ -22,11 +22,10 @@
 class MeshManager;
 class Skeleton;
 namespace org { class Buffer; }
-using org::Buffer;
 
 class Mesh {
 public:
-	using SparseChunkViewTable = std::unordered_map<uint32_t, std::unique_ptr<BufferView>>;
+	using SparseChunkViewTable = std::unordered_map<uint32_t, std::unique_ptr<org::BufferView>>;
 
 	struct ObjectReyesAtlasBakeData {
 		std::uint32_t atlasWidth = 0;
@@ -97,11 +96,11 @@ public:
 		return m_perMeshBufferData.clodNumMeshlets;
 	}
 
-	void SetPerMeshBufferView(std::unique_ptr<BufferView> view) {
+	void SetPerMeshBufferView(std::unique_ptr<org::BufferView> view) {
 		m_perMeshBufferView = std::move(view);
 	}
 
-	std::unique_ptr<BufferView>& GetPerMeshBufferView() {
+	std::unique_ptr<org::BufferView>& GetPerMeshBufferView() {
 		return m_perMeshBufferView;
 	}
 
@@ -123,15 +122,15 @@ public:
 	void SetRasterBucketIndex(unsigned int index);
 
 	void SetCLodBufferViews(
-		std::unique_ptr<BufferView> clusterLODGroupsView,
-		std::unique_ptr<BufferView> clusterLODSegmentsView,
-		std::unique_ptr<BufferView> clodNodesView,
-		std::unique_ptr<BufferView> clodNodeSkinningInfosView,
-		std::unique_ptr<BufferView> clodNodeBoneIndicesView,
-		std::unique_ptr<BufferView> clodAssemblyTransformsView = nullptr,
-		std::unique_ptr<BufferView> clodAssemblyInstancesView = nullptr,
-		std::unique_ptr<BufferView> clodAssemblyBoneRemapsView = nullptr,
-		std::unique_ptr<BufferView> clodAssemblyBoneRemapIndicesView = nullptr
+		std::unique_ptr<org::BufferView> clusterLODGroupsView,
+		std::unique_ptr<org::BufferView> clusterLODSegmentsView,
+		std::unique_ptr<org::BufferView> clodNodesView,
+		std::unique_ptr<org::BufferView> clodNodeSkinningInfosView,
+		std::unique_ptr<org::BufferView> clodNodeBoneIndicesView,
+		std::unique_ptr<org::BufferView> clodAssemblyTransformsView = nullptr,
+		std::unique_ptr<org::BufferView> clodAssemblyInstancesView = nullptr,
+		std::unique_ptr<org::BufferView> clodAssemblyBoneRemapsView = nullptr,
+		std::unique_ptr<org::BufferView> clodAssemblyBoneRemapIndicesView = nullptr
 	);
 
 	const std::vector<ClusterLODGroup>& GetCLodGroups() const {
@@ -219,31 +218,31 @@ public:
 		return m_clodMaxTraversalDepth;
 	}
 
-	const BufferView* GetCLodGroupsView() const {
+	const org::BufferView* GetCLodGroupsView() const {
 		return m_clusterLODGroupsView.get();
 	}
 
-	const BufferView* GetCLodSegmentsView() const {
+	const org::BufferView* GetCLodSegmentsView() const {
 		return m_clusterLODSegmentsView.get();
 	}
 
-	const BufferView* GetCLodNodesView() const {
+	const org::BufferView* GetCLodNodesView() const {
 		return m_clusterLODNodesView.get();
 	}
 
-	const BufferView* GetCLodAssemblyTransformsView() const {
+	const org::BufferView* GetCLodAssemblyTransformsView() const {
 		return m_clusterLODAssemblyTransformsView.get();
 	}
 
-	const BufferView* GetCLodAssemblyInstancesView() const {
+	const org::BufferView* GetCLodAssemblyInstancesView() const {
 		return m_clusterLODAssemblyInstancesView.get();
 	}
 
-	const BufferView* GetCLodAssemblyBoneRemapsView() const {
+	const org::BufferView* GetCLodAssemblyBoneRemapsView() const {
 		return m_clusterLODAssemblyBoneRemapsView.get();
 	}
 
-	const BufferView* GetCLodAssemblyBoneRemapIndicesView() const {
+	const org::BufferView* GetCLodAssemblyBoneRemapIndicesView() const {
 		return m_clusterLODAssemblyBoneRemapIndicesView.get();
 	}
 
@@ -279,7 +278,7 @@ private:
 	void ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data);
 	void ClearCLodCacheBuildChunkData(bool shrinkToFit);
 	void EnsureAnimatedBoundingSpheresBuilt_() const;
-	static SparseChunkViewTable ToSparseChunkViewTable(std::vector<std::unique_ptr<BufferView>>&& denseViews) {
+	static SparseChunkViewTable ToSparseChunkViewTable(std::vector<std::unique_ptr<org::BufferView>>&& denseViews) {
 		SparseChunkViewTable sparseViews;
 		sparseViews.reserve(denseViews.size());
 		for (uint32_t i = 0; i < denseViews.size(); ++i) {
@@ -289,11 +288,11 @@ private:
 		}
 		return sparseViews;
 	}
-	static const BufferView* GetChunkViewAt(const SparseChunkViewTable& views, uint32_t groupIndex) {
+	static const org::BufferView* GetChunkViewAt(const SparseChunkViewTable& views, uint32_t groupIndex) {
 		auto it = views.find(groupIndex);
 		return (it != views.end() && it->second != nullptr) ? it->second.get() : nullptr;
 	}
-	static void SetChunkViewAt(SparseChunkViewTable& views, uint32_t groupIndex, std::unique_ptr<BufferView> view) {
+	static void SetChunkViewAt(SparseChunkViewTable& views, uint32_t groupIndex, std::unique_ptr<org::BufferView> view) {
 		if (view == nullptr) {
 			views.erase(groupIndex);
 			return;
@@ -340,15 +339,15 @@ private:
 	uint32_t                         m_clodMaxTraversalDepth = 0;
 	std::optional<ClusterLODPrebuiltData> m_prebuiltClusterLOD;
 
-	std::unique_ptr<BufferView> m_clusterLODGroupsView = nullptr;
-	std::unique_ptr<BufferView> m_clusterLODSegmentsView = nullptr;
-	std::unique_ptr<BufferView> m_clusterLODNodesView = nullptr;
-	std::unique_ptr<BufferView> m_clusterLODNodeSkinningInfosView = nullptr;
-	std::unique_ptr<BufferView> m_clusterLODNodeBoneIndicesView = nullptr;
-	std::unique_ptr<BufferView> m_clusterLODAssemblyTransformsView = nullptr;
-	std::unique_ptr<BufferView> m_clusterLODAssemblyInstancesView = nullptr;
-	std::unique_ptr<BufferView> m_clusterLODAssemblyBoneRemapsView = nullptr;
-	std::unique_ptr<BufferView> m_clusterLODAssemblyBoneRemapIndicesView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODGroupsView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODSegmentsView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODNodesView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODNodeSkinningInfosView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODNodeBoneIndicesView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODAssemblyTransformsView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODAssemblyInstancesView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODAssemblyBoneRemapsView = nullptr;
+	std::unique_ptr<org::BufferView> m_clusterLODAssemblyBoneRemapIndicesView = nullptr;
 
 	//UINT m_indexCount = 0;
     //std::shared_ptr<Buffer> m_vertexBufferHandle;
@@ -363,7 +362,7 @@ private:
 	std::shared_ptr<const ObjectReyesAtlasBakeData> m_objectReyesAtlasBakeData;
 	mutable std::vector<BoundingSphere> m_animationBoundingSpheres;
 	float m_skinnedTraversalBoundsScale = 1.0f;
-	std::unique_ptr<BufferView> m_perMeshBufferView;
+	std::unique_ptr<org::BufferView> m_perMeshBufferView;
 	MeshManager* m_pCurrentMeshManager = nullptr;
 
 	std::shared_ptr<Skeleton> m_baseSkeleton = nullptr;

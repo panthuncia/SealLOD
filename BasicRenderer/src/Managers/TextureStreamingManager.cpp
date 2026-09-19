@@ -53,15 +53,15 @@ namespace {
 		return enabled;
 	}
 
-	uint32_t TextureSrvIndex(const std::shared_ptr<PixelBuffer>& image) {
+	uint32_t TextureSrvIndex(const std::shared_ptr<org::PixelBuffer>& image) {
 		return image && image->HasValidBackingResource()
 			? image->GetSRVInfo(0).slot.index
 			: UINT32_MAX;
 	}
 
-	uint64_t ComputeTextureResidentBytes(const TextureDescription& desc) {
+	uint64_t ComputeTextureResidentBytes(const org::TextureDescription& desc) {
 		uint64_t totalBytes = 0;
-		for (const ImageDimensions& dims : desc.imageDimensions) {
+		for (const org::ImageDimensions& dims : desc.imageDimensions) {
 			totalBytes += dims.slicePitch;
 		}
 		return totalBytes;
@@ -109,7 +109,7 @@ namespace {
 	}
 
 	struct MaterialTextureStreamingReadbackInputs {
-		std::shared_ptr<Resource> source;
+		std::shared_ptr<org::Resource> source;
 		RG_DEFINE_PASS_INPUTS(MaterialTextureStreamingReadbackInputs, &MaterialTextureStreamingReadbackInputs::source);
 	};
 
@@ -120,10 +120,10 @@ namespace {
 
 	class MaterialReadbackReservation final : public org::PreparedLifecycleEffect {
 	public:
-		MaterialReadbackReservation(ExternalTimelinePoint signal,
+		MaterialReadbackReservation(org::ExternalTimelinePoint signal,
 			std::function<void()> submitted, std::function<void()> cancelled)
 			: m_signal(signal), m_submitted(std::move(submitted)), m_cancelled(std::move(cancelled)) {}
-		std::span<const ExternalTimelinePoint> SignalsAfterCompletion() const override { return {&m_signal, 1u}; }
+		std::span<const org::ExternalTimelinePoint> SignalsAfterCompletion() const override { return {&m_signal, 1u}; }
 		void Submitted(org::SubmissionContext) const override {
 			if (!m_resolved.exchange(true) && m_submitted) m_submitted();
 		}
@@ -131,7 +131,7 @@ namespace {
 			if (!m_resolved.exchange(true) && m_cancelled) m_cancelled();
 		}
 	private:
-		ExternalTimelinePoint m_signal{};
+		org::ExternalTimelinePoint m_signal{};
 		std::function<void()> m_submitted, m_cancelled;
 		mutable std::atomic<bool> m_resolved{false};
 	};
@@ -141,10 +141,10 @@ namespace {
 			  MaterialTextureStreamingReadbackFrameData> {
 	public:
 		MaterialTextureStreamingReadbackPass(
-			std::shared_ptr<Resource> source,
-			std::shared_ptr<Buffer> staging,
+			std::shared_ptr<org::Resource> source,
+			std::shared_ptr<org::Buffer> staging,
 			uint64_t bytes,
-			ExternalTimelinePoint signal,
+			org::ExternalTimelinePoint signal,
 			std::function<void()> submitted,
 			std::function<void()> cancel)
 			: m_source(std::move(source)), m_staging(std::move(staging)), m_bytes(bytes),
@@ -155,7 +155,7 @@ namespace {
 		void Declare(org::PassBuilder& builder) {
 			builder.WithCopySource(m_source);
 			builder.WithCopyDest(m_staging);
-			builder.PreferQueue(QueueKind::Copy);
+			builder.PreferQueue(org::QueueKind::Copy);
 		}
 		MaterialTextureStreamingReadbackFrameData Prepare(const org::PassPrepareContext& preparation) {
 			if (!m_source || !m_staging || m_bytes == 0) return {};
@@ -171,10 +171,10 @@ namespace {
 				recording.Resolve(frame.source).GetHandle(), 0, frame.bytes);
 		}
 	private:
-		std::shared_ptr<Resource> m_source;
-		std::shared_ptr<Buffer> m_staging;
+		std::shared_ptr<org::Resource> m_source;
+		std::shared_ptr<org::Buffer> m_staging;
 		uint64_t m_bytes = 0;
-		ExternalTimelinePoint m_signal{};
+		org::ExternalTimelinePoint m_signal{};
 		std::function<void()> m_submitted;
 		std::function<void()> m_cancel;
 	};
@@ -409,7 +409,7 @@ void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessed
 		uint32_t index = 0;
 		uint64_t fenceValue = 0;
 		uint64_t copyBytes = 0;
-		std::shared_ptr<Buffer> staging;
+		std::shared_ptr<org::Buffer> staging;
 		std::vector<uint32_t> activeIDs;
 	};
 	std::vector<CompletedSlot> completedSlots;
@@ -890,7 +890,7 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 	}
 }
 
-std::shared_ptr<RenderPass> TextureStreamingManager::CreateTextureStreamingFeedbackReadbackPass()
+std::shared_ptr<org::RenderPass> TextureStreamingManager::CreateTextureStreamingFeedbackReadbackPass()
 {
 	// Diagnostic escape hatch for isolating unrelated render-graph failures. It
 	// suppresses only the feedback copy/readback; texture publication and uploads
@@ -912,7 +912,7 @@ std::shared_ptr<RenderPass> TextureStreamingManager::CreateTextureStreamingFeedb
 	uint64_t bytes = 0;
 	if (!m_textureStreamingFeedbackBuffer->TryGetBufferByteSize(bytes) || bytes == 0) return {};
 	uint32_t selectedSlot = UINT32_MAX;
-	std::shared_ptr<Buffer> staging;
+	std::shared_ptr<org::Buffer> staging;
 	{
 		std::lock_guard lock(m_readbackSlotMutex);
 		for (uint32_t i = 0; i < static_cast<uint32_t>(m_readbackSlots.size()); ++i) {
@@ -928,7 +928,7 @@ std::shared_ptr<RenderPass> TextureStreamingManager::CreateTextureStreamingFeedb
 		}
 		auto& slot = m_readbackSlots[selectedSlot];
 		if (!slot.staging || slot.capacityBytes < bytes) {
-			slot.staging = Buffer::CreateShared(rhi::HeapType::Readback, bytes);
+			slot.staging = org::Buffer::CreateShared(rhi::HeapType::Readback, bytes);
 			slot.staging->SetName(("MaterialTextureStreamingReadback_" + std::to_string(selectedSlot)).c_str());
 			org::memory::SetResourceUsageHint(*slot.staging, "Material texture streaming readback");
 			slot.capacityBytes = bytes;
@@ -941,10 +941,10 @@ std::shared_ptr<RenderPass> TextureStreamingManager::CreateTextureStreamingFeedb
 		m_readbackSlotCursor = (selectedSlot + 1u) % static_cast<uint32_t>(m_readbackSlots.size());
 	}
 
-	std::shared_ptr<Resource> source = m_textureStreamingFeedbackBuffer;
+	std::shared_ptr<org::Resource> source = m_textureStreamingFeedbackBuffer;
 	const uint64_t fenceValue = m_readbackFenceCounter.fetch_add(1u, std::memory_order_acq_rel) + 1u;
 	return std::make_shared<MaterialTextureStreamingReadbackPass>(
-		std::move(source), std::move(staging), bytes, ExternalTimelinePoint{m_readbackFence, fenceValue},
+		std::move(source), std::move(staging), bytes, org::ExternalTimelinePoint{m_readbackFence, fenceValue},
 		[state = m_readbackCallbackState, selectedSlot, fenceValue]() {
 			std::lock_guard stateLock(state->mutex);
 			auto* owner = state->owner;
@@ -1051,7 +1051,7 @@ void TextureStreamingManager::FinishBindingMailboxRequest(
 	}
 }
 
-void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::shared_ptr<PixelBuffer> previousImage)
+void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::shared_ptr<org::PixelBuffer> previousImage)
 {
 	ZoneScopedN("TextureStreamingManager::QueueBindingChanged");
 	const uint32_t streamingTextureID = texture.GetStreamingTextureID();
@@ -1145,7 +1145,7 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 						return;
 					}
 					pending->graphReady = true;
-					std::shared_ptr<PixelBuffer> replaced;
+					std::shared_ptr<org::PixelBuffer> replaced;
 					if (!pending->texture || !pending->texture->PublishPreparedImage(
 						pending->bindingRevision, pending->newImage, &replaced)) {
 						if (pending->texture) {
@@ -1158,7 +1158,7 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 					// Graph and manifest leases retain any still-consumed generation. The
 					// displaced compatibility snapshot can enter deferred retirement now.
 					if (replaced && replaced != pending->newImage) {
-						DescriptorHeapManager::GetInstance().RetireResource(std::move(replaced));
+						org::DescriptorHeapManager::GetInstance().RetireResource(std::move(replaced));
 					}
 					basic_telemetry::AddCounter("SARP.TextureStreaming.BindingsAdopted");
 					basic_telemetry::Record("SARP.TextureStreaming.BindingAdoptionLatencyUs",
@@ -1294,14 +1294,14 @@ void TextureStreamingManager::AcknowledgePublishedImageTable(
 	}
 }
 
-std::shared_ptr<Resource> TextureStreamingManager::ResolvePublishedImageTableResourceForDiagnostics() const
+std::shared_ptr<org::Resource> TextureStreamingManager::ResolvePublishedImageTableResourceForDiagnostics() const
 {
 	if (!m_textureImageTableResolver) return {};
 	auto resources = m_textureImageTableResolver->Resolve();
-	return resources.empty() ? std::shared_ptr<Resource>{} : std::move(resources.front());
+	return resources.empty() ? std::shared_ptr<org::Resource>{} : std::move(resources.front());
 }
 
-std::shared_ptr<Resource> TextureStreamingManager::PublishedImageTableReadbackAnchorForDiagnostics() const
+std::shared_ptr<org::Resource> TextureStreamingManager::PublishedImageTableReadbackAnchorForDiagnostics() const
 {
 	// Capture requests are attached while compiling the consumer pass, which
 	// references this logical resource. Its resolver selects the published
@@ -1310,12 +1310,12 @@ std::shared_ptr<Resource> TextureStreamingManager::PublishedImageTableReadbackAn
 }
 
 bool TextureStreamingManager::RequestExternalMaterialTextureReadback(
-	const std::shared_ptr<PixelBuffer>& image,
+	const std::shared_ptr<org::PixelBuffer>& image,
 	std::wstring outputFile,
 	std::function<void()> callback)
 {
 	if (!m_materialTextureTransfers || !image ||
-		image->GetGraphOwnership() != Resource::GraphOwnership::ExternalImmutableShaderResource) {
+		image->GetGraphOwnership() != org::Resource::GraphOwnership::ExternalImmutableShaderResource) {
 		return false;
 	}
 	m_materialTextureTransfers->RequestReadback(image, std::move(outputFile), std::move(callback));
@@ -1735,7 +1735,7 @@ uint64_t TextureStreamingManager::PublishedStatsSequence() const noexcept
 }
 
 MaterialTextureStreamingStats TextureStreamingManager::GetTextureStreamingStats(
-	const std::vector<std::shared_ptr<Resource>>& activeTextureResources, uint64_t* sequence) const
+	const std::vector<std::shared_ptr<org::Resource>>& activeTextureResources, uint64_t* sequence) const
 {
 	MaterialTextureStreamingStats stats;
 	{
@@ -1748,14 +1748,14 @@ MaterialTextureStreamingStats TextureStreamingManager::GetTextureStreamingStats(
 		stats.participatingPublishedResourceIDs.end());
 	std::unordered_set<uint64_t> seenActiveIDs;
 	for (const auto& resource : activeTextureResources) {
-		auto image = std::dynamic_pointer_cast<PixelBuffer>(resource);
+		auto image = std::dynamic_pointer_cast<org::PixelBuffer>(resource);
 		if (!image || !seenActiveIDs.insert(image->GetGlobalResourceID()).second) {
 			continue;
 		}
 		const uint64_t bytes = ComputeTextureResidentBytes(image->GetDescription());
 		stats.activeMaterialResourceCount++;
 		stats.activeMaterialResourceBytes += bytes;
-		if (image->GetGraphOwnership() == Resource::GraphOwnership::ExternalImmutableShaderResource) {
+		if (image->GetGraphOwnership() == org::Resource::GraphOwnership::ExternalImmutableShaderResource) {
 			stats.externallyManagedActiveResourceCount++;
 			stats.externallyManagedActiveResourceBytes += bytes;
 		}
@@ -1829,7 +1829,7 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 		const auto pendingInfo = texture->GetPendingDebugInfo();
 		const auto& imageDesc = image->GetDescription();
 		const auto residentDimensions = imageDesc.imageDimensions.empty()
-			? ImageDimensions{}
+			? org::ImageDimensions{}
 			: imageDesc.imageDimensions.front();
 		const uint32_t expectedResidentWidth =
 			(std::max)(1u, texture->GetFullMip0Width() >> residentTopMip);
@@ -1936,7 +1936,7 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 	return stats;
 }
 
-std::shared_ptr<Resource> TextureStreamingManager::ProvideResource(ResourceIdentifier const& key)
+std::shared_ptr<org::Resource> TextureStreamingManager::ProvideResource(org::ResourceIdentifier const& key)
 {
 	auto it = m_resources.find(key);
 	if (it == m_resources.end()) {
@@ -1945,9 +1945,9 @@ std::shared_ptr<Resource> TextureStreamingManager::ProvideResource(ResourceIdent
 	return it->second;
 }
 
-std::vector<ResourceIdentifier> TextureStreamingManager::GetSupportedKeys()
+std::vector<org::ResourceIdentifier> TextureStreamingManager::GetSupportedKeys()
 {
-	std::vector<ResourceIdentifier> keys;
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources) {
 		keys.push_back(key);
@@ -1955,12 +1955,12 @@ std::vector<ResourceIdentifier> TextureStreamingManager::GetSupportedKeys()
 	return keys;
 }
 
-std::vector<ResourceIdentifier> TextureStreamingManager::GetSupportedResolverKeys()
+std::vector<org::ResourceIdentifier> TextureStreamingManager::GetSupportedResolverKeys()
 {
 	return { Builtin::Material::TextureStreamingMetadataBuffer };
 }
 
-std::shared_ptr<IResourceResolver> TextureStreamingManager::ProvideResolver(ResourceIdentifier const& key)
+std::shared_ptr<org::IResourceResolver> TextureStreamingManager::ProvideResolver(org::ResourceIdentifier const& key)
 {
 	if (key == Builtin::Material::TextureStreamingMetadataBuffer) return m_textureImageTableResolver;
 	return nullptr;

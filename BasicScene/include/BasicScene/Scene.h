@@ -19,7 +19,6 @@
 #include "Render/RasterBucketFlags.h"
 
 namespace org { class DynamicGloballyIndexedResource; }
-using org::DynamicGloballyIndexedResource;
 class Material;
 
 class SkeletonVariantSet {

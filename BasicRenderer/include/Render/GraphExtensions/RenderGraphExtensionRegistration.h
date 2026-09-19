@@ -12,4 +12,4 @@
 #include "RenderPasses/Base/CopyPass.h"
 #include "RenderPasses/Base/RenderPass.h"
 
-using RenderGraphExtensionFactory = std::function<std::unique_ptr<RenderGraph::IRenderGraphExtension>()>;
+using RenderGraphExtensionFactory = std::function<std::unique_ptr<org::RenderGraph::IRenderGraphExtension>()>;

@@ -17,11 +17,8 @@
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 namespace org { class DynamicGloballyIndexedResource; }
-using org::DynamicGloballyIndexedResource;
 
 // Flags describing purpose/type of a view
 struct ViewFlags {
@@ -40,8 +37,8 @@ struct ViewFlags {
 // Optional creation customization
 struct ViewCreationParams {
     // Provide existing depth resources if already created externally
-    std::shared_ptr<PixelBuffer> depthMap;
-    std::shared_ptr<PixelBuffer> linearDepthMap;
+    std::shared_ptr<org::PixelBuffer> depthMap;
+    std::shared_ptr<org::PixelBuffer> linearDepthMap;
 
     // Link to ECS entity that owns this view (camera or light)
     uint64_t parentEntityID = 0;
@@ -52,14 +49,14 @@ struct ViewCreationParams {
 };
 
 struct ViewResources {
-    std::shared_ptr<BufferView> cameraBufferView;
-	std::shared_ptr<BufferView> cullingCameraBufferView;
+    std::shared_ptr<org::BufferView> cameraBufferView;
+	std::shared_ptr<org::BufferView> cullingCameraBufferView;
     uint32_t cameraBufferIndex = 0;
 
-	std::shared_ptr<PixelBuffer> depthMap = nullptr;
-    std::shared_ptr<PixelBuffer> linearDepthMap = nullptr;
-    std::shared_ptr<PixelBuffer> visibilityBuffer = nullptr;
-    std::shared_ptr<PixelBuffer> clodDeepVisibilityHeadPointers = nullptr;
+	std::shared_ptr<org::PixelBuffer> depthMap = nullptr;
+    std::shared_ptr<org::PixelBuffer> linearDepthMap = nullptr;
+    std::shared_ptr<org::PixelBuffer> visibilityBuffer = nullptr;
+    std::shared_ptr<org::PixelBuffer> clodDeepVisibilityHeadPointers = nullptr;
     // Descriptor indices are deliberately not cached here: the render graph
     // gives a resource new slots whenever it realizes it on a new backing.
 };
@@ -114,7 +111,7 @@ struct ViewEvents {
 	std::function<void(const View&)> onVisibilityBufferAttached;
 };
 
-class ViewManager : public IResourceProvider,
+class ViewManager : public org::IResourceProvider,
                     public br::render::IShadowViewService {
 public:
     static std::unique_ptr<ViewManager> CreateUnique() {
@@ -135,11 +132,11 @@ public:
 
     // Attach (or replace) depth resources post creation
     void AttachDepth(uint64_t viewID,
-        std::shared_ptr<PixelBuffer> depth,
-        std::shared_ptr<PixelBuffer> linearDepth);
+        std::shared_ptr<org::PixelBuffer> depth,
+        std::shared_ptr<org::PixelBuffer> linearDepth);
 
-	void AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<PixelBuffer> visibilityBuffer);
-    std::shared_ptr<PixelBuffer> EnsureCLodDeepVisibilityHeadPointers(uint64_t viewID);
+	void AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<org::PixelBuffer> visibilityBuffer);
+    std::shared_ptr<org::PixelBuffer> EnsureCLodDeepVisibilityHeadPointers(uint64_t viewID);
 
     // Update camera matrices/params
     void UpdateCamera(uint64_t viewID, const CameraInfo& cameraInfo);
@@ -157,8 +154,8 @@ public:
     uint32_t ShadowViewCameraBufferIndex(uint64_t viewID) const override;
 
 	uint32_t GetCameraBufferSize() const { return static_cast<uint32_t>(m_cameraBuffer->Size()); }
-    std::shared_ptr<Resource> GetCameraBuffer() const { return m_cameraBuffer; }
-    std::shared_ptr<Resource> GetCullingCameraBuffer() const { return m_cullingCameraBuffer; }
+    std::shared_ptr<org::Resource> GetCameraBuffer() const { return m_cameraBuffer; }
+    std::shared_ptr<org::Resource> GetCullingCameraBuffer() const { return m_cullingCameraBuffer; }
     std::shared_ptr<const std::vector<std::byte>> CaptureCameraTableImage() const {
         return std::make_shared<const std::vector<std::byte>>(m_cameraBuffer->CaptureCpuShadowBytes());
     }
@@ -193,10 +190,10 @@ public:
     void SetEvents(ViewEvents events) { m_events = events; }
 
     // IResourceProvider
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-    std::vector<ResourceIdentifier> GetSupportedKeys() override;
-    std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-    std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+    std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+    std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+    std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 private:
     ViewManager();
 
@@ -205,20 +202,20 @@ private:
 
 
     // Core buffers/groups
-    std::shared_ptr<LazyDynamicStructuredBuffer<CameraInfo>> m_cameraBuffer;
-	std::shared_ptr<LazyDynamicStructuredBuffer<CullingCameraInfo>> m_cullingCameraBuffer;
+    std::shared_ptr<org::LazyDynamicStructuredBuffer<CameraInfo>> m_cameraBuffer;
+	std::shared_ptr<org::LazyDynamicStructuredBuffer<CullingCameraInfo>> m_cullingCameraBuffer;
 
-    std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
-    std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
+    std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
+    std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::IResourceResolver>, org::ResourceIdentifier::Hasher> m_resolvers;
 
-    std::shared_ptr<ResourceGroup> m_linearDepthGroup;
+    std::shared_ptr<org::ResourceGroup> m_linearDepthGroup;
 
     uint64_t m_resourceLayoutRevision = 1u;
     std::atomic_uint64_t m_publicationRevision{1};
     std::atomic_uint64_t m_primaryCameraRevision{1};
     std::uint64_t m_primaryViewID = 0;
-    std::shared_ptr<BufferView> m_primaryCameraBufferView;
-    std::shared_ptr<BufferView> m_primaryCullingCameraBufferView;
+    std::shared_ptr<org::BufferView> m_primaryCameraBufferView;
+    std::shared_ptr<org::BufferView> m_primaryCullingCameraBufferView;
 
     mutable std::mutex m_cameraUpdateMutex;
     ViewEvents m_events;

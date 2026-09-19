@@ -12,14 +12,14 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 ReyesSeedPatchesPass::ReyesSeedPatchesPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> ownedClustersBuffer,
-    std::shared_ptr<Buffer> ownedClustersCounterBuffer,
-    std::shared_ptr<Buffer> splitQueueBuffer,
-    std::shared_ptr<Buffer> splitQueueCounterBuffer,
-    std::shared_ptr<Buffer> splitQueueOverflowBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> ownedClustersBuffer,
+    std::shared_ptr<org::Buffer> ownedClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> splitQueueBuffer,
+    std::shared_ptr<org::Buffer> splitQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> splitQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
     uint32_t maxSplitQueueEntries,
     uint32_t phaseIndex)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
@@ -86,7 +86,7 @@ br::render::PreparedComputeIndirect ReyesSeedPatchesPass::Prepare(
     return data;
 }
 
-void ReyesSeedPatchesPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesSeedPatchesPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
 }

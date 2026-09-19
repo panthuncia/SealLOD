@@ -11,10 +11,10 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITEarlyDepthRootConstants.h"
 
 AVBOITEarlyDepthPass::AVBOITEarlyDepthPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<Buffer> tileCommandsBuffer,
-    std::shared_ptr<Buffer> tileCountBuffer,
-    std::shared_ptr<PixelBuffer> earlyDepthTexture)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::Buffer> tileCommandsBuffer,
+    std::shared_ptr<org::Buffer> tileCountBuffer,
+    std::shared_ptr<org::PixelBuffer> earlyDepthTexture)
     : m_configBuffer(std::move(configBuffer))
     , m_tileCommandsBuffer(std::move(tileCommandsBuffer))
     , m_tileCountBuffer(std::move(tileCountBuffer))
@@ -77,7 +77,7 @@ AVBOITEarlyDepthPass::AVBOITEarlyDepthPass(
     }
 
     pso->SetName("CLod.AVBOITEarlyDepth.PSO");
-    m_pso = PipelineState(std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots,
+    m_pso = org::PipelineState(std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots,
         PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout), soLayout.layout);
 
     rhi::IndirectArg args[] = {

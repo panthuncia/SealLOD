@@ -273,7 +273,7 @@ struct WindSharedResources {
         if (!readbackService || registeredTypeCount == 0u || residentPlacementCount == 0u || elapsedSeconds < nextTelemetrySeconds) return;
         nextTelemetrySeconds = elapsedSeconds + 2.0f;
         readbackService->RequestReadbackCaptureAfterGraph(allocationCounters.get(), {},
-            [](ReadbackCaptureResult&& result) {
+            [](org::ReadbackCaptureResult&& result) {
                 if (result.data.size() < 15u * sizeof(std::uint32_t)) return;
                 std::array<std::uint32_t, 15> c{};
                 std::memcpy(c.data(), result.data.data(), (std::min)(result.data.size(), sizeof(c)));
@@ -288,11 +288,11 @@ struct WindSharedResources {
 				EmitWindTelemetry(fmt::format(
 					"ProceduralWind GPU telemetry: allocatedBones={} commands={} capacityRejects={} bucketOverflow={} allocatedAssemblies={} livePlacements={} stalePlacements={} frustumRejected={} distanceRejected={} visibleBucketed={} deferred={} deferredWritten={} lateOccluded={} lateAccepted={} deferredOverflow={}.",
 					c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14]));
-            }, QueueKind::Copy);
+            }, org::QueueKind::Copy);
         const float currentScale = displacementScale;
         const float currentStrength = state.strength;
         readbackService->RequestReadbackCaptureAfterGraph(diagnostics.get(), {},
-            [currentScale, currentStrength](ReadbackCaptureResult&& result) {
+            [currentScale, currentStrength](org::ReadbackCaptureResult&& result) {
 				if (result.data.size() < 112u * sizeof(std::uint32_t)) return;
 				std::array<std::uint32_t, 112> d{};
                 std::memcpy(d.data(), result.data.data(), (std::min)(result.data.size(), sizeof(d)));
@@ -328,7 +328,7 @@ struct WindSharedResources {
 				EmitWindTelemetry(fmt::format(
 					"ProceduralWind radius telemetry: fullStrengthPlacements={} fadingPlacements={}.",
 					d[90], d[91]));
-            }, QueueKind::Copy);
+            }, org::QueueKind::Copy);
     }
 
     void UpdateFieldPair()
@@ -624,7 +624,7 @@ struct WindSharedResources {
         }
     }
 
-    void UpdateTypes(const UpdateExecutionContext& context)
+    void UpdateTypes(const org::UpdateExecutionContext& context)
     {
         const auto* update = context.hostData ? context.hostData->Get<UpdateContext>() : nullptr;
         if (!update || !update->windPaletteService) {
@@ -841,7 +841,7 @@ struct WindSharedResources {
     br::render::TransientWindRegion transientRegion{};
 };
 
-void BindAndDispatch(PassExecutionContext& executionContext, const PipelineState& pso, const WindRootConstants& constants)
+void BindAndDispatch(org::PassExecutionContext& executionContext, const org::PipelineState& pso, const WindRootConstants& constants)
 {
     auto* renderContext = executionContext.hostData->Get<RenderContext>();
     auto& commandList = executionContext.commandList;
@@ -863,14 +863,14 @@ public:
             .PreferQueue(org::QueueKind::Compute);
     }
     void Initialize() {}
-    void Update(const UpdateExecutionContext&) override { m_resources->UpdateFieldPair(); }
+    void Update(const org::UpdateExecutionContext&) override { m_resources->UpdateFieldPair(); }
     PreparedWindResidency Prepare(const org::PassPrepareContext&) { return {}; }
     static void Record(const PreparedWindResidency&, org::PassRecordContext&) {}
 private:
     std::shared_ptr<WindSharedResources> m_resources;
 };
 
-void PrepareTransient(PassExecutionContext& context, const PipelineState& pso, const WindTransientConstants& constants)
+void PrepareTransient(org::PassExecutionContext& context, const org::PipelineState& pso, const WindTransientConstants& constants)
 {
     auto* renderContext = context.hostData->Get<RenderContext>();
     auto& commandList = context.commandList;
@@ -889,8 +889,8 @@ const ProceduralWindFrameSettings& WindFrameSettings(
     return context ? context->proceduralWind : defaults;
 }
 
-WindTransientConstants MakeTransientConstants(WindSharedResources& resources, GloballyIndexedResource* skinInfo,
-    GloballyIndexedResource* forward, GloballyIndexedResource* inverse, GloballyIndexedResource* inverseBind,
+WindTransientConstants MakeTransientConstants(WindSharedResources& resources, org::GloballyIndexedResource* skinInfo,
+    org::GloballyIndexedResource* forward, org::GloballyIndexedResource* inverse, org::GloballyIndexedResource* inverseBind,
     const ProceduralWindFrameSettings& settings)
 {
     WindTransientConstants c{};
@@ -1023,16 +1023,16 @@ public:
                 Builtin::SkeletonResources::BoneTransforms, Builtin::SkeletonResources::InverseSkinMatrices);
     }
     void Initialize() {}
-    void Update(const UpdateExecutionContext& context) override { m_resources->UpdateTypes(context); }
+    void Update(const org::UpdateExecutionContext& context) override { m_resources->UpdateTypes(context); }
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
     {
         br::render::PreparedComputeDispatch data{};
         if (!m_resources->transientRegion.valid) return data;
         auto constants = MakeTransientConstants(*m_resources,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
             WindFrameSettings(preparation));
         constants.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
         constants.placementCount = m_resources->residentTransformCount;
@@ -1052,7 +1052,7 @@ public:
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 class WindActivatePass final : public org::TypedRenderGraphPass<WindActivatePass, br::render::PreparedComputeDispatch> {
@@ -1077,17 +1077,17 @@ public:
                 Builtin::SkeletonResources::BoneTransforms, Builtin::SkeletonResources::InverseSkinMatrices);
     }
     void Initialize() {}
-    void Update(const UpdateExecutionContext&) override {}
+    void Update(const org::UpdateExecutionContext&) override {}
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
     {
         br::render::PreparedComputeDispatch data{};
         if (!m_resources->residentPlacementCount) return data;
         const auto* context = preparation.preparationData->Get<UpdateContext>();
         auto constants = MakeTransientConstants(*m_resources,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
             WindFrameSettings(preparation));
         if (context) {
             const auto view = std::ranges::find(context->Views(),
@@ -1118,7 +1118,7 @@ public:
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
-    PipelineState m_pso;
+    org::PipelineState m_pso;
     bool m_latePhase = false;
 };
 
@@ -1139,15 +1139,15 @@ public:
             .PreferQueue(org::QueueKind::Compute);
     }
     void Initialize() {}
-    void Update(const UpdateExecutionContext&) override {}
+    void Update(const org::UpdateExecutionContext&) override {}
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
         br::render::PreparedComputeDispatch data{};
         if (!m_resources->typeCount) return data;
         auto constants = MakeTransientConstants(*m_resources,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
             WindFrameSettings(preparation));
         constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
         constants.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
@@ -1163,7 +1163,7 @@ public:
     static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeDispatch(data, recording);
     }
-private: std::shared_ptr<WindSharedResources> m_resources; PipelineState m_pso; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; org::PipelineState m_pso; bool m_latePhase = false;
 };
 
 class WindFinalizeAllocationsPass final : public org::TypedRenderGraphPass<WindFinalizeAllocationsPass, br::render::PreparedComputeDispatch> {
@@ -1187,15 +1187,15 @@ public:
 			.PreferQueue(org::QueueKind::Compute);
 	}
 	void Initialize() {}
-	void Update(const UpdateExecutionContext&) override {}
+	void Update(const org::UpdateExecutionContext&) override {}
 	br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
 		br::render::PreparedComputeDispatch data{};
 		if (!m_resources->typeCount || !m_resources->residentPlacementCount) return data;
 		auto constants = MakeTransientConstants(*m_resources,
-			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
-			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
-			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
-			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
+			m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
+			m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
+			m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
+			m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
             WindFrameSettings(preparation));
 		constants.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
 		constants.fieldSlice0 = m_resources->boneRemaps->GetSRVInfo(0).slot.index;
@@ -1213,7 +1213,7 @@ public:
 	}
 private:
 	std::shared_ptr<WindSharedResources> m_resources;
-	PipelineState m_pso;
+	org::PipelineState m_pso;
 };
 
 class WindIndirectSimulatePass final : public org::TypedRenderGraphPass<WindIndirectSimulatePass, br::render::PreparedComputeIndirect> {
@@ -1233,15 +1233,15 @@ public:
         b.PreferQueue(org::QueueKind::Compute);
     }
     void Initialize() {}
-    void Update(const UpdateExecutionContext&) override {}
+    void Update(const org::UpdateExecutionContext&) override {}
     br::render::PreparedComputeIndirect Prepare(const org::PassPrepareContext& preparation) {
         br::render::PreparedComputeIndirect data{};
         if (!m_resources->typeCount) { data.enabled = false; return data; }
         auto constants = MakeTransientConstants(*m_resources,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices),
             WindFrameSettings(preparation));
         constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
         constants.allocationRecords = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
@@ -1258,7 +1258,7 @@ public:
     static void Record(const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeIndirect(data, recording);
     }
-private: std::shared_ptr<WindSharedResources> m_resources; PipelineState m_pso; std::shared_ptr<rhi::CommandSignaturePtr> m_signature; ResourceBindingToken m_argumentsBinding{}, m_countBinding{}; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; org::PipelineState m_pso; std::shared_ptr<rhi::CommandSignaturePtr> m_signature; org::ResourceBindingToken m_argumentsBinding{}, m_countBinding{}; bool m_latePhase = false;
 };
 
 struct WindSkeletonDebugFrameData {
@@ -1352,7 +1352,7 @@ public:
             .WithConstantBuffer(Builtin::PerFrameBuffer);
         bindings.indirectCommands = declaration.BindIndirectArguments(m_resources->indirectCommands);
         bindings.allocationCounters = declaration.BindIndirectArguments(m_resources->allocationCounters);
-        bindings.target = declaration.BindRenderTarget(ResourceIdentifier{Builtin::PresentationColor});
+        bindings.target = declaration.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor});
         return bindings;
     }
     WindSkeletonDebugFrameData Prepare(const WindSkeletonDebugBindings& bindings,
@@ -1385,11 +1385,11 @@ public:
         data.constants = {
             m_resources->windTypes->GetSRVInfo(0).slot.index, m_resources->boneEntries->GetSRVInfo(0).slot.index,
             m_resources->activeInstances->GetSRVInfo(0).slot.index,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms)->GetSRVInfo(0).slot.index,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices)->GetSRVInfo(0).slot.index,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo)->GetSRVInfo(0).slot.index,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PerFrameBuffer)->GetCBVInfo().slot.index,
-            m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index,
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms)->GetSRVInfo(0).slot.index,
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices)->GetSRVInfo(0).slot.index,
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo)->GetSRVInfo(0).slot.index,
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::PerFrameBuffer)->GetCBVInfo().slot.index,
+            m_resourceRegistryView->RequestPtr<org::GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index,
             0u,
             m_resources->skinnedPlacements ? m_resources->skinnedPlacements->GetSRVInfo(0).slot.index : 0u,
             m_resources->activeSkinnedPlacements ? m_resources->activeSkinnedPlacements->GetSRVInfo(0).slot.index : 0u,
@@ -1437,15 +1437,15 @@ private:
     std::shared_ptr<rhi::PipelinePtr> m_pso;
     std::shared_ptr<rhi::PipelinePtr> m_spherePso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_signature;
-    PipelineResources m_bindings;
-    PipelineResources m_sphereBindings;
+    org::PipelineResources m_bindings;
+    org::PipelineResources m_sphereBindings;
 };
 
 } // namespace
 
 ProceduralWindExtension::ProceduralWindExtension(std::shared_ptr<ProceduralWindRuntime> runtime) : m_runtime(std::move(runtime)) {}
 
-void ProceduralWindExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& out)
+void ProceduralWindExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& out)
 {
     auto resources = std::make_shared<WindSharedResources>(m_runtime, rg.GetReadbackService());
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletons", resources->visibleSkeletons);
@@ -1454,27 +1454,27 @@ void ProceduralWindExtension::GatherStructuralPasses(RenderGraph& rg, std::vecto
 	rg.RegisterResource(DynamicWindFieldSlice0ResourceName, resources->fieldSlices[0]);
 	rg.RegisterResource(DynamicWindFieldSlice1ResourceName, resources->fieldSlices[1]);
 	rg.RegisterResource(DynamicWindFrameStateResourceName, resources->frameState);
-    auto earlyInsertion = RenderGraph::ExternalInsertPoint::Before("CLodOpaque::HierarchicalCullingPass1");
-    out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::UploadFieldPair", std::make_shared<WindResidencyPass>(resources)).At(earlyInsertion));
-    out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ResetTransient", std::make_shared<WindResetPass>(resources)).At(earlyInsertion));
-    out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase1", std::make_shared<WindActivatePass>(resources, false)).At(earlyInsertion));
-    out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase1", std::make_shared<WindBuildCommandsPass>(resources, false)).At(earlyInsertion));
-	out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase1", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(earlyInsertion));
-    out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase1", std::make_shared<WindIndirectSimulatePass>(resources)).At(earlyInsertion));
+    auto earlyInsertion = org::RenderGraph::ExternalInsertPoint::Before("CLodOpaque::HierarchicalCullingPass1");
+    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::UploadFieldPair", std::make_shared<WindResidencyPass>(resources)).At(earlyInsertion));
+    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ResetTransient", std::make_shared<WindResetPass>(resources)).At(earlyInsertion));
+    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase1", std::make_shared<WindActivatePass>(resources, false)).At(earlyInsertion));
+    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase1", std::make_shared<WindBuildCommandsPass>(resources, false)).At(earlyInsertion));
+	out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase1", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(earlyInsertion));
+    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase1", std::make_shared<WindIndirectSimulatePass>(resources)).At(earlyInsertion));
 
-    auto lateInsertion = RenderGraph::ExternalInsertPoint::After("CLodOpaque::LinearDepthDownsamplePass1");
+    auto lateInsertion = org::RenderGraph::ExternalInsertPoint::After("CLodOpaque::LinearDepthDownsamplePass1");
     lateInsertion.AlsoBefore("CLodOpaque::HierarchicalCullingPass2");
     lateInsertion.AlsoBefore("CLodShadow::HierarchicalCullingPass1");
-    out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase2", std::make_shared<WindActivatePass>(resources, true)).At(lateInsertion));
-    out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase2", std::make_shared<WindBuildCommandsPass>(resources, true)).At(lateInsertion));
-	out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase2", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(lateInsertion));
-    out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase2", std::make_shared<WindIndirectSimulatePass>(resources, true)).At(lateInsertion));
-    auto debugInsertion = RenderGraph::ExternalInsertPoint::After("TonemappingPass");
+    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase2", std::make_shared<WindActivatePass>(resources, true)).At(lateInsertion));
+    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase2", std::make_shared<WindBuildCommandsPass>(resources, true)).At(lateInsertion));
+	out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase2", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(lateInsertion));
+    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase2", std::make_shared<WindIndirectSimulatePass>(resources, true)).At(lateInsertion));
+    auto debugInsertion = org::RenderGraph::ExternalInsertPoint::After("TonemappingPass");
     // Keep debug composition before the scene output becomes presentation-ready.
     // final backbuffer access so the enhanced RENDER_TARGET -> PRESENT
     // transition is not undone before IDXGISwapChain::Present.
     debugInsertion.AlsoBefore("PresentationReadyPass");
-    out.push_back(RenderGraph::ExternalPassDesc::Render(
+    out.push_back(org::RenderGraph::ExternalPassDesc::Render(
         "ProceduralWind::DebugActiveSkeletons",
         std::make_shared<WindSkeletonDebugPass>(resources))
         .At(debugInsertion));

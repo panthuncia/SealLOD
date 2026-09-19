@@ -49,5 +49,5 @@ private:
 			"Light cluster generation CS");
 	}
 
-	PipelineState m_PSO;
+	org::PipelineState m_PSO;
 };

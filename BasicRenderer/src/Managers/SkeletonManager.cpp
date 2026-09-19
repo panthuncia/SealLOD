@@ -40,7 +40,7 @@ void DispatchUpload(org::runtime::IUploadService& uploadService, const void* dat
 }
 
 void UploadMatrixSpans(org::runtime::IUploadService& uploadService,
-    const std::shared_ptr<DynamicBuffer>& target, std::vector<MatrixUploadSpan>& spans,
+    const std::shared_ptr<org::DynamicBuffer>& target, std::vector<MatrixUploadSpan>& spans,
     std::vector<org::runtime::UploadRegion>& regions) {
     std::erase_if(spans, [](const MatrixUploadSpan& span) {
         return span.data == nullptr || span.matrixCount == 0;
@@ -86,15 +86,15 @@ SkeletonManager::SkeletonManager(std::shared_ptr<org::runtime::IUploadService> u
     // outside publication. Immutable inverse-bind input takes the versioned path.
     constexpr uint32_t staticPaletteHeadroom = 32768u;
     const auto paletteCapacity = (std::max)(transientWindMatrixCapacity, 1u);
-    m_inverseBindMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseBindMatricesPacked");
+    m_inverseBindMatrices = org::DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseBindMatricesPacked");
     m_inverseBindMatrices->EnableVersionedGraphJournal();
     m_inverseBindMatrices->SetVersionedGraphExclusive(true);
-    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX),
+    m_boneTransforms = org::DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX),
         static_cast<size_t>(paletteCapacity) * 2u + staticPaletteHeadroom * 2u,
         "BoneSkinMatricesPacked", false, true);
     // TODO: This only exists to project skinned voxel samples back to object-space for voxel sample reconstruction.
     // Maybe we could avoid this if we changed the normal skinning path as well?
-    m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX),
+    m_inverseSkinMatrices = org::DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX),
         static_cast<size_t>(paletteCapacity) + staticPaletteHeadroom,
         "InverseSkinMatricesPacked", false, true);
 
@@ -115,7 +115,7 @@ SkeletonManager::SkeletonManager(std::shared_ptr<org::runtime::IUploadService> u
     m_resources[Builtin::SkeletonResources::InverseSkinMatrices] = m_inverseSkinMatrices;
     m_resources[Builtin::SkeletonResources::SkinningInstanceInfo] = m_instanceInfo;
     const auto source = br::render::PublishedStateSource::ProcessSource();
-    const auto addPublished = [&](ResourceIdentifier key, std::shared_ptr<Resource> fallback,
+    const auto addPublished = [&](org::ResourceIdentifier key, std::shared_ptr<org::Resource> fallback,
         std::uint64_t variant) {
         m_resolvers[key] = std::make_shared<PublishedStateResourceResolver>(source,
             br::render::PublishedResourceKey{ br::render::PublishedFragmentKind::Poses,
@@ -555,12 +555,12 @@ void SkeletonManager::AcknowledgeInverseBindGraphState(
     if (version) m_inverseBindMatrices->AcknowledgeVersionedGraphState(version);
 }
 
-std::shared_ptr<Resource> SkeletonManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> SkeletonManager::ProvideResource(org::ResourceIdentifier const& key) {
     return m_resources[key];
 }
 
-std::vector<ResourceIdentifier> SkeletonManager::GetSupportedKeys() {
-    std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> SkeletonManager::GetSupportedKeys() {
+    std::vector<org::ResourceIdentifier> keys;
     keys.reserve(m_resources.size());
     for (auto const& [key, _] : m_resources) keys.push_back(key);
     return keys;
@@ -587,13 +587,13 @@ org::runtime::IUploadService& SkeletonManager::UploadService() const {
     if (!m_uploadService) throw std::runtime_error("SkeletonManager upload service generation is unavailable");
     return *m_uploadService;
 }
-std::vector<ResourceIdentifier> SkeletonManager::GetSupportedResolverKeys() {
-    std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> SkeletonManager::GetSupportedResolverKeys() {
+    std::vector<org::ResourceIdentifier> keys;
     keys.reserve(m_resolvers.size());
     for (const auto& [key, _] : m_resolvers) keys.push_back(key);
     return keys;
 }
-std::shared_ptr<IResourceResolver> SkeletonManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> SkeletonManager::ProvideResolver(org::ResourceIdentifier const& key) {
     const auto found = m_resolvers.find(key);
     return found == m_resolvers.end() ? nullptr : found->second;
 }

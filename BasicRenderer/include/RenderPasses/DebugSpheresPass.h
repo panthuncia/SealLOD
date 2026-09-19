@@ -50,7 +50,7 @@ public:
 			builder->BindShaderResource(Builtin::PerObjectBuffer)};
 	}
 
-	void Update(const UpdateExecutionContext&) override {
+	void Update(const org::UpdateExecutionContext&) override {
 		std::scoped_lock lock(m_spheresMutex);
 		m_spheres.clear();
 		for (const auto& sphere : m_snapshots->CaptureSpheres())

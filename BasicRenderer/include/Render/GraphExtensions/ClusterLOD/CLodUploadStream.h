@@ -11,9 +11,7 @@
 #include "Render/Runtime/UploadTypes.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class Resource; }
-using org::Resource;
 
 enum class CLodUploadTicketState : uint8_t {
     Published,
@@ -31,14 +29,14 @@ struct CLodUploadTicket {
 };
 
 struct CLodUploadPage {
-    std::shared_ptr<Buffer> buffer;
+    std::shared_ptr<org::Buffer> buffer;
     size_t capacity = 0;
     size_t tail = 0;
 };
 
 struct CLodUploadCopy {
-    std::shared_ptr<Resource> destination;
-    std::shared_ptr<Buffer> staging;
+    std::shared_ptr<org::Resource> destination;
+    std::shared_ptr<org::Buffer> staging;
     size_t destinationOffset = 0;
     size_t stagingOffset = 0;
     size_t size = 0;
@@ -48,7 +46,7 @@ struct CLodUploadBatch {
     std::shared_ptr<CLodUploadTicket> ticket;
     std::vector<CLodUploadCopy> copies;
     std::vector<std::shared_ptr<CLodUploadPage>> pages;
-    std::vector<std::shared_ptr<Resource>> destinations;
+    std::vector<std::shared_ptr<org::Resource>> destinations;
     std::vector<uint32_t> affectedGroups;
     std::vector<uint32_t> retiringPages;
     uint64_t nonResidentEpoch = 0;

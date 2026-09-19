@@ -15,24 +15,24 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 ReyesBuildRasterWorkPass::ReyesBuildRasterWorkPass(
-    std::shared_ptr<Buffer> diceQueueBuffer,
-    std::shared_ptr<Buffer> diceQueueCounterBuffer,
-    std::shared_ptr<Buffer> diceQueueReadOffsetBuffer,
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> rasterWorkBuffer,
-    std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> diceQueueBuffer,
+    std::shared_ptr<org::Buffer> diceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> diceQueueReadOffsetBuffer,
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t rasterWorkCapacity,
     uint32_t phaseIndex,
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
     bool enableViewDepthOcclusion,
-    std::shared_ptr<Buffer> replayDiceQueueBuffer,
-    std::shared_ptr<Buffer> replayDiceQueueCounterBuffer,
-    std::shared_ptr<Buffer> replayDiceQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> replayDiceQueueBuffer,
+    std::shared_ptr<org::Buffer> replayDiceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> replayDiceQueueOverflowBuffer,
     uint32_t replayDiceQueueCapacity,
-    std::shared_ptr<ResourceGroup> slabResourceGroup)
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup)
     : m_diceQueueBuffer(std::move(diceQueueBuffer))
     , m_diceQueueCounterBuffer(std::move(diceQueueCounterBuffer))
     , m_diceQueueReadOffsetBuffer(std::move(diceQueueReadOffsetBuffer))
@@ -137,7 +137,7 @@ ReyesBuildRasterWorkBindings ReyesBuildRasterWorkPass::Declare(org::PassBuilder&
     return bindings;
 }
 
-void ReyesBuildRasterWorkPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesBuildRasterWorkPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
     const uint32_t zero = 0u;

@@ -70,8 +70,8 @@ public:
     }
 
 private:
-    PipelineState DenoisePassPSO;
-    PipelineState DenoiseLastPassPSO;
+    org::PipelineState DenoisePassPSO;
+    org::PipelineState DenoiseLastPassPSO;
     uint32_t m_samplerIndex = 0;
 
     void CreatePointClampSampler()

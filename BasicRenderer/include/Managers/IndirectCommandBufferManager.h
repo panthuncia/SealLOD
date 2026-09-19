@@ -15,9 +15,7 @@
 #include "Resources/Buffers/SortedUnsignedIntBuffer.h"
 
 namespace org { class DynamicGloballyIndexedResource; }
-using org::DynamicGloballyIndexedResource;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 class ObjectManager;
 class SortedUnsignedIntBuffer;
 namespace org::runtime { class IUploadService; }

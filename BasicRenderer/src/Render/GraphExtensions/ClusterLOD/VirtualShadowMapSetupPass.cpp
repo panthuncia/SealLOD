@@ -113,17 +113,17 @@ int32_t ClampClearOffset(int64_t delta, uint32_t pageTableResolution)
 } // namespace
 
 VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<Buffer> markClipmapDataBuffer,
-    std::shared_ptr<Buffer> compactMainCameraBuffer,
-    std::shared_ptr<Buffer> compactShadowCameraBuffer,
-    std::shared_ptr<Buffer> statsBuffer,
-    std::shared_ptr<Buffer> runtimeStateBuffer,
-    std::shared_ptr<Buffer> fallbackCandidateCountBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> markClipmapDataBuffer,
+    std::shared_ptr<org::Buffer> compactMainCameraBuffer,
+    std::shared_ptr<org::Buffer> compactShadowCameraBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer,
+    std::shared_ptr<org::Buffer> runtimeStateBuffer,
+    std::shared_ptr<org::Buffer> fallbackCandidateCountBuffer,
     std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters,
     bool forceResetResources)
     : m_pageTableTexture(std::move(pageTableTexture))
@@ -174,7 +174,7 @@ VirtualShadowMapSetupBindings VirtualShadowMapSetupPass::Declare(org::PassBuilde
 
 void VirtualShadowMapSetupPass::Initialize() {}
 
-void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionContext)
+void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     const bool disableVirtualShadowPageCaching =
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableVirtualShadowPageCachingSettingName)();
@@ -480,7 +480,7 @@ br::render::PreparedComputeDispatch VirtualShadowMapSetupPass::Prepare(
         CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_SHIFT;
     auto& c = data.constants;
     const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index; };
-    c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+    c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
     c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
     c[CLOD_VIRTUAL_SHADOW_SETUP_ALLOCATION_COUNT_DESCRIPTOR_INDEX] = uav(bindings.allocationCount);
     c[CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);

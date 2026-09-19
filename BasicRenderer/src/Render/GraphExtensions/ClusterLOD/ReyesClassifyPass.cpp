@@ -12,18 +12,18 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 ReyesClassifyPass::ReyesClassifyPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> visibleClustersReadBaseCounterBuffer,
-    std::shared_ptr<Buffer> fullClusterOutputsBuffer,
-    std::shared_ptr<Buffer> fullClusterCounterBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersReadBaseCounterBuffer,
+    std::shared_ptr<org::Buffer> fullClusterOutputsBuffer,
+    std::shared_ptr<org::Buffer> fullClusterCounterBuffer,
     uint32_t fullClusterOutputCapacity,
-    std::shared_ptr<Buffer> ownedClustersBuffer,
-    std::shared_ptr<Buffer> ownedClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> ownedClustersBuffer,
+    std::shared_ptr<org::Buffer> ownedClustersCounterBuffer,
     uint32_t ownedClusterCapacity,
-    std::shared_ptr<Buffer> ownershipBitsetBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> ownershipBitsetBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t phaseIndex,
     ReyesClassifyMode classifyMode)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))

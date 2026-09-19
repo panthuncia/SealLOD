@@ -36,7 +36,7 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
         return ArtifactBuildResult::Failure("indirect-state immutable input missing");
     }
 
-    Resource::ScopedECSRegistrationSuppression suppressECS;
+    org::Resource::ScopedECSRegistrationSuppression suppressECS;
     auto state = std::make_shared<PublishedIndirectState>();
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::IndirectWorkloads;

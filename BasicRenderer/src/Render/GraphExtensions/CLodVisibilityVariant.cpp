@@ -15,8 +15,8 @@
 void CLodVisibilityVariant::AppendPhase1ReyesRasterPasses(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    const std::shared_ptr<ResourceGroup>& slabGroup,
-    std::vector<RenderGraph::ExternalPassDesc>& outPasses)
+    const std::shared_ptr<org::ResourceGroup>& slabGroup,
+    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
 {
     AppendReyesRasterPassesForPhase(extension, traits, slabGroup, outPasses, 1u);
 }
@@ -24,8 +24,8 @@ void CLodVisibilityVariant::AppendPhase1ReyesRasterPasses(
 void CLodVisibilityVariant::AppendPhase2ReyesRasterPasses(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    const std::shared_ptr<ResourceGroup>& slabGroup,
-    std::vector<RenderGraph::ExternalPassDesc>& outPasses)
+    const std::shared_ptr<org::ResourceGroup>& slabGroup,
+    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
 {
     AppendReyesRasterPassesForPhase(extension, traits, slabGroup, outPasses, 2u);
 }
@@ -33,8 +33,8 @@ void CLodVisibilityVariant::AppendPhase2ReyesRasterPasses(
 std::string CLodVisibilityVariant::AppendPhase1FineRasterPass(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    const std::shared_ptr<ResourceGroup>& slabGroup,
-    std::vector<RenderGraph::ExternalPassDesc>& outPasses)
+    const std::shared_ptr<org::ResourceGroup>& slabGroup,
+    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
 {
     return AppendFineRasterPassForPhase(extension, traits, slabGroup, outPasses, 1u);
 }
@@ -42,8 +42,8 @@ std::string CLodVisibilityVariant::AppendPhase1FineRasterPass(
 std::string CLodVisibilityVariant::AppendPhase2FineRasterPass(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    const std::shared_ptr<ResourceGroup>& slabGroup,
-    std::vector<RenderGraph::ExternalPassDesc>& outPasses)
+    const std::shared_ptr<org::ResourceGroup>& slabGroup,
+    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
 {
     return AppendFineRasterPassForPhase(extension, traits, slabGroup, outPasses, 2u);
 }
@@ -51,8 +51,8 @@ std::string CLodVisibilityVariant::AppendPhase2FineRasterPass(
 void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    const std::shared_ptr<ResourceGroup>& slabGroup,
-    std::vector<RenderGraph::ExternalPassDesc>& outPasses,
+    const std::shared_ptr<org::ResourceGroup>& slabGroup,
+    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
     uint32_t phaseIndex)
 {
     if (traits.type != CLodExtensionType::VisiblityBuffer) {
@@ -60,7 +60,7 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
     }
 
     const auto phaseSuffix = std::to_string(phaseIndex);
-    auto diceQueuePhase1CountBuffer = std::shared_ptr<Buffer>{};
+    auto diceQueuePhase1CountBuffer = std::shared_ptr<org::Buffer>{};
     auto diceIndirectArgsBuffer = extension.m_reyesDiceIndirectArgsBuffer;
     auto rasterWorkBuffer = extension.m_reyesRasterWorkBuffer;
     auto rasterWorkCounterBuffer = extension.m_reyesRasterWorkCounterBuffer;
@@ -84,7 +84,7 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
         SettingsManager::GetInstance().getSettingGetter<bool>("enableOcclusionCulling")() &&
         (phaseIndex == 1u || phaseIndex == 2u);
     outPasses.push_back(
-        RenderGraph::ExternalPassDesc::Compute(
+        org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, std::string("ReyesBuildRasterWorkPass") + phaseSuffix),
             std::make_shared<ReyesBuildRasterWorkPass>(
                 extension.m_reyesDiceQueueBuffer,
@@ -107,7 +107,7 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
                 slabGroup)));
 
     outPasses.push_back(
-        RenderGraph::ExternalPassDesc::Compute(
+        org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, std::string("ReyesCreateRasterWorkDispatchArgsPass") + phaseSuffix),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 rasterWorkCounterBuffer,
@@ -119,8 +119,8 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
 std::string CLodVisibilityVariant::AppendFineRasterPassForPhase(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    const std::shared_ptr<ResourceGroup>& slabGroup,
-    std::vector<RenderGraph::ExternalPassDesc>& outPasses,
+    const std::shared_ptr<org::ResourceGroup>& slabGroup,
+    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
     uint32_t phaseIndex)
 {
     if (traits.type != CLodExtensionType::VisiblityBuffer) {
@@ -145,7 +145,7 @@ std::string CLodVisibilityVariant::AppendFineRasterPassForPhase(
         throw std::runtime_error("Unsupported CLod visibility fine raster phase.");
     }
 
-    auto rasterPassDesc = RenderGraph::ExternalPassDesc::Compute(
+    auto rasterPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
         passName,
         std::make_shared<ReyesPatchRasterizationPass>(
                 extension.m_visibleClustersBuffer,
@@ -163,7 +163,7 @@ std::string CLodVisibilityVariant::AppendFineRasterPassForPhase(
                 extension.m_visibleClusterCapacity,
                 phaseIndex,
                 CLodReyesPatchVisibilityIndexBase(extension.m_visibleClusterCapacity)));
-    rasterPassDesc.At(RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
+    rasterPassDesc.At(org::RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
     outPasses.push_back(std::move(rasterPassDesc));
 
     return passName;

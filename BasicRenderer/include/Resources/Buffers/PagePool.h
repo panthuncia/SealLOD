@@ -15,7 +15,7 @@
 #include "Render/Runtime/UploadTypes.h"
 #include "ShaderBuffers.h"
 
-class GpuBufferBacking;
+namespace org { class GpuBufferBacking; }
 
 // Size-class page allocator backed by multiple GPU "slab" ByteAddressBuffers.
 //
@@ -72,13 +72,13 @@ public:
 	// Number of slabs currently allocated.
 	uint32_t GetSlabCount() const;
 	// Get the static Buffer backing slab `slabIndex` (for resource registration).
-	std::shared_ptr<Buffer> GetSlab(uint32_t slabIndex) const;
+	std::shared_ptr<org::Buffer> GetSlab(uint32_t slabIndex) const;
 
 	// Get the page-table Buffer (StructuredBuffer<PageTableEntry>).
-	std::shared_ptr<Buffer> GetPageTableBuffer() const;
+	std::shared_ptr<org::Buffer> GetPageTableBuffer() const;
 
 	// Get the ResourceGroup tracking all slab buffers (for render graph declarations).
-	std::shared_ptr<ResourceGroup> GetSlabResourceGroup() const { return m_slabResourceGroup; }
+	std::shared_ptr<org::ResourceGroup> GetSlabResourceGroup() const { return m_slabResourceGroup; }
 
 	// Total pages across all slabs.
 	uint32_t GetTotalPageCount() const;
@@ -139,7 +139,7 @@ private:
 	};
 
 	struct Slab {
-		std::shared_ptr<Buffer> buffer; // The GPU ByteAddressBuffer.
+		std::shared_ptr<org::Buffer> buffer; // The GPU ByteAddressBuffer.
 		SlabRole role = SlabRole::General;
 		uint32_t firstPageID = 0;
 		uint32_t pageCount = 0;
@@ -157,10 +157,10 @@ private:
 	bool                        m_pageTableDirty = false;
 
 	// GPU-side StructuredBuffer<PageTableEntry>.
-	std::shared_ptr<Buffer> m_pageTableBuffer;
+	std::shared_ptr<org::Buffer> m_pageTableBuffer;
 
 	// ResourceGroup tracking all slab buffers for render graph auto-invalidation.
-	std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+	std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
 
 	// Generation-bound upload function. Cleared when the streaming owner shuts down.
 	UploadFn m_uploadFn;

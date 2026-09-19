@@ -7,8 +7,8 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITAdaptiveFitRootConstants.h"
 
 AVBOITAdaptiveFitPass::AVBOITAdaptiveFitPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<Buffer> fitStateBuffer)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::Buffer> fitStateBuffer)
     : m_configBuffer(std::move(configBuffer))
     , m_fitStateBuffer(std::move(fitStateBuffer))
 {

@@ -31,11 +31,11 @@ size_t TotalAllocationProbeSize(const std::vector<size_t>& counts, size_t elemen
 
 }
 
-DynamicBuffer::~DynamicBuffer() {
+org::DynamicBuffer::~DynamicBuffer() {
     UnregisterDeferredBackingResizeClient(this);
 }
 
-std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementSize) {
+std::unique_ptr<org::BufferView> org::DynamicBuffer::Allocate(size_t size, size_t elementSize) {
     std::lock_guard lock(m_allocationMutex);
 	size_t requiredSize = size;
 
@@ -66,15 +66,15 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
 		// Cache the weak pointer to avoid repeated dynamic_pointer_cast
 		if (!m_weakPtrCached) {
 			m_cachedWeakPtr = std::weak_ptr(
-				std::dynamic_pointer_cast<DynamicBuffer>(Resource::weak_from_this().lock())
+				std::dynamic_pointer_cast<org::DynamicBuffer>(org::Resource::weak_from_this().lock())
 			);
 			m_weakPtrCached = true;
 		}
         // Return BufferView
-        return BufferView::CreateUnique(m_cachedWeakPtr, blockOffset, requiredSize, elementSize);
+        return org::BufferView::CreateUnique(m_cachedWeakPtr, blockOffset, requiredSize, elementSize);
 	}
 
-    if (BufferBase::IsBackingMutationAllowedOnThisThread() &&
+    if (org::BufferBase::IsBackingMutationAllowedOnThisThread() &&
         PublishReadyAsyncResizeLocked(false)) {
         return Allocate(size, elementSize);
     }
@@ -92,7 +92,7 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
 		return Allocate(size, elementSize);
 	}
 
-    if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
+    if (!org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
         const size_t previousCapacity = m_capacity;
         RequestAsyncReserveBytesLocked(requiredSize);
         const size_t desiredLogicalCapacity = (std::max)(m_pendingResizeCapacity, m_requestedResizeCapacity);
@@ -129,7 +129,7 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
 			m_blocksByOffset.erase(lastIt);
 		}
     }
-    size_t newCapacity = DynamicBuffer::AlignBufferCapacity(previousCapacity + growBy, m_byteAddress);
+    size_t newCapacity = org::DynamicBuffer::AlignBufferCapacity(previousCapacity + growBy, m_byteAddress);
 
 	GrowBuffer(newCapacity);
     size_t trackedFreeSize = m_capacity - newBlockOffset;
@@ -140,7 +140,7 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
     return Allocate(size, elementSize);
 }
 
-void DynamicBuffer::ReserveBytes(size_t size) {
+void org::DynamicBuffer::ReserveBytes(size_t size) {
     std::lock_guard lock(m_allocationMutex);
     if (size == 0) {
         return;
@@ -150,14 +150,14 @@ void DynamicBuffer::ReserveBytes(size_t size) {
         return;
     }
 
-    if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
+    if (org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
         (void)PublishReadyAsyncResizeLocked(false);
     }
     if (m_freeBlocks.lower_bound({ size, 0 }) != m_freeBlocks.end()) {
         return;
     }
 
-    if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
+    if (!org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
         const size_t previousCapacity = m_capacity;
         RequestAsyncReserveBytesLocked(size);
         const size_t desiredLogicalCapacity = (std::max)(m_pendingResizeCapacity, m_requestedResizeCapacity);
@@ -171,7 +171,7 @@ void DynamicBuffer::ReserveBytes(size_t size) {
     Deallocate(view.get());
 }
 
-size_t DynamicBuffer::ComputeReserveCapacityLocked(size_t size) const {
+size_t org::DynamicBuffer::ComputeReserveCapacityLocked(size_t size) const {
     if (size == 0 || m_freeBlocks.lower_bound({ size, 0 }) != m_freeBlocks.end()) {
         return m_capacity;
     }
@@ -185,10 +185,10 @@ size_t DynamicBuffer::ComputeReserveCapacityLocked(size_t size) const {
             growBy -= lastIt->second.size;
         }
     }
-    return DynamicBuffer::AlignBufferCapacity(previousCapacity + growBy, m_byteAddress);
+    return org::DynamicBuffer::AlignBufferCapacity(previousCapacity + growBy, m_byteAddress);
 }
 
-bool DynamicBuffer::ExtendTrackedCapacityLocked(size_t newCapacity) {
+bool org::DynamicBuffer::ExtendTrackedCapacityLocked(size_t newCapacity) {
     if (newCapacity <= m_capacity) {
         return false;
     }
@@ -228,7 +228,7 @@ bool DynamicBuffer::ExtendTrackedCapacityLocked(size_t newCapacity) {
     return true;
 }
 
-void DynamicBuffer::RequestAsyncReserveBytes(size_t size) {
+void org::DynamicBuffer::RequestAsyncReserveBytes(size_t size) {
     BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytes");
     BT_ZONE_TEXT(m_name.data(), m_name.size());
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.RequestBytes", static_cast<int64_t>(size));
@@ -251,7 +251,7 @@ void DynamicBuffer::RequestAsyncReserveBytes(size_t size) {
     RequestAsyncReserveBytesLocked((std::max)(size, deferredSize));
 }
 
-void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
+void org::DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
     BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked");
     BT_ZONE_TEXT(m_name.data(), m_name.size());
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.InputBytes", static_cast<int64_t>(size));
@@ -291,7 +291,7 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
         {
             BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked::CoalesceAsyncResizeRequest::Submit");
             BT_ZONE_TEXT(m_name.data(), m_name.size());
-            m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+            m_asyncResizeState.Request(org::AsyncBufferBackingResizeRequest{
                 .resourceID = GetGlobalResourceID(),
                 .heapType = rhi::HeapType::DeviceLocal,
                 .byteSize = m_requestedResizeCapacity,
@@ -306,7 +306,7 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
             m_pendingResizeCapacity,
             requestedCapacity,
             desiredBackingCapacity,
-            BufferBase::IsBackingMutationAllowedOnThisThread());
+            org::BufferBase::IsBackingMutationAllowedOnThisThread());
         return;
     }
 
@@ -318,7 +318,7 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
     {
         BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked::SubmitAsyncResizeRequest");
         BT_ZONE_TEXT(m_name.data(), m_name.size());
-        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+        m_asyncResizeState.Request(org::AsyncBufferBackingResizeRequest{
             .resourceID = resourceID,
             .heapType = rhi::HeapType::DeviceLocal,
             .byteSize = desiredBackingCapacity,
@@ -328,7 +328,7 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
     }
 }
 
-void DynamicBuffer::RaiseDeferredAsyncReserveBytes(size_t size) {
+void org::DynamicBuffer::RaiseDeferredAsyncReserveBytes(size_t size) {
     size_t current = m_deferredAsyncReserveBytes.load(std::memory_order_relaxed);
     while (current < size &&
            !m_deferredAsyncReserveBytes.compare_exchange_weak(
@@ -340,11 +340,11 @@ void DynamicBuffer::RaiseDeferredAsyncReserveBytes(size_t size) {
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.DeferredBytes", static_cast<int64_t>((std::max)(current, size)));
 }
 
-size_t DynamicBuffer::ConsumeDeferredAsyncReserveBytes() {
+size_t org::DynamicBuffer::ConsumeDeferredAsyncReserveBytes() {
     return m_deferredAsyncReserveBytes.exchange(0, std::memory_order_acq_rel);
 }
 
-bool DynamicBuffer::PublishReadyAsyncResize(bool wait) {
+bool org::DynamicBuffer::PublishReadyAsyncResize(bool wait) {
     BT_ZONE_SCOPE("DynamicBuffer::PublishReadyAsyncResize");
 	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return false;
     std::lock_guard lock(m_allocationMutex);
@@ -358,13 +358,13 @@ bool DynamicBuffer::PublishReadyAsyncResize(bool wait) {
     return PublishReadyAsyncResizeLocked(wait);
 }
 
-bool DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
+bool org::DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
     BT_ZONE_SCOPE("DynamicBuffer::PublishReadyAsyncResizeLocked");
     if (!m_pendingResizeValid && !m_asyncResizeState.HasPending()) {
         TracyPlot("DynamicBuffer.Resize.Pending", int64_t{ 0 });
         return false;
     }
-    if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
+    if (!org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
         return false;
     }
     TracyPlot("DynamicBuffer.Resize.Pending", int64_t{ 1 });
@@ -397,14 +397,14 @@ bool DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
         return false;
     }
 
-    std::unique_ptr<GpuBufferBacking> newBacking = std::move(resizeResult->backing);
+    std::unique_ptr<org::GpuBufferBacking> newBacking = std::move(resizeResult->backing);
     const size_t previousBackingCapacity = static_cast<size_t>(GetBufferSize());
     size_t newCapacity = (std::max)({ static_cast<size_t>(resizeResult->byteSize), m_requestedResizeCapacity, m_capacity });
     if (newCapacity > static_cast<size_t>(resizeResult->byteSize)) {
         m_pendingResizeCapacity = newCapacity;
         m_requestedResizeCapacity = newCapacity;
         m_pendingResizeValid = true;
-        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+        m_asyncResizeState.Request(org::AsyncBufferBackingResizeRequest{
             .resourceID = GetGlobalResourceID(),
             .heapType = rhi::HeapType::DeviceLocal,
             .byteSize = newCapacity,
@@ -448,7 +448,7 @@ bool DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
     return true;
 }
 
-bool DynamicBuffer::CanAllocateBytes(size_t size) const {
+bool org::DynamicBuffer::CanAllocateBytes(size_t size) const {
     std::lock_guard lock(m_allocationMutex);
     if (size == 0) {
         return true;
@@ -456,7 +456,7 @@ bool DynamicBuffer::CanAllocateBytes(size_t size) const {
     return m_freeBlocks.lower_bound({ size, 0 }) != m_freeBlocks.end();
 }
 
-bool DynamicBuffer::HasPendingBackingResize() const {
+bool org::DynamicBuffer::HasPendingBackingResize() const {
 	if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return false;
     if (m_deferredAsyncReserveBytes.load(std::memory_order_acquire) != 0) {
         return true;
@@ -465,9 +465,9 @@ bool DynamicBuffer::HasPendingBackingResize() const {
     return m_pendingResizeValid || m_asyncResizeState.HasPending();
 }
 
-std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void* data, size_t count, size_t elementSize) {
+std::vector<std::shared_ptr<org::BufferView>> org::DynamicBuffer::AddDataBatch(const void* data, size_t count, size_t elementSize) {
     std::lock_guard lock(m_allocationMutex);
-    std::vector<std::shared_ptr<BufferView>> views;
+    std::vector<std::shared_ptr<org::BufferView>> views;
     if (count == 0 || elementSize == 0) {
         return views;
     }
@@ -475,7 +475,7 @@ std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void*
     const size_t totalSize = count * elementSize;
     if (!m_weakPtrCached) {
         m_cachedWeakPtr = std::weak_ptr(
-            std::dynamic_pointer_cast<DynamicBuffer>(Resource::weak_from_this().lock())
+            std::dynamic_pointer_cast<org::DynamicBuffer>(org::Resource::weak_from_this().lock())
         );
         m_weakPtrCached = true;
     }
@@ -485,7 +485,7 @@ std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void*
         for (size_t i = 0; i < count; ++i) {
             const size_t itemOffset = blockOffset + i * elementSize;
             m_blocksByOffset[itemOffset] = { itemOffset, elementSize, false };
-            views.push_back(BufferView::CreateShared(m_cachedWeakPtr, itemOffset, elementSize, elementSize));
+            views.push_back(org::BufferView::CreateShared(m_cachedWeakPtr, itemOffset, elementSize, elementSize));
         }
     };
 
@@ -522,7 +522,7 @@ std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void*
     return views;
 }
 
-std::pair<size_t, size_t> DynamicBuffer::AddDataRange(const void* data, size_t count, size_t elementSize) {
+std::pair<size_t, size_t> org::DynamicBuffer::AddDataRange(const void* data, size_t count, size_t elementSize) {
     std::lock_guard lock(m_allocationMutex);
     if (count == 0 || elementSize == 0) {
         return { 0, 0 };
@@ -562,7 +562,7 @@ std::pair<size_t, size_t> DynamicBuffer::AddDataRange(const void* data, size_t c
     return { blockOffset, totalSize };
 }
 
-std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AllocateRangesBatch(
+std::vector<org::DynamicBuffer::PagedAllocation> org::DynamicBuffer::AllocateRangesBatch(
     const std::vector<size_t>& counts,
     size_t elementSize)
 {
@@ -627,7 +627,7 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AllocateRangesBatch(
     return ranges;
 }
 
-bool DynamicBuffer::TryAllocateRangesBatch(
+bool org::DynamicBuffer::TryAllocateRangesBatch(
     const std::vector<size_t>& counts,
     size_t elementSize,
     std::vector<PagedAllocation>& ranges,
@@ -675,7 +675,7 @@ bool DynamicBuffer::TryAllocateRangesBatch(
     return true;
 }
 
-DynamicBuffer::AllocationProbe DynamicBuffer::SnapshotAllocationProbe() const
+org::DynamicBuffer::AllocationProbe org::DynamicBuffer::SnapshotAllocationProbe() const
 {
     // The probe only needs the largest free blocks: admission simulates the
     // best-fit search against them, conservatively. Copying every free block
@@ -704,7 +704,7 @@ DynamicBuffer::AllocationProbe DynamicBuffer::SnapshotAllocationProbe() const
     return probe;
 }
 
-bool DynamicBuffer::CanConsumeAllocationProbe(
+bool org::DynamicBuffer::CanConsumeAllocationProbe(
     const AllocationProbe& probe,
     const std::vector<size_t>& counts,
     size_t elementSize)
@@ -712,7 +712,7 @@ bool DynamicBuffer::CanConsumeAllocationProbe(
     return CanConsumeAllocationProbeBytes(probe, TotalAllocationProbeSize(counts, elementSize));
 }
 
-bool DynamicBuffer::CanConsumeAllocationProbeBytes(
+bool org::DynamicBuffer::CanConsumeAllocationProbeBytes(
     const AllocationProbe& probe,
     size_t totalSize)
 {
@@ -726,7 +726,7 @@ bool DynamicBuffer::CanConsumeAllocationProbeBytes(
         std::pair<size_t, size_t>{ totalSize, 0 }) != probe.freeBlocks.end();
 }
 
-bool DynamicBuffer::TryConsumeAllocationProbeBytes(
+bool org::DynamicBuffer::TryConsumeAllocationProbeBytes(
     AllocationProbe& probe,
     size_t totalSize)
 {
@@ -756,7 +756,7 @@ bool DynamicBuffer::TryConsumeAllocationProbeBytes(
     return true;
 }
 
-bool DynamicBuffer::TryConsumeAllocationProbe(
+bool org::DynamicBuffer::TryConsumeAllocationProbe(
     AllocationProbe& probe,
     const std::vector<size_t>& counts,
     size_t elementSize)
@@ -764,7 +764,7 @@ bool DynamicBuffer::TryConsumeAllocationProbe(
     return TryConsumeAllocationProbeBytes(probe, TotalAllocationProbeSize(counts, elementSize));
 }
 
-std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
+std::vector<org::DynamicBuffer::PagedAllocation> org::DynamicBuffer::AddDataPaged(
     const void* data,
     size_t count,
     size_t elementSize,
@@ -775,7 +775,7 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
     return pages;
 }
 
-std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AllocatePages(
+std::vector<org::DynamicBuffer::PagedAllocation> org::DynamicBuffer::AllocatePages(
     size_t count,
     size_t elementSize,
     size_t pageElementCount)
@@ -817,14 +817,14 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AllocatePages(
     return pages;
 }
 
-void DynamicBuffer::StageWriteRange(const void* data, size_t size, size_t offset) {
+void org::DynamicBuffer::StageWriteRange(const void* data, size_t size, size_t offset) {
     if (data == nullptr || size == 0) {
         return;
     }
     StageOrUpload(data, size, offset);
 }
 
-void DynamicBuffer::StageWritePages(
+void org::DynamicBuffer::StageWritePages(
     const void* data,
     size_t count,
     size_t elementSize,
@@ -851,7 +851,7 @@ void DynamicBuffer::StageWritePages(
     }
 }
 
-std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {
+std::unique_ptr<org::BufferView> org::DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {
     BT_ZONE_SCOPE("DynamicBuffer::AddData");
     BT_ZONE_VALUE(static_cast<int64_t>(size));
     BT_ZONE_TEXT(m_name.data(), m_name.size());
@@ -868,7 +868,7 @@ std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size
 			actualSize = size;
 		}
     }
-    std::unique_ptr<BufferView> view;
+    std::unique_ptr<org::BufferView> view;
     {
         BT_ZONE_SCOPE("DynamicBuffer::AddData::AllocateView");
         view = Allocate(actualSize, elementSize);
@@ -885,7 +885,7 @@ std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size
     return view;
 }
 
-void DynamicBuffer::ReserveCpuShadowAdditionalBytes(size_t additionalBytes) {
+void org::DynamicBuffer::ReserveCpuShadowAdditionalBytes(size_t additionalBytes) {
     BT_ZONE_SCOPE("DynamicBuffer::ReserveCpuShadowAdditionalBytes");
     BT_ZONE_VALUE(static_cast<int64_t>(additionalBytes));
     BT_ZONE_TEXT(m_name.data(), m_name.size());
@@ -908,11 +908,11 @@ void DynamicBuffer::ReserveCpuShadowAdditionalBytes(size_t additionalBytes) {
     }
 }
 
-void DynamicBuffer::UpdateView(BufferView* view, const void* data) {
+void org::DynamicBuffer::UpdateView(org::BufferView* view, const void* data) {
     StageOrUpload(data, view->GetSize(), view->GetOffset());
 }
 
-void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
+void org::DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
     BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload");
     BT_ZONE_VALUE(static_cast<int64_t>(size));
     BT_ZONE_TEXT(m_name.data(), m_name.size());
@@ -949,7 +949,7 @@ void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) 
     }
 }
 
-void DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t offset) {
+void org::DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t offset) {
     if (data == nullptr || size == 0) {
         return;
     }
@@ -982,7 +982,7 @@ void DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t of
     UploadBufferData(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset, __FILE__, __LINE__);
 }
 
-void DynamicBuffer::EnsureCpuShadowSize(size_t size) {
+void org::DynamicBuffer::EnsureCpuShadowSize(size_t size) {
     if (m_cpuShadowData.size() < size) {
         BT_ZONE_SCOPE("DynamicBuffer::EnsureCpuShadowSize::Grow");
         BT_ZONE_VALUE(static_cast<int64_t>(size - m_cpuShadowData.size()));
@@ -990,7 +990,7 @@ void DynamicBuffer::EnsureCpuShadowSize(size_t size) {
     }
 }
 
-void DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t offset) {
+void org::DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t offset) {
     if (data == nullptr || size == 0) {
         return;
     }
@@ -1012,7 +1012,7 @@ void DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t o
 	}
 }
 
-void DynamicBuffer::EnableVersionedGraphJournal() {
+void org::DynamicBuffer::EnableVersionedGraphJournal() {
 	std::scoped_lock lock(m_allocationMutex, m_uploadPolicyMirrorMutex);
 	if (m_versionedGraphJournal) return;
 	size_t populatedBytes = 0;
@@ -1029,17 +1029,17 @@ void DynamicBuffer::EnableVersionedGraphJournal() {
 	m_versionedGraphJournal = std::move(journal);
 }
 
-bool DynamicBuffer::RequestVersionedGraphCapacityBytes(size_t absoluteCapacity) {
+bool org::DynamicBuffer::RequestVersionedGraphCapacityBytes(size_t absoluteCapacity) {
 	if (absoluteCapacity == 0 ||
 		!m_versionedGraphExclusive.load(std::memory_order_acquire)) {
 		return false;
 	}
 	std::lock_guard lock(m_allocationMutex);
-	return ExtendTrackedCapacityLocked(DynamicBuffer::AlignBufferCapacity(
+	return ExtendTrackedCapacityLocked(org::DynamicBuffer::AlignBufferCapacity(
 		(std::max)(absoluteCapacity, m_capacity), m_byteAddress));
 }
 
-void DynamicBuffer::SetVersionedGraphExclusive(bool exclusive) {
+void org::DynamicBuffer::SetVersionedGraphExclusive(bool exclusive) {
 	const bool previous = m_versionedGraphExclusive.exchange(exclusive, std::memory_order_acq_rel);
 	if (!previous && exclusive) {
 		UnregisterDeferredBackingResizeClient(this);
@@ -1054,7 +1054,7 @@ void DynamicBuffer::SetVersionedGraphExclusive(bool exclusive) {
 	}
 }
 
-br::render::VersionedGpuBufferJournal::Capture DynamicBuffer::CaptureVersionedGraphState() const {
+br::render::VersionedGpuBufferJournal::Capture org::DynamicBuffer::CaptureVersionedGraphState() const {
 	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
 	if (!m_versionedGraphJournal) {
 		throw std::logic_error("versioned graph journal is not enabled for DynamicBuffer");
@@ -1062,23 +1062,23 @@ br::render::VersionedGpuBufferJournal::Capture DynamicBuffer::CaptureVersionedGr
 	return m_versionedGraphJournal->CaptureDesired();
 }
 
-std::vector<std::byte> DynamicBuffer::CaptureCpuShadowBytes() const {
+std::vector<std::byte> org::DynamicBuffer::CaptureCpuShadowBytes() const {
 	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
 	return m_cpuShadowData;
 }
 
-void DynamicBuffer::AcknowledgeVersionedGraphState(
+void org::DynamicBuffer::AcknowledgeVersionedGraphState(
 	const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version) {
 	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
 	if (m_versionedGraphJournal) m_versionedGraphJournal->Acknowledge(version);
 }
 
-bool DynamicBuffer::HasUnpublishedVersionedGraphState() const {
+bool org::DynamicBuffer::HasUnpublishedVersionedGraphState() const {
 	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
 	return m_versionedGraphJournal && m_versionedGraphJournal->HasUnpublishedChanges();
 }
 
-void DynamicBuffer::Deallocate(const BufferView* view) {
+void org::DynamicBuffer::Deallocate(const org::BufferView* view) {
     if (view == nullptr) {
         return;
     }
@@ -1086,7 +1086,7 @@ void DynamicBuffer::Deallocate(const BufferView* view) {
     DeallocateRange(view->GetOffset(), view->GetSize());
 }
 
-void DynamicBuffer::DeallocateRange(size_t offset, size_t size) {
+void org::DynamicBuffer::DeallocateRange(size_t offset, size_t size) {
     std::lock_guard lock(m_allocationMutex);
     if (size == 0) {
         return;
@@ -1127,7 +1127,7 @@ void DynamicBuffer::DeallocateRange(size_t offset, size_t size) {
     m_freeBlocks.insert({ it->second.size, it->second.offset });
 }
 
-void DynamicBuffer::DeallocatePages(const std::vector<PagedAllocation>& pages) {
+void org::DynamicBuffer::DeallocatePages(const std::vector<PagedAllocation>& pages) {
     for (const auto& page : pages) {
         if (!page.IsValid()) {
             continue;
@@ -1136,9 +1136,9 @@ void DynamicBuffer::DeallocatePages(const std::vector<PagedAllocation>& pages) {
     }
 }
 
-void DynamicBuffer::AssignDescriptorSlots()
+void org::DynamicBuffer::AssignDescriptorSlots()
 {
-    BufferBase::DescriptorRequirements requirements{};
+    org::BufferBase::DescriptorRequirements requirements{};
 
     const uint32_t viewElements =
         static_cast<uint32_t>(m_byteAddress ? (m_capacity / 4) : m_capacity/m_elementSize);
@@ -1175,11 +1175,11 @@ void DynamicBuffer::AssignDescriptorSlots()
     SetDescriptorRequirements(requirements);
 }
 
-void DynamicBuffer::CreateBuffer(size_t capacity) {
+void org::DynamicBuffer::CreateBuffer(size_t capacity) {
     std::lock_guard lock(m_allocationMutex);
 	auto device = DeviceManager::GetInstance().GetDevice();
 	m_capacity = capacity;
-	auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity, GetGlobalResourceID(), m_UAV);
+	auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity, GetGlobalResourceID(), m_UAV);
 	SetBacking(std::move(newDataBuffer), capacity);
     {
         std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
@@ -1197,7 +1197,7 @@ void DynamicBuffer::CreateBuffer(size_t capacity) {
 	AssignDescriptorSlots();
 }
 
-void DynamicBuffer::GrowBuffer(size_t newSize) {
+void org::DynamicBuffer::GrowBuffer(size_t newSize) {
     std::lock_guard lock(m_allocationMutex);
     const size_t previousCapacity = m_capacity;
     spdlog::debug(
@@ -1212,7 +1212,7 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
         "DynamicBuffer '{}' id={} GrowBuffer creating new GPU backing",
         m_name,
         GetGlobalResourceID());
-    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize, GetGlobalResourceID(), m_UAV);
+    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize, GetGlobalResourceID(), m_UAV);
     spdlog::debug(
         "DynamicBuffer '{}' id={} GrowBuffer created new GPU backing",
         m_name,
@@ -1220,7 +1220,7 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
 	ApplyResizeBackingLocked(std::move(newDataBuffer), newSize, previousCapacity);
 }
 
-void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> newDataBuffer, size_t newSize, size_t previousCapacity) {
+void org::DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<org::GpuBufferBacking> newDataBuffer, size_t newSize, size_t previousCapacity) {
     BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked");
     BT_ZONE_TEXT(m_name.data(), m_name.size());
     TracyPlot("DynamicBuffer.Resize.ApplyNewSizeBytes", static_cast<int64_t>(newSize));

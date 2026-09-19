@@ -46,21 +46,21 @@ void VoxelSoftwareRasterizationPass::Record(const VoxelRasterBindings&, const Vo
 }
 
 VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> rigidVoxelWorkRecordsBuffer,
-    std::shared_ptr<Buffer> rigidVoxelWorkCounterBuffer,
-    std::shared_ptr<Buffer> skinnedVoxelWorkRecordsBuffer,
-    std::shared_ptr<Buffer> skinnedVoxelWorkCounterBuffer,
-    std::shared_ptr<Buffer> rigidVoxelIndirectArgsBuffer,
-    std::shared_ptr<Buffer> skinnedVoxelIndirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> rigidVoxelWorkRecordsBuffer,
+    std::shared_ptr<org::Buffer> rigidVoxelWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> skinnedVoxelWorkRecordsBuffer,
+    std::shared_ptr<org::Buffer> skinnedVoxelWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> rigidVoxelIndirectArgsBuffer,
+    std::shared_ptr<org::Buffer> skinnedVoxelIndirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     CLodRasterOutputKind outputKind,
-    std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
-    std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture,
+    std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
     uint32_t voxelWorkCapacity)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
@@ -150,7 +150,7 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
 {
     auto* builder = &declaration;
     builder->PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    const ResourceState indirectState{
+    const org::ResourceState indirectState{
         rhi::ResourceAccessType::IndirectArgument,
         rhi::ResourceLayout::GenericRead,
         rhi::ResourceSyncState::ExecuteIndirect
@@ -231,13 +231,13 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
     return bindings;
 }
 
-void VoxelSoftwareRasterizationPass::Update(const UpdateExecutionContext& executionContext)
+void VoxelSoftwareRasterizationPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     // Only the declarations are maintained here: the view table the shader
     // reads is published during preparation.
-    std::vector<std::shared_ptr<PixelBuffer>> nextVisibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> nextVisibilityBuffers;
     if (m_outputKind != CLodRasterOutputKind::VirtualShadow)
         for (const auto& viewInfo : context.Views())
             if (viewInfo.visibilityBuffer && viewInfo.cameraBufferIndex < context.ViewCameraBufferSize())
@@ -276,7 +276,7 @@ VoxelRasterFrameData VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBi
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-            uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+            uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = uav(bindings.physicalPages);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = uav(bindings.dynamicPages);
@@ -291,7 +291,7 @@ VoxelRasterFrameData VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBi
         step.constants[CLOD_RASTER_VOXEL_WORK_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.workCounters[i]);
         step.constants[CLOD_RASTER_VOXEL_INDIRECT_ARGS_DESCRIPTOR_INDEX] = uav(bindings.indirectArgs[i]);
         step.buildProgram = preparation.CaptureProgramBinding(m_buildArgsPso);
-        const PipelineState& raster = telemetry ? (i == 0 ? m_rigidTelemetryRasterPso : m_skinnedTelemetryRasterPso)
+        const org::PipelineState& raster = telemetry ? (i == 0 ? m_rigidTelemetryRasterPso : m_skinnedTelemetryRasterPso)
             : (i == 0 ? m_rigidRasterPso : m_skinnedRasterPso);
         step.rasterProgram = preparation.CaptureProgramBinding(raster);
         step.arguments = preparation.CaptureResource(bindings.indirectArgs[i]);

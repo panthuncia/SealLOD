@@ -13,10 +13,8 @@
 using namespace Microsoft::WRL;
 
 namespace org { class BufferView; }
-using org::BufferView;
 class SortedUnsignedIntBuffer;
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org::runtime { class IUploadService; }
 
 class ResourceManager {
@@ -33,7 +31,7 @@ public:
 
     void UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex);
     
-    std::shared_ptr<Buffer>& GetPerFrameBuffer() {
+    std::shared_ptr<org::Buffer>& GetPerFrameBuffer() {
 		return m_perFrameBuffer;
     }
 
@@ -61,7 +59,7 @@ public:
 private:
     ResourceManager(){};
 
-    std::shared_ptr<Buffer> m_perFrameBuffer;
+    std::shared_ptr<org::Buffer> m_perFrameBuffer;
     UINT8* pPerFrameConstantBuffer;
     PerFrameCB perFrameCBData;
     UINT currentFrameIndex;

@@ -1,28 +1,28 @@
 #include "Resources/Sampler.h"
 #include "Render/Runtime/IDescriptorService.h"
 
-std::shared_ptr<Sampler> Sampler::m_defaultSampler = nullptr;
-std::shared_ptr<Sampler> Sampler::m_defaultShadowSampler = nullptr;
-std::unordered_map<rhi::SamplerDesc, std::shared_ptr<Sampler>, rhi::SamplerDescHash, rhi::SamplerDescEq> Sampler::m_samplerCache;
+std::shared_ptr<org::Sampler> org::Sampler::m_defaultSampler = nullptr;
+std::shared_ptr<org::Sampler> org::Sampler::m_defaultShadowSampler = nullptr;
+std::unordered_map<rhi::SamplerDesc, std::shared_ptr<org::Sampler>, rhi::SamplerDescHash, rhi::SamplerDescEq> org::Sampler::m_samplerCache;
 
-Sampler::Sampler(rhi::SamplerDesc samplerDesc)
+org::Sampler::Sampler(rhi::SamplerDesc samplerDesc)
 	: m_index(0), m_hasDescriptorIndex(false), m_samplerDesc(samplerDesc) {}
 
-std::shared_ptr<Sampler> Sampler::CreateSampler(rhi::SamplerDesc samplerDesc) {
+std::shared_ptr<org::Sampler> org::Sampler::CreateSampler(rhi::SamplerDesc samplerDesc) {
 	auto it = m_samplerCache.find(samplerDesc);
 	if (it != m_samplerCache.end()) {
 		return it->second;
 	}
-	auto sampler = std::shared_ptr<Sampler>(new Sampler(samplerDesc));
+	auto sampler = std::shared_ptr<org::Sampler>(new org::Sampler(samplerDesc));
 	m_samplerCache.emplace(samplerDesc, sampler);
 	return sampler;
 }
 
-std::shared_ptr<Sampler> Sampler::CreateCpuOnlySampler(rhi::SamplerDesc samplerDesc) {
-	return std::shared_ptr<Sampler>(new Sampler(samplerDesc));
+std::shared_ptr<org::Sampler> org::Sampler::CreateCpuOnlySampler(rhi::SamplerDesc samplerDesc) {
+	return std::shared_ptr<org::Sampler>(new org::Sampler(samplerDesc));
 }
 
-UINT Sampler::GetDescriptorIndex(org::runtime::IDescriptorService& descriptorService) const {
+UINT org::Sampler::GetDescriptorIndex(org::runtime::IDescriptorService& descriptorService) const {
 	if (m_hasDescriptorIndex.load(std::memory_order_acquire) &&
 		m_descriptorOwner.load(std::memory_order_acquire) == &descriptorService) {
 		return m_index;
@@ -38,7 +38,7 @@ UINT Sampler::GetDescriptorIndex(org::runtime::IDescriptorService& descriptorSer
 	return m_index;
 }
 
-std::shared_ptr<Sampler> Sampler::GetDefaultSampler() {
+std::shared_ptr<org::Sampler> org::Sampler::GetDefaultSampler() {
 	if (m_defaultSampler == nullptr) {
 		rhi::SamplerDesc samplerDesc = {};
 		samplerDesc.minFilter = rhi::Filter::Linear;
@@ -60,12 +60,12 @@ std::shared_ptr<Sampler> Sampler::GetDefaultSampler() {
 		// but have no active GPU descriptor service. Keep the sampler description
 		// CPU-only; GetDescriptorIndex(service) materializes it lazily if the asset is
 		// subsequently used by a renderer with an active descriptor service.
-		m_defaultSampler = Sampler::CreateSampler(samplerDesc);
+		m_defaultSampler = org::Sampler::CreateSampler(samplerDesc);
 	}
 	return m_defaultSampler;
 }
 
-std::shared_ptr<Sampler> Sampler::GetDefaultShadowSampler() {
+std::shared_ptr<org::Sampler> org::Sampler::GetDefaultShadowSampler() {
 	if (m_defaultShadowSampler == nullptr) {
 		rhi::SamplerDesc samplerDesc = {};
 		samplerDesc.minFilter = rhi::Filter::Linear;
@@ -83,7 +83,7 @@ std::shared_ptr<Sampler> Sampler::GetDefaultShadowSampler() {
 		samplerDesc.reduction = rhi::ReductionMode::Comparison;
 		samplerDesc.borderPreset = rhi::BorderPreset::OpaqueWhite;
 
-		m_defaultShadowSampler = Sampler::CreateSampler(samplerDesc);
+		m_defaultShadowSampler = org::Sampler::CreateSampler(samplerDesc);
 	}
 	return m_defaultShadowSampler;
 }

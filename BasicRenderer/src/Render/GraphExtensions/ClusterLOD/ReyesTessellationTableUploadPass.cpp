@@ -6,9 +6,9 @@
 #include "OpenRenderGraph/OpenRenderGraph.h"
 
 ReyesTessellationTableUploadPass::ReyesTessellationTableUploadPass(
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> tessTableVerticesBuffer,
-    std::shared_ptr<Buffer> tessTableTrianglesBuffer)
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> tessTableTrianglesBuffer)
     : m_tessTableConfigsBuffer(std::move(tessTableConfigsBuffer))
     , m_tessTableVerticesBuffer(std::move(tessTableVerticesBuffer))
     , m_tessTableTrianglesBuffer(std::move(tessTableTrianglesBuffer)) {
@@ -23,13 +23,13 @@ void ReyesTessellationTableUploadPass::Declare(org::PassBuilder& builder)
         m_tessTableTrianglesBuffer);
 }
 
-void ReyesTessellationTableUploadPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesTessellationTableUploadPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
 
     const auto& tableData = GetReyesTessellationTableData();
     const auto uploadOnce = [this](size_t index, const auto& bytes,
-        const std::shared_ptr<Buffer>& target) {
+        const std::shared_ptr<org::Buffer>& target) {
         if (!target) return;
         const auto generation = target->GetBackingGeneration();
         if (m_uploadedGenerations[index] == generation) return;

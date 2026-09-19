@@ -10,9 +10,9 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 RasterBucketBlockScanPass::RasterBucketBlockScanPass(
-    std::shared_ptr<Buffer> histogramBuffer,
-    std::shared_ptr<Buffer> offsetsBuffer,
-    std::shared_ptr<Buffer> blockSumsBuffer,
+    std::shared_ptr<org::Buffer> histogramBuffer,
+    std::shared_ptr<org::Buffer> offsetsBuffer,
+    std::shared_ptr<org::Buffer> blockSumsBuffer,
     bool runWhenComputeSWRasterEnabledOnly)
     : m_histogramBuffer(std::move(histogramBuffer))
     , m_offsetsBuffer(std::move(offsetsBuffer))
@@ -54,7 +54,7 @@ br::render::PreparedComputeDispatch RasterBucketBlockScanPass::Prepare(
     return data;
 }
 
-void RasterBucketBlockScanPass::Update(const UpdateExecutionContext& executionContext) {
+void RasterBucketBlockScanPass::Update(const org::UpdateExecutionContext& executionContext) {
     m_enabled = !m_runWhenComputeSWRasterEnabledOnly ||
         CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)());
     if (!m_enabled) {

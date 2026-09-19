@@ -8,10 +8,10 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITDepthWarpRootConstants.h"
 
 AVBOITOccupancyRemapPass::AVBOITOccupancyRemapPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<PixelBuffer> occupancyTexture,
-    std::shared_ptr<PixelBuffer> occupancySliceMaskTexture,
-    std::shared_ptr<Buffer> depthWarpLUTBuffer)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::PixelBuffer> occupancyTexture,
+    std::shared_ptr<org::PixelBuffer> occupancySliceMaskTexture,
+    std::shared_ptr<org::Buffer> depthWarpLUTBuffer)
     : m_configBuffer(std::move(configBuffer))
     , m_occupancyTexture(std::move(occupancyTexture))
     , m_occupancySliceMaskTexture(std::move(occupancySliceMaskTexture))

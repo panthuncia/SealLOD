@@ -8,10 +8,10 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITResolveRootConstants.h"
 
 AVBOITResolvePass::AVBOITResolvePass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<PixelBuffer> accumulationTexture,
-    std::shared_ptr<PixelBuffer> normalizationTexture,
-    std::shared_ptr<PixelBuffer> shadingExtinctionTexture)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::PixelBuffer> accumulationTexture,
+    std::shared_ptr<org::PixelBuffer> normalizationTexture,
+    std::shared_ptr<org::PixelBuffer> shadingExtinctionTexture)
     : m_configBuffer(std::move(configBuffer))
     , m_accumulationTexture(std::move(accumulationTexture))
     , m_normalizationTexture(std::move(normalizationTexture))

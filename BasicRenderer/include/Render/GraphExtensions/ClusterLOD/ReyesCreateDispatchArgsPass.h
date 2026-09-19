@@ -7,7 +7,6 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
 struct ReyesCreateDispatchArgsBindings {
     org::ResourceBindingToken sourceCounter, indirectArgs, sourceBaseCounter;
@@ -20,9 +19,9 @@ class ReyesCreateDispatchArgsPass final : public org::TypedRenderGraphPass<Reyes
     br::render::PreparedComputeDispatch, ReyesCreateDispatchArgsBindings> {
 public:
     ReyesCreateDispatchArgsPass(
-        std::shared_ptr<Buffer> sourceCounterBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer,
-        std::shared_ptr<Buffer> sourceBaseCounterBuffer = nullptr,
+        std::shared_ptr<org::Buffer> sourceCounterBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer,
+        std::shared_ptr<org::Buffer> sourceBaseCounterBuffer = nullptr,
         uint32_t threadsPerGroup = 64u,
         uint32_t maxWorkItemCount = 0xFFFFFFFFu);
 
@@ -33,14 +32,14 @@ public:
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesCreateDispatchArgsBindings&,
         const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     void ShutdownPass();
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<Buffer> m_sourceCounterBuffer;
-    std::shared_ptr<Buffer> m_indirectArgsBuffer;
-    std::shared_ptr<Buffer> m_sourceBaseCounterBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_sourceCounterBuffer;
+    std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_sourceBaseCounterBuffer;
     uint32_t m_threadsPerGroup = 64u;
     uint32_t m_maxWorkItemCount = 0xFFFFFFFFu;
 };

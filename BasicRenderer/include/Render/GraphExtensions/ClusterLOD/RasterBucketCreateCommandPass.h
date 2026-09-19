@@ -6,7 +6,6 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
 struct RasterBucketCreateCommandBindings {
     org::ResourceBindingToken visibleCount, indirectCommand, replayState, nodeInputs;
@@ -20,10 +19,10 @@ class RasterBucketCreateCommandPass : public org::TypedRenderGraphPass<RasterBuc
     br::render::PreparedComputeDispatch, RasterBucketCreateCommandBindings> {
 public:
     RasterBucketCreateCommandPass(
-        std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-        std::shared_ptr<Buffer> histogramIndirectCommand,
-        std::shared_ptr<Buffer> occlusionReplayStateBuffer,
-        std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
+        std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+        std::shared_ptr<org::Buffer> histogramIndirectCommand,
+        std::shared_ptr<org::Buffer> occlusionReplayStateBuffer,
+        std::shared_ptr<org::Buffer> occlusionNodeGpuInputsBuffer,
         uint32_t visibleClustersCapacity,
         bool runWhenComputeSWRasterEnabledOnly = false,
         bool patchReplayNodeInputs = false);
@@ -34,14 +33,14 @@ public:
     static void Record(const RasterBucketCreateCommandBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& context) {
         br::render::RecordPreparedComputeDispatch(data, context);
     }
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<Buffer> m_visibleClustersCounterBuffer;
-    std::shared_ptr<Buffer> m_histogramIndirectCommand;
-    std::shared_ptr<Buffer> m_occlusionReplayStateBuffer;
-    std::shared_ptr<Buffer> m_occlusionNodeGpuInputsBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
+    std::shared_ptr<org::Buffer> m_histogramIndirectCommand;
+    std::shared_ptr<org::Buffer> m_occlusionReplayStateBuffer;
+    std::shared_ptr<org::Buffer> m_occlusionNodeGpuInputsBuffer;
     uint32_t m_visibleClustersCapacity = 0;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     bool m_patchReplayNodeInputs = false;

@@ -52,7 +52,7 @@ struct CacheData {
     BinaryFormat binaryFormat = BinaryFormat::Dxil;
     ArtifactKind artifactKind = ArtifactKind::Bundle;
     std::vector<CachedShaderBlob> blobs;
-    PipelineResources resourceDescriptorSlots;
+    org::PipelineResources resourceDescriptorSlots;
     uint64_t resourceIDsHash = 0;
 };
 

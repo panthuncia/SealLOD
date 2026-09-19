@@ -13,10 +13,10 @@
 #include "../shaders/PerPassRootConstants/clodReyesRasterWorkBucketRootConstants.h"
 
 ReyesRasterWorkHistogramPass::ReyesRasterWorkHistogramPass(
-    std::shared_ptr<Buffer> rasterWorkBuffer,
-    std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> histogramIndirectCommand,
-    std::shared_ptr<Buffer> histogramBuffer)
+    std::shared_ptr<org::Buffer> rasterWorkBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> histogramIndirectCommand,
+    std::shared_ptr<org::Buffer> histogramBuffer)
     : m_rasterWorkBuffer(std::move(rasterWorkBuffer))
     , m_rasterWorkCounterBuffer(std::move(rasterWorkCounterBuffer))
     , m_histogramIndirectCommand(std::move(histogramIndirectCommand))
@@ -53,7 +53,7 @@ ReyesHistogramFrameData ReyesRasterWorkHistogramPass::Prepare(
     ReyesHistogramFrameData data{};
     const auto numRasterBuckets = bindings.numBuckets;
     if (numRasterBuckets == 0u) return data;
-    const auto capture = [&](auto& dispatch, const PipelineState& pipeline) {
+    const auto capture = [&](auto& dispatch, const org::PipelineState& pipeline) {
         dispatch.resourceHeap = context.textureDescriptorHeap.GetHandle();
         dispatch.samplerHeap = context.samplerDescriptorHeap.GetHandle();
         auto binding = preparation.CaptureProgramBinding(pipeline);
@@ -90,7 +90,7 @@ void ReyesRasterWorkHistogramPass::Record(const ReyesRasterWorkHistogramBindings
     br::render::RecordPreparedComputeIndirect(data.histogram, recording);
 }
 
-void ReyesRasterWorkHistogramPass::Update(const UpdateExecutionContext& executionContext) {
+void ReyesRasterWorkHistogramPass::Update(const org::UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     const auto numRasterBuckets = context.preparedRasterBucketCount;
@@ -104,8 +104,8 @@ void ReyesRasterWorkHistogramPass::Update(const UpdateExecutionContext& executio
 void ReyesRasterWorkHistogramPass::CreatePipelines(
     rhi::Device device,
     rhi::PipelineLayoutHandle globalRootSignature,
-    PipelineState& outHistogramPipeline,
-    PipelineState& outClearPipeline)
+    org::PipelineState& outHistogramPipeline,
+    org::PipelineState& outClearPipeline)
 {
     (void)device;
     outHistogramPipeline = PSOManager::GetInstance().MakeComputePipeline(

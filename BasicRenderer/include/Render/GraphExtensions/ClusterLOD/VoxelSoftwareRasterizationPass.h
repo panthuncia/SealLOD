@@ -14,9 +14,7 @@
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 
 struct VoxelRasterFrameData {
     struct Step {
@@ -38,56 +36,56 @@ struct VoxelRasterBindings {
 
 class VoxelSoftwareRasterizationPass
     : public org::TypedRenderGraphPass<VoxelSoftwareRasterizationPass, VoxelRasterFrameData, VoxelRasterBindings>,
-      public IDynamicDeclaredResources {
+      public org::IDynamicDeclaredResources {
 public:
     VoxelSoftwareRasterizationPass(
-        std::shared_ptr<Buffer> visibleClustersBuffer,
-        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> rigidVoxelWorkRecordsBuffer,
-        std::shared_ptr<Buffer> rigidVoxelWorkCounterBuffer,
-        std::shared_ptr<Buffer> skinnedVoxelWorkRecordsBuffer,
-        std::shared_ptr<Buffer> skinnedVoxelWorkCounterBuffer,
-        std::shared_ptr<Buffer> rigidVoxelIndirectArgsBuffer,
-        std::shared_ptr<Buffer> skinnedVoxelIndirectArgsBuffer,
-        std::shared_ptr<Buffer> telemetryBuffer,
+        std::shared_ptr<org::Buffer> visibleClustersBuffer,
+        std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> rigidVoxelWorkRecordsBuffer,
+        std::shared_ptr<org::Buffer> rigidVoxelWorkCounterBuffer,
+        std::shared_ptr<org::Buffer> skinnedVoxelWorkRecordsBuffer,
+        std::shared_ptr<org::Buffer> skinnedVoxelWorkCounterBuffer,
+        std::shared_ptr<org::Buffer> rigidVoxelIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> skinnedVoxelIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> telemetryBuffer,
         CLodRasterOutputKind outputKind,
-        std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-        std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-        std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
-        std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-        std::shared_ptr<ResourceGroup> slabResourceGroup,
+        std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+        std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+        std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture,
+        std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+        std::shared_ptr<org::ResourceGroup> slabResourceGroup,
         uint32_t voxelWorkCapacity);
     ~VoxelSoftwareRasterizationPass() override;
 
     VoxelRasterBindings Declare(org::PassBuilder& builder);
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
     VoxelRasterFrameData Prepare(const VoxelRasterBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const VoxelRasterBindings&, const VoxelRasterFrameData&, org::PassRecordContext&);
 
 private:
-    PipelineState m_buildArgsPso;
-    PipelineState m_rigidRasterPso;
-    PipelineState m_skinnedRasterPso;
-    PipelineState m_rigidTelemetryRasterPso;
-    PipelineState m_skinnedTelemetryRasterPso;
+    org::PipelineState m_buildArgsPso;
+    org::PipelineState m_rigidRasterPso;
+    org::PipelineState m_skinnedRasterPso;
+    org::PipelineState m_rigidTelemetryRasterPso;
+    org::PipelineState m_skinnedTelemetryRasterPso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_dispatchCommandSignature;
-    std::shared_ptr<Buffer> m_visibleClustersBuffer;
-    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
-    std::array<std::shared_ptr<Buffer>, 2> m_voxelWorkRecordsBuffers;
-    std::array<std::shared_ptr<Buffer>, 2> m_voxelWorkCounterBuffers;
-    std::array<std::shared_ptr<Buffer>, 2> m_voxelIndirectArgsBuffers;
-    std::shared_ptr<Buffer> m_telemetryBuffer;
+    std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_visibleClusterTransformIndicesBuffer;
+    std::array<std::shared_ptr<org::Buffer>, 2> m_voxelWorkRecordsBuffers;
+    std::array<std::shared_ptr<org::Buffer>, 2> m_voxelWorkCounterBuffers;
+    std::array<std::shared_ptr<org::Buffer>, 2> m_voxelIndirectArgsBuffers;
+    std::shared_ptr<org::Buffer> m_telemetryBuffer;
     // The per-view table the shader reads; it embeds the visibility UAVs, so
     // it is published during preparation from the frame's bindings.
     org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Voxel Raster View Raster Info"};
-    std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
-    std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPageTableTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowDynamicPagesTexture;
+    std::shared_ptr<org::Buffer> m_virtualShadowClipmapInfoBuffer;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
-    std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
     uint32_t m_voxelWorkCapacity = 0u;
     bool m_declaredResourcesChanged = true;
 };

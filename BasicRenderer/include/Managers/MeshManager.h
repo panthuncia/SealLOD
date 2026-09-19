@@ -28,11 +28,8 @@ class SkeletonManager;
 class MeshInstance;
 class Material;
 namespace org { class DynamicBuffer; }
-using org::DynamicBuffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 namespace org { class BufferView; }
-using org::BufferView;
 class ViewManager;
 class ICLodGeometryStorage;
 class MeshManagerCLodGeometryStorage;
@@ -41,7 +38,7 @@ namespace br::render { struct PublishedRendererState; class VersionedGpuBufferBa
 namespace org::runtime { class IUploadService; }
 class PublishedStateResourceResolver;
 
-class MeshManager : public IResourceProvider {
+class MeshManager : public org::IResourceProvider {
 public:
 	struct CLodActiveGroupRange {
 		uint32_t groupsBase = 0;
@@ -269,53 +266,53 @@ public:
 	// the caller can compute the estimated page count before dispatching I/O.
 	CLodGroupStreamingInfo GetCLodGroupStreamingInfo(uint32_t groupGlobalIndex) const;
 
-	void UpdatePerMeshBuffer(std::unique_ptr<BufferView>& view, PerMeshCB& data);
-	void UpdatePerMeshInstanceBuffer(std::unique_ptr<BufferView>& view, PerMeshInstanceCB& data);
-	std::unique_ptr<BufferView> AllocatePerMeshOverrideBuffer(const PerMeshCB& data);
-	void ReleasePerMeshOverrideBuffer(std::unique_ptr<BufferView>& view);
+	void UpdatePerMeshBuffer(std::unique_ptr<org::BufferView>& view, PerMeshCB& data);
+	void UpdatePerMeshInstanceBuffer(std::unique_ptr<org::BufferView>& view, PerMeshInstanceCB& data);
+	std::unique_ptr<org::BufferView> AllocatePerMeshOverrideBuffer(const PerMeshCB& data);
+	void ReleasePerMeshOverrideBuffer(std::unique_ptr<org::BufferView>& view);
 	void SetViewManager(ViewManager* viewManager) { m_pViewManager = viewManager; }
 
 	// Access the CLod page pool (may be null if no CLod meshes loaded).
 	PagePool* GetCLodPagePool() const { return m_clodPagePool.get(); }
-	std::shared_ptr<ResourceGroup> GetCLodSlabResourceGroup() const {
+	std::shared_ptr<org::ResourceGroup> GetCLodSlabResourceGroup() const {
 		return m_clodPagePool ? m_clodPagePool->GetSlabResourceGroup() : nullptr;
 	}
 	void SetCLodStreamingUploadFunction(PagePool::UploadFn fn);
 	void SetCLodStreamingWakeFunction(std::function<void()> fn);
 	uint64_t GetActiveMeshletCount() const { return m_activeMeshletCount; }
 
-	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-	std::vector<ResourceIdentifier> GetSupportedKeys() override;
-	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
-	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
+	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+	std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
 
 private:
 	MeshManager();
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
 
 	// Base meshes
-	std::shared_ptr<DynamicBuffer> m_perMeshBuffers;
+	std::shared_ptr<org::DynamicBuffer> m_perMeshBuffers;
 
 	// mesh instances
-	std::shared_ptr<DynamicBuffer> m_perMeshInstanceBuffers;
+	std::shared_ptr<org::DynamicBuffer> m_perMeshInstanceBuffers;
 
-	std::shared_ptr<DynamicBuffer> m_perMeshInstanceClodOffsets;
-	std::shared_ptr<DynamicBuffer> m_clodSharedGroupChunks;
-	std::shared_ptr<DynamicBuffer> m_clodMeshMetadata;
-	std::shared_ptr<DynamicBuffer> m_clodHierarchyLevelInfos;
-	std::shared_ptr<DynamicBuffer> m_clusterLODGroups;
-	std::shared_ptr<DynamicBuffer> m_clusterLODSegments;
+	std::shared_ptr<org::DynamicBuffer> m_perMeshInstanceClodOffsets;
+	std::shared_ptr<org::DynamicBuffer> m_clodSharedGroupChunks;
+	std::shared_ptr<org::DynamicBuffer> m_clodMeshMetadata;
+	std::shared_ptr<org::DynamicBuffer> m_clodHierarchyLevelInfos;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODGroups;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODSegments;
 
 	//std::shared_ptr<DynamicBuffer> m_clusterLODMeshlets;
 	//std::shared_ptr<DynamicBuffer> m_clusterLODMeshletBounds;
-	std::shared_ptr<DynamicBuffer> m_clusterLODNodes;
-	std::shared_ptr<DynamicBuffer> m_clusterLODNodeSkinningInfos;
-	std::shared_ptr<DynamicBuffer> m_clusterLODNodeBoneIndices;
-	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyTransforms;
-	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyInstances;
-	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyBoneRemaps;
-	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyBoneRemapIndices;
-	std::shared_ptr<DynamicBuffer> m_clodGroupPageMap;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODNodes;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODNodeSkinningInfos;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODNodeBoneIndices;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyTransforms;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyInstances;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyBoneRemaps;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyBoneRemapIndices;
+	std::shared_ptr<org::DynamicBuffer> m_clodGroupPageMap;
 	uint64_t m_activeMeshletCount = 0;
 
 	struct PreparedCLodContainer {
@@ -348,12 +345,12 @@ private:
 		std::unique_ptr<std::atomic<uint8_t>[]> mappedPageWarmStates;
 		uint32_t mappedPageWarmStateCount = 0u;
 		std::vector<ClusterLODRuntimeSummary::GroupChunkHint> groupChunkHints;
-		std::unique_ptr<BufferView> ownedMeshMetadataView;
+		std::unique_ptr<org::BufferView> ownedMeshMetadataView;
 		uint32_t clodMeshMetadataIndex = 0;
 		uint32_t groupsBase = 0;
 		uint32_t groupCount = 0;
-		std::unique_ptr<BufferView> ownedGroupChunksView;
-		BufferView* groupChunksView = nullptr;
+		std::unique_ptr<org::BufferView> ownedGroupChunksView;
+		org::BufferView* groupChunksView = nullptr;
 		std::vector<ClusterLODGroupChunk> baselineGroupChunks;
 		std::vector<uint8_t> groupResidentFlags;
 		std::vector<ResidentGroupAllocations> residentGroupAllocations;
@@ -376,7 +373,7 @@ private:
 		std::vector<ClusterLODRuntimeSummary::GroupRange> coarsestRanges;
 
 		// GroupPageMap buffer view for this mesh's page map entries.
-		std::unique_ptr<BufferView> ownedPageMapView;
+		std::unique_ptr<org::BufferView> ownedPageMapView;
 		uint32_t pageMapGlobalBase = 0; // global offset into GroupPageMap buffer
 		uint32_t totalPageMapEntries = 0;
 		std::vector<GroupPageMapEntry> pageMapEntriesCPU; // CPU mirror for UpdateView
@@ -403,8 +400,8 @@ private:
 	// this lock; they consume immutable geometry-buffer versions from a frame snapshot.
 	mutable std::recursive_mutex m_staticTemplatePublicationMutex;
 	struct GraphBufferBinding {
-		ResourceIdentifier identifier;
-		std::shared_ptr<DynamicBuffer> buffer;
+		org::ResourceIdentifier identifier;
+		std::shared_ptr<org::DynamicBuffer> buffer;
 		br::render::ArtifactKey key;
 		std::uint64_t catalogVariant = 0;
 		std::uint32_t elementStride = 0;
@@ -412,8 +409,8 @@ private:
 		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
 	};
 	std::vector<GraphBufferBinding> m_graphBufferBindings;
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<PublishedStateResourceResolver>,
-		ResourceIdentifier::Hasher> m_graphBufferResolvers;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<PublishedStateResourceResolver>,
+		org::ResourceIdentifier::Hasher> m_graphBufferResolvers;
 	std::shared_ptr<org::runtime::IUploadService> m_geometryUploadService;
 	mutable std::mutex m_geometryBufferGraphMutex;
 	std::atomic_bool m_geometryBufferGraphDirty{ true };

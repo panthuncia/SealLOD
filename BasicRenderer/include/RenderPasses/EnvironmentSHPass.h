@@ -12,7 +12,7 @@
 
 #include <vector>
 
-class EnvironmentSHPass : public org::TypedRenderGraphPass<EnvironmentSHPass, br::render::PreparedComputeDispatchSequence>, public IDynamicDeclaredResources {
+class EnvironmentSHPass : public org::TypedRenderGraphPass<EnvironmentSHPass, br::render::PreparedComputeDispatchSequence>, public org::IDynamicDeclaredResources {
 public:
 	EnvironmentSHPass() = default;
 
@@ -53,7 +53,7 @@ public:
 
 
 
-    void Update(const UpdateExecutionContext& context) override {
+    void Update(const org::UpdateExecutionContext& context) override {
         const auto* input = context.hostData->Get<UpdateContext>();
         m_work = input->environmentWork.sphericalHarmonics;
         auto pending = m_work.Pending();
@@ -113,5 +113,5 @@ private:
 	}
 
 	unsigned int m_samplerIndex = 0;
-	PipelineState m_PSO;
+	org::PipelineState m_PSO;
 };

@@ -78,7 +78,7 @@ public:
         // every declared slot would make the recipe depend on all of them.
     }
 
-    void Register(const PipelineState& pipeline)
+    void Register(const org::PipelineState& pipeline)
     {
         const auto payload = pipeline.GetPayload();
         if (!payload || !payload->pso)
@@ -88,7 +88,7 @@ public:
         m_programs.emplace(handle, std::move(captured));
     }
 
-    uint32_t SRVIndex(const std::shared_ptr<Resource>& resource,
+    uint32_t SRVIndex(const std::shared_ptr<org::Resource>& resource,
         uint32_t variant = UINT32_MAX, uint32_t mip = 0,
         uint32_t slice = 0) const
     {
@@ -96,7 +96,7 @@ public:
             variant, mip, slice});
     }
 
-    uint32_t SRVIndex(Resource* resource,
+    uint32_t SRVIndex(org::Resource* resource,
         uint32_t variant = UINT32_MAX, uint32_t mip = 0,
         uint32_t slice = 0) const
     {
@@ -104,7 +104,7 @@ public:
             variant, mip, slice});
     }
 
-    uint32_t UAVIndex(const std::shared_ptr<Resource>& resource,
+    uint32_t UAVIndex(const std::shared_ptr<org::Resource>& resource,
         uint32_t variant = UINT32_MAX, uint32_t mip = 0,
         uint32_t slice = 0) const
     {
@@ -133,7 +133,7 @@ public:
             found->second.program, found->second.descriptorIndices});
     }
 
-    void BindDescriptorIndices(const PipelineResources& resources)
+    void BindDescriptorIndices(const org::PipelineResources& resources)
     {
         m_builder.Commands().emplace_back(br::render::PreparedComputeDescriptorIndices{
             m_preparation.captureDescriptorIndices(resources)});
@@ -216,13 +216,13 @@ public:
     }
 
 private:
-    uint32_t ViewIndex(const std::shared_ptr<Resource>& resource,
+    uint32_t ViewIndex(const std::shared_ptr<org::Resource>& resource,
         org::BindlessViewRequest request) const
     {
         return ViewIndex(resource.get(), request);
     }
 
-    uint32_t ViewIndex(Resource* resource,
+    uint32_t ViewIndex(org::Resource* resource,
         org::BindlessViewRequest request) const
     {
         if (!resource) throw std::invalid_argument(
@@ -302,38 +302,38 @@ constexpr uint32_t kReplaySourceClusters = 1u;
 HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::string stablePassIdentifier,
     HierarchicalCullingPassInputs inputs,
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> voxelRasterWorkBuffer,
-    std::shared_ptr<Buffer> voxelRasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> skinnedVoxelRasterWorkBuffer,
-    std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> swVisibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> voxelRasterWorkBuffer,
+    std::shared_ptr<org::Buffer> voxelRasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> skinnedVoxelRasterWorkBuffer,
+    std::shared_ptr<org::Buffer> skinnedVoxelRasterWorkCounterBuffer,
     uint32_t voxelRasterWorkCapacity,
-    std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
-    std::shared_ptr<Buffer> pageJobVisibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> histogramIndirectCommand,
-    std::shared_ptr<Buffer> workGraphTelemetryBuffer,
-    std::shared_ptr<Buffer> occlusionReplayBuffer,
-    std::shared_ptr<Buffer> occlusionReplayStateBuffer,
-    std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
-    std::shared_ptr<Buffer> viewRasterInfoBuffer,
-    std::shared_ptr<PixelBuffer> shadowDirtyHierarchyTexture,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
-    std::shared_ptr<Buffer> phase1VisibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> swWriteBaseCounterBuffer,
-    std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidatesBuffer,
-    std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
-    std::shared_ptr<Buffer> shadowInvalidationCountBuffer,
-    std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
-    std::shared_ptr<PixelBuffer> shadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
-    std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer,
-    std::shared_ptr<Buffer> shadowReceiverSubpageMaskBuffer,
-    std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture,
-    std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer)
+    std::shared_ptr<org::Buffer> pageJobVisibleClustersBuffer,
+    std::shared_ptr<org::Buffer> pageJobVisibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> pageJobVisibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> histogramIndirectCommand,
+    std::shared_ptr<org::Buffer> workGraphTelemetryBuffer,
+    std::shared_ptr<org::Buffer> occlusionReplayBuffer,
+    std::shared_ptr<org::Buffer> occlusionReplayStateBuffer,
+    std::shared_ptr<org::Buffer> occlusionNodeGpuInputsBuffer,
+    std::shared_ptr<org::Buffer> viewRasterInfoBuffer,
+    std::shared_ptr<org::PixelBuffer> shadowDirtyHierarchyTexture,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::Buffer> phase1VisibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> swWriteBaseCounterBuffer,
+    std::shared_ptr<org::Buffer> shadowPredictiveInvalidationCandidatesBuffer,
+    std::shared_ptr<org::Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
+    std::shared_ptr<org::Buffer> shadowInvalidationCountBuffer,
+    std::shared_ptr<org::Buffer> shadowInvalidatedInstancesBitsetBuffer,
+    std::shared_ptr<org::PixelBuffer> shadowPageTableTexture,
+    std::shared_ptr<org::PixelBuffer> shadowPhysicalPagesTexture,
+    std::shared_ptr<org::Buffer> shadowActiveBlockMetadataBuffer,
+    std::shared_ptr<org::Buffer> shadowReceiverSubpageMaskBuffer,
+    std::shared_ptr<org::PixelBuffer> shadowDynamicPhysicalPagesTexture,
+    std::shared_ptr<org::Buffer> shadowDynamicActiveBlockMetadataBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_visibleClustersCounterBuffer(std::move(visibleClustersCounterBuffer))
@@ -585,8 +585,8 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         pureComputeDefines,
         "CLod.PureCompute.DenseClusterCull");
 
-    const ResourceIdentifier voxelDescriptorId{ m_voxelRasterQueueDescriptorResourceId };
-    auto validateVoxelVariant = [&](const char* pipelineName, const PipelineState& pipeline, bool expectsVoxelDescriptor) {
+    const org::ResourceIdentifier voxelDescriptorId{ m_voxelRasterQueueDescriptorResourceId };
+    auto validateVoxelVariant = [&](const char* pipelineName, const org::PipelineState& pipeline, bool expectsVoxelDescriptor) {
         const auto& resources = pipeline.GetResourceDescriptorSlots();
         const bool requestsVoxelDescriptor = std::ranges::find(
             resources.mandatoryResourceDescriptorSlots,
@@ -621,12 +621,12 @@ HierarchicalDispatchCullingPass::~HierarchicalDispatchCullingPass() = default;
 
 void HierarchicalDispatchCullingPass::Declare(org::PassBuilder& builder)
 {
-    const ResourceState computeReadState{
+    const org::ResourceState computeReadState{
         rhi::ResourceAccessType::ShaderResource,
         rhi::ResourceLayout::ShaderResource,
         rhi::ResourceSyncState::ComputeShading
     };
-    const ResourceState indirectState{
+    const org::ResourceState indirectState{
         rhi::ResourceAccessType::IndirectArgument,
         rhi::ResourceLayout::GenericRead,
         rhi::ResourceSyncState::ExecuteIndirect
@@ -760,7 +760,7 @@ void HierarchicalDispatchCullingPass::Declare(org::PassBuilder& builder)
         // This read both enforces SimulateInstancesPhase2 -> shadow traversal
         // ordering and limits caching to placements accepted by DynamicWind.
         m_dynamicWindVisibleMembershipBuffer = m_resourceRegistryView
-            ->RequestPtr<GloballyIndexedResource>("Builtin::DynamicWind::VisibleSkeletonMembership");
+            ->RequestPtr<org::GloballyIndexedResource>("Builtin::DynamicWind::VisibleSkeletonMembership");
         builder.WithShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
     }
 
@@ -852,7 +852,7 @@ void HierarchicalDispatchCullingPass::Initialize()
 }
 
 template<class EmissionData, class CommandSink>
-PassReturn HierarchicalDispatchCullingPass::EmitCommands(
+org::PassReturn HierarchicalDispatchCullingPass::EmitCommands(
     const EmissionData& inputs, CommandSink& commandList, const HierarchicalDispatchCullingCommandConfiguration& configuration)
 {
     commandList.BindLayout(configuration.layout);
@@ -958,7 +958,7 @@ PassReturn HierarchicalDispatchCullingPass::EmitCommands(
     }
     sharedRootConstants[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] =
         inputs.m_shadowDirtyHierarchyTexture
-            ? commandList.SRVIndex(inputs.m_shadowDirtyHierarchyTexture, static_cast<uint32_t>(SRVViewType::Texture2DArrayFull))
+            ? commandList.SRVIndex(inputs.m_shadowDirtyHierarchyTexture, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull))
             : 0u;
     sharedRootConstants[CLOD_WG_SHADOW_INVALIDATED_INSTANCES_DESCRIPTOR_INDEX] =
         inputs.m_shadowInvalidatedInstancesBitsetBuffer
@@ -975,7 +975,7 @@ PassReturn HierarchicalDispatchCullingPass::EmitCommands(
     sharedRootConstants[CLOD_WG_PAGE_JOB_FLAGS] = configuration.pageJobFlags;
     sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX] =
         inputs.m_shadowPageTableTexture
-            ? commandList.UAVIndex(inputs.m_shadowPageTableTexture, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull))
+            ? commandList.UAVIndex(inputs.m_shadowPageTableTexture, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull))
             : 0u;
     sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX] =
         inputs.m_shadowPhysicalPagesTexture
@@ -1592,7 +1592,7 @@ br::render::CapturedHierarchicalDispatchCullingInputs HierarchicalDispatchCullin
     BT_ZONE_SCOPE("BR.CullingPublication.CaptureInputs");
     br::render::CapturedHierarchicalDispatchCullingInputs result;
     std::unordered_map<uint64_t,br::render::CapturedHierarchicalDispatchCullingInputs::EmissionBuffer> resources;
-    const auto capture = [&](const Resource* resource) -> br::render::CapturedHierarchicalDispatchCullingInputs::EmissionBuffer {
+    const auto capture = [&](const org::Resource* resource) -> br::render::CapturedHierarchicalDispatchCullingInputs::EmissionBuffer {
         if (!resource) return {};
         const auto id = resource->GetGlobalResourceID();
         if (const auto found = resources.find(id); found != resources.end()) return found->second;
@@ -1864,7 +1864,7 @@ void HierarchicalDispatchCullingPass::RecordWithObjectConstants(const Hierarchic
     br::render::RecordPreparedComputeCommands(recipe.suffix, recording, nullptr, {}, invocation.constants);
 }
 
-void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& executionContext)
+void HierarchicalDispatchCullingPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     ZoneScopedN("HierarchicalDispatchCullingPass::Update");
 
@@ -2037,7 +2037,7 @@ bool HierarchicalDispatchCullingPass::DeclaredResourcesChanged() const
     return m_declaredResourcesChanged;
 }
 
-std::shared_ptr<Resource> HierarchicalDispatchCullingPass::ProvideResource(ResourceIdentifier const& key)
+std::shared_ptr<org::Resource> HierarchicalDispatchCullingPass::ProvideResource(org::ResourceIdentifier const& key)
 {
     if (key == m_workGraphComputePageJobDescriptorResourceId) {
         return m_workGraphComputePageJobDescriptorsBuffer;
@@ -2050,9 +2050,9 @@ std::shared_ptr<Resource> HierarchicalDispatchCullingPass::ProvideResource(Resou
     return nullptr;
 }
 
-std::vector<ResourceIdentifier> HierarchicalDispatchCullingPass::GetSupportedKeys()
+std::vector<org::ResourceIdentifier> HierarchicalDispatchCullingPass::GetSupportedKeys()
 {
-    std::vector<ResourceIdentifier> resources;
+    std::vector<org::ResourceIdentifier> resources;
     if (m_voxelRasterQueueDescriptorsBuffer) {
         resources.emplace_back(m_voxelRasterQueueDescriptorResourceId);
     }

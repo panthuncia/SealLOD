@@ -17,8 +17,8 @@ class PresentationCopyPass : public org::TypedRenderGraphPass<
 public:
 	PresentationCopyBindings Declare(org::PassBuilder& builder) {
 		return {
-			builder.BindCopySource(ResourceIdentifier{Builtin::PresentationColor}),
-			builder.BindCopyDestination(ResourceIdentifier{Builtin::Backbuffer})};
+			builder.BindCopySource(org::ResourceIdentifier{Builtin::PresentationColor}),
+			builder.BindCopyDestination(org::ResourceIdentifier{Builtin::Backbuffer})};
 	}
 
 	PresentationCopyFrameData Prepare(const PresentationCopyBindings& bindings,
@@ -51,7 +51,7 @@ public:
 class PresentationReadyPass : public org::TypedRenderGraphPass<PresentationReadyPass> {
 public:
 	void Declare(org::PassBuilder& builder) {
-		builder.BindCopySource(ResourceIdentifier{Builtin::PresentationColor});
+		builder.BindCopySource(org::ResourceIdentifier{Builtin::PresentationColor});
 	}
 	static void Record(org::PassRecordContext&) {}
 };

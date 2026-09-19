@@ -8,7 +8,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 
 struct CLodDirectStorageLaunchInputs {
-    std::unique_ptr<IResourceResolver> targetSlabResolver;
+    std::unique_ptr<org::IResourceResolver> targetSlabResolver;
     std::function<std::shared_ptr<const org::PreparedLifecycleEffect>()> reserveLaunch;
 };
 

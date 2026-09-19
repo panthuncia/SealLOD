@@ -62,6 +62,6 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
     uint32_t m_blockSize = 1024;
 };

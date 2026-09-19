@@ -24,11 +24,8 @@
 #include "ShaderBuffers.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 
 enum class HierarchicalCullingWorkGraphMode : uint8_t {
     HardwareOnly,
@@ -80,48 +77,48 @@ struct HierarchicalCullingInvocation {
 class HierarchicalCullingPass
     : public org::TypedRenderGraphPass<HierarchicalCullingPass,
           HierarchicalCullingInvocation, HierarchicalCullingBindings, br::render::PreparedComputeCommandSequence>
-    , public IDynamicDeclaredResources {
+    , public org::IDynamicDeclaredResources {
 public:
     HierarchicalCullingPass(
         std::string stablePassIdentifier,
         HierarchicalCullingPassInputs inputs,
-        std::shared_ptr<Buffer> visibleClustersBuffer,
-        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-        std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
-        std::shared_ptr<Buffer> voxelRasterWorkBuffer,
-        std::shared_ptr<Buffer> voxelRasterWorkCounterBuffer,
-        std::shared_ptr<Buffer> skinnedVoxelRasterWorkBuffer,
-        std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
+        std::shared_ptr<org::Buffer> visibleClustersBuffer,
+        std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+        std::shared_ptr<org::Buffer> swVisibleClustersCounterBuffer,
+        std::shared_ptr<org::Buffer> voxelRasterWorkBuffer,
+        std::shared_ptr<org::Buffer> voxelRasterWorkCounterBuffer,
+        std::shared_ptr<org::Buffer> skinnedVoxelRasterWorkBuffer,
+        std::shared_ptr<org::Buffer> skinnedVoxelRasterWorkCounterBuffer,
         uint32_t voxelRasterWorkCapacity,
-        std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
-        std::shared_ptr<Buffer> pageJobVisibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
-        std::shared_ptr<Buffer> histogramIndirectCommand,
-        std::shared_ptr<Buffer> workGraphTelemetryBuffer,
-        std::shared_ptr<Buffer> occlusionReplayBuffer,
-        std::shared_ptr<Buffer> occlusionReplayStateBuffer,
-        std::shared_ptr<Buffer> occlusionNodeGpuInputsBuffer,
-        std::shared_ptr<Buffer> viewRasterInfoBuffer,
-        std::shared_ptr<PixelBuffer> shadowDirtyHierarchyTexture = nullptr,
-        std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
-        std::shared_ptr<Buffer> phase1VisibleClustersCounterBuffer = nullptr,
-        std::shared_ptr<Buffer> swWriteBaseCounterBuffer = nullptr,
-        std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidatesBuffer = nullptr,
-        std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer = nullptr,
-        std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer = nullptr,
-        std::shared_ptr<PixelBuffer> shadowPageTableTexture = nullptr,
-        std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture = nullptr,
-        std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer = nullptr,
-        std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture = nullptr,
-        std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer = nullptr,
-        std::shared_ptr<Buffer> reyesDiceQueueBuffer = nullptr,
-        std::shared_ptr<Buffer> reyesDiceQueueCounterBuffer = nullptr,
-        std::shared_ptr<Buffer> reyesDiceQueueOverflowBuffer = nullptr,
-        std::shared_ptr<Buffer> reyesTessTableConfigsBuffer = nullptr,
-        std::shared_ptr<Buffer> reyesTessTableVerticesBuffer = nullptr,
-        std::shared_ptr<Buffer> reyesTessTableTrianglesBuffer = nullptr,
-        std::shared_ptr<Buffer> reyesTelemetryBuffer = nullptr,
+        std::shared_ptr<org::Buffer> pageJobVisibleClustersBuffer,
+        std::shared_ptr<org::Buffer> pageJobVisibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> pageJobVisibleClustersCounterBuffer,
+        std::shared_ptr<org::Buffer> histogramIndirectCommand,
+        std::shared_ptr<org::Buffer> workGraphTelemetryBuffer,
+        std::shared_ptr<org::Buffer> occlusionReplayBuffer,
+        std::shared_ptr<org::Buffer> occlusionReplayStateBuffer,
+        std::shared_ptr<org::Buffer> occlusionNodeGpuInputsBuffer,
+        std::shared_ptr<org::Buffer> viewRasterInfoBuffer,
+        std::shared_ptr<org::PixelBuffer> shadowDirtyHierarchyTexture = nullptr,
+        std::shared_ptr<org::ResourceGroup> slabResourceGroup = nullptr,
+        std::shared_ptr<org::Buffer> phase1VisibleClustersCounterBuffer = nullptr,
+        std::shared_ptr<org::Buffer> swWriteBaseCounterBuffer = nullptr,
+        std::shared_ptr<org::Buffer> shadowPredictiveInvalidationCandidatesBuffer = nullptr,
+        std::shared_ptr<org::Buffer> shadowPredictiveInvalidationCandidateCountBuffer = nullptr,
+        std::shared_ptr<org::Buffer> shadowInvalidatedInstancesBitsetBuffer = nullptr,
+        std::shared_ptr<org::PixelBuffer> shadowPageTableTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> shadowPhysicalPagesTexture = nullptr,
+        std::shared_ptr<org::Buffer> shadowActiveBlockMetadataBuffer = nullptr,
+        std::shared_ptr<org::PixelBuffer> shadowDynamicPhysicalPagesTexture = nullptr,
+        std::shared_ptr<org::Buffer> shadowDynamicActiveBlockMetadataBuffer = nullptr,
+        std::shared_ptr<org::Buffer> reyesDiceQueueBuffer = nullptr,
+        std::shared_ptr<org::Buffer> reyesDiceQueueCounterBuffer = nullptr,
+        std::shared_ptr<org::Buffer> reyesDiceQueueOverflowBuffer = nullptr,
+        std::shared_ptr<org::Buffer> reyesTessTableConfigsBuffer = nullptr,
+        std::shared_ptr<org::Buffer> reyesTessTableVerticesBuffer = nullptr,
+        std::shared_ptr<org::Buffer> reyesTessTableTrianglesBuffer = nullptr,
+        std::shared_ptr<org::Buffer> reyesTelemetryBuffer = nullptr,
         uint32_t reyesDiceQueueCapacity = 0u);
     ~HierarchicalCullingPass();
 
@@ -136,10 +133,10 @@ public:
         org::PassRecordContext& recording) {
         br::render::RecordPreparedComputeCommands(recipe, recording, &data.cpuDispatch, data.initializeBacking);
     }
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-    std::vector<ResourceIdentifier> GetSupportedKeys() override;
+    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+    std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
     static size_t ReloadAllWorkGraphs();
 
 private:
@@ -159,58 +156,58 @@ private:
         rhi::Device device,
         rhi::PipelineLayoutHandle globalRootSignature,
         rhi::WorkGraphPtr& outGraph,
-        PipelineState& outCreateCommandPipeline,
-        PipelineState& outClearPipeline);
+        org::PipelineState& outCreateCommandPipeline,
+        org::PipelineState& outClearPipeline);
 
-    PipelineResources m_pipelineResources;
+    org::PipelineResources m_pipelineResources;
     // Work-graph generations are immutable shared owners so prepared packets
     // may safely outlive a live-reload replacement on the pass object.
     std::shared_ptr<rhi::WorkGraphPtr> m_workGraph;
-    PipelineState m_createCommandPipelineState;
-    PipelineState m_clearPipelineState;
-    std::shared_ptr<Buffer> m_visibleClustersBuffer;
-    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_visibleClustersCounterBuffer;
-    std::shared_ptr<Buffer> m_swVisibleClustersCounterBuffer;
-    std::shared_ptr<Buffer> m_voxelRasterWorkBuffer;
-    std::shared_ptr<Buffer> m_voxelRasterWorkCounterBuffer;
-    std::shared_ptr<Buffer> m_skinnedVoxelRasterWorkBuffer;
-    std::shared_ptr<Buffer> m_skinnedVoxelRasterWorkCounterBuffer;
-    std::shared_ptr<Buffer> m_voxelRasterQueueDescriptorsBuffer;
+    org::PipelineState m_createCommandPipelineState;
+    org::PipelineState m_clearPipelineState;
+    std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_visibleClusterTransformIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
+    std::shared_ptr<org::Buffer> m_swVisibleClustersCounterBuffer;
+    std::shared_ptr<org::Buffer> m_voxelRasterWorkBuffer;
+    std::shared_ptr<org::Buffer> m_voxelRasterWorkCounterBuffer;
+    std::shared_ptr<org::Buffer> m_skinnedVoxelRasterWorkBuffer;
+    std::shared_ptr<org::Buffer> m_skinnedVoxelRasterWorkCounterBuffer;
+    std::shared_ptr<org::Buffer> m_voxelRasterQueueDescriptorsBuffer;
     std::string m_voxelRasterQueueDescriptorResourceId;
     uint32_t m_voxelRasterWorkCapacity = 0u;
-    std::shared_ptr<Buffer> m_pageJobVisibleClustersBuffer;
-    std::shared_ptr<Buffer> m_pageJobVisibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_pageJobVisibleClustersCounterBuffer;
-    std::shared_ptr<Buffer> m_workGraphComputePageJobDescriptorsBuffer;
+    std::shared_ptr<org::Buffer> m_pageJobVisibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_pageJobVisibleClusterTransformIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_pageJobVisibleClustersCounterBuffer;
+    std::shared_ptr<org::Buffer> m_workGraphComputePageJobDescriptorsBuffer;
     std::string m_workGraphComputePageJobDescriptorResourceId;
-    std::shared_ptr<Buffer> m_scratchBuffer;
-    std::shared_ptr<Buffer> m_histogramIndirectCommand;
-    std::shared_ptr<Buffer> m_workGraphTelemetryBuffer;
-    std::shared_ptr<Buffer> m_occlusionReplayBuffer;
-    std::shared_ptr<Buffer> m_occlusionReplayStateBuffer;
-    std::shared_ptr<Buffer> m_occlusionNodeGpuInputsBuffer;
-    std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
-    std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidatesBuffer;
-    std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidateCountBuffer;
-    std::shared_ptr<Buffer> m_shadowInvalidatedInstancesBitsetBuffer;
-    std::shared_ptr<PixelBuffer> m_shadowDirtyHierarchyTexture;
-    std::shared_ptr<PixelBuffer> m_shadowPageTableTexture;
-    std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;
-    std::shared_ptr<Buffer> m_shadowActiveBlockMetadataBuffer;
-    std::shared_ptr<PixelBuffer> m_shadowDynamicPhysicalPagesTexture;
-    std::shared_ptr<Buffer> m_shadowDynamicActiveBlockMetadataBuffer;
-    std::shared_ptr<Buffer> m_reyesDiceQueueBuffer;
-    std::shared_ptr<Buffer> m_reyesDiceQueueCounterBuffer;
-    std::shared_ptr<Buffer> m_reyesDiceQueueOverflowBuffer;
-    std::shared_ptr<Buffer> m_reyesTessTableConfigsBuffer;
-    std::shared_ptr<Buffer> m_reyesTessTableVerticesBuffer;
-    std::shared_ptr<Buffer> m_reyesTessTableTrianglesBuffer;
-    std::shared_ptr<Buffer> m_reyesTelemetryBuffer;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
-    std::shared_ptr<Buffer> m_phase1VisibleClustersCounterBuffer; // Phase 2 only: Phase 1's HW counter for write offset
-    std::shared_ptr<Buffer> m_swWriteBaseCounterBuffer; // Phase 2 only: Phase 1's SW counter for top-down write offset
-    std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
+    std::shared_ptr<org::Buffer> m_scratchBuffer;
+    std::shared_ptr<org::Buffer> m_histogramIndirectCommand;
+    std::shared_ptr<org::Buffer> m_workGraphTelemetryBuffer;
+    std::shared_ptr<org::Buffer> m_occlusionReplayBuffer;
+    std::shared_ptr<org::Buffer> m_occlusionReplayStateBuffer;
+    std::shared_ptr<org::Buffer> m_occlusionNodeGpuInputsBuffer;
+    std::shared_ptr<org::Buffer> m_viewRasterInfoBuffer;
+    std::shared_ptr<org::Buffer> m_shadowPredictiveInvalidationCandidatesBuffer;
+    std::shared_ptr<org::Buffer> m_shadowPredictiveInvalidationCandidateCountBuffer;
+    std::shared_ptr<org::Buffer> m_shadowInvalidatedInstancesBitsetBuffer;
+    std::shared_ptr<org::PixelBuffer> m_shadowDirtyHierarchyTexture;
+    std::shared_ptr<org::PixelBuffer> m_shadowPageTableTexture;
+    std::shared_ptr<org::PixelBuffer> m_shadowPhysicalPagesTexture;
+    std::shared_ptr<org::Buffer> m_shadowActiveBlockMetadataBuffer;
+    std::shared_ptr<org::PixelBuffer> m_shadowDynamicPhysicalPagesTexture;
+    std::shared_ptr<org::Buffer> m_shadowDynamicActiveBlockMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_reyesDiceQueueBuffer;
+    std::shared_ptr<org::Buffer> m_reyesDiceQueueCounterBuffer;
+    std::shared_ptr<org::Buffer> m_reyesDiceQueueOverflowBuffer;
+    std::shared_ptr<org::Buffer> m_reyesTessTableConfigsBuffer;
+    std::shared_ptr<org::Buffer> m_reyesTessTableVerticesBuffer;
+    std::shared_ptr<org::Buffer> m_reyesTessTableTrianglesBuffer;
+    std::shared_ptr<org::Buffer> m_reyesTelemetryBuffer;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::Buffer> m_phase1VisibleClustersCounterBuffer; // Phase 2 only: Phase 1's HW counter for write offset
+    std::shared_ptr<org::Buffer> m_swWriteBaseCounterBuffer; // Phase 2 only: Phase 1's SW counter for top-down write offset
+    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
     std::vector<uint64_t> m_declaredDrawSetResourceIds;
     std::vector<uint64_t> m_declaredVisibilityBufferIds;
     std::vector<CLodViewRasterInfo> m_cachedViewRasterInfo; // Descriptor-free rows shared with page-job passes.

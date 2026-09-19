@@ -12,18 +12,17 @@
 #include "ShaderBuffers.h"
 
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 namespace Components {
 
     struct DepthMap {
         DepthMap() = default;
-        DepthMap(std::shared_ptr<PixelBuffer> depthMap, std::shared_ptr<PixelBuffer> linearDepthMap, std::shared_ptr<PixelBuffer> projectedDepthMap)
+        DepthMap(std::shared_ptr<org::PixelBuffer> depthMap, std::shared_ptr<org::PixelBuffer> linearDepthMap, std::shared_ptr<org::PixelBuffer> projectedDepthMap)
             : depthMap(depthMap), linearDepthMap(linearDepthMap), projectedDepthMap(projectedDepthMap) {
         }
-        std::shared_ptr<PixelBuffer> depthMap;
-        std::shared_ptr<PixelBuffer> linearDepthMap;
-        std::shared_ptr<PixelBuffer> projectedDepthMap;
+        std::shared_ptr<org::PixelBuffer> depthMap;
+        std::shared_ptr<org::PixelBuffer> linearDepthMap;
+        std::shared_ptr<org::PixelBuffer> projectedDepthMap;
     };
 
     struct RenderViewRef {
@@ -34,7 +33,7 @@ namespace Components {
         std::vector<uint64_t> viewIDs;
         std::vector<int64_t> virtualShadowUnwrappedPageOffsetX;
         std::vector<int64_t> virtualShadowUnwrappedPageOffsetY;
-        std::shared_ptr<BufferView> lightBufferView;
+        std::shared_ptr<org::BufferView> lightBufferView;
         uint32_t lightBufferIndex = 0;
         uint32_t viewInfoBufferIndex = 0;
         Matrix projectionMatrix;
@@ -58,7 +57,7 @@ namespace Components {
 
     struct IndirectDrawInfo {
         std::vector<unsigned int> indices;
-        std::vector<std::shared_ptr<BufferView>> views;
+        std::vector<std::shared_ptr<org::BufferView>> views;
         std::vector<std::vector<DrawWorkloadKey>> drawWorkloadKeysPerDraw;
     };
 
@@ -84,14 +83,14 @@ namespace Components {
         std::vector<uint32_t> perMeshInstanceBufferIndices;
         std::vector<uint32_t> instanceDrawRecordIndices;
         std::vector<uint32_t> skinnedAssemblyPlacementIndices;
-        std::shared_ptr<BufferView> perObjectCBView;
+        std::shared_ptr<org::BufferView> perObjectCBView;
         uint32_t perObjectCBIndex;
-        std::shared_ptr<BufferView> normalMatrixView;
+        std::shared_ptr<org::BufferView> normalMatrixView;
         uint32_t normalMatrixIndex;
-        std::vector<std::shared_ptr<BufferView>> perObjectCBViews;
-        std::vector<std::shared_ptr<BufferView>> perInstanceTransformViews;
-        std::vector<std::shared_ptr<BufferView>> normalMatrixViews;
-        std::vector<std::shared_ptr<BufferView>> instanceDrawRecordViews;
+        std::vector<std::shared_ptr<org::BufferView>> perObjectCBViews;
+        std::vector<std::shared_ptr<org::BufferView>> perInstanceTransformViews;
+        std::vector<std::shared_ptr<org::BufferView>> normalMatrixViews;
+        std::vector<std::shared_ptr<org::BufferView>> instanceDrawRecordViews;
         BufferRange perObjectCBRange;
         BufferRange perInstanceTransformRange;
         BufferRange normalMatrixRange;

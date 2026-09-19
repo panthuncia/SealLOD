@@ -23,7 +23,7 @@
 
 namespace {
 	std::vector<rhi::helpers::SubresourceData> BuildSubresources(
-		const TextureDescription& description,
+		const org::TextureDescription& description,
 		const TextureFactory::TextureInitialData& initialData,
 		uint32_t mipLevels,
 		uint32_t arraySlices)
@@ -102,7 +102,7 @@ void MaterialTextureTransferService::SaveReadbackToDds(InFlightBatch::ReadbackCo
 }
 
 void MaterialTextureTransferService::RequestReadback(
-	const std::shared_ptr<PixelBuffer>& image,
+	const std::shared_ptr<org::PixelBuffer>& image,
 	std::wstring outputFile,
 	std::function<void()> callback)
 {
@@ -172,7 +172,7 @@ void MaterialTextureTransferService::Shutdown()
 
 std::shared_ptr<const br::render::TextureTransferArtifact>
 MaterialTextureTransferService::EnsureTransferRecordLocked(
-	const std::shared_ptr<PixelBuffer>& image)
+	const std::shared_ptr<org::PixelBuffer>& image)
 {
 	if (!image) return {};
 	const auto id = image->GetGlobalResourceID();
@@ -244,13 +244,13 @@ void MaterialTextureTransferService::PublishTransferState(
 
 std::shared_ptr<const br::render::TextureTransferArtifact>
 MaterialTextureTransferService::EnqueueUpload(
-	const std::shared_ptr<PixelBuffer>& image,
-	TextureDescription description,
+	const std::shared_ptr<org::PixelBuffer>& image,
+	org::TextureDescription description,
 	TextureFactory::TextureInitialData initialData)
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::EnqueueUpload");
 	if (!image || initialData.Empty()) return {};
-	image->SetGraphOwnership(Resource::GraphOwnership::ExternalImmutableShaderResource);
+	image->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
 	std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
 	{
 		std::scoped_lock lock(m_mutex);
@@ -266,11 +266,11 @@ MaterialTextureTransferService::EnqueueUpload(
 }
 
 std::shared_ptr<const br::render::TextureTransferArtifact>
-MaterialTextureTransferService::EnsureShaderReady(const std::shared_ptr<PixelBuffer>& image)
+MaterialTextureTransferService::EnsureShaderReady(const std::shared_ptr<org::PixelBuffer>& image)
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::EnsureShaderReady");
 	if (!image) return {};
-	image->SetGraphOwnership(Resource::GraphOwnership::ExternalImmutableShaderResource);
+	image->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
 	std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
 	{
 		std::scoped_lock lock(m_mutex);
@@ -285,7 +285,7 @@ MaterialTextureTransferService::EnsureShaderReady(const std::shared_ptr<PixelBuf
 }
 
 rhi::TextureBarrier MaterialTextureTransferService::MakeWholeTextureBarrier(
-	const PixelBuffer& image,
+	const org::PixelBuffer& image,
 	rhi::ResourceAccessType beforeAccess,
 	rhi::ResourceAccessType afterAccess,
 	rhi::ResourceLayout beforeLayout,
@@ -294,7 +294,7 @@ rhi::TextureBarrier MaterialTextureTransferService::MakeWholeTextureBarrier(
 	rhi::ResourceSyncState afterSync)
 {
 	rhi::TextureBarrier barrier{};
-	barrier.texture = const_cast<PixelBuffer&>(image).GetAPIResource().GetHandle();
+	barrier.texture = const_cast<org::PixelBuffer&>(image).GetAPIResource().GetHandle();
 	barrier.range = {0, image.GetMipLevels(), 0, image.GetArraySize()};
 	barrier.beforeAccess = beforeAccess;
 	barrier.afterAccess = afterAccess;
@@ -308,7 +308,7 @@ rhi::TextureBarrier MaterialTextureTransferService::MakeWholeTextureBarrier(
 void MaterialTextureTransferService::ReapCompleted()
 {
 	struct ReadyTransfer {
-		std::shared_ptr<PixelBuffer> image;
+		std::shared_ptr<org::PixelBuffer> image;
 		std::shared_ptr<TransferState> transfer;
 		std::uint64_t fenceValue = 0;
 	};
@@ -340,10 +340,10 @@ void MaterialTextureTransferService::ReapCompleted()
 		}
 	}
 	for (auto& ready : readyTransfers) {
-		RangeSpec whole{};
+		org::RangeSpec whole{};
 		ready.image->GetStateTracker()->Reset(
 			whole,
-			ResourceState{
+			org::ResourceState{
 				rhi::ResourceAccessType::ShaderResource,
 				rhi::ResourceLayout::ShaderResource,
 				rhi::ResourceSyncState::AllShading});
@@ -406,7 +406,7 @@ void MaterialTextureTransferService::PumpWorker()
 	// Staging allocation, command recording and queue submission are deliberately
 	// outside m_mutex. EnsureShaderReady only needs the record table and must not
 	// queue behind an unrelated upload batch.
-	auto failTransfer = [this](const std::shared_ptr<PixelBuffer>& image, std::string error) {
+	auto failTransfer = [this](const std::shared_ptr<org::PixelBuffer>& image, std::string error) {
 		if (!image) return;
 		std::shared_ptr<TransferState> transfer;
 		{
@@ -517,7 +517,7 @@ void MaterialTextureTransferService::PumpWorker()
 		const auto footprintInfo = m_device.GetCopyableFootprints(
 			range, footprints.data(), static_cast<uint32_t>(footprints.size()));
 		if (footprintInfo.count != mipLevels || footprintInfo.totalBytes == 0) continue;
-		auto buffer = Buffer::CreateShared(rhi::HeapType::Readback, footprintInfo.totalBytes);
+		auto buffer = org::Buffer::CreateShared(rhi::HeapType::Readback, footprintInfo.totalBytes);
 		buffer->SetName("External material texture readback");
 		auto toCopy = MakeWholeTextureBarrier(
 			*request.image,
@@ -616,7 +616,7 @@ void MaterialTextureTransferService::PumpWorker()
 	BT_PLOT("MaterialTextureTransfer.Submitted", static_cast<int64_t>(submittedTransfers.size()));
 }
 
-bool MaterialTextureTransferService::IsShaderReady(const std::shared_ptr<PixelBuffer>& image) const
+bool MaterialTextureTransferService::IsShaderReady(const std::shared_ptr<org::PixelBuffer>& image) const
 {
 	if (!image) return false;
 	std::unique_lock lock(m_mutex, std::try_to_lock);
@@ -627,7 +627,7 @@ bool MaterialTextureTransferService::IsShaderReady(const std::shared_ptr<PixelBu
 
 std::shared_ptr<const br::render::GpuSubmissionSet>
 MaterialTextureTransferService::ShaderReadySubmission(
-	const std::shared_ptr<PixelBuffer>& image) const
+	const std::shared_ptr<org::PixelBuffer>& image) const
 {
 	if (!image) return {};
 	std::unique_lock lock(m_mutex, std::try_to_lock);
@@ -649,7 +649,7 @@ MaterialTextureTransferService::ShaderReadySubmission(
 	return result;
 }
 
-bool MaterialTextureTransferService::HasFailed(const std::shared_ptr<PixelBuffer>& image) const
+bool MaterialTextureTransferService::HasFailed(const std::shared_ptr<org::PixelBuffer>& image) const
 {
 	if (!image) return true;
 	std::unique_lock lock(m_mutex, std::try_to_lock);

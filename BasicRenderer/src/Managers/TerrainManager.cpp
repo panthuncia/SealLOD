@@ -327,7 +327,7 @@ namespace {
         TextureFactory* textureFactory,
         MaterialManager* materialManager,
 		org::runtime::IDescriptorService& descriptorService,
-        std::shared_ptr<ResourceGroup>& textureGroup,
+        std::shared_ptr<org::ResourceGroup>& textureGroup,
         std::vector<std::shared_ptr<TextureAsset>>& retainedTextures,
         bool generateMipmaps,
         std::uint32_t& textureIndex,
@@ -450,7 +450,7 @@ TerrainManager::TerrainManager()
     m_layerRefs = DynamicStructuredBuffer<TerrainLayerRefGPU>::CreateShared(1, "Builtin::Terrain::LayerRefs", true);
     m_regions = DynamicStructuredBuffer<TerrainRegionGPU>::CreateShared(1, "Builtin::Terrain::Regions", true);
     m_weightBlocks = DynamicStructuredBuffer<std::uint32_t>::CreateShared(1, "Builtin::Terrain::WeightBlocks", true);
-    m_textureGroup = std::make_shared<ResourceGroup>("Builtin::Terrain::TextureGroup");
+    m_textureGroup = std::make_shared<org::ResourceGroup>("Builtin::Terrain::TextureGroup");
     org::memory::SetResourceUsageHint(*m_sets, "Terrain material buffers");
     org::memory::SetResourceUsageHint(*m_layers, "Terrain material buffers");
     org::memory::SetResourceUsageHint(*m_stochasticLayers, "Terrain material buffers");
@@ -464,7 +464,7 @@ TerrainManager::TerrainManager()
     m_regions->UpdateAt(0u, MakeFallbackRegion());
     m_weightBlocks->UpdateAt(0u, MakeFallbackWeightBlock());
 	const auto source = br::render::PublishedStateSource::ProcessSource();
-	const auto makeResolver = [&](std::uint64_t variant, const std::shared_ptr<Resource>& fallback) {
+	const auto makeResolver = [&](std::uint64_t variant, const std::shared_ptr<org::Resource>& fallback) {
 		return std::make_shared<PublishedStateResourceResolver>(source,
 			br::render::PublishedResourceKey{
 				br::render::PublishedFragmentKind::Terrain,
@@ -478,7 +478,7 @@ TerrainManager::TerrainManager()
 		makeResolver(br::render::kTerrainLayerRefsVariant, m_layerRefs),
 		makeResolver(br::render::kTerrainRegionsVariant, m_regions),
 		makeResolver(br::render::kTerrainWeightBlocksVariant, m_weightBlocks),
-		makeResolver(br::render::kTerrainTextureGroupVariant, std::shared_ptr<Resource>{})
+		makeResolver(br::render::kTerrainTextureGroupVariant, std::shared_ptr<org::Resource>{})
 	};
 }
 
@@ -1187,18 +1187,18 @@ void TerrainManager::ClearActiveTerrain()
     m_desiredSet = MakeEmptySet();
 }
 
-std::shared_ptr<Resource> TerrainManager::ProvideResource(ResourceIdentifier const& key)
+std::shared_ptr<org::Resource> TerrainManager::ProvideResource(org::ResourceIdentifier const& key)
 {
     (void)key;
     return nullptr;
 }
 
-std::vector<ResourceIdentifier> TerrainManager::GetSupportedKeys()
+std::vector<org::ResourceIdentifier> TerrainManager::GetSupportedKeys()
 {
     return {};
 }
 
-std::vector<ResourceIdentifier> TerrainManager::GetSupportedResolverKeys()
+std::vector<org::ResourceIdentifier> TerrainManager::GetSupportedResolverKeys()
 {
     return {
 		Builtin::Terrain::Sets,
@@ -1211,7 +1211,7 @@ std::vector<ResourceIdentifier> TerrainManager::GetSupportedResolverKeys()
 	};
 }
 
-std::shared_ptr<IResourceResolver> TerrainManager::ProvideResolver(ResourceIdentifier const& key)
+std::shared_ptr<org::IResourceResolver> TerrainManager::ProvideResolver(org::ResourceIdentifier const& key)
 {
 	const auto text = key.ToString();
 	if (text == Builtin::Terrain::Sets) return m_terrainResolvers[0];

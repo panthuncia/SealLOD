@@ -132,8 +132,8 @@ public:
     }
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<GloballyIndexedResource> m_visibleClusterResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesDiceQueueResource;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesDiceQueueResource;
     uint32_t m_patchVisibilityIndexBase = 0u;
 };

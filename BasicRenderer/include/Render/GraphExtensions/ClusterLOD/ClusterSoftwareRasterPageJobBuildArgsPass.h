@@ -20,10 +20,10 @@ class ClusterSoftwareRasterPageJobBuildArgsPass : public org::TypedRenderGraphPa
     br::render::PreparedComputeDispatchSequence, ClusterSoftwareRasterPageJobBuildArgsBindings> {
 public:
     ClusterSoftwareRasterPageJobBuildArgsPass(
-        std::shared_ptr<Buffer> rigidPageJobCountBuffer,
-        std::shared_ptr<Buffer> rigidPageJobIndirectArgsBuffer,
-        std::shared_ptr<Buffer> skinnedPageJobCountBuffer,
-        std::shared_ptr<Buffer> skinnedPageJobIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> rigidPageJobCountBuffer,
+        std::shared_ptr<org::Buffer> rigidPageJobIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> skinnedPageJobCountBuffer,
+        std::shared_ptr<org::Buffer> skinnedPageJobIndirectArgsBuffer,
         bool runWhenComputeSWRasterEnabledOnly = false)
         : m_pageJobCountBuffers{ std::move(rigidPageJobCountBuffer), std::move(skinnedPageJobCountBuffer) }
         , m_pageJobIndirectArgsBuffers{ std::move(rigidPageJobIndirectArgsBuffer), std::move(skinnedPageJobIndirectArgsBuffer) }
@@ -83,8 +83,8 @@ public:
     }
 
 private:
-    PipelineState m_pso;
-    std::array<std::shared_ptr<Buffer>, 2> m_pageJobCountBuffers;
-    std::array<std::shared_ptr<Buffer>, 2> m_pageJobIndirectArgsBuffers;
+    org::PipelineState m_pso;
+    std::array<std::shared_ptr<org::Buffer>, 2> m_pageJobCountBuffers;
+    std::array<std::shared_ptr<org::Buffer>, 2> m_pageJobIndirectArgsBuffers;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
 };

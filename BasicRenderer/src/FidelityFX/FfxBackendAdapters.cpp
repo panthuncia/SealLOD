@@ -9,15 +9,15 @@
 namespace fidelityfx_backend::detail {
 bool CreateUpscaleContextDX12(ffx::Context& context, rhi::Device device, ffx::CreateContextDescUpscale& createUpscaling);
 bool CreateUpscaleContextVulkan(ffx::Context& context, rhi::Device device, ffx::CreateContextDescUpscale& createUpscaling);
-FfxApiResource GetApiResourceDX12(PixelBuffer* resource, FfxApiResourceState state);
-FfxApiResource GetApiResourceVulkan(PixelBuffer* resource, FfxApiResourceState state);
+FfxApiResource GetApiResourceDX12(org::PixelBuffer* resource, FfxApiResourceState state);
+FfxApiResource GetApiResourceVulkan(org::PixelBuffer* resource, FfxApiResourceState state);
 void* GetApiCommandListDX12(rhi::CommandList& commandList);
 void* GetApiCommandListVulkan(rhi::CommandList& commandList);
 
 bool CreateHostBackendInterfaceDX12(FfxInterface& backendInterface, void*& scratchMemory, rhi::Device device, size_t maxContexts);
 bool CreateHostBackendInterfaceVulkan(FfxInterface& backendInterface, void*& scratchMemory, rhi::Device device, size_t maxContexts);
-FfxResource GetHostResourceDX12(PixelBuffer* resource, const wchar_t* name, FfxResourceStates state);
-FfxResource GetHostResourceVulkan(PixelBuffer* resource, const wchar_t* name, FfxResourceStates state);
+FfxResource GetHostResourceDX12(org::PixelBuffer* resource, const wchar_t* name, FfxResourceStates state);
+FfxResource GetHostResourceVulkan(org::PixelBuffer* resource, const wchar_t* name, FfxResourceStates state);
 void* GetHostCommandListDX12(rhi::CommandList& commandList);
 void* GetHostCommandListVulkan(rhi::CommandList& commandList);
 }
@@ -148,7 +148,7 @@ bool fidelityfx_backend::api::CreateUpscaleContext(ffx::Context& context, rhi::B
     }
 }
 
-FfxApiResource fidelityfx_backend::api::GetResource(rhi::Backend backend, PixelBuffer* resource, const wchar_t* name, FfxApiResourceState state) {
+FfxApiResource fidelityfx_backend::api::GetResource(rhi::Backend backend, org::PixelBuffer* resource, const wchar_t* name, FfxApiResourceState state) {
     switch (backend) {
     case rhi::Backend::D3D12:
         return detail::GetApiResourceDX12(resource, state);
@@ -184,7 +184,7 @@ bool fidelityfx_backend::host::CreateBackendInterface(FfxInterface& backendInter
     }
 }
 
-FfxResource fidelityfx_backend::host::GetResource(rhi::Backend backend, PixelBuffer* resource, const wchar_t* name, FfxResourceStates state) {
+FfxResource fidelityfx_backend::host::GetResource(rhi::Backend backend, org::PixelBuffer* resource, const wchar_t* name, FfxResourceStates state) {
     switch (backend) {
     case rhi::Backend::D3D12:
         return detail::GetHostResourceDX12(resource, name, state);

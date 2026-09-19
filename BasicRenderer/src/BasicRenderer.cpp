@@ -1081,7 +1081,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     renderer.SetInputMode(InputMode::wasd);
 
     {
-        BufferBase::ScopedBackingMutation startupSceneBackingMutation;
+        org::BufferBase::ScopedBackingMutation startupSceneBackingMutation;
 
         auto baseScene = std::make_shared<Scene>();
 

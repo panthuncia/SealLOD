@@ -6,7 +6,7 @@
 #include <memory>
 
 // Adapts the renderer-owned IO service to graph extension insertion points.
-class RenderGraphIOExtension final : public RenderGraph::IRenderGraphExtension {
+class RenderGraphIOExtension final : public org::RenderGraph::IRenderGraphExtension {
 public:
     explicit RenderGraphIOExtension(std::shared_ptr<br::render::RenderGraphIOService> service)
         : m_service(std::move(service)) {}
@@ -15,13 +15,13 @@ public:
         m_service->SetRegistry(*registry);
     }
 
-    void GatherStructuralPasses(RenderGraph&,
-        std::vector<RenderGraph::ExternalPassDesc>& passes) override {
+    void GatherStructuralPasses(org::RenderGraph&,
+        std::vector<org::RenderGraph::ExternalPassDesc>& passes) override {
         m_service->GatherStructuralPasses(passes);
     }
 
-    void GatherFramePasses(RenderGraph&,
-        std::vector<RenderGraph::ExternalPassDesc>& passes) override {
+    void GatherFramePasses(org::RenderGraph&,
+        std::vector<org::RenderGraph::ExternalPassDesc>& passes) override {
         m_service->GatherFramePasses(passes);
     }
 

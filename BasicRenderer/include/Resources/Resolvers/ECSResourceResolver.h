@@ -9,7 +9,7 @@
 #include "Resources/components.h"
 
 // A resolver that captures any flecs::query<...> by value
-class ECSResourceResolver : public ClonableResolver<ECSResourceResolver> {
+class ECSResourceResolver : public org::ClonableResolver<ECSResourceResolver> {
 public:
     ECSResourceResolver() = default;
 
@@ -17,7 +17,7 @@ public:
     template<typename QueryT>
     explicit ECSResourceResolver(QueryT query) {
         // Move the query into a closure to keep it alive for the resolver lifetime.
-        m_enumerator = [q = std::move(query)](std::vector<std::shared_ptr<Resource>>& out) {
+        m_enumerator = [q = std::move(query)](std::vector<std::shared_ptr<org::Resource>>& out) {
             q.each([&](flecs::entity e) {
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
                 assert(e.has<Components::Resource>() && "Entity does not have Resource component");
@@ -31,8 +31,8 @@ public:
         };
     }
 
-    std::vector<std::shared_ptr<Resource>> Resolve() const override {
-        std::vector<std::shared_ptr<Resource>> resources;
+    std::vector<std::shared_ptr<org::Resource>> Resolve() const override {
+        std::vector<std::shared_ptr<org::Resource>> resources;
         if (m_enumerator) {
             m_enumerator(resources);
         }
@@ -47,5 +47,5 @@ public:
     }
 
 private:
-    std::function<void(std::vector<std::shared_ptr<Resource>>&)> m_enumerator;
+    std::function<void(std::vector<std::shared_ptr<org::Resource>>&)> m_enumerator;
 };

@@ -822,15 +822,15 @@ uint64_t Mesh::GetGlobalID() const {
 }
 
 void Mesh::SetCLodBufferViews(
-	std::unique_ptr<BufferView> clusterLODGroupsView,
-	std::unique_ptr<BufferView> clusterLODSegmentsView,
-	std::unique_ptr<BufferView> clusterLODNodesView,
-	std::unique_ptr<BufferView> clusterLODNodeSkinningInfosView,
-	std::unique_ptr<BufferView> clusterLODNodeBoneIndicesView,
-	std::unique_ptr<BufferView> clusterLODAssemblyTransformsView,
-	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView,
-	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView,
-	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapIndicesView
+	std::unique_ptr<org::BufferView> clusterLODGroupsView,
+	std::unique_ptr<org::BufferView> clusterLODSegmentsView,
+	std::unique_ptr<org::BufferView> clusterLODNodesView,
+	std::unique_ptr<org::BufferView> clusterLODNodeSkinningInfosView,
+	std::unique_ptr<org::BufferView> clusterLODNodeBoneIndicesView,
+	std::unique_ptr<org::BufferView> clusterLODAssemblyTransformsView,
+	std::unique_ptr<org::BufferView> clusterLODAssemblyInstancesView,
+	std::unique_ptr<org::BufferView> clusterLODAssemblyBoneRemapsView,
+	std::unique_ptr<org::BufferView> clusterLODAssemblyBoneRemapIndicesView
 ) {
 	m_clusterLODGroupsView = std::move(clusterLODGroupsView);
 	m_clusterLODSegmentsView = std::move(clusterLODSegmentsView);

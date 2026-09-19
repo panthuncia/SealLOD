@@ -9,9 +9,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct DeepVisibilityResolveBindings {
     org::ResourceBindingToken headPointers, nodes, counter, overflow, visibleClusters, stats;
@@ -24,42 +22,42 @@ struct DeepVisibilityResolveBindings {
 };
 
 class DeepVisibilityResolvePass final : public org::TypedRenderGraphPass<DeepVisibilityResolvePass,
-    br::render::PreparedComputeDispatch, DeepVisibilityResolveBindings>, public IDynamicDeclaredResources {
+    br::render::PreparedComputeDispatch, DeepVisibilityResolveBindings>, public org::IDynamicDeclaredResources {
 public:
     DeepVisibilityResolvePass(
-        std::shared_ptr<Buffer> visibleClustersBuffer,
-        std::shared_ptr<Buffer> reyesDiceQueueBuffer,
-        std::shared_ptr<Buffer> reyesTessTableConfigsBuffer,
-        std::shared_ptr<Buffer> reyesTessTableVerticesBuffer,
-        std::shared_ptr<Buffer> reyesTessTableTrianglesBuffer,
-        std::shared_ptr<Buffer> deepVisibilityNodesBuffer,
-        std::shared_ptr<Buffer> deepVisibilityCounterBuffer,
-        std::shared_ptr<Buffer> deepVisibilityOverflowCounterBuffer,
-        std::shared_ptr<Buffer> deepVisibilityStatsBuffer,
+        std::shared_ptr<org::Buffer> visibleClustersBuffer,
+        std::shared_ptr<org::Buffer> reyesDiceQueueBuffer,
+        std::shared_ptr<org::Buffer> reyesTessTableConfigsBuffer,
+        std::shared_ptr<org::Buffer> reyesTessTableVerticesBuffer,
+        std::shared_ptr<org::Buffer> reyesTessTableTrianglesBuffer,
+        std::shared_ptr<org::Buffer> deepVisibilityNodesBuffer,
+        std::shared_ptr<org::Buffer> deepVisibilityCounterBuffer,
+        std::shared_ptr<org::Buffer> deepVisibilityOverflowCounterBuffer,
+        std::shared_ptr<org::Buffer> deepVisibilityStatsBuffer,
         uint32_t patchVisibilityIndexBase);
 
     DeepVisibilityResolveBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
     br::render::PreparedComputeDispatch Prepare(const DeepVisibilityResolveBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const DeepVisibilityResolveBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording);
 
 private:
-    std::shared_ptr<Buffer> m_visibleClustersBuffer;
-    std::shared_ptr<Buffer> m_reyesDiceQueueBuffer;
-    std::shared_ptr<Buffer> m_reyesTessTableConfigsBuffer;
-    std::shared_ptr<Buffer> m_reyesTessTableVerticesBuffer;
-    std::shared_ptr<Buffer> m_reyesTessTableTrianglesBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityNodesBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityCounterBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityOverflowCounterBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityStatsBuffer;
+    std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_reyesDiceQueueBuffer;
+    std::shared_ptr<org::Buffer> m_reyesTessTableConfigsBuffer;
+    std::shared_ptr<org::Buffer> m_reyesTessTableVerticesBuffer;
+    std::shared_ptr<org::Buffer> m_reyesTessTableTrianglesBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityNodesBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityCounterBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityOverflowCounterBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityStatsBuffer;
     uint32_t m_patchVisibilityIndexBase = 0u;
-    std::shared_ptr<PixelBuffer> m_primaryHeadPointerTexture;
+    std::shared_ptr<org::PixelBuffer> m_primaryHeadPointerTexture;
 
-    PixelBuffer* m_pHDRTarget = nullptr;
+    org::PixelBuffer* m_pHDRTarget = nullptr;
     bool m_declaredResourcesChanged = true;
 
     std::function<bool()> m_getPunctualLightingEnabled;

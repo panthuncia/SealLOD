@@ -59,7 +59,7 @@ public:
     }
 
 private:
-        PipelineState m_pso;
+        org::PipelineState m_pso;
         // block size used by the shader (materialPrefixSum.hlsl). Keep in sync.
         uint32_t m_blockSize = 1024;
 };

@@ -28,13 +28,10 @@
 #endif
 
 namespace org { class DescriptorHeap; }
-using org::DescriptorHeap;
 namespace org { class Sampler; }
-using org::Sampler;
 class TextureAsset;
 struct TextureFileMeta;
 namespace org { class Buffer; }
-using org::Buffer;
 
 void ThrowIfFailed(HRESULT hr);
 
@@ -56,13 +53,13 @@ struct LoadFlags {
 
 std::shared_ptr<TextureAsset> LoadTextureFromFile(
 	const std::wstring& filePath,
-	std::shared_ptr<Sampler> sampler = nullptr,
+	std::shared_ptr<org::Sampler> sampler = nullptr,
 	bool preferSRGB = false,
 	const LoadFlags& flags = {}, bool allowRTV = false, bool allowUAV = false);
 
 std::shared_ptr<TextureAsset> LoadTextureFromFileDeferred(
 	const std::wstring& filePath,
-	std::shared_ptr<Sampler> sampler = nullptr,
+	std::shared_ptr<org::Sampler> sampler = nullptr,
 	bool preferSRGB = false,
 	const TextureFileMeta* metaOverride = nullptr,
 	bool allowRTV = false,
@@ -71,7 +68,7 @@ std::shared_ptr<TextureAsset> LoadTextureFromFileDeferred(
 std::shared_ptr<TextureAsset> LoadTextureFromMemory(
 	const void* bytes,
 	size_t byteCount,
-	std::shared_ptr<Sampler> sampler = nullptr,
+	std::shared_ptr<org::Sampler> sampler = nullptr,
 	const LoadFlags& flags = {},
 	bool preferSRGB = false, bool allowRTV = false , bool allowUAV = false);
 std::shared_ptr<TextureAsset> LoadCubemapFromFile(const char* topPath, const char* bottomPath, const char* leftPath, const char* rightPath, const char* frontPath, const char* backPath);
@@ -139,73 +136,73 @@ std::vector<stbi_uc> ExpandImageData(const stbi_uc* image, int width, int height
 
 // Helper functions for creating resources
 
-std::vector<std::vector<ShaderVisibleIndexInfo>> CreateShaderResourceViewsPerMip(
+std::vector<std::vector<org::ShaderVisibleIndexInfo>> CreateShaderResourceViewsPerMip(
 	rhi::Device& device,
 	rhi::Resource& resource,
 	rhi::Format       format,
-	DescriptorHeap* srvHeap,
+	org::DescriptorHeap* srvHeap,
 	int               mipLevels,
 	bool              isCubemap,
 	bool              isArray,
 	int               arraySize);
 
-ShaderVisibleIndexInfo CreateUnorderedAccessView(
+org::ShaderVisibleIndexInfo CreateUnorderedAccessView(
 	rhi::Device& device,
 	rhi::Resource& resource,
 	rhi::Format format,
-	DescriptorHeap* uavHeap,
+	org::DescriptorHeap* uavHeap,
 	bool isArray,
 	int arraySize,
 	int mipSlice = 0,
 	int firstArraySlice = 0,
 	int planeSlice = 0);
 
-NonShaderVisibleIndexInfo CreateNonShaderVisibleUnorderedAccessView(
+org::NonShaderVisibleIndexInfo CreateNonShaderVisibleUnorderedAccessView(
 	rhi::Device& device,
 	rhi::Resource& resource,
 	rhi::Format format,
-	DescriptorHeap* uavHeap,
+	org::DescriptorHeap* uavHeap,
 	bool isArray,
 	int arraySize,
 	int mipSlice = 0,
 	int firstArraySlice = 0,
 	int planeSlice = 0);
 
-std::vector<std::vector<ShaderVisibleIndexInfo>> CreateUnorderedAccessViewsPerMip(
+std::vector<std::vector<org::ShaderVisibleIndexInfo>> CreateUnorderedAccessViewsPerMip(
 	rhi::Device& device,
 	rhi::Resource& resource,
 	rhi::Format format,
-	DescriptorHeap* uavHeap,
+	org::DescriptorHeap* uavHeap,
 	int               mipLevels,
 	bool              isArray,
 	int               arraySize,
 	int               planeSlice,
 	bool              isCubemap);
 
-std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateNonShaderVisibleUnorderedAccessViewsPerMip(
+std::vector<std::vector<org::NonShaderVisibleIndexInfo>> CreateNonShaderVisibleUnorderedAccessViewsPerMip(
 	rhi::Device& device,
 	rhi::Resource& resource,
 	rhi::Format format,
-	DescriptorHeap* uavHeap,
+	org::DescriptorHeap* uavHeap,
 	int                mipLevels,
 	bool               isArray,
 	int                arraySize,
 	int                planeSlice);
 
-std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateRenderTargetViews(
+std::vector<std::vector<org::NonShaderVisibleIndexInfo>> CreateRenderTargetViews(
 	rhi::Device& device,
 	rhi::Resource& resource,
 	rhi::Format        format,
-	DescriptorHeap* rtvHea,
+	org::DescriptorHeap* rtvHea,
 	bool               isCubemap,
 	bool               isArray,
 	int                arraySize = 1,
 	int                mipLevels = 1);
 
-std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateDepthStencilViews(
+std::vector<std::vector<org::NonShaderVisibleIndexInfo>> CreateDepthStencilViews(
 	rhi::Device& device,
 	rhi::Resource& resource,
-	DescriptorHeap* dsvHeap,
+	org::DescriptorHeap* dsvHeap,
 	rhi::Format        format,
 	bool               isCubemap = false,
 	bool               isArray = false,
@@ -268,12 +265,12 @@ constexpr UINT CalcSubresource(UINT MipSlice, UINT ArraySlice, UINT PlaneSlice, 
 	return MipSlice + ArraySlice * MipLevels + PlaneSlice * MipLevels * ArraySize;
 }
 
-std::shared_ptr<Buffer> CreateIndexedStructuredBuffer(size_t numElements, unsigned int elementSize, bool UAV = false, bool UAVCounter = false);
+std::shared_ptr<org::Buffer> CreateIndexedStructuredBuffer(size_t numElements, unsigned int elementSize, bool UAV = false, bool UAVCounter = false);
 
-std::shared_ptr<Buffer> CreateIndexedTypedBuffer(
+std::shared_ptr<org::Buffer> CreateIndexedTypedBuffer(
 	uint32_t        numElements,
 	rhi::Format   elementFormat,
 	bool          UAV = false);
 
 
-std::shared_ptr<Buffer> CreateIndexedConstantBuffer(size_t bufferSize, std::string name = "");
+std::shared_ptr<org::Buffer> CreateIndexedConstantBuffer(size_t bufferSize, std::string name = "");

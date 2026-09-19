@@ -18,15 +18,15 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapInvalidatePagesPass::VirtualShadowMapInvalidatePagesPass(
-    std::shared_ptr<Buffer> invalidationInputsBuffer,
-    std::shared_ptr<Buffer> invalidationCountBuffer,
-    std::shared_ptr<Buffer> invalidatedInstancesBitsetBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
-    std::shared_ptr<Buffer> statsBuffer,
+    std::shared_ptr<org::Buffer> invalidationInputsBuffer,
+    std::shared_ptr<org::Buffer> invalidationCountBuffer,
+    std::shared_ptr<org::Buffer> invalidatedInstancesBitsetBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> directionalPageViewInfoBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer,
     std::shared_ptr<VirtualShadowInvalidationQueue> extensionInvalidations)
     : m_invalidationInputsBuffer(std::move(invalidationInputsBuffer))
     , m_invalidationCountBuffer(std::move(invalidationCountBuffer))
@@ -51,7 +51,7 @@ VirtualShadowMapInvalidatePagesPass::VirtualShadowMapInvalidatePagesPass(
         L"CLodVirtualShadowInvalidateBoundsCSMain",
         {},
         "CLod.VirtualShadow.InvalidateBounds.PSO");
-    m_boundsInvalidationBuffer = DynamicBuffer::CreateShared(
+    m_boundsInvalidationBuffer = org::DynamicBuffer::CreateShared(
         sizeof(float) * 4u + sizeof(uint32_t) * 4u,
         CLodVirtualShadowMaxInvalidationInputs,
         "CLod.VirtualShadow.ExtensionInvalidationBounds");
@@ -81,7 +81,7 @@ VirtualShadowMapInvalidatePagesBindings VirtualShadowMapInvalidatePagesPass::Dec
         builder.BindUnorderedAccess(m_statsBuffer), m_pendingInputCount, m_pendingBoundsCount, m_invalidateAllActiveClipmaps};
 }
 
-void VirtualShadowMapInvalidatePagesPass::Update(const UpdateExecutionContext& executionContext)
+void VirtualShadowMapInvalidatePagesPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
 
@@ -194,7 +194,7 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapInvalidatePagesPass:
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_INPUTS_DESCRIPTOR_INDEX] = srv(bindings.inputs);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_INPUT_COUNT_DESCRIPTOR_INDEX] = srv(bindings.inputCount);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
@@ -204,7 +204,7 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapInvalidatePagesPass:
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_DESCRIPTOR_INDEX] = srv(bindings.bounds);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_COUNT] = bindings.pendingBoundsCount;
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_ALL_ACTIVE_CLIPMAPS] = bindings.invalidateAllActiveClipmaps ? 1u : 0u;
-    const auto append = [&](const PipelineState& pso, uint32_t groups) {
+    const auto append = [&](const org::PipelineState& pso, uint32_t groups) {
         br::render::PreparedComputePipelineSequence::Step step{};
         auto program = preparation.CaptureProgramBinding(pso);
         step.program = program.program;

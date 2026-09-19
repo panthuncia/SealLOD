@@ -73,14 +73,14 @@ public:
 
 private:
 
-    PipelineState PrefilterDepths16x16PSO;
-    PipelineState GTAOLowPSO;
-    PipelineState GTAOMediumPSO;
-    PipelineState GTAOHighPSO;
-    PipelineState GTAOUltraPSO;
-    PipelineState DenoisePassPSO;
-    PipelineState DenoiseLastPassPSO;
-    PipelineState GenerateNormalsPSO;
+    org::PipelineState PrefilterDepths16x16PSO;
+    org::PipelineState GTAOLowPSO;
+    org::PipelineState GTAOMediumPSO;
+    org::PipelineState GTAOHighPSO;
+    org::PipelineState GTAOUltraPSO;
+    org::PipelineState DenoisePassPSO;
+    org::PipelineState DenoiseLastPassPSO;
+    org::PipelineState GenerateNormalsPSO;
 
     uint32_t m_samplerIndex = 0;
 

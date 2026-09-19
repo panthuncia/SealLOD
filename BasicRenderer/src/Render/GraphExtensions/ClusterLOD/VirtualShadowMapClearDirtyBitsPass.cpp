@@ -13,12 +13,12 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapClearDirtyBitsPass::VirtualShadowMapClearDirtyBitsPass(
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> allocationRequestsBuffer,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> dirtyFlagsBuffer,
-    std::shared_ptr<Buffer> statsBuffer)
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> allocationRequestsBuffer,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> dirtyFlagsBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_dirtyFlagsBuffer(std::move(dirtyFlagsBuffer))
     , m_statsBuffer(std::move(statsBuffer))
@@ -63,7 +63,7 @@ br::render::PreparedComputeDispatch VirtualShadowMapClearDirtyBitsPass::Prepare(
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.pageTable,
-        {org::BindlessViewKind::UnorderedAccess, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull)}).index;
+        {org::BindlessViewKind::UnorderedAccess, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}).index;
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.stats,
         {org::BindlessViewKind::UnorderedAccess}).index;

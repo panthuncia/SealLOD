@@ -24,7 +24,7 @@
 using Microsoft::WRL::ComPtr;
 
 template<class T>
-class DynamicStructuredBuffer : public BufferBase, public IHasMemoryMetadata, public IDeferredBackingResizeClient {
+class DynamicStructuredBuffer : public org::BufferBase, public org::IHasMemoryMetadata, public org::IDeferredBackingResizeClient {
 public:
 
     std::vector<std::byte> CaptureCpuShadowBytes() const {
@@ -97,7 +97,7 @@ public:
             return true;
         }
 
-        if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
+        if (org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
             CreateBuffer(newCapacity, m_capacity);
             m_capacity = newCapacity;
             return true;
@@ -295,7 +295,7 @@ private:
 
     bool m_UAV = false;
 
-    std::vector<EntityComponentBundle> m_metadataBundles;
+    std::vector<org::EntityComponentBundle> m_metadataBundles;
 
     void EnsureCapacityForIndex(size_t index) {
         (void)TryEnsureCapacityForIndex(index);
@@ -308,7 +308,7 @@ private:
 
         if (m_pendingResizeValid) {
             m_pendingResizeCapacity = (std::max)(m_pendingResizeCapacity, newCapacity);
-            m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+            m_asyncResizeState.Request(org::AsyncBufferBackingResizeRequest{
                 .resourceID = GetGlobalResourceID(),
                 .heapType = rhi::HeapType::DeviceLocal,
                 .byteSize = sizeof(T) * static_cast<size_t>(m_pendingResizeCapacity),
@@ -321,7 +321,7 @@ private:
         const auto resourceID = GetGlobalResourceID();
         m_pendingResizeCapacity = newCapacity;
         m_pendingResizeValid = true;
-        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+        m_asyncResizeState.Request(org::AsyncBufferBackingResizeRequest{
             .resourceID = resourceID,
             .heapType = rhi::HeapType::DeviceLocal,
             .byteSize = sizeof(T) * static_cast<size_t>(newCapacity),
@@ -332,7 +332,7 @@ private:
 
     bool PublishReadyAsyncResizeInternal(bool wait) {
         if ((!m_pendingResizeValid && !m_asyncResizeState.HasPending()) ||
-            !BufferBase::IsBackingMutationAllowedOnThisThread()) {
+            !org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
             return false;
         }
 
@@ -418,7 +418,7 @@ private:
 
     void AssignDescriptorSlots(uint32_t capacity)
     {
-        BufferBase::DescriptorRequirements requirements{};
+        org::BufferBase::DescriptorRequirements requirements{};
 
         requirements.createCBV = false;
         requirements.createSRV = true;
@@ -456,7 +456,7 @@ private:
 
 
     void CreateBuffer(size_t capacity, size_t previousCapacity = 0) {
-        auto backing = GpuBufferBacking::CreateUnique(
+        auto backing = org::GpuBufferBacking::CreateUnique(
             rhi::HeapType::DeviceLocal,
             sizeof(T) * capacity,
             GetGlobalResourceID(),
@@ -464,7 +464,7 @@ private:
         ApplyResizeBacking(std::move(backing), capacity, previousCapacity);
     }
 
-    void ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> backing, size_t capacity, size_t previousCapacity = 0) {
+    void ApplyResizeBacking(std::unique_ptr<org::GpuBufferBacking> backing, size_t capacity, size_t previousCapacity = 0) {
         const size_t replayElements = (std::min)(m_data.size(), capacity);
         if (previousCapacity != 0u) {
             spdlog::debug(
@@ -528,13 +528,13 @@ private:
         }
     }
 
-    void ApplyMetadataComponentBundle(const EntityComponentBundle& bundle) override {
+    void ApplyMetadataComponentBundle(const org::EntityComponentBundle& bundle) override {
         m_metadataBundles.emplace_back(bundle);
         ApplyMetadataToBacking(bundle);
     }
 
     org::runtime::BufferUploadPolicyState m_uploadPolicyState{};
-    AsyncBufferBackingResizeState m_asyncResizeState;
+    org::AsyncBufferBackingResizeState m_asyncResizeState;
     uint32_t m_pendingResizeCapacity = 0u;
     bool m_pendingResizeValid = false;
 };

@@ -69,9 +69,8 @@
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/RendererFrameInputs.h"
 
-class DynamicResource;
+namespace org { class DynamicResource; }
 namespace org { class ExternalTextureResource; }
-using org::ExternalTextureResource;
 class CLodStreamingSystem;
 class VirtualShadowCasterRegistry;
 
@@ -204,8 +203,8 @@ public:
     br::render::SceneIngestionServices& GetSceneIngestionServices() { return m_sceneIngestionServices; }
     const br::render::SceneIngestionServices& GetSceneIngestionServices() const { return m_sceneIngestionServices; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
-    RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
-    const RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
+    org::RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
+    const org::RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
     bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
     void StartAsyncStateGraphTrace(br::render::AsyncStateGraphTraceConfig config = {});
     [[nodiscard]] bool AsyncStateGraphTraceActive() const;
@@ -230,10 +229,10 @@ private:
 
     rhi::DescriptorHeapPtr rtvHeap;
 	std::vector<rhi::ResourceHandle> renderTargets;
-	std::vector<std::shared_ptr<ExternalTextureResource>> m_backbufferResources;
-	std::shared_ptr<DynamicResource> m_dynamicBackbuffer;
-	std::vector<std::shared_ptr<PixelBuffer>> m_presentationColorResources;
-	std::shared_ptr<DynamicResource> m_dynamicPresentationColor;
+	std::vector<std::shared_ptr<org::ExternalTextureResource>> m_backbufferResources;
+	std::shared_ptr<org::DynamicResource> m_dynamicBackbuffer;
+	std::vector<std::shared_ptr<org::PixelBuffer>> m_presentationColorResources;
+	std::shared_ptr<org::DynamicResource> m_dynamicPresentationColor;
     //ComPtr<ID3D12DescriptorHeap> dsvHeap;
 	//std::vector<ComPtr<ID3D12Resource>> depthStencilBuffers;
 	//Components::DepthMap m_depthMap;
@@ -262,7 +261,7 @@ private:
 
     std::shared_ptr<Scene> currentScene;
 
-    std::unique_ptr<RenderGraph> currentRenderGraph = nullptr;
+    std::unique_ptr<org::RenderGraph> currentRenderGraph = nullptr;
     bool m_renderGraphRuntimeInitialized = false;
     br::pipeline::PipelineRecipe m_pipelineRecipe;
     std::optional<br::pipeline::PipelineRecipe> m_pendingPipelineRecipe;
@@ -289,9 +288,9 @@ private:
 
 	std::string m_environmentName;
 	std::unique_ptr<Environment> m_currentEnvironment = nullptr;
-    std::shared_ptr<PixelBuffer> m_defaultEnvironmentCubemap = nullptr;
-    std::shared_ptr<PixelBuffer> m_defaultEnvironmentPrefilteredCubemap = nullptr;
-    std::shared_ptr<PixelBuffer> m_blueNoiseTexture = nullptr;
+    std::shared_ptr<org::PixelBuffer> m_defaultEnvironmentCubemap = nullptr;
+    std::shared_ptr<org::PixelBuffer> m_defaultEnvironmentPrefilteredCubemap = nullptr;
+    std::shared_ptr<org::PixelBuffer> m_blueNoiseTexture = nullptr;
     OpenPBRLookupResources m_openPBRLookupResources;
     bool m_warnedUsingFallbackEnvironment = false;
     bool m_warnedNullScene = false;
@@ -500,13 +499,13 @@ private:
     bool m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;
     bool m_loggedObjectReyesAtlasTelemetryEnabled = false;
 
-    class CoreResourceProvider : public IResourceProvider {
+    class CoreResourceProvider : public org::IResourceProvider {
 	public:
-        std::shared_ptr<PixelBuffer> m_HDRColorTarget = nullptr;
-		std::shared_ptr<PixelBuffer> m_upscaledHDRColorTarget = nullptr;
-		std::shared_ptr<PixelBuffer> m_gbufferDilatedMotionVectors = nullptr;
+        std::shared_ptr<org::PixelBuffer> m_HDRColorTarget = nullptr;
+		std::shared_ptr<org::PixelBuffer> m_upscaledHDRColorTarget = nullptr;
+		std::shared_ptr<org::PixelBuffer> m_gbufferDilatedMotionVectors = nullptr;
 
-		std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override { // TODO: don't use ifs
+		std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override { // TODO: don't use ifs
 			if (key.ToString() == Builtin::Surface::DilatedMotion)
 				return m_gbufferDilatedMotionVectors;
             if (key.ToString() == Builtin::Color::HDRColorTarget)
@@ -518,11 +517,11 @@ private:
 			return nullptr;
         }
 
-        std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override {
+        std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override {
             return nullptr;
 		}
 
-        std::vector<ResourceIdentifier> GetSupportedKeys() override {
+        std::vector<org::ResourceIdentifier> GetSupportedKeys() override {
 			return {
                 Builtin::Surface::DilatedMotion,
                 Builtin::Color::HDRColorTarget,
@@ -530,7 +529,7 @@ private:
 			};
         }
 
-        std::vector<ResourceIdentifier> GetSupportedResolverKeys() override {
+        std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override {
             return {};
 		}
 

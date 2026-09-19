@@ -12,10 +12,10 @@ struct UpscalingFrameData {
     Components::Camera camera;
     uint64_t frameNumber = 0;
     double deltaTime = 0;
-    std::shared_ptr<PixelBuffer> hdr;
-    std::shared_ptr<PixelBuffer> output;
-    std::shared_ptr<PixelBuffer> depth;
-    std::shared_ptr<PixelBuffer> motion;
+    std::shared_ptr<org::PixelBuffer> hdr;
+    std::shared_ptr<org::PixelBuffer> output;
+    std::shared_ptr<org::PixelBuffer> depth;
+    std::shared_ptr<org::PixelBuffer> motion;
 };
 
 class UpscalingPass
@@ -32,7 +32,7 @@ public:
         // replaced by an external resource with additional subresources.
         const auto upscaledHDR = Subresources(
             Builtin::PostProcessing::UpscaledHDR,
-            Mip{ 0, 1 });
+            org::Mip{ 0, 1 });
         const UpscalingMode upscalingMode = m_service->Mode();
         const rhi::Backend backend = m_service->Backend();
         const bool useDilatedMotionVectors = m_service->UsesDilatedMotionVectors();
@@ -58,11 +58,11 @@ public:
             return;
         }
 
-        ResourceState vulkanStreamlineExitState{
+        org::ResourceState vulkanStreamlineExitState{
             .access = rhi::ResourceAccessType::UnorderedAccess | rhi::ResourceAccessType::UnorderedAccessClear,
             .layout = rhi::ResourceLayout::UnorderedAccess,
             .sync = rhi::ResourceSyncState::AllShading | rhi::ResourceSyncState::ClearUnorderedAccessView };
-        ResourceState dx12StreamlineExitState{
+        org::ResourceState dx12StreamlineExitState{
             .access = rhi::ResourceAccessType::Common,
             .layout = rhi::ResourceLayout::Common,
             .sync = rhi::ResourceSyncState::All };
@@ -87,14 +87,14 @@ public:
     }
 
     void Initialize() {
-        m_pHDRTarget = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::Color::HDRColorTarget);
+        m_pHDRTarget = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::Color::HDRColorTarget);
         const bool useDilatedMotionVectors = m_service->UsesDilatedMotionVectors();
         const auto motionVectors = useDilatedMotionVectors
             ? Builtin::Surface::DilatedMotion
             : Builtin::Surface::Motion;
-        m_pMotionVectors = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(motionVectors);
-		m_pDepthTexture = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::PrimaryCamera::ProjectedDepthTexture);
-		m_pUpscaledHDRTarget = m_resourceRegistryView->RequestSharedAs<PixelBuffer>(Builtin::PostProcessing::UpscaledHDR);
+        m_pMotionVectors = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(motionVectors);
+		m_pDepthTexture = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::PrimaryCamera::ProjectedDepthTexture);
+		m_pUpscaledHDRTarget = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::PostProcessing::UpscaledHDR);
     }
 
     UpscalingFrameData Prepare(const org::PassPrepareContext& preparation) {
@@ -118,10 +118,10 @@ public:
 
 private:
 
-    std::shared_ptr<PixelBuffer> m_pHDRTarget;
-    std::shared_ptr<PixelBuffer> m_pMotionVectors;
-	std::shared_ptr<PixelBuffer> m_pDepthTexture;
-	std::shared_ptr<PixelBuffer> m_pUpscaledHDRTarget;
+    std::shared_ptr<org::PixelBuffer> m_pHDRTarget;
+    std::shared_ptr<org::PixelBuffer> m_pMotionVectors;
+	std::shared_ptr<org::PixelBuffer> m_pDepthTexture;
+	std::shared_ptr<org::PixelBuffer> m_pUpscaledHDRTarget;
 
     std::shared_ptr<const br::render::UpscalingGenerationService> m_service;
 

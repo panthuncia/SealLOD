@@ -19,7 +19,7 @@ public:
     }
 
     BRDFIntegrationBindings Declare(org::PassBuilder& builder) {
-        return {builder.BindRenderTarget(ResourceIdentifier{Builtin::BRDFLUT})};
+        return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::BRDFLUT})};
     }
 
     br::render::PreparedFullscreenDraw Prepare(const BRDFIntegrationBindings& bindings,
@@ -43,7 +43,7 @@ public:
     }
 
 private:
-    PipelineState PSO;
+    org::PipelineState PSO;
 
     void CreatePSO() {
         auto dev = DeviceManager::GetInstance().GetDevice();
@@ -113,7 +113,7 @@ private:
                 ")");
         }
         pipeline->SetName("BRDFIntegration.PSO");
-        PSO = PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+        PSO = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
             compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
             soLayout.layout);
     }

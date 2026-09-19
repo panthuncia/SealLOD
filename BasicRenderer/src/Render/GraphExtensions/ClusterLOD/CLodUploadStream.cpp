@@ -18,9 +18,9 @@ size_t AlignUp(size_t value, size_t alignment) {
     return (value + alignment - 1u) & ~(alignment - 1u);
 }
 
-bool UploadRangeFits(const std::shared_ptr<Resource>& resource,
+bool UploadRangeFits(const std::shared_ptr<org::Resource>& resource,
     size_t offset, size_t size, const char* phase) {
-	auto destination = std::dynamic_pointer_cast<BufferBase>(resource);
+	auto destination = std::dynamic_pointer_cast<org::BufferBase>(resource);
     if (!destination) {
 		basic_telemetry::AddCounter("CLodStreaming.InvalidUploadDestinations");
 		spdlog::error("CLOD upload destination rejected: phase={} resource={} name='{}' is not a buffer wrapper",
@@ -189,7 +189,7 @@ std::shared_ptr<CLodUploadPage> CLodUploadStream::AcquirePage(size_t minimumSize
     } else {
         page = std::make_shared<CLodUploadPage>();
         page->capacity = capacity;
-        page->buffer = Buffer::CreateShared(rhi::HeapType::Upload, capacity, false);
+        page->buffer = org::Buffer::CreateShared(rhi::HeapType::Upload, capacity, false);
         page->buffer->SetName("CLodStreamingUploadPage_" + std::to_string(++m_nextPageId));
         org::memory::SetResourceUsageHint(*page->buffer, "Cluster LOD streaming upload staging");
     }
@@ -290,7 +290,7 @@ std::shared_ptr<CLodUploadBatch> CLodUploadStream::Seal(
     batch->nonResidentEpoch = nonResidentEpoch;
     m_activePage.reset();
 
-    std::unordered_set<Resource*> seen;
+    std::unordered_set<org::Resource*> seen;
     for (const auto& copy : batch->copies) {
         if (copy.destination && seen.insert(copy.destination.get()).second) {
             batch->destinations.push_back(copy.destination);

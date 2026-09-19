@@ -9,9 +9,7 @@
 #include <vector>
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct AVBOITEarlyDepthFrameData {
     bool enabled = false;
@@ -34,10 +32,10 @@ class AVBOITEarlyDepthPass final : public org::TypedRenderGraphPass<AVBOITEarlyD
     AVBOITEarlyDepthFrameData, AVBOITEarlyDepthBindings> {
 public:
     AVBOITEarlyDepthPass(
-        std::shared_ptr<Buffer> configBuffer,
-        std::shared_ptr<Buffer> tileCommandsBuffer,
-        std::shared_ptr<Buffer> tileCountBuffer,
-        std::shared_ptr<PixelBuffer> earlyDepthTexture);
+        std::shared_ptr<org::Buffer> configBuffer,
+        std::shared_ptr<org::Buffer> tileCommandsBuffer,
+        std::shared_ptr<org::Buffer> tileCountBuffer,
+        std::shared_ptr<org::PixelBuffer> earlyDepthTexture);
 
     AVBOITEarlyDepthBindings Declare(org::PassBuilder& builder);
     AVBOITEarlyDepthFrameData Prepare(const AVBOITEarlyDepthBindings&,
@@ -46,10 +44,10 @@ public:
         const AVBOITEarlyDepthFrameData&, org::PassRecordContext&);
 
 private:
-    std::shared_ptr<Buffer> m_configBuffer;
-    std::shared_ptr<Buffer> m_tileCommandsBuffer;
-    std::shared_ptr<Buffer> m_tileCountBuffer;
-    std::shared_ptr<PixelBuffer> m_earlyDepthTexture;
-    PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_configBuffer;
+    std::shared_ptr<org::Buffer> m_tileCommandsBuffer;
+    std::shared_ptr<org::Buffer> m_tileCountBuffer;
+    std::shared_ptr<org::PixelBuffer> m_earlyDepthTexture;
+    org::PipelineState m_pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

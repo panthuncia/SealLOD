@@ -25,8 +25,8 @@ public:
 
     BloomBlendBindings Declare(org::PassBuilder& builder) {
         return {
-            builder.BindShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ 1, 2 })),
-            builder.BindRenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ 0, 1 }))
+            builder.BindShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ 1, 2 })),
+            builder.BindRenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 }))
         };
     }
 
@@ -68,7 +68,7 @@ private:
     unsigned int m_mipIndex;
     bool m_isUpsample = false;
 
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
     void CreatePSO() {
         auto dev = DeviceManager::GetInstance().GetDevice();
@@ -133,7 +133,7 @@ private:
             throw std::runtime_error("Failed to create upsample PSO (RHI)");
         }
         pipeline->SetName("BloomBlend (RHI)");
-        m_pso = PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
             compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
             soLayout.layout);
     }

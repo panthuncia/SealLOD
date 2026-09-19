@@ -20,9 +20,7 @@
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 
 struct ClusterRasterizationPassInputs {
     bool wireframe;
@@ -49,43 +47,43 @@ struct ClusterRasterBindings {
 class ClusterRasterizationPass
     : public org::TypedRenderGraphPass<ClusterRasterizationPass,
           org::EmptyPassFrameData, ClusterRasterBindings, br::render::PreparedRenderIndirectSequence>,
-      public IDynamicDeclaredResources {
+      public org::IDynamicDeclaredResources {
 public:
     ClusterRasterizationPass(
         ClusterRasterizationPassInputs inputs,
-        std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
-        std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
-        std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
-        std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
-        std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
-        std::shared_ptr<Buffer> deepVisibilityNodesBuffer = nullptr,
-        std::shared_ptr<Buffer> deepVisibilityCounterBuffer = nullptr,
-        std::shared_ptr<Buffer> deepVisibilityOverflowCounterBuffer = nullptr,
-        std::shared_ptr<Buffer> AVBOITConfigBuffer = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITOccupancyTexture = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITScalarExtinctionTexture = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITChromaticExtinctionTexture = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITIntegratedTransmittanceTexture = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITZeroTransmittanceSliceTexture = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITAccumulationTexture = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITNormalizationTexture = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITShadingExtinctionTexture = nullptr,
-        std::shared_ptr<Buffer> visibleClustersResolveBuffer = nullptr,
-        std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
-          std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture = nullptr,
-          std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture = nullptr,
-          std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITOccupancySliceMaskTexture = nullptr,
-        std::shared_ptr<PixelBuffer> AVBOITEarlyDepthTexture = nullptr,
-          std::shared_ptr<Buffer> telemetryBuffer = nullptr,
-          std::shared_ptr<Buffer> sourceGroupMismatchCounterBuffer = nullptr,
-          std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer = nullptr,
-          std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture = nullptr);
+        std::shared_ptr<org::Buffer> compactedVisibleClustersBuffer,
+        std::shared_ptr<org::Buffer> compactedVisibleClusterTransformIndicesBuffer,
+        std::shared_ptr<org::Buffer> rasterBucketsHistogramBuffer,
+        std::shared_ptr<org::Buffer> rasterBucketsIndirectArgsBuffer,
+        std::shared_ptr<org::Buffer> sortedToUnsortedMappingBuffer,
+        std::shared_ptr<org::Buffer> deepVisibilityNodesBuffer = nullptr,
+        std::shared_ptr<org::Buffer> deepVisibilityCounterBuffer = nullptr,
+        std::shared_ptr<org::Buffer> deepVisibilityOverflowCounterBuffer = nullptr,
+        std::shared_ptr<org::Buffer> AVBOITConfigBuffer = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITOccupancyTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITScalarExtinctionTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITChromaticExtinctionTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITIntegratedTransmittanceTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITZeroTransmittanceSliceTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITAccumulationTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITNormalizationTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITShadingExtinctionTexture = nullptr,
+        std::shared_ptr<org::Buffer> visibleClustersResolveBuffer = nullptr,
+        std::shared_ptr<org::ResourceGroup> slabResourceGroup = nullptr,
+          std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture = nullptr,
+          std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture = nullptr,
+          std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITOccupancySliceMaskTexture = nullptr,
+        std::shared_ptr<org::PixelBuffer> AVBOITEarlyDepthTexture = nullptr,
+          std::shared_ptr<org::Buffer> telemetryBuffer = nullptr,
+          std::shared_ptr<org::Buffer> sourceGroupMismatchCounterBuffer = nullptr,
+          std::shared_ptr<org::Buffer> sourceGroupMismatchDetailsBuffer = nullptr,
+          std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture = nullptr);
     ~ClusterRasterizationPass();
 
     ClusterRasterBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    void Update(const UpdateExecutionContext& executionContext) override;
+    void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
     std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const;
     org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedRenderIndirectSequence&,
@@ -108,38 +106,38 @@ private:
     // the table published when the recipe is built.
     CLodViewRasterInfoTable m_viewRasterInfoTable;
     org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Raster View Raster Info"};
-    std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
-    std::vector<std::shared_ptr<PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
+    std::vector<std::shared_ptr<org::PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
 
-    std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
-    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
-    std::shared_ptr<Buffer> m_rasterBucketsHistogramBuffer;
-    std::shared_ptr<Buffer> m_rasterBucketsIndirectArgsBuffer;
-    std::shared_ptr<Buffer> m_sortedToUnsortedMappingBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityNodesBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityCounterBuffer;
-    std::shared_ptr<Buffer> m_deepVisibilityOverflowCounterBuffer;
-    std::shared_ptr<Buffer> m_AVBOITConfigBuffer;
-    std::shared_ptr<PixelBuffer> m_AVBOITOccupancyTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITScalarExtinctionTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITChromaticExtinctionTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITIntegratedTransmittanceTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITZeroTransmittanceSliceTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITAccumulationTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITNormalizationTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITShadingExtinctionTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITEarlyDepthTexture;
-    std::shared_ptr<PixelBuffer> m_AVBOITOccupancySliceMaskTexture;
-    std::shared_ptr<Buffer> m_visibleClustersResolveBuffer;
-    std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
-    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
-    std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_telemetryBuffer;
-    std::shared_ptr<Buffer> m_sourceGroupMismatchCounterBuffer;
-    std::shared_ptr<Buffer> m_sourceGroupMismatchDetailsBuffer;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClustersBuffer;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
+    std::shared_ptr<org::Buffer> m_rasterBucketsHistogramBuffer;
+    std::shared_ptr<org::Buffer> m_rasterBucketsIndirectArgsBuffer;
+    std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityNodesBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityCounterBuffer;
+    std::shared_ptr<org::Buffer> m_deepVisibilityOverflowCounterBuffer;
+    std::shared_ptr<org::Buffer> m_AVBOITConfigBuffer;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITOccupancyTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITScalarExtinctionTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITChromaticExtinctionTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITIntegratedTransmittanceTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITZeroTransmittanceSliceTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITAccumulationTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITNormalizationTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITShadingExtinctionTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITEarlyDepthTexture;
+    std::shared_ptr<org::PixelBuffer> m_AVBOITOccupancySliceMaskTexture;
+    std::shared_ptr<org::Buffer> m_visibleClustersResolveBuffer;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPageTableTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<org::PixelBuffer> m_virtualShadowDynamicPagesTexture;
+    std::shared_ptr<org::Buffer> m_virtualShadowClipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_telemetryBuffer;
+    std::shared_ptr<org::Buffer> m_sourceGroupMismatchCounterBuffer;
+    std::shared_ptr<org::Buffer> m_sourceGroupMismatchDetailsBuffer;
 
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
 
     std::shared_ptr<rhi::CommandSignaturePtr> m_rasterizationCommandSignature;
 

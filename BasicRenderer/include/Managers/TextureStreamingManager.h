@@ -31,9 +31,7 @@ class RendererStateRequestService;
 struct TextureTransferArtifact;
 }
 namespace org { class CopyPass; }
-using org::CopyPass;
 namespace org { class Buffer; }
-using org::Buffer;
 class MaterialTextureTransferService;
 class PublishedStateResourceResolver;
 
@@ -113,7 +111,7 @@ struct TextureStreamingBindingOptions {
 	uint32_t maximumResidentTopMip = (std::numeric_limits<uint32_t>::max)();
 };
 
-class TextureStreamingManager : public IResourceProvider {
+class TextureStreamingManager : public org::IResourceProvider {
 public:
 	using BindingChangedCallback = std::function<void(TextureAsset&)>;
 
@@ -136,10 +134,10 @@ public:
 	// published texture-image fragment through its lease.
 	void AcknowledgePublishedImageTable(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
-	std::shared_ptr<Resource> ResolvePublishedImageTableResourceForDiagnostics() const;
-	std::shared_ptr<Resource> PublishedImageTableReadbackAnchorForDiagnostics() const;
+	std::shared_ptr<org::Resource> ResolvePublishedImageTableResourceForDiagnostics() const;
+	std::shared_ptr<org::Resource> PublishedImageTableReadbackAnchorForDiagnostics() const;
 	bool RequestExternalMaterialTextureReadback(
-		const std::shared_ptr<PixelBuffer>& image,
+		const std::shared_ptr<org::PixelBuffer>& image,
 		std::wstring outputFile,
 		std::function<void()> callback);
 	uint64_t RegisterTextureBinding(
@@ -150,17 +148,17 @@ public:
 	void UnregisterTextureBinding(uint64_t bindingID);
 	void UnregisterTextureBindings(const std::vector<uint64_t>& bindingIDs);
 
-	std::shared_ptr<RenderPass> CreateTextureStreamingFeedbackReadbackPass();
-	MaterialTextureStreamingStats GetTextureStreamingStats(const std::vector<std::shared_ptr<Resource>>& activeTextureResources,
+	std::shared_ptr<org::RenderPass> CreateTextureStreamingFeedbackReadbackPass();
+	MaterialTextureStreamingStats GetTextureStreamingStats(const std::vector<std::shared_ptr<org::Resource>>& activeTextureResources,
 		uint64_t* sequence = nullptr) const;
 	// Advances whenever the streaming worker publishes new stats; callers cache on it.
 	uint64_t PublishedStatsSequence() const noexcept;
 	MaterialTextureStreamingReadinessStats GetTextureStreamingReadinessStats() const;
 
-	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-	std::vector<ResourceIdentifier> GetSupportedKeys() override;
-	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+	std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+	std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 
 private:
 	TextureStreamingManager();
@@ -190,8 +188,8 @@ private:
 		uint64_t streamingStateRevision = 0;
 		std::chrono::steady_clock::time_point queuedAt{};
 		std::shared_ptr<TextureAsset> texture;
-		std::shared_ptr<PixelBuffer> previousImage;
-		std::shared_ptr<PixelBuffer> newImage;
+		std::shared_ptr<org::PixelBuffer> previousImage;
+		std::shared_ptr<org::PixelBuffer> newImage;
 		TextureStreamingGPUInfo metadata{};
 		std::shared_ptr<const br::render::TextureTransferArtifact> transfer;
 		bool graphRequested = false;
@@ -200,7 +198,7 @@ private:
 	};
 	void ApplyRegisterCommand(WorkerCommand&& command);
 	void ApplyUnregisterCommand(uint64_t bindingID);
-	void QueueBindingChanged(TextureAsset& texture, std::shared_ptr<PixelBuffer> previousImage);
+	void QueueBindingChanged(TextureAsset& texture, std::shared_ptr<org::PixelBuffer> previousImage);
 	void FinishBindingMailboxRequest(uint32_t streamingTextureID, const std::shared_ptr<TextureAsset>& texture);
 	void QueueCommand(WorkerCommand&& command);
 	void EnqueueTextureMetadataRefresh(const std::shared_ptr<TextureAsset>& texture, const char* reason);
@@ -220,7 +218,7 @@ private:
 	void PublishTextureImageTable();
 	MaterialTextureStreamingStats BuildTextureStreamingStats() const;
 
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
 	std::shared_ptr<DynamicStructuredBuffer<TextureStreamingGPUInfo>> m_textureStreamingMetadataBuffer;
 	std::shared_ptr<PublishedStateResourceResolver> m_textureImageTableResolver;
 	br::render::VersionedGpuBufferJournal m_textureImageTableJournal{ sizeof(TextureStreamingGPUInfo) };
@@ -280,7 +278,7 @@ private:
 	uint64_t m_lastProcessedReadbackFence = 0;
 	std::atomic<bool> m_initialized{false};
 	struct ReadbackSlot {
-		std::shared_ptr<Buffer> staging;
+		std::shared_ptr<org::Buffer> staging;
 		std::vector<uint32_t> activeStreamingTextureIDs;
 		uint64_t capacityBytes = 0;
 		uint64_t copyBytes = 0;

@@ -35,27 +35,27 @@ public:
 	explicit TonemappingPass(bool bloomEnabled = false)
         : m_bloomEnabled(bloomEnabled) {
 		CreatePSO();
-        m_pLPMConstants = LazyDynamicStructuredBuffer<LPMConstants>::CreateShared(1, "AMD LPM constants", 1, true);
+        m_pLPMConstants = org::LazyDynamicStructuredBuffer<LPMConstants>::CreateShared(1, "AMD LPM constants", 1, true);
 	}
 
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override {
+    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override {
         if (key == m_providedResources[0]) {
 			return m_pLPMConstants;
         }
 		return nullptr;
     }
-    std::vector<ResourceIdentifier> GetSupportedKeys() override {
+    std::vector<org::ResourceIdentifier> GetSupportedKeys() override {
 		return m_providedResources;
     }
 
     TonemappingBindings Declare(org::PassBuilder& builder) {
         builder.WithShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer);
         TonemappingBindings bindings{};
-        bindings.target = builder.BindRenderTarget(ResourceIdentifier{Builtin::PresentationColor});
+        bindings.target = builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor});
         bindings.lpm = builder.BindShaderResource(m_pLPMConstants);
         if (m_bloomEnabled) {
             bindings.bloom = builder.BindShaderResource(
-                Subresources(Builtin::PostProcessing::BloomTexture, Mip{ 1, 2 }));
+                Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ 1, 2 }));
         }
 		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
         return bindings;
@@ -111,13 +111,13 @@ public:
 
 private:
 
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
-    std::shared_ptr<LazyDynamicStructuredBuffer<LPMConstants>> m_pLPMConstants;
+    std::shared_ptr<org::LazyDynamicStructuredBuffer<LPMConstants>> m_pLPMConstants;
 
     bool m_bloomEnabled = false;
 
-    std::vector<ResourceIdentifier> m_providedResources = {
+    std::vector<org::ResourceIdentifier> m_providedResources = {
 		"FFX::LPMConstants"
 	};
 
@@ -193,7 +193,7 @@ private:
             throw std::runtime_error("Failed to create tonemapping PSO (RHI)");
         }
         pipeline->SetName("Tonemapping.PSO");
-        m_pso = PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
             compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
             soLayout.layout);
     }

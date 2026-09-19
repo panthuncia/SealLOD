@@ -31,7 +31,7 @@ namespace TerrainRegionMaterialEval
         return (flags & MaterialCompileFlags::MaterialCompileTerrain) != 0;
     }
 
-    inline std::vector<uint64_t> RecipeRevision(const PipelineState& pso, const org::PassPrepareContext& preparation) {
+    inline std::vector<uint64_t> RecipeRevision(const org::PipelineState& pso, const org::PassPrepareContext& preparation) {
         const auto& context = *preparation.preparationData->Get<UpdateContext>();
         const auto& signatures = CommandSignatureManager::GetInstance();
         return {reinterpret_cast<uintptr_t>(pso.PeekPayload()), SettingsManager::GetInstance().Revision(),
@@ -82,7 +82,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 template<class Derived>
@@ -98,7 +98,7 @@ public:
     }
 
     void Initialize() {
-        m_materialEvalCmds = this->m_resourceRegistryView->template RequestPtr<Resource>("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+        m_materialEvalCmds = this->m_resourceRegistryView->template RequestPtr<org::Resource>("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
     }
 
     void ShutdownPass() { m_materialEvalCmds = nullptr; }
@@ -144,8 +144,8 @@ public:
         for (const auto& data : work) br::render::RecordPreparedComputeIndirect(data, recording);
     }
 
-    Resource* m_materialEvalCmds = nullptr;
-    PipelineState m_pso;
+    org::Resource* m_materialEvalCmds = nullptr;
+    org::PipelineState m_pso;
 };
 
 class TerrainRegionHistogramPass : public TerrainRegionMaterialRangePassBase<TerrainRegionHistogramPass> {
@@ -212,7 +212,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 class TerrainRegionBlockOffsetsPass : public org::TypedRenderGraphPass<TerrainRegionBlockOffsetsPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
@@ -259,7 +259,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 class TerrainRegionPixelListPass : public TerrainRegionMaterialRangePassBase<TerrainRegionPixelListPass> {
@@ -324,7 +324,7 @@ public:
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 };
 
 class BuildTerrainRegionMaterialIndirectCommandBufferPass : public org::TypedRenderGraphPass<BuildTerrainRegionMaterialIndirectCommandBufferPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeIndirect> {
@@ -351,7 +351,7 @@ public:
     }
 
     void Initialize() {
-        m_dispatchArgs = m_resourceRegistryView->RequestPtr<Resource>("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
+        m_dispatchArgs = m_resourceRegistryView->RequestPtr<org::Resource>("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
     }
 
     void ShutdownPass() { m_dispatchArgs = nullptr; }
@@ -378,8 +378,8 @@ public:
     }
 
 private:
-    PipelineState m_pso;
-    Resource* m_dispatchArgs = nullptr;
+    org::PipelineState m_pso;
+    org::Resource* m_dispatchArgs = nullptr;
 };
 
 struct EvaluateTerrainRegionMaterialGroupsBindings {
@@ -503,8 +503,8 @@ public:
     }
 
     void Initialize() {
-        m_terrainRegionEvalCmds = m_resourceRegistryView->RequestPtr<Resource>("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
-        m_activeCount = m_resourceRegistryView->RequestPtr<Resource>("Builtin::VisUtil::TerrainRegionActiveCountBuffer");
+        m_terrainRegionEvalCmds = m_resourceRegistryView->RequestPtr<org::Resource>("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
+        m_activeCount = m_resourceRegistryView->RequestPtr<org::Resource>("Builtin::VisUtil::TerrainRegionActiveCountBuffer");
     }
 
 
@@ -554,14 +554,14 @@ public:
     }
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
-    std::shared_ptr<GloballyIndexedResource> m_visibleClusterResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesDiceQueueResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesTessTableConfigsResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesTessTableVerticesResource;
-    std::shared_ptr<GloballyIndexedResource> m_reyesTessTableTrianglesResource;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
+    std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesDiceQueueResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesTessTableConfigsResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesTessTableVerticesResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_reyesTessTableTrianglesResource;
     uint32_t m_patchVisibilityIndexBase = 0u;
-    Resource* m_terrainRegionEvalCmds = nullptr;
-    Resource* m_activeCount = nullptr;
+    org::Resource* m_terrainRegionEvalCmds = nullptr;
+    org::Resource* m_activeCount = nullptr;
 };

@@ -16,13 +16,13 @@
 #include "../shaders/PerPassRootConstants/clodHistogramRootConstants.h"
 
 RasterBucketHistogramPass::RasterBucketHistogramPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> histogramIndirectCommand,
-    std::shared_ptr<Buffer> histogramBuffer,
-    std::shared_ptr<Buffer> reyesOwnershipBitsetBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
-    std::shared_ptr<Buffer> readBaseCounterBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> histogramIndirectCommand,
+    std::shared_ptr<org::Buffer> histogramBuffer,
+    std::shared_ptr<org::Buffer> reyesOwnershipBitsetBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> readBaseCounterBuffer,
     bool readReverse,
     uint32_t visibleClustersCapacity,
     bool runWhenComputeSWRasterEnabledOnly) {
@@ -165,7 +165,7 @@ void RasterBucketHistogramPass::Record(const RasterBucketHistogramBindings&,
         recording.Resolve(data.indirectArguments).GetHandle(), 0, {}, 0, 1);
 }
 
-void RasterBucketHistogramPass::Update(const UpdateExecutionContext& executionContext) {
+void RasterBucketHistogramPass::Update(const org::UpdateExecutionContext& executionContext) {
     m_enabled = !m_runWhenComputeSWRasterEnabledOnly ||
         CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)());
     if (!m_enabled) {
@@ -186,8 +186,8 @@ void RasterBucketHistogramPass::Update(const UpdateExecutionContext& executionCo
 void RasterBucketHistogramPass::CreatePipelines(
     rhi::Device device,
     rhi::PipelineLayoutHandle globalRootSignature,
-    PipelineState& outHistogramPipeline,
-    PipelineState& outClearPipeline)
+    org::PipelineState& outHistogramPipeline,
+    org::PipelineState& outClearPipeline)
 {
     (void)device;
     outHistogramPipeline = PSOManager::GetInstance().MakeComputePipeline(

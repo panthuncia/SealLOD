@@ -1998,7 +1998,7 @@ int main() {
 		directResolvePublisher.ResourceSource(), directResolveKey);
 	const auto directMissingIdentity = directResolver.CaptureDeclarationState()->resourceSetIdentity;
 	Check(directResolver.Resolve().empty());
-	auto directResource = Buffer::CreateSharedUnmaterialized(
+	auto directResource = org::Buffer::CreateSharedUnmaterialized(
 		rhi::HeapType::DeviceLocal, sizeof(std::uint32_t), false);
 	auto directResources = std::make_shared<PublishedResourceCatalog::ResourceList>();
 	directResources->push_back(directResource);

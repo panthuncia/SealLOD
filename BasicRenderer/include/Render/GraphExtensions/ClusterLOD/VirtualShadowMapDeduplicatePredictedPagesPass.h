@@ -8,9 +8,7 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct VirtualShadowMapDeduplicatePredictedPagesBindings {
     org::ResourceBindingToken rawPages, rawCount, scratch, pages, pageCount;
@@ -22,15 +20,15 @@ class VirtualShadowMapDeduplicatePredictedPagesPass final : public org::TypedRen
     br::render::PreparedComputePipelineSequence, VirtualShadowMapDeduplicatePredictedPagesBindings> {
 public:
     VirtualShadowMapDeduplicatePredictedPagesPass(
-        std::shared_ptr<Buffer> predictiveRawPagesBuffer,
-        std::shared_ptr<Buffer> predictiveRawPageCountBuffer,
-        std::shared_ptr<Buffer> predictedScratchBitsetBuffer,
-        std::shared_ptr<Buffer> predictedPagesBuffer,
-        std::shared_ptr<Buffer> predictedPageCountBuffer,
-        std::shared_ptr<Buffer> statsBuffer,
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> dirtyFlagsBuffer,
+        std::shared_ptr<org::Buffer> predictiveRawPagesBuffer,
+        std::shared_ptr<org::Buffer> predictiveRawPageCountBuffer,
+        std::shared_ptr<org::Buffer> predictedScratchBitsetBuffer,
+        std::shared_ptr<org::Buffer> predictedPagesBuffer,
+        std::shared_ptr<org::Buffer> predictedPageCountBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> dirtyFlagsBuffer,
         uint32_t physicalPageCount);
 
     VirtualShadowMapDeduplicatePredictedPagesBindings Declare(org::PassBuilder& builder);
@@ -41,16 +39,16 @@ public:
 
 private:
 
-    PipelineState m_clearStatePso;
-    PipelineState m_deduplicatePso;
-    std::shared_ptr<Buffer> m_predictiveRawPagesBuffer;
-    std::shared_ptr<Buffer> m_predictiveRawPageCountBuffer;
-    std::shared_ptr<Buffer> m_predictedScratchBitsetBuffer;
-    std::shared_ptr<Buffer> m_predictedPagesBuffer;
-    std::shared_ptr<Buffer> m_predictedPageCountBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_dirtyFlagsBuffer;
+    org::PipelineState m_clearStatePso;
+    org::PipelineState m_deduplicatePso;
+    std::shared_ptr<org::Buffer> m_predictiveRawPagesBuffer;
+    std::shared_ptr<org::Buffer> m_predictiveRawPageCountBuffer;
+    std::shared_ptr<org::Buffer> m_predictedScratchBitsetBuffer;
+    std::shared_ptr<org::Buffer> m_predictedPagesBuffer;
+    std::shared_ptr<org::Buffer> m_predictedPageCountBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_dirtyFlagsBuffer;
     uint32_t m_physicalPageCount = 0u;
 };

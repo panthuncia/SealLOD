@@ -78,14 +78,14 @@ void SceneRenderableResidencyService::ReleaseRasterBucket(MaterialRasterFlags fl
         .ReleaseRasterBucket(flags);
 }
 
-std::unique_ptr<BufferView> SceneRenderableResidencyService::AllocateMeshOverride(
+std::unique_ptr<org::BufferView> SceneRenderableResidencyService::AllocateMeshOverride(
     const PerMeshCB& data) const {
     return Storage(m_meshes, "Renderable residency geometry storage is unavailable")
         .AllocatePerMeshOverrideBuffer(data);
 }
 
 void SceneRenderableResidencyService::ReleaseMeshOverride(
-    std::unique_ptr<BufferView>& view) const {
+    std::unique_ptr<org::BufferView>& view) const {
     Storage(m_meshes, "Renderable residency geometry storage is unavailable")
         .ReleasePerMeshOverrideBuffer(view);
 }

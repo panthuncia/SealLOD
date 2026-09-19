@@ -10,8 +10,8 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapBuildMarkTilesPass::VirtualShadowMapBuildMarkTilesPass(
-    std::shared_ptr<Buffer> tileWorkBuffer,
-    std::shared_ptr<Buffer> tileCountBuffer)
+    std::shared_ptr<org::Buffer> tileWorkBuffer,
+    std::shared_ptr<org::Buffer> tileCountBuffer)
     : m_tileWorkBuffer(std::move(tileWorkBuffer))
     , m_tileCountBuffer(std::move(tileCountBuffer))
 {
@@ -26,13 +26,13 @@ VirtualShadowMapBuildMarkTilesPass::VirtualShadowMapBuildMarkTilesPass(
 VirtualShadowMapBuildMarkTilesBindings VirtualShadowMapBuildMarkTilesPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }));
+    builder.WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }));
     return {builder.BindUnorderedAccess(m_tileWorkBuffer), builder.BindUnorderedAccess(m_tileCountBuffer)};
 }
 
 void VirtualShadowMapBuildMarkTilesPass::Initialize() {}
 
-void VirtualShadowMapBuildMarkTilesPass::Update(const UpdateExecutionContext& executionContext)
+void VirtualShadowMapBuildMarkTilesPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
     const uint32_t zero = 0u;

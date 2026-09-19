@@ -15,7 +15,7 @@ struct MenuBindings { org::ResourceBindingToken target; };
 class MenuRenderPass final : public org::TypedRenderGraphPass<MenuRenderPass, MenuFrameData, MenuBindings> {
 public:
 	MenuBindings Declare(org::PassBuilder& builder) {
-		return {builder.BindRenderTarget(ResourceIdentifier{Builtin::PresentationColor})};
+		return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
 	}
 
 	MenuFrameData Prepare(const MenuBindings& bindings, const org::PassPrepareContext& preparation) const {

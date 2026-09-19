@@ -12,14 +12,14 @@
 #include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapClearPagesPass::VirtualShadowMapClearPagesPass(
-    std::shared_ptr<PixelBuffer> staticPagesTexture,
-    std::shared_ptr<PixelBuffer> dynamicPagesTexture,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<Buffer> pageViewInfoBuffer,
-    std::shared_ptr<Buffer> statsBuffer)
+    std::shared_ptr<org::PixelBuffer> staticPagesTexture,
+    std::shared_ptr<org::PixelBuffer> dynamicPagesTexture,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> pageViewInfoBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer)
     : m_staticPagesTexture(std::move(staticPagesTexture))
     , m_dynamicPagesTexture(std::move(dynamicPagesTexture))
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
@@ -72,7 +72,7 @@ br::render::PreparedComputeDispatch VirtualShadowMapClearPagesPass::Prepare(
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_STATIC_PAGES_DESCRIPTOR_INDEX] = uav(bindings.staticPages);
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = uav(bindings.dynamicPages);
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
-    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(UAVViewType::Texture2DArrayFull));
+    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_PHYSICAL_PAGE_COUNT] = config.maxPhysicalPages;

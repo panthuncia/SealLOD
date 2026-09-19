@@ -14,15 +14,15 @@
 #include "../shaders/PerPassRootConstants/visUtilRootConstants.h"
 
 DeepVisibilityResolvePass::DeepVisibilityResolvePass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> reyesDiceQueueBuffer,
-    std::shared_ptr<Buffer> reyesTessTableConfigsBuffer,
-    std::shared_ptr<Buffer> reyesTessTableVerticesBuffer,
-    std::shared_ptr<Buffer> reyesTessTableTrianglesBuffer,
-    std::shared_ptr<Buffer> deepVisibilityNodesBuffer,
-    std::shared_ptr<Buffer> deepVisibilityCounterBuffer,
-    std::shared_ptr<Buffer> deepVisibilityOverflowCounterBuffer,
-    std::shared_ptr<Buffer> deepVisibilityStatsBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> reyesDiceQueueBuffer,
+    std::shared_ptr<org::Buffer> reyesTessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> reyesTessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> reyesTessTableTrianglesBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityNodesBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityCounterBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityOverflowCounterBuffer,
+    std::shared_ptr<org::Buffer> deepVisibilityStatsBuffer,
     uint32_t patchVisibilityIndexBase)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_reyesDiceQueueBuffer(std::move(reyesDiceQueueBuffer))
@@ -140,14 +140,14 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
 
 void DeepVisibilityResolvePass::Initialize()
 {
-    RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
+    RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
     if (m_getShadowsEnabled && m_getShadowsEnabled()) {
-        RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
+        RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
     }
-    m_pHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Color::HDRColorTarget);
+    m_pHDRTarget = m_resourceRegistryView->RequestPtr<org::PixelBuffer>(Builtin::Color::HDRColorTarget);
 }
 
-void DeepVisibilityResolvePass::Update(const UpdateExecutionContext& executionContext)
+void DeepVisibilityResolvePass::Update(const org::UpdateExecutionContext& executionContext)
 {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
@@ -155,7 +155,7 @@ void DeepVisibilityResolvePass::Update(const UpdateExecutionContext& executionCo
     m_renderHeight = context.renderResolution.y;
     m_globalPsoFlags = context.globalPSOFlags;
 
-    std::shared_ptr<PixelBuffer> primaryHeadPointers;
+    std::shared_ptr<org::PixelBuffer> primaryHeadPointers;
     for (const auto& view : context.Views()) if (view.primary) {
         primaryHeadPointers = view.deepVisibilityHeadPointers;
         break;

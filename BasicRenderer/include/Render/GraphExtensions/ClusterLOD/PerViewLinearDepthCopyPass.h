@@ -7,7 +7,6 @@
 #include <vector>
 
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 struct PerViewLinearDepthCopyPreparedView {
     std::vector<uint32_t> constants;
@@ -34,13 +33,13 @@ struct PerViewLinearDepthCopyBindings {
 };
 
 class PerViewLinearDepthCopyPass : public org::TypedRenderGraphPass<PerViewLinearDepthCopyPass,
-    PerViewLinearDepthCopyPreparedData, PerViewLinearDepthCopyBindings>, public IDynamicDeclaredResources {
+    PerViewLinearDepthCopyPreparedData, PerViewLinearDepthCopyBindings>, public org::IDynamicDeclaredResources {
 public:
     explicit PerViewLinearDepthCopyPass(bool writeProjectedDepth = true);
 
     PerViewLinearDepthCopyBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    void Update(const UpdateExecutionContext&) override;
+    void Update(const org::UpdateExecutionContext&) override;
     bool DeclaredResourcesChanged() const override;
     PerViewLinearDepthCopyPreparedData Prepare(const PerViewLinearDepthCopyBindings&,
         const org::PassPrepareContext& preparation) const;
@@ -50,9 +49,9 @@ public:
 private:
     using PreparedView = PerViewLinearDepthCopyPreparedView;
     using PreparedData = PerViewLinearDepthCopyPreparedData;
-    PipelineState m_pso;
+    org::PipelineState m_pso;
     struct ViewSnapshot {
-        std::shared_ptr<PixelBuffer> visibility, linearDepth;
+        std::shared_ptr<org::PixelBuffer> visibility, linearDepth;
         uint32_t width = 0, height = 0;
         bool primary = false;
         std::array<uint32_t, 2> projection{};

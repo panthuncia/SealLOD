@@ -100,7 +100,7 @@ struct TextureSourceData {
     using BytesPtr = std::shared_ptr<std::vector<uint8_t>>;
     using BytesList = std::vector<BytesPtr>;
 
-    TextureDescription desc;
+    org::TextureDescription desc;
     BytesList subresources;
     bool hasFullMipChain = false;
     bool isBlockCompressed = false;
@@ -232,7 +232,7 @@ struct TextureDirectStorageReloadJobHandle {
     std::atomic_bool cancelRequested = false;
     std::mutex mutex;
     std::atomic<uint32_t> targetTopMip = 0;
-    std::shared_ptr<PixelBuffer> uploadedImage;
+    std::shared_ptr<org::PixelBuffer> uploadedImage;
     DirectStorageAsyncRequestHandle requestHandle;
     std::string error;
 };
@@ -253,12 +253,12 @@ public:
         std::monostate,
         BytesList,
         std::string,
-        std::shared_ptr<PixelBuffer>>;
+        std::shared_ptr<org::PixelBuffer>>;
     StorageVariant m_initialStorage;
 
-    static std::shared_ptr<TextureAsset> CreateShared(TextureDescription desc,
+    static std::shared_ptr<TextureAsset> CreateShared(org::TextureDescription desc,
         StorageVariant initialStorage,
-        std::shared_ptr<Sampler> defaultSampler,
+        std::shared_ptr<org::Sampler> defaultSampler,
         TextureFileMeta meta) {
 	    return std::shared_ptr<TextureAsset>(new TextureAsset(
             std::move(desc),
@@ -285,7 +285,7 @@ public:
             [&](const std::string& path) -> const BytesList& {
 				throw std::runtime_error("Not implemented");
             },
-        [&](const std::shared_ptr<PixelBuffer>& pb) -> const BytesList& {
+        [&](const std::shared_ptr<org::PixelBuffer>& pb) -> const BytesList& {
 	            throw std::runtime_error("ResolveToBytes: Not implemented for PixelBuffer");
 	            return kEmpty;
 			},
@@ -293,7 +293,7 @@ public:
     }
 
     struct PublishedBindingSnapshot {
-        std::shared_ptr<PixelBuffer> image;
+        std::shared_ptr<org::PixelBuffer> image;
         uint64_t bindingRevision = 0;
         TextureStreamingState streamingState{};
     };
@@ -302,30 +302,30 @@ public:
         return {m_publishedImage, m_publishedBindingRevision, m_publishedStreamingState};
     }
     struct PreparedBindingSnapshot {
-        std::shared_ptr<PixelBuffer> image;
+        std::shared_ptr<org::PixelBuffer> image;
         TextureStreamingState streamingState{};
     };
     PreparedBindingSnapshot GetPreparedBindingSnapshot() const {
         std::scoped_lock lock(m_uploadAdvanceMutex);
         return {m_image, m_streamingState};
     }
-    std::shared_ptr<PixelBuffer> ImagePtr() const {
+    std::shared_ptr<org::PixelBuffer> ImagePtr() const {
         return GetPublishedBindingSnapshot().image;
     }
-    std::shared_ptr<PixelBuffer> PreparedImagePtr() const {
+    std::shared_ptr<org::PixelBuffer> PreparedImagePtr() const {
         std::scoped_lock lock(m_uploadAdvanceMutex);
         return m_image;
     }
     bool PublishPreparedImage(
         uint64_t bindingRevision,
-        const std::shared_ptr<PixelBuffer>& image,
-        std::shared_ptr<PixelBuffer>* replacedPublishedImage = nullptr);
-    bool RejectPreparedImage(uint64_t bindingRevision, const std::shared_ptr<PixelBuffer>& image);
+        const std::shared_ptr<org::PixelBuffer>& image,
+        std::shared_ptr<org::PixelBuffer>* replacedPublishedImage = nullptr);
+    bool RejectPreparedImage(uint64_t bindingRevision, const std::shared_ptr<org::PixelBuffer>& image);
 
-    Sampler& SamplerState() const { return *m_sampler; }
-	void SetSampler(std::shared_ptr<Sampler> sampler) {
+    org::Sampler& SamplerState() const { return *m_sampler; }
+	void SetSampler(std::shared_ptr<org::Sampler> sampler) {
 		std::scoped_lock lock(m_uploadAdvanceMutex);
-		m_sampler = sampler ? std::move(sampler) : Sampler::GetDefaultSampler();
+		m_sampler = sampler ? std::move(sampler) : org::Sampler::GetDefaultSampler();
 	}
     UINT SamplerDescriptorIndex(org::runtime::IDescriptorService& descriptorService) const {
         std::scoped_lock lock(m_uploadAdvanceMutex);
@@ -334,7 +334,7 @@ public:
 
     const TextureFileMeta& Meta() const { return m_meta; }
     TextureFileMeta& Meta() { return m_meta; }
-    const TextureDescription& Description() const { return m_desc; }
+    const org::TextureDescription& Description() const { return m_desc; }
     rhi::Format Format() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_desc.format; }
 
     const TextureProcessingSettings& ProcessingSettings() const { return m_meta.processing; }
@@ -391,7 +391,7 @@ public:
     void EnableMipStreaming(bool enabled);
     void SetMipStreamingSuppressed(bool suppressed);
 
-    void AdoptUploadedImage(std::shared_ptr<PixelBuffer> image);
+    void AdoptUploadedImage(std::shared_ptr<org::PixelBuffer> image);
     void RecordLoadPath(TextureLoadPathTelemetry path, std::string detail = {});
     void RecordUploadPath(TextureUploadPathTelemetry path, std::string detail = {});
 
@@ -428,17 +428,17 @@ public:
 
 private:
     static uint32_t NextStreamingTextureID();
-    TextureAsset(TextureDescription desc,
+    TextureAsset(org::TextureDescription desc,
         StorageVariant initialStorage,
-        std::shared_ptr<Sampler> defaultSampler,
+        std::shared_ptr<org::Sampler> defaultSampler,
         TextureFileMeta meta)
         : m_initialStorage(std::move(initialStorage))
         , m_desc(std::move(desc))
-        , m_sampler(defaultSampler ? std::move(defaultSampler) : Sampler::GetDefaultSampler())
+        , m_sampler(defaultSampler ? std::move(defaultSampler) : org::Sampler::GetDefaultSampler())
         , m_meta(std::move(meta)) {
         m_streamingState.streamingTextureID = NextStreamingTextureID();
-        if (std::holds_alternative<std::shared_ptr<PixelBuffer>>(m_initialStorage)) { // Already initialized
-            m_image = std::get<std::shared_ptr<PixelBuffer>>(m_initialStorage);
+        if (std::holds_alternative<std::shared_ptr<org::PixelBuffer>>(m_initialStorage)) { // Already initialized
+            m_image = std::get<std::shared_ptr<org::PixelBuffer>>(m_initialStorage);
 			m_publishedImage = m_image;
 			m_hasUploadedFinalImage = true;
         }
@@ -457,13 +457,13 @@ private:
             InvalidateResidentImageForStreamingRequest();
         }
     }
-	TextureDescription m_desc;
+	org::TextureDescription m_desc;
 	mutable std::recursive_mutex m_uploadAdvanceMutex;
-    std::shared_ptr<PixelBuffer> m_image;
-    std::shared_ptr<PixelBuffer> m_publishedImage;
+    std::shared_ptr<org::PixelBuffer> m_image;
+    std::shared_ptr<org::PixelBuffer> m_publishedImage;
     uint64_t m_publishedBindingRevision = 0;
     TextureStreamingState m_publishedStreamingState{};
-    std::shared_ptr<Sampler> m_sampler;
+    std::shared_ptr<org::Sampler> m_sampler;
     TextureFileMeta m_meta;
 	std::shared_ptr<TextureProcessingJobHandle> m_processingHandle;
     std::shared_ptr<TextureReloadJobHandle> m_reloadHandle;
@@ -475,7 +475,7 @@ private:
     uint32_t m_sourceFullWidth = 0;
     uint32_t m_sourceFullHeight = 0;
     std::string m_initialDataString;
-    TextureDescription m_originalSourceDesc;
+    org::TextureDescription m_originalSourceDesc;
     BytesList m_originalSourceBytes;
     std::string m_name;
 	bool m_hasUploadedPlaceholder = false;
@@ -485,7 +485,7 @@ private:
     TextureUploadPathTelemetry m_lastReportedUploadPath = TextureUploadPathTelemetry::Unknown;
 
     void RefreshStreamingStateFromDescription();
-	void SetPreparedImageLocked(std::shared_ptr<PixelBuffer> image) {
+	void SetPreparedImageLocked(std::shared_ptr<org::PixelBuffer> image) {
 		m_image = std::move(image);
 		// Material texture publication is owned by TextureStreamingManager even when
 		// mip streaming is disabled or the texture is ineligible.  Otherwise an
@@ -494,7 +494,7 @@ private:
 			m_publishedImage = m_image;
 		}
 	}
-	void UpdateSourceShapeFromDescription(const TextureDescription& desc, uint32_t totalMipCountHint = 0u);
+	void UpdateSourceShapeFromDescription(const org::TextureDescription& desc, uint32_t totalMipCountHint = 0u);
     void ApplySourceShapeHint(uint32_t fullWidth, uint32_t fullHeight, uint32_t totalMipCount);
 	void ApplyStreamingBootstrapTopMip();
     bool HasStreamingSourceData() const;

@@ -11,11 +11,11 @@ bool HasRequiredView(uint8_t requiredViews, ResourceViewCapability capability)
 }
 
 void ValidatePixelBufferBinding(
-    ResourceIdentifier id,
+    org::ResourceIdentifier id,
     const ResourceBinding& binding,
     PipelineValidationResult& result)
 {
-    const auto texture = std::dynamic_pointer_cast<PixelBuffer>(binding.resource);
+    const auto texture = std::dynamic_pointer_cast<org::PixelBuffer>(binding.resource);
     if (!texture) {
         return;
     }
@@ -50,13 +50,13 @@ void ValidatePixelBufferBinding(
 }
 }
 
-const ResourceBinding* ResourceBindings::Find(ResourceIdentifier id) const
+const ResourceBinding* ResourceBindings::Find(org::ResourceIdentifier id) const
 {
     auto it = m_bindings.find(id);
     return it == m_bindings.end() ? nullptr : &it->second;
 }
 
-bool ResourceBindings::Contains(ResourceIdentifier id) const
+bool ResourceBindings::Contains(org::ResourceIdentifier id) const
 {
     return m_bindings.contains(id);
 }
@@ -203,8 +203,8 @@ PipelineValidationResult PipelineRecipe::Validate() const
 }
 
 namespace Slots {
-const ResourceSlot<PixelBuffer> EnvironmentCubemap{ Builtin::Environment::CurrentCubemap };
-const ResourceSlot<PixelBuffer> EnvironmentPrefilteredCubemap{ Builtin::Environment::CurrentPrefilteredCubemap };
+const ResourceSlot<org::PixelBuffer> EnvironmentCubemap{ Builtin::Environment::CurrentCubemap };
+const ResourceSlot<org::PixelBuffer> EnvironmentPrefilteredCubemap{ Builtin::Environment::CurrentPrefilteredCubemap };
 }
 
 namespace {

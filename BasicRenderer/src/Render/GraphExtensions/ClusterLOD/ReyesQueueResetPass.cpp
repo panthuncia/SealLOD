@@ -10,20 +10,20 @@
 #include "../shaders/PerPassRootConstants/clodReyesResetRootConstants.h"
 
 ReyesQueueResetPass::ReyesQueueResetPass(
-    std::shared_ptr<Buffer> fullClusterCounter,
-    std::shared_ptr<Buffer> ownedClusterCounter,
-    std::vector<std::shared_ptr<Buffer>> splitQueueCounters,
-    std::vector<std::shared_ptr<Buffer>> splitQueueOverflowCounters,
-    std::shared_ptr<Buffer> diceQueueCounter,
-    std::shared_ptr<Buffer> diceQueueOverflowCounter,
-    std::shared_ptr<Buffer> ownershipBitsetBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> fullClusterCounter,
+    std::shared_ptr<org::Buffer> ownedClusterCounter,
+    std::vector<std::shared_ptr<org::Buffer>> splitQueueCounters,
+    std::vector<std::shared_ptr<org::Buffer>> splitQueueOverflowCounters,
+    std::shared_ptr<org::Buffer> diceQueueCounter,
+    std::shared_ptr<org::Buffer> diceQueueOverflowCounter,
+    std::shared_ptr<org::Buffer> ownershipBitsetBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t phaseIndex,
     bool clearDiceQueueCounter,
-    std::shared_ptr<Buffer> replaySplitQueueCounter,
-    std::shared_ptr<Buffer> replaySplitQueueOverflowCounter,
-    std::shared_ptr<Buffer> replayDiceQueueCounter,
-    std::shared_ptr<Buffer> replayDiceQueueOverflowCounter)
+    std::shared_ptr<org::Buffer> replaySplitQueueCounter,
+    std::shared_ptr<org::Buffer> replaySplitQueueOverflowCounter,
+    std::shared_ptr<org::Buffer> replayDiceQueueCounter,
+    std::shared_ptr<org::Buffer> replayDiceQueueOverflowCounter)
     : m_fullClusterCounter(std::move(fullClusterCounter))
     , m_ownedClusterCounter(std::move(ownedClusterCounter))
     , m_splitQueueCounters(std::move(splitQueueCounters))
@@ -152,7 +152,7 @@ void ReyesQueueResetPass::Record(const ReyesQueueResetBindings&,
     br::render::RecordPreparedComputePipelineSequence(data, recording);
 }
 
-void ReyesQueueResetPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesQueueResetPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
     CLodReyesTelemetry telemetry{};

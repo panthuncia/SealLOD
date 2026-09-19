@@ -165,9 +165,9 @@ public:
     }
 
     void Initialize() {
-        RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
+        RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
         if (m_shadowsEnabled) {
-            RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
+            RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
         }
 
         //if (m_meshShaders)
@@ -197,7 +197,7 @@ public:
         data.draws.reserve(workloads.size());
         for (const auto* workload : workloads) {
             if (!workload || !workload->indirectArguments || workload->count == 0u) continue;
-            if (const auto backing = std::dynamic_pointer_cast<Buffer>(workload->indirectArguments)) {
+            if (const auto backing = std::dynamic_pointer_cast<org::Buffer>(workload->indirectArguments)) {
                 const auto requiredBytes = static_cast<uint64_t>(workload->count) * sizeof(DispatchMeshIndirectCommand);
                 if (backing->GetSize() < requiredBytes) continue;
             }
