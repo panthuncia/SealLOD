@@ -2607,6 +2607,72 @@ int main() {
     }
 
     {
+        // Draw publication depends on resident geometry. ResidentGeometryCoverage
+        // releases only waiters its coverage reaches, and never moves backwards.
+        std::vector<std::uint64_t> notified;
+        ResidentGeometryCoverage registry([&](std::uint64_t identity) { notified.push_back(identity); });
+        const auto low = registry.AwaitIdentity(10);
+        const auto high = registry.AwaitIdentity(20);
+        Check(low != 0 && high != 0 && low != high);
+        registry.Observe(15);
+        Check(notified.size() == 1 && notified.front() == low);
+        registry.Observe(12);
+        Check(registry.Resident() == 15 && notified.size() == 1);
+        Check(registry.AwaitIdentity(15) == 0);
+        registry.Observe(20);
+        Check(notified.size() == 2 && notified.back() == high);
+    }
+
+    {
+        // A draw-records root holds an exact requirement on its coverage gate, so
+        // it is not built until a committed Geometry root covers its templates:
+        // not after partial coverage, and without being rejected or rebuilt.
+        AsyncStateGraph gateGraph(scheduler, "GeometryCoverageGateTests");
+        RegisterGeometryCoverageGateProducer(gateGraph);
+        std::atomic_uint32_t consumerBuilds{ 0 };
+        gateGraph.RegisterProducer(ArtifactKind::Generic, {
+            TaskLane::Streaming, TaskDomain::GraphPublication, "GatedConsumer",
+            [&](const ArtifactBuildContext& context) {
+                consumerBuilds.fetch_add(1, std::memory_order_acq_rel);
+                return ArtifactBuildResult::Ready(Payload(context.revision));
+            } });
+        auto resident = std::make_shared<ResidentGeometryCoverage>(gateGraph.MakeSuspensionNotifier());
+        constexpr std::uint64_t kRequired = 40;
+        auto gateInput = std::make_shared<GeometryCoverageGateInput>();
+        gateInput->coverage = kRequired;
+        gateInput->resident = resident;
+        const ArtifactKey gateKey{ ArtifactKind::GeometryCoverageGate, kRequired, 0 };
+        const auto gate = gateGraph.Request(gateKey, 1, {},
+            ArtifactPayload::Make<GeometryCoverageGateInput>(std::move(gateInput)), kRequired);
+        Check(static_cast<bool>(gate));
+        const ArtifactKey consumerKey{ ArtifactKind::Generic, 0xf301, 0 };
+        Check(static_cast<bool>(gateGraph.Request(consumerKey, 1,
+            { Exact(gate.Handle(), ArtifactReadiness::CpuReady) }, Payload(1), 1)));
+        while (gateGraph.Snapshot(gateKey).readiness != ArtifactReadiness::Blocked)
+            std::this_thread::yield();
+        resident->Observe(kRequired - 1);
+        gateGraph.WaitIdle();
+        Check(gateGraph.Snapshot(gateKey).readiness == ArtifactReadiness::Blocked);
+        Check(consumerBuilds.load(std::memory_order_acquire) == 0);
+        resident->Observe(kRequired + 5);
+        gateGraph.WaitIdle();
+        Check(gateGraph.Snapshot(gateKey).readiness == ArtifactReadiness::GpuReady);
+        Check(gateGraph.Snapshot(consumerKey).readiness == ArtifactReadiness::GpuReady);
+        Check(consumerBuilds.load(std::memory_order_acquire) == 1);
+
+        // Coverage that is already resident satisfies a new gate immediately.
+        auto coveredInput = std::make_shared<GeometryCoverageGateInput>();
+        coveredInput->coverage = kRequired + 5;
+        coveredInput->resident = resident;
+        const ArtifactKey coveredKey{ ArtifactKind::GeometryCoverageGate, kRequired + 5, 0 };
+        Check(static_cast<bool>(gateGraph.Request(coveredKey, 1, {},
+            ArtifactPayload::Make<GeometryCoverageGateInput>(std::move(coveredInput)), kRequired + 5)));
+        gateGraph.WaitIdle();
+        Check(gateGraph.Snapshot(coveredKey).readiness == ArtifactReadiness::GpuReady);
+        gateGraph.Shutdown();
+    }
+
+    {
         AsyncStateGraph acceptanceGraph(scheduler, "AcceptanceOrderingTests");
         std::atomic_bool acceptanceStarted{ false };
         std::atomic_bool releaseAcceptance{ false };

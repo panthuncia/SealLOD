@@ -2104,6 +2104,7 @@ struct ObjectCullRecord
     uint activeDrawSetIndicesSRVIndex; // One record per draw set
     uint activeDrawCount;
     uint drawRecordVisibilityGenerationSRVIndex;
+    uint drawRecordVisibilityGenerationCount;
     uint3 dispatchGrid : SV_DispatchGrid; // Drives dispatch size
 };
 
@@ -3034,7 +3035,10 @@ void WG_ObjectCull(
         const uint2 activeEntry = activeDrawSetIndicesBuffer[vDispatchThreadID.x];
         drawRecordIndex = activeEntry.x;
         const uint activeGeneration = activeEntry.y;
-        if (activeGeneration == 0u || drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
+        // Active lists may name records newer than this generation version; rows
+        // past its count belong to another version and must not be compared.
+        if (activeGeneration == 0u || drawRecordIndex >= hdr.drawRecordVisibilityGenerationCount ||
+            drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_STALE_GENERATION, 1);
             entryVisible = false;
         }

@@ -299,7 +299,9 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     const uint2 activeEntry = activeDrawSetIndicesBuffer[drawIndex];
     const uint drawRecordIndex = activeEntry.x;
     const uint activeGeneration = activeEntry.y;
-    if (activeGeneration == 0u || drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
+    // Rows past the published count belong to another generation version.
+    if (activeGeneration == 0u || drawRecordIndex >= CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_COUNT ||
+        drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
         WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_STALE_GENERATION, 1);
         return;
     }

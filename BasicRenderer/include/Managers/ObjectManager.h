@@ -458,6 +458,10 @@ public:
 	struct DesiredObjectBufferStateCut {
 		br::render::ArtifactVersionHandle version;
 		std::uint64_t coveredMutationGeneration = 0;
+		// Exact buffer versions the draw-records root pairs. Work that needs the
+		// uploaded object data waits on these: the root itself additionally waits
+		// for resident geometry, which static scene publication must not depend on.
+		std::vector<br::render::ArtifactVersionHandle> bufferVersions;
 
 		explicit operator bool() const noexcept { return static_cast<bool>(version); }
 	};
@@ -585,6 +589,10 @@ public:
 	std::uint64_t PublishDesiredBufferState();
 	void AcknowledgePublishedBufferState(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
+	// Called for every committed manifest: its Geometry root is what frames now
+	// draw with, so its coverage releases draw-records roots waiting on it.
+	// Posts suspension notifications only; never waits on the state graph.
+	void ObserveResidentGeometry(const br::render::PublishedRendererState& committed);
 	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
 	// Owner-thread entry: seals nothing itself, it schedules PublishDesiredBufferState
 	// on a worker so the renderer thread never enters the state-graph mutex.
@@ -631,6 +639,7 @@ private:
 		std::uint64_t catalogVariant = 0;
 		std::uint32_t elementStride = 0;
 		br::render::ArtifactVersionID submittedVersion{};
+		br::render::ArtifactVersionHandle submittedHandle{};
 		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
 	};
 
@@ -743,12 +752,18 @@ private:
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
 	br::render::VersionedGpuBufferJournal m_visibilityGenerationJournal{ sizeof(std::uint32_t) };
 	br::render::ArtifactVersionID m_visibilityGenerationSubmittedVersion{};
+	br::render::ArtifactVersionHandle m_visibilityGenerationSubmittedHandle{};
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_visibilityGenerationBackingPool;
 	br::render::VersionedGpuBufferJournal m_skinnedPlacementJournal{ sizeof(SkinnedAssemblyPlacementGPU) };
 	br::render::VersionedGpuBufferJournal m_activeSkinnedPlacementJournal{
 		sizeof(br::render::PublishedActiveSkinnedPlacement) };
 	br::render::ArtifactVersionID m_skinnedPlacementSubmittedVersion{};
 	br::render::ArtifactVersionID m_activeSkinnedPlacementSubmittedVersion{};
+	br::render::ArtifactVersionHandle m_skinnedPlacementSubmittedHandle{};
+	br::render::ArtifactVersionHandle m_activeSkinnedPlacementSubmittedHandle{};
+	std::vector<br::render::ArtifactVersionHandle> m_objectBufferCutVersions;
+	std::shared_ptr<br::render::ResidentGeometryCoverage> m_residentGeometryCoverage;
+	br::render::ArtifactVersionHandle m_geometryCoverageGate{};
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_skinnedPlacementBackingPool;
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_activeSkinnedPlacementBackingPool;
 	std::uint32_t m_graphFramesInFlight = 1;

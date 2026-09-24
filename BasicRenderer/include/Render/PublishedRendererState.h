@@ -47,16 +47,6 @@ struct PublishedDependencyRef {
     auto operator<=>(const PublishedDependencyRef&) const = default;
 };
 
-// Monotonic publication edge: the fragment may only be selected while the root
-// selected in fragmentKind advertises at least minimumCoverage. Unlike the exact
-// closure pairing, any later root keeps satisfying it, so the depended-on
-// fragment advances on its own while the dependent waits to be covered.
-struct PublishedMinimumDependency {
-    PublishedFragmentKind fragmentKind = PublishedFragmentKind::Count;
-    std::uint64_t minimumCoverage = 0;
-    auto operator<=>(const PublishedMinimumDependency&) const = default;
-};
-
 inline constexpr std::size_t kPublishedFragmentCount =
     static_cast<std::size_t>(PublishedFragmentKind::Count);
 inline constexpr std::uint64_t PublishedFragmentMask(PublishedFragmentKind kind) noexcept {
@@ -135,9 +125,9 @@ struct PublishedStateFragment {
     ArtifactVersionID publicationRoot{};
     std::shared_ptr<const PublicationBundle> publicationBundle;
     std::vector<PublishedDependencyRef> publicationDependencies;
-    std::vector<PublishedMinimumDependency> minimumPublicationDependencies;
     // Monotonic producer sequence this root's content covers (Geometry: the
-    // MeshManager journal mutation sequence captured in its buffer cut).
+    // MeshManager journal write sequences captured in its buffer cut). Draw
+    // publication waits until the resident Geometry root covers its templates.
     std::uint64_t coverage = 0;
     ArtifactPayload payload;
     // Direct manager state selected by a non-root dependency.
@@ -186,11 +176,6 @@ struct PublishedRendererState {
 // from different addresses are intentionally incomparable.
 [[nodiscard]] bool IsMonotonicFragmentSuccessor(const PublishedStateFragment& active,
     const PublishedStateFragment& successor) noexcept;
-
-// True when every populated fragment's minimum publication dependencies are met
-// by the roots selected in state.
-[[nodiscard]] bool MinimumPublicationDependenciesSatisfied(
-    const PublishedRendererState& state) noexcept;
 
 enum class ManifestPublicationPolicy : std::uint8_t {
     MonotonicSuccessor,

@@ -91,6 +91,15 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
     }
     state->visibilityGenerationsSRVIndex =
         state->visibilityGenerations->GetSRVInfo(0).slot.index;
+    const auto objectState = drawRoot->fragment.payload.Get<PublishedObjectBufferState>();
+    const auto generationVersion = objectState
+        ? objectState->FindVersion(kObjectVisibilityGenerationVariant) : nullptr;
+    if (!generationVersion) {
+        return ArtifactBuildResult::Failure(
+            "indirect workload visibility-generation version missing");
+    }
+    state->visibilityGenerationCount = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
+        generationVersion->elementCount, (std::numeric_limits<std::uint32_t>::max)()));
 
     for (const auto& workload : input->workloads) {
         const auto logicalCount = workload.logicalEntryCount;

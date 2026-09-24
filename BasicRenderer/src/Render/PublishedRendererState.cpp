@@ -343,19 +343,6 @@ bool IsMonotonicFragmentSuccessor(const PublishedStateFragment& active,
         successor.revision >= active.revision;
 }
 
-bool MinimumPublicationDependenciesSatisfied(const PublishedRendererState& state) noexcept {
-    for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
-        const auto& fragment = state.Fragment(static_cast<PublishedFragmentKind>(index));
-        if (fragment.revision == 0) continue;
-        for (const auto& dependency : fragment.minimumPublicationDependencies) {
-            if (dependency.fragmentKind == PublishedFragmentKind::Count) return false;
-            const auto& selected = state.Fragment(dependency.fragmentKind);
-            if (selected.revision == 0 || selected.coverage < dependency.minimumCoverage) return false;
-        }
-    }
-    return true;
-}
-
 namespace {
 bool AllowsRollback(ManifestPublicationPolicy policy, const std::string& reason) noexcept {
     return policy == ManifestPublicationPolicy::ExplicitRollback && !reason.empty();
@@ -404,9 +391,6 @@ std::shared_ptr<const PublishedRendererState> MaterializePublishedState(
             state->Fragment(kind), *patch.fragments[index])) return {};
         state->Fragment(kind) = *patch.fragments[index];
     }
-    // The manifest was solved against an older base; roots only advance, so this
-    // holds unless a rollback moved a depended-on fragment backwards.
-    if (!MinimumPublicationDependenciesSatisfied(*state)) return {};
 
     state->epoch = targetEpoch;
     state->resourceCatalog = MakeCatalogUpdate(state->resourceCatalog,

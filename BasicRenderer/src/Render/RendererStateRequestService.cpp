@@ -335,7 +335,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                         dependency.artifact) return false;
             }
         }
-        return MinimumPublicationDependenciesSatisfied(candidate);
+        return true;
     };
 
     using Selection = std::array<std::optional<ArtifactSnapshot>, kPublishedFragmentCount>;
@@ -496,45 +496,6 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
         Selection closure;
         if (addClosure(addClosure, root, closure)) closures.push_back(std::move(closure));
     }
-    // Minimum publication dependencies are not exact closure pairs, so merge()
-    // cannot see them. A closure waiting for coverage no available root provides
-    // would make every merged trial incoherent and stall all publication behind
-    // one fragment; leave it out until a covering root is ready.
-    const auto hasMinimumDependencies = [](const Selection& closure) {
-        return std::ranges::any_of(closure, [](const std::optional<ArtifactSnapshot>& root) {
-            const auto artifact = root ? root->payload.Get<RendererStateFragmentArtifact>() : nullptr;
-            return artifact && !artifact->fragment.minimumPublicationDependencies.empty();
-        });
-    };
-    {
-        std::array<std::uint64_t, kPublishedFragmentCount> availableCoverage{};
-        if (input->base) {
-            for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
-                const auto& fragment = input->base->Fragment(static_cast<PublishedFragmentKind>(index));
-                if (fragment.revision != 0) availableCoverage[index] = fragment.coverage;
-            }
-        }
-        for (const auto& closure : closures) {
-            for (std::size_t index = 0; index < kPublishedFragmentCount; ++index) {
-                const auto artifact = closure[index]
-                    ? closure[index]->payload.Get<RendererStateFragmentArtifact>() : nullptr;
-                if (artifact) availableCoverage[index] = (std::max)(availableCoverage[index], artifact->fragment.coverage);
-            }
-        }
-        const auto erased = std::erase_if(closures, [&](const Selection& closure) {
-            for (const auto& root : closure) {
-                const auto artifact = root ? root->payload.Get<RendererStateFragmentArtifact>() : nullptr;
-                if (!artifact) continue;
-                for (const auto& dependency : artifact->fragment.minimumPublicationDependencies) {
-                    if (dependency.fragmentKind == PublishedFragmentKind::Count ||
-                        availableCoverage[static_cast<std::size_t>(dependency.fragmentKind)] <
-                            dependency.minimumCoverage) return true;
-                }
-            }
-            return false;
-        });
-        if (erased != 0) basic_telemetry::AddCounter("SARP.RendererStateManifest.MinimumDependencyDeferred", static_cast<std::int64_t>(erased));
-    }
     const auto closureScore = [](const Selection& selection) {
         std::pair<std::size_t, std::uint64_t> result{};
         for (const auto& root : selection) {
@@ -571,26 +532,18 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
     Selection selected;
     std::optional<decltype(candidateScore(selected))> bestScore;
     for (std::size_t seed = 0; seed < closures.size(); ++seed) {
-        // If the greedy merge pairs a minimum-dependent closure with a root that
-        // does not cover it (for example an older Geometry root merged first),
-        // retry the seed without such closures rather than discarding it.
-        for (const bool allowMinimumDependents : { true, false }) {
-            if (!allowMinimumDependents && hasMinimumDependencies(closures[seed])) break;
-            auto trial = closures[seed];
-            for (std::size_t index = 0; index < closures.size(); ++index) {
-                if (index == seed) continue;
-                if (!allowMinimumDependents && hasMinimumDependencies(closures[index])) continue;
-                auto merged = trial;
-                if (merge(merged, closures[index])) trial = std::move(merged);
-            }
-            const auto score = candidateScore(trial);
-            if ((bestScore && score <= *bestScore) || !monotonicSuccessor(trial)) continue;
-            const auto candidate = materialize(trial, false);
-            if (coherent(candidate)) {
-                bestScore = score;
-                selected = std::move(trial);
-                break;
-            }
+        auto trial = closures[seed];
+        for (std::size_t index = 0; index < closures.size(); ++index) {
+            if (index == seed) continue;
+            auto merged = trial;
+            if (merge(merged, closures[index])) trial = std::move(merged);
+        }
+        const auto score = candidateScore(trial);
+        if ((bestScore && score <= *bestScore) || !monotonicSuccessor(trial)) continue;
+        const auto candidate = materialize(trial, false);
+        if (coherent(candidate)) {
+            bestScore = score;
+            selected = std::move(trial);
         }
     }
     if (!bestScore) return ArtifactBuildResult::Cancelled();

@@ -35,6 +35,7 @@ struct PreparedCullingWorkload {
     uint32_t activeDrawSetIndicesSRVIndex = 0;
     uint32_t activeDrawCount = 0;
     uint32_t drawRecordVisibilityGenerationSRVIndex = 0;
+    uint32_t drawRecordVisibilityGenerationCount = 0;
     uint32_t shadowCasterClass = 0;
     uint32_t dispatchGridX = 0;
     uint32_t dispatchGridY = 1;
@@ -84,6 +85,7 @@ inline std::vector<PreparedCullingWorkload> PrepareCullingWorkloads(
                 .activeDrawSetIndicesSRVIndex = workload->activeDrawListSRVIndex,
                 .activeDrawCount = workload->count,
                 .drawRecordVisibilityGenerationSRVIndex = published->visibilityGenerationsSRVIndex,
+                .drawRecordVisibilityGenerationCount = published->visibilityGenerationCount,
                 .shadowCasterClass = rasterOutputKind == CLodRasterOutputKind::VirtualShadow
                     ? (workload->key.skinnedShadowCaster ? 2u : 1u)
                     : 0u,

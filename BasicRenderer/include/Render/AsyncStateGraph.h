@@ -58,9 +58,10 @@ enum class ArtifactKind : std::uint16_t {
     ViewFamily,
     PoseState,
     LightTable,
+    GeometryCoverageGate,
 };
 inline constexpr std::size_t kArtifactKindCount =
-    static_cast<std::size_t>(ArtifactKind::LightTable) + 1u;
+    static_cast<std::size_t>(ArtifactKind::GeometryCoverageGate) + 1u;
 
 struct ArtifactAddress {
     ArtifactKind kind = ArtifactKind::Generic;

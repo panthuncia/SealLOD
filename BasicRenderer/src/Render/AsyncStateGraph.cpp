@@ -83,7 +83,7 @@ std::string_view KindName(ArtifactKind kind) {
         "StaticTemplateBatch", "StaticVisibility", "StaticAsset", "StaticMaterialVariant",
         "StaticShaderVariant", "StaticVariant", "TextureImageTable", "GrassCell",
         "GrassShard", "GrassScratch", "GrassScene", "GeometryResidency", "ViewFamily",
-        "PoseState", "LightTable" };
+        "PoseState", "LightTable", "GeometryCoverageGate" };
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(names) ? names[index] : "Unknown";
 }

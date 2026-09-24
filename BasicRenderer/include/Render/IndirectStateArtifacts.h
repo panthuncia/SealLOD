@@ -74,6 +74,10 @@ struct PublishedIndirectState {
     // DrawRecords catalog slot or generations can be compared across cuts.
     std::shared_ptr<org::GloballyIndexedResource> visibilityGenerations;
     std::uint32_t visibilityGenerationsSRVIndex = 0;
+    // Rows this version owns. Active lists may name newer records; the backing
+    // beyond this count holds another version's generations, so culling must
+    // treat any index at or past it as not visible.
+    std::uint32_t visibilityGenerationCount = 0;
     ArtifactVersionID drawRecordsRoot{};
     struct ActiveListVersion {
         std::uint64_t workloadID = 0;

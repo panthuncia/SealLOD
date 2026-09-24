@@ -397,6 +397,10 @@ void ObjectManager::SetRendererStateServices(
 	m_rendererStateRequests = requests;
 	m_uploadService = std::move(uploads);
 	m_graphFramesInFlight = (std::max)(framesInFlight, 1u);
+	if (requests && !m_residentGeometryCoverage) {
+		m_residentGeometryCoverage = std::make_shared<br::render::ResidentGeometryCoverage>(
+			requests->MakeSuspensionNotifier());
+	}
 	if (!requests || !m_uploadService || !m_graphBufferBindings.empty()) return;
 
 	const std::array definitions{
@@ -675,8 +679,8 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 				m_objectBufferGraphDirty.store(true, std::memory_order_release);
 				return m_objectBufferStateRevision;
 			}
-			m_graphBufferBindings[bindingIndex].submittedVersion =
-				results[resultIndex++].version;
+			m_graphBufferBindings[bindingIndex].submittedVersion = results[resultIndex].version;
+			m_graphBufferBindings[bindingIndex].submittedHandle = results[resultIndex++].Handle();
 		}
 		if (visibilityIntentPending) {
 			if (!results[resultIndex]) {
@@ -684,12 +688,13 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 				return m_objectBufferStateRevision;
 			}
 			m_visibilityGenerationSubmittedVersion = results[resultIndex].version;
+			m_visibilityGenerationSubmittedHandle = results[resultIndex].Handle();
 		}
 	}
 	const auto publishPlacementVersion = [&](const br::render::VersionedGpuBufferJournal::Capture& capture,
 		std::uint64_t variant, std::uint32_t stride, std::string_view debugName,
 		const std::shared_ptr<br::render::VersionedGpuBufferBackingPool>& backingPool,
-		br::render::ArtifactVersionID& submittedVersion) {
+		br::render::ArtifactVersionID& submittedVersion, br::render::ArtifactVersionHandle& submittedHandle) {
 		const auto revision = (std::max<std::uint64_t>)(capture.writeSequence, 1u);
 		if (submittedVersion.revision == revision) return true;
 		auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
@@ -715,17 +720,18 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 			(revision << 8u) ^ variant });
 		if (!request) return false;
 		submittedVersion = request.version;
+		submittedHandle = request.Handle();
 		return true;
 	};
 	if (!publishPlacementVersion(snapshotCut->skinnedPlacements,
 			br::render::kObjectSkinnedPlacementVariant, sizeof(SkinnedAssemblyPlacementGPU),
 			"Published::SkinnedAssemblyPlacements", m_skinnedPlacementBackingPool,
-			m_skinnedPlacementSubmittedVersion) ||
+			m_skinnedPlacementSubmittedVersion, m_skinnedPlacementSubmittedHandle) ||
 		!publishPlacementVersion(snapshotCut->activeSkinnedPlacements,
 			br::render::kObjectActiveSkinnedPlacementVariant,
 			sizeof(br::render::PublishedActiveSkinnedPlacement),
 			"Published::ActiveSkinnedAssemblyPlacements", m_activeSkinnedPlacementBackingPool,
-			m_activeSkinnedPlacementSubmittedVersion)) {
+			m_activeSkinnedPlacementSubmittedVersion, m_activeSkinnedPlacementSubmittedHandle)) {
 		m_objectBufferGraphDirty.store(true, std::memory_order_release);
 		return m_objectBufferStateRevision;
 	}
@@ -735,16 +741,31 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	rootInput->residentTransformCount = snapshotCut->residentTransformCount;
 	rootInput->placementRecords = snapshotCut->placementRecords;
 	rootInput->activePlacementEntries = snapshotCut->activePlacementEntries;
-	// The root is built immediately (static transactions wait on its GPU
-	// readiness), but the manifest selects it only alongside a Geometry root
-	// that already holds the template rows its records reference. Otherwise
-	// culling admits a record whose template reads as zero and rasterizes
-	// CLod mesh 0 at the record's transform for a frame or two.
-	if (snapshotCut->requiredGeometryCoverage != 0) {
-		rootInput->minimumPublicationDependencies.push_back({
-			br::render::PublishedFragmentKind::Geometry, snapshotCut->requiredGeometryCoverage });
-	}
 	std::vector<br::render::ArtifactRequirement> requirements;
+	// Draw publication depends on resident geometry: static records name
+	// mesh-template and CLod rows that shaders resolve only through the Geometry
+	// root being drawn with. Until that root covers them the template reads as
+	// zero and the record rasterizes CLod mesh 0 at its transform. The gate is
+	// satisfied once a committed manifest's Geometry root covers the sequence,
+	// so this root is simply not built before then; nothing is rejected.
+	if (snapshotCut->requiredGeometryCoverage != 0 && m_residentGeometryCoverage) {
+		const auto coverage = snapshotCut->requiredGeometryCoverage;
+		if (!m_geometryCoverageGate || m_geometryCoverageGate.version.address.primaryID != coverage) {
+			auto gateInput = std::make_shared<br::render::GeometryCoverageGateInput>();
+			gateInput->coverage = coverage;
+			gateInput->resident = m_residentGeometryCoverage;
+			const auto gate = m_rendererStateRequests->RequestExact(
+				{ br::render::ArtifactKind::GeometryCoverageGate, coverage, 0 }, 1u, {},
+				br::render::ArtifactPayload::Make<br::render::GeometryCoverageGateInput>(std::move(gateInput)),
+				coverage);
+			if (!gate) {
+				m_objectBufferGraphDirty.store(true, std::memory_order_release);
+				return m_objectBufferStateRevision;
+			}
+			m_geometryCoverageGate = gate.Handle();
+		}
+		requirements.push_back(br::render::Exact(m_geometryCoverageGate, br::render::ArtifactReadiness::CpuReady));
+	}
 	for (std::size_t bindingIndex = 0; bindingIndex < m_graphBufferBindings.size(); ++bindingIndex) {
 		const auto& binding = m_graphBufferBindings[bindingIndex];
 		const auto revision = desiredRevisions[bindingIndex];
@@ -796,6 +817,11 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 			m_objectBufferFingerprint = fingerprint;
 			m_objectBufferStateRevision = candidateRevision;
 			m_objectBufferStateVersion = rootRequest.Handle();
+			m_objectBufferCutVersions.clear();
+			for (const auto& binding : m_graphBufferBindings) m_objectBufferCutVersions.push_back(binding.submittedHandle);
+			m_objectBufferCutVersions.push_back(m_visibilityGenerationSubmittedHandle);
+			m_objectBufferCutVersions.push_back(m_skinnedPlacementSubmittedHandle);
+			m_objectBufferCutVersions.push_back(m_activeSkinnedPlacementSubmittedHandle);
 		} else {
 			// Admission failure must leave the mailbox dirty. Committing the
 			// fingerprint here suppresses every retry and strands consumers on
@@ -833,7 +859,13 @@ br::render::ArtifactVersionHandle ObjectManager::DesiredBufferStateHandle() cons
 
 ObjectManager::DesiredObjectBufferStateCut ObjectManager::DesiredBufferStateCut() const {
 	std::lock_guard graphStateLock(m_objectBufferGraphStateMutex);
-	return { m_objectBufferStateVersion, m_objectBufferSubmittedMutationGeneration };
+	return { m_objectBufferStateVersion, m_objectBufferSubmittedMutationGeneration, m_objectBufferCutVersions };
+}
+
+void ObjectManager::ObserveResidentGeometry(const br::render::PublishedRendererState& committed) {
+	if (m_residentGeometryCoverage && committed.geometry.revision != 0) {
+		m_residentGeometryCoverage->Observe(committed.geometry.coverage);
+	}
 }
 
 void ObjectManager::AcknowledgePublishedBufferState(

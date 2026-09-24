@@ -833,7 +833,7 @@ HierarchicalCullingInvocation HierarchicalCullingPass::PrepareInvocation(
         for (const auto& workload : workloads) records.push_back({
             workload.viewDataIndex, workload.activeDrawSetIndicesSRVIndex,
             workload.activeDrawCount, workload.drawRecordVisibilityGenerationSRVIndex,
-            workload.dispatchGridX, workload.dispatchGridY, workload.dispatchGridZ});
+            workload.drawRecordVisibilityGenerationCount, workload.dispatchGridX, workload.dispatchGridY, workload.dispatchGridZ});
         basic_telemetry::SetGauge("SARP.Culling.GraphWorkloadRecords.WorkGraph",
             static_cast<std::int64_t>(records.size()));
         invocation.cpuDispatch = br::render::PreparedWorkGraphCpuDispatch::From(0u, records);

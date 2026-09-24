@@ -147,6 +147,7 @@ private:
         uint32_t activeDrawSetIndicesSRVIndex;
         uint32_t activeDrawCount;
         uint32_t drawRecordVisibilityGenerationSRVIndex;
+        uint32_t drawRecordVisibilityGenerationCount;
         uint32_t dispatchGridX;
         uint32_t dispatchGridY;
         uint32_t dispatchGridZ;

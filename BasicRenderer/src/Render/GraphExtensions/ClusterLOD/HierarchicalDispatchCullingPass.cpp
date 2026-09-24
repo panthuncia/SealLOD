@@ -1856,6 +1856,7 @@ void HierarchicalDispatchCullingPass::RecordWithObjectConstants(const Hierarchic
         constants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] = workload.viewDataIndex;
         constants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] = workload.activeDrawSetIndicesSRVIndex;
         constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] = workload.drawRecordVisibilityGenerationSRVIndex;
+        constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_COUNT] = workload.drawRecordVisibilityGenerationCount;
         constants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] = workload.shadowCasterClass;
         recording.Commands().PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
             NumMiscUintRootConstants, constants.data());
