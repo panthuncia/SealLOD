@@ -1672,6 +1672,13 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         const auto previous = Producers();
         auto table = previous ? std::make_shared<ProducerTable>(*previous)
                               : std::make_shared<ProducerTable>();
+        const auto previousTelemetry = producerTelemetry.load(std::memory_order_acquire);
+        auto telemetry = previousTelemetry
+            ? std::make_shared<ProducerTelemetryTable>(*previousTelemetry)
+            : std::make_shared<ProducerTelemetryTable>();
+        (*telemetry)[kind] = std::make_shared<const ProducerTelemetry>(registration.taskName.empty()
+            ? std::string("AsyncStateGraph::Build") : registration.taskName);
+        producerTelemetry.store(std::move(telemetry), std::memory_order_release);
         (*table)[kind] = std::move(registration);
         producers.store(std::move(table), std::memory_order_release);
     }
@@ -1953,6 +1960,27 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         const auto found = table->find(kind);
         return found == table->end() ? nullptr : &found->second;
     }
+    // Telemetry scopes named after each producer's task name, so build and
+    // acceptance time on shared single-lane domains can be attributed per kind.
+    // Callsites keep string_views into the names, so the record never moves.
+    struct ProducerTelemetry {
+        explicit ProducerTelemetry(std::string name)
+            : buildName(std::move(name)), acceptName(buildName + "::Acceptance"),
+              build(buildName), accept(acceptName) {}
+        std::string buildName;
+        std::string acceptName;
+        basic_telemetry::Callsite build;
+        basic_telemetry::Callsite accept;
+    };
+    using ProducerTelemetryTable =
+        std::unordered_map<ArtifactKind, std::shared_ptr<const ProducerTelemetry>>;
+    std::atomic<std::shared_ptr<const ProducerTelemetryTable>> producerTelemetry{ nullptr };
+    [[nodiscard]] std::shared_ptr<const ProducerTelemetry> ProducerTelemetryFor(ArtifactKind kind) const {
+        const auto table = producerTelemetry.load(std::memory_order_acquire);
+        if (!table) return nullptr;
+        const auto found = table->find(kind);
+        return found == table->end() ? nullptr : found->second;
+    }
     std::deque<ArtifactKey> pending;
 	struct PendingWaiterWake {
 		ArtifactKey dependency{};
@@ -2180,7 +2208,12 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
             std::string error;
             if (succeeded) {
                 const auto mutationStarted = std::chrono::steady_clock::now();
-                try { item.registration.action(item.snapshot); }
+                try {
+                    const auto telemetry = ProducerTelemetryFor(item.completion.key.kind);
+                    std::optional<basic_telemetry::Scope> acceptanceScope;
+                    if (telemetry) acceptanceScope.emplace(telemetry->accept);
+                    item.registration.action(item.snapshot);
+                }
                 catch (const std::exception& exception) {
                     succeeded = false;
                     error = exception.what();
@@ -3519,7 +3552,7 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
         // using StaticImport's FIFO puts its service drains behind thousands of
         // producer tasks.
         auto body = [weak, registration, context = std::move(context), key, revision, generation,
-                taskKind, correlationID,
+                taskKind, correlationID, telemetry = ProducerTelemetryFor(key.kind),
                 dependencyStamp = std::move(dependencyStamp),
                 superseded = std::move(superseded)](const TaskContext& cancellation) mutable {
                 auto self = weak.lock();
@@ -3535,6 +3568,8 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
                 };
                 ArtifactBuildResult result;
                 try {
+                    std::optional<basic_telemetry::Scope> producerScope;
+                    if (telemetry) producerScope.emplace(telemetry->build);
                     result = cancellation.StopRequested()
                         ? ArtifactBuildResult::Cancelled()
                         : registration.producer(context);

@@ -177,8 +177,13 @@ CpuSetSelection SelectCpuSets(bool reserveRenderCpu) {
 }
 
 void ApplyCpuSets(const std::vector<ULONG>& ids) {
-    const auto setCpuSets = ResolveKernelFunction<SetThreadSelectedCpuSetsFn>("SetThreadSelectedCpuSets");
-    if (setCpuSets && !ids.empty()) (void)setCpuSets(GetCurrentThread(), ids.data(), static_cast<ULONG>(ids.size()));
+    // Arena observers call this on every worker entry, which TBB repeats
+    // constantly. A thread's selection persists, so apply each set once per
+    // thread instead of re-resolving the export and re-entering the kernel.
+    thread_local std::vector<ULONG> applied;
+    if (ids.empty() || ids == applied) return;
+    static const auto setCpuSets = ResolveKernelFunction<SetThreadSelectedCpuSetsFn>("SetThreadSelectedCpuSets");
+    if (setCpuSets && setCpuSets(GetCurrentThread(), ids.data(), static_cast<ULONG>(ids.size()))) applied = ids;
 }
 
 } // namespace

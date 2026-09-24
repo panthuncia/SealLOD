@@ -1152,6 +1152,70 @@ std::shared_ptr<org::PixelBuffer> GetSharedProcessingPlaceholderTexture(
 	return placeholder;
 }
 
+// Block-compressed 2D DDS payloads are stored exactly as the renderer consumes
+// them: item-major, then mip, tightly packed, and DirectXTex applies no
+// conversion to them. Copy each subresource straight from the mapped file
+// instead of decoding into a zero-filled ScratchImage and copying it again.
+// Returns null for anything DirectXTex might convert or that fails validation.
+std::shared_ptr<TextureSourceData> TryBuildSourceDataFromBlockCompressedDDS(
+	const uint8_t* bytes, size_t size, bool preferSRGB)
+{
+	constexpr size_t kHeaderBytes = 4u + 124u;
+	constexpr size_t kDX10HeaderBytes = 20u;
+	constexpr size_t kFourCCOffset = 4u + 72u + 8u;
+	constexpr uint32_t kDX10FourCC = uint32_t('D') | (uint32_t('X') << 8) | (uint32_t('1') << 16) | (uint32_t('0') << 24);
+	if (size < kHeaderBytes) return nullptr;
+	DirectX::TexMetadata metadata{};
+	if (FAILED(DirectX::GetMetadataFromDDSMemory(bytes, size, DirectX::DDS_FLAGS_NONE, metadata))) return nullptr;
+	if (metadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D || metadata.depth != 1 ||
+		!DirectX::IsCompressed(metadata.format) || metadata.mipLevels == 0 || metadata.arraySize == 0) {
+		return nullptr;
+	}
+	uint32_t fourCC = 0;
+	std::memcpy(&fourCC, bytes + kFourCCOffset, sizeof(fourCC));
+	size_t offset = kHeaderBytes + (fourCC == kDX10FourCC ? kDX10HeaderBytes : 0u);
+
+	auto result = std::make_shared<TextureSourceData>();
+	const size_t imageCount = metadata.arraySize * metadata.mipLevels;
+	result->desc.imageDimensions.reserve(imageCount);
+	result->subresources.reserve(imageCount);
+	for (size_t item = 0; item < metadata.arraySize; ++item) {
+		size_t width = metadata.width;
+		size_t height = metadata.height;
+		for (size_t mip = 0; mip < metadata.mipLevels; ++mip) {
+			size_t rowPitch = 0;
+			size_t slicePitch = 0;
+			if (FAILED(DirectX::ComputePitch(metadata.format, width, height, rowPitch, slicePitch)) ||
+				slicePitch > size - offset) {
+				return nullptr;
+			}
+			org::ImageDimensions dims{};
+			dims.width = static_cast<uint32_t>(width);
+			dims.height = static_cast<uint32_t>(height);
+			dims.rowPitch = rowPitch;
+			dims.slicePitch = slicePitch;
+			result->desc.imageDimensions.push_back(dims);
+			result->subresources.push_back(std::make_shared<std::vector<uint8_t>>(bytes + offset, bytes + offset + slicePitch));
+			offset += slicePitch;
+			width = (std::max)(size_t(1), width / 2u);
+			height = (std::max)(size_t(1), height / 2u);
+		}
+	}
+
+	result->desc.format = rhi::helpers::ToRHI(preferSRGB ? DirectX::MakeSRGB(metadata.format) : DirectX::MakeLinear(metadata.format));
+	result->desc.channels = static_cast<unsigned short>(rhi::helpers::FormatChannelCount(result->desc.format));
+	result->desc.isCubemap = metadata.IsCubemap();
+	result->desc.isArray = metadata.arraySize > 1 && !result->desc.isCubemap;
+	result->desc.arraySize = result->desc.isCubemap
+		? static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize / size_t(6)))
+		: static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize));
+	result->isBlockCompressed = rhi::helpers::IsBlockCompressed(result->desc.format);
+	result->hasFullMipChain = metadata.mipLevels == CalcFullMipCount(
+		result->desc.imageDimensions[0].width,
+		result->desc.imageDimensions[0].height);
+	return result;
+}
+
 std::shared_ptr<TextureSourceData> BuildSourceDataFromDDSFilePath(const std::string& path, bool preferSRGB, const std::string& reason) {
 	ZoneScopedN("TextureAsset::BuildSourceDataFromDDSFilePath");
 	ZoneText(path.data(), path.size());
@@ -1165,6 +1229,10 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromDDSFilePath(const std::str
 	HRESULT hr = E_FAIL;
 	std::string mapError;
 	if (auto mapped = MappedFileView::Open(widePath, &mapError)) {
+		if (auto direct = TryBuildSourceDataFromBlockCompressedDDS(
+				static_cast<const uint8_t*>(mapped->Data()), mapped->Size(), preferSRGB)) {
+			return direct;
+		}
 		ZoneScopedN("TextureAsset::BuildSourceDataFromDDSFilePath::LoadFromMappedMemory");
 		hr = DirectX::LoadFromDDSMemory(
 			static_cast<const uint8_t*>(mapped->Data()),

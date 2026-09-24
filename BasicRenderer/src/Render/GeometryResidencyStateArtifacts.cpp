@@ -25,18 +25,21 @@ ArtifactBuildResult BuildGeometryResidencyState(const ArtifactBuildContext& cont
         }
     }
 
+    // Every published state keeps activeRanges sorted by groupsBase, so a delta
+    // edits the predecessor in place instead of scanning and re-sorting it.
     if (input->kind == GeometryResidencyDeltaKind::Reset) {
         state->activeRanges = input->resetRanges;
+        std::ranges::sort(state->activeRanges, {}, &GeometryResidencyRange::groupsBase);
     } else {
-        auto existing = std::ranges::find_if(state->activeRanges,
-            [&](const GeometryResidencyRange& range) {
-                return range.groupsBase == input->range.groupsBase;
-            });
+        auto existing = std::ranges::lower_bound(state->activeRanges,
+            input->range.groupsBase, {}, &GeometryResidencyRange::groupsBase);
+        const bool found = existing != state->activeRanges.end() &&
+            existing->groupsBase == input->range.groupsBase;
         if (input->kind == GeometryResidencyDeltaKind::Remove) {
-            if (existing != state->activeRanges.end()) state->activeRanges.erase(existing);
+            if (found) state->activeRanges.erase(existing);
         } else if (input->range.groupCount != 0) {
-            if (existing != state->activeRanges.end()) *existing = input->range;
-            else state->activeRanges.push_back(input->range);
+            if (found) *existing = input->range;
+            else state->activeRanges.insert(existing, input->range);
         }
     }
 
@@ -44,7 +47,6 @@ ArtifactBuildResult BuildGeometryResidencyState(const ArtifactBuildContext& cont
     if (input->slabResources) state->slabResources = input->slabResources;
     state->storageGeneration = input->storageGeneration;
 
-    std::ranges::sort(state->activeRanges, {}, &GeometryResidencyRange::groupsBase);
     state->revision = context.revision;
     state->maxTraversalDepth = 0;
     state->maxGroupIndex = 0;

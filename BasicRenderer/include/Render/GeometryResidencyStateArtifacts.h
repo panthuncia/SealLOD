@@ -15,8 +15,10 @@ struct GeometryResidencyRange {
     std::uint32_t groupsBase = 0;
     std::uint32_t groupCount = 0;
     std::uint32_t maxTraversalDepth = 0;
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> coarsestRanges;
-    auto operator<=>(const GeometryResidencyRange&) const = default;
+    // Immutable and shared: every residency delta copies all active ranges into
+    // a self-contained successor state, so an owned vector per range turned each
+    // delta into thousands of allocations.
+    std::shared_ptr<const std::vector<std::pair<std::uint32_t, std::uint32_t>>> coarsestRanges;
 };
 
 enum class GeometryResidencyDeltaKind : std::uint8_t {

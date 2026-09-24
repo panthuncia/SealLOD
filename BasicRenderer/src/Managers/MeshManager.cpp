@@ -2176,10 +2176,12 @@ void MeshManager::PublishGeometryResidencyDelta(const CLodStreamingDomainEvent& 
 	input->range.groupsBase = event.groupsBase;
 	input->range.groupCount = event.groupCount;
 	input->range.maxTraversalDepth = event.maxTraversalDepth;
-	input->range.coarsestRanges.reserve(event.coarsestRanges.size());
+	auto coarsestRanges = std::make_shared<std::vector<std::pair<std::uint32_t, std::uint32_t>>>();
+	coarsestRanges->reserve(event.coarsestRanges.size());
 	for (const auto& range : event.coarsestRanges) {
-		input->range.coarsestRanges.emplace_back(range.groupsBase, range.groupCount);
+		coarsestRanges->emplace_back(range.groupsBase, range.groupCount);
 	}
+	input->range.coarsestRanges = std::move(coarsestRanges);
 
 	std::vector<br::render::ArtifactRequirement> requirements;
 	if (m_geometryResidencyVersion) {
