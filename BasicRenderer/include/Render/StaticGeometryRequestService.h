@@ -15,6 +15,7 @@ public:
         const std::vector<MeshManager::StaticMeshTemplateRequest>& requests) const;
 	std::uint64_t PublishDesiredBufferState() const;
 	std::optional<ArtifactRequirement> DesiredBufferStateRequirement() const;
+	std::optional<ArtifactRequirement> DesiredBufferStateRequirement(std::uint64_t& coverage) const;
 private:
     MeshManager* m_meshes = nullptr;
 };

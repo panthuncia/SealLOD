@@ -29,6 +29,9 @@ public:
     void RequestStaticImportTransactionResources(const ObjectManager::StaticImportBuildBatch& build) const;
     std::uint64_t PublishDesiredBufferState() const;
     ObjectManager::DesiredObjectBufferStateCut DesiredBufferStateCut() const;
+    // Geometry mutation sequence a Geometry root must cover before the newest
+    // static draw records can publish.
+    std::uint64_t RequiredGeometryCoverage() const;
     ObjectManager::StaticImportBulkPublishResult PublishStaticImportTransactionsBulk(
         std::span<ObjectManager::MaterializedStaticImportTransaction*> transactions) const;
     std::uint64_t MakeDeferredRetireFrame() const;

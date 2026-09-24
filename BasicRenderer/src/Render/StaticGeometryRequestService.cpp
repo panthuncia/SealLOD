@@ -8,4 +8,5 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> StaticGeometryRequestSe
 void StaticGeometryRequestService::PrepareStaticMeshTemplateResourcesAsync(const std::vector<MeshManager::StaticMeshTemplateRequest>& requests) const { Storage(m_meshes).PrepareStaticMeshTemplateResourcesAsync(requests); }
 std::uint64_t StaticGeometryRequestService::PublishDesiredBufferState() const { return Storage(m_meshes).PublishDesiredBufferState(); }
 std::optional<ArtifactRequirement> StaticGeometryRequestService::DesiredBufferStateRequirement() const { return Storage(m_meshes).DesiredBufferStateRequirement(); }
+std::optional<ArtifactRequirement> StaticGeometryRequestService::DesiredBufferStateRequirement(std::uint64_t& coverage) const { return Storage(m_meshes).DesiredBufferStateRequirement(coverage); }
 }

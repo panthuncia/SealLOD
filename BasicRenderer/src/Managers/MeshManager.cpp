@@ -2071,12 +2071,14 @@ std::uint64_t MeshManager::PublishDesiredBufferState() {
 	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	std::lock_guard lock(m_geometryBufferGraphMutex);
 	if (!m_geometryBufferGraphDirty.exchange(false, std::memory_order_acq_rel)) return m_geometryBufferStateRevision;
+	std::uint64_t coverage = 0;
 	std::vector<br::render::ArtifactIntent> intents;
 	std::vector<br::render::VersionedGpuBufferJournal::Capture> captures;
 	captures.reserve(m_graphBufferBindings.size());
 	std::uint64_t fingerprint = 1469598103934665603ull;
 	for (auto& binding : m_graphBufferBindings) {
 		auto capture = binding.buffer->CaptureVersionedGraphState();
+		coverage += capture.writeSequence;
 		const auto revision = (std::max<std::uint64_t>)(capture.writeSequence, 1u);
 		fingerprint ^= revision + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
 		if (binding.submittedVersion.revision != revision) {
@@ -2116,6 +2118,7 @@ std::uint64_t MeshManager::PublishDesiredBufferState() {
 	}
 	if (fingerprint == m_geometryBufferFingerprint) return m_geometryBufferStateRevision;
 	auto rootInput = std::make_shared<br::render::GeometryBufferStateBuildInput>();
+	rootInput->coveredMutationSequence = coverage;
 	std::vector<br::render::ArtifactRequirement> requirements;
 	for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
 		const auto& binding = m_graphBufferBindings[i];
@@ -2135,11 +2138,25 @@ std::uint64_t MeshManager::PublishDesiredBufferState() {
 	}
 	m_geometryBufferFingerprint = fingerprint;
 	m_geometryBufferStateVersion = result.Handle();
+	m_geometryBufferStateCoverage = coverage;
 	return m_geometryBufferStateRevision;
 }
 
+std::uint64_t MeshManager::GeometryMutationSequence() const {
+	// Bindings are fixed once renderer-state services are configured.
+	std::uint64_t sequence = 0;
+	for (const auto& binding : m_graphBufferBindings) sequence += binding.buffer->VersionedGraphWriteSequence();
+	return sequence;
+}
+
 std::optional<br::render::ArtifactRequirement> MeshManager::DesiredBufferStateRequirement() const {
+	std::uint64_t coverage = 0;
+	return DesiredBufferStateRequirement(coverage);
+}
+
+std::optional<br::render::ArtifactRequirement> MeshManager::DesiredBufferStateRequirement(std::uint64_t& coverage) const {
 	std::lock_guard lock(m_geometryBufferGraphMutex);
+	coverage = m_geometryBufferStateCoverage;
 	if (!m_geometryBufferStateVersion) return std::nullopt;
 	return br::render::Exact(m_geometryBufferStateVersion,
 		br::render::ArtifactReadiness::GpuReady);

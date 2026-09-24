@@ -20,6 +20,8 @@ struct GeometryBufferDependencyDTO {
 
 struct GeometryBufferStateBuildInput {
     std::vector<GeometryBufferDependencyDTO> buffers;
+    // MeshManager journal mutation sequence contained in this cut.
+    std::uint64_t coveredMutationSequence = 0;
 };
 
 struct PublishedGeometryBufferState {

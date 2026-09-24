@@ -19,6 +19,8 @@
 #include <array>
 #include <stacktrace>
 #include <thread>
+#include <condition_variable>
+#include <deque>
 #include <future>
 #include <unordered_map>
 #include <unordered_set>
@@ -888,6 +890,11 @@ void Renderer::Initialize(
 		m_rendererStateRequests.get(),
 		currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
 		m_numFramesInFlight);
+	// Static draw-record roots publish only with a Geometry root covering the
+	// mesh templates they reference (see ObjectManager::SetGeometryCoverageSource).
+	m_pObjectManager->SetGeometryCoverageSource([meshes = m_pMeshManager.get()] {
+		return meshes->GeometryMutationSequence();
+	});
 	m_pIndirectCommandBufferManager = IndirectCommandBufferManager::CreateUnique();
 	m_pViewManager = ViewManager::CreateUnique();
 	m_pEnvironmentManager = EnvironmentManager::CreateUnique(currentRenderGraph->RetainUploadService());
@@ -4145,6 +4152,7 @@ void Renderer::Update(float elapsedSeconds) {
             }
             std::free(value);
         }
+        TraceVisibilityTransients(); // TEMP-VISBUF-TRACE
         static bool colorOutputReadbackRequested = false;
         if (!colorOutputReadbackRequested && m_totalFramesRendered >= diagnosticCaptureFrame &&
             currentRenderGraph && m_dynamicPresentationColor) {
@@ -4626,6 +4634,476 @@ void Renderer::HandlePipelineReplacementFailure(const std::exception& error) {
     settings.getSettingSetter<bool>("enableShadows")(
         m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
     m_syncingPipelineTopologySettings = false;
+}
+
+// TEMP-TRANSFORM-AUDIT: for each newly selected publication, checks that every
+// active entry the GPU may draw (generation matches) references a transform row
+// the frame's published instance-transform image actually contains.
+void Renderer::AuditPublishedTransformRows() {
+    static const bool enabled = std::getenv("SARP_TRANSFORM_ROW_AUDIT") != nullptr;
+    const auto published = m_context.publishedRendererState;
+    if (!enabled || !published) return;
+    if (published->drawRecords.revision == m_transformAuditDrawRevision &&
+        published->indirectWorkloads.revision == m_transformAuditIndirectRevision) return;
+    m_transformAuditDrawRevision = published->drawRecords.revision;
+    m_transformAuditIndirectRevision = published->indirectWorkloads.revision;
+    const auto objects = published->drawRecords.payload.Get<br::render::PublishedObjectBufferState>();
+    const auto indirect = published->indirectWorkloads.payload.Get<br::render::PublishedIndirectState>();
+    if (!objects || !indirect) return;
+    const auto drawVersion = objects->FindVersion(br::render::kObjectDrawRecordVariant);
+    const auto generationVersion = objects->FindVersion(br::render::kObjectVisibilityGenerationVariant);
+    const auto transformVersion = objects->FindVersion(br::render::kObjectInstanceTransformVariant);
+    const auto drawBytes = drawVersion ? drawVersion->MaterializeCpuImage() : nullptr;
+    const auto generationBytes = generationVersion ? generationVersion->MaterializeCpuImage() : nullptr;
+    const auto transformBytes = transformVersion ? transformVersion->MaterializeCpuImage() : nullptr;
+    if (!drawBytes || !generationBytes || !transformBytes) return;
+    std::uint64_t drawable = 0, zeroRows = 0, originRows = 0, outOfRange = 0;
+    std::vector<std::uint32_t> samples;
+    for (const auto& active : indirect->activeListVersions) {
+        const auto activeBytes = active.version ? active.version->MaterializeCpuImage() : nullptr;
+        if (!activeBytes) continue;
+        const auto activeByteCount = (std::min<std::size_t>)(activeBytes->size(),
+            static_cast<std::size_t>(active.version->elementCount) * sizeof(br::render::ActiveDrawEntryDTO));
+        for (std::size_t offset = 0; offset + sizeof(br::render::ActiveDrawEntryDTO) <= activeByteCount;
+            offset += sizeof(br::render::ActiveDrawEntryDTO)) {
+            br::render::ActiveDrawEntryDTO entry{};
+            std::memcpy(&entry, activeBytes->data() + offset, sizeof(entry));
+            if (entry.generation == 0u) continue;
+            const auto generationOffset = static_cast<std::size_t>(entry.drawRecordIndex) * sizeof(std::uint32_t);
+            const auto drawOffset = static_cast<std::size_t>(entry.drawRecordIndex) * sizeof(InstanceDrawRecordCB);
+            if (generationOffset + sizeof(std::uint32_t) > generationBytes->size() ||
+                drawOffset + sizeof(InstanceDrawRecordCB) > drawBytes->size()) continue;
+            std::uint32_t generation = 0;
+            std::memcpy(&generation, generationBytes->data() + generationOffset, sizeof(generation));
+            if (generation != entry.generation) continue;
+            ++drawable;
+            InstanceDrawRecordCB record{};
+            std::memcpy(&record, drawBytes->data() + drawOffset, sizeof(record));
+            const auto transformOffset = static_cast<std::size_t>(record.instanceTransformIndex) * sizeof(PerInstanceTransformCB);
+            if (transformOffset + sizeof(DirectX::XMFLOAT4X4) > transformBytes->size()) {
+                ++outOfRange;
+                if (samples.size() < 8) samples.push_back(entry.drawRecordIndex);
+                continue;
+            }
+            float m[16];
+            std::memcpy(m, transformBytes->data() + transformOffset, sizeof(m));
+            bool zero = true;
+            for (const float value : m) zero = zero && value == 0.0f;
+            if (zero) ++zeroRows;
+            else if (std::fabs(m[12]) < 1.0f && std::fabs(m[13]) < 1.0f && std::fabs(m[14]) < 1.0f) ++originRows;
+            if ((zero || m[12] == 0.0f) && samples.size() < 8) samples.push_back(entry.drawRecordIndex);
+        }
+    }
+    const bool bad = zeroRows || outOfRange;
+    std::string sampleText;
+    for (const auto sample : samples) sampleText += (sampleText.empty() ? "" : ",") + std::to_string(sample);
+    if (bad) {
+        spdlog::warn("SARP transform-row audit: draw_revision={} indirect_revision={} drawable={} zero_rows={} "
+            "origin_rows={} out_of_range={} transform_rows={} sample_draw_records=[{}]",
+            m_transformAuditDrawRevision, m_transformAuditIndirectRevision, drawable, zeroRows, originRows,
+            outOfRange, transformBytes->size() / sizeof(PerInstanceTransformCB), sampleText);
+    } else {
+        spdlog::info("SARP transform-row audit: draw_revision={} indirect_revision={} drawable={} zero_rows=0 "
+            "origin_rows={} out_of_range=0", m_transformAuditDrawRevision, m_transformAuditIndirectRevision,
+            drawable, originRows);
+    }
+}
+
+// TEMP-VISBUF-TRACE: reads back visibility depth and the per-pixel stamp the
+// resolve writes into the surface records (draw record, GPU-read transform row,
+// its translation, mesh template, mesh-identity check). With the fixed benchmark
+// camera a static object must not jump; each object is also compared with the
+// CPU cut this frame was built from, so GPU/CPU disagreement is named directly.
+namespace {
+    struct VisbufTraceObjectStats {
+        std::uint32_t count = 0;
+        std::uint32_t overlap = 0;
+        double sumX = 0.0, sumY = 0.0, sumDepth = 0.0;
+        std::uint32_t minX = UINT32_MAX, minY = UINT32_MAX, maxX = 0, maxY = 0;
+        std::uint32_t clodMeta = 0, templateClodMeta = 0;
+        std::uint32_t meta = 0;
+        bool stampVaries = false;
+    };
+    struct VisbufTraceFrame {
+        std::uint64_t frame = 0;
+        std::uint32_t width = 0, height = 0;
+        bool hasVisibility = false, hasRecords = false;
+        // Raw readback bytes, decoded on the trace worker.
+        std::vector<std::byte> visibilityBytes, recordBytes;
+        std::uint64_t visibilityOffset = 0, visibilityPitch = 0;
+        std::unordered_set<std::uint64_t> flagged;
+        std::vector<float> depth;
+        std::vector<std::uint64_t> ids;
+        std::vector<std::uint32_t> clodMeta, templateClodMeta;
+        std::vector<std::uint32_t> meta;
+        std::shared_ptr<const br::render::PublishedRendererState> published;
+        std::unordered_map<std::uint64_t, VisbufTraceObjectStats> objects;
+    };
+    struct VisbufTraceState {
+        std::ofstream log;
+        std::map<std::uint64_t, VisbufTraceFrame> pending; // render thread only
+        std::optional<VisbufTraceFrame> previous;           // worker only
+        std::optional<VisbufTraceFrame> beforePrevious;     // worker only
+        std::uint64_t events = 0;
+        // draw record -> (clod mesh metadata index, frame first seen with it); worker only.
+        std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint64_t>> clodMetaByRecord;
+        std::mutex queueMutex;
+        std::condition_variable_any queueChanged;
+        std::deque<VisbufTraceFrame> queue;
+        std::atomic<std::uint32_t> queued{ 0 };
+        std::jthread worker;
+    };
+
+    std::string DescribeVisbufTraceObject(std::uint64_t id, const VisbufTraceObjectStats& stats) {
+        const auto meshTemplate = stats.meta & 0x3FFFFFFFu;
+        return std::format("draw_record={} gpu_row={} gpu_mesh_template={} identity={} px={} centroid=({:.0f},{:.0f}) "
+            "bbox=[{},{}..{},{}] depth={:.1f} gpu_clod_meta={} gpu_template_expected_clod_meta={}{}",
+            static_cast<std::uint32_t>(id), id >> 32,
+            meshTemplate, (stats.meta & 0x80000000u) ? "MISMATCH" : ((stats.meta & 0x40000000u) ? "ok" : "untagged"),
+            stats.count, stats.sumX / stats.count, stats.sumY / stats.count, stats.minX, stats.minY, stats.maxX, stats.maxY,
+            stats.sumDepth / stats.count, stats.clodMeta, stats.templateClodMeta, stats.stampVaries ? " STAMP-VARIES" : "");
+    }
+
+    struct VisbufTraceCut {
+        bool valid = false;
+        std::uint32_t row = UINT32_MAX;
+        std::uint32_t meshTemplate = UINT32_MAX;
+        std::optional<DirectX::XMFLOAT3> translation;
+        std::string text = "cut=unavailable";
+    };
+
+    // What this frame's CPU cut holds for the pixel's draw record and row.
+    VisbufTraceCut LookupVisbufTraceCut(const VisbufTraceFrame& frame, std::uint64_t id) {
+        VisbufTraceCut cut;
+        if (!frame.published) return cut;
+        const auto objects = frame.published->drawRecords.payload.Get<br::render::PublishedObjectBufferState>();
+        const auto transformVersion = objects ? objects->FindVersion(br::render::kObjectInstanceTransformVariant) : nullptr;
+        const auto drawVersion = objects ? objects->FindVersion(br::render::kObjectDrawRecordVariant) : nullptr;
+        // Materialize copies the whole image; cache one per published version.
+        static std::shared_ptr<const br::render::PublishedGpuBufferVersion> cachedTransformVersion, cachedDrawVersion;
+        static std::shared_ptr<const std::vector<std::byte>> cachedTransforms, cachedDraws;
+        if (transformVersion != cachedTransformVersion) {
+            cachedTransformVersion = transformVersion;
+            cachedTransforms = transformVersion ? transformVersion->MaterializeCpuImage() : nullptr;
+        }
+        if (drawVersion != cachedDrawVersion) {
+            cachedDrawVersion = drawVersion;
+            cachedDraws = drawVersion ? drawVersion->MaterializeCpuImage() : nullptr;
+        }
+        const auto transforms = cachedTransforms;
+        const auto draws = cachedDraws;
+        if (!transforms || !draws) return cut;
+        cut.valid = true;
+        const auto drawRecordIndex = static_cast<std::uint32_t>(id);
+        const auto rowIndex = static_cast<std::uint32_t>(id >> 32);
+        if ((drawRecordIndex + 1ull) * sizeof(InstanceDrawRecordCB) <= draws->size()) {
+            InstanceDrawRecordCB record{};
+            std::memcpy(&record, draws->data() + drawRecordIndex * sizeof(InstanceDrawRecordCB), sizeof(record));
+            cut.row = record.instanceTransformIndex;
+            cut.meshTemplate = record.meshTemplateIndex;
+        }
+        if ((rowIndex + 1ull) * sizeof(PerInstanceTransformCB) <= transforms->size()) {
+            PerInstanceTransformCB row{};
+            std::memcpy(&row, transforms->data() + rowIndex * sizeof(PerInstanceTransformCB), sizeof(row));
+            DirectX::XMFLOAT4X4 m{};
+            DirectX::XMStoreFloat4x4(&m, row.modelMatrix);
+            cut.translation = DirectX::XMFLOAT3(m._41, m._42, m._43);
+        }
+        cut.text = std::format("cut draw_rev={} transform_rev={} draw_rev_buf={} transform_rows={} draw_records={} "
+            "cut_row={} cut_mesh_template={} cut_translation={}",
+            frame.published->drawRecords.revision, transformVersion->revision, drawVersion->revision,
+            transforms->size() / sizeof(PerInstanceTransformCB), draws->size() / sizeof(InstanceDrawRecordCB),
+            cut.row, cut.meshTemplate,
+            cut.translation ? std::format("({:.0f},{:.0f},{:.0f})", cut.translation->x, cut.translation->y, cut.translation->z)
+                            : std::string("out-of-range"));
+        return cut;
+    }
+
+    std::string DescribePublishedTransform(const VisbufTraceFrame& frame, std::uint64_t id) {
+        return LookupVisbufTraceCut(frame, id).text;
+    }
+
+    void DecodeVisbufTraceFrame(VisbufTraceFrame& target) {
+        const std::size_t pixels = static_cast<std::size_t>(target.width) * target.height;
+        target.depth.assign(pixels, -1.0f);
+        for (std::uint32_t y = 0; y < target.height; ++y) {
+            if (target.visibilityOffset + y * target.visibilityPitch + target.width * sizeof(std::uint64_t) >
+                target.visibilityBytes.size()) {
+                target.depth.clear();
+                break;
+            }
+            const auto* row = target.visibilityBytes.data() + target.visibilityOffset + y * target.visibilityPitch;
+            for (std::uint32_t x = 0; x < target.width; ++x) {
+                std::uint64_t key = 0;
+                std::memcpy(&key, row + x * sizeof(key), sizeof(key));
+                if (key == UINT64_MAX) continue;
+                const std::uint32_t depthBits = static_cast<std::uint32_t>(key >> 33) << 1;
+                std::memcpy(&target.depth[static_cast<std::size_t>(y) * target.width + x], &depthBits, sizeof(float));
+            }
+        }
+        // Stamp: sourceObjectId = (draw record, row), sourceMaterialId = (CLod offsets
+        // mesh metadata index, template's expected metadata index),
+        // diagnosticReason = mesh template | tagged << 30 | identity mismatch << 31.
+        const std::size_t count = target.recordBytes.size() / 32u;
+        target.ids.resize(count);
+        target.clodMeta.resize(count);
+        target.templateClodMeta.resize(count);
+        target.meta.resize(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto* record = target.recordBytes.data() + i * 32u;
+            std::memcpy(&target.ids[i], record, sizeof(std::uint64_t));
+            std::memcpy(&target.clodMeta[i], record + 8, sizeof(std::uint32_t));
+            std::memcpy(&target.templateClodMeta[i], record + 12, sizeof(std::uint32_t));
+            std::memcpy(&target.meta[i], record + 28, sizeof(std::uint32_t));
+        }
+        target.visibilityBytes = {};
+        target.recordBytes = {};
+    }
+
+    void AnalyzeVisbufTraceFrame(VisbufTraceState& state, VisbufTraceFrame& current) {
+        DecodeVisbufTraceFrame(current);
+        const std::size_t pixels = static_cast<std::size_t>(current.width) * current.height;
+        if (pixels == 0 || current.depth.size() < pixels || current.ids.size() < pixels) {
+            state.log << std::format("frame={} invalid capture depth={} ids={} pixels={}\n", current.frame,
+                current.depth.size(), current.ids.size(), pixels);
+            current.objects.clear();
+            return;
+        }
+        std::uint64_t covered = 0, foreign = 0, mismatchPixels = 0;
+        for (std::size_t i = 0; i < pixels; ++i) {
+            if (current.depth[i] < 0.0f) continue;
+            ++covered;
+            const auto id = current.ids[i];
+            // Records not written by the object resolve (grass etc.) carry no stamp.
+            if (static_cast<std::uint32_t>(id) == UINT32_MAX) {
+                ++foreign;
+                current.depth[i] = -1.0f;
+                continue;
+            }
+            auto& stats = current.objects[id];
+            const auto x = static_cast<std::uint32_t>(i % current.width);
+            const auto y = static_cast<std::uint32_t>(i / current.width);
+            if (stats.count == 0) {
+                stats.clodMeta = current.clodMeta[i];
+                stats.templateClodMeta = current.templateClodMeta[i];
+                stats.meta = current.meta[i];
+            } else if (stats.meta != current.meta[i] || stats.clodMeta != current.clodMeta[i] ||
+                stats.templateClodMeta != current.templateClodMeta[i]) {
+                stats.stampVaries = true;
+            }
+            if (current.meta[i] & 0x80000000u) ++mismatchPixels;
+            ++stats.count;
+            stats.sumX += x;
+            stats.sumY += y;
+            stats.sumDepth += current.depth[i];
+            stats.minX = (std::min)(stats.minX, x);
+            stats.minY = (std::min)(stats.minY, y);
+            stats.maxX = (std::max)(stats.maxX, x);
+            stats.maxY = (std::max)(stats.maxY, y);
+        }
+        std::uint64_t nearer = 0, farther = 0, appeared = 0, vanished = 0, disagreePixels = 0;
+        std::vector<std::string> lines;
+        const auto push = [&](std::string line) {
+            ++state.events;
+            if (lines.size() < 32) lines.push_back(std::move(line));
+        };
+        // GPU-read state must equal the CPU cut this frame was built from.
+        for (const auto& [id, stats] : current.objects) {
+            const auto cut = LookupVisbufTraceCut(current, id);
+            if (!cut.valid) continue;
+            std::string reasons;
+            if (stats.meta & 0x80000000u) reasons += " mesh-identity-mismatch";
+            if (cut.row != static_cast<std::uint32_t>(id >> 32)) reasons += " row-differs";
+            if (cut.meshTemplate != (stats.meta & 0x3FFFFFFFu)) reasons += " mesh-template-differs";
+            if (!cut.translation) reasons += " row-out-of-cut";
+            if (stats.templateClodMeta != UINT32_MAX && stats.clodMeta != stats.templateClodMeta)
+                reasons += " clod-offsets-disagree-with-template";
+            if (stats.stampVaries) reasons += " stamp-varies";
+            // A static record's geometry must never change once seen.
+            const auto drawRecordIndex = static_cast<std::uint32_t>(id);
+            auto [seen, inserted] = state.clodMetaByRecord.try_emplace(drawRecordIndex, stats.clodMeta, current.frame);
+            if (!inserted && seen->second.first != stats.clodMeta) {
+                reasons += std::format(" clod-meta-changed(was {} since frame {})", seen->second.first, seen->second.second);
+                seen->second = { stats.clodMeta, current.frame };
+            }
+            if (reasons.empty()) continue;
+            disagreePixels += stats.count;
+            current.flagged.insert(id);
+            // Report the frame a disagreement starts; persistent ones would flood the log.
+            if (state.previous && state.previous->flagged.contains(id)) continue;
+            push(std::format("  DISAGREE [{} ] frame {}: {}\n    {}", reasons, current.frame,
+                DescribeVisbufTraceObject(id, stats), cut.text));
+        }
+        auto& previous = state.previous;
+        if (previous) {
+            for (const auto id : previous->flagged) {
+                const auto found = current.objects.find(id);
+                if (current.flagged.contains(id) || found == current.objects.end()) continue;
+                push(std::format("  AGREES-AGAIN frame {}: {}", current.frame, DescribeVisbufTraceObject(id, found->second)));
+            }
+        }
+        if (previous && previous->width == current.width && previous->height == current.height) {
+            for (std::size_t i = 0; i < pixels; ++i) {
+                const float before = previous->depth[i];
+                const float after = current.depth[i];
+                if (before < 0.0f && after < 0.0f) continue;
+                if (before < 0.0f) { ++appeared; continue; }
+                if (after < 0.0f) { ++vanished; continue; }
+                if (after < before * 0.5f) ++nearer;
+                else if (after > before * 2.0f) ++farther;
+                if (previous->ids[i] == current.ids[i]) ++current.objects[current.ids[i]].overlap;
+            }
+            for (const auto& [id, stats] : current.objects) {
+                const auto found = previous->objects.find(id);
+                if (found == previous->objects.end()) continue;
+                const auto& before = found->second;
+                // Footprint blow-up: geometry drawn far larger than one frame earlier.
+                if (stats.count > 20000u && stats.count > before.count * 20u) {
+                    push(std::format("  BLOWUP frame {}: {}\n    was frame {}: {}\n    {}", current.frame,
+                        DescribeVisbufTraceObject(id, stats), previous->frame, DescribeVisbufTraceObject(id, before),
+                        DescribePublishedTransform(current, id)));
+                    continue;
+                }
+                if (before.count > 20000u && before.count > stats.count * 20u) {
+                    push(std::format("  SHRINK frame {}: {}\n    was frame {}: {}", current.frame,
+                        DescribeVisbufTraceObject(id, stats), previous->frame, DescribeVisbufTraceObject(id, before)));
+                    continue;
+                }
+                if (stats.count < 32 || before.count < 32) continue;
+                const double dx = stats.sumX / stats.count - before.sumX / before.count;
+                const double dy = stats.sumY / stats.count - before.sumY / before.count;
+                const double distance = std::sqrt(dx * dx + dy * dy);
+                const double depthRatio = (stats.sumDepth / stats.count) / (before.sumDepth / before.count);
+                const auto smaller = (std::min)(stats.count, before.count);
+                const bool moved = stats.overlap * 10u < smaller && distance > 24.0;
+                const bool depthJump = stats.overlap * 4u < smaller && (depthRatio > 1.3 || depthRatio < 0.77);
+                if (!moved && !depthJump) continue;
+                push(std::format(
+                    "  MOVED shift={:.0f}px depth_ratio={:.2f} overlap={}\n    frame {}: {}\n    frame {}: {}\n    {}",
+                    distance, depthRatio, stats.overlap, previous->frame, DescribeVisbufTraceObject(id, before),
+                    current.frame, DescribeVisbufTraceObject(id, stats), DescribePublishedTransform(current, id)));
+            }
+            // New in the previous frame, gone again now: a one-frame flash.
+            if (state.beforePrevious) {
+                for (const auto& [id, stats] : previous->objects) {
+                    if (stats.count < 32 || current.objects.contains(id) || state.beforePrevious->objects.contains(id)) continue;
+                    push(std::format("  FLASH frame {}: {}\n    {}", previous->frame, DescribeVisbufTraceObject(id, stats),
+                        DescribePublishedTransform(*previous, id)));
+                }
+            }
+        }
+        const auto rev = current.published ? current.published->drawRecords.revision : 0u;
+        const auto indirectRev = current.published ? current.published->indirectWorkloads.revision : 0u;
+        state.log << std::format("frame={} gap={} draw_rev={} indirect_rev={} covered={} foreign={} objects={} "
+            "nearer_x2={} farther_x2={} appeared={} vanished={} disagree_px={} identity_mismatch_px={} events_total={}\n",
+            current.frame, previous ? static_cast<std::int64_t>(current.frame - previous->frame) : -1, rev, indirectRev,
+            covered, foreign, current.objects.size(), nearer, farther, appeared, vanished, disagreePixels, mismatchPixels,
+            state.events);
+        for (const auto& line : lines) state.log << line << '\n';
+        state.log.flush();
+        if (!lines.empty()) spdlog::warn("SARP visbuf trace: frame {} flagged {} event(s)", current.frame, lines.size());
+    }
+}
+
+void Renderer::TraceVisibilityTransients() {
+    static const std::filesystem::path directory = [] {
+        wchar_t* value = nullptr;
+        size_t length = 0;
+        _wdupenv_s(&value, &length, L"SARP_VISBUF_TRACE_DIR");
+        std::filesystem::path result = value ? value : L"";
+        std::free(value);
+        return result;
+    }();
+    if (directory.empty() || !currentRenderGraph) return;
+    auto* service = currentRenderGraph->GetReadbackService();
+    if (!service) return;
+    if (!m_visbufTraceState) {
+        std::filesystem::create_directories(directory);
+        auto state = std::make_shared<VisbufTraceState>();
+        state->log.open(directory / "visbuf_trace.log", std::ios::trunc);
+        // The worker holds a raw pointer; jthread joins in the state destructor
+        // before the members it uses are destroyed (it is declared last).
+        state->worker = std::jthread([raw = state.get()](std::stop_token stop) {
+            while (true) {
+                VisbufTraceFrame current;
+                {
+                    std::unique_lock lock(raw->queueMutex);
+                    raw->queueChanged.wait(lock, stop, [raw] { return !raw->queue.empty(); });
+                    if (raw->queue.empty()) return;
+                    current = std::move(raw->queue.front());
+                    raw->queue.pop_front();
+                }
+                AnalyzeVisbufTraceFrame(*raw, current);
+                raw->queued.fetch_sub(1, std::memory_order_acq_rel);
+                raw->beforePrevious = std::move(raw->previous);
+                raw->previous = std::move(current);
+                if (raw->beforePrevious) {
+                    raw->beforePrevious->depth = {};
+                    raw->beforePrevious->ids = {};
+                    raw->beforePrevious->clodMeta = {};
+                    raw->beforePrevious->templateClodMeta = {};
+                    raw->beforePrevious->meta = {};
+                }
+            }
+        });
+        m_visbufTraceState = state;
+    }
+    auto state = std::static_pointer_cast<VisbufTraceState>(m_visbufTraceState);
+    const auto frame = m_totalFramesRendered;
+    while (!state->pending.empty() && state->pending.begin()->first + 30 < frame) state->pending.erase(state->pending.begin());
+    // Bound memory: skip a frame (logged as a gap) rather than stall rendering.
+    if (state->pending.size() >= 6 || state->queued.load(std::memory_order_acquire) >= 4) return;
+    auto visibility = currentRenderGraph->RequestResourcePtr(Builtin::PrimaryCamera::VisibilityTexture, true);
+    auto records = currentRenderGraph->RequestResourcePtr(Builtin::Surface::Records, true);
+    const auto unwrap = [](std::shared_ptr<org::Resource>& resource) {
+        if (auto* dynamic = dynamic_cast<org::DynamicResource*>(resource.get())) {
+            if (auto backing = dynamic->GetResource()) resource = std::move(backing);
+        }
+    };
+    unwrap(visibility);
+    unwrap(records);
+    if (!visibility || !records) return;
+    auto& entry = state->pending[frame];
+    entry.frame = frame;
+    entry.published = m_context.publishedRendererState;
+    const auto complete = [state, frame] {
+        const auto found = state->pending.find(frame);
+        if (found == state->pending.end() || !found->second.hasVisibility || !found->second.hasRecords) return;
+        auto current = std::move(found->second);
+        state->pending.erase(found);
+        while (!state->pending.empty() && state->pending.begin()->first < frame) state->pending.erase(state->pending.begin());
+        state->queued.fetch_add(1, std::memory_order_acq_rel);
+        {
+            std::lock_guard lock(state->queueMutex);
+            state->queue.push_back(std::move(current));
+        }
+        state->queueChanged.notify_one();
+    };
+    // Both resources have aliasing disabled while tracing, so the cheap
+    // end-of-graph capture sees this frame's contents without interrupting it.
+    service->RequestReadbackCaptureAfterGraph(visibility.get(), org::RangeSpec{},
+        [state, frame, complete](org::ReadbackCaptureResult&& result) {
+            const auto found = state->pending.find(frame);
+            if (found == state->pending.end()) return;
+            auto& target = found->second;
+            target.hasVisibility = true;
+            target.width = result.width;
+            target.height = result.height;
+            if (!result.layouts.empty()) {
+                target.visibilityOffset = result.layouts.front().offset;
+                target.visibilityPitch = result.layouts.front().rowPitch;
+            }
+            target.visibilityBytes = std::move(result.data);
+            complete();
+        });
+    service->RequestReadbackCaptureAfterGraph(records.get(), org::RangeSpec{},
+        [state, frame, complete](org::ReadbackCaptureResult&& result) {
+            const auto found = state->pending.find(frame);
+            if (found == state->pending.end()) return;
+            found->second.recordBytes = std::move(result.data);
+            found->second.hasRecords = true;
+            complete();
+        });
 }
 
 void Renderer::MaybeRequestCLodVisibilityTelemetry() {
@@ -6292,6 +6770,7 @@ void Renderer::Render() {
         BT_ZONE_SCOPE("Renderer::Render::CLodVisibilityTelemetry");
         MaybeRequestCLodVisibilityTelemetry();
         MaybeRequestCLodVirtualShadowTelemetry();
+        AuditPublishedTransformRows(); // TEMP-TRANSFORM-AUDIT
     }
     runCapturedStage("RenderGraphExecute", [&]() {
         BT_ZONE_SCOPE("Renderer::Render::RenderGraphExecute");
@@ -6697,6 +7176,8 @@ void Renderer::Cleanup() {
 	m_depthHistory.Clear();
 	m_pViewManager.reset();
 	m_pLightManager.reset();
+	// The object manager reads the mesh manager's geometry sequence on commit.
+	if (m_pObjectManager) m_pObjectManager->SetGeometryCoverageSource({});
 	m_pMeshManager.reset();
 	m_pObjectManager.reset();
     m_pMaterialManager.reset();
@@ -7330,7 +7811,7 @@ void Renderer::CreateRenderGraph() {
                 desc.channels = 2;
                 desc.format = rhi::Format::R32G32_UInt;
                 desc.hasRTV = desc.hasSRV = desc.hasUAV = desc.hasNonShaderVisibleUAV = true;
-                desc.allowAlias = true;
+                desc.allowAlias = std::getenv("SARP_VISBUF_TRACE_DIR") == nullptr; // TEMP-VISBUF-TRACE
                 desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
                 auto visibilityBuffer = org::PixelBuffer::CreateSharedUnmaterialized(desc);
                 visibilityBuffer->SetName("Visibility Buffer");

@@ -27,6 +27,7 @@ ArtifactBuildResult BuildGeometryBufferState(const ArtifactBuildContext& context
     // its immutable dependency closure.
     root->publishRoot = false;
     root->fragment.revision = context.revision;
+    root->fragment.coverage = input->coveredMutationSequence;
     std::unordered_set<std::uint64_t> variants;
     for (const auto& expected : input->buffers) {
         if (!variants.insert(expected.catalogVariant).second) {

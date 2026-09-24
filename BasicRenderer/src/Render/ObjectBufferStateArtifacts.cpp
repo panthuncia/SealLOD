@@ -23,6 +23,7 @@ ArtifactBuildResult BuildObjectBufferState(const ArtifactBuildContext& context) 
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::DrawRecords;
     root->fragment.revision = context.revision;
+    root->fragment.minimumPublicationDependencies = input->minimumPublicationDependencies;
     state->buffers = input->buffers;
     state->coveredMutationGeneration = input->coveredMutationGeneration;
     state->residentTransformCount = input->residentTransformCount;

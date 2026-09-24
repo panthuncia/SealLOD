@@ -591,6 +591,15 @@ public:
 	void ScheduleDesiredBufferStatePublish();
 	br::render::ArtifactVersionHandle DesiredBufferStateHandle() const;
 	DesiredObjectBufferStateCut DesiredBufferStateCut() const;
+	// Static draw records name mesh-template and CLod rows that shaders resolve
+	// through the published Geometry root. Each static transaction records the
+	// geometry mutation sequence current at commit (its templates were accepted
+	// earlier), and every draw-records root carries a minimum publication
+	// dependency on a Geometry root covering that sequence.
+	void SetGeometryCoverageSource(std::function<std::uint64_t()> source);
+	[[nodiscard]] std::uint64_t RequiredGeometryCoverage() const noexcept {
+		return m_requiredGeometryCoveragePublished.load(std::memory_order_acquire);
+	}
 	std::shared_ptr<SortedUnsignedIntBuffer> TryGetActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
 		auto it = m_activeDrawSetIndices.find(workloadKey);
 		return it != m_activeDrawSetIndices.end() ? it->second : nullptr;
@@ -638,9 +647,11 @@ private:
 		std::shared_ptr<const std::vector<br::render::PublishedActiveSkinnedPlacement>> activePlacementEntries;
 		std::uint64_t fingerprint = 0;
 		std::uint64_t coveredMutationGeneration = 0;
+		std::uint64_t requiredGeometryCoverage = 0;
 	};
 
 	std::uint64_t SealDesiredBufferStateLocked();
+	void RecordStaticGeometryRequirementLocked();
 
 	struct DeferredBufferRangeRetire {
 		std::shared_ptr<org::DynamicBuffer> buffer;
@@ -750,6 +761,9 @@ private:
 	// coverage generations while the graph submitter captures the newest
 	// coherent cut only after its admission gates open.
 	mutable std::mutex m_staticPublicationMutationMutex;
+	std::function<std::uint64_t()> m_geometryCoverageSource;
+	std::uint64_t m_requiredGeometryCoverage = 0; // m_staticPublicationMutationMutex
+	std::atomic<std::uint64_t> m_requiredGeometryCoveragePublished{ 0 };
 	std::shared_ptr<org::LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
 	Stats m_stats{};

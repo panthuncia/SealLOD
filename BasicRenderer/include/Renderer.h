@@ -381,6 +381,11 @@ private:
         const std::chrono::steady_clock::time_point& stageEnd);
     void PublishFrameTaskGraphCapture();
     void MaybeRequestCLodVisibilityTelemetry();
+    void AuditPublishedTransformRows(); // TEMP-TRANSFORM-AUDIT
+    std::uint64_t m_transformAuditDrawRevision = 0; // TEMP-TRANSFORM-AUDIT
+    std::uint64_t m_transformAuditIndirectRevision = 0; // TEMP-TRANSFORM-AUDIT
+    void TraceVisibilityTransients(); // TEMP-VISBUF-TRACE
+    std::shared_ptr<void> m_visbufTraceState; // TEMP-VISBUF-TRACE
     void MaybeRequestCLodVirtualShadowTelemetry();
     void MaybeRequestObjectReyesAtlasTelemetry();
     void MaybeRequestTerrainRvtTelemetry();

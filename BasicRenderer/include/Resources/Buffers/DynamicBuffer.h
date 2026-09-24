@@ -164,6 +164,8 @@ public:
 	}
 	void SetVersionedGraphExclusive(bool exclusive);
     br::render::VersionedGpuBufferJournal::Capture CaptureVersionedGraphState() const;
+    // Current journal write sequence; matches Capture::writeSequence of a capture taken now.
+    std::uint64_t VersionedGraphWriteSequence() const;
     std::vector<std::byte> CaptureCpuShadowBytes() const;
     void AcknowledgeVersionedGraphState(
         const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version);

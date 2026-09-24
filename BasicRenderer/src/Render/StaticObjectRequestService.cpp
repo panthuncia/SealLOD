@@ -21,6 +21,7 @@ ObjectManager::MaterializedStaticImportTransaction StaticObjectRequestService::M
 void StaticObjectRequestService::StageStaticImportTransactionUploads(ObjectManager::MaterializedStaticImportTransaction& transaction, bool includeDrawRecords) const { RequireObjects(m_objects).StageStaticImportTransactionUploads(transaction, includeDrawRecords); }
 void StaticObjectRequestService::RequestStaticImportTransactionResources(const ObjectManager::StaticImportBuildBatch& build) const { RequireObjects(m_objects).RequestStaticImportTransactionResources(build); }
 std::uint64_t StaticObjectRequestService::PublishDesiredBufferState() const { return RequireObjects(m_objects).PublishDesiredBufferState(); }
+std::uint64_t StaticObjectRequestService::RequiredGeometryCoverage() const { return RequireObjects(m_objects).RequiredGeometryCoverage(); }
 ObjectManager::DesiredObjectBufferStateCut StaticObjectRequestService::DesiredBufferStateCut() const { return RequireObjects(m_objects).DesiredBufferStateCut(); }
 ObjectManager::StaticImportBulkPublishResult StaticObjectRequestService::PublishStaticImportTransactionsBulk(std::span<ObjectManager::MaterializedStaticImportTransaction*> transactions) const { return RequireObjects(m_objects).PublishStaticImportTransactionsBulk(transactions); }
 std::uint64_t StaticObjectRequestService::MakeDeferredRetireFrame() const { return RequireObjects(m_objects).MakeDeferredRetireFrame(); }

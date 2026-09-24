@@ -147,6 +147,13 @@ public:
 	void SetRendererStateRequestService(br::render::RendererStateRequestService* service);
 	std::uint64_t PublishDesiredBufferState();
 	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
+	// Also reports the geometry mutation sequence the returned cut covers: every
+	// journal mutation counted at or below it is contained in that cut.
+	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement(std::uint64_t& coverage) const;
+	// Sum of the geometry journals' write sequences. Every component only grows,
+	// so a cut whose captured sum reaches a value read after some writes contains
+	// those writes; the newest cut always reaches the current value.
+	[[nodiscard]] std::uint64_t GeometryMutationSequence() const;
 	void AcknowledgePublishedBufferState(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 	ICLodGeometryStorage& GetCLodGeometryStorage() noexcept;
@@ -414,6 +421,7 @@ private:
 	std::shared_ptr<org::runtime::IUploadService> m_geometryUploadService;
 	mutable std::mutex m_geometryBufferGraphMutex;
 	std::atomic_bool m_geometryBufferGraphDirty{ true };
+	std::uint64_t m_geometryBufferStateCoverage = 0;
 	std::uint64_t m_geometryBufferStateRevision = 0;
 	std::uint64_t m_geometryBufferFingerprint = 0;
 	br::render::ArtifactVersionHandle m_geometryBufferStateVersion{};

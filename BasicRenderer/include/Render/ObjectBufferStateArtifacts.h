@@ -38,6 +38,9 @@ struct ObjectBufferStateBuildInput {
     std::uint32_t residentTransformCount = 0;
     std::shared_ptr<const std::vector<SkinnedAssemblyPlacementGPU>> placementRecords;
     std::shared_ptr<const std::vector<PublishedActiveSkinnedPlacement>> activePlacementEntries;
+    // Draw records name mesh-template and CLod rows that exist only in the
+    // Geometry root; the root must cover them before these records publish.
+    std::vector<PublishedMinimumDependency> minimumPublicationDependencies;
 };
 
 struct PublishedObjectBufferState {

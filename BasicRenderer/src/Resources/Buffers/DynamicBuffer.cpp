@@ -1062,6 +1062,11 @@ br::render::VersionedGpuBufferJournal::Capture org::DynamicBuffer::CaptureVersio
 	return m_versionedGraphJournal->CaptureDesired();
 }
 
+std::uint64_t org::DynamicBuffer::VersionedGraphWriteSequence() const {
+	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+	return m_versionedGraphJournal ? m_versionedGraphJournal->DesiredSequence() : 0u;
+}
+
 std::vector<std::byte> org::DynamicBuffer::CaptureCpuShadowBytes() const {
 	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
 	return m_cpuShadowData;

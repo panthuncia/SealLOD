@@ -521,6 +521,9 @@ ArtifactBuildResult BuildStaticScene(const ArtifactBuildContext& context) {
 			geometryBufferRoot->fragment.resourceHolds.begin(),
 			geometryBufferRoot->fragment.resourceHolds.end());
 		root->fragment.selectedState = geometryBufferRoot->fragment.payload;
+		// Draw-record roots wait on this: they may publish only once the
+		// Geometry root they are paired with contains their template rows.
+		root->fragment.coverage = geometryBufferRoot->fragment.coverage;
 	}
     // The scene root is the atomic publication boundary. Retain every resolved
     // resource dependency—not merely the membership pages—so manifest solving

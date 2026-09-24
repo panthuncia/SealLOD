@@ -1126,7 +1126,7 @@ inline void CreateCanonicalSurfaceResources(org::RenderGraph* graph)
     // the renderer library does not depend on SARP's public module headers.
     auto records = org::Buffer::CreateUnmaterializedStructuredBuffer(
         resolution.x * resolution.y, 32u, true, false, false, rhi::HeapType::DeviceLocal);
-    records->SetAllowAlias(true);
+    records->SetAllowAlias(std::getenv("SARP_VISBUF_TRACE_DIR") == nullptr); // TEMP-VISBUF-TRACE
     records->SetName("SARP Surface Records");
     org::memory::SetResourceUsageHint(*records, "SARP canonical surface contract v1");
     graph->RegisterResource(Builtin::Surface::Records, std::move(records));

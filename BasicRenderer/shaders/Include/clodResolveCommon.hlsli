@@ -2314,6 +2314,26 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         materialInputs.diagnosticReason =
             LoadTextureStreamingInfo(materialInfo.baseColorStreamingTextureID).imageDescriptorIndex;
     }
+    // TEMP-VISBUF-TRACE: stamp what the GPU actually read for this pixel: the
+    // draw record, its transform row, that row's translation, the mesh template,
+    // and whether the record's expected mesh identity matches the CLod metadata.
+    {
+        const InstanceDrawRecordBuffer traceRecord = LoadInstanceDrawRecord(md.drawcallAndMeshlet.x);
+        const MeshInstanceClodOffsets traceOffsets = LoadCLodOffsetsForDraw(md.drawcallAndMeshlet.x);
+        StructuredBuffer<CLodMeshMetadata> traceMetadataBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+        const CLodMeshMetadata traceMetadata = traceMetadataBuffer[traceOffsets.clodMeshMetadataIndex];
+        const bool traceTagged = (traceRecord.expectedMeshIdentityLo | traceRecord.expectedMeshIdentityHi) != 0u;
+        const bool traceMismatch = traceTagged &&
+            (traceRecord.expectedMeshIdentityLo != traceMetadata.meshIdentityLo ||
+             traceRecord.expectedMeshIdentityHi != traceMetadata.meshIdentityHi);
+        const PerMeshInstanceBuffer traceTemplate = LoadMeshTemplateForDrawRecord(traceRecord);
+        materialInputs.sourceObjectId = uint2(md.drawcallAndMeshlet.x, traceRecord.instanceTransformIndex);
+        materialInputs.sourceMaterialId = uint2(traceOffsets.clodMeshMetadataIndex,
+            traceTemplate.expectedClodMeshMetadataIndex);
+        materialInputs.diagnosticReason = (traceRecord.meshTemplateIndex & 0x3FFFFFFFu) |
+            (traceTagged ? 0x40000000u : 0u) | (traceMismatch ? 0x80000000u : 0u);
+    }
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     sample.materialInfo = (MaterialInfo)0;
 #else

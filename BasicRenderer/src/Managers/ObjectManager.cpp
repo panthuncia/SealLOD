@@ -476,6 +476,7 @@ std::uint64_t ObjectManager::SealDesiredBufferStateLocked() {
 	cut.activeSkinnedPlacements = m_activeSkinnedPlacementJournal.CaptureDesired();
 	cut.coveredMutationGeneration =
 		m_objectBufferMutationGeneration.load(std::memory_order_acquire);
+	cut.requiredGeometryCoverage = m_requiredGeometryCoverage;
 	cut.residentTransformCount = static_cast<std::uint32_t>(
 		GetResidentInstanceTransformCount());
 	cut.placementRecords = m_publishedSkinnedPlacementRecords;
@@ -490,6 +491,8 @@ std::uint64_t ObjectManager::SealDesiredBufferStateLocked() {
 		(cut.fingerprint << 6u) + (cut.fingerprint >> 2u);
 	cut.fingerprint ^= cut.coveredMutationGeneration + 0x9e3779b97f4a7c15ull +
 		(cut.fingerprint << 6u) + (cut.fingerprint >> 2u);
+	cut.fingerprint ^= cut.requiredGeometryCoverage + 0x9e3779b97f4a7c15ull +
+		(cut.fingerprint << 6u) + (cut.fingerprint >> 2u);
 	m_objectBufferSnapshotMailbox.Publish(++m_objectBufferSnapshotGeneration);
 	basic_telemetry::AddCounter("SARP.VersionedBuffer.Object.SnapshotCutsSealed");
 	basic_telemetry::SetGauge("SARP.AsyncState.ObjectPlacementSnapshot.PlacementCount",
@@ -500,6 +503,19 @@ std::uint64_t ObjectManager::SealDesiredBufferStateLocked() {
 	basic_telemetry::SetGauge("SARP.VersionedBuffer.Object.MutationCoverageCaptured",
 		static_cast<std::int64_t>(cut.coveredMutationGeneration));
 	return m_objectBufferSnapshotGeneration;
+}
+
+void ObjectManager::SetGeometryCoverageSource(std::function<std::uint64_t()> source) {
+	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
+	m_geometryCoverageSource = std::move(source);
+}
+
+void ObjectManager::RecordStaticGeometryRequirementLocked() {
+	// Read at commit, after the transaction's templates were accepted into the
+	// geometry journals, so any Geometry root covering this value contains them.
+	if (!m_geometryCoverageSource) return;
+	m_requiredGeometryCoverage = (std::max)(m_requiredGeometryCoverage, m_geometryCoverageSource());
+	m_requiredGeometryCoveragePublished.store(m_requiredGeometryCoverage, std::memory_order_release);
 }
 
 void ObjectManager::ScheduleDesiredBufferStatePublish() {
@@ -719,6 +735,15 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	rootInput->residentTransformCount = snapshotCut->residentTransformCount;
 	rootInput->placementRecords = snapshotCut->placementRecords;
 	rootInput->activePlacementEntries = snapshotCut->activePlacementEntries;
+	// The root is built immediately (static transactions wait on its GPU
+	// readiness), but the manifest selects it only alongside a Geometry root
+	// that already holds the template rows its records reference. Otherwise
+	// culling admits a record whose template reads as zero and rasterizes
+	// CLod mesh 0 at the record's transform for a frame or two.
+	if (snapshotCut->requiredGeometryCoverage != 0) {
+		rootInput->minimumPublicationDependencies.push_back({
+			br::render::PublishedFragmentKind::Geometry, snapshotCut->requiredGeometryCoverage });
+	}
 	std::vector<br::render::ArtifactRequirement> requirements;
 	for (std::size_t bindingIndex = 0; bindingIndex < m_graphBufferBindings.size(); ++bindingIndex) {
 		const auto& binding = m_graphBufferBindings[bindingIndex];
@@ -1619,6 +1644,13 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 	if (objects.empty()) {
 		return drawInfos;
 	}
+	// Rows, draw records, visibility generations and active-set entries must land
+	// in one sealed cut, exactly as static transactions do. Unlocked, a seal on a
+	// worker could capture the instance-transform journal before these rows and
+	// the draw-record/visibility journals after them: the new record then passes
+	// the generation check while its transform row is still empty, and the
+	// object draws near the origin until the next cut.
+	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
 
 	++m_stats.bulkAddCalls;
 	m_stats.objectsSubmitted += objects.size();
@@ -2794,6 +2826,7 @@ void ObjectManager::StageStaticImportTransactionUploads(
 ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction) {
 	ZoneScopedN("ObjectManager::PublishStaticImportTransaction");
 	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
+	RecordStaticGeometryRequirementLocked();
 	ZoneValue(static_cast<int64_t>(transaction.reservation.drawRecords));
 	StaticImportPublishResult result;
 	result.transactionID = transaction.reservation.id;
@@ -2869,6 +2902,7 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	if (transactions.empty()) {
 		return result;
 	}
+	RecordStaticGeometryRequirementLocked();
 	ZoneValue(static_cast<int64_t>(transactions.size()));
 
 	std::uint64_t inputGroups = 0;
