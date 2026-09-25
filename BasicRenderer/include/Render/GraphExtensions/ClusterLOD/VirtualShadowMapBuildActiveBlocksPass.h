@@ -3,30 +3,40 @@
 #include <memory>
 
 #include "Render/PipelineState.h"
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
-class VirtualShadowMapBuildActiveBlocksPass final : public ComputePass {
+struct VirtualShadowMapBuildActiveBlocksBindings {
+    org::ResourceBindingToken pageTable;
+    org::ResourceBindingToken clipmapInfo;
+    org::ResourceBindingToken output;
+    bool dynamicPages = false;
+};
+
+class VirtualShadowMapBuildActiveBlocksPass final : public org::TypedRenderGraphPass<VirtualShadowMapBuildActiveBlocksPass,
+    br::render::PreparedComputeDispatch, VirtualShadowMapBuildActiveBlocksBindings> {
 public:
     VirtualShadowMapBuildActiveBlocksPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> activeBlockMetadataBuffer,
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> activeBlockMetadataBuffer,
         bool dynamicPages = false);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override {}
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override {}
+    VirtualShadowMapBuildActiveBlocksBindings Declare(org::PassBuilder& builder);
+    void Initialize() {}
+    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapBuildActiveBlocksBindings&,
+        const org::PassPrepareContext& preparation) const;
+    static void Record(const VirtualShadowMapBuildActiveBlocksBindings&,
+        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    void ShutdownPass() {}
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_activeBlockMetadataBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_activeBlockMetadataBuffer;
     bool m_dynamicPages = false;
 };

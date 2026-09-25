@@ -1,29 +1,27 @@
 #pragma once
 
+#include "Render/VersionedGpuBufferArtifacts.h"
+
 #include <atomic>
 #include <limits>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Resources/Buffers/DynamicBuffer.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "ShaderBuffers.h"
+#include "Render/WindPaletteService.h"
 
 class Skeleton; // base skeleton asset or instance
 namespace org { class BufferView; }
-using org::BufferView;
+namespace org::runtime { class IUploadService; }
 
-class SkeletonManager : public IResourceProvider {
+class SkeletonManager : public org::IResourceProvider, public br::render::IWindPaletteService {
 public:
-	struct TransientWindRegion {
-		uint32_t transformBaseMatrices = 0;
-		uint32_t previousTransformBaseMatrices = 0;
-		uint32_t inverseSkinBaseMatrices = 0;
-		uint32_t capacityMatrices = 0;
-		bool valid = false;
-	};
+	using TransientWindRegion = br::render::TransientWindRegion;
 	struct ActiveInstanceView {
 		Skeleton* skeleton = nullptr;
 		uint32_t instanceSlot = 0xFFFFFFFFu;
@@ -32,8 +30,15 @@ public:
 		uint32_t boneCount = 0u;
 	};
 
-    static std::unique_ptr<SkeletonManager> CreateUnique() {
-        return std::unique_ptr<SkeletonManager>(new SkeletonManager());
+    static std::unique_ptr<SkeletonManager> CreateUnique(std::shared_ptr<org::runtime::IUploadService> uploadService = {},
+        uint32_t transientWindMatrixCapacity = 0) {
+        return std::unique_ptr<SkeletonManager>(new SkeletonManager(
+            std::move(uploadService), transientWindMatrixCapacity));
+    }
+    static std::shared_ptr<SkeletonManager> CreateShared(std::shared_ptr<org::runtime::IUploadService> uploadService = {},
+        uint32_t transientWindMatrixCapacity = 0) {
+        return std::shared_ptr<SkeletonManager>(new SkeletonManager(
+            std::move(uploadService), transientWindMatrixCapacity));
     }
     ~SkeletonManager();
 
@@ -42,6 +47,7 @@ public:
     uint32_t AcquireSkinningInstance(const std::shared_ptr<Skeleton>& skinningInstance);
     void     ReleaseSkinningInstance(Skeleton* skinningInstance);
     std::weak_ptr<std::atomic_bool> GetLifetimeToken() const noexcept { return m_lifetimeToken; }
+    void SetUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService);
 
     // Tick animations for all active skeletons
     void TickAnimations(float elapsedSeconds);
@@ -55,18 +61,28 @@ public:
     void UpdateAllDirtyInstances();
 	std::vector<ActiveInstanceView> GetActiveInstanceViews() const;
 	uint64_t GetActiveInstanceRevision() const noexcept { return m_activeInstanceRevision; }
-	TransientWindRegion ReserveTransientWindRegion(uint32_t matrixCapacity);
-	void EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity);
+    std::vector<std::shared_ptr<const std::vector<std::byte>>> CapturePoseTableImages() const;
+    // Journal capture of the immutable inverse-bind table for the posted pose
+    // publication; no CPU copy and no hash.
+    br::render::VersionedGpuBufferJournal::Capture CaptureInverseBindGraphState() const;
+    void AcknowledgeInverseBindGraphState(
+        const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version);
+	TransientWindRegion ReserveTransientWindRegion(uint32_t matrixCapacity) override;
+	void EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity) override;
 
     // IResourceProvider
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-    std::vector<ResourceIdentifier> GetSupportedKeys() override;
+    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+    std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+    std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+    std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 
 private:
-    SkeletonManager();
+    explicit SkeletonManager(std::shared_ptr<org::runtime::IUploadService> uploadService,
+        uint32_t transientWindMatrixCapacity);
+    org::runtime::IUploadService& UploadService() const;
 
     struct BaseRecord {
-        std::unique_ptr<BufferView> invBindView;
+        std::unique_ptr<org::BufferView> invBindView;
         uint32_t boneCount = 0;
         uint32_t refCount = 0;
         // cached matrix offset (index, not bytes)
@@ -74,8 +90,8 @@ private:
     };
 
     struct InstanceRecord {
-        std::unique_ptr<BufferView> transformsView;
-        std::unique_ptr<BufferView> inverseSkinView;
+        std::unique_ptr<org::BufferView> transformsView;
+        std::unique_ptr<org::BufferView> inverseSkinView;
         uint32_t boneCount = 0;
         uint32_t refCount = 0;
 
@@ -97,20 +113,22 @@ private:
     void RebuildIterationList();
 
     // Global packed buffers
-    std::shared_ptr<DynamicBuffer> m_inverseBindMatrices;  // float4x4[]
-    std::shared_ptr<DynamicBuffer> m_boneTransforms;       // float4x4[]
-    std::shared_ptr<DynamicBuffer> m_inverseSkinMatrices;  // float4x4[]
+    std::shared_ptr<org::DynamicBuffer> m_inverseBindMatrices;  // float4x4[]
+    std::shared_ptr<org::DynamicBuffer> m_boneTransforms;       // float4x4[]
+    std::shared_ptr<org::DynamicBuffer> m_inverseSkinMatrices;  // float4x4[]
 	std::shared_ptr<DynamicStructuredBuffer<SkinningInstanceGPUInfo>> m_instanceInfo; // slot -> offsets/count
-	std::unique_ptr<BufferView> m_transientWindTransformsView;
-	std::unique_ptr<BufferView> m_transientWindInverseSkinView;
+	std::unique_ptr<org::BufferView> m_transientWindTransformsView;
+	std::unique_ptr<org::BufferView> m_transientWindInverseSkinView;
 	TransientWindRegion m_transientWindRegion{};
 	uint32_t m_transientWindAllocationBaseMatrices = 0;
 	uint64_t m_lastBegunFrame = std::numeric_limits<uint64_t>::max();
 	uint64_t m_activeInstanceRevision = 0;
 
     // Resource provider map
-    std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
+    std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
+    std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::IResourceResolver>, org::ResourceIdentifier::Hasher> m_resolvers;
     std::shared_ptr<std::atomic_bool> m_lifetimeToken;
+    std::shared_ptr<org::runtime::IUploadService> m_uploadService;
 
     // Records
     std::unordered_map<const Skeleton*, BaseRecord>    m_bases;
@@ -123,6 +141,13 @@ private:
     };
     std::vector<InstanceEntry> m_iterationList;
     bool m_iterationListDirty = true;
+    // Instances whose palette was uploaded last frame: the only ones whose
+    // previous/current offsets need resynchronising in BeginFrame.
+    std::vector<const Skeleton*> m_uploadedLastFrame;
+    std::vector<Skeleton*> m_animatedScratch;
+    std::vector<DirectX::XMMATRIX> m_skinScratch;
+    std::vector<DirectX::XMMATRIX> m_inverseSkinScratch;
+    std::vector<org::runtime::UploadRegion> m_uploadRegionScratch;
 
     // Free-list for instance slots
     std::vector<uint32_t> m_freeInstanceSlots;

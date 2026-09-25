@@ -5,8 +5,8 @@
 #include "Mesh/Mesh.h"
 #include "Animation/Skeleton.h"
 
-class SkeletonManager;
 class Material;
+namespace br::render { class PoseInstanceRegistrationService; }
 
 class MeshInstance {
 public:
@@ -14,16 +14,19 @@ public:
 	static std::shared_ptr<MeshInstance> CreateShared(std::shared_ptr<Mesh> mesh) {
 		return std::shared_ptr<MeshInstance>(new MeshInstance(mesh));
 	}
+    // Capture editable instance state while retaining immutable mesh and
+    // material artifacts. The copy owns no manager registration or views.
+    static std::shared_ptr<MeshInstance> CreateFrozenCopy(const MeshInstance& source);
     static std::unique_ptr<MeshInstance> CreateUnique(std::shared_ptr<Mesh> mesh) {
         return std::unique_ptr<MeshInstance>(new MeshInstance(mesh));
     }
 
     ~MeshInstance();
 
-	BufferView* GetPerMeshInstanceBufferView() { return m_perMeshInstanceBufferView.get(); }
+	org::BufferView* GetPerMeshInstanceBufferView() { return m_perMeshInstanceBufferView.get(); }
 
-	void SetBufferViews(std::unique_ptr<BufferView> perMeshInstanceBufferView);
-    void SetBufferViewUsingBaseMesh(std::unique_ptr<BufferView> perMeshInstanceBufferView);
+	void SetBufferViews(std::unique_ptr<org::BufferView> perMeshInstanceBufferView);
+    void SetBufferViewUsingBaseMesh(std::unique_ptr<org::BufferView> perMeshInstanceBufferView);
 
     void SetSkeleton(std::shared_ptr<Skeleton> skeleton);
     void SyncSkinningStateFromSkeleton();
@@ -51,7 +54,7 @@ public:
         m_pCurrentMeshManager = manager;
     }
 
-    void SetCurrentSkeletonManager(SkeletonManager* manager);
+    void SetPoseRegistrationService(br::render::PoseInstanceRegistrationService* service);
 
 	const PerMeshInstanceCB& GetPerMeshInstanceBufferData() const {
 		return m_perMeshInstanceBufferData;
@@ -67,18 +70,20 @@ public:
 
     void SetPerObjectBufferIndex(uint32_t index);
     void SetPerMeshBufferIndex(uint32_t index);
+    void SetExpectedClodMeshMetadataIndex(uint32_t index);
+    void SetExpectedClodMeshIdentity(uint64_t identity);
     uint32_t GetPerMeshBufferIndex() const { return m_perMeshInstanceBufferData.perMeshBufferIndex; }
 	void SetSkinningInstanceSlot(uint32_t slot);
 
-    std::unique_ptr<BufferView>& GetPerMeshOverrideBufferView() { return m_perMeshOverrideBufferView; }
-    void SetPerMeshOverrideBufferView(std::unique_ptr<BufferView> view) { m_perMeshOverrideBufferView = std::move(view); }
+    std::unique_ptr<org::BufferView>& GetPerMeshOverrideBufferView() { return m_perMeshOverrideBufferView; }
+    void SetPerMeshOverrideBufferView(std::unique_ptr<org::BufferView> view) { m_perMeshOverrideBufferView = std::move(view); }
 
-    void SetCLodBufferViews(std::unique_ptr<BufferView> perMeshInstanceClodOffsetsView) {
+    void SetCLodBufferViews(std::unique_ptr<org::BufferView> perMeshInstanceClodOffsetsView) {
         m_perMeshInstanceClodOffsetsView = std::move(perMeshInstanceClodOffsetsView);
     }
 
 
-    const BufferView* GetCLodOffsetsView() const {
+    const org::BufferView* GetCLodOffsetsView() const {
         return m_perMeshInstanceClodOffsetsView.get();
     }
 
@@ -98,12 +103,12 @@ private:
     std::shared_ptr<Material> m_materialOverride;
     std::shared_ptr<Skeleton> m_skeleton; // Runtime skeleton; may be shared by a skeleton variant set.
     MeshManager* m_pCurrentMeshManager = nullptr;
-    SkeletonManager* m_pCurrentSkeletonManager = nullptr;
-    std::weak_ptr<std::atomic_bool> m_skeletonManagerLifetime;
-    std::unique_ptr<BufferView> m_perMeshInstanceBufferView;
-    std::unique_ptr<BufferView> m_perMeshOverrideBufferView;
+    br::render::PoseInstanceRegistrationService* m_poseRegistration = nullptr;
+    std::weak_ptr<std::atomic_bool> m_poseRegistrationLifetime;
+    std::unique_ptr<org::BufferView> m_perMeshInstanceBufferView;
+    std::unique_ptr<org::BufferView> m_perMeshOverrideBufferView;
 
-    std::unique_ptr<BufferView> m_perMeshInstanceClodOffsetsView = nullptr;
+    std::unique_ptr<org::BufferView> m_perMeshInstanceClodOffsetsView = nullptr;
 
 	float m_animationSpeed = 1.0f;
 };

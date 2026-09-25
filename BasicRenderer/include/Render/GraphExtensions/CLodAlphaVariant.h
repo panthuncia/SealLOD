@@ -7,7 +7,6 @@
 
 class CLodExtension;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 struct CLodVariantTraits;
 struct RenderPhase;
 
@@ -22,20 +21,20 @@ public:
     static void AppendSinglePassStructuralPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
-        const std::shared_ptr<ResourceGroup>& slabGroup,
+        const std::shared_ptr<org::ResourceGroup>& slabGroup,
         const RenderPhase& renderPhase,
         bool useAVBOIT,
         bool useReyesForThisVariant,
         bool disableReyesTessellation,
-        std::vector<RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
 
 private:
     static void AppendSinglePassResolveTail(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
-        const std::shared_ptr<ResourceGroup>& slabGroup,
+        const std::shared_ptr<org::ResourceGroup>& slabGroup,
         const RenderPhase& renderPhase,
         bool useAVBOIT,
         bool disableReyesTessellation,
-        std::vector<RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
 };

@@ -2,13 +2,17 @@
 
 #include <functional>
 
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedFullscreenDraw.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
 #include "Scene/Scene.h"
 
-class SpecularIBLPass : public RenderPass {
+struct SpecularIBLBindings { org::ResourceBindingToken target; };
+
+class SpecularIBLPass : public org::TypedRenderGraphPass<SpecularIBLPass,
+    br::render::PreparedFullscreenDraw, SpecularIBLBindings> {
 public:
     SpecularIBLPass() {
         CreatePSO();
@@ -16,8 +20,8 @@ public:
         m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
     }
 
-    void DeclareResourceUsages(RenderPassBuilder* builder) override {
-        builder->WithShaderResource(Builtin::PostProcessing::ScreenSpaceReflections, 
+    SpecularIBLBindings Declare(org::PassBuilder& builder) {
+        builder.WithShaderResource(Builtin::PostProcessing::ScreenSpaceReflections,
             Builtin::Environment::InfoBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
             Builtin::Surface::BaseColorOpacity,
@@ -33,65 +37,49 @@ public:
 			Builtin::OpenPBR::IdealMetalEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
-            Builtin::CameraBuffer)
-            .WithRenderTarget(Builtin::Color::HDRColorTarget)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+            Builtin::CameraBuffer).WithConstantBuffer(Builtin::PerFrameBuffer);
 
-        builder->WithUnorderedAccess(Builtin::DebugVisualization);
+        builder.WithUnorderedAccess(Builtin::DebugVisualization);
 
         if (m_gtaoEnabled) {
-            builder->WithShaderResource(Builtin::GTAO::OutputAOTerm);
+            builder.WithShaderResource(Builtin::GTAO::OutputAOTerm);
         }
+        return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget})};
     }
 
-    void Setup() override {
-		RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
-        m_pHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Color::HDRColorTarget);
+    void Initialize() {
+		RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
-        auto& psoManager = PSOManager::GetInstance();
-        auto& commandList = executionContext.commandList;
-
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-
-		rhi::PassBeginInfo passInfo{};
-		rhi::ColorAttachment colorAttachment{};
-		colorAttachment.rtv = m_pHDRTarget->GetRTVInfo(0).slot;
-		colorAttachment.loadOp = rhi::LoadOp::Load;
-		colorAttachment.storeOp = rhi::StoreOp::Store;
-		passInfo.colors = { &colorAttachment };
-		passInfo.width = context.renderResolution.x;
-		passInfo.height = context.renderResolution.y;
-		passInfo.debugName = "Specular IBL Pass";
-		commandList.BeginPass(passInfo);
-
-        commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleStrip);
-
-        commandList.BindLayout(PSOManager::GetInstance().GetRootSignature().GetHandle());
-        commandList.BindPipeline(m_pso->GetHandle());
-
-        unsigned int enableGTAO = m_gtaoEnabled;
-		commandList.PushConstants(rhi::ShaderStage::AllGraphics, 0, MiscUintRootSignatureIndex, MiscEnableGTAO, 1, &enableGTAO);
-
-        BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
-
-        commandList.Draw(3, 1, 0, 0); // Fullscreen triangle
-        return {};
+    br::render::PreparedFullscreenDraw Prepare(const SpecularIBLBindings& bindings,
+        const org::PassPrepareContext& preparation) const {
+        const auto* context = preparation.preparationData->Get<UpdateContext>();
+        br::render::PreparedFullscreenDraw data{};
+        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
+        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+        data.renderTargetReference = preparation.CaptureView(bindings.target,
+            {org::BindlessViewKind::RenderTarget});
+        const auto& desc = preparation.Describe(bindings.target);
+        data.width = desc.texture.width;
+        data.height = desc.texture.height;
+        data.constantStage = rhi::ShaderStage::AllGraphics;
+        br::render::BindPreparedProgram(data, preparation, m_pso);
+        data.constants[MiscEnableGTAO] = m_gtaoEnabled;
+        return data;
     }
 
-    void Cleanup() override {
+    static void Record(const SpecularIBLBindings&, const br::render::PreparedFullscreenDraw& data,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedFullscreenDraw(data, recording);
+    }
+
+    void ShutdownPass() {
         // Cleanup the render pass
     }
 
 private:
 
-    rhi::PipelinePtr m_pso;
-
-    PixelBuffer* m_pHDRTarget;
-    PipelineResources m_resourceDescriptorBindings;
+    org::PipelineState m_pso;
 
     bool m_gtaoEnabled = true;
 
@@ -103,7 +91,6 @@ private:
         sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSMain", L"vs_6_6" };
         sib.pixelShader = { L"shaders/specularIBL.hlsl",   L"PSMain",           L"ps_6_6" };
         auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-        m_resourceDescriptorBindings = compiled.resourceDescriptorSlots;
 
         // Subobjects
         auto& layout = PSOManager::GetInstance().GetRootSignature(); // rhi::PipelineLayout&
@@ -164,10 +151,14 @@ private:
 			rhi::Make(soTopo)
         };
 
-        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), m_pso);
+        rhi::PipelinePtr pipeline;
+        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
         if (Failed(result)) {
             throw std::runtime_error("Failed to create SpecularIBL PSO (RHI)");
         }
-        m_pso->SetName("SpecularIBL.PSO");
+        pipeline->SetName("SpecularIBL.PSO");
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+            compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
+            soLayout.layout);
     }
 };

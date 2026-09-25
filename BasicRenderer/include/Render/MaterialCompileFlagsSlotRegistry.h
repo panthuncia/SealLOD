@@ -28,23 +28,20 @@ public:
             slot = existing->second;
         } else {
             createdSlot = true;
-            if (!m_freeSlots.empty()) {
-                slot = m_freeSlots.back();
-                m_freeSlots.pop_back();
-            } else {
-                slot = m_nextSlot++;
-                ++m_slotsUsed;
-                m_usageCounts.push_back(0u);
-            }
+            slot = m_nextSlot++;
+            ++m_slotsUsed;
+            m_usageCounts.push_back(0u);
             m_slotMapping.emplace(flags, slot);
-        }
-
-        const bool becameActive = m_usageCounts[slot] == 0u;
-        m_usageCounts[slot] += count;
-        if (becameActive) {
+            // Compile-flag slots are written into GPU-visible mesh records and
+            // therefore have interned, lifetime-stable meaning. A released CPU
+            // owner does not prove that every published or in-flight record has
+            // stopped referring to the slot.
             m_activeSlots.push_back(slot);
             m_activeFlags.push_back(flags);
         }
+
+        const bool becameActive = createdSlot;
+        m_usageCounts[slot] += count;
         return { slot, createdSlot, becameActive };
     }
 
@@ -64,18 +61,9 @@ public:
         }
 
         m_usageCounts[slot] -= count;
-        if (m_usageCounts[slot] != 0u) {
-            return true;
-        }
-
-        m_activeSlots.erase(
-            std::remove(m_activeSlots.begin(), m_activeSlots.end(), slot),
-            m_activeSlots.end());
-        m_activeFlags.erase(
-            std::remove(m_activeFlags.begin(), m_activeFlags.end(), flags),
-            m_activeFlags.end());
-        m_slotMapping.erase(existing);
-        m_freeSlots.push_back(slot);
+        // Preserve the mapping and evaluation dispatch for the renderer
+        // lifetime. Reclamation requires a publication/fence retirement proof,
+        // which this ownership counter intentionally does not provide.
         return true;
     }
 
@@ -103,7 +91,6 @@ private:
     std::unordered_map<MaterialCompileFlags, unsigned int> m_slotMapping;
     unsigned int m_nextSlot = 1u;
     unsigned int m_slotsUsed = 1u;
-    std::vector<unsigned int> m_freeSlots;
     std::vector<unsigned int> m_usageCounts = { 0u };
     std::vector<unsigned int> m_activeSlots;
     std::vector<MaterialCompileFlags> m_activeFlags;

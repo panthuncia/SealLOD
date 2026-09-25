@@ -118,6 +118,7 @@ struct Builtin {
     inline static constexpr std::string_view ScreenSpaceReflections = "Builtin::PostProcessing::ScreenSpaceReflections";
     inline static constexpr std::string_view UpscaledHDR = "Builtin::PostProcessing::UpscaledHDR";
   };
+  inline static constexpr std::string_view PresentationColor = "Builtin::PresentationColor";
   struct PrimaryCamera {
     inline static constexpr std::string_view DepthTexture = "Builtin::PrimaryCamera::DepthTexture";
     struct IndirectCommandBuffers {

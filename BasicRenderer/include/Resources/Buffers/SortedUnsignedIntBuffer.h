@@ -5,6 +5,8 @@
 #include <algorithm> // For std::lower_bound, std::upper_bound
 #include <cstddef>
 #include <cstring>
+#include <functional>
+#include <mutex>
 #include <rhi.h>
 
 #include "Resources/Buffers/Buffer.h"
@@ -16,12 +18,15 @@
 
 using Microsoft::WRL::ComPtr;
 
-class SortedUnsignedIntBuffer : public BufferBase, public IHasMemoryMetadata, public IDeferredBackingResizeClient {
+class SortedUnsignedIntBuffer : public org::BufferBase, public org::IHasMemoryMetadata, public org::IDeferredBackingResizeClient {
 public:
     struct ActiveDrawSetEntry {
         uint32_t drawRecordIndex = 0;
         uint32_t generation = 0;
     };
+    using ActiveMutationCallback = std::function<void(
+        bool replace, std::uint64_t revision,
+        std::shared_ptr<const std::vector<ActiveDrawSetEntry>> entries)>;
 
     static std::shared_ptr<SortedUnsignedIntBuffer> CreateShared(uint64_t capacity = 64, std::string name = "", bool UAV = false) {
         return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, UAV));
@@ -29,6 +34,10 @@ public:
 
     static std::shared_ptr<SortedUnsignedIntBuffer> CreateActiveDrawSetShared(uint64_t capacity = 64, std::string name = "") {
         return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, false, true));
+    }
+
+    static std::shared_ptr<SortedUnsignedIntBuffer> CreateGraphActiveDrawSetShared(uint64_t capacity = 64, std::string name = "") {
+        return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, false, true, true));
     }
 
     ~SortedUnsignedIntBuffer() override;
@@ -45,8 +54,13 @@ public:
     void AssignActiveSnapshot(std::vector<ActiveDrawSetEntry> entries);
     std::vector<ActiveDrawSetEntry> SnapshotActiveEntries() const;
     uint64_t MutationRevision() const {
+        if (m_activeEntryMode) {
+            std::lock_guard lock(m_activeStateMutex);
+            return m_mutationRevision;
+        }
         return m_mutationRevision;
     }
+    void SetActiveMutationCallback(ActiveMutationCallback callback);
 
     // Remove an element (and shift the tail on GPU)
     void Remove(unsigned int element);
@@ -62,15 +76,21 @@ public:
     }
 
     UINT Size() const {
-        return m_activeEntryMode ? static_cast<UINT>(m_activeEntries.size()) : static_cast<UINT>(m_data.size());
+        if (m_activeEntryMode) {
+            std::lock_guard lock(m_activeStateMutex);
+            return static_cast<UINT>(m_activeEntries.size());
+        }
+        return static_cast<UINT>(m_data.size());
     }
 
     uint64_t ResidentCapacity() const {
+        if (m_graphManaged) return m_capacity;
         const auto stride = ElementStride();
         return stride == 0u ? 0u : GetBufferSize() / stride;
     }
 
     uint64_t ResidentSize() const {
+        if (m_graphManaged) return Size();
         return std::min<uint64_t>(Size(), ResidentCapacity());
     }
 
@@ -108,14 +128,18 @@ public:
     bool ActiveEntryMode() const {
         return m_activeEntryMode;
     }
+    std::vector<std::byte> CaptureCpuShadowBytes() const {
+        std::lock_guard lock(m_activeStateMutex);
+        return m_cpuShadowData;
+    }
 
 private:
-    SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false, bool activeEntryMode = false)
-        : m_capacity(capacity), m_earliestModifiedIndex(0), m_UAV(UAV), m_activeEntryMode(activeEntryMode) {
+    SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false, bool activeEntryMode = false, bool graphManaged = false)
+        : m_capacity(capacity), m_earliestModifiedIndex(0), m_UAV(UAV), m_activeEntryMode(activeEntryMode), m_graphManaged(graphManaged) {
         SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
-        CreateBuffer(capacity);
+        if (!m_graphManaged) CreateBuffer(capacity);
         SetName(name);
-        RegisterDeferredBackingResizeClient(this);
+        if (!m_graphManaged) RegisterDeferredBackingResizeClient(this);
     }
 
     void OnUploadPolicyBeginFrame() override {
@@ -126,6 +150,7 @@ private:
     void OnUploadPolicyFlush() override {
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
+            *RetainBufferUploadService(),
             org::runtime::UploadTarget::FromShared(shared_from_this()),
             [this](size_t offset, size_t size) -> const void* {
                 if (offset + size > m_cpuShadowData.size()) {
@@ -153,6 +178,11 @@ private:
 
     // Sorted list of unsigned integers
     std::vector<unsigned int> m_data;
+    // Graph publication mutates active lists on streaming workers while wind
+    // and other extensions may snapshot them on the render thread. The owning
+    // ObjectManager mutex orders writers but cannot protect those external
+    // readers, so active-list state has its own narrow synchronization domain.
+    mutable std::mutex m_activeStateMutex;
     std::vector<ActiveDrawSetEntry> m_activeEntries;
     std::vector<std::byte> m_cpuShadowData;
 
@@ -160,22 +190,24 @@ private:
     uint64_t m_liveSize = 0;
     uint64_t m_activeTombstoneEstimate = 0;
     uint64_t m_mutationRevision = 1;
+    ActiveMutationCallback m_activeMutationCallback;
     uint64_t m_earliestModifiedIndex; // To avoid updating the entire buffer every time
 
-    std::vector<EntityComponentBundle> m_metadataBundles;
+    std::vector<org::EntityComponentBundle> m_metadataBundles;
 
     inline static std::string m_name = "SortedUnsignedIntBuffer";
 
     bool m_UAV = false;
     bool m_activeEntryMode = false;
-    AsyncBufferBackingResizeState m_asyncResizeState;
+    bool m_graphManaged = false;
+    org::AsyncBufferBackingResizeState m_asyncResizeState;
     uint64_t m_pendingResizeCapacity = 0;
     bool m_pendingResizeValid = false;
 
     void CreateBuffer(uint64_t capacity);
 
     void GrowBuffer(uint64_t newSize);
-    void ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> newDataBuffer, uint64_t newCapacity);
+    void ApplyResizeBacking(std::unique_ptr<org::GpuBufferBacking> newDataBuffer, uint64_t newCapacity);
     void EnsureCapacityForSize(uint64_t requiredSize);
 
     void SyncUploadPolicyState() {
@@ -191,7 +223,7 @@ private:
 
     void StageOrUpload(const void* data, size_t size, size_t offset);
 
-    void ApplyMetadataComponentBundle(const EntityComponentBundle& bundle) override {
+    void ApplyMetadataComponentBundle(const org::EntityComponentBundle& bundle) override {
         m_metadataBundles.emplace_back(bundle);
         ApplyMetadataToBacking(bundle);
     }

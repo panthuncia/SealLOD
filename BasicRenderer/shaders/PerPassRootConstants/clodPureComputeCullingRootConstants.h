@@ -16,6 +16,9 @@
 // CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT and must survive object-cull setup.
 #define CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS UintRootConstant33
 #define CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX UintRootConstant34
+// Rows owned by the published visibility-generation version; see
+// PublishedIndirectState::visibilityGenerationCount.
+#define CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_COUNT UintRootConstant41
 
 #define CLOD_PC_DISPATCH_COUNTER_DESCRIPTOR_INDEX UintRootConstant20
 #define CLOD_PC_DISPATCH_ARGS_DESCRIPTOR_INDEX UintRootConstant21

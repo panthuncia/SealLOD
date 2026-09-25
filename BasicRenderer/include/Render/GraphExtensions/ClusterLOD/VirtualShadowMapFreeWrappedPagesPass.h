@@ -3,30 +3,37 @@
 #include <memory>
 
 #include "Render/PipelineState.h"
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
-class VirtualShadowMapFreeWrappedPagesPass final : public ComputePass {
+struct VirtualShadowMapFreeWrappedPagesBindings {
+    org::ResourceBindingToken pageTable, pageMetadata, clipmapInfo, stats;
+};
+
+class VirtualShadowMapFreeWrappedPagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapFreeWrappedPagesPass,
+    br::render::PreparedComputeDispatch, VirtualShadowMapFreeWrappedPagesBindings> {
 public:
     VirtualShadowMapFreeWrappedPagesPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> statsBuffer);
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    VirtualShadowMapFreeWrappedPagesBindings Declare(org::PassBuilder& builder);
+    void Initialize();
+    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapFreeWrappedPagesBindings&,
+        const org::PassPrepareContext& preparation) const;
+    static void Record(const VirtualShadowMapFreeWrappedPagesBindings&,
+        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    void ShutdownPass();
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
 };

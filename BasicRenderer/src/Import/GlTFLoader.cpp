@@ -854,7 +854,7 @@ rhi::AddressMode ConvertWrapMode(int wrapMode) {
     }
 }
 
-std::shared_ptr<Sampler> CreateTextureSampler(const json& gltf, const json& textureNode) {
+std::shared_ptr<org::Sampler> CreateTextureSampler(const json& gltf, const json& textureNode) {
     rhi::SamplerDesc samplerDesc = {};
     samplerDesc.addressU = rhi::AddressMode::Wrap;
     samplerDesc.addressV = rhi::AddressMode::Wrap;
@@ -872,7 +872,7 @@ std::shared_ptr<Sampler> CreateTextureSampler(const json& gltf, const json& text
     samplerDesc.mipFilter = rhi::MipFilter::Linear;
 
     if (!textureNode.contains("sampler")) {
-        return Sampler::CreateSampler(samplerDesc);
+        return org::Sampler::CreateSampler(samplerDesc);
     }
 
     const auto& samplers = gltf.contains("samplers") ? gltf["samplers"] : json::array();
@@ -917,7 +917,7 @@ std::shared_ptr<Sampler> CreateTextureSampler(const json& gltf, const json& text
         break;
     }
 
-    return Sampler::CreateSampler(samplerDesc);
+    return org::Sampler::CreateSampler(samplerDesc);
 }
 
 std::shared_ptr<TextureAsset> LoadTexture(

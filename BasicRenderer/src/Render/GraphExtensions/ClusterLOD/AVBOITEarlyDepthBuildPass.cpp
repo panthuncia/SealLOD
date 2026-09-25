@@ -3,17 +3,17 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
-#include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/Runtime/UploadTypes.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 
 #include "../shaders/PerPassRootConstants/clodAVBOITEarlyDepthBuildRootConstants.h"
 
 AVBOITEarlyDepthBuildPass::AVBOITEarlyDepthBuildPass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<PixelBuffer> zeroTransmittanceSliceTexture,
-    std::shared_ptr<Buffer> tileCommandsBuffer,
-    std::shared_ptr<Buffer> tileCountBuffer)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::PixelBuffer> zeroTransmittanceSliceTexture,
+    std::shared_ptr<org::Buffer> tileCommandsBuffer,
+    std::shared_ptr<org::Buffer> tileCountBuffer)
     : m_configBuffer(std::move(configBuffer))
     , m_zeroTransmittanceSliceTexture(std::move(zeroTransmittanceSliceTexture))
     , m_tileCommandsBuffer(std::move(tileCommandsBuffer))
@@ -27,17 +27,13 @@ AVBOITEarlyDepthBuildPass::AVBOITEarlyDepthBuildPass(
         "CLod.AVBOITEarlyDepthBuild.PSO");
 }
 
-void AVBOITEarlyDepthBuildPass::DeclareResourceUsages(ComputePassBuilder* builder)
+AVBOITEarlyDepthBuildBindings AVBOITEarlyDepthBuildPass::Declare(org::PassBuilder& builder)
 {
-    builder->WithShaderResource(m_configBuffer, m_zeroTransmittanceSliceTexture)
-        .WithUnorderedAccess(m_tileCommandsBuffer, m_tileCountBuffer);
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    return {builder.BindShaderResource(m_configBuffer), builder.BindShaderResource(m_zeroTransmittanceSliceTexture), builder.BindUnorderedAccess(m_tileCommandsBuffer), builder.BindUnorderedAccess(m_tileCountBuffer)};
 }
 
-void AVBOITEarlyDepthBuildPass::Setup()
-{
-}
-
-void AVBOITEarlyDepthBuildPass::Update(const UpdateExecutionContext& executionContext)
+void AVBOITEarlyDepthBuildPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
 
@@ -51,51 +47,45 @@ void AVBOITEarlyDepthBuildPass::Update(const UpdateExecutionContext& executionCo
     }
 
     const uint32_t zeroCount = 0u;
-    BUFFER_UPLOAD(
+    UploadBufferData(
         &zeroCount,
         sizeof(uint32_t),
         org::runtime::UploadTarget::FromShared(m_tileCountBuffer),
         0);
 }
 
-PassReturn AVBOITEarlyDepthBuildPass::Execute(PassExecutionContext& executionContext)
-{
+br::render::PreparedComputeDispatch AVBOITEarlyDepthBuildPass::Prepare(const AVBOITEarlyDepthBuildBindings& bindings, const org::PassPrepareContext& preparation) const {
+    br::render::PreparedComputeDispatch data{};
     if (!m_configBuffer || !m_zeroTransmittanceSliceTexture || !m_tileCommandsBuffer || !m_tileCountBuffer) {
         return {};
     }
 
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
+    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
     auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
 
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
+    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
+    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
+    auto program = preparation.CaptureProgramBinding(m_pso);
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
 
-    uint32_t misc[NumMiscUintRootConstants] = {};
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_CONFIG_DESCRIPTOR_INDEX] = m_configBuffer->GetSRVInfo(0).slot.index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_ZERO_SLICE_DESCRIPTOR_INDEX] = m_zeroTransmittanceSliceTexture->GetSRVInfo(0).slot.index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMANDS_DESCRIPTOR_INDEX] = m_tileCommandsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMAND_COUNT_DESCRIPTOR_INDEX] = m_tileCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        misc);
+    auto& misc = data.constants;
+    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_CONFIG_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
+    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_ZERO_SLICE_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.zeroSlice, {org::BindlessViewKind::ShaderResource}).index;
+    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMANDS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.commands, {org::BindlessViewKind::UnorderedAccess}).index;
+    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMAND_COUNT_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.count, {org::BindlessViewKind::UnorderedAccess}).index;
 
-    const uint32_t groupCountX = (m_zeroTransmittanceSliceTexture->GetWidth() + 7u) / 8u;
-    const uint32_t groupCountY = (m_zeroTransmittanceSliceTexture->GetHeight() + 7u) / 8u;
+    const auto& zeroSlice = preparation.Describe(bindings.zeroSlice);
+    const uint32_t groupCountX = (zeroSlice.texture.width + 7u) / 8u;
+    const uint32_t groupCountY = (zeroSlice.texture.height + 7u) / 8u;
     if (groupCountX == 0u || groupCountY == 0u) {
         return {};
     }
 
-    commandList.Dispatch(groupCountX, groupCountY, 1u);
-    return {};
+    data.groupsX = groupCountX; data.groupsY = groupCountY; data.groupsZ = 1u;
+    return data;
 }
 
-void AVBOITEarlyDepthBuildPass::Cleanup()
-{
+void AVBOITEarlyDepthBuildPass::Record(const AVBOITEarlyDepthBuildBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeDispatch(data, recording);
 }

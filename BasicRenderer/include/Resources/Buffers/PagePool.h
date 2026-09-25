@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <span>
 #include <vector>
@@ -15,7 +16,7 @@
 #include "Render/Runtime/UploadTypes.h"
 #include "ShaderBuffers.h"
 
-class GpuBufferBacking;
+namespace org { class GpuBufferBacking; }
 
 // Size-class page allocator backed by multiple GPU "slab" ByteAddressBuffers.
 //
@@ -72,13 +73,13 @@ public:
 	// Number of slabs currently allocated.
 	uint32_t GetSlabCount() const;
 	// Get the static Buffer backing slab `slabIndex` (for resource registration).
-	std::shared_ptr<Buffer> GetSlab(uint32_t slabIndex) const;
+	std::shared_ptr<org::Buffer> GetSlab(uint32_t slabIndex) const;
 
 	// Get the page-table Buffer (StructuredBuffer<PageTableEntry>).
-	std::shared_ptr<Buffer> GetPageTableBuffer() const;
+	std::shared_ptr<org::Buffer> GetPageTableBuffer() const;
 
 	// Get the ResourceGroup tracking all slab buffers (for render graph declarations).
-	std::shared_ptr<ResourceGroup> GetSlabResourceGroup() const { return m_slabResourceGroup; }
+	std::shared_ptr<org::ResourceGroup> GetSlabResourceGroup() const { return m_slabResourceGroup; }
 
 	// Total pages across all slabs.
 	uint32_t GetTotalPageCount() const;
@@ -128,8 +129,8 @@ public:
 	// Upload callback signature: (data, dataSize, target, dstOffset).
 	using UploadFn = std::function<void(const void*, size_t, org::runtime::UploadTarget, size_t)>;
 
-	// Override the upload function used by UploadToPage / FlushPageTableUpdates.
-	// When not set, the default BUFFER_UPLOAD macro path is used.
+	// Install the generation-bound upload function used by UploadToPage and
+	// FlushPageTableUpdates. Upload entry points fail if no owner is installed.
 	void SetUploadFunction(UploadFn fn) { m_uploadFn = std::move(fn); }
 
 private:
@@ -139,7 +140,7 @@ private:
 	};
 
 	struct Slab {
-		std::shared_ptr<Buffer> buffer; // The GPU ByteAddressBuffer.
+		std::shared_ptr<org::Buffer> buffer; // The GPU ByteAddressBuffer.
 		SlabRole role = SlabRole::General;
 		uint32_t firstPageID = 0;
 		uint32_t pageCount = 0;
@@ -147,9 +148,13 @@ private:
 	};
 
 	Config     m_config;
-	uint32_t   m_totalPageCapacity = 0;
 	uint32_t   m_generalSlabCount = 0;
 
+	// The streaming worker grows the slab table while other threads (graph
+	// declaration, ray-tracing refresh) read it. Guards m_slabs and
+	// m_totalPageCapacity; everything else is owned by the streaming worker.
+	mutable std::shared_mutex m_slabMutex;
+	uint32_t   m_totalPageCapacity = 0;
 	std::vector<Slab> m_slabs;
 	std::array<std::vector<uint32_t>, 5> m_freePinnedPageIDs;
 	// CPU-side mirror of the page table: indexed by global page ID.
@@ -157,13 +162,15 @@ private:
 	bool                        m_pageTableDirty = false;
 
 	// GPU-side StructuredBuffer<PageTableEntry>.
-	std::shared_ptr<Buffer> m_pageTableBuffer;
+	std::shared_ptr<org::Buffer> m_pageTableBuffer;
 
 	// ResourceGroup tracking all slab buffers for render graph auto-invalidation.
-	std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+	std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
 
-	// Optional upload function override; when empty, falls back to BUFFER_UPLOAD.
+	// Generation-bound upload function. Cleared when the streaming owner shuts down.
 	UploadFn m_uploadFn;
+
+	uint32_t PageToSlabIndexLocked(uint32_t globalPageID) const;
 
 	// Allocate a new slab. Streaming slabs are capped by numStreamingSlabs.
 	bool AllocateNewSlab(SlabRole role, uint32_t pageSizeBytes, std::vector<uint32_t>* outPageIDs = nullptr);

@@ -5,15 +5,41 @@
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
-#include <tbb/parallel_for.h>
 #include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Telemetry.h>
 
+#include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Resources/Buffers/Buffer.h"
+#include "Resources/Buffers/DynamicBufferBase.h"
 
 namespace {
 size_t AlignUp(size_t value, size_t alignment) {
     return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+bool UploadRangeFits(const std::shared_ptr<org::Resource>& resource,
+    size_t offset, size_t size, const char* phase) {
+	auto destination = std::dynamic_pointer_cast<org::BufferBase>(resource);
+    if (!destination) {
+		basic_telemetry::AddCounter("CLodStreaming.InvalidUploadDestinations");
+		spdlog::error("CLOD upload destination rejected: phase={} resource={} name='{}' is not a buffer wrapper",
+			phase, resource ? resource->GetGlobalResourceID() : 0u,
+			resource ? resource->GetName() : std::string{});
+		return false;
+	}
+    const auto capacity = destination->GetBufferSize();
+    if (offset <= capacity && size <= capacity - offset) return true;
+    basic_telemetry::AddCounter("CLodStreaming.InvalidUploadRanges");
+    basic_telemetry::SetGauge("CLodStreaming.InvalidUploadDestinationBytes",
+        static_cast<std::int64_t>(capacity));
+    basic_telemetry::SetGauge("CLodStreaming.InvalidUploadEndBytes",
+        static_cast<std::int64_t>(offset + size));
+    spdlog::error(
+        "CLOD upload range rejected: phase={} resource={} name='{}' capacity={} offset={} size={} end={}",
+        phase, destination->GetGlobalResourceID(), destination->GetName(),
+        capacity, offset, size, offset + size);
+    return false;
 }
 }
 
@@ -47,11 +73,11 @@ void CLodUploadStream::EndBulkUpload() {
         ZoneScopedN("CLodUploadStream::EndBulkUpload::PlanStaging");
         for (auto& upload : m_deferredUploads) {
             if (!m_activePage) {
-                m_activePage = AcquirePage(upload.size + 15u);
+                m_activePage = AcquirePage(upload.data.size() + 15u);
             }
             size_t stagingOffset = AlignUp(m_activePage->tail, 16u);
-            if (stagingOffset + upload.size > m_activePage->capacity) {
-                m_activePage = AcquirePage(upload.size + 15u);
+            if (stagingOffset + upload.data.size() > m_activePage->capacity) {
+                m_activePage = AcquirePage(upload.data.size() + 15u);
                 stagingOffset = 0u;
             }
             stagedUploads.push_back({
@@ -59,7 +85,7 @@ void CLodUploadStream::EndBulkUpload() {
                 .page = m_activePage,
                 .stagingOffset = stagingOffset,
             });
-            m_activePage->tail = stagingOffset + upload.size;
+            m_activePage->tail = stagingOffset + upload.data.size();
         }
     }
 
@@ -93,10 +119,9 @@ void CLodUploadStream::EndBulkUpload() {
 
     {
         ZoneScopedN("CLodUploadStream::EndBulkUpload::ParallelCopyPayloads");
-        tbb::parallel_for(
-            size_t{0u},
-            stagedUploads.size(),
-            [&stagedUploads](size_t index) {
+		TaskSchedulerManager::GetInstance().ParallelFor(
+			"CLodUploadStream::CopyPayloads", stagedUploads.size(),
+			[&stagedUploads](size_t index) {
                 const auto& staged = stagedUploads[index];
                 if (staged.mappedData == nullptr) {
                     return;
@@ -104,8 +129,8 @@ void CLodUploadStream::EndBulkUpload() {
                 std::memcpy(
                     static_cast<std::byte*>(staged.mappedData) +
                         staged.stagingOffset,
-                    staged.upload->data,
-                    staged.upload->size);
+                    staged.upload->data.data(),
+                    staged.upload->data.size());
             });
     }
 
@@ -126,12 +151,16 @@ void CLodUploadStream::EndBulkUpload() {
             if (staged.mappedData == nullptr) {
                 continue;
             }
+			if (!UploadRangeFits(staged.upload->target.pinned,
+				staged.upload->destinationOffset, staged.upload->data.size(), "bulk")) {
+				continue;
+			}
             CLodUploadCopy copy{
                 .destination = std::move(staged.upload->target.pinned),
                 .staging = staged.page->buffer,
                 .destinationOffset = staged.upload->destinationOffset,
                 .stagingOffset = staged.stagingOffset,
-                .size = staged.upload->size,
+                .size = staged.upload->data.size(),
             };
             if (!m_copies.empty()) {
                 auto& previous = m_copies.back();
@@ -160,7 +189,7 @@ std::shared_ptr<CLodUploadPage> CLodUploadStream::AcquirePage(size_t minimumSize
     } else {
         page = std::make_shared<CLodUploadPage>();
         page->capacity = capacity;
-        page->buffer = Buffer::CreateShared(rhi::HeapType::Upload, capacity, false);
+        page->buffer = org::Buffer::CreateShared(rhi::HeapType::Upload, capacity, false);
         page->buffer->SetName("CLodStreamingUploadPage_" + std::to_string(++m_nextPageId));
         org::memory::SetResourceUsageHint(*page->buffer, "Cluster LOD streaming upload staging");
     }
@@ -177,12 +206,15 @@ void CLodUploadStream::UploadPageData(
     if (m_bulkUploadActive && data != nullptr && size != 0u &&
         target.kind == org::runtime::UploadTarget::Kind::PinnedShared &&
         target.pinned != nullptr) {
-        m_deferredUploads.push_back({
-            .data = data,
-            .size = size,
+        DeferredUpload upload{
+            .data = std::vector<std::byte>(size),
             .target = std::move(target),
             .destinationOffset = destinationOffset,
-        });
+        };
+        std::memcpy(upload.data.data(), data, size);
+        m_deferredUploads.push_back(std::move(upload));
+        basic_telemetry::AddCounter("CLodStreaming.BulkJournalBytes",
+            static_cast<std::int64_t>(size));
         return;
     }
     UploadData(
@@ -202,6 +234,7 @@ void CLodUploadStream::UploadData(
         spdlog::error("CLodUploadStream requires a pinned shared destination");
         return;
     }
+	if (!UploadRangeFits(target.pinned, destinationOffset, size, "single")) return;
     if (!m_activePage) m_activePage = AcquirePage(size + 15u);
     size_t stagingOffset = AlignUp(m_activePage->tail, 16u);
     if (stagingOffset + size > m_activePage->capacity) {
@@ -257,7 +290,7 @@ std::shared_ptr<CLodUploadBatch> CLodUploadStream::Seal(
     batch->nonResidentEpoch = nonResidentEpoch;
     m_activePage.reset();
 
-    std::unordered_set<Resource*> seen;
+    std::unordered_set<org::Resource*> seen;
     for (const auto& copy : batch->copies) {
         if (copy.destination && seen.insert(copy.destination.get()).second) {
             batch->destinations.push_back(copy.destination);

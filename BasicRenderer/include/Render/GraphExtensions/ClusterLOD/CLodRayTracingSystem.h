@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <source_location>
 #include <vector>
 
 #include "Managers/MeshManager.h"
@@ -9,14 +11,17 @@
 #include <rhi.h>
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
+namespace org::runtime { class IUploadService; }
+namespace org::runtime { struct UploadTarget; }
 
 namespace br::render {
 
 class CLodRayTracingSystem {
 public:
+    explicit CLodRayTracingSystem(std::shared_ptr<org::runtime::IUploadService> uploads = {});
+    void SetUploadService(std::shared_ptr<org::runtime::IUploadService> uploads) noexcept;
+    std::mutex& FrameOperationMutex() noexcept { return m_frameOperationMutex; }
     struct Stats {
         uint32_t residentGroups = 0;
         uint32_t residentPages = 0;
@@ -61,7 +66,8 @@ public:
     void ExecuteBlasBuild(rhi::CommandList commandList);
     void ExecuteTlasBuild(rhi::CommandList commandList);
     void EnsureRayTracingPipeline(rhi::Device device, const RayTracingFeatureInfo& rayTracingFeatures);
-    void ExecuteTraceRays(rhi::Device device, rhi::CommandList commandList, PixelBuffer& output, uint32_t width, uint32_t height);
+    void ExecuteTraceRays(rhi::Device device, rhi::CommandList commandList,
+        org::PixelBuffer& output, uint32_t outputUAVIndex, uint32_t width, uint32_t height);
 
     const Stats& GetStats() const { return m_stats; }
     const MeshManager::CLodRayTracingResidencySnapshot& GetSnapshot() const { return m_snapshot; }
@@ -73,22 +79,27 @@ public:
     bool HasGpuTlasBuildInputs() const { return HasGpuBlasBuildInputs() && static_cast<bool>(m_tlas) && m_tlasInstanceBuffer != nullptr; }
     bool HasRayTracingPipeline() const { return m_stats.rayPipelineReady; }
 
-    std::shared_ptr<Buffer> GetPageSourceBuffer() const { return m_pageSourceBuffer; }
-    std::shared_ptr<Buffer> GetClasBuildInfoBuffer() const { return m_clasBuildInfoBuffer; }
-    std::shared_ptr<Buffer> GetClasAddressBuffer() const { return m_clasAddressBuffer; }
-    std::shared_ptr<Buffer> GetClasSizeBuffer() const { return m_clasSizeBuffer; }
-    std::shared_ptr<Buffer> GetClasDataBuffer() const { return m_clasDataBuffer; }
-    std::shared_ptr<Buffer> GetClasScratchBuffer() const { return m_clasScratchBuffer; }
-    std::shared_ptr<Buffer> GetBlasBuildInfoBuffer() const { return m_blasBuildInfoBuffer; }
-    std::shared_ptr<Buffer> GetBlasAddressBuffer() const { return m_blasAddressBuffer; }
-    std::shared_ptr<Buffer> GetBlasSizeBuffer() const { return m_blasSizeBuffer; }
-    std::shared_ptr<Buffer> GetBlasDataBuffer() const { return m_blasDataBuffer; }
-    std::shared_ptr<Buffer> GetBlasScratchBuffer() const { return m_blasScratchBuffer; }
-    std::shared_ptr<Buffer> GetTlasInstanceBuffer() const { return m_tlasInstanceBuffer; }
-    std::shared_ptr<Buffer> GetTlasScratchBuffer() const { return m_tlasScratchBuffer; }
+    std::shared_ptr<org::Buffer> GetPageSourceBuffer() const { return m_pageSourceBuffer; }
+    std::shared_ptr<org::Buffer> GetClasBuildInfoBuffer() const { return m_clasBuildInfoBuffer; }
+    std::shared_ptr<org::Buffer> GetClasAddressBuffer() const { return m_clasAddressBuffer; }
+    std::shared_ptr<org::Buffer> GetClasSizeBuffer() const { return m_clasSizeBuffer; }
+    std::shared_ptr<org::Buffer> GetClasDataBuffer() const { return m_clasDataBuffer; }
+    std::shared_ptr<org::Buffer> GetClasScratchBuffer() const { return m_clasScratchBuffer; }
+    std::shared_ptr<org::Buffer> GetBlasBuildInfoBuffer() const { return m_blasBuildInfoBuffer; }
+    std::shared_ptr<org::Buffer> GetBlasAddressBuffer() const { return m_blasAddressBuffer; }
+    std::shared_ptr<org::Buffer> GetBlasSizeBuffer() const { return m_blasSizeBuffer; }
+    std::shared_ptr<org::Buffer> GetBlasDataBuffer() const { return m_blasDataBuffer; }
+    std::shared_ptr<org::Buffer> GetBlasScratchBuffer() const { return m_blasScratchBuffer; }
+    std::shared_ptr<org::Buffer> GetTlasInstanceBuffer() const { return m_tlasInstanceBuffer; }
+    std::shared_ptr<org::Buffer> GetTlasScratchBuffer() const { return m_tlasScratchBuffer; }
     rhi::AccelerationStructure GetTlas() const { return m_tlas ? m_tlas.Get() : rhi::AccelerationStructure{}; }
 
 private:
+    org::runtime::IUploadService& UploadService() const;
+    void UploadBufferData(const void* data, size_t size, org::runtime::UploadTarget target,
+        size_t offset, std::source_location source = std::source_location::current()) const;
+    std::mutex m_frameOperationMutex;
+    std::weak_ptr<org::runtime::IUploadService> m_uploadService;
     void EnsureBuffers(
         uint32_t pageSourceCount,
         uint32_t clusterCount,
@@ -115,23 +126,23 @@ private:
     uint64_t m_tlasScratchBytes = 0;
     uint64_t m_tlasStorageBytes = 0;
 
-    std::shared_ptr<Buffer> m_pageSourceBuffer;
-    std::shared_ptr<Buffer> m_clasBuildInfoBuffer;
-    std::shared_ptr<Buffer> m_clasAddressBuffer;
-    std::shared_ptr<Buffer> m_clasSizeBuffer;
-    std::shared_ptr<Buffer> m_clasDataBuffer;
-    std::shared_ptr<Buffer> m_clasScratchBuffer;
-    std::shared_ptr<Buffer> m_blasBuildInfoBuffer;
-    std::shared_ptr<Buffer> m_blasAddressBuffer;
-    std::shared_ptr<Buffer> m_blasSizeBuffer;
-    std::shared_ptr<Buffer> m_blasDataBuffer;
-    std::shared_ptr<Buffer> m_blasScratchBuffer;
-    std::shared_ptr<Buffer> m_tlasInstanceBuffer;
-    std::shared_ptr<Buffer> m_tlasScratchBuffer;
-    std::shared_ptr<Buffer> m_shaderTableBuffer;
+    std::shared_ptr<org::Buffer> m_pageSourceBuffer;
+    std::shared_ptr<org::Buffer> m_clasBuildInfoBuffer;
+    std::shared_ptr<org::Buffer> m_clasAddressBuffer;
+    std::shared_ptr<org::Buffer> m_clasSizeBuffer;
+    std::shared_ptr<org::Buffer> m_clasDataBuffer;
+    std::shared_ptr<org::Buffer> m_clasScratchBuffer;
+    std::shared_ptr<org::Buffer> m_blasBuildInfoBuffer;
+    std::shared_ptr<org::Buffer> m_blasAddressBuffer;
+    std::shared_ptr<org::Buffer> m_blasSizeBuffer;
+    std::shared_ptr<org::Buffer> m_blasDataBuffer;
+    std::shared_ptr<org::Buffer> m_blasScratchBuffer;
+    std::shared_ptr<org::Buffer> m_tlasInstanceBuffer;
+    std::shared_ptr<org::Buffer> m_tlasScratchBuffer;
+    std::shared_ptr<org::Buffer> m_shaderTableBuffer;
     rhi::ResourcePtr m_tlasStorage;
     rhi::AccelerationStructurePtr m_tlas;
-    PipelineState m_rayTracingPso;
+    org::PipelineState m_rayTracingPso;
     rhi::DescriptorSlot m_tlasSrvSlot{};
     bool m_hasTlasSrvSlot = false;
     uint64_t m_shaderTableBytes = 0;

@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapSetupPass.h"
+#include "Render/LightStateArtifacts.h"
 
 #include <array>
 #include <bit>
@@ -13,24 +14,15 @@
 #include "Render/RenderContext.h"
 #include "Render/RendererComponents.h"
 #include "Render/RendererSettings.h"
-#include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/Runtime/UploadTypes.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 #include "ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodVirtualShadowSetupRootConstants.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace {
-
-std::array<CLodVirtualShadowClipmapInfo, CLodVirtualShadowMaxSupportedClipmapCount> g_previousClipmapInfos{};
-std::array<int64_t, CLodVirtualShadowMaxSupportedClipmapCount> g_previousClipmapPageOffsetX{};
-std::array<int64_t, CLodVirtualShadowMaxSupportedClipmapCount> g_previousClipmapPageOffsetY{};
-bool g_previousClipmapInfosValid = false;
-DirectX::XMFLOAT3 g_previousDirectionalLightDirection{};
-bool g_previousDirectionalLightDirectionValid = false;
-DirectX::XMUINT2 g_previousRenderResolution{};
-bool g_previousRenderResolutionValid = false;
-uint32_t g_pendingRenderResolutionResetFrames = 0u;
 
 uint32_t GetVirtualShadowVirtualResolution()
 {
@@ -121,17 +113,17 @@ int32_t ClampClearOffset(int64_t delta, uint32_t pageTableResolution)
 } // namespace
 
 VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<Buffer> markClipmapDataBuffer,
-    std::shared_ptr<Buffer> compactMainCameraBuffer,
-    std::shared_ptr<Buffer> compactShadowCameraBuffer,
-    std::shared_ptr<Buffer> statsBuffer,
-    std::shared_ptr<Buffer> runtimeStateBuffer,
-    std::shared_ptr<Buffer> fallbackCandidateCountBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> markClipmapDataBuffer,
+    std::shared_ptr<org::Buffer> compactMainCameraBuffer,
+    std::shared_ptr<org::Buffer> compactShadowCameraBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer,
+    std::shared_ptr<org::Buffer> runtimeStateBuffer,
+    std::shared_ptr<org::Buffer> fallbackCandidateCountBuffer,
     std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters,
     bool forceResetResources)
     : m_pageTableTexture(std::move(pageTableTexture))
@@ -156,43 +148,49 @@ VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
         "CLod.VirtualShadow.Setup.PSO");
 }
 
-void VirtualShadowMapSetupPass::DeclareResourceUsages(ComputePassBuilder* builder)
+VirtualShadowMapSetupBindings VirtualShadowMapSetupPass::Declare(org::PassBuilder& builder)
 {
-    builder->WithUnorderedAccess(
-        m_clipmapInfoBuffer,
-        m_pageTableTexture,
-        m_pageMetadataBuffer,
-        m_allocationCountBuffer,
-        m_dirtyPageFlagsBuffer,
-        m_markClipmapDataBuffer,
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    builder.WithUnorderedAccess(
         m_compactMainCameraBuffer,
-        m_compactShadowCameraBuffer,
-        m_statsBuffer,
-        m_runtimeStateBuffer,
-        m_fallbackCandidateCountBuffer);
+        m_compactShadowCameraBuffer);
 
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    const uint32_t packedFlags =
+        ((m_resetResources ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_RESOURCES_BIT) |
+        ((m_resetReasonForced ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_FORCED_BIT) |
+        ((m_resetReasonNoPreviousState ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_NO_PREVIOUS_STATE_BIT) |
+        ((m_resetReasonStructureMismatch ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_STRUCTURE_MISMATCH_BIT) |
+        ((m_resetReasonLightDirectionChanged ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_LIGHT_DIRECTION_CHANGED_BIT) |
+        ((SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowAutoLodBiasSettingName)() ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_ENABLED_BIT) |
+        ((m_feedbackRecoveryRefresh ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_FEEDBACK_RECOVERY_REFRESH_BIT);
+    return {builder.BindUnorderedAccess(m_pageTableTexture), builder.BindUnorderedAccess(m_pageMetadataBuffer),
+        builder.BindUnorderedAccess(m_allocationCountBuffer), builder.BindUnorderedAccess(m_dirtyPageFlagsBuffer),
+        builder.BindUnorderedAccess(m_clipmapInfoBuffer), builder.BindUnorderedAccess(m_markClipmapDataBuffer),
+        builder.BindUnorderedAccess(m_statsBuffer), builder.BindUnorderedAccess(m_runtimeStateBuffer),
+        builder.BindUnorderedAccess(m_fallbackCandidateCountBuffer), packedFlags,
+        SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowAutoLodBiasScaleSettingName)()};
 }
 
-void VirtualShadowMapSetupPass::Setup() {}
+void VirtualShadowMapSetupPass::Initialize() {}
 
-void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionContext)
+void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     const bool disableVirtualShadowPageCaching =
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableVirtualShadowPageCachingSettingName)();
     auto* updateContext = executionContext.hostData ? executionContext.hostData->Get<UpdateContext>() : nullptr;
     const bool renderResolutionChanged =
         updateContext != nullptr &&
-        g_previousRenderResolutionValid &&
-        (g_previousRenderResolution.x != updateContext->renderResolution.x ||
-            g_previousRenderResolution.y != updateContext->renderResolution.y);
+        m_previousRenderResolutionValid &&
+        (m_previousRenderResolution.x != updateContext->renderResolution.x ||
+            m_previousRenderResolution.y != updateContext->renderResolution.y);
     if (renderResolutionChanged) {
         // Virtual shadow page marking samples the primary linear-depth texture
         // before the current frame repopulates it, so a resolution change needs
         // one reset for the resize frame and one more once the new-size depth is valid.
-        g_pendingRenderResolutionResetFrames = 2u;
+        m_pendingRenderResolutionResetFrames = 2u;
     }
-    const bool renderResolutionResetPending = g_pendingRenderResolutionResetFrames > 0u;
+    const bool renderResolutionResetPending = m_pendingRenderResolutionResetFrames > 0u;
     const bool forceResetResources = m_forceResetResources || disableVirtualShadowPageCaching || renderResolutionResetPending;
     m_forceResetResources = false;
     m_feedbackRecoveryRefresh =
@@ -200,7 +198,7 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
             false,
             std::memory_order_acq_rel);
     if (renderResolutionResetPending) {
-        --g_pendingRenderResolutionResetFrames;
+        --m_pendingRenderResolutionResetFrames;
     }
     const CLodVirtualShadowResolutionConfig virtualShadowConfig = GetVirtualShadowResolutionConfig();
     const uint32_t virtualShadowResolution = virtualShadowConfig.virtualResolution;
@@ -210,7 +208,7 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
     const uint32_t virtualShadowPhysicalAtlasPagesHigh = virtualShadowConfig.physicalAtlasPagesHigh;
 
     m_resetReasonForced = forceResetResources;
-    m_resetReasonNoPreviousState = !g_previousClipmapInfosValid;
+    m_resetReasonNoPreviousState = !m_previousClipmapInfosValid;
     m_resetReasonStructureMismatch = false;
     m_resetReasonLightDirectionChanged = false;
     m_resetResources = m_resetReasonForced || m_resetReasonNoPreviousState;
@@ -224,37 +222,19 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
     bool currentDirectionalLightDirectionValid = false;
     uint32_t activeClipmapCount = 0u;
 
-    if (updateContext && updateContext->viewManager) {
-        bool foundPrimaryCamera = false;
-        updateContext->viewManager->ForEachFiltered(ViewFilter::PrimaryCameras(), [&](uint64_t viewId) {
-            if (foundPrimaryCamera) {
-                return;
-            }
+    if (updateContext) {
+        for (const auto& view : updateContext->Views()) {
+            if (!view.primary) continue;
+            compactMainCamera.positionWorldSpace = view.cameraInfo.positionWorldSpace;
+            compactMainCamera.viewInverse = view.cameraInfo.viewInverse;
+            compactMainCamera.projectionInverse = view.cameraInfo.projectionInverse;
+            break;
+        }
 
-            const View* view = updateContext->viewManager->Get(viewId);
-            if (!view) {
-                return;
-            }
-
-            foundPrimaryCamera = true;
-            compactMainCamera.positionWorldSpace = view->cameraInfo.positionWorldSpace;
-            compactMainCamera.viewInverse = view->cameraInfo.viewInverse;
-            compactMainCamera.projectionInverse = view->cameraInfo.projectionInverse;
-        });
-
-        auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-        auto lightQuery = ecsWorld.query_builder<const Components::Light, const Components::LightViewInfo>().build();
-
-        bool foundDirectionalShadow = false;
-        lightQuery.each([&](flecs::entity, const Components::Light& light, const Components::LightViewInfo& lightViewInfo) {
-            if (foundDirectionalShadow || !light.lightInfo.shadowCaster || light.type != Components::LightType::Directional) {
-                return;
-            }
-
-            foundDirectionalShadow = true;
-            DirectX::XMStoreFloat3(
-                &currentDirectionalLightDirection,
-                DirectX::XMVector3Normalize(light.lightInfo.dirWorldSpace));
+        const auto& publishedLights = updateContext->lightTables;
+        if (publishedLights && !publishedLights->directionalShadows.empty()) {
+            const auto& lightViewInfo = publishedLights->directionalShadows.front();
+            currentDirectionalLightDirection = lightViewInfo.direction;
             currentDirectionalLightDirectionValid = true;
             const uint32_t clipmapCount = std::min<uint32_t>(
                 static_cast<uint32_t>(lightViewInfo.viewIDs.size()),
@@ -264,7 +244,7 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
 			// which skinned VSM clipmaps are required. Keep the two workloads on one
 			// quality control instead of allowing shadow skinning beyond wind reach.
 			const float configuredSkinnedShadowRadius = (std::max)(0.0f,
-				SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)());
+				updateContext->proceduralWind.outerRadius);
 			const float casterDynamicShadowRadius = m_virtualShadowCasters
 				? m_virtualShadowCasters->GetRequestedDynamicShadowRadius()
 				: 0.0f;
@@ -281,13 +261,15 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
 			uint32_t reclassifiedClipmapCount = 0u;
 
             for (uint32_t clipmapIndex = 0; clipmapIndex < clipmapCount; ++clipmapIndex) {
-                const View* view = updateContext->viewManager->Get(lightViewInfo.viewIDs[clipmapIndex]);
-                if (!view) {
+                const auto viewIt = std::ranges::find(updateContext->Views(),
+                    lightViewInfo.viewIDs[clipmapIndex], &PreparedViewFrameData::id);
+                if (viewIt == updateContext->Views().end()) {
                     continue;
                 }
+                const auto& view = *viewIt;
 
-                const float orthoWidth = ExtractOrthographicWidth(view->cameraInfo.unjitteredProjection);
-                const float orthoHeight = ExtractOrthographicHeight(view->cameraInfo.unjitteredProjection);
+                const float orthoWidth = ExtractOrthographicWidth(view.cameraInfo.unjitteredProjection);
+                const float orthoHeight = ExtractOrthographicHeight(view.cameraInfo.unjitteredProjection);
                 const float virtualShadowResolutionFloat = static_cast<float>(virtualShadowResolution);
 				const bool dynamicSkinnedClipmap = dynamicClipmapOverride >= 0
 					? clipmapIndex < clampedOverride
@@ -301,30 +283,30 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
 
                 auto& clipmapInfo = clipmapInfos[clipmapIndex];
                 const int64_t pageOffsetX =
-                    clipmapIndex < lightViewInfo.virtualShadowUnwrappedPageOffsetX.size()
-                    ? lightViewInfo.virtualShadowUnwrappedPageOffsetX[clipmapIndex]
+                    clipmapIndex < lightViewInfo.unwrappedPageOffsetX.size()
+                    ? lightViewInfo.unwrappedPageOffsetX[clipmapIndex]
                     : 0;
                 const int64_t pageOffsetY =
-                    clipmapIndex < lightViewInfo.virtualShadowUnwrappedPageOffsetY.size()
-                    ? lightViewInfo.virtualShadowUnwrappedPageOffsetY[clipmapIndex]
+                    clipmapIndex < lightViewInfo.unwrappedPageOffsetY.size()
+                    ? lightViewInfo.unwrappedPageOffsetY[clipmapIndex]
                     : 0;
-                clipmapInfo.worldOriginX = view->cameraInfo.positionWorldSpace.x;
-                clipmapInfo.worldOriginY = view->cameraInfo.positionWorldSpace.y;
-                clipmapInfo.worldOriginZ = view->cameraInfo.positionWorldSpace.z;
+                clipmapInfo.worldOriginX = view.cameraInfo.positionWorldSpace.x;
+                clipmapInfo.worldOriginY = view.cameraInfo.positionWorldSpace.y;
+                clipmapInfo.worldOriginZ = view.cameraInfo.positionWorldSpace.z;
                 clipmapInfo.texelWorldSize = std::max(orthoWidth, orthoHeight) / std::max(virtualShadowResolutionFloat, 1.0f);
                 clipmapInfo.pageOffsetX = WrapPageOffset(pageOffsetX, virtualShadowPageTableResolution);
                 clipmapInfo.pageOffsetY = WrapPageOffset(pageOffsetY, virtualShadowPageTableResolution);
                 clipmapInfo.pageTableLayer = clipmapIndex;
-                clipmapInfo.shadowCameraBufferIndex = view->gpu.cameraBufferIndex;
+                clipmapInfo.shadowCameraBufferIndex = view.cameraBufferIndex;
                 clipmapInfo.clipLevel = clipmapIndex;
-				const uint32_t previousDynamicFlag = g_previousClipmapInfosValid
-					? g_previousClipmapInfos[clipmapIndex].flags & CLodVirtualShadowClipmapDynamicSkinnedFlag
+				const uint32_t previousDynamicFlag = m_previousClipmapInfosValid
+					? m_previousClipmapInfos[clipmapIndex].flags & CLodVirtualShadowClipmapDynamicSkinnedFlag
 					: 0u;
 				const uint32_t currentDynamicFlag = dynamicSkinnedClipmap
 					? CLodVirtualShadowClipmapDynamicSkinnedFlag
 					: 0u;
 				clipmapInfo.flags = CLodVirtualShadowClipmapValidFlag | currentDynamicFlag;
-				if (g_previousClipmapInfosValid && previousDynamicFlag != currentDynamicFlag) {
+				if (m_previousClipmapInfosValid && previousDynamicFlag != currentDynamicFlag) {
 					clipmapInfo.flags |= CLodVirtualShadowClipmapInvalidateFlag;
 					++reclassifiedClipmapCount;
 				}
@@ -337,9 +319,9 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                     static_cast<int32_t>(pageOffsetX);
                 clipmapInfo.unwrappedPageOffsetY =
                     static_cast<int32_t>(pageOffsetY);
-                clipmapInfo.depthNear = view->cameraInfo.zNear;
+                clipmapInfo.depthNear = view.cameraInfo.zNear;
                 clipmapInfo.depthRange = std::max(
-                    view->cameraInfo.zFar - view->cameraInfo.zNear,
+                    view.cameraInfo.zFar - view.cameraInfo.zNear,
                     1.0e-6f);
 
                 auto& markData = markClipmapData[clipmapIndex];
@@ -357,22 +339,22 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                     clipmapInfo.unwrappedPageOffsetX;
                 markData.unwrappedPageOffsetY =
                     clipmapInfo.unwrappedPageOffsetY;
-                markData.shadowViewProjection = view->cameraInfo.viewProjection;
+                markData.shadowViewProjection = view.cameraInfo.viewProjection;
 
-                compactShadowCameras[clipmapIndex].view = view->cameraInfo.view;
-                compactShadowCameras[clipmapIndex].projection = view->cameraInfo.jitteredProjection;
-                compactShadowCameras[clipmapIndex].viewProjection = view->cameraInfo.viewProjection;
-                compactShadowCameras[clipmapIndex].isOrtho = view->cameraInfo.isOrtho;
-                if (g_previousClipmapInfosValid && IsClipmapValid(g_previousClipmapInfos[clipmapIndex])) {
+                compactShadowCameras[clipmapIndex].view = view.cameraInfo.view;
+                compactShadowCameras[clipmapIndex].projection = view.cameraInfo.jitteredProjection;
+                compactShadowCameras[clipmapIndex].viewProjection = view.cameraInfo.viewProjection;
+                compactShadowCameras[clipmapIndex].isOrtho = view.cameraInfo.isOrtho;
+                if (m_previousClipmapInfosValid && IsClipmapValid(m_previousClipmapInfos[clipmapIndex])) {
                     clipmapInfo.clearOffsetX = ClampClearOffset(
-                        pageOffsetX - g_previousClipmapPageOffsetX[clipmapIndex],
+                        pageOffsetX - m_previousClipmapPageOffsetX[clipmapIndex],
                         virtualShadowPageTableResolution);
                     clipmapInfo.clearOffsetY = ClampClearOffset(
-                        pageOffsetY - g_previousClipmapPageOffsetY[clipmapIndex],
+                        pageOffsetY - m_previousClipmapPageOffsetY[clipmapIndex],
                         virtualShadowPageTableResolution);
                 }
-                g_previousClipmapPageOffsetX[clipmapIndex] = pageOffsetX;
-                g_previousClipmapPageOffsetY[clipmapIndex] = pageOffsetY;
+                m_previousClipmapPageOffsetX[clipmapIndex] = pageOffsetX;
+                m_previousClipmapPageOffsetY[clipmapIndex] = pageOffsetY;
             }
 			g_clodSkinnedShadowEffectiveDynamicClipmapCount.store(
 				effectiveDynamicClipmapCount, std::memory_order_relaxed);
@@ -388,12 +370,12 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
 				g_clodSkinnedShadowOneShotInvalidationCount.fetch_add(
 					reclassifiedClipmapCount, std::memory_order_relaxed);
 			}
-        });
+        }
     }
 
     if (currentDirectionalLightDirectionValid &&
-        g_previousDirectionalLightDirectionValid &&
-        !NearlyEqualDirection(currentDirectionalLightDirection, g_previousDirectionalLightDirection)) {
+        m_previousDirectionalLightDirectionValid &&
+        !NearlyEqualDirection(currentDirectionalLightDirection, m_previousDirectionalLightDirection)) {
         m_resetReasonLightDirectionChanged = true;
         m_resetResources = true;
     }
@@ -424,19 +406,19 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
         markData.unwrappedPageOffsetX = info.unwrappedPageOffsetX;
         markData.unwrappedPageOffsetY = info.unwrappedPageOffsetY;
 
-        if (!m_resetResources && !ClipmapStructureEquals(info, g_previousClipmapInfos[clipmapIndex])) {
+        if (!m_resetResources && !ClipmapStructureEquals(info, m_previousClipmapInfos[clipmapIndex])) {
             m_resetReasonStructureMismatch = true;
             m_resetResources = true;
         }
     }
 
-    g_previousClipmapInfos = clipmapInfos;
-    g_previousClipmapInfosValid = true;
-    g_previousDirectionalLightDirection = currentDirectionalLightDirection;
-    g_previousDirectionalLightDirectionValid = currentDirectionalLightDirectionValid;
+    m_previousClipmapInfos = clipmapInfos;
+    m_previousClipmapInfosValid = true;
+    m_previousDirectionalLightDirection = currentDirectionalLightDirection;
+    m_previousDirectionalLightDirectionValid = currentDirectionalLightDirectionValid;
     if (updateContext) {
-        g_previousRenderResolution = updateContext->renderResolution;
-        g_previousRenderResolutionValid = true;
+        m_previousRenderResolution = updateContext->renderResolution;
+        m_previousRenderResolutionValid = true;
     }
 
     runtimeState.clipmapCount = activeClipmapCount;
@@ -448,98 +430,78 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
     runtimeState.maxPhysicalPages = virtualShadowPhysicalPageCount;
     runtimeState.maxAllocationRequests = virtualShadowConfig.maxAllocationRequests;
     runtimeState.directionalLodBias = virtualShadowConfig.directionalLodBias;
-    BUFFER_UPLOAD(&runtimeState, sizeof(runtimeState), org::runtime::UploadTarget::FromShared(m_runtimeStateBuffer), 0);
+    UploadBufferData(&runtimeState, sizeof(runtimeState), org::runtime::UploadTarget::FromShared(m_runtimeStateBuffer), 0);
 
-    BUFFER_UPLOAD(
+    UploadBufferData(
         clipmapInfos.data(),
         static_cast<uint32_t>(clipmapInfos.size() * sizeof(CLodVirtualShadowClipmapInfo)),
         org::runtime::UploadTarget::FromShared(m_clipmapInfoBuffer),
         0);
 
-    BUFFER_UPLOAD(
+    UploadBufferData(
         markClipmapData.data(),
         static_cast<uint32_t>(markClipmapData.size() * sizeof(CLodVirtualShadowMarkClipmapData)),
         org::runtime::UploadTarget::FromShared(m_markClipmapDataBuffer),
         0);
 
-    BUFFER_UPLOAD(
+    UploadBufferData(
         &compactMainCamera,
         sizeof(compactMainCamera),
         org::runtime::UploadTarget::FromShared(m_compactMainCameraBuffer),
         0);
 
-    BUFFER_UPLOAD(
+    UploadBufferData(
         compactShadowCameras.data(),
         static_cast<uint32_t>(compactShadowCameras.size() * sizeof(CLodVirtualShadowCompactShadowCameraInfo)),
         org::runtime::UploadTarget::FromShared(m_compactShadowCameraBuffer),
         0);
 }
 
-PassReturn VirtualShadowMapSetupPass::Execute(PassExecutionContext& executionContext)
+
+
+br::render::PreparedComputeDispatch VirtualShadowMapSetupPass::Prepare(
+    const VirtualShadowMapSetupBindings& bindings, const org::PassPrepareContext& preparation) const
 {
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-    const CLodVirtualShadowResolutionConfig virtualShadowConfig = GetVirtualShadowResolutionConfig();
-
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-
-    uint32_t rootConstants[NumMiscUintRootConstants] = {};
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    const auto config = GetVirtualShadowResolutionConfig();
+    auto payload = m_pso.GetPayload();
+    br::render::PreparedComputeDispatch data{};
+    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
+    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+    auto program = preparation.CaptureProgramBinding(std::move(payload));
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
     const uint32_t packedConfig0 =
-        ((virtualShadowConfig.pageTableResolution & CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_RESOLUTION_MASK)
-            << CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_RESOLUTION_SHIFT) |
-        ((CLodVirtualShadowMaxSupportedClipmapCount & CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT_MASK)
-            << CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT_SHIFT) |
-        ((virtualShadowConfig.maxPhysicalPages & CLOD_VIRTUAL_SHADOW_SETUP_PHYSICAL_PAGE_COUNT_MASK)
-            << CLOD_VIRTUAL_SHADOW_SETUP_PHYSICAL_PAGE_COUNT_SHIFT);
-    const uint32_t packedConfig1 =
-        (CLodVirtualShadowDirtyWordCount(virtualShadowConfig.maxPhysicalPages) & CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_MASK)
-        << CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_SHIFT;
-    const uint32_t packedFlags =
-        ((m_resetResources ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_RESOURCES_BIT) |
-        ((m_resetReasonForced ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_FORCED_BIT) |
-        ((m_resetReasonNoPreviousState ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_NO_PREVIOUS_STATE_BIT) |
-        ((m_resetReasonStructureMismatch ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_STRUCTURE_MISMATCH_BIT) |
-        ((m_resetReasonLightDirectionChanged ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_LIGHT_DIRECTION_CHANGED_BIT) |
-        ((SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowAutoLodBiasSettingName)() ? 1u : 0u)
-            << CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_ENABLED_BIT) |
-        ((m_feedbackRecoveryRefresh ? 1u : 0u)
-            << CLOD_VIRTUAL_SHADOW_SETUP_FEEDBACK_RECOVERY_REFRESH_BIT);
-
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_DESCRIPTOR_INDEX] = m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_METADATA_DESCRIPTOR_INDEX] = m_pageMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_ALLOCATION_COUNT_DESCRIPTOR_INDEX] = m_allocationCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_FLAGS_DESCRIPTOR_INDEX] = m_dirtyPageFlagsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_CONFIG0] = packedConfig0;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_CONFIG1] = packedConfig1;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_clipmapInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_FLAGS] = packedFlags;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_MARK_CLIPMAP_DATA_DESCRIPTOR_INDEX] = m_markClipmapDataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_RUNTIME_STATE_DESCRIPTOR_INDEX] = m_runtimeStateBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_SCALE_AS_UINT] =
-        std::bit_cast<uint32_t>(
-            SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowAutoLodBiasScaleSettingName)());
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_FALLBACK_CANDIDATE_COUNT_DESCRIPTOR_INDEX] =
-        m_fallbackCandidateCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        rootConstants);
-
-    constexpr uint32_t kThreadsPerDimension = 8u;
-    const uint32_t groupCountX = (virtualShadowConfig.pageTableResolution + kThreadsPerDimension - 1u) / kThreadsPerDimension;
-    const uint32_t groupCountY = (virtualShadowConfig.pageTableResolution + kThreadsPerDimension - 1u) / kThreadsPerDimension;
-    commandList.Dispatch(groupCountX, groupCountY, CLodVirtualShadowMaxSupportedClipmapCount);
-
-    return {};
+        ((config.pageTableResolution & CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_RESOLUTION_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_RESOLUTION_SHIFT) |
+        ((CLodVirtualShadowMaxSupportedClipmapCount & CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT_SHIFT) |
+        ((config.maxPhysicalPages & CLOD_VIRTUAL_SHADOW_SETUP_PHYSICAL_PAGE_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_PHYSICAL_PAGE_COUNT_SHIFT);
+    const uint32_t packedConfig1 = (CLodVirtualShadowDirtyWordCount(config.maxPhysicalPages) &
+        CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_SHIFT;
+    auto& c = data.constants;
+    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index; };
+    c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
+    c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_ALLOCATION_COUNT_DESCRIPTOR_INDEX] = uav(bindings.allocationCount);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_CONFIG0] = packedConfig0;
+    c[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_CONFIG1] = packedConfig1;
+    c[CLOD_VIRTUAL_SHADOW_SETUP_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_INFO_DESCRIPTOR_INDEX] = uav(bindings.clipmapInfo);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_FLAGS] = bindings.packedFlags;
+    c[CLOD_VIRTUAL_SHADOW_SETUP_MARK_CLIPMAP_DATA_DESCRIPTOR_INDEX] = uav(bindings.markClipmapData);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_RUNTIME_STATE_DESCRIPTOR_INDEX] = uav(bindings.runtimeState);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_SCALE_AS_UINT] = std::bit_cast<uint32_t>(bindings.autoBiasScale);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_FALLBACK_CANDIDATE_COUNT_DESCRIPTOR_INDEX] = uav(bindings.fallbackCandidateCount);
+    data.groupsX = (config.pageTableResolution + 7u) / 8u;
+    data.groupsY = data.groupsX;
+    data.groupsZ = CLodVirtualShadowMaxSupportedClipmapCount;
+    return data;
 }
 
-void VirtualShadowMapSetupPass::Cleanup() {}
+void VirtualShadowMapSetupPass::ShutdownPass() {}
+
+void VirtualShadowMapSetupPass::Record(const VirtualShadowMapSetupBindings&,
+    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeDispatch(data, recording);
+}

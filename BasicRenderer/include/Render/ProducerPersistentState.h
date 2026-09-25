@@ -5,7 +5,6 @@
 #include <unordered_map>
 
 namespace org { class Resource; }
-using org::Resource;
 class CLodStreamingSystem;
 class VirtualShadowCasterRegistry;
 
@@ -14,14 +13,14 @@ class VirtualShadowCasterRegistry;
 // hosts or recipes; standalone BasicRenderer creates one by default.
 struct ProducerPersistentState {
     struct DirectionalVsmResources {
-        std::shared_ptr<Resource> contract;
-        std::shared_ptr<Resource> clipmapInfo;
-        std::shared_ptr<Resource> mainCamera;
-        std::shared_ptr<Resource> shadowCameras;
-        std::shared_ptr<Resource> pageViewInfo;
-        std::shared_ptr<Resource> pageMetadata;
-        std::shared_ptr<Resource> pageTable;
-        std::shared_ptr<Resource> physicalPages;
+        std::shared_ptr<org::Resource> contract;
+        std::shared_ptr<org::Resource> clipmapInfo;
+        std::shared_ptr<org::Resource> mainCamera;
+        std::shared_ptr<org::Resource> shadowCameras;
+        std::shared_ptr<org::Resource> pageViewInfo;
+        std::shared_ptr<org::Resource> pageMetadata;
+        std::shared_ptr<org::Resource> pageTable;
+        std::shared_ptr<org::Resource> physicalPages;
         uint64_t generation = 0;
 
         void InvalidateGpuState() {
@@ -33,7 +32,7 @@ struct ProducerPersistentState {
 
     std::shared_ptr<CLodStreamingSystem> clodStreaming;
     std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters;
-    std::unordered_map<std::string, std::shared_ptr<Resource>> terrainRvtResources;
+    std::unordered_map<std::string, std::shared_ptr<org::Resource>> terrainRvtResources;
     DirectionalVsmResources directionalVsm;
 
     void InvalidateTerrainRvt() { terrainRvtResources.clear(); }

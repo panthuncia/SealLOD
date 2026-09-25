@@ -1,18 +1,26 @@
 #pragma once
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
+#include <mutex>
 #include <span>
+#include <atomic>
 
 #include "Scene/Components.h"
 #include "Materials/TechniqueDescriptor.h"
+#include "Render/IndirectStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Managers/Singletons/TaskSchedulerManager.h"
+#include "Resources/Buffers/SortedUnsignedIntBuffer.h"
 
 namespace org { class DynamicGloballyIndexedResource; }
-using org::DynamicGloballyIndexedResource;
 namespace org { class ResourceGroup; }
-using org::ResourceGroup;
 class ObjectManager;
 class SortedUnsignedIntBuffer;
+namespace org::runtime { class IUploadService; }
+namespace br::render { class RendererStateRequestService; }
+namespace br::render { struct PublishedRendererState; }
 
 struct RenderPhase; // forward
 
@@ -21,19 +29,6 @@ struct MaterialCompileFlagsHash {
     size_t operator()(MaterialCompileFlags f) const noexcept {
         return std::hash<uint64_t>()(static_cast<uint64_t>(f));
     }
-};
-
-struct IndirectWorkload {
-    std::shared_ptr<DynamicGloballyIndexedResource> buffer;
-    unsigned int count = 0;
-    unsigned int activeDrawCount = 0;
-    std::shared_ptr<SortedUnsignedIntBuffer> activeDrawSetIndices;
-};
-
-struct IndirectBufferEntry {
-    uint64_t viewID;
-    DrawWorkloadKey key;
-    IndirectWorkload workload;
 };
 
 struct WorkloadCountUpdate {
@@ -57,7 +52,7 @@ public:
     void RegisterWorkload(const DrawWorkloadKey& workloadKey);
 
     // Ensure we have buffers for all known workloads for this view.
-    void CreateBuffersForView(uint64_t viewID);
+    void CreateBuffersForView(uint64_t viewID, bool materializeIndirectArguments);
 
     // Remove buffers associated with a view
     void UnregisterBuffers(uint64_t viewID);
@@ -69,59 +64,97 @@ public:
     void UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate> updates);
     void RequestWorkloadCount(const DrawWorkloadKey& workloadKey, unsigned int numDraws);
     void RequestWorkloadCounts(std::span<const WorkloadCountUpdate> updates);
-    void CommitGpuVisibleSnapshot(ObjectManager& objectManager);
+    // Ingestion-time subscription. The object store pushes immutable active-list
+    // journal changes through this boundary; artifact builds never query it.
+    void AttachActiveDrawSource(ObjectManager& objectManager);
+    // Captured publication inputs for one desired-state revision. The caller
+    // selects these values from the object publication owner before scheduling.
+    void PublishDesiredState(
+        std::optional<br::render::ArtifactRequirement> objectBufferRequirement,
+        std::uint64_t residentDrawRecordCount,
+        const std::shared_ptr<const br::render::PublishedRendererState>& selectedState);
+    void SetRendererStateServices(br::render::RendererStateRequestService* requests,
+        std::shared_ptr<org::runtime::IUploadService> uploads);
+    // End preparation while borrowed request/upload services are still alive.
+    // Idempotent; must run before those services are destroyed.
+    void Shutdown();
 
     // Set growth granularity
     void SetIncrementSize(unsigned int incrementSize);
 
-    // Query: which (per-view) indirect command buffers participate in a render pass?
-    // Order is unspecified; returns empty if none registered.
-    std::vector<std::pair<MaterialCompileFlags, IndirectWorkload>>
-        GetBuffersForRenderPhase(uint64_t viewID, const RenderPhase& phase, bool clodOnly = false) const;
-
-    // per-view version of phase query, but returning viewID too
-    std::vector<IndirectBufferEntry> GetViewIndirectBuffersForRenderPhase(uint64_t viewID, const RenderPhase& phase, bool clodOnly = false) const;
-
-	// Iterate over all indirect buffers (all views, all flags):
-    template<class F>
-    void ForEachIndirectBuffer(F&& f) const {
-        for (auto const& [viewID, perView] : m_viewIDToBuffers) {
-            for (auto const& [key, wl] : perView.buffersByWorkload) {
-                std::forward<F>(f)(viewID, key, wl);
-            }
-        }
-    }
-
 private:
     IndirectCommandBufferManager();
 
-    // Per-view buffer set
-    struct PerViewBuffers {
-        // One buffer per unique draw workload
-        std::unordered_map<DrawWorkloadKey,
-            IndirectWorkload,
-            DrawWorkloadKey::Hasher> buffersByWorkload;
+    struct ActiveJournal {
+        std::uint64_t revision = 0;
+        std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>> base;
+        std::vector<std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>>> appends;
+        std::shared_ptr<br::render::VersionedGpuBufferJournal> bufferJournal;
+        std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
+    };
+    struct DesiredSnapshot {
+        std::uint64_t revision = 0;
+        std::uint64_t activeMaterialRevision = 0;
+        std::optional<br::render::ArtifactRequirement> objectBufferRequirement;
+        std::uint64_t residentDrawRecordCount = 0;
+        unsigned int incrementSize = 1000;
+        std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> requestedCounts;
+        std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> capacities;
+        std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> workloadIDs;
+        std::unordered_map<DrawWorkloadKey, ActiveJournal, DrawWorkloadKey::Hasher> activeJournals;
+        std::unordered_map<DrawWorkloadKey, br::render::VersionedGpuBufferJournal::Capture,
+            DrawWorkloadKey::Hasher> activeCaptures;
+        std::unordered_set<std::uint64_t> viewIDs;
+        std::unordered_set<std::uint64_t> argumentViewIDs;
+        std::unordered_map<std::uint64_t, std::uint64_t> viewLifetimeRevisions;
     };
 
-    // Per-workload published capacity (rounded to increment)
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToCapacity;
-
-    // Per-workload requested and published draw count (unrounded)
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToRequestedCount;
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToPublishedCount;
-
-    // Single group that owns all indirect command buffers (regardless of flags)
-    std::shared_ptr<ResourceGroup> m_indirectCommandsResourceGroup;
-
-    // ViewID -> buffers
-    std::unordered_map<uint64_t, PerViewBuffers> m_viewIDToBuffers;
-
-    // Growth granularity
+    std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> m_workloadIDs;
+    std::uint64_t m_nextWorkloadID = 1;
+    std::unordered_set<std::uint64_t> m_viewIDs;
+    // Culling needs an active workload for every view, but only views that
+    // execute mesh draws need a private indirect-argument buffer/counter.
+    std::unordered_set<std::uint64_t> m_argumentViewIDs;
+    std::unordered_map<std::uint64_t, std::uint64_t> m_viewLifetimeRevisions;
     unsigned int m_incrementSize = 1000;
+    br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
+    std::shared_ptr<org::runtime::IUploadService> m_uploadService;
+    std::unordered_map<DrawWorkloadKey, ActiveJournal, DrawWorkloadKey::Hasher> m_activeJournals;
+    mutable std::mutex m_desiredMutex;
+    TaskScope m_buildScope;
+    std::atomic_bool m_buildScheduled{ false };
+    std::atomic_bool m_stopping{ false };
+	std::atomic<std::uint64_t> m_admittedRootRevision{ 0 };
+	std::atomic<std::uint64_t> m_publishedRootRevision{ 0 };
+	std::atomic<std::uint64_t> m_lastAdmissionRetirementEpoch{ 0 };
+    struct ActiveDrawObserverState {
+        std::mutex mutex;
+        IndirectCommandBufferManager* owner = nullptr;
+    };
+    std::shared_ptr<ActiveDrawObserverState> m_activeDrawObserver;
+    std::uint64_t m_desiredMutationRevision = 1;
+    std::uint64_t m_consumedMutationRevision = 0;
+    std::uint64_t m_lastObjectBufferRevision = 0;
+    std::optional<br::render::ArtifactRequirement> m_objectBufferRequirement;
+    std::uint64_t m_lastMaterialRevision = 0;
+    std::uint64_t m_lastResidentDrawRecordCount = 0;
+    struct SubmittedArtifact {
+        std::uint64_t revision = 0;
+        br::render::ArtifactVersionHandle handle;
+    };
+    std::mutex m_submissionCacheMutex;
+    std::unordered_map<br::render::ArtifactAddress, SubmittedArtifact,
+        br::render::ArtifactAddress::Hasher> m_submittedArtifacts;
 
-    // Helpers
-    unsigned int RoundUp(unsigned int x) const {
-        return ((x + m_incrementSize - 1) / m_incrementSize) * m_incrementSize;
-    }
+    void OnActiveDrawSetMutation(const DrawWorkloadKey& workloadKey, bool replace,
+        std::uint64_t revision,
+        std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>> entries);
+    void ScheduleDesiredBuild();
+    void DrainDesiredBuild(const br::TaskContext& context);
+    [[nodiscard]] bool BuildDesiredState(DesiredSnapshot snapshot);
+    [[nodiscard]] DesiredSnapshot CaptureDesiredSnapshotLocked() const;
     void EnsureWorkloadRegistered(const DrawWorkloadKey& workloadKey);
 };

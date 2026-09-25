@@ -3,25 +3,34 @@
 #include <memory>
 
 #include "Render/PipelineState.h"
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
-class VirtualShadowMapBuildMarkTilesPass final : public ComputePass {
+struct VirtualShadowMapBuildMarkTilesBindings {
+    org::ResourceBindingToken tileWork;
+    org::ResourceBindingToken tileCount;
+};
+
+class VirtualShadowMapBuildMarkTilesPass final : public org::TypedRenderGraphPass<VirtualShadowMapBuildMarkTilesPass,
+    br::render::PreparedComputeDispatch, VirtualShadowMapBuildMarkTilesBindings> {
 public:
     VirtualShadowMapBuildMarkTilesPass(
-        std::shared_ptr<Buffer> tileWorkBuffer,
-        std::shared_ptr<Buffer> tileCountBuffer);
+        std::shared_ptr<org::Buffer> tileWorkBuffer,
+        std::shared_ptr<org::Buffer> tileCountBuffer);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    void Update(const UpdateExecutionContext& executionContext) override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    VirtualShadowMapBuildMarkTilesBindings Declare(org::PassBuilder& builder);
+    void Initialize();
+    void Update(const org::UpdateExecutionContext& executionContext) override;
+    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapBuildMarkTilesBindings&,
+        const org::PassPrepareContext& preparation) const;
+    static void Record(const VirtualShadowMapBuildMarkTilesBindings&,
+        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    void ShutdownPass();
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<Buffer> m_tileWorkBuffer;
-    std::shared_ptr<Buffer> m_tileCountBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_tileWorkBuffer;
+    std::shared_ptr<org::Buffer> m_tileCountBuffer;
 };

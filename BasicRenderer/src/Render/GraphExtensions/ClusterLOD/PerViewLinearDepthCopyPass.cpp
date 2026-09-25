@@ -17,68 +17,93 @@ PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass(bool writeProjectedDepth)
         "PerViewPrimaryDepthCopyPSO");
 }
 
-void PerViewLinearDepthCopyPass::DeclareResourceUsages(ComputePassBuilder* builder) {
-    builder->WithShaderResource(Builtin::PrimaryCamera::VisibilityTexture)
-        .WithUnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap,
-            Builtin::PrimaryCamera::ProjectedDepthTexture, Builtin::Surface::DeviceDepth);
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+PerViewLinearDepthCopyBindings PerViewLinearDepthCopyPass::Declare(org::PassBuilder& builder) {
+    PerViewLinearDepthCopyBindings bindings{};
+    bindings.views.reserve(m_views.size());
+    for (const auto& view : m_views) {
+        bindings.views.push_back({builder.BindShaderResource(view.visibility),
+            builder.BindUnorderedAccess(view.linearDepth), view.width, view.height,
+            view.primary, view.projection});
+    }
+    if (m_writeProjectedDepth) {
+        bindings.projectedDepth = builder.BindUnorderedAccess(
+            Builtin::PrimaryCamera::ProjectedDepthTexture);
+        bindings.hasProjectedDepth = true;
+        bindings.canonicalDeviceDepth = builder.BindUnorderedAccess(Builtin::Surface::DeviceDepth);
+        bindings.hasCanonicalDeviceDepth = true;
+    }
+    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    return bindings;
 }
 
-void PerViewLinearDepthCopyPass::Setup() {
-    m_pProjectedDepthTexture = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PrimaryCamera::ProjectedDepthTexture);
-    m_pCanonicalDeviceDepth = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Surface::DeviceDepth);
+void PerViewLinearDepthCopyPass::Initialize() {
 }
 
-PassReturn PerViewLinearDepthCopyPass::Execute(PassExecutionContext& executionContext) {
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-
-    uint32_t rootConstants[NumMiscUintRootConstants] = {};
-
-    context.viewManager->ForEachView([&](uint64_t viewID) {
-        const auto* view = context.viewManager->Get(viewID);
-        if (!view || !view->gpu.visibilityBuffer || !view->gpu.linearDepthMap) {
-            return;
-        }
-
-        rootConstants[UintRootConstant0] = view->gpu.visibilityBuffer->GetSRVInfo(0).slot.index;
-        rootConstants[UintRootConstant1] = view->gpu.linearDepthMap->GetUAVShaderVisibleInfo(0).slot.index;
-        rootConstants[UintRootConstant2] = view->gpu.visibilityBuffer->GetWidth();
-        rootConstants[UintRootConstant3] = view->gpu.visibilityBuffer->GetHeight();
-
-        // Only write projected depth for the primary camera view
-        if (m_writeProjectedDepth && view->flags.primaryCamera && m_pProjectedDepthTexture) {
-            rootConstants[UintRootConstant4] = m_pProjectedDepthTexture->GetUAVShaderVisibleInfo(0).slot.index;
-            rootConstants[UintRootConstant7] = m_pCanonicalDeviceDepth
-                ? m_pCanonicalDeviceDepth->GetUAVShaderVisibleInfo(0).slot.index : 0xFFFFFFFFu;
-            // Extract M[2][2] and M[3][2] from the unjittered projection matrix (row-major)
-            const auto& proj = view->cameraInfo.unjitteredProjection;
-            rootConstants[UintRootConstant5] = as_uint(DirectX::XMVectorGetZ(proj.r[2])); // M[2][2]
-            rootConstants[UintRootConstant6] = as_uint(DirectX::XMVectorGetZ(proj.r[3])); // M[3][2]
-        } else {
-            rootConstants[UintRootConstant4] = 0xFFFFFFFF; // sentinel: skip projected depth write
-            rootConstants[UintRootConstant7] = 0xFFFFFFFF;
-        }
-
-        commandList.PushConstants(
-            rhi::ShaderStage::Compute,
-            0,
-            MiscUintRootSignatureIndex,
-            0,
-            NumMiscUintRootConstants,
-            rootConstants);
-
-        const uint32_t groupsX = (rootConstants[UintRootConstant2] + 7u) / 8u;
-        const uint32_t groupsY = (rootConstants[UintRootConstant3] + 7u) / 8u;
-        commandList.Dispatch(groupsX, groupsY, 1);
-    });
-
-    return {};
+void PerViewLinearDepthCopyPass::Update(const org::UpdateExecutionContext& executionContext) {
+    const auto* context = executionContext.hostData->Get<UpdateContext>();
+    std::vector<ViewSnapshot> views;
+    for (const auto& view : context->Views()) {
+        if (!view.visibilityBuffer || !view.linearDepthMap) continue;
+        const auto& projection = view.cameraInfo.unjitteredProjection;
+        views.push_back({view.visibilityBuffer, view.linearDepthMap,
+            view.visibilityBuffer->GetWidth(), view.visibilityBuffer->GetHeight(),
+            view.primary,
+            {as_uint(DirectX::XMVectorGetZ(projection.r[2])),
+                as_uint(DirectX::XMVectorGetZ(projection.r[3]))}});
+    }
+    m_declaredResourcesChanged = views != m_views;
+    m_views = std::move(views);
 }
 
-void PerViewLinearDepthCopyPass::Cleanup() {}
+bool PerViewLinearDepthCopyPass::DeclaredResourcesChanged() const {
+    return m_declaredResourcesChanged;
+}
+
+PerViewLinearDepthCopyPreparedData PerViewLinearDepthCopyPass::Prepare(
+    const PerViewLinearDepthCopyBindings& bindings,
+    const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    PreparedData data{};
+    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
+    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+    data.program = preparation.CaptureProgram(m_pso);
+    for (const auto& view : bindings.views) {
+        PreparedView item{};
+        item.constants.resize(NumMiscUintRootConstants);
+        auto& c = item.constants;
+        c[UintRootConstant0] = preparation.ResolveView(view.visibility,
+            {org::BindlessViewKind::ShaderResource}).index;
+        c[UintRootConstant1] = preparation.ResolveView(view.linearDepth,
+            {org::BindlessViewKind::UnorderedAccess}).index;
+        c[UintRootConstant2] = view.width;
+        c[UintRootConstant3] = view.height;
+        if (m_writeProjectedDepth && view.primary && bindings.hasProjectedDepth) {
+            c[UintRootConstant4] = preparation.ResolveView(bindings.projectedDepth,
+                {org::BindlessViewKind::UnorderedAccess}).index;
+            c[UintRootConstant7] = bindings.hasCanonicalDeviceDepth
+                ? preparation.ResolveView(bindings.canonicalDeviceDepth,
+                    {org::BindlessViewKind::UnorderedAccess}).index : 0xFFFFFFFFu;
+            c[UintRootConstant5] = view.projection[0];
+            c[UintRootConstant6] = view.projection[1];
+        } else c[UintRootConstant4] = c[UintRootConstant7] = 0xFFFFFFFFu;
+        item.groupsX = (c[UintRootConstant2] + 7u) / 8u;
+        item.groupsY = (c[UintRootConstant3] + 7u) / 8u;
+        data.views.push_back(std::move(item));
+    }
+    return data;
+}
+
+void PerViewLinearDepthCopyPass::Record(const PerViewLinearDepthCopyBindings&,
+    const PreparedData& data, org::PassRecordContext& recording) {
+    auto& commands = recording.Commands();
+    commands.SetDescriptorHeaps(data.resourceHeap, data.samplerHeap);
+    commands.BindLayout(data.layout);
+    commands.BindPipeline(recording.Resolve(data.program));
+    for (const auto& view : data.views) {
+        commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
+            NumMiscUintRootConstants, view.constants.data());
+        commands.Dispatch(view.groupsX, view.groupsY, 1);
+    }
+}
+

@@ -2,19 +2,19 @@
 
 #include <cassert>
 #include <algorithm>
+#include <stdexcept>
 #include <spdlog/spdlog.h>
 
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Resources/Buffers/Buffer.h"
-#include "Render/Runtime/UploadServiceAccess.h"
 
 namespace {
-	std::shared_ptr<Buffer> CreatePagePoolSlabBuffer(uint64_t byteSize, const std::string& name)
+	std::shared_ptr<org::Buffer> CreatePagePoolSlabBuffer(uint64_t byteSize, const std::string& name)
 	{
-		auto buffer = Buffer::CreateShared(rhi::HeapType::DeviceLocal, byteSize, false);
+		auto buffer = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, byteSize, false);
 		buffer->SetName(name);
 
-		BufferBase::DescriptorRequirements requirements{};
+		org::BufferBase::DescriptorRequirements requirements{};
 		requirements.createSRV = true;
 		requirements.srvDesc = rhi::SrvDesc{
 			.dimension = rhi::SrvDim::Buffer,
@@ -30,9 +30,9 @@ namespace {
 		return buffer;
 	}
 
-	std::shared_ptr<Buffer> CreatePageTableBuffer(uint32_t pageCount, const std::string& name)
+	std::shared_ptr<org::Buffer> CreatePageTableBuffer(uint32_t pageCount, const std::string& name)
 	{
-		auto buffer = Buffer::CreateUnmaterializedStructuredBuffer(
+		auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
 			pageCount,
 			static_cast<uint32_t>(sizeof(PageTableEntry)),
 			false,
@@ -60,7 +60,7 @@ PagePool::PagePool(const Config& config)
 	org::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
 
 	// Resource group for slab buffers (render graph auto-invalidation).
-	m_slabResourceGroup = std::make_shared<ResourceGroup>(m_config.debugName + "::Slabs");
+	m_slabResourceGroup = std::make_shared<org::ResourceGroup>(m_config.debugName + "::Slabs");
 
 	for (uint32_t classIndex = 0u;
 		classIndex < static_cast<uint32_t>(m_config.pageSizes.size());
@@ -92,14 +92,22 @@ bool PagePool::AllocateNewSlab(
 		return false;
 	}
 
-	const uint32_t slabIndex = static_cast<uint32_t>(m_slabs.size());
+	// Only the streaming worker grows the table, so the index and first page
+	// read here stay valid until the exclusive section below publishes the slab.
+	uint32_t slabIndex = 0u;
+	uint32_t firstGlobal = 0u;
+	{
+		std::shared_lock lock(m_slabMutex);
+		slabIndex = static_cast<uint32_t>(m_slabs.size());
+		firstGlobal = m_totalPageCapacity;
+	}
 	Slab slab;
 	slab.role = role;
 	slab.pageSize = pageSizeBytes;
 	const uint64_t slabByteSize =
 		role == SlabRole::Pinned ? m_config.pinnedSlabSize : m_config.slabSize;
 	const uint32_t slabPageCount = static_cast<uint32_t>(slabByteSize / pageSizeBytes);
-	slab.firstPageID = m_totalPageCapacity;
+	slab.firstPageID = firstGlobal;
 	slab.pageCount = slabPageCount;
 	slab.buffer = CreatePagePoolSlabBuffer(
 		slabByteSize,
@@ -109,18 +117,21 @@ bool PagePool::AllocateNewSlab(
 			std::to_string(slabIndex));
 	org::memory::SetResourceUsageHint(*slab.buffer, role == SlabRole::Pinned ? "Cluster LOD pinned page slabs" : "Cluster LOD page slabs");
 
-	m_slabs.push_back(std::move(slab));
-	m_totalPageCapacity += slabPageCount;
+	auto slabBuffer = slab.buffer;
+	{
+		std::unique_lock lock(m_slabMutex);
+		m_slabs.push_back(std::move(slab));
+		m_totalPageCapacity += slabPageCount;
+	}
 	if (role == SlabRole::General) {
 		m_generalSlabCount++;
 	}
 
 	// Register new slab in the resource group for render graph tracking.
-	m_slabResourceGroup->AddResource(m_slabs.back().buffer);
+	m_slabResourceGroup->AddResource(slabBuffer);
 
 	// Extend the CPU page-table mirror and describe every physical page.
-	m_pageTableCpu.resize(m_totalPageCapacity, PageTableEntry{});
-	const uint32_t firstGlobal = m_slabs.back().firstPageID;
+	m_pageTableCpu.resize(static_cast<size_t>(firstGlobal) + slabPageCount, PageTableEntry{});
 	for (uint32_t i = 0; i < slabPageCount; ++i) {
 		auto& entry = m_pageTableCpu[firstGlobal + i];
 		entry.slabIndex = slabIndex;
@@ -148,18 +159,24 @@ bool PagePool::AllocateNewSlab(
 // Upload
 void PagePool::UploadToPage(uint32_t globalPageID, uint32_t intraPageByteOffset,
 							const void* data, size_t dataSize) {
-	const uint32_t si = PageToSlabIndex(globalPageID);
-	assert(si < m_slabs.size());
-
-	const uint64_t slabOffset = PageToSlabByteOffset(globalPageID) + intraPageByteOffset;
-	assert(intraPageByteOffset + dataSize <= m_slabs[si].pageSize);
-
-	auto& slab = m_slabs[si];
-	auto target = org::runtime::UploadTarget::FromShared(slab.buffer);
+	std::shared_ptr<org::Buffer> slabBuffer;
+	uint64_t slabOffset = 0u;
+	{
+		std::shared_lock lock(m_slabMutex);
+		const uint32_t si = PageToSlabIndexLocked(globalPageID);
+		if (si >= m_slabs.size()) {
+			throw std::out_of_range("PagePool upload targets an unknown page");
+		}
+		assert(intraPageByteOffset + dataSize <= m_slabs[si].pageSize);
+		slabOffset = static_cast<uint64_t>(globalPageID - m_slabs[si].firstPageID) * m_slabs[si].pageSize +
+			intraPageByteOffset;
+		slabBuffer = m_slabs[si].buffer;
+	}
+	auto target = org::runtime::UploadTarget::FromShared(slabBuffer);
 	if (m_uploadFn) {
 		m_uploadFn(data, dataSize, target, slabOffset);
 	} else {
-		BUFFER_UPLOAD(data, dataSize, target, slabOffset);
+		throw std::runtime_error("PagePool upload owner is not configured");
 	}
 }
 
@@ -187,7 +204,7 @@ void PagePool::FlushPageTableUpdates() {
 	if (m_uploadFn) {
 		m_uploadFn(m_pageTableCpu.data(), tableBytes, target, 0);
 	} else {
-		BUFFER_UPLOAD(m_pageTableCpu.data(), tableBytes, target, 0);
+		throw std::runtime_error("PagePool upload owner is not configured");
 	}
 
 	m_pageTableDirty = false;
@@ -195,22 +212,29 @@ void PagePool::FlushPageTableUpdates() {
 
 // Accessors
 uint32_t PagePool::GetSlabCount() const {
+	std::shared_lock lock(m_slabMutex);
 	return static_cast<uint32_t>(m_slabs.size());
 }
 
-std::shared_ptr<Buffer> PagePool::GetSlab(uint32_t slabIndex) const {
-	assert(slabIndex < m_slabs.size());
-	return m_slabs[slabIndex].buffer;
+std::shared_ptr<org::Buffer> PagePool::GetSlab(uint32_t slabIndex) const {
+	std::shared_lock lock(m_slabMutex);
+	return slabIndex < m_slabs.size() ? m_slabs[slabIndex].buffer : nullptr;
 }
 
 uint32_t PagePool::GetSlabDescriptorIndex(const PageAllocation& alloc) const {
 	if (!alloc.IsValid()) return 0u;
-	const uint32_t si = PageToSlabIndex(alloc.firstPageID);
-	assert(si < m_slabs.size());
+	std::shared_lock lock(m_slabMutex);
+	const uint32_t si = PageToSlabIndexLocked(alloc.firstPageID);
+	if (si >= m_slabs.size()) return 0u;
 	return m_slabs[si].buffer->GetSRVInfo(0).slot.index;
 }
 
 uint32_t PagePool::PageToSlabIndex(uint32_t globalPageID) const {
+	std::shared_lock lock(m_slabMutex);
+	return PageToSlabIndexLocked(globalPageID);
+}
+
+uint32_t PagePool::PageToSlabIndexLocked(uint32_t globalPageID) const {
 	for (uint32_t slabIndex = 0; slabIndex < static_cast<uint32_t>(m_slabs.size()); ++slabIndex) {
 		const Slab& slab = m_slabs[slabIndex];
 		if (globalPageID >= slab.firstPageID &&
@@ -222,21 +246,24 @@ uint32_t PagePool::PageToSlabIndex(uint32_t globalPageID) const {
 }
 
 uint64_t PagePool::PageToSlabByteOffset(uint32_t globalPageID) const {
-	const uint32_t slabIndex = PageToSlabIndex(globalPageID);
-	assert(slabIndex < m_slabs.size());
+	std::shared_lock lock(m_slabMutex);
+	const uint32_t slabIndex = PageToSlabIndexLocked(globalPageID);
+	if (slabIndex >= m_slabs.size()) return 0u;
 	return static_cast<uint64_t>(globalPageID - m_slabs[slabIndex].firstPageID) *
 		m_slabs[slabIndex].pageSize;
 }
 
-std::shared_ptr<Buffer> PagePool::GetPageTableBuffer() const {
+std::shared_ptr<org::Buffer> PagePool::GetPageTableBuffer() const {
 	return m_pageTableBuffer;
 }
 
 uint32_t PagePool::GetTotalPageCount() const {
+	std::shared_lock lock(m_slabMutex);
 	return m_totalPageCapacity;
 }
 
 uint32_t PagePool::GetGeneralPageCount() const {
+	std::shared_lock lock(m_slabMutex);
 	uint32_t result = 0u;
 	for (const Slab& slab : m_slabs) {
 		if (slab.role == SlabRole::General) {
@@ -260,7 +287,8 @@ uint32_t PagePool::SelectPageSizeClassIndex(uint64_t payloadBytes) const {
 }
 
 uint32_t PagePool::GetPageSize(uint32_t globalPageID) const {
-	const uint32_t slabIndex = PageToSlabIndex(globalPageID);
+	std::shared_lock lock(m_slabMutex);
+	const uint32_t slabIndex = PageToSlabIndexLocked(globalPageID);
 	return slabIndex < m_slabs.size() ? m_slabs[slabIndex].pageSize : 0u;
 }
 
@@ -279,6 +307,7 @@ std::vector<uint32_t> PagePool::GrowGeneralPageClass(uint32_t pageSizeBytes) {
 }
 
 std::vector<uint32_t> PagePool::GetGeneralPageIDs(uint32_t pageSizeBytes) const {
+	std::shared_lock lock(m_slabMutex);
 	std::vector<uint32_t> pages;
 	for (const Slab& slab : m_slabs) {
 		if (slab.role != SlabRole::General || slab.pageSize != pageSizeBytes) {
@@ -318,10 +347,15 @@ std::vector<uint32_t> PagePool::AllocatePinnedPages(uint32_t count) {
 
 void PagePool::FreePinnedPages(const std::vector<uint32_t>& pageIDs) {
 	for (uint32_t pageID : pageIDs) {
-		const uint32_t slabIndex = PageToSlabIndex(pageID);
-		if (slabIndex >= m_slabs.size() || m_slabs[slabIndex].role != SlabRole::Pinned) {
-			continue;
+		uint32_t pageSize = 0u;
+		{
+			std::shared_lock lock(m_slabMutex);
+			const uint32_t slabIndex = PageToSlabIndexLocked(pageID);
+			if (slabIndex >= m_slabs.size() || m_slabs[slabIndex].role != SlabRole::Pinned) {
+				continue;
+			}
+			pageSize = m_slabs[slabIndex].pageSize;
 		}
-		m_freePinnedPageIDs[GetPageSizeClassIndex(pageID)].push_back(pageID);
+		m_freePinnedPageIDs[SelectPageSizeClassIndex(pageSize)].push_back(pageID);
 	}
 }

@@ -7,9 +7,9 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITAdaptiveFitRootConstants.h"
 
 AVBOITAdaptiveFitUpdatePass::AVBOITAdaptiveFitUpdatePass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<Buffer> occupancyHistogramBuffer,
-    std::shared_ptr<Buffer> fitStateBuffer)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::Buffer> occupancyHistogramBuffer,
+    std::shared_ptr<org::Buffer> fitStateBuffer)
     : m_configBuffer(std::move(configBuffer))
     , m_occupancyHistogramBuffer(std::move(occupancyHistogramBuffer))
     , m_fitStateBuffer(std::move(fitStateBuffer))
@@ -22,55 +22,39 @@ AVBOITAdaptiveFitUpdatePass::AVBOITAdaptiveFitUpdatePass(
         "CLod.AVBOITAdaptiveFitUpdate.PSO");
 }
 
-void AVBOITAdaptiveFitUpdatePass::DeclareResourceUsages(ComputePassBuilder* builder)
+AVBOITAdaptiveFitUpdateBindings AVBOITAdaptiveFitUpdatePass::Declare(org::PassBuilder& builder)
 {
-    builder->WithShaderResource(m_configBuffer, m_occupancyHistogramBuffer)
-        .WithUnorderedAccess(m_fitStateBuffer);
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    return {builder.BindShaderResource(m_configBuffer), builder.BindShaderResource(m_occupancyHistogramBuffer), builder.BindUnorderedAccess(m_fitStateBuffer)};
 }
 
-void AVBOITAdaptiveFitUpdatePass::Setup()
-{
-}
-
-void AVBOITAdaptiveFitUpdatePass::Update(const UpdateExecutionContext& executionContext)
-{
-    (void)executionContext;
-}
-
-PassReturn AVBOITAdaptiveFitUpdatePass::Execute(PassExecutionContext& executionContext)
-{
+br::render::PreparedComputeDispatch AVBOITAdaptiveFitUpdatePass::Prepare(const AVBOITAdaptiveFitUpdateBindings& bindings, const org::PassPrepareContext& preparation) const {
+    br::render::PreparedComputeDispatch data{};
     if (!m_configBuffer || !m_occupancyHistogramBuffer || !m_fitStateBuffer) {
         return {};
     }
 
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
+    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
     auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
 
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
+    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
+    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
+    auto program = preparation.CaptureProgramBinding(m_pso);
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
 
-    uint32_t misc[NumMiscUintRootConstants] = {};
+    auto& misc = data.constants;
     misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_CONFIG_DESCRIPTOR_INDEX] =
-        m_configBuffer->GetSRVInfo(0).slot.index;
+        preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
     misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_STATE_DESCRIPTOR_INDEX] =
-        m_fitStateBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        preparation.ResolveView(bindings.state, {org::BindlessViewKind::UnorderedAccess}).index;
     misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_HISTOGRAM_DESCRIPTOR_INDEX] =
-        m_occupancyHistogramBuffer->GetSRVInfo(0).slot.index;
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        misc);
+        preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::ShaderResource}).index;
 
-    commandList.Dispatch(1u, 1u, 1u);
-    return {};
+    data.groupsX = 1u; data.groupsY = 1u; data.groupsZ = 1u;
+    return data;
 }
 
-void AVBOITAdaptiveFitUpdatePass::Cleanup()
-{
+void AVBOITAdaptiveFitUpdatePass::Record(const AVBOITAdaptiveFitUpdateBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeDispatch(data, recording);
 }

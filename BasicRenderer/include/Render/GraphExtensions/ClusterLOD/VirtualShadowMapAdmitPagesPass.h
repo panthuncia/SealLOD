@@ -3,52 +3,51 @@
 #include <functional>
 #include <memory>
 #include <vector>
+#include <mutex>
 
 #include "Render/PipelineState.h"
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "Render/GraphExtensions/ClusterLOD/VirtualShadowUpgradeService.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
-class VirtualShadowMapAdmitPagesPass final : public ComputePass {
+struct VirtualShadowMapAdmitPagesBindings {
+    org::ResourceBindingToken pageTable, dirtyPageFlags, pageMetadata, clipmapInfo, compactShadowCameras, stats;
+    std::vector<org::ResourceBindingToken> upgradeInputs;
+    uint32_t normalBudget = 0;
+    uint32_t upgradeBudget = 0;
+};
+
+class VirtualShadowMapAdmitPagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapAdmitPagesPass,
+    br::render::PreparedComputePipelineSequence, VirtualShadowMapAdmitPagesBindings> {
 public:
-    using AcquireUpgradeUploadFn =
-        std::function<bool(uint32_t&, uint32_t&)>;
-    using ReleaseUpgradeUploadFn = std::function<void(uint32_t)>;
-
     VirtualShadowMapAdmitPagesPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-        std::vector<std::shared_ptr<Buffer>> upgradeInputBuffers,
-        std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> compactShadowCamerasBuffer,
-        std::shared_ptr<Buffer> statsBuffer,
-        AcquireUpgradeUploadFn acquireUpgradeUpload,
-        ReleaseUpgradeUploadFn releaseUpgradeUpload,
-        uint32_t framesInFlight);
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+        std::vector<std::shared_ptr<org::Buffer>> upgradeInputBuffers,
+        std::shared_ptr<org::Buffer> pageMetadataBuffer,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+        std::shared_ptr<org::Buffer> compactShadowCamerasBuffer,
+        std::shared_ptr<org::Buffer> statsBuffer,
+        VirtualShadowUpgradeQueue upgradeQueue);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    void Update(const UpdateExecutionContext& executionContext) override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    VirtualShadowMapAdmitPagesBindings Declare(org::PassBuilder& builder);
+    br::render::PreparedComputePipelineSequence Prepare(const VirtualShadowMapAdmitPagesBindings&,
+        const org::PassPrepareContext& preparation) const;
+    static void Record(const VirtualShadowMapAdmitPagesBindings&,
+        const br::render::PreparedComputePipelineSequence&, org::PassRecordContext&);
 
 private:
-    PipelineState m_pso;
-    PipelineState m_applyUpgradesPso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<Buffer> m_dirtyPageFlagsBuffer;
-    std::vector<std::shared_ptr<Buffer>> m_upgradeInputBuffers;
-    std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
-    std::shared_ptr<Buffer> m_compactShadowCamerasBuffer;
-    std::shared_ptr<Buffer> m_statsBuffer;
-    AcquireUpgradeUploadFn m_acquireUpgradeUpload;
-    ReleaseUpgradeUploadFn m_releaseUpgradeUpload;
-    std::vector<uint32_t> m_inFlightSlotByFrame;
-    uint32_t m_pendingUpgradeSlot = UINT32_MAX;
-    uint32_t m_pendingUpgradeInputCount = 0u;
+    org::PipelineState m_pso;
+    org::PipelineState m_applyUpgradesPso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::Buffer> m_dirtyPageFlagsBuffer;
+    std::vector<std::shared_ptr<org::Buffer>> m_upgradeInputBuffers;
+    std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<org::Buffer> m_compactShadowCamerasBuffer;
+    std::shared_ptr<org::Buffer> m_statsBuffer;
+    VirtualShadowUpgradeQueue m_upgradeQueue;
 };

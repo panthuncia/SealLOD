@@ -34,6 +34,6 @@ void Environment::SetReflectionCubemapResolution(unsigned int resolution) {
 	m_currentManager->UpdateEnvironmentView(*this);
 }
 
-std::shared_ptr<PixelBuffer> Environment::GetEnvironmentPrefilteredCubemap() const {
+std::shared_ptr<org::PixelBuffer> Environment::GetEnvironmentPrefilteredCubemap() const {
 	return m_environmentPrefilteredCubemap->ImagePtr();
 }

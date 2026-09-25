@@ -15,7 +15,6 @@ static const uint TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
 static const uint TERRAIN_LAYER_FLAG_HEIGHT_FROM_DIFFUSE_ALPHA = 1u << 1;
 static const uint TERRAIN_LAYER_FLAG_PBR = 1u << 2;
 static const uint TERRAIN_LAYER_FLAG_GLINT = 1u << 3;
-static const uint TERRAIN_LAYER_FLAG_GRASS_FAR_OVERLAY = 1u << 4;
 static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE = 1u << 0;
 static const uint TERRAIN_STOCHASTIC_FLAG_NORMAL = 1u << 1;
 static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
@@ -1746,7 +1745,15 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtHeightScale = rvtSample.heightScale;
         inputs.terrainRvtLocal = rvtSample.local;
         inputs.terrainRvtTerrainClipCount = rvtSample.terrainClipCount;
-        inputs.geometricHeightDebug = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(terrainSetIndex, rvtSamplePositionWS, dpdxWS, dpdyWS));
+        if (perFrameBuffer.outputType == OUTPUT_TERRAIN_GEOMETRIC_HEIGHT)
+        {
+            inputs.geometricHeightDebug = saturate(
+                TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(
+                    terrainSetIndex,
+                    rvtSamplePositionWS,
+                    dpdxWS,
+                    dpdyWS));
+        }
         inputs.parallaxApplied = rvtParallaxApplied ? 1u : inputs.parallaxApplied;
         return;
     }
@@ -1882,7 +1889,6 @@ void ApplyTerrainMaterialInternal(
     float heightSum = 0.0f;
     float heightScaleSum = 0.0f;
     float heightWeightSum = 0.0f;
-    const bool terrainGrassOverlayDebug = perFrameBuffer.outputType == OUTPUT_TERRAIN_GRASS_OVERLAY;
     for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
     {
         float weight = TerrainInterpolateLayerWeight(terrainWeightBlocks, terrain, region, localLayer, regionLocal);
@@ -1897,26 +1903,6 @@ void ApplyTerrainMaterialInternal(
         }
         uint layerIndex = min(terrain.layerBase + terrainLayerRefs[layerRefIndex].layerIndex, terrain.layerBase + terrain.layerCount - 1u);
         TerrainLayerInfo layer = terrainLayers[layerIndex];
-        const bool isGrassFarOverlayLayer = (layer.flags & TERRAIN_LAYER_FLAG_GRASS_FAR_OVERLAY) != 0u;
-        if (terrainGrassOverlayDebug && !isGrassFarOverlayLayer)
-        {
-            continue;
-        }
-        if (isGrassFarOverlayLayer)
-        {
-            StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-            Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
-            float2 cameraSkyrimXY = TerrainSkyrimXYFromRendererPosition(mainCamera.positionWorldSpace.xyz);
-            float distanceCells = max(abs(skyrimXY.x - cameraSkyrimXY.x), abs(skyrimXY.y - cameraSkyrimXY.y)) * (1.0f / 4096.0f);
-            float fadeStart = max(layer.farOverlayParams.x, 0.0f);
-            float fadeEnd = max(layer.farOverlayParams.y, fadeStart + 0.001f);
-            float fade = smoothstep(fadeStart, fadeEnd, distanceCells);
-            weight *= fade * max(layer.farOverlayParams.z, 0.0f);
-            if (weight <= 0.0001f)
-            {
-                continue;
-            }
-        }
         weightSum += weight;
         float2 layerUv = skyrimXY * layer.uvScale;
         float2 layerDUdx = skyrimXYDdx * layer.uvScale;
@@ -2097,19 +2083,6 @@ void ApplyTerrainMaterialInternal(
 
     if (weightSum <= 1.0e-4f)
     {
-        if (terrainGrassOverlayDebug)
-        {
-            inputs.albedo = 0.0f.xxx;
-            inputs.normalWS = normalWSBase;
-            inputs.metallic = 0.0f;
-            inputs.roughness = 1.0f;
-            inputs.ambientOcclusion = 1.0f;
-            inputs.opacity = 1.0f;
-            inputs.emissive = 0.0f.xxx;
-            inputs.glintEnabled = 0u;
-            inputs.terrainRvtHeightScale = 0.0f;
-            inputs.geometricHeightDebug = 0.0f;
-        }
         return;
     }
     float invWeightSum = rcp(weightSum);
@@ -2119,7 +2092,7 @@ void ApplyTerrainMaterialInternal(
     blendedMetallic *= invWeightSum;
     blendedAmbientOcclusion *= invWeightSum;
 
-    inputs.albedo = terrainGrassOverlayDebug ? blendedBaseColor : blendedBaseColor * vertexColor;
+    inputs.albedo = blendedBaseColor * vertexColor;
     inputs.normalWS = normalize(mul(TerrainDerivativeToNormal(blendedNormalDerivative), terrainBasis));
     inputs.metallic = saturate(blendedMetallic);
     inputs.roughness = clamp(blendedRoughness, 0.04f, 1.0f);

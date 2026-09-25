@@ -11,6 +11,7 @@
 #include <rhi.h>
 #include <memory>
 #include <utility>
+#include <cstring>
 
 #include <spdlog/spdlog.h>
 
@@ -18,14 +19,20 @@
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Interfaces/IHasMemoryMetadata.h"
-#include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 
 using Microsoft::WRL::ComPtr;
 
 template<class T>
-class DynamicStructuredBuffer : public BufferBase, public IHasMemoryMetadata, public IDeferredBackingResizeClient {
+class DynamicStructuredBuffer : public org::BufferBase, public org::IHasMemoryMetadata, public org::IDeferredBackingResizeClient {
 public:
+
+    std::vector<std::byte> CaptureCpuShadowBytes() const {
+        std::scoped_lock lock(m_mutex);
+        std::vector<std::byte> bytes(m_data.size() * sizeof(T));
+        if (!bytes.empty()) std::memcpy(bytes.data(), m_data.data(), bytes.size());
+        return bytes;
+    }
 
     static std::shared_ptr<DynamicStructuredBuffer<T>> CreateShared(UINT capacity = 64, std::string name = "", bool UAV = false) {
         return std::shared_ptr<DynamicStructuredBuffer<T>>(new DynamicStructuredBuffer<T>(capacity, name, UAV));
@@ -90,7 +97,7 @@ public:
             return true;
         }
 
-        if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
+        if (org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
             CreateBuffer(newCapacity, m_capacity);
             m_capacity = newCapacity;
             return true;
@@ -248,6 +255,7 @@ private:
         std::scoped_lock lock(m_mutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
+            *RetainBufferUploadService(),
             org::runtime::UploadTarget::FromShared(shared_from_this()),
             [this](size_t offset, size_t size) -> const void* {
                 const auto byteSize = m_data.size() * sizeof(T);
@@ -287,7 +295,7 @@ private:
 
     bool m_UAV = false;
 
-    std::vector<EntityComponentBundle> m_metadataBundles;
+    std::vector<org::EntityComponentBundle> m_metadataBundles;
 
     void EnsureCapacityForIndex(size_t index) {
         (void)TryEnsureCapacityForIndex(index);
@@ -300,7 +308,7 @@ private:
 
         if (m_pendingResizeValid) {
             m_pendingResizeCapacity = (std::max)(m_pendingResizeCapacity, newCapacity);
-            m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+            m_asyncResizeState.Request(org::AsyncBufferBackingResizeRequest{
                 .resourceID = GetGlobalResourceID(),
                 .heapType = rhi::HeapType::DeviceLocal,
                 .byteSize = sizeof(T) * static_cast<size_t>(m_pendingResizeCapacity),
@@ -313,7 +321,7 @@ private:
         const auto resourceID = GetGlobalResourceID();
         m_pendingResizeCapacity = newCapacity;
         m_pendingResizeValid = true;
-        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+        m_asyncResizeState.Request(org::AsyncBufferBackingResizeRequest{
             .resourceID = resourceID,
             .heapType = rhi::HeapType::DeviceLocal,
             .byteSize = sizeof(T) * static_cast<size_t>(newCapacity),
@@ -324,7 +332,7 @@ private:
 
     bool PublishReadyAsyncResizeInternal(bool wait) {
         if ((!m_pendingResizeValid && !m_asyncResizeState.HasPending()) ||
-            !BufferBase::IsBackingMutationAllowedOnThisThread()) {
+            !org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
             return false;
         }
 
@@ -380,6 +388,7 @@ private:
     }
 
     void StageOrUpload(const void* data, size_t size, size_t offset) {
+        EnsureUploadPolicyRegistration();
         if (org::runtime::GetActiveUploadPolicyService() == nullptr) {
             SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
@@ -387,7 +396,7 @@ private:
 #else
             m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize());
 #endif
-            BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+            UploadBufferData(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset, __FILE__, __LINE__);
             return;
         }
 
@@ -404,12 +413,12 @@ private:
             return;
         }
 
-        BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+        UploadBufferData(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset, __FILE__, __LINE__);
     }
 
     void AssignDescriptorSlots(uint32_t capacity)
     {
-        BufferBase::DescriptorRequirements requirements{};
+        org::BufferBase::DescriptorRequirements requirements{};
 
         requirements.createCBV = false;
         requirements.createSRV = true;
@@ -447,7 +456,7 @@ private:
 
 
     void CreateBuffer(size_t capacity, size_t previousCapacity = 0) {
-        auto backing = GpuBufferBacking::CreateUnique(
+        auto backing = org::GpuBufferBacking::CreateUnique(
             rhi::HeapType::DeviceLocal,
             sizeof(T) * capacity,
             GetGlobalResourceID(),
@@ -455,7 +464,7 @@ private:
         ApplyResizeBacking(std::move(backing), capacity, previousCapacity);
     }
 
-    void ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> backing, size_t capacity, size_t previousCapacity = 0) {
+    void ApplyResizeBacking(std::unique_ptr<org::GpuBufferBacking> backing, size_t capacity, size_t previousCapacity = 0) {
         const size_t replayElements = (std::min)(m_data.size(), capacity);
         if (previousCapacity != 0u) {
             spdlog::debug(
@@ -493,8 +502,8 @@ private:
         if (replayElements > 0u) {
             SyncUploadPolicyState();
             const size_t replayBytes = replayElements * sizeof(T);
-            if (org::runtime::GetActiveUploadService() != nullptr) {
-                BUFFER_UPLOAD(m_data.data(), replayBytes, org::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+            if (RetainUploadService() != nullptr) {
+                UploadBufferData(m_data.data(), replayBytes, org::runtime::UploadTarget::FromShared(shared_from_this()), 0u, __FILE__, __LINE__);
                 spdlog::debug(
                     "DynamicStructuredBuffer '{}' id={} GrowBuffer replayed CPU rows={} bytes={}",
                     name,
@@ -519,13 +528,13 @@ private:
         }
     }
 
-    void ApplyMetadataComponentBundle(const EntityComponentBundle& bundle) override {
+    void ApplyMetadataComponentBundle(const org::EntityComponentBundle& bundle) override {
         m_metadataBundles.emplace_back(bundle);
         ApplyMetadataToBacking(bundle);
     }
 
     org::runtime::BufferUploadPolicyState m_uploadPolicyState{};
-    AsyncBufferBackingResizeState m_asyncResizeState;
+    org::AsyncBufferBackingResizeState m_asyncResizeState;
     uint32_t m_pendingResizeCapacity = 0u;
     bool m_pendingResizeValid = false;
 };

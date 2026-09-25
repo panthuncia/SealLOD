@@ -1,7 +1,7 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
+#include <array>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <deque>
 #include <span>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -24,16 +23,25 @@
 #include "Interfaces/IResourceProvider.h"
 #include "Materials/TechniqueDescriptor.h"
 #include "Render/Runtime/BufferUploadPolicy.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/ObjectBufferStateArtifacts.h"
+#include "Managers/Singletons/TaskSchedulerManager.h"
+#include "Utilities/TripleGenerationMailbox.h"
 
 namespace org { class BufferView; }
-using org::BufferView;
+namespace org { class GloballyIndexedResource; }
 namespace org { class DynamicBuffer; }
-using org::DynamicBuffer;
+namespace org::runtime { class IUploadService; }
+class PublishedStateResourceResolver;
+namespace br::render { class RendererStateRequestService; class VersionedGpuBufferBackingPool; struct PublishedGpuBufferVersion; struct PublishedRendererState; }
 class Material;
 class Mesh;
 
-class ObjectManager : public IResourceProvider {
+class ObjectManager : public org::IResourceProvider {
 public:
+	using ActiveDrawSetMutationCallback = std::function<void(
+		const DrawWorkloadKey&, bool, std::uint64_t,
+		std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>>)>;
 	static std::unique_ptr<ObjectManager> CreateUnique() {
 		return std::unique_ptr<ObjectManager>(new ObjectManager());
 	}
@@ -48,6 +56,7 @@ public:
 	struct StaticMeshTemplateRef {
 		std::uint32_t meshTemplateIndex = 0;
 		std::uint32_t clodOffsetIndex = 0;
+		std::uint64_t meshIdentity = 0;
 		std::shared_ptr<Mesh> mesh;
 		std::shared_ptr<Material> material;
 		std::vector<DrawWorkloadKey> workloadKeys;
@@ -65,6 +74,7 @@ public:
 	struct PreparedStaticMeshTemplateRef {
 		std::uint32_t meshTemplateIndex = 0;
 		std::uint32_t clodOffsetIndex = 0;
+		std::uint64_t meshIdentity = 0;
 		std::vector<DrawWorkloadKey> workloadKeys;
 		std::span<const DrawWorkloadKey> mappedWorkloadKeys;
 		std::uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
@@ -76,12 +86,29 @@ public:
 	};
 
 	struct PreparedStaticGroupInfo {
+		struct WorkloadRouteRange {
+			std::uint32_t first = 0;
+			std::uint32_t count = 0;
+		};
 		std::uint64_t stableGroupID = 0;
 		std::uint64_t allocationScopeID = 0;
 		std::vector<PerObjectCB> perObjectCBs;
 		std::vector<DirectX::XMFLOAT4X4> normalMatrices;
 		std::vector<PreparedStaticMeshTemplateRef> meshTemplates;
 		std::vector<std::vector<DrawWorkloadKey>> workloadKeysByMeshTemplate;
+		// Immutable compact routing: each template range contains indices into
+		// uniqueWorkloadKeys. Materialization binds each unique key once instead
+		// of hashing and deduplicating every template occurrence again.
+		std::vector<DrawWorkloadKey> uniqueWorkloadKeys;
+		std::vector<std::uint32_t> workloadRouteIndices;
+		std::vector<WorkloadRouteRange> workloadRouteRanges;
+		std::vector<std::uint32_t> workloadRouteOccurrences;
+		// Scatter/gather publication batches retain the source artifact and map
+		// these immutable route tables instead of copying four vectors per group.
+		std::span<const DrawWorkloadKey> mappedUniqueWorkloadKeys;
+		std::span<const std::uint32_t> mappedWorkloadRouteIndices;
+		std::span<const WorkloadRouteRange> mappedWorkloadRouteRanges;
+		std::span<const std::uint32_t> mappedWorkloadRouteOccurrences;
 		// Recipe-backed groups keep immutable transform rows in their mapped pack.
 		// Runtime bindings remain owning because their indices are renderer-assigned.
 		std::span<const PerObjectCB> mappedPerObjectCBs;
@@ -89,6 +116,10 @@ public:
 		std::span<const PreparedStaticMeshTemplateRef> mappedMeshTemplates;
 		std::shared_ptr<const void> mappedRecipeOwner;
 		std::shared_ptr<const void> mappedTemplateOwner;
+		// Mapping storage and recipe publication semantics are independent. Static
+		// import scatter/gather batches also map immutable rows, but still require
+		// legacy draw-info/removal payload construction.
+		bool mappedRecipeSemantics = false;
 
 		[[nodiscard]] std::span<const PerObjectCB> PerObjectRows() const {
 			return mappedPerObjectCBs.empty() ? std::span<const PerObjectCB>{ perObjectCBs } : mappedPerObjectCBs;
@@ -99,7 +130,19 @@ public:
 		[[nodiscard]] std::span<const PreparedStaticMeshTemplateRef> MeshTemplates() const {
 			return mappedMeshTemplates.empty() ? std::span<const PreparedStaticMeshTemplateRef>{ meshTemplates } : mappedMeshTemplates;
 		}
-		[[nodiscard]] bool IsRecipeView() const { return !mappedPerObjectCBs.empty(); }
+		[[nodiscard]] std::span<const DrawWorkloadKey> UniqueWorkloadKeys() const {
+			return mappedUniqueWorkloadKeys.empty() ? std::span<const DrawWorkloadKey>{ uniqueWorkloadKeys } : mappedUniqueWorkloadKeys;
+		}
+		[[nodiscard]] std::span<const std::uint32_t> WorkloadRouteIndices() const {
+			return mappedWorkloadRouteIndices.empty() ? std::span<const std::uint32_t>{ workloadRouteIndices } : mappedWorkloadRouteIndices;
+		}
+		[[nodiscard]] std::span<const WorkloadRouteRange> WorkloadRouteRanges() const {
+			return mappedWorkloadRouteRanges.empty() ? std::span<const WorkloadRouteRange>{ workloadRouteRanges } : mappedWorkloadRouteRanges;
+		}
+		[[nodiscard]] std::span<const std::uint32_t> WorkloadRouteOccurrences() const {
+			return mappedWorkloadRouteOccurrences.empty() ? std::span<const std::uint32_t>{ workloadRouteOccurrences } : mappedWorkloadRouteOccurrences;
+		}
+		[[nodiscard]] bool IsRecipeView() const { return mappedRecipeSemantics; }
 	};
 
 	struct StaticRecipeTemplateBinding {
@@ -192,10 +235,10 @@ public:
 	};
 
 	struct StaticImportPacketAllocation {
-		std::vector<DynamicBuffer::PagedAllocation> perObjectPages;
-		std::vector<DynamicBuffer::PagedAllocation> instanceTransformPages;
-		std::vector<DynamicBuffer::PagedAllocation> normalMatrixPages;
-		std::vector<DynamicBuffer::PagedAllocation> instanceDrawRecordPages;
+		std::vector<org::DynamicBuffer::PagedAllocation> perObjectPages;
+		std::vector<org::DynamicBuffer::PagedAllocation> instanceTransformPages;
+		std::vector<org::DynamicBuffer::PagedAllocation> normalMatrixPages;
+		std::vector<org::DynamicBuffer::PagedAllocation> instanceDrawRecordPages;
 	};
 
 	struct StaticImportPacket {
@@ -209,6 +252,7 @@ public:
 			std::size_t scopeTransformOrdinal = 0;
 			std::uint32_t meshTemplateIndex = 0;
 			std::uint32_t clodOffsetIndex = 0;
+			std::uint64_t meshIdentity = 0;
 			std::uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
 			BoundingSphere skinnedAssemblyBounds{};
 			float skinnedBoundsScale = 1.0f;
@@ -244,6 +288,11 @@ public:
 		std::vector<std::size_t> transformCounts;
 		std::vector<std::size_t> drawRecordCounts;
 		std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> activeReserveCounts;
+		// Transaction-wide workload slots and each group's local-to-transaction
+		// mapping. Materialization can bind vector destinations directly instead
+		// of hashing every workload key for every group.
+		std::vector<DrawWorkloadKey> activeWorkloadKeys;
+		std::vector<std::vector<std::uint32_t>> activeWorkloadRoutesByGroup;
 		std::uint64_t drawRecords = 0;
 		std::uint64_t activeInsertIndices = 0;
 		std::uint64_t preparedBytes = 0;
@@ -267,10 +316,10 @@ public:
 	};
 
 	struct StaticImportResourceProbe {
-		DynamicBuffer::AllocationProbe normalMatrix;
-		DynamicBuffer::AllocationProbe perObject;
-		DynamicBuffer::AllocationProbe instanceTransform;
-		DynamicBuffer::AllocationProbe instanceDrawRecord;
+		org::DynamicBuffer::AllocationProbe normalMatrix;
+		org::DynamicBuffer::AllocationProbe perObject;
+		org::DynamicBuffer::AllocationProbe instanceTransform;
+		org::DynamicBuffer::AllocationProbe instanceDrawRecord;
 	};
 
 	struct StaticImportReservation {
@@ -278,16 +327,16 @@ public:
 		StaticImportBuildBatch build;
 		std::vector<std::size_t> transformCounts;
 		std::vector<std::size_t> drawRecordCounts;
-		std::vector<DynamicBuffer::PagedAllocation> perObjectRanges;
-		std::vector<DynamicBuffer::PagedAllocation> instanceTransformRanges;
-		std::vector<DynamicBuffer::PagedAllocation> normalMatrixRanges;
-		std::vector<DynamicBuffer::PagedAllocation> instanceDrawRecordRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> perObjectRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> instanceTransformRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> normalMatrixRanges;
+		std::vector<org::DynamicBuffer::PagedAllocation> instanceDrawRecordRanges;
 		std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
 		std::size_t visibilityDirtyEnd = 0;
-		std::shared_ptr<DynamicBuffer> perObjectBuffer;
-		std::shared_ptr<DynamicBuffer> instanceTransformBuffer;
-		std::shared_ptr<DynamicBuffer> normalMatrixBuffer;
-		std::shared_ptr<DynamicBuffer> instanceDrawRecordBuffer;
+		std::shared_ptr<org::DynamicBuffer> perObjectBuffer;
+		std::shared_ptr<org::DynamicBuffer> instanceTransformBuffer;
+		std::shared_ptr<org::DynamicBuffer> normalMatrixBuffer;
+		std::shared_ptr<org::DynamicBuffer> instanceDrawRecordBuffer;
 		std::uint64_t groupCount = 0;
 		std::uint64_t preparedBytes = 0;
 		std::uint64_t drawRecords = 0;
@@ -299,6 +348,10 @@ public:
 		std::uint64_t retireFrame = 0;
 	};
 
+	struct StaticObjectRemovalResult {
+		std::uint64_t mutationCoverageGeneration = 0;
+	};
+
 	struct StaticObjectRemovalPayload {
 		enum class BufferKind : std::uint8_t {
 			PerObject,
@@ -308,15 +361,32 @@ public:
 		};
 
 		struct BufferRetireRange {
-			std::shared_ptr<DynamicBuffer> buffer;
+			std::shared_ptr<org::DynamicBuffer> buffer;
 			Components::ObjectDrawInfo::BufferRange range;
 			BufferKind kind = BufferKind::PerObject;
+		};
+		struct ActiveDrawSetRemovalRange {
+			std::uint32_t workloadSlot = UINT32_MAX;
+			std::uint32_t firstIndex = 0;
+			std::uint32_t indexCount = 0;
+		};
+		struct ActiveDrawSetRemovalStorage {
+			// Workload identity is transaction-wide. Intern it once instead of
+			// copying RenderPhase strings into every per-group removal range.
+			std::vector<DrawWorkloadKey> workloadKeys;
+			std::vector<ActiveDrawSetRemovalRange> ranges;
+			std::unique_ptr<std::uint32_t[]> indices;
+			std::size_t indexCapacity = 0;
+			std::size_t nextIndex = 0;
 		};
 
 		std::array<BufferRetireRange, 4> inlineBufferRanges;
 		std::uint8_t inlineBufferRangeCount = 0;
 		std::vector<BufferRetireRange> bufferRanges;
 		std::vector<Components::ObjectDrawInfo::ActiveDrawSetRemovalBucket> activeDrawSetRemovals;
+		std::shared_ptr<const ActiveDrawSetRemovalStorage> sharedActiveDrawSetRemovals;
+		std::uint32_t firstActiveDrawSetRemovalRange = 0;
+		std::uint32_t activeDrawSetRemovalRangeCount = 0;
 		std::vector<std::uint32_t> drawRecordIndices;
 		std::vector<std::uint32_t> skinnedAssemblyPlacementIndices;
 		std::size_t drawInfoCount = 0;
@@ -345,10 +415,13 @@ public:
 		std::vector<Components::ObjectDrawInfo> drawInfos;
 		std::vector<std::uint32_t> drawInfoIndicesByGroup;
 		std::vector<StaticObjectRemovalPayload> removalPayloads;
+		std::shared_ptr<StaticObjectRemovalPayload::ActiveDrawSetRemovalStorage> activeDrawSetRemovalStorage;
 		std::vector<PendingSkinnedAssemblyPlacement> skinnedAssemblyPlacements;
 		std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 		std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> activeDrawSetSpans;
 		std::uint64_t materializeUs = 0;
+		bool transformRowsStaged = false;
+		bool drawRecordRowsStaged = false;
 	};
 
 	struct StaticImportPublishResult {
@@ -376,6 +449,21 @@ public:
 		std::uint64_t groupsImported = 0;
 		std::uint64_t drawRecords = 0;
 		std::uint64_t preparedBytes = 0;
+		// Logical mutation epoch covered by this bulk publication. Physical journal
+		// capture is deferred until the DrawRecords root is admissible; a graph cut
+		// is compatible only when it covers at least this generation.
+		std::uint64_t mutationCoverageGeneration = 0;
+	};
+
+	struct DesiredObjectBufferStateCut {
+		br::render::ArtifactVersionHandle version;
+		std::uint64_t coveredMutationGeneration = 0;
+		// Exact buffer versions the draw-records root pairs. Work that needs the
+		// uploaded object data waits on these: the root itself additionally waits
+		// for resident geometry, which static scene publication must not depend on.
+		std::vector<br::render::ArtifactVersionHandle> bufferVersions;
+
+		explicit operator bool() const noexcept { return static_cast<bool>(version); }
 	};
 
 	struct ActiveDrawSetCompactionPublishResult {
@@ -407,6 +495,12 @@ public:
 	void PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan);
 	void RequestStaticImportPacketResources(const StaticImportPacketPlan& plan);
 	void RequestStaticImportTransactionResources(const StaticImportBuildBatch& build);
+	// Supplies a workload-derived upper bound before static transactions begin
+	// consuming the persistent graph-owned object buffers. This changes only
+	// backing capacity; logical row counts and immutable version identity remain
+	// driven by committed writes.
+	void RequestStaticImportGraphCapacityHint(
+		std::uint64_t transformRows, std::uint64_t drawRecords);
 	StaticImportResourceProbe CreateStaticImportResourceProbe() const;
 	StaticImportResourceProbeStatus ProbeStaticImportTransactionResources(
 		StaticImportBuildBatch& build,
@@ -424,6 +518,12 @@ public:
 	MaterializedStaticImportTransaction MaterializeStaticImportTransaction(
 		StaticImportReservation&& reservation,
 		StaticImportBuildBatch& buildScratch) const;
+	// Copies immutable transaction rows into the versioned buffer journals. This
+	// is safe to run during worker preparation after ranges have been reserved;
+	// publication only activates generations and selects the resulting versions.
+	void StageStaticImportTransactionUploads(
+		MaterializedStaticImportTransaction& transaction,
+		bool includeDrawRecords = true);
 	StaticImportPublishResult PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction);
 	StaticImportBulkPublishResult PublishStaticImportTransactionsBulk(std::span<MaterializedStaticImportTransaction*> transactions);
 	void CancelStaticImportTransaction(StaticImportReservation reservation, std::uint64_t retireFrame = 0);
@@ -435,18 +535,17 @@ public:
 		const std::vector<const Components::ObjectDrawInfo*>& drawInfos,
 		const RemoveObjectsBulkOptions& options);
 	void RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo *> &drawInfos);
-	void RemoveStaticObjectsBulk(
+	StaticObjectRemovalResult RemoveStaticObjectsBulk(
 		std::span<const StaticObjectRemovalPayload> payloads,
 		const RemoveObjectsBulkOptions& options);
-	void RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads);
+	StaticObjectRemovalResult RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads);
 	StaticVisibilityUpdateResult SetStaticObjectsVisibleBulk(
 		std::span<StaticObjectResidencyHandle*> handles,
 		bool visible);
-	void UpdatePerObjectBuffer(BufferView*, PerObjectCB& data);
-	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
+	void UpdatePerObjectBuffer(org::BufferView*, PerObjectCB& data);
+	void UpdateNormalMatrixBuffer(org::BufferView* view, void* data);
 	void PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames);
 	std::uint64_t MakeDeferredRetireFrame() const;
-	std::vector<ActiveDrawSetCompactionPublishResult> PublishActiveDrawSetCompactionResults(std::size_t maxResults = 1);
 	std::vector<ActiveDrawSetDebugStats> SnapshotActiveDrawSetDebugStats() const;
 
 	org::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
@@ -456,18 +555,16 @@ public:
 	org::runtime::BulkWriteHandle BeginNormalMatrixBulkWrite();
 	void EndNormalMatrixBulkWrite(size_t dirtyOffset, size_t dirtySize);
 
-	std::shared_ptr<DynamicBuffer>& GetPerObjectBuffers() {
+	std::shared_ptr<org::DynamicBuffer>& GetPerObjectBuffers() {
 		return m_perObjectBuffers;
 	}
 
-	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>>& GetDrawRecordVisibilityGenerationBuffer() {
-		return m_drawRecordVisibilityGenerationSidecar;
-	}
-
 	std::uint64_t GetResidentInstanceDrawRecordCount() const {
-		return m_instanceDrawRecordBuffers
-			? m_instanceDrawRecordBuffers->GetBufferSize() / sizeof(InstanceDrawRecordCB)
-			: 0u;
+		// The graph-owned visibility-generation table has exactly one logical row per allocated
+		// draw-record index. Use that logical extent for immutable active-list
+		// validation; backing capacity can temporarily lag while an asynchronous grow
+		// is awaiting publication.
+		return m_drawRecordVisibilityGenerations.size();
 	}
 	std::uint64_t GetResidentInstanceTransformCount() const {
 		return m_perInstanceTransformBuffers
@@ -481,12 +578,41 @@ public:
 	std::shared_ptr<SortedUnsignedIntBuffer>& GetActiveSkinnedAssemblyPlacements() { return m_activeSkinnedAssemblyPlacements; }
 	std::span<const SkinnedAssemblyPlacementGPU> GetSkinnedAssemblyPlacementCPU() const { return m_skinnedAssemblyPlacementCPU; }
 
-	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-	std::vector<ResourceIdentifier> GetSupportedKeys() override;
+	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+	std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
+		std::shared_ptr<org::runtime::IUploadService> uploads, std::uint32_t framesInFlight);
+	using DesiredBufferStateReadyCallback = std::function<void()>;
+	void SetDesiredBufferStateReadyCallback(DesiredBufferStateReadyCallback callback);
+	std::uint64_t PublishDesiredBufferState();
+	void AcknowledgePublishedBufferState(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published);
+	// Called for every committed manifest: its Geometry root is what frames now
+	// draw with, so its coverage releases draw-records roots waiting on it.
+	// Posts suspension notifications only; never waits on the state graph.
+	void ObserveResidentGeometry(const br::render::PublishedRendererState& committed);
+	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
+	// Owner-thread entry: seals nothing itself, it schedules PublishDesiredBufferState
+	// on a worker so the renderer thread never enters the state-graph mutex.
+	void ScheduleDesiredBufferStatePublish();
+	br::render::ArtifactVersionHandle DesiredBufferStateHandle() const;
+	DesiredObjectBufferStateCut DesiredBufferStateCut() const;
+	// Static draw records name mesh-template and CLod rows that shaders resolve
+	// through the published Geometry root. Each static transaction records the
+	// geometry mutation sequence current at commit (its templates were accepted
+	// earlier), and every draw-records root carries a minimum publication
+	// dependency on a Geometry root covering that sequence.
+	void SetGeometryCoverageSource(std::function<std::uint64_t()> source);
+	[[nodiscard]] std::uint64_t RequiredGeometryCoverage() const noexcept {
+		return m_requiredGeometryCoveragePublished.load(std::memory_order_acquire);
+	}
 	std::shared_ptr<SortedUnsignedIntBuffer> TryGetActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
 		auto it = m_activeDrawSetIndices.find(workloadKey);
 		return it != m_activeDrawSetIndices.end() ? it->second : nullptr;
 	}
+	void SetActiveDrawSetMutationCallback(ActiveDrawSetMutationCallback callback);
 	std::shared_ptr<SortedUnsignedIntBuffer> GetActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
 		auto buffer = TryGetActiveDrawSetIndices(workloadKey);
 		if (!buffer) {
@@ -502,12 +628,42 @@ public:
 
 private:
 	void PublishSkinnedAssemblyPlacements(MaterializedStaticImportTransaction& transaction);
+	void PublishSkinnedPlacementSourceVersionLocked();
 	std::uint32_t AllocateSkinnedAssemblyPlacement(SkinnedAssemblyPlacementGPU placement);
 	void FreeSkinnedAssemblyPlacement(std::uint32_t placementIndex);
 	ObjectManager();
+	struct GraphBufferBinding {
+		org::ResourceIdentifier identifier;
+		std::shared_ptr<org::DynamicBuffer> buffer;
+		br::render::ArtifactKey key;
+		std::uint64_t catalogVariant = 0;
+		std::uint32_t elementStride = 0;
+		br::render::ArtifactVersionID submittedVersion{};
+		br::render::ArtifactVersionHandle submittedHandle{};
+		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
+	};
+
+	// Immutable producer cut handed from the ordered object-journal writer to
+	// the graph submitter. Capturing happens once at the end of a mutation
+	// transaction; graph submission never reaches back into mutable buffers.
+	struct ObjectBufferSnapshotCut {
+		std::vector<br::render::VersionedGpuBufferJournal::Capture> buffers;
+		br::render::VersionedGpuBufferJournal::Capture visibility;
+		br::render::VersionedGpuBufferJournal::Capture skinnedPlacements;
+		br::render::VersionedGpuBufferJournal::Capture activeSkinnedPlacements;
+		std::uint32_t residentTransformCount = 0;
+		std::shared_ptr<const std::vector<SkinnedAssemblyPlacementGPU>> placementRecords;
+		std::shared_ptr<const std::vector<br::render::PublishedActiveSkinnedPlacement>> activePlacementEntries;
+		std::uint64_t fingerprint = 0;
+		std::uint64_t coveredMutationGeneration = 0;
+		std::uint64_t requiredGeometryCoverage = 0;
+	};
+
+	std::uint64_t SealDesiredBufferStateLocked();
+	void RecordStaticGeometryRequirementLocked();
 
 	struct DeferredBufferRangeRetire {
-		std::shared_ptr<DynamicBuffer> buffer;
+		std::shared_ptr<org::DynamicBuffer> buffer;
 		std::uint64_t offset = 0;
 		std::uint64_t size = 0;
 		std::uint64_t retireFrame = 0;
@@ -534,51 +690,104 @@ private:
 
 	void StartDeferredRetireWorker();
 	void StopDeferredRetireWorker();
-	void DeferredRetireWorkerMain();
+	void ScheduleDeferredRetireDrain();
+	void DeferredRetireDrain(const br::TaskContext& context);
 	void EnqueueDeferredBufferRangeRetire(
-		const std::shared_ptr<DynamicBuffer>& buffer,
+		const std::shared_ptr<org::DynamicBuffer>& buffer,
 		std::uint64_t offset,
 		std::uint64_t size,
 		std::uint64_t retireFrame);
 	void EnqueueDeferredBufferRangeRetires(
-		const std::shared_ptr<DynamicBuffer>& buffer,
+		const std::shared_ptr<org::DynamicBuffer>& buffer,
 		const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges,
 		std::uint64_t retireFrame);
 	void EnqueueDeferredBufferRangeRetires(std::vector<DeferredBufferRangeRetire> retires);
 	void StartActiveDrawSetCompactionWorker();
 	void StopActiveDrawSetCompactionWorker();
-	void ActiveDrawSetCompactionWorkerMain();
+	void RunActiveDrawSetCompaction(ActiveDrawSetCompactionJob job, const br::TaskContext& context);
+	void ScheduleActiveDrawSetCompactionDrain();
+	std::vector<ActiveDrawSetCompactionPublishResult> PublishActiveDrawSetCompactionResults(
+		std::size_t maxResults = 0);
 	void PumpActiveDrawSetCompactionRequests(std::size_t maxRequests);
 	void MaybeQueueActiveDrawSetCompaction(
 		const DrawWorkloadKey& workloadKey,
 		const std::shared_ptr<SortedUnsignedIntBuffer>& buffer);
 
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
-	std::shared_ptr<DynamicBuffer> m_perObjectBuffers; // Per object constant buffer
-	std::shared_ptr<DynamicBuffer> m_perInstanceTransformBuffers; // Per instance transform/object data
-	std::shared_ptr<DynamicBuffer> m_instanceDrawRecordBuffers; // Compact draw records consumed by GPU culling
-	// Absolute-index sidecar for append-only active draw entries.
-	// This is deliberately not a DynamicBuffer allocation pool: draw-record index N
-	// must always read generation[N], and backing growth replays the CPU mirror.
-	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> m_drawRecordVisibilityGenerationSidecar;
-	std::shared_ptr<DynamicBuffer> m_masterIndirectCommandsBuffer; // Indirect draw command buffer
-	std::shared_ptr<DynamicBuffer> m_normalMatrixBuffer; // Normal matrices for each object
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
+	std::shared_ptr<org::DynamicBuffer> m_perObjectBuffers; // Per object constant buffer
+	std::shared_ptr<org::DynamicBuffer> m_perInstanceTransformBuffers; // Per instance transform/object data
+	std::shared_ptr<org::DynamicBuffer> m_instanceDrawRecordBuffers; // Compact draw records consumed by GPU culling
+	std::shared_ptr<org::DynamicBuffer> m_masterIndirectCommandsBuffer; // Indirect draw command buffer
+	std::shared_ptr<org::DynamicBuffer> m_normalMatrixBuffer; // Normal matrices for each object
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
+	ActiveDrawSetMutationCallback m_activeDrawSetMutationCallback;
 	std::vector<std::uint32_t> m_drawRecordVisibilityGenerations;
 	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>> m_skinnedAssemblyPlacements;
 	std::shared_ptr<SortedUnsignedIntBuffer> m_activeSkinnedAssemblyPlacements;
+	// Stages only the changed rows of the skinned placement buffer (contiguous
+	// runs of `indices`) instead of re-uploading the whole table per publish.
+	void StageSkinnedAssemblyPlacementRows(std::vector<std::uint32_t> indices);
 	std::vector<SkinnedAssemblyPlacementGPU> m_skinnedAssemblyPlacementCPU;
 	std::vector<std::uint32_t> m_freeSkinnedAssemblyPlacementIndices;
 	std::vector<std::uint8_t> m_skinnedAssemblyPlacementFree;
+	std::shared_ptr<const std::vector<SkinnedAssemblyPlacementGPU>> m_publishedSkinnedPlacementRecords;
+	std::shared_ptr<const std::vector<br::render::PublishedActiveSkinnedPlacement>>
+		m_publishedActiveSkinnedPlacementEntries;
+	std::vector<GraphBufferBinding> m_graphBufferBindings;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<PublishedStateResourceResolver>,
+		org::ResourceIdentifier::Hasher> m_graphBufferResolvers;
+	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
+	std::shared_ptr<org::runtime::IUploadService> m_uploadService;
+	std::uint64_t m_objectBufferStateRevision = 0;
+	br::render::ArtifactVersionHandle m_objectBufferStateVersion{};
+	std::atomic<std::uint64_t> m_activeObjectBufferStateRevision{ 0 };
+	std::uint64_t m_objectBufferFingerprint = 0;
+	mutable std::mutex m_objectBufferGraphStateMutex;
+	std::atomic_bool m_objectBufferGraphDirty{ true };
+	br::TripleGenerationMailbox<ObjectBufferSnapshotCut> m_objectBufferSnapshotMailbox;
+	std::uint64_t m_objectBufferSnapshotGeneration = 0;
+	std::uint64_t m_objectBufferSubmittedSnapshotGeneration = 0;
+	std::atomic<std::uint64_t> m_objectBufferMutationGeneration{ 0 };
+	std::uint64_t m_objectBufferSubmittedMutationGeneration = 0;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
-	std::uint64_t m_nextStaticImportTransactionID = 1;
-	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
+	br::render::VersionedGpuBufferJournal m_visibilityGenerationJournal{ sizeof(std::uint32_t) };
+	br::render::ArtifactVersionID m_visibilityGenerationSubmittedVersion{};
+	br::render::ArtifactVersionHandle m_visibilityGenerationSubmittedHandle{};
+	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_visibilityGenerationBackingPool;
+	br::render::VersionedGpuBufferJournal m_skinnedPlacementJournal{ sizeof(SkinnedAssemblyPlacementGPU) };
+	br::render::VersionedGpuBufferJournal m_activeSkinnedPlacementJournal{
+		sizeof(br::render::PublishedActiveSkinnedPlacement) };
+	br::render::ArtifactVersionID m_skinnedPlacementSubmittedVersion{};
+	br::render::ArtifactVersionID m_activeSkinnedPlacementSubmittedVersion{};
+	br::render::ArtifactVersionHandle m_skinnedPlacementSubmittedHandle{};
+	br::render::ArtifactVersionHandle m_activeSkinnedPlacementSubmittedHandle{};
+	std::vector<br::render::ArtifactVersionHandle> m_objectBufferCutVersions;
+	std::shared_ptr<br::render::ResidentGeometryCoverage> m_residentGeometryCoverage;
+	br::render::ArtifactVersionHandle m_geometryCoverageGate{};
+	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_skinnedPlacementBackingPool;
+	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_activeSkinnedPlacementBackingPool;
+	std::uint32_t m_graphFramesInFlight = 1;
+	std::uint64_t m_lastBufferStatePublicationRetirementEpoch = 0;
+	mutable std::mutex m_desiredBufferStateReadyCallbackMutex;
+	DesiredBufferStateReadyCallback m_desiredBufferStateReadyCallback;
+	std::atomic<std::uint64_t> m_nextStaticImportTransactionID{ 1 };
+	// Serializes the ordered producer side of the static CPU journals,
+	// visibility generations, and active lists. Transactions issue logical
+	// coverage generations while the graph submitter captures the newest
+	// coherent cut only after its admission gates open.
+	mutable std::mutex m_staticPublicationMutationMutex;
+	std::function<std::uint64_t()> m_geometryCoverageSource;
+	std::uint64_t m_requiredGeometryCoverage = 0; // m_staticPublicationMutationMutex
+	std::atomic<std::uint64_t> m_requiredGeometryCoveragePublished{ 0 };
+	std::shared_ptr<org::LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
 	Stats m_stats{};
 	std::mutex m_deferredRetireMutex;
-	std::condition_variable m_deferredRetireCv;
 	std::deque<DeferredBufferRangeRetire> m_deferredRetireQueue;
-	std::thread m_deferredRetireWorker;
+	TaskScope m_deferredRetireScope;
+	TaskScope m_desiredPublishScope;
+	std::atomic_bool m_desiredPublishScheduled{ false };
+	std::atomic_bool m_deferredRetireDrainScheduled{ false };
 	std::atomic_bool m_deferredRetireStop{ false };
 	std::atomic<std::uint64_t> m_deferredRetireCompletedFrame{ 0 };
 	std::atomic<std::uint64_t> m_deferredRetireDelayFrames{ 4 };
@@ -589,19 +798,20 @@ private:
 	std::atomic<std::uint64_t> m_deferredRetireQueueDepth{ 0 };
 	std::atomic<std::uint64_t> m_deferredRetireWorkerUs{ 0 };
 	std::mutex m_activeDrawSetCompactionMutex;
-	std::condition_variable m_activeDrawSetCompactionCv;
 	std::deque<DrawWorkloadKey> m_activeDrawSetCompactionRequests;
 	std::deque<ActiveDrawSetCompactionJob> m_activeDrawSetCompactionJobs;
 	std::deque<ActiveDrawSetCompactionResult> m_activeDrawSetCompactionResults;
 	std::unordered_set<DrawWorkloadKey, DrawWorkloadKey::Hasher> m_activeDrawSetCompactionQueued;
-	std::thread m_activeDrawSetCompactionWorker;
+	TaskScope m_activeDrawSetCompactionScope;
 	std::atomic_bool m_activeDrawSetCompactionStop{ false };
+	std::atomic_bool m_activeDrawSetCompactionDrainScheduled{ false };
 	std::mutex m_objectUpdateMutex; // Mutex for thread safety
 	std::mutex m_normalMatrixUpdateMutex; // Mutex for thread safety
 
 	std::shared_ptr<SortedUnsignedIntBuffer> EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey, std::size_t initialCapacity = 1);
 	std::uint32_t ActivateDrawRecordCPU(std::uint32_t drawRecordIndex);
 	std::uint32_t AdvanceDrawRecordVisibilityGenerationCPU(std::uint32_t drawRecordIndex);
+	void JournalDrawRecordVisibilityRange(std::size_t first, std::size_t count);
 	std::uint32_t ActivateDrawRecord(std::uint32_t drawRecordIndex);
 	void TombstoneDrawRecord(std::uint32_t drawRecordIndex);
 	void TombstoneDrawRecords(std::span<const std::uint32_t> drawRecordIndices);

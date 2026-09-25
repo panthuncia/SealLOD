@@ -13,10 +13,12 @@
 static const uint REYES_PATCH_RASTER_GROUP_SIZE = 64u;
 static const float REYES_PATCH_RASTER_TINY_TRIANGLE_AREA_EPSILON = 1e-8f;
 
-#define REYES_PATCH_RASTER_ENABLE_NEAR_PLANE_CLIPPING 1 // TODO: Looks nicer, but might be more expensive. Maybe have a separate dispatch for these?
-
 #ifndef REYES_PATCH_RASTER_ENABLE_NEAR_PLANE_CLIPPING
 #define REYES_PATCH_RASTER_ENABLE_NEAR_PLANE_CLIPPING 0
+#endif
+
+#ifndef CLOD_REYES_PATCH_RASTER_ATLAS_DEBUG_TELEMETRY
+#define CLOD_REYES_PATCH_RASTER_ATLAS_DEBUG_TELEMETRY 0
 #endif
 
 #ifndef REYES_PATCH_RASTER_ENABLE_TINY_TRIANGLE_FALLBACK
@@ -698,6 +700,7 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         diceEntry.instanceID, assemblyTransformIndex);
     const CullingCameraInfo camera = cameras[diceEntry.viewID];
     const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
+#if CLOD_REYES_PATCH_RASTER_ATLAS_DEBUG_TELEMETRY
     const bool objectReyesAtlasDebugMaterial =
         materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT;
     if (objectReyesAtlasDebugMaterial)
@@ -726,6 +729,7 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             InterlockedAdd(telemetryBuffer[0].objectReyesAtlasDebugInvalidHeightUvSetCount, 1u);
         }
     }
+#endif
 
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
     const uint sourceTriangleIndex = diceEntry.sourcePrimitiveAndSplitConfig & 0xFFFFu;
@@ -758,6 +762,7 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             sourceUv1 = DecodeCompressedUV(sourceTriangle.y, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
             sourceUv2 = DecodeCompressedUV(sourceTriangle.z, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
         }
+#if CLOD_REYES_PATCH_RASTER_ATLAS_DEBUG_TELEMETRY
         if (objectReyesAtlasDebugMaterial && materialInfo.heightMapIndex != 0u && materialInfo.heightSamplerIndex != 0u)
         {
             Texture2D<float4> objectReyesAtlasDebugHeightTexture =
@@ -774,11 +779,39 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinHeightValueU16, objectReyesAtlasDebugHeightValueU16);
             InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxHeightValueU16, objectReyesAtlasDebugHeightValueU16);
         }
+#endif
     }
 
     const float3 domain0 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex0UV);
     const float3 domain1 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex1UV);
     const float3 domain2 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex2UV);
+
+    // Project source-triangle attributes into the patch domain once.  The old
+    // inner loop composed source barycentrics and then interpolated every
+    // attribute through the source triangle for each micro vertex.  Both
+    // operations are affine, so using these three patch-domain control values
+    // is equivalent and removes the first interpolation from every iteration.
+    const float3 patchSourcePosition0 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, domain0);
+    const float3 patchSourcePosition1 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, domain1);
+    const float3 patchSourcePosition2 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, domain2);
+    float3 patchSourceNormal0 = sourceNormal0;
+    float3 patchSourceNormal1 = sourceNormal1;
+    float3 patchSourceNormal2 = sourceNormal2;
+    float2 patchSourceUv0 = sourceUv0;
+    float2 patchSourceUv1 = sourceUv1;
+    float2 patchSourceUv2 = sourceUv2;
+    if (displacementEnabled)
+    {
+        patchSourceNormal0 = ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, domain0);
+        patchSourceNormal1 = ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, domain1);
+        patchSourceNormal2 = ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, domain2);
+        patchSourceUv0 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, domain0);
+        patchSourceUv1 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, domain1);
+        patchSourceUv2 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, domain2);
+    }
+    const float3 patchDomainBasis0 = float3(1.0f, 0.0f, 0.0f);
+    const float3 patchDomainBasis1 = float3(0.0f, 1.0f, 0.0f);
+    const float3 patchDomainBasis2 = float3(0.0f, 0.0f, 1.0f);
     const uint microTriangleCount = ReyesGetDicePatchMicroTriangleCount(tessTableConfigs, diceEntry);
     if (microTriangleCount == 0u)
     {
@@ -829,18 +862,18 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             perFrame.heightFadeEndDistance,
             objectData.model,
             patchDepth,
-            sourcePosition0,
-            sourcePosition1,
-            sourcePosition2,
-            sourceNormal0,
-            sourceNormal1,
-            sourceNormal2,
-            sourceUv0,
-            sourceUv1,
-            sourceUv2,
-            domain0,
-            domain1,
-            domain2,
+            patchSourcePosition0,
+            patchSourcePosition1,
+            patchSourcePosition2,
+            patchSourceNormal0,
+            patchSourceNormal1,
+            patchSourceNormal2,
+            patchSourceUv0,
+            patchSourceUv1,
+            patchSourceUv2,
+            patchDomainBasis0,
+            patchDomainBasis1,
+            patchDomainBasis2,
             patchBary0,
             patchBary1,
             patchBary2,
@@ -851,6 +884,7 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             patchPosition1,
             patchPosition2);
 
+#if CLOD_REYES_PATCH_RASTER_ATLAS_DEBUG_TELEMETRY
         if (objectReyesAtlasDebugMaterial && displacementEnabled && materialInfo.heightMapIndex != 0u && materialInfo.heightSamplerIndex != 0u)
         {
             Texture2D<float4> objectReyesAtlasDebugPatchHeightTexture =
@@ -898,6 +932,7 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchUvYU16, patchUv1U16.y);
             InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchUvYU16, patchUv2U16.y);
         }
+#endif
 
         const float4 clip0 = mul(float4(patchPosition0, 1.0f), modelViewProjection);
         const float4 clip1 = mul(float4(patchPosition1, 1.0f), modelViewProjection);

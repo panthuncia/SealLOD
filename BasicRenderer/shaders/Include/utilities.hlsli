@@ -394,6 +394,46 @@ float3x3 cotangent_frame_from_derivs(
     return float3x3(T * invmax, B * invmax, N);
 }
 
+float4 SampleAlphaTestMaterialTexture2DGrad(
+    uint directTextureDescriptorIndex,
+    SamplerState samplerState,
+    uint streamingTextureID,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    uint resolvedTextureDescriptorIndex = directTextureDescriptorIndex;
+    TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
+    bool hasStreamingInfo = streamingTextureID != 0u;
+    if (hasStreamingInfo)
+    {
+        streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
+        if (streamingInfo.imageDescriptorIndex != 0xffffffffu)
+        {
+            resolvedTextureDescriptorIndex = streamingInfo.imageDescriptorIndex;
+        }
+    }
+
+    Texture2D<float4> texture = ResourceDescriptorHeap[
+        NonUniformResourceIndex(resolvedTextureDescriptorIndex)];
+    if (hasStreamingInfo)
+    {
+        uint width;
+        uint height;
+        uint mipCount;
+        texture.GetDimensions(0u, width, height, mipCount);
+        const float2 texelScale = ResolveTextureStreamingTexelScale(
+            streamingInfo, width, height);
+        RecordTextureStreamingFeedback(
+            streamingInfo,
+            streamingTextureID,
+            dUVdx * texelScale,
+            dUVdy * texelScale);
+    }
+
+    return texture.SampleGrad(samplerState, uv, dUVdx, dUVdy);
+}
+
 void TestAlpha(in float2 texcoords, in uint materialDataIndex)
 {
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
@@ -406,9 +446,14 @@ void TestAlpha(in float2 texcoords, in uint materialDataIndex)
 
     if (materialFlags & MATERIAL_BASE_COLOR_TEXTURE)
     {
-        Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
         SamplerState baseColorSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
-        float4 sampledColor = baseColorTexture.SampleGrad(baseColorSamplerState, texcoords, dTexcoordsDx, dTexcoordsDy);
+        float4 sampledColor = SampleAlphaTestMaterialTexture2DGrad(
+            materialInfo.baseColorTextureIndex,
+            baseColorSamplerState,
+            materialInfo.baseColorStreamingTextureID,
+            texcoords,
+            dTexcoordsDx,
+            dTexcoordsDy);
 #if defined(PSO_ALPHA_TEST) || defined (PSO_BLEND)
         if (baseColor.a * sampledColor.a < materialInfo.alphaCutoff){
             discard;
@@ -418,9 +463,14 @@ void TestAlpha(in float2 texcoords, in uint materialDataIndex)
     
     if (materialFlags & MATERIAL_OPACITY_TEXTURE)
     {
-        Texture2D<float4> opacityTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.opacityTextureIndex)];
         SamplerState opacitySamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.opacitySamplerIndex)];
-        float4 opacitySample = opacityTexture.SampleGrad(opacitySamplerState, texcoords, dTexcoordsDx, dTexcoordsDy);
+        float4 opacitySample = SampleAlphaTestMaterialTexture2DGrad(
+            materialInfo.opacityTextureIndex,
+            opacitySamplerState,
+            materialInfo.opacityStreamingTextureID,
+            texcoords,
+            dTexcoordsDx,
+            dTexcoordsDy);
         float opacity = opacitySample.a;
         baseColor.a *= opacity;
         if (baseColor.a < materialInfo.alphaCutoff)
@@ -603,6 +653,26 @@ float4 SampleStreamingMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
+	if (streamingTextureID != 0u)
+	{
+		TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
+		if (currentBinding.imageDescriptorIndex != 0xffffffffu)
+		{
+			Texture2D<float4> currentTexture = ResourceDescriptorHeap[NonUniformResourceIndex(currentBinding.imageDescriptorIndex)];
+			uint currentWidth;
+			uint currentHeight;
+			uint currentMipCount;
+			currentTexture.GetDimensions(0u, currentWidth, currentHeight, currentMipCount);
+			const float2 currentTexelScale = ResolveTextureStreamingTexelScale(
+				currentBinding, currentWidth, currentHeight);
+			RecordTextureStreamingFeedback(currentBinding, streamingTextureID,
+				dUVdx * currentTexelScale, dUVdy * currentTexelScale);
+			if (ShouldTrackMaterialSelectedMipDebug())
+				RecordMaterialSelectedMipDebug(feedback, currentBinding, true,
+					currentWidth, currentHeight, currentMipCount, dUVdx, dUVdy);
+			return Sample2DGrad(currentTexture, samp, uv, dUVdx, dUVdy);
+		}
+	}
     uint width;
     uint height;
 	uint mipCount;
@@ -636,11 +706,12 @@ float4 SampleMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
-#if defined(PSO_TEXTURE_STREAMING)
+    // Stable texture IDs define how streamed material images are resolved;
+    // that is binding correctness, not a PSO specialization.  The direct
+    // descriptor is only the ID-zero/non-streamed fallback.  Conditioning
+    // this lookup on PSO_TEXTURE_STREAMING left otherwise valid material
+    // variants permanently sampling their bootstrap fallback descriptors.
     return SampleStreamingMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
-#else
-    return SampleResidentMaterialTexture2DGrad(tex, samp, uv, dUVdx, dUVdy, feedback);
-#endif
 }
 
 float4 SampleMaterialTexture2DGrad(
@@ -706,6 +777,26 @@ float SampleStreamingMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
+	if (streamingTextureID != 0u)
+	{
+		TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
+		if (currentBinding.imageDescriptorIndex != 0xffffffffu)
+		{
+			Texture2D<float> currentTexture = ResourceDescriptorHeap[NonUniformResourceIndex(currentBinding.imageDescriptorIndex)];
+			uint currentWidth;
+			uint currentHeight;
+			uint currentMipCount;
+			currentTexture.GetDimensions(0u, currentWidth, currentHeight, currentMipCount);
+			const float2 currentTexelScale = ResolveTextureStreamingTexelScale(
+				currentBinding, currentWidth, currentHeight);
+			RecordTextureStreamingFeedback(currentBinding, streamingTextureID,
+				dUVdx * currentTexelScale, dUVdy * currentTexelScale);
+			if (ShouldTrackMaterialSelectedMipDebug())
+				RecordMaterialSelectedMipDebug(feedback, currentBinding, true,
+					currentWidth, currentHeight, currentMipCount, dUVdx, dUVdy);
+			return Sample2DGrad(currentTexture, samp, uv, dUVdx, dUVdy);
+		}
+	}
     uint width;
     uint height;
 	uint mipCount;
@@ -739,11 +830,9 @@ float SampleMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
-#if defined(PSO_TEXTURE_STREAMING)
+    // See the float4 overload above.  Stable-ID binding must not depend on a
+    // compile-time residency specialization.
     return SampleStreamingMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
-#else
-    return SampleResidentMaterialTexture2DGrad(tex, samp, uv, dUVdx, dUVdy, feedback);
-#endif
 }
 
 float SampleMaterialTexture2DGrad(
@@ -782,24 +871,7 @@ float SampleMaterialTexture2DGradNoFeedback(
 
 float ObjectReyesSampleAtlasHeightSmooth(Texture2D<float4> tex, SamplerState samp, float2 uv)
 {
-    uint width;
-    uint height;
-	uint mipCount;
-	tex.GetDimensions(0u, width, height, mipCount);
-    const float2 texel = float2(1.0f, 1.0f) / max(float2((float)width, (float)height), float2(1.0f, 1.0f));
-    uv = saturate(uv);
-
-    float sum = 0.0f;
-    sum += tex.SampleLevel(samp, uv, 0.0f).r * 4.0f;
-    sum += tex.SampleLevel(samp, saturate(uv + float2(texel.x, 0.0f)), 0.0f).r * 2.0f;
-    sum += tex.SampleLevel(samp, saturate(uv - float2(texel.x, 0.0f)), 0.0f).r * 2.0f;
-    sum += tex.SampleLevel(samp, saturate(uv + float2(0.0f, texel.y)), 0.0f).r * 2.0f;
-    sum += tex.SampleLevel(samp, saturate(uv - float2(0.0f, texel.y)), 0.0f).r * 2.0f;
-    sum += tex.SampleLevel(samp, saturate(uv + texel), 0.0f).r;
-    sum += tex.SampleLevel(samp, saturate(uv - texel), 0.0f).r;
-    sum += tex.SampleLevel(samp, saturate(uv + float2(texel.x, -texel.y)), 0.0f).r;
-    sum += tex.SampleLevel(samp, saturate(uv + float2(-texel.x, texel.y)), 0.0f).r;
-    return sum * (1.0f / 16.0f);
+    return tex.SampleLevel(samp, saturate(uv), 0.0f).r;
 }
 
 float ObjectSurfaceHash21(float2 p)
@@ -1057,7 +1129,25 @@ float4 ObjectSurfaceSampleTriplanar4(
     ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
     ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
     ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
-    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+    if (streamingTextureID != 0u)
+    {
+        TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
+        if (currentBinding.imageDescriptorIndex != 0xffffffffu)
+        {
+            Texture2D<float4> currentTexture = ResourceDescriptorHeap[NonUniformResourceIndex(currentBinding.imageDescriptorIndex)];
+            RecordObjectSurfaceTriplanarTextureAccess(currentTexture, streamingTextureID,
+                xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+            float4 currentResult = ObjectSurfaceSampleStochastic4NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
+            currentResult += ObjectSurfaceSampleStochastic4NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
+            currentResult += ObjectSurfaceSampleStochastic4NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
+            return currentResult;
+        }
+    }
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID,
+        xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
     float4 result = ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
     result += ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
     result += ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
@@ -1088,7 +1178,25 @@ float ObjectSurfaceSampleTriplanarHeight(
     ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
     ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
     ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
-    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+    if (streamingTextureID != 0u)
+    {
+        TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
+        if (currentBinding.imageDescriptorIndex != 0xffffffffu)
+        {
+            Texture2D<float> currentTexture = ResourceDescriptorHeap[NonUniformResourceIndex(currentBinding.imageDescriptorIndex)];
+            RecordObjectSurfaceTriplanarTextureAccess(currentTexture, streamingTextureID,
+                xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
+            float currentResult = ObjectSurfaceSampleStochastic1NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
+            currentResult += ObjectSurfaceSampleStochastic1NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
+            currentResult += ObjectSurfaceSampleStochastic1NoFeedback(
+                currentTexture, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
+            return currentResult;
+        }
+    }
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID,
+        xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, feedback);
     float result = ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)) * weights.x;
     result += ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)) * weights.y;
     result += ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)) * weights.z;
@@ -2971,16 +3079,21 @@ void SampleMaterialFromUvCache(
         ret);
 #endif
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
-    ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
-        uvCache,
-        uvBindings,
-        materialInfo,
-        materialFlags,
-        hasParallaxResolvedUv,
-        parallaxUv,
-        parallaxDUdx,
-        parallaxDUdy,
-        ret);
+    ConstantBuffer<PerFrameBuffer> debugPerFrameBuffer =
+        ResourceDescriptorHeap[0];
+    if (debugPerFrameBuffer.outputType == OUTPUT_TERRAIN_GEOMETRIC_HEIGHT)
+    {
+        ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
+            uvCache,
+            uvBindings,
+            materialInfo,
+            materialFlags,
+            hasParallaxResolvedUv,
+            parallaxUv,
+            parallaxDUdx,
+            parallaxDUdy,
+            ret);
+    }
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
@@ -3008,16 +3121,37 @@ void SampleMaterialEvalFromUvCache(
 #if defined(PSO_PARALLAX)
     if (uvBindings.hasHeightSource && uvBindings.hasTbnSource)
     {
-        const float3x3 parallaxTBN = BuildMaterialTBN(uvCache, uvBindings, normalWSBase, dpdx, dpdy);
-        const MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
         ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
-        StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-        Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
-
-        float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS.xyz);
-
         if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
         {
+            StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+            const float3 cameraDelta =
+                cameras[perFrameBuffer.mainCameraIndex].positionWorldSpace.xyz -
+                posWS;
+            const float fadeStart = max(perFrameBuffer.heightFadeStartDistance, 0.0f);
+            const float fadeEnd = max(perFrameBuffer.heightFadeEndDistance, 0.0f);
+            const float distanceSquared = dot(cameraDelta, cameraDelta);
+            const bool usesDistanceFade = fadeEnd > fadeStart;
+            const bool insideParallaxRange =
+                !usesDistanceFade || distanceSquared < fadeEnd * fadeEnd;
+            if (insideParallaxRange)
+            {
+            const float viewDistance = sqrt(max(distanceSquared, 1.0e-10f));
+            const float parallaxFade = usesDistanceFade
+                ? 1.0f - smoothstep(fadeStart, fadeEnd, viewDistance)
+                : 1.0f;
+            const float3 viewDir = cameraDelta / viewDistance;
+            const float3x3 parallaxTBN = BuildMaterialTBN(
+                uvCache, uvBindings, normalWSBase, dpdx, dpdy);
+            const MaterialUvSample heightUv = GetBoundUvSample(
+                uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
+            const float parallaxHeightScale =
+                materialInfo.heightMapScale *
+                perFrameBuffer.objectParallaxHeightScale *
+                parallaxFade;
+            const uint parallaxStepCount = max(
+                4u,
+                (uint)ceil(16.0f * parallaxFade));
             float3 uvh;
             if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
             {
@@ -3030,8 +3164,8 @@ void SampleMaterialEvalFromUvCache(
                     parallaxTBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
-                    16u,
+                    parallaxHeightScale,
+                    parallaxStepCount,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
             }
@@ -3045,8 +3179,8 @@ void SampleMaterialEvalFromUvCache(
                     parallaxTBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
-                    16u,
+                    parallaxHeightScale,
+                    parallaxStepCount,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
             }
@@ -3056,6 +3190,7 @@ void SampleMaterialEvalFromUvCache(
             parallaxDUdy = heightUv.dUVdy;
             hasParallaxResolvedUv = true;
             ret.parallaxApplied = 1u;
+            }
         }
     }
 #endif

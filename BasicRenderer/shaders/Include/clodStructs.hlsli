@@ -41,7 +41,9 @@ struct CLodMeshMetadata
     uint nodeBoneIndexBase;
     uint nodeBoneIndexCount;
     uint nodeBoneLimit;
-    uint3 padNodeSkinning;
+    uint meshIdentityLo;
+    uint meshIdentityHi;
+    uint meshIdentityClass;
 };
 
 struct ClusterLODNodeSkinningInfo
@@ -236,6 +238,8 @@ struct GroupPageMapEntry
 {
     uint slabDescriptorIndex; // Descriptor-heap index of the slab BAB
     uint slabByteOffset;      // Byte offset of page start in slab
+    uint ownerMeshMetadataIndex;
+    uint ownerPageMapBase;
 };
 
 struct CLodStreamingRequest

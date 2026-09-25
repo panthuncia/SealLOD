@@ -1,22 +1,37 @@
 #pragma once
 
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Render/RenderContext.h"
 #include "Menu/Menu.h"
 
-class MenuRenderPass : public RenderPass {
+struct MenuFrameData {
+	std::shared_ptr<const PreparedImGuiDrawData> drawData;
+	org::PreparedDescriptorReference target{};
+	DirectX::XMUINT2 outputResolution{};
+};
+
+struct MenuBindings { org::ResourceBindingToken target; };
+
+class MenuRenderPass final : public org::TypedRenderGraphPass<MenuRenderPass, MenuFrameData, MenuBindings> {
 public:
-	void DeclareResourceUsages(RenderPassBuilder* builder) override {
-		builder->WithRenderTarget(Builtin::Backbuffer);
+	MenuBindings Declare(org::PassBuilder& builder) {
+		return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
 	}
 
-	void Setup() override {}
-
-	PassReturn Execute(PassExecutionContext& executionContext) override {
-		auto* renderContext = executionContext.hostData->Get<RenderContext>();
-		Menu::GetInstance().Render(*renderContext, executionContext.commandList);
-		return {};
+	MenuFrameData Prepare(const MenuBindings& bindings, const org::PassPrepareContext& preparation) const {
+		const auto* context = preparation.preparationData
+			? preparation.preparationData->Get<RenderContext>() : nullptr;
+		if (!context) return {};
+		return {
+			.drawData = context->uiDrawData,
+			.target = preparation.CaptureView(bindings.target,
+				{org::BindlessViewKind::RenderTarget}),
+			.outputResolution = context->outputResolution,
+		};
 	}
 
-	void Cleanup() override {}
+	static void Record(const MenuBindings&, const MenuFrameData& data, org::PassRecordContext& recording) {
+		if (data.drawData) Menu::RecordPreparedDrawData(
+			*data.drawData, recording.Commands(), recording.Resolve(data.target), data.outputResolution);
+	}
 };

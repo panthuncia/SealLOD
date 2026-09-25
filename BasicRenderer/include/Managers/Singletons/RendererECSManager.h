@@ -32,6 +32,7 @@ public:
     const std::unordered_map<RenderPhase, flecs::entity, RenderPhase::Hasher>& GetRenderPhaseEntities() const;
 
 private:
+	void RequireMainThread(const char* operation) const;
     std::unique_ptr<flecs::world> m_world;
     br::ecs::EcsEntityPool m_entityPool;
     std::unordered_map<RenderPhase, flecs::entity, RenderPhase::Hasher> m_renderPhaseEntities;

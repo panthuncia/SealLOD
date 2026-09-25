@@ -16,7 +16,6 @@
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Resources/Buffers/BufferView.h"
 #include "Resources/GPUBacking/GpuBufferBacking.h"
-#include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 
 
@@ -287,6 +286,11 @@ public:
         return m_capacity;
     }
 
+    std::vector<std::byte> CaptureCpuShadowBytes() const {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+        return m_cpuShadowData;
+    }
+
 	size_t GetElementSize() const override {
 		return m_elementSize;
 	}
@@ -335,6 +339,7 @@ public:
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
+            *RetainBufferUploadService(),
             org::runtime::UploadTarget::FromShared(shared_from_this()),
             [this](size_t offset, size_t size) -> const void* {
                 if (offset + size > m_cpuShadowData.size()) {
@@ -530,8 +535,8 @@ private:
                 // Lazy buffers own an explicit CPU shadow. Re-upload preserved
                 // bytes from that shadow after backing replacement so sparse and
                 // bulk-written data survives buffer growth.
-                if (org::runtime::GetActiveUploadService() != nullptr) {
-                    BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, org::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+                if (RetainUploadService() != nullptr) {
+                    UploadBufferData(m_cpuShadowData.data(), replayBytes, org::runtime::UploadTarget::FromShared(shared_from_this()), 0u, __FILE__, __LINE__);
                 } else {
                     StageOrUploadLocked(m_cpuShadowData.data(), replayBytes, 0u);
                     if (m_uploadPolicyState.HasPendingWork()) {
@@ -573,6 +578,7 @@ private:
             return;
         }
 
+        EnsureUploadPolicyRegistration();
         if (org::runtime::GetActiveUploadPolicyService() == nullptr) {
             SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
@@ -580,7 +586,7 @@ private:
 #else
             m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize());
 #endif
-            BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+            UploadBufferData(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset, __FILE__, __LINE__);
             return;
         }
 
@@ -597,7 +603,7 @@ private:
             return;
         }
 
-        BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+        UploadBufferData(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset, __FILE__, __LINE__);
     }
 
     void EnsureCpuShadowSize(size_t size) {
@@ -629,5 +635,3 @@ private:
 
 } // namespace org
 
-using org::LazyDynamicStructuredBuffer;
-using org::LazyDynamicStructuredBufferBase;

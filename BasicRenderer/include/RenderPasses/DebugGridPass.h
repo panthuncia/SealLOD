@@ -4,14 +4,15 @@
 #include <cstring>   // memcpy
 #include <stdexcept>
 
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
 #include "../shaders/PerPassRootConstants/debugGridRootConstants.h"
 
 // Uses MiscUintRootSignatureIndex / UintRootConstantN in HLSL.
 
-class DebugGridPass final : public ComputePass
+class DebugGridPass final : public org::TypedRenderGraphPass<DebugGridPass, br::render::PreparedComputeDispatch>
 {
 public:
     struct Params
@@ -49,69 +50,49 @@ public:
         CreatePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override
-    {
+    void Declare(org::PassBuilder& declaration) {
+        declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        auto* builder = &declaration;
         builder
             ->WithShaderResource(Builtin::CameraBuffer,
-                Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
+                Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }))
             // Needs UAV, since compute will read-modify-write (manual blend)
             .WithUnorderedAccess(Builtin::Color::HDRColorTarget);
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
     }
 
-    void Setup() override
-    {
-        // Removed redundant Register calls now covered by declared-resource auto descriptor registration
+    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+
+        const auto& context = *preparation.preparationData->Get<UpdateContext>();
+        br::render::PreparedComputeDispatch data{};
+        data.resourceHeap = context.textureDescriptorHeap.GetHandle();
+        data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
+        auto program = preparation.CaptureProgramBinding(m_pso);
+        data.program = program.program;
+        data.descriptorIndices = std::move(program.descriptorIndices);
+        data.constants[RC_PlaneY] = PackFloat(m_params.planeY);
+        data.constants[RC_MinorCellSize] = PackFloat(m_params.minorCellSize);
+        data.constants[RC_MajorCellSize] = PackFloat(m_params.majorCellSize);
+        data.constants[RC_MinorLineWidth] = PackFloat(m_params.minorLineWidth);
+        data.constants[RC_MajorLineWidth] = PackFloat(m_params.majorLineWidth);
+        data.constants[RC_AxisHalfWidthWorld] = PackFloat(m_params.axisHalfWidthWorld);
+        data.constants[RC_MinorOpacity] = PackFloat(m_params.minorOpacity);
+        data.constants[RC_MajorOpacity] = PackFloat(m_params.majorOpacity);
+        data.constants[RC_AxisOpacity] = PackFloat(m_params.axisOpacity);
+        data.constants[RC_OverallOpacity] = PackFloat(m_params.overallOpacity);
+        data.groupsX = (context.renderResolution.x + 7u) / 8u;
+        data.groupsY = (context.renderResolution.y + 7u) / 8u;
+        return data;
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
-        auto& psoManager = PSOManager::GetInstance();
-        auto& cmd = executionContext.commandList;
-
-        cmd.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(),
-            context.samplerDescriptorHeap.GetHandle());
-
-        cmd.BindLayout(psoManager.GetComputeRootSignature().GetHandle());
-        cmd.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-
-        BindResourceDescriptorIndices(cmd, m_pso.GetResourceDescriptorSlots());
-
-        // Root constants (packed as uint32; shader reads them via asfloat()).
-        uint32_t rc[NumMiscUintRootConstants] = {};
-        rc[RC_PlaneY] = PackFloat(m_params.planeY);
-        rc[RC_MinorCellSize] = PackFloat(m_params.minorCellSize);
-        rc[RC_MajorCellSize] = PackFloat(m_params.majorCellSize);
-        rc[RC_MinorLineWidth] = PackFloat(m_params.minorLineWidth);
-        rc[RC_MajorLineWidth] = PackFloat(m_params.majorLineWidth);
-        rc[RC_AxisHalfWidthWorld] = PackFloat(m_params.axisHalfWidthWorld);
-        rc[RC_MinorOpacity] = PackFloat(m_params.minorOpacity);
-        rc[RC_MajorOpacity] = PackFloat(m_params.majorOpacity);
-        rc[RC_AxisOpacity] = PackFloat(m_params.axisOpacity);
-        rc[RC_OverallOpacity] = PackFloat(m_params.overallOpacity);
-
-        cmd.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rc);
-
-        uint32_t w = context.renderResolution.x;
-        uint32_t h = context.renderResolution.y;
-
-        constexpr uint32_t groupSizeX = 8;
-        constexpr uint32_t groupSizeY = 8;
-        const uint32_t groupsX = (w + groupSizeX - 1) / groupSizeX;
-        const uint32_t groupsY = (h + groupSizeY - 1) / groupSizeY;
-
-        cmd.Dispatch(groupsX, groupsY, 1);
-        return {};
+    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+        br::render::RecordPreparedComputeDispatch(data, recording);
     }
 
-    void Cleanup() override {}
-
-    Params& GetParams() { return m_params; }
     const Params& GetParams() const { return m_params; }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
     Params m_params;
 

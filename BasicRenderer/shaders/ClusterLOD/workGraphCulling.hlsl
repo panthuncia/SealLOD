@@ -2104,6 +2104,7 @@ struct ObjectCullRecord
     uint activeDrawSetIndicesSRVIndex; // One record per draw set
     uint activeDrawCount;
     uint drawRecordVisibilityGenerationSRVIndex;
+    uint drawRecordVisibilityGenerationCount;
     uint3 dispatchGrid : SV_DispatchGrid; // Drives dispatch size
 };
 
@@ -3034,7 +3035,10 @@ void WG_ObjectCull(
         const uint2 activeEntry = activeDrawSetIndicesBuffer[vDispatchThreadID.x];
         drawRecordIndex = activeEntry.x;
         const uint activeGeneration = activeEntry.y;
-        if (activeGeneration == 0u || drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
+        // Active lists may name records newer than this generation version; rows
+        // past its count belong to another version and must not be compared.
+        if (activeGeneration == 0u || drawRecordIndex >= hdr.drawRecordVisibilityGenerationCount ||
+            drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_STALE_GENERATION, 1);
             entryVisible = false;
         }
@@ -6084,6 +6088,8 @@ void WG_ReyesDice(
     }
     diceQueueIndex = WaveReadLaneFirst(diceQueueIndex);
     const bool validDice = diceQueueIndex < CLOD_WG_REYES_DICE_QUEUE_CAPACITY && microTriangleCount != 0u;
+    if (GI == 0u && validDice) {
+    }
     GroupNodeOutputRecords<ReyesRasterBatchRecord> rasterOut =
         rasterOutput.GetGroupNodeOutputRecords(validDice ? rasterBatchCount : 0u);
     for (uint batchIndex = GI; batchIndex < rasterBatchCount && validDice; batchIndex += REYES_WG_DICE_THREADS) {
@@ -6115,6 +6121,8 @@ void WG_ReyesRaster(
     ReyesRasterBatchRecord rec = inputRecord.Get();
     if (GI >= rec.microTriangleCount) {
         return;
+    }
+    if (GI == 0u) {
     }
 
     StructuredBuffer<CLodReyesTessTableConfigEntry> tessTableConfigs = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX];

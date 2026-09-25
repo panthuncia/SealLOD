@@ -174,8 +174,11 @@ target_link_libraries(CLodCacheTool PRIVATE
 target_include_directories(CLodCacheTool PRIVATE ${DIRECTX_HEADERS_INCLUDE_DIR})
 
 # OpenUSD headers
-get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-set(BASICRENDERER_USD_ROOT_TOOL "${REPO_ROOT}/ThirdParty" CACHE PATH "")
+get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+# This target lives at BasicRenderer/CLodCacheTool, so its repository root is
+# two parents up. The previous one-parent calculation pointed to a
+# non-existent BasicRenderer/ThirdParty directory after a fresh checkout.
+set(BASICRENDERER_USD_ROOT_TOOL "${REPO_ROOT}/ThirdParty" CACHE PATH "" FORCE)
 target_include_directories(CLodCacheTool BEFORE PRIVATE
     "${BASICRENDERER_USD_ROOT_TOOL}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>/include/"
 )

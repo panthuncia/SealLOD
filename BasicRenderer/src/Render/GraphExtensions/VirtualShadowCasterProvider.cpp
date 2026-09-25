@@ -54,7 +54,7 @@ uint64_t VirtualShadowInvalidationQueue::GetOverflowCount() const
 }
 
 VirtualShadowPassBuilder::VirtualShadowPassBuilder(
-    std::vector<RenderGraph::ExternalPassDesc>& passes,
+    std::vector<org::RenderGraph::ExternalPassDesc>& passes,
     std::string afterPass,
     std::string beforePass)
     : m_passes(passes)
@@ -62,12 +62,12 @@ VirtualShadowPassBuilder::VirtualShadowPassBuilder(
     , m_beforePass(std::move(beforePass))
 {}
 
-void VirtualShadowPassBuilder::Add(RenderGraph::ExternalPassDesc pass)
+void VirtualShadowPassBuilder::Add(org::RenderGraph::ExternalPassDesc pass)
 {
     if (pass.name.empty()) {
         throw std::invalid_argument("Virtual shadow caster pass must have a stable name");
     }
-    auto insertion = RenderGraph::ExternalInsertPoint::After(m_lastPass);
+    auto insertion = org::RenderGraph::ExternalInsertPoint::After(m_lastPass);
     if (!m_beforePass.empty()) {
         insertion.AlsoBefore(m_beforePass);
     }

@@ -1,6 +1,7 @@
 #pragma once
 
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedFullscreenDraw.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
@@ -9,64 +10,56 @@
 #include "../shaders/PerPassRootConstants/bloomBlendRootConstants.h"
 #include "Resources/PixelBuffer.h"
 
-class BloomBlendPass : public RenderPass {
+struct BloomBlendBindings {
+    org::ResourceBindingToken bloom;
+    org::ResourceBindingToken target;
+};
+
+class BloomBlendPass : public org::TypedRenderGraphPass<BloomBlendPass,
+    br::render::PreparedFullscreenDraw, BloomBlendBindings> {
 public:
 
     BloomBlendPass() {
         CreatePSO();
     }
 
-    void DeclareResourceUsages(RenderPassBuilder* builder) override {
-        builder->WithShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ 1, 2 }))
-            .WithRenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ 0, 1 }));
+    BloomBlendBindings Declare(org::PassBuilder& builder) {
+        return {
+            builder.BindShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ 1, 2 })),
+            builder.BindRenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 }))
+        };
     }
 
-    void Setup() override {
-        m_pHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PostProcessing::UpscaledHDR);
-        m_pBloomTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PostProcessing::BloomTexture);
+    br::render::PreparedFullscreenDraw Prepare(const BloomBlendBindings& bindings,
+        const org::PassPrepareContext& preparation) const {
+        const auto* context = preparation.preparationData->Get<UpdateContext>();
+        br::render::PreparedFullscreenDraw data{};
+        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
+        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+        data.renderTargetReference = preparation.CaptureView(bindings.target,
+            {org::BindlessViewKind::RenderTarget});
+        const auto& targetDesc = preparation.Describe(bindings.target);
+        data.width = targetDesc.texture.width;
+        data.height = targetDesc.texture.height;
+        data.constantStage = rhi::ShaderStage::AllGraphics;
+        br::render::BindPreparedProgram(data, preparation, m_pso);
+        data.constants[BLOOM_LOW_SOURCE_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.bloom,
+            {org::BindlessViewKind::ShaderResource, UINT32_MAX, 2}).index;
+        data.constants[BLOOM_SOURCE_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.bloom,
+            {org::BindlessViewKind::ShaderResource, UINT32_MAX, 1}).index;
+        data.constants[DST_WIDTH] = data.width;
+        data.constants[DST_HEIGHT] = data.height;
+        data.constants[BLOOM_BLEND_FILTER_RADIUS] = as_uint(0.001f);
+        data.constants[BLOOM_BLEND_ASPECT_RATIO] = as_uint(data.width / static_cast<float>(data.height));
+        return data;
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
-        auto& psoManager = PSOManager::GetInstance();
-        auto& commandList = executionContext.commandList;
-
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-
-		rhi::PassBeginInfo passInfo{};
-		rhi::ColorAttachment colorAttachment{};
-		colorAttachment.rtv = m_pHDRTarget->GetRTVInfo(0).slot;
-		colorAttachment.loadOp = rhi::LoadOp::Load;
-		colorAttachment.mipSlice = 0;
-		colorAttachment.storeOp = rhi::StoreOp::Store;
-		colorAttachment.resource = m_pHDRTarget->GetAPIResource().GetHandle();
-		passInfo.colors = { &colorAttachment };
-		passInfo.height = m_pHDRTarget->GetHeight();
-		passInfo.width = m_pHDRTarget->GetWidth();
-		commandList.BeginPass(passInfo);
-
-        commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleStrip);
-
-		commandList.BindLayout(psoManager.GetRootSignature().GetHandle());
-		commandList.BindPipeline(m_pso->GetHandle());
-
-        BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
-
-        unsigned int misc[NumMiscUintRootConstants] = {};
-		misc[BLOOM_LOW_SOURCE_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(2).slot.index;
-		misc[BLOOM_SOURCE_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(1).slot.index; // Bloom texture index
-        misc[DST_WIDTH] = m_pHDRTarget->GetWidth();
-        misc[DST_HEIGHT] = m_pHDRTarget->GetHeight();
-        misc[BLOOM_BLEND_FILTER_RADIUS] = as_uint(0.001f); // Kernel size
-        misc[BLOOM_BLEND_ASPECT_RATIO] = as_uint(misc[DST_WIDTH] / static_cast<float>(misc[DST_HEIGHT]));
-		commandList.PushConstants(rhi::ShaderStage::AllGraphics, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, misc);
-
-        commandList.Draw(3, 1, 0, 0); // Fullscreen triangle
-        return {};
+    static void Record(const BloomBlendBindings&, const br::render::PreparedFullscreenDraw& data,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedFullscreenDraw(data, recording);
     }
 
-    void Cleanup() override {
+    void ShutdownPass() {
         // Cleanup the render pass
     }
 
@@ -75,12 +68,7 @@ private:
     unsigned int m_mipIndex;
     bool m_isUpsample = false;
 
-    rhi::PipelinePtr m_pso;
-
-	PixelBuffer* m_pHDRTarget;
-	PixelBuffer* m_pBloomTarget;
-
-	PipelineResources m_resourceDescriptorBindings;
+    org::PipelineState m_pso;
 
     void CreatePSO() {
         auto dev = DeviceManager::GetInstance().GetDevice();
@@ -91,7 +79,6 @@ private:
         sib.pixelShader = { L"shaders/PostProcessing/bloomBlend.hlsl", L"blend", L"ps_6_6" };
 
         auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-        m_resourceDescriptorBindings = compiled.resourceDescriptorSlots;
 
         auto& layout = PSOManager::GetInstance().GetRootSignature(); // rhi::PipelineLayout&
         rhi::SubobjLayout soLayout{ layout.GetHandle() };
@@ -140,10 +127,14 @@ private:
         };
 
         // 3) Create PSO
-        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), m_pso);
+        rhi::PipelinePtr pipeline;
+        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
         if (Failed(result)) {
             throw std::runtime_error("Failed to create upsample PSO (RHI)");
         }
-        m_pso->SetName("BloomBlend (RHI)");
+        pipeline->SetName("BloomBlend (RHI)");
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+            compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
+            soLayout.layout);
     }
 };

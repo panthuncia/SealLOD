@@ -5,12 +5,13 @@
 
 #include <spdlog/spdlog.h>
 
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
 #include "Scene/Scene.h"
 #include "Materials/colorspaces.h"
+#include "RenderPasses/PreparedFullscreenDraw.h"
 
 #include "../shaders/FidelityFX/ffx_a.h"
 A_STATIC AF1 fs2S;
@@ -24,116 +25,99 @@ A_STATIC void LpmSetupOut(AU1 i, inAU4 v)
 #include "../shaders/FidelityFX/ffx_lpm.h"
 #include "../shaders/PerPassRootConstants/tonemapRootConstants.h"
 
-class TonemappingPass : public RenderPass {
+struct TonemappingBindings {
+    org::ResourceBindingToken lpm, bloom, target;
+};
+
+class TonemappingPass : public org::TypedRenderGraphPass<
+    TonemappingPass, br::render::PreparedFullscreenDraw, TonemappingBindings> {
 public:
 	explicit TonemappingPass(bool bloomEnabled = false)
         : m_bloomEnabled(bloomEnabled) {
 		CreatePSO();
-		getTonemapType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("tonemapType");
-        m_pLPMConstants = LazyDynamicStructuredBuffer<LPMConstants>::CreateShared(1, "AMD LPM constants", 1, true);
+        m_pLPMConstants = org::LazyDynamicStructuredBuffer<LPMConstants>::CreateShared(1, "AMD LPM constants", 1, true);
 	}
 
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override {
+    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override {
         if (key == m_providedResources[0]) {
 			return m_pLPMConstants;
         }
 		return nullptr;
     }
-    std::vector<ResourceIdentifier> GetSupportedKeys() override {
+    std::vector<org::ResourceIdentifier> GetSupportedKeys() override {
 		return m_providedResources;
     }
 
-    void DeclareResourceUsages(RenderPassBuilder* builder) override {
-        builder->WithShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer, "FFX::LPMConstants")
-            .WithRenderTarget(Builtin::Backbuffer);
+    TonemappingBindings Declare(org::PassBuilder& builder) {
+        builder.WithShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer);
+        TonemappingBindings bindings{};
+        bindings.target = builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor});
+        bindings.lpm = builder.BindShaderResource(m_pLPMConstants);
         if (m_bloomEnabled) {
-            builder->WithShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ 1, 2 }));
+            bindings.bloom = builder.BindShaderResource(
+                Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ 1, 2 }));
         }
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+        return bindings;
     }
 
-	void Setup() override {
-        if (m_bloomEnabled) {
-            m_pBloomTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(
-                Builtin::PostProcessing::BloomTexture);
-        }
-
+	void Initialize() {
         LPMConstants lpmConstants = {};
-        
+
         lpmConstants.shoulder = true;
         lpmConstants.con = false;
         lpmConstants.soft = false;
         lpmConstants.con2 = false;
         lpmConstants.clip = true;
         lpmConstants.scaleOnly = false;
-        
+
         // Rest will be filled in by the luminanceHistogramAverage shader
 
-        BUFFER_UPLOAD(&lpmConstants, sizeof(LPMConstants), org::runtime::UploadTarget::FromShared(m_pLPMConstants), 0);
+        UploadBufferData(&lpmConstants, sizeof(LPMConstants),
+            org::runtime::UploadTarget::FromShared(m_pLPMConstants), 0);
     }
 
-	PassReturn Execute(PassExecutionContext& executionContext) override {
-		auto* renderContext = executionContext.hostData->Get<RenderContext>();
-		auto& context = *renderContext;
-		auto& psoManager = PSOManager::GetInstance();
-		auto& commandList = executionContext.commandList;
+	br::render::PreparedFullscreenDraw Prepare(const TonemappingBindings& bindings,
+        const org::PassPrepareContext& preparation) const {
+		const auto* context = preparation.preparationData->Get<UpdateContext>();
+		br::render::PreparedFullscreenDraw data{};
+		data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+		data.targetResource = preparation.CaptureResource(bindings.target);
+		data.renderTargetReference = preparation.CaptureView(
+			bindings.target, {org::BindlessViewKind::RenderTarget});
+		data.loadOp = rhi::LoadOp::Clear;
+		data.clear.rgba[3] = 1.0f; data.width = context->outputResolution.x; data.height = context->outputResolution.y;
 
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-
-		rhi::PassBeginInfo passInfo{};
-		rhi::ColorAttachment colorAttachment{};
-		colorAttachment.rtv = { context.rtvHeap.GetHandle(), context.frameIndex };
-		colorAttachment.loadOp = rhi::LoadOp::Clear;
-		colorAttachment.storeOp = rhi::StoreOp::Store;
-		colorAttachment.clear.rgba[0] = 0.0f;
-		colorAttachment.clear.rgba[1] = 0.0f;
-		colorAttachment.clear.rgba[2] = 0.0f;
-		colorAttachment.clear.rgba[3] = 1.0f;
-		passInfo.colors = { &colorAttachment };
-		passInfo.width = context.outputResolution.x;
-		passInfo.height = context.outputResolution.y;
-		commandList.BeginPass(passInfo);
-
-		commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleStrip);
-		commandList.BindLayout(psoManager.GetRootSignature().GetHandle());
-		commandList.BindPipeline(m_pso->GetHandle());
-
-        BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
-
-		unsigned int misc[NumMiscUintRootConstants] = {};
-		misc[LPM_CONSTANTS_BUFFER_SRV_DESCRIPTOR_INDEX] = m_pLPMConstants->GetSRVInfo(0).slot.index;
-		misc[TONEMAP_TYPE] = getTonemapType();
-        misc[TONEMAP_BLOOM_ENABLED] = m_bloomEnabled ? 1u : 0u;
-        if (m_bloomEnabled) {
-            misc[TONEMAP_BLOOM_MIP1_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(1).slot.index;
-            misc[TONEMAP_BLOOM_MIP2_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(2).slot.index;
-            misc[TONEMAP_BLOOM_FILTER_RADIUS] = as_uint(0.001f);
-            misc[TONEMAP_BLOOM_ASPECT_RATIO] = as_uint(
-                context.outputResolution.x / static_cast<float>(context.outputResolution.y));
-        }
-
-		commandList.PushConstants(rhi::ShaderStage::Pixel, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, misc);
-
-		commandList.Draw(3, 1, 0, 0); // Fullscreen triangle
-		return {};
+        br::render::BindPreparedProgram(
+            data, preparation, m_pso);
+		data.constants[LPM_CONSTANTS_BUFFER_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(
+            bindings.lpm, {org::BindlessViewKind::ShaderResource}).index;
+		data.constants[TONEMAP_TYPE] = context->tonemapType; data.constants[TONEMAP_BLOOM_ENABLED] = m_bloomEnabled ? 1u : 0u;
+		if (m_bloomEnabled) {
+			data.constants[TONEMAP_BLOOM_MIP1_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(
+                bindings.bloom, {org::BindlessViewKind::ShaderResource, UINT32_MAX, 1}).index;
+			data.constants[TONEMAP_BLOOM_MIP2_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(
+                bindings.bloom, {org::BindlessViewKind::ShaderResource, UINT32_MAX, 2}).index;
+			data.constants[TONEMAP_BLOOM_FILTER_RADIUS] = as_uint(0.001f);
+			data.constants[TONEMAP_BLOOM_ASPECT_RATIO] = as_uint(context->outputResolution.x / static_cast<float>(context->outputResolution.y));
+		}
+		return data;
 	}
 
-    void Cleanup() override {
-        // Cleanup the render pass
-	}
+    static void Record(const TonemappingBindings&, const br::render::PreparedFullscreenDraw& data,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedFullscreenDraw(data, recording);
+    }
 
 private:
 
-    rhi::PipelinePtr m_pso;
-    PipelineResources m_resourceDescriptorBindings;
+    org::PipelineState m_pso;
 
-    std::shared_ptr<LazyDynamicStructuredBuffer<LPMConstants>> m_pLPMConstants;
+    std::shared_ptr<org::LazyDynamicStructuredBuffer<LPMConstants>> m_pLPMConstants;
 
-    std::function<unsigned int()> getTonemapType;
     bool m_bloomEnabled = false;
-    PixelBuffer* m_pBloomTarget = nullptr;
 
-    std::vector<ResourceIdentifier> m_providedResources = {
+    std::vector<org::ResourceIdentifier> m_providedResources = {
 		"FFX::LPMConstants"
 	};
 
@@ -145,7 +129,6 @@ private:
         sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6" };
         sib.pixelShader = { L"shaders/PostProcessing/tonemapping.hlsl", L"PSMain", L"ps_6_6" };
         auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-        m_resourceDescriptorBindings = compiled.resourceDescriptorSlots;
 
         // Subobjects
         auto& layout = PSOManager::GetInstance().GetRootSignature(); // rhi::PipelineLayout&
@@ -204,10 +187,14 @@ private:
 			rhi::Make(soTopo)
         };
 
-        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), m_pso);
+        rhi::PipelinePtr pipeline;
+        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
         if (Failed(result)) {
             throw std::runtime_error("Failed to create tonemapping PSO (RHI)");
         }
-        m_pso->SetName("Tonemapping.PSO");
+        pipeline->SetName("Tonemapping.PSO");
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+            compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
+            soLayout.layout);
     }
 };

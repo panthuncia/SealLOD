@@ -10,7 +10,9 @@
 
 namespace shadercache {
 
-inline constexpr uint32_t kSchemaVersion = 2;
+// Schema 4 artifacts were produced by a temporary material-record diagnostic
+// ABI. Never reuse them with the restored production surface-record layout.
+inline constexpr uint32_t kSchemaVersion = 7;
 
 enum class BinaryFormat : uint8_t {
     Dxil = 1,
@@ -50,7 +52,7 @@ struct CacheData {
     BinaryFormat binaryFormat = BinaryFormat::Dxil;
     ArtifactKind artifactKind = ArtifactKind::Bundle;
     std::vector<CachedShaderBlob> blobs;
-    PipelineResources resourceDescriptorSlots;
+    org::PipelineResources resourceDescriptorSlots;
     uint64_t resourceIDsHash = 0;
 };
 

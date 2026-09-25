@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -17,73 +18,115 @@
 #include "Animation/Skeleton.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
-#include "Managers/Singletons/RendererECSManager.h"
+#include "Render/DebugSceneSnapshotService.h"
 #include "Mesh/MeshInstance.h"
 #include "Render/RenderContext.h"
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Scene/Scene.h"
 #include "ShaderBuffers.h"
 
-class DebugSkeletonPass final : public RenderPass {
+struct SkeletonDebugLine {
+    DirectX::XMFLOAT4 startWorld;
+    DirectX::XMFLOAT4 endWorld;
+    DirectX::XMFLOAT4 color;
+};
+
+struct DebugSkeletonFrameData {
+    struct DrawRange { uint32_t lineOffset = 0, lineCount = 0; };
+    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
+    org::PreparedDescriptorReference target{};
+    DirectX::XMUINT2 outputResolution{};
+    rhi::PipelineLayoutHandle layout{};
+    org::PreparedProgramBinding program{};
+    org::PreparedResourceReference lineResource{};
+    std::array<uint32_t, 3> constants{};
+    std::vector<DrawRange> ranges;
+};
+
+struct DebugSkeletonBindings {
+    org::ResourceBindingToken lines, perFrame, camera, target;
+};
+
+class DebugSkeletonPass final
+    : public org::TypedRenderGraphPass<DebugSkeletonPass, DebugSkeletonFrameData, DebugSkeletonBindings> {
 public:
-    DebugSkeletonPass()
-    {
+    explicit DebugSkeletonPass(std::shared_ptr<br::render::DebugSceneSnapshotService> snapshots)
+        : m_snapshots(std::move(snapshots)) {
         m_lineBuffer = DynamicStructuredBuffer<SkeletonDebugLine>::CreateShared(65536, "Debug Skeleton Lines");
         CreatePSO();
 
-        auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-        m_meshInstancesQuery = ecsWorld.query_builder<Components::Matrix, Components::ObjectDrawInfo, Components::MeshInstances>()
-            .cached()
-            .cache_kind(flecs::QueryCacheAll)
-            .build();
     }
 
-    void DeclareResourceUsages(RenderPassBuilder* builder) override
+    DebugSkeletonBindings Declare(org::PassBuilder& declaration)
     {
-        builder->WithShaderResource(Builtin::CameraBuffer, m_lineBuffer)
-            .WithRenderTarget(Builtin::Backbuffer);
-        builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+        auto* builder = &declaration;
+        return {builder->BindShaderResource(m_lineBuffer),
+            builder->BindConstantBuffer(Builtin::PerFrameBuffer),
+            builder->BindShaderResource(Builtin::CameraBuffer),
+            builder->BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
     }
 
-    void Setup() override {}
-
-    PassReturn Execute(PassExecutionContext& executionContext) override
+    void Update(const org::UpdateExecutionContext&) override
     {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
-        auto& commandList = executionContext.commandList;
-
         BuildLines();
-        if (m_drawRanges.empty()) {
-            return {};
-        }
-
+        if (m_drawRanges.empty()) return;
         m_lineBuffer->ReplaceData(std::move(m_lines));
         m_lines.clear();
+    }
 
-        commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
+    DebugSkeletonFrameData Prepare(const DebugSkeletonBindings& bindings,
+        const org::PassPrepareContext& preparation) const
+    {
+        DebugSkeletonFrameData data{};
+        if (m_drawRanges.empty()) return data;
+        const auto* context = preparation.preparationData->Get<UpdateContext>();
+        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
+        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+        data.target = preparation.CaptureView(bindings.target,
+            {org::BindlessViewKind::RenderTarget});
+        data.outputResolution = context->outputResolution;
+        data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle();
+        data.program = preparation.CaptureProgramBinding(m_pso, m_resourceDescriptorBindings);
+        data.lineResource = preparation.CaptureResource(bindings.lines);
+        data.constants = {
+            preparation.ResolveView(bindings.lines, {org::BindlessViewKind::ShaderResource}).index,
+            preparation.ResolveView(bindings.perFrame, {org::BindlessViewKind::ConstantBuffer}).index,
+            preparation.ResolveView(bindings.camera, {org::BindlessViewKind::ShaderResource}).index };
+        data.ranges.reserve(m_drawRanges.size());
+        for (const auto& range : m_drawRanges)
+            data.ranges.push_back({range.lineOffset, range.lineCount});
+        return data;
+    }
+
+    static void Record(const DebugSkeletonBindings&, const DebugSkeletonFrameData& data, org::PassRecordContext& recording)
+    {
+        if (data.ranges.empty()) return;
+        auto& commandList = recording.Commands();
+        commandList.SetDescriptorHeaps(data.resourceHeap, data.samplerHeap);
 
         rhi::PassBeginInfo passInfo{};
         rhi::ColorAttachment colorAttachment{};
-        colorAttachment.rtv = { context.rtvHeap.GetHandle(), context.frameIndex };
+        colorAttachment.rtv = recording.Resolve(data.target);
         colorAttachment.loadOp = rhi::LoadOp::Load;
         colorAttachment.storeOp = rhi::StoreOp::Store;
         passInfo.colors = { &colorAttachment };
-        passInfo.width = context.outputResolution.x;
-        passInfo.height = context.outputResolution.y;
+        passInfo.width = data.outputResolution.x;
+        passInfo.height = data.outputResolution.y;
         passInfo.debugName = "Debug Skeleton Overlay";
         commandList.BeginPass(passInfo);
 
         commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::LineList);
-        commandList.BindLayout(PSOManager::GetInstance().GetRootSignature().GetHandle());
-        commandList.BindPipeline(m_pso->GetHandle());
-        BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
+        commandList.BindLayout(data.layout);
+        commandList.BindPipeline(recording.Resolve(data.program.program));
+        if (!data.program.descriptorIndices.empty())
+            commandList.PushConstants(rhi::ShaderStage::AllGraphics, 0,
+                org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
+                static_cast<uint32_t>(data.program.descriptorIndices.size()),
+                data.program.descriptorIndices.data());
 
         uint32_t rootConstants[NumMiscUintRootConstants] = {};
-        rootConstants[0] = m_lineBuffer->GetSRVInfo(0).slot.index;
-        rootConstants[1] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PerFrameBuffer)->GetCBVInfo().slot.index;
-        rootConstants[2] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index;
+        std::copy(data.constants.begin(), data.constants.end(), rootConstants);
         commandList.PushConstants(
             rhi::ShaderStage::AllGraphics,
             0,
@@ -93,7 +136,7 @@ public:
             rootConstants);
 
         constexpr uint32_t kLinesPerMeshShaderGroup = 32u;
-        for (const auto& range : m_drawRanges) {
+        for (const auto& range : data.ranges) {
             if (range.lineCount == 0u) {
                 continue;
             }
@@ -111,19 +154,10 @@ public:
             const uint32_t groupCount = (range.lineCount + kLinesPerMeshShaderGroup - 1u) / kLinesPerMeshShaderGroup;
             commandList.DispatchMesh(groupCount, 1, 1);
         }
-
-        return {};
+        commandList.EndPass();
     }
 
-    void Cleanup() override {}
-
 private:
-    struct SkeletonDebugLine {
-        DirectX::XMFLOAT4 startWorld;
-        DirectX::XMFLOAT4 endWorld;
-        DirectX::XMFLOAT4 color;
-    };
-
     struct DrawRange {
         uint32_t lineOffset = 0;
         uint32_t lineCount = 0;
@@ -258,24 +292,10 @@ private:
         uint32_t diagnosticLongSameInstanceLineCount = 0;
 
         uint32_t skeletonIndex = 0;
-        std::unordered_set<const Skeleton*> drawnSkeletons;
-        m_meshInstancesQuery.each([&](flecs::entity, Components::Matrix matrix, Components::ObjectDrawInfo, Components::MeshInstances meshInstances) {
-            for (const auto& meshInstance : meshInstances.meshInstances) {
-                if (!meshInstance || !meshInstance->HasSkin()) {
-                    continue;
-                }
-
-                const auto skin = meshInstance->GetSkin();
-                if (!skin) {
-                    continue;
-                }
-                if (!drawnSkeletons.insert(skin.get()).second) {
-                    continue;
-                }
-
-                const auto boneMatrices = skin->GetBoneMatrices();
-                const auto parentIndices = skin->GetParentIndices();
-                const auto rootParentGlobals = skin->GetRootParentGlobals();
+        for (const auto& source : m_snapshots->CaptureSkeletons()) {
+                const auto& boneMatrices = source.boneMatrices;
+                const auto& parentIndices = source.parentIndices;
+                const auto& rootParentGlobals = source.rootParentGlobals;
                 const uint32_t boneCount = (std::min)(
                     static_cast<uint32_t>(boneMatrices.size()),
                     static_cast<uint32_t>(parentIndices.size()));
@@ -286,8 +306,8 @@ private:
                 const uint32_t rangeStart = static_cast<uint32_t>(m_lines.size());
                 const uint32_t currentSkeletonIndex = skeletonIndex;
                 const DirectX::XMFLOAT4 color = ColorForSkeleton(skeletonIndex++);
-                const auto boneNames = skin->GetBoneNames();
-                const DirectX::XMFLOAT4 skeletonRootWorld = TransformJointOrigin(boneMatrices[0], matrix.matrix);
+                const auto& boneNames = source.boneNames;
+                const DirectX::XMFLOAT4 skeletonRootWorld = TransformJointOrigin(boneMatrices[0], source.objectMatrix);
                 for (uint32_t boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
                     const int32_t parentIndex = parentIndices[boneIndex];
 
@@ -297,16 +317,16 @@ private:
                         if (boneIndex >= rootParentGlobals.size() || MatrixIsNearlyIdentity(rootParentGlobals[boneIndex])) {
                             continue;
                         }
-                        line.startWorld = TransformJointOrigin(rootParentGlobals[boneIndex], matrix.matrix);
+                        line.startWorld = TransformJointOrigin(rootParentGlobals[boneIndex], source.objectMatrix);
                         rootParentLine = true;
                     }
                     else if (static_cast<uint32_t>(parentIndex) < boneCount) {
-                        line.startWorld = TransformJointOrigin(boneMatrices[static_cast<uint32_t>(parentIndex)], matrix.matrix);
+                        line.startWorld = TransformJointOrigin(boneMatrices[static_cast<uint32_t>(parentIndex)], source.objectMatrix);
                     }
                     else {
                         continue;
                     }
-                    line.endWorld = TransformJointOrigin(boneMatrices[boneIndex], matrix.matrix);
+                    line.endWorld = TransformJointOrigin(boneMatrices[boneIndex], source.objectMatrix);
 
                     const float lineLength = Distance(line.startWorld, line.endWorld);
                     const float startDistanceFromRoot = Distance(line.startWorld, skeletonRootWorld);
@@ -392,8 +412,7 @@ private:
                         .lineCount = rangeCount,
                     });
                 }
-            }
-        });
+        }
 
         if (!m_loggedLineDiagnostics && !m_lines.empty()) {
             m_loggedLineDiagnostics = true;
@@ -490,18 +509,19 @@ private:
             rhi::Make(soTopology),
         };
 
-        const auto result = dev.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), m_pso);
+        m_pso = std::make_shared<rhi::PipelinePtr>();
+        const auto result = dev.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), *m_pso);
         if (Failed(result)) {
             throw std::runtime_error("Failed to create DebugSkeleton PSO");
         }
-        m_pso->SetName("DebugSkeleton.PSO");
+        (*m_pso)->SetName("DebugSkeleton.PSO");
     }
 
     std::shared_ptr<DynamicStructuredBuffer<SkeletonDebugLine>> m_lineBuffer;
     std::vector<SkeletonDebugLine> m_lines;
     std::vector<DrawRange> m_drawRanges;
-    flecs::query<Components::Matrix, Components::ObjectDrawInfo, Components::MeshInstances> m_meshInstancesQuery;
-    rhi::PipelinePtr m_pso;
-    PipelineResources m_resourceDescriptorBindings;
+    std::shared_ptr<br::render::DebugSceneSnapshotService> m_snapshots;
+    std::shared_ptr<rhi::PipelinePtr> m_pso;
+    org::PipelineResources m_resourceDescriptorBindings;
     bool m_loggedLineDiagnostics = false;
 };

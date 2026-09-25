@@ -8,19 +8,23 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
-#include "Render/Runtime/UploadServiceAccess.h"
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 #include "../../../../shaders/PerPassRootConstants/clodVirtualShadowBuildArgsRootConstants.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
-class VirtualShadowBuildRasterArgsPass : public ComputePass {
+struct VirtualShadowBuildRasterArgsBindings {
+    org::ResourceBindingToken histogram, offsets, arguments;
+};
+
+class VirtualShadowBuildRasterArgsPass : public org::TypedRenderGraphPass<VirtualShadowBuildRasterArgsPass,
+    br::render::PreparedComputeDispatch, VirtualShadowBuildRasterArgsBindings> {
 public:
     VirtualShadowBuildRasterArgsPass(
-        std::shared_ptr<Buffer> histogramBuffer,
-        std::shared_ptr<Buffer> offsetsBuffer,
-        std::shared_ptr<Buffer> indirectArgsBuffer,
+        std::shared_ptr<org::Buffer> histogramBuffer,
+        std::shared_ptr<org::Buffer> offsetsBuffer,
+        std::shared_ptr<org::Buffer> indirectArgsBuffer,
         bool runWhenComputeSWRasterEnabledOnly = false)
         : m_histogramBuffer(std::move(histogramBuffer))
         , m_offsetsBuffer(std::move(offsetsBuffer))
@@ -35,16 +39,15 @@ public:
             "CLod_VirtualShadowBuildRasterArgsPSO");
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override
-    {
-        builder->WithShaderResource(m_histogramBuffer, m_offsetsBuffer)
-            .WithUnorderedAccess(m_indirectArgsBuffer)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+    VirtualShadowBuildRasterArgsBindings Declare(org::PassBuilder& declaration) {
+        declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        declaration.WithConstantBuffer(Builtin::PerFrameBuffer);
+        return {declaration.BindShaderResource(m_histogramBuffer),
+            declaration.BindShaderResource(m_offsetsBuffer),
+            declaration.BindUnorderedAccess(m_indirectArgsBuffer)};
     }
 
-    void Setup() override {}
-
-    void Update(const UpdateExecutionContext& executionContext) override
+    void Update(const org::UpdateExecutionContext& executionContext) override
     {
         if (m_runWhenComputeSWRasterEnabledOnly &&
             !CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)())) {
@@ -53,48 +56,49 @@ public:
 
         auto* updateContext = executionContext.hostData->Get<UpdateContext>();
         auto& context = *updateContext;
-        const uint32_t numBuckets = context.materialManager->GetRasterBucketCount();
+        const uint32_t numBuckets = context.preparedRasterBucketCount;
         if (m_indirectArgsBuffer->GetSize() < static_cast<size_t>(numBuckets) * sizeof(RasterizeClustersCommand)) {
             m_indirectArgsBuffer->ResizeStructured(numBuckets);
         }
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override
-    {
+    br::render::PreparedComputeDispatch Prepare(const VirtualShadowBuildRasterArgsBindings& bindings,
+        const org::PassPrepareContext& preparation) const {
+
         if (m_runWhenComputeSWRasterEnabledOnly &&
             !CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)())) {
             return {};
         }
 
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
-        auto& commandList = executionContext.commandList;
-        const uint32_t numBuckets = context.materialManager->GetRasterBucketCount();
-        if (numBuckets == 0u) {
-            return {};
-        }
-
-        commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-        commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-        commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-        BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-
-        uint32_t misc[NumMiscUintRootConstants] = {};
-        misc[CLOD_VSM_BUILD_ARGS_HISTOGRAM_DESCRIPTOR_INDEX] = m_histogramBuffer->GetSRVInfo(0).slot.index;
-        misc[CLOD_VSM_BUILD_ARGS_OFFSETS_DESCRIPTOR_INDEX] = m_offsetsBuffer->GetSRVInfo(0).slot.index;
-        misc[CLOD_VSM_BUILD_ARGS_INDIRECT_ARGS_DESCRIPTOR_INDEX] = m_indirectArgsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        misc[CLOD_VSM_BUILD_ARGS_NUM_BUCKETS] = numBuckets;
-        commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, misc);
-        commandList.Dispatch((numBuckets + 63u) / 64u, 1u, 1u);
-        return {};
+        const auto& context = *preparation.preparationData->Get<UpdateContext>();
+        br::render::PreparedComputeDispatch data{};
+        const uint32_t numBuckets = context.preparedRasterBucketCount;
+        if (numBuckets == 0u) return {};
+        data.resourceHeap = context.textureDescriptorHeap.GetHandle();
+        data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
+        auto program = preparation.CaptureProgramBinding(m_pso);
+        data.program = program.program;
+        data.descriptorIndices = std::move(program.descriptorIndices);
+        data.constants[CLOD_VSM_BUILD_ARGS_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.ResolveView(
+            bindings.histogram, {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[CLOD_VSM_BUILD_ARGS_OFFSETS_DESCRIPTOR_INDEX] = preparation.ResolveView(
+            bindings.offsets, {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[CLOD_VSM_BUILD_ARGS_INDIRECT_ARGS_DESCRIPTOR_INDEX] = preparation.ResolveView(
+            bindings.arguments, {org::BindlessViewKind::UnorderedAccess}).index;
+        data.constants[CLOD_VSM_BUILD_ARGS_NUM_BUCKETS] = numBuckets;
+        data.groupsX = (numBuckets + 63u) / 64u;
+        return data;
     }
 
-    void Cleanup() override {}
+    static void Record(const VirtualShadowBuildRasterArgsBindings&,
+        const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+        br::render::RecordPreparedComputeDispatch(data, recording);
+    }
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<Buffer> m_histogramBuffer;
-    std::shared_ptr<Buffer> m_offsetsBuffer;
-    std::shared_ptr<Buffer> m_indirectArgsBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_histogramBuffer;
+    std::shared_ptr<org::Buffer> m_offsetsBuffer;
+    std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
 };

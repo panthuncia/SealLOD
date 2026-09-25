@@ -9,7 +9,6 @@
 #include "ThirdParty/FFX/host/ffx_sssr.h"
 
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 namespace fidelityfx_backend::api {
 bool LoadModule(rhi::Backend backend);
@@ -19,7 +18,7 @@ ffx::ReturnCode DestroyContext(ffx::Context& context, const ffxAllocationCallbac
 ffx::ReturnCode Query(ffx::Context& context, ffxQueryDescHeader* header);
 ffx::ReturnCode Dispatch(ffx::Context& context, ffxDispatchDescHeader* header);
 bool CreateUpscaleContext(ffx::Context& context, rhi::Backend backend, rhi::Device device, ffx::CreateContextDescUpscale& createUpscaling);
-FfxApiResource GetResource(rhi::Backend backend, PixelBuffer* resource, const wchar_t* name, FfxApiResourceState state);
+FfxApiResource GetResource(rhi::Backend backend, org::PixelBuffer* resource, const wchar_t* name, FfxApiResourceState state);
 void* GetCommandList(rhi::Backend backend, rhi::CommandList& commandList);
 
 template<class... Desc>
@@ -46,6 +45,6 @@ ffx::ReturnCode Dispatch(ffx::Context& context, Desc&... desc)
 
 namespace fidelityfx_backend::host {
 bool CreateBackendInterface(FfxInterface& backendInterface, void*& scratchMemory, rhi::Backend backend, rhi::Device device, size_t maxContexts);
-FfxResource GetResource(rhi::Backend backend, PixelBuffer* resource, const wchar_t* name, FfxResourceStates state);
+FfxResource GetResource(rhi::Backend backend, org::PixelBuffer* resource, const wchar_t* name, FfxResourceStates state);
 void* GetCommandList(rhi::Backend backend, rhi::CommandList& commandList);
 }

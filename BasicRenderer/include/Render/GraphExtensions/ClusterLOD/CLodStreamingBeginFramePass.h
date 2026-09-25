@@ -4,49 +4,51 @@
 #include <memory>
 #include <vector>
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class UploadInstance; }
-using org::UploadInstance;
+struct UpdateContext;
 
-class CLodStreamingBeginFramePass : public ComputePass {
+struct CLodStreamingBeginFrameBindings {
+    org::ResourceBindingToken loadCounter, loadRequestKeys, usedGroupsCounter, sourceMismatchCounter;
+    bool hasSourceMismatchCounter = false;
+};
+
+class CLodStreamingBeginFramePass : public org::TypedRenderGraphPass<CLodStreamingBeginFramePass,
+    br::render::PreparedComputeDispatchSequence, CLodStreamingBeginFrameBindings> {
 public:
     CLodStreamingBeginFramePass(
-        std::function<UploadInstance*()> getUploadInstance,
-        std::shared_ptr<Buffer> loadCounter,
-        std::shared_ptr<Buffer> loadRequestKeys,
-        std::shared_ptr<Buffer> usedGroupsCounter,
-        std::shared_ptr<Buffer> sourceGroupMismatchCounter,
-        std::shared_ptr<Buffer> nonResidentBits,
-        std::shared_ptr<Buffer> activeGroupsBits,
-        std::shared_ptr<Buffer> runtimeState,
-        std::function<bool(std::vector<uint32_t>&, uint32_t&, UploadInstance*)> queueNonResidentBitsUpload,
-        std::function<bool(std::vector<uint32_t>&, uint32_t&)> getActiveGroupsBitsUpload,
+        std::function<org::UploadInstance*()> getUploadInstance,
+        std::shared_ptr<org::Buffer> loadCounter,
+        std::shared_ptr<org::Buffer> loadRequestKeys,
+        std::shared_ptr<org::Buffer> usedGroupsCounter,
+        std::shared_ptr<org::Buffer> sourceGroupMismatchCounter,
+        std::shared_ptr<org::Buffer> runtimeState,
+        std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> queueNonResidentBitsUpload,
+        std::function<uint32_t(const UpdateContext&)> getActiveGroupScanCount,
         std::function<void()> scheduleStreamingReadbacks,
         std::function<void()> processStreamingRequests);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Update(const UpdateExecutionContext& executionContext) override;
-    void Cleanup() override;
+    CLodStreamingBeginFrameBindings Declare(org::PassBuilder& builder);
+    br::render::PreparedComputeDispatchSequence Prepare(const CLodStreamingBeginFrameBindings&,
+        const org::PassPrepareContext& preparation) const;
+    static void Record(const CLodStreamingBeginFrameBindings&,
+        const br::render::PreparedComputeDispatchSequence&, org::PassRecordContext&);
+    void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
-    std::shared_ptr<Buffer> m_loadCounter;
-    std::shared_ptr<Buffer> m_loadRequestKeys;
-    std::shared_ptr<Buffer> m_usedGroupsCounter;
-    std::shared_ptr<Buffer> m_sourceGroupMismatchCounter;
-    std::shared_ptr<Buffer> m_nonResidentBits;
-    std::shared_ptr<Buffer> m_activeGroupsBits;
-    std::shared_ptr<Buffer> m_runtimeState;
-    std::function<bool(std::vector<uint32_t>&, uint32_t&, UploadInstance*)> m_queueNonResidentBitsUpload;
-    std::function<bool(std::vector<uint32_t>&, uint32_t&)> m_getActiveGroupsBitsUpload;
+    std::shared_ptr<org::Buffer> m_loadCounter;
+    std::shared_ptr<org::Buffer> m_loadRequestKeys;
+    std::shared_ptr<org::Buffer> m_usedGroupsCounter;
+    std::shared_ptr<org::Buffer> m_sourceGroupMismatchCounter;
+    std::shared_ptr<org::Buffer> m_runtimeState;
+    std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> m_queueNonResidentBitsUpload;
+    std::function<uint32_t(const UpdateContext&)> m_getActiveGroupScanCount;
     std::function<void()> m_scheduleStreamingReadbacks;
     std::function<void()> m_processStreamingRequests;
-    std::function<UploadInstance*()> m_getUploadInstance;
-    std::vector<uint32_t> m_activeGroupsBitsUploadScratch;
+    std::function<org::UploadInstance*()> m_getUploadInstance;
     std::vector<uint32_t> m_nonResidentBitsUploadScratch;
-    PipelineState m_clearUintPipeline;
+    org::PipelineState m_clearUintPipeline;
 };

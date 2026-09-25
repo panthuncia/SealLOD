@@ -1,22 +1,27 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <DirectXMath.h>
-
 #include "Interfaces/IResourceProvider.h"
 #include "ShaderBuffers.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/ResourceGroup.h"
 #include "Resources/Texture.h"
+#include "Render/AsyncStateGraph.h"
+#include "Render/PublishedRendererState.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 
 class TextureFactory;
 class MaterialManager;
 class TextureStreamingManager;
+class PublishedStateResourceResolver;
+namespace org::runtime { class IDescriptorService; class IUploadService; }
 
 inline constexpr float kDefaultTerrainLayerUvScale = 24.0f / 4096.0f;
 inline constexpr float kDefaultTerrainRegionSizeWorld = 2048.0f;
@@ -25,7 +30,6 @@ inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
 inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_HEIGHT_FROM_DIFFUSE_ALPHA = 1u << 1;
 inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_PBR = 1u << 2;
 inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_GLINT = 1u << 3;
-inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_GRASS_FAR_OVERLAY = 1u << 4;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_DIFFUSE = 1u << 0;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_NORMAL = 1u << 1;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
@@ -63,8 +67,6 @@ struct TerrainLayerDesc
     float roughnessScale = 1.0f;
     float specularLevel = 0.04f;
     DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
-    // x=start distance in cells, y=end distance in cells, z=max weight scale.
-    DirectX::XMFLOAT4 farOverlayParams = { 0.0f, 0.0f, 1.0f, 0.0f };
     // Close landscape layer flags copied from Skyrim LTEX metadata. Distant land LOD overlays are not terrain layers.
     std::uint32_t flags = 0u;
 };
@@ -93,21 +95,31 @@ struct TerrainMaterialDesc
     float regionSizeWorld = kDefaultTerrainRegionSizeWorld;
 };
 
-class TerrainManager : public IResourceProvider
+class TerrainManager : public org::IResourceProvider
 {
 public:
     static std::unique_ptr<TerrainManager> CreateUnique();
 
     std::uint32_t SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory, MaterialManager* materialManager = nullptr);
-    // Advances the main-thread terrain activation boundary after streaming
-    // binding callbacks have been drained for the frame.
+    // Reconciles level-triggered graph binding observations and advances the
+    // terrain publication boundary.
     void ProcessPendingUpdates();
     void ClearActiveTerrain();
+	void SetRendererStateServices(
+		void* requests,
+		std::shared_ptr<org::runtime::IUploadService> uploads,
+		std::shared_ptr<org::runtime::IDescriptorService> descriptors) noexcept {
+		m_rendererStateRequests = requests;
+		m_uploadService = std::move(uploads);
+		m_descriptorService = std::move(descriptors);
+	}
+	bool TryActivatePublishedTerrainState(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-    std::vector<ResourceIdentifier> GetSupportedKeys() override;
-    std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-    std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+    std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+    std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+    std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 
 private:
     TerrainManager();
@@ -117,13 +129,13 @@ private:
         Height,
         RMAOS
     };
-    void RefreshTerrainLayerTextureBinding(
-        std::uint32_t layerIndex,
-        TerrainTextureSlot slot,
-        const std::shared_ptr<TextureAsset>& texture,
-        std::uint64_t terrainGeneration,
-        std::size_t initialDependencyIndex);
-    void InvalidateAndScheduleTerrainSetActivation();
+    struct GraphTextureBinding {
+        std::uint32_t layerIndex = 0;
+        TerrainTextureSlot slot = TerrainTextureSlot::Diffuse;
+        std::shared_ptr<TextureAsset> texture;
+        br::render::ArtifactAddress address{};
+    };
+	void RequestGraphState();
 
     std::shared_ptr<DynamicStructuredBuffer<TerrainSetGPU>> m_sets;
     std::shared_ptr<DynamicStructuredBuffer<TerrainLayerGPU>> m_layers;
@@ -132,16 +144,32 @@ private:
     std::shared_ptr<DynamicStructuredBuffer<TerrainRegionGPU>> m_regions;
     // Four exact Skyrim UNORM8 paint weights are stored in each GPU word.
     std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> m_weightBlocks;
-    std::shared_ptr<ResourceGroup> m_textureGroup;
+    std::shared_ptr<org::ResourceGroup> m_textureGroup;
     std::vector<std::shared_ptr<TextureAsset>> m_layerTextures;
     std::vector<TerrainLayerGPU> m_layerData;
+	std::vector<TerrainStochasticLayerGPU> m_stochasticLayerData;
+	std::vector<TerrainLayerRefGPU> m_layerRefData;
+	std::vector<TerrainRegionGPU> m_regionData;
+	std::vector<std::uint32_t> m_weightBlockData;
     TerrainSetGPU m_desiredSet{};
-    std::vector<std::uint8_t> m_initialBindingReady;
-    std::size_t m_readyInitialBindingCount = 0;
     std::uint64_t m_terrainGeneration = 0;
-    std::uint32_t m_activationDelayFrames = 0;
-    bool m_terrainSetActive = false;
-    bool m_pendingTerrainSetActivation = false;
     std::vector<std::uint64_t> m_streamingBindingIDs;
+    std::vector<GraphTextureBinding> m_graphTextureBindings;
     TextureStreamingManager* m_textureStreamingManager = nullptr;
+	void* m_rendererStateRequests = nullptr;
+	std::shared_ptr<org::runtime::IUploadService> m_uploadService;
+	std::shared_ptr<org::runtime::IDescriptorService> m_descriptorService;
+	std::array<std::shared_ptr<PublishedStateResourceResolver>, 7> m_terrainResolvers;
+	std::array<std::shared_ptr<br::render::VersionedBufferFamily>, 6> m_bufferFamilies;
+	std::uint64_t m_terrainRowsRevision = 0;
+	std::uint64_t m_terrainStateRevision = 0;
+	std::uint64_t m_activeTerrainPublishedRevision = 0;
+	std::uint32_t m_terrainGraphStableFrames = 0;
+	bool m_terrainGraphDirty = false;
+	bool m_terrainGraphRequestPending = false;
+	bool m_terrainGraphActive = false;
+	// 0 = building, 1 = built, 2 = failed/cancelled; written by the awaiter's
+	// continuation on a worker, read on the owner thread.
+	std::shared_ptr<std::atomic<int>> m_terrainGraphOutcome;
+	std::shared_ptr<br::render::ArtifactAwaiter> m_terrainGraphAwaiter;
 };

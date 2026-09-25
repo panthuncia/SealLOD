@@ -1,78 +1,87 @@
 #pragma once
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
 #include "Resources/PixelBuffer.h"
 #include "ThirdParty/XeGTAO.h"
-#include "Render/Runtime/DescriptorServiceAccess.h"
+#include "Render/Runtime/IDescriptorService.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
-class GTAOMainPass : public ComputePass {
+struct GTAOMainBindings {
+    org::ResourceBindingToken workingDepths, normals, workingAO, workingEdges;
+};
+
+class GTAOMainPass : public org::TypedRenderGraphPass<GTAOMainPass,
+    br::render::PreparedComputeDispatch, GTAOMainBindings> {
 public:
     GTAOMainPass() {
         CreatePointClampSampler();
         CreateXeGTAOComputePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override {
-        builder->WithShaderResource(Builtin::Surface::NormalRoughness, Builtin::GTAO::WorkingDepths, Builtin::CameraBuffer)
-            .WithUnorderedAccess(Builtin::GTAO::WorkingEdges, Builtin::GTAO::WorkingAOTerm1)
+    GTAOMainBindings Declare(org::PassBuilder& builder) {
+        builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        builder.WithShaderResource(Builtin::CameraBuffer)
             .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+        return {
+            builder.BindShaderResource(Builtin::GTAO::WorkingDepths),
+            builder.BindShaderResource(Builtin::Surface::NormalRoughness),
+            builder.BindUnorderedAccess(Builtin::GTAO::WorkingAOTerm1),
+            builder.BindUnorderedAccess(Builtin::GTAO::WorkingEdges) };
     }
 
-    void Setup() override {
+    void Initialize() {
         // Removed redundant Register calls now covered by declared-resource auto descriptor registration
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
-        frameIndex++;
-        auto& psoManager = PSOManager::GetInstance();
-        auto& commandList = executionContext.commandList;
-        auto workingDepths = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingDepths);
-        auto workingAOTerm = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingAOTerm1);
-        auto workingEdges = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingEdges);
-        auto normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::NormalRoughness);
 
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
 
-		commandList.BindLayout(psoManager.GetRootSignature().GetHandle());
-		commandList.BindPipeline(GTAOHighPSO.GetAPIPipelineState().GetHandle());
+    br::render::PreparedComputeDispatch Prepare(const GTAOMainBindings& bindings,
+        const org::PassPrepareContext& preparation) const {
+        const auto* context = preparation.preparationData->Get<UpdateContext>();
+        auto payload = GTAOHighPSO.GetPayload(); br::render::PreparedComputeDispatch data{};
+        data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+        data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(std::move(payload));
+        data.program = program.program;
+        data.descriptorIndices = std::move(program.descriptorIndices);
 
-        BindResourceDescriptorIndices(commandList, GTAOHighPSO.GetResourceDescriptorSlots());
-
-        unsigned int passConstants[NumMiscUintRootConstants] = {};
-		passConstants[UintRootConstant0] = frameIndex % 64; // For spatiotemporal denoising
-        passConstants[UintRootConstant1] = m_samplerIndex;
-        passConstants[UintRootConstant2] = workingDepths->GetSRVInfo(0).slot.index;
-        passConstants[UintRootConstant3] = normals->GetSRVInfo(0).slot.index;
-        passConstants[UintRootConstant4] = workingAOTerm->GetUAVShaderVisibleInfo(0).slot.index;
-        passConstants[UintRootConstant5] = workingEdges->GetUAVShaderVisibleInfo(0).slot.index;
-
-		commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, passConstants);
-
-        commandList.Dispatch((context.renderResolution.x + XE_GTAO_NUMTHREADS_X - 1) / XE_GTAO_NUMTHREADS_X, (context.renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
-        return {};
+        data.constants[UintRootConstant0] = static_cast<uint32_t>(context->frameNumber % 64);
+        data.constants[UintRootConstant1] = m_samplerIndex;
+        data.constants[UintRootConstant2] = preparation.ResolveView(bindings.workingDepths,
+            {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[UintRootConstant3] = preparation.ResolveView(bindings.normals,
+            {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[UintRootConstant4] = preparation.ResolveView(bindings.workingAO,
+            {org::BindlessViewKind::UnorderedAccess}).index;
+        data.constants[UintRootConstant5] = preparation.ResolveView(bindings.workingEdges,
+            {org::BindlessViewKind::UnorderedAccess}).index;
+        data.groupsX = (context->renderResolution.x + XE_GTAO_NUMTHREADS_X - 1u) / XE_GTAO_NUMTHREADS_X;
+        data.groupsY = (context->renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1u) / XE_GTAO_NUMTHREADS_Y;
+        return data;
     }
 
-    void Cleanup() override {
+    static void Record(const GTAOMainBindings&, const br::render::PreparedComputeDispatch& data,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedComputeDispatch(data, recording);
+    }
+
+    void ShutdownPass() {
         // Cleanup if necessary
     }
 
 private:
 
-    PipelineState PrefilterDepths16x16PSO;
-    PipelineState GTAOLowPSO;
-    PipelineState GTAOMediumPSO;
-    PipelineState GTAOHighPSO;
-    PipelineState GTAOUltraPSO;
-    PipelineState DenoisePassPSO;
-    PipelineState DenoiseLastPassPSO;
-    PipelineState GenerateNormalsPSO;
+    org::PipelineState PrefilterDepths16x16PSO;
+    org::PipelineState GTAOLowPSO;
+    org::PipelineState GTAOMediumPSO;
+    org::PipelineState GTAOHighPSO;
+    org::PipelineState GTAOUltraPSO;
+    org::PipelineState DenoisePassPSO;
+    org::PipelineState DenoiseLastPassPSO;
+    org::PipelineState GenerateNormalsPSO;
 
-    uint64_t frameIndex = 0;
     uint32_t m_samplerIndex = 0;
 
     void CreatePointClampSampler()
@@ -90,7 +99,7 @@ private:
         samplerDesc.borderPreset = rhi::BorderPreset::TransparentBlack;
         samplerDesc.minLod = 0.0f;
         samplerDesc.maxLod = 0.0f;
-        m_samplerIndex = org::runtime::CreateIndexedSamplerFromActiveDescriptorService(samplerDesc);
+        m_samplerIndex = DescriptorService().CreateIndexedSampler(samplerDesc);
     }
 
     void CreateXeGTAOComputePSO() {
@@ -122,6 +131,6 @@ private:
 			L"CSGTAOLow",
 			{},
 			"GTAO Low Quality");
-		
+
     }
 };

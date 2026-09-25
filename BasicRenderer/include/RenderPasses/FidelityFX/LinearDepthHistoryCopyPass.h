@@ -1,42 +1,34 @@
 #pragma once
 
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Render/RenderContext.h"
-#include "Managers/ViewManager.h"
+#include "Render/DepthHistoryService.h"
+#include <vector>
 
-class LinearDepthHistoryCopyPass : public RenderPass {
+class LinearDepthHistoryCopyPass
+    : public org::TypedRenderGraphPass<LinearDepthHistoryCopyPass> {
 public:
-    explicit LinearDepthHistoryCopyPass(ViewManager* viewManager)
-        : m_viewManager(viewManager) {
+    explicit LinearDepthHistoryCopyPass(br::render::IDepthHistoryService* historyService)
+        : m_historyService(historyService) {
     }
 
-    void DeclareResourceUsages(RenderPassBuilder* builder) override {
+    void Declare(org::PassBuilder& builder) {
         // The current depth pyramid remains intact until the next frame's
         // phase-1 cull consumes it. Declaring the read keeps this marker after
         // the final phase-2 depth writes without copying the texture.
-        builder->WithShaderResource(Builtin::LinearDepthMaps);
+        builder.WithShaderResource(Builtin::LinearDepthMaps);
     }
 
-    void Setup() override {
-    }
-
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        if (!m_viewManager) {
-            return {};
-        }
-        m_viewManager->ForEachView([&](uint64_t viewID) {
-            const auto* view = m_viewManager->Get(viewID);
-            if (view && view->gpu.linearDepthMap) {
-                m_viewManager->MarkDepthHistoryValid(viewID);
-            }
-        });
-
+    org::EmptyPassFrameData Prepare(const org::PassPrepareContext& preparation) {
+        const auto* frame = preparation.preparationData->Get<UpdateContext>();
+        if (m_historyService) preparation.Reserve(
+            m_historyService->ReserveDepthHistoryPublication(
+                frame ? frame->viewFamily : nullptr,
+                frame ? frame->frameNumber : 0));
         return {};
     }
-
-    void Cleanup() override {
-    }
+    static void Record(const org::EmptyPassFrameData&, org::PassRecordContext&) {}
 
 private:
-    ViewManager* m_viewManager = nullptr;
+    br::render::IDepthHistoryService* m_historyService = nullptr;
 };

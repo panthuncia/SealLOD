@@ -14,6 +14,7 @@
 #include "Resources/DynamicResource.h"
 #include "Resources/MemoryStatisticsComponents.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/ViewStateArtifacts.h"
 
 namespace
 {
@@ -30,10 +31,10 @@ namespace
         return errorPixels / denom;
     }
 
-    TextureDescription CreateCLodDeepVisibilityHeadPointerDesc(const PixelBuffer& visibilityBuffer)
+    org::TextureDescription CreateCLodDeepVisibilityHeadPointerDesc(const org::PixelBuffer& visibilityBuffer)
     {
-        TextureDescription desc;
-        ImageDimensions dims;
+        org::TextureDescription desc;
+        org::ImageDimensions dims;
         dims.width = visibilityBuffer.GetWidth();
         dims.height = visibilityBuffer.GetHeight();
         desc.imageDimensions.push_back(dims);
@@ -48,7 +49,7 @@ namespace
         return desc;
     }
 
-    bool CLodHeadPointerMatchesVisibility(const PixelBuffer& headPointers, const PixelBuffer& visibilityBuffer)
+    bool CLodHeadPointerMatchesVisibility(const org::PixelBuffer& headPointers, const org::PixelBuffer& visibilityBuffer)
     {
         return headPointers.GetWidth() == visibilityBuffer.GetWidth() &&
             headPointers.GetHeight() == visibilityBuffer.GetHeight();
@@ -84,25 +85,27 @@ namespace
 
 ViewManager::ViewManager() {
     auto& resourceManager = ::ResourceManager::GetInstance();
-    m_cameraBuffer = LazyDynamicStructuredBuffer<CameraInfo>::CreateShared(1, "cameraBuffer<ViewManager>");
-	m_cullingCameraBuffer = LazyDynamicStructuredBuffer<CullingCameraInfo>::CreateShared(1, "cullingCameraBuffer<ViewManager>");
+    m_cameraBuffer = org::LazyDynamicStructuredBuffer<CameraInfo>::CreateShared(1, "cameraBuffer<ViewManager>");
+    m_cullingCameraBuffer = org::LazyDynamicStructuredBuffer<CullingCameraInfo>::CreateShared(1, "cullingCameraBuffer<ViewManager>");
+    m_primaryCameraBufferView = m_cameraBuffer->Add();
+    m_primaryCullingCameraBufferView = m_cullingCameraBuffer->Add();
     org::memory::SetResourceUsageHint(*m_cameraBuffer, "Camera and view buffers");
 	org::memory::SetResourceUsageHint(*m_cullingCameraBuffer, "Camera and view buffers");
-    m_linearDepthGroup = std::make_shared<ResourceGroup>("LinearDepthMaps");
-    m_lastFrameLinearDepthGroup = std::make_shared<ResourceGroup>("LastFrameLinearDepthMaps");
+    m_linearDepthGroup = std::make_shared<org::ResourceGroup>("LinearDepthMaps");
 
     // Register provided resources
     m_resources[Builtin::CameraBuffer] = m_cameraBuffer;
 	m_resources[Builtin::CullingCameraBuffer] = m_cullingCameraBuffer;
     m_resolvers[Builtin::LinearDepthMaps] =
         std::make_shared<ResourceGroupResolver>(m_linearDepthGroup);
+    // History is the last submitted contents of the persistent linear-depth
+    // resources. Keep the shader-facing legacy name as an alias while
+    // DepthHistoryPublicationService owns which producer is valid.
     m_resolvers[Builtin::LastFrameLinearDepthMaps] =
-        std::make_shared<ResourceGroupResolver>(m_lastFrameLinearDepthGroup);
+        std::make_shared<ResourceGroupResolver>(m_linearDepthGroup);
 }
 
-void ViewManager::SetIndirectCommandBufferManager(IndirectCommandBufferManager* manager) {
-    m_indirectManager = manager;
-}
+ViewManager::~ViewManager() = default;
 
 uint64_t ViewManager::CreateView(const CameraInfo& cameraInfo,
     const ViewFlags& flags,
@@ -118,19 +121,22 @@ uint64_t ViewManager::CreateView(const CameraInfo& cameraInfo,
     v.cascadeIndex = params.cascadeIndex;
     v.parentEntityID = params.parentEntityID;
 
-    // Indirect buffers
-    if (m_indirectManager) {
-        m_indirectManager->CreateBuffersForView(id);
+    // The primary camera owns the permanently reserved first table element.
+    if (flags.primaryCamera) {
+        if (m_primaryViewID != 0)
+            throw std::logic_error("ViewManager supports exactly one primary camera view");
+        m_primaryViewID = id;
+        v.gpu.cameraBufferView = m_primaryCameraBufferView;
+        v.gpu.cullingCameraBufferView = m_primaryCullingCameraBufferView;
+    } else {
+        v.gpu.cameraBufferView = m_cameraBuffer->Add();
+        v.gpu.cullingCameraBufferView = m_cullingCameraBuffer->Add();
     }
-
-    // Camera buffer view
-    v.gpu.cameraBufferView = m_cameraBuffer->Add();
     v.gpu.cameraBufferIndex = static_cast<uint32_t>(v.gpu.cameraBufferView->GetOffset() / sizeof(CameraInfo));
     m_cameraBuffer->UpdateView(v.gpu.cameraBufferView.get(), &cameraInfo);
 
     CullingCameraInfo cullCam = BuildCullingCameraInfo(cameraInfo);
 
-	v.gpu.cullingCameraBufferView = m_cullingCameraBuffer->Add();
 	m_cullingCameraBuffer->UpdateView(v.gpu.cullingCameraBufferView.get(), &cullCam);
 
     // Depth (optional)
@@ -139,6 +145,7 @@ uint64_t ViewManager::CreateView(const CameraInfo& cameraInfo,
 
     m_views.emplace(id, std::move(v));
     ++m_resourceLayoutRevision;
+    m_publicationRevision.fetch_add(1, std::memory_order_release);
 
     if (m_events.onCreated) m_events.onCreated(m_views[id]);
     return id;
@@ -150,14 +157,13 @@ void ViewManager::DestroyView(uint64_t viewID) {
 
     auto& v = it->second;
 
-    // Remove indirect buffers
-    if (m_indirectManager) {
-        m_indirectManager->UnregisterBuffers(viewID);
-    }
-
     // Camera buffer view
-    m_cameraBuffer->Remove(v.gpu.cameraBufferView.get());
-	m_cullingCameraBuffer->Remove(v.gpu.cullingCameraBufferView.get());
+    if (v.flags.primaryCamera) {
+        m_primaryViewID = 0;
+    } else {
+        m_cameraBuffer->Remove(v.gpu.cameraBufferView.get());
+	    m_cullingCameraBuffer->Remove(v.gpu.cullingCameraBufferView.get());
+    }
 
     if (v.gpu.linearDepthMap) {
         const uint64_t sourceID = v.gpu.linearDepthMap->GetGlobalResourceID();
@@ -174,22 +180,18 @@ void ViewManager::DestroyView(uint64_t viewID) {
 
         if (!stillReferenced) {
             m_linearDepthGroup->RemoveResource(v.gpu.linearDepthMap.get());
-            auto it = m_lastFrameLinearDepthBySource.find(sourceID);
-            if (it != m_lastFrameLinearDepthBySource.end()) {
-                m_lastFrameLinearDepthGroup->RemoveResource(it->second.get());
-                m_lastFrameLinearDepthBySource.erase(it);
-            }
         }
     }
 
     m_views.erase(it);
     ++m_resourceLayoutRevision;
+    m_publicationRevision.fetch_add(1, std::memory_order_release);
     if (m_events.onDestroyed) m_events.onDestroyed(viewID);
 }
 
 void ViewManager::AttachDepth(uint64_t viewID,
-    std::shared_ptr<PixelBuffer> depth,
-    std::shared_ptr<PixelBuffer> linearDepth) {
+    std::shared_ptr<org::PixelBuffer> depth,
+    std::shared_ptr<org::PixelBuffer> linearDepth) {
     auto* v = Get(viewID);
     if (!v) return;
     const auto previousLinearDepth = v->gpu.linearDepthMap;
@@ -204,43 +206,22 @@ void ViewManager::AttachDepth(uint64_t viewID,
             });
         if (!stillReferenced) {
             m_linearDepthGroup->RemoveResource(previousLinearDepth.get());
-            auto historyIt = m_lastFrameLinearDepthBySource.find(previousSourceID);
-            if (historyIt != m_lastFrameLinearDepthBySource.end()) {
-                m_lastFrameLinearDepthGroup->RemoveResource(historyIt->second.get());
-                m_lastFrameLinearDepthBySource.erase(historyIt);
-            }
         }
     }
     v->gpu.depthMap = depth;
     v->gpu.linearDepthMap = linearDepth;
-    v->gpu.lastFrameLinearDepthMap.reset();
-    v->gpu.lastFrameLinearDepthValid = false;
-
     if (linearDepth) {
-        const uint64_t sourceID = linearDepth->GetGlobalResourceID();
-        auto it = m_lastFrameLinearDepthBySource.find(sourceID);
-        if (it == m_lastFrameLinearDepthBySource.end()) {
-            auto desc = linearDepth->GetDescription();
-            auto history = PixelBuffer::CreateShared(desc);
-            history->SetName("Last Frame Linear Depth");
-            org::memory::SetResourceUsageHint(*history, "Depth resources");
-            m_lastFrameLinearDepthBySource[sourceID] = history;
-            m_linearDepthGroup->AddResource(linearDepth);
-            m_lastFrameLinearDepthGroup->AddResource(history);
-            v->gpu.lastFrameLinearDepthMap = history;
-        }
-        else {
-            v->gpu.lastFrameLinearDepthMap = it->second;
-        }
+        m_linearDepthGroup->AddResource(linearDepth);
     }
 
     if (m_events.onDepthAttached) {
         m_events.onDepthAttached(*v);
     }
     ++m_resourceLayoutRevision;
+    m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
-void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<PixelBuffer> visibilityBuffer) {
+void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<org::PixelBuffer> visibilityBuffer) {
     auto* v = Get(viewID);
     if (!v) return;
     v->gpu.visibilityBuffer = visibilityBuffer;
@@ -249,9 +230,10 @@ void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<PixelB
         m_events.onVisibilityBufferAttached(*v);
     }
     ++m_resourceLayoutRevision;
+    m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
-std::shared_ptr<PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPointers(uint64_t viewID)
+std::shared_ptr<org::PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPointers(uint64_t viewID)
 {
     auto* v = Get(viewID);
     if (!v || !v->gpu.visibilityBuffer) {
@@ -267,7 +249,7 @@ std::shared_ptr<PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPointers(u
         return v->gpu.clodDeepVisibilityHeadPointers;
     }
 
-    auto headPointerTexture = PixelBuffer::CreateSharedUnmaterialized(
+    auto headPointerTexture = org::PixelBuffer::CreateSharedUnmaterialized(
         CreateCLodDeepVisibilityHeadPointerDesc(*v->gpu.visibilityBuffer));
     headPointerTexture->SetName("CLod Deep Visibility Head Pointers " + std::to_string(viewID));
     // These textures are created outside of RenderGraph::AddResource(), but later update code
@@ -275,6 +257,8 @@ std::shared_ptr<PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPointers(u
     // GetUAVShaderVisibleInfo()/GetUAVNonShaderVisibleInfo() are valid before graph materialization.
     headPointerTexture->EnsureVirtualDescriptorSlotsAllocated();
     v->gpu.clodDeepVisibilityHeadPointers = std::move(headPointerTexture);
+    ++m_resourceLayoutRevision;
+    m_publicationRevision.fetch_add(1, std::memory_order_release);
     return v->gpu.clodDeepVisibilityHeadPointers;
 }
 
@@ -284,9 +268,14 @@ void ViewManager::UpdateCamera(uint64_t viewID, const CameraInfo& cameraInfo) {
     std::lock_guard<std::mutex> lock(m_cameraUpdateMutex);
     const bool depthSliceChanged = v->cameraInfo.depthBufferArrayIndex != cameraInfo.depthBufferArrayIndex;
     v->cameraInfo = cameraInfo;
-    m_cameraBuffer->UpdateView(v->gpu.cameraBufferView.get(), &cameraInfo);
-	CullingCameraInfo cullInfo = BuildCullingCameraInfo(cameraInfo);
-	m_cullingCameraBuffer->UpdateView(v->gpu.cullingCameraBufferView.get(), &cullInfo);
+    if (!v->flags.primaryCamera) {
+        m_cameraBuffer->UpdateView(v->gpu.cameraBufferView.get(), &cameraInfo);
+	    CullingCameraInfo cullInfo = BuildCullingCameraInfo(cameraInfo);
+	    m_cullingCameraBuffer->UpdateView(v->gpu.cullingCameraBufferView.get(), &cullInfo);
+        m_publicationRevision.fetch_add(1, std::memory_order_release);
+    } else {
+        m_primaryCameraRevision.fetch_add(1, std::memory_order_release);
+    }
     if (depthSliceChanged) {
         ++m_resourceLayoutRevision;
     }
@@ -294,16 +283,6 @@ void ViewManager::UpdateCamera(uint64_t viewID, const CameraInfo& cameraInfo) {
     if (m_events.onCameraUpdated) {
         m_events.onCameraUpdated(*v);
     }
-}
-
-void ViewManager::MarkDepthHistoryValid(uint64_t viewID) {
-    auto* v = Get(viewID);
-    if (!v || v->gpu.lastFrameLinearDepthValid) {
-        return;
-    }
-
-    v->gpu.lastFrameLinearDepthValid = true;
-    ++m_resourceLayoutRevision;
 }
 
 View* ViewManager::Get(uint64_t viewID) {
@@ -318,28 +297,48 @@ const View* ViewManager::Get(uint64_t viewID) const {
     return &it->second;
 }
 
-std::shared_ptr<Resource> ViewManager::ProvideResource(ResourceIdentifier const& key) {
+br::render::PrimaryCameraFrameUpload ViewManager::CapturePrimaryCameraUpload(
+    std::uint64_t frameNumber) const {
+    std::lock_guard<std::mutex> lock(m_cameraUpdateMutex);
+    const auto* view = Get(m_primaryViewID);
+    if (!view) return {};
+    return {
+        .camera = view->cameraInfo,
+        .cullingCamera = BuildCullingCameraInfo(view->cameraInfo),
+        .viewID = view->id,
+        .revision = m_primaryCameraRevision.load(std::memory_order_acquire),
+        .frameNumber = frameNumber,
+        .cameraBufferIndex = 0,
+    };
+}
+
+uint32_t ViewManager::ShadowViewCameraBufferIndex(uint64_t viewID) const {
+    const auto* view = Get(viewID);
+    return view ? view->gpu.cameraBufferIndex : 0xFFFFFFFFu;
+}
+
+std::shared_ptr<org::Resource> ViewManager::ProvideResource(org::ResourceIdentifier const& key) {
     auto it = m_resources.find(key);
     if (it == m_resources.end()) return nullptr;
     return it->second;
 }
 
-std::vector<ResourceIdentifier> ViewManager::GetSupportedKeys() {
-    std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> ViewManager::GetSupportedKeys() {
+    std::vector<org::ResourceIdentifier> keys;
     keys.reserve(m_resources.size());
     for (auto const& [k, _] : m_resources)
         keys.push_back(k);
     return keys;
 }
 
-std::vector<ResourceIdentifier> ViewManager::GetSupportedResolverKeys() {
-    std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> ViewManager::GetSupportedResolverKeys() {
+    std::vector<org::ResourceIdentifier> keys;
     keys.reserve(m_resolvers.size());
     for (auto const& [k, _] : m_resolvers)
         keys.push_back(k);
 	return keys;
 }
-std::shared_ptr<IResourceResolver> ViewManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> ViewManager::ProvideResolver(org::ResourceIdentifier const& key) {
 	auto it = m_resolvers.find(key);
 	if (it == m_resolvers.end()) return nullptr;
 	return it->second;

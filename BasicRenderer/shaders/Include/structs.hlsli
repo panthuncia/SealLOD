@@ -71,6 +71,7 @@ struct VisBufferPSInput
 #endif
 #endif
 #endif
+    nointerpolation uint drawRecordIndex : TEXCOORD12;
 };
 
 struct VisibilityPerPrimitive
@@ -673,7 +674,6 @@ struct TerrainLayerInfo {
     float roughnessScale;
     float specularLevel;
     float4 glintParameters;
-    float4 farOverlayParams;
 };
 
 struct TerrainStochasticLayerInfo {
@@ -839,6 +839,8 @@ struct TextureStreamingGPUInfo {
     uint pendingTopMip;
     uint bindingRevisionLo;
     uint bindingRevisionHi;
+	uint imageDescriptorIndex;
+	uint samplerDescriptorIndex;
 };
 
 struct SingleMatrix {
@@ -882,6 +884,9 @@ struct PerMeshInstanceBuffer {
     uint skinningInstanceSlot;
     float skinnedBoundsScale;
     BoundingSphere boundingSphere;
+    uint expectedClodMeshMetadataIndex;
+    uint expectedClodMeshIdentityLo;
+    uint expectedClodMeshIdentityHi;
 };
 
 struct PerInstanceTransformBuffer {
@@ -900,6 +905,8 @@ struct InstanceDrawRecordBuffer {
     uint clodOffsetIndex;
     uint skinnedAssemblyPlacementIndex;
     uint skinningTypeSlot;
+    uint expectedMeshIdentityLo;
+    uint expectedMeshIdentityHi;
 };
 
 struct SkinnedAssemblyPlacementBuffer {

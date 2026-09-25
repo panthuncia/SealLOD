@@ -24,7 +24,6 @@
 #include "Resources/PixelBuffer.h"
 
 namespace org { class RenderGraph; }
-using org::RenderGraph;
 
 namespace br::pipeline {
 
@@ -59,14 +58,14 @@ struct ResourceBindingContract {
 
 template<typename TResource>
 struct ResourceSlot {
-    ResourceIdentifier identifier;
+    org::ResourceIdentifier identifier;
 
-    explicit ResourceSlot(ResourceIdentifier id)
+    explicit ResourceSlot(org::ResourceIdentifier id)
         : identifier(std::move(id)) {}
 };
 
 struct ResourceBinding {
-    std::shared_ptr<Resource> resource;
+    std::shared_ptr<org::Resource> resource;
     ResourceBindingContract contract;
 };
 
@@ -77,7 +76,7 @@ public:
         const ResourceSlot<TResource>& slot,
         std::shared_ptr<TResource> resource,
         ResourceBindingContract contract = {}) {
-        static_assert(std::is_base_of_v<Resource, TResource>);
+        static_assert(std::is_base_of_v<org::Resource, TResource>);
         m_bindings.insert_or_assign(
             slot.identifier,
             ResourceBinding{ std::move(resource), contract });
@@ -92,12 +91,12 @@ public:
         return std::dynamic_pointer_cast<TResource>(it->second.resource);
     }
 
-    const ResourceBinding* Find(ResourceIdentifier id) const;
-    bool Contains(ResourceIdentifier id) const;
-    const std::unordered_map<ResourceIdentifier, ResourceBinding>& Entries() const { return m_bindings; }
+    const ResourceBinding* Find(org::ResourceIdentifier id) const;
+    bool Contains(org::ResourceIdentifier id) const;
+    const std::unordered_map<org::ResourceIdentifier, ResourceBinding>& Entries() const { return m_bindings; }
 
 private:
-    std::unordered_map<ResourceIdentifier, ResourceBinding> m_bindings;
+    std::unordered_map<org::ResourceIdentifier, ResourceBinding> m_bindings;
 };
 
 enum class TechniqueId : uint8_t {
@@ -201,9 +200,9 @@ BR_DECLARE_PIPELINE_TECHNIQUE(PresentTechnique, Present);
 #undef BR_DECLARE_PIPELINE_TECHNIQUE
 
 struct TechniqueContract {
-    std::vector<ResourceIdentifier> requiredInputs;
-    std::vector<ResourceIdentifier> optionalInputs;
-    std::vector<ResourceIdentifier> outputs;
+    std::vector<org::ResourceIdentifier> requiredInputs;
+    std::vector<org::ResourceIdentifier> optionalInputs;
+    std::vector<org::ResourceIdentifier> outputs;
 };
 
 class PipelineBuildContext {
@@ -211,7 +210,7 @@ public:
     using TechniqueCallback = std::function<void(TechniqueId, const TechniqueOptions&)>;
 
     PipelineBuildContext(
-        RenderGraph& graph,
+        org::RenderGraph& graph,
         const ResourceBindings& bindings,
         TechniqueCallback buildTechnique = {},
         TechniqueCallback registerExtensions = {})
@@ -220,7 +219,7 @@ public:
         , m_buildTechnique(std::move(buildTechnique))
         , m_registerExtensions(std::move(registerExtensions)) {}
 
-    RenderGraph& Graph() const { return m_graph; }
+    org::RenderGraph& Graph() const { return m_graph; }
     const ResourceBindings& Bindings() const { return m_bindings; }
     void BuildTechnique(TechniqueId id, const TechniqueOptions& options) const {
         if (!m_buildTechnique) {
@@ -259,7 +258,7 @@ public:
     }
 
 private:
-    RenderGraph& m_graph;
+    org::RenderGraph& m_graph;
     const ResourceBindings& m_bindings;
     TechniqueCallback m_buildTechnique;
     TechniqueCallback m_registerExtensions;
@@ -367,8 +366,8 @@ private:
 };
 
 namespace Slots {
-    extern const ResourceSlot<PixelBuffer> EnvironmentCubemap;
-    extern const ResourceSlot<PixelBuffer> EnvironmentPrefilteredCubemap;
+    extern const ResourceSlot<org::PixelBuffer> EnvironmentCubemap;
+    extern const ResourceSlot<org::PixelBuffer> EnvironmentPrefilteredCubemap;
 }
 
 PipelineRecipe MakeBasicRendererDemoPipeline();

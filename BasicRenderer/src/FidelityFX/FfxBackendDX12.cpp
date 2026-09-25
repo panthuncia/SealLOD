@@ -67,7 +67,7 @@ bool CreateUpscaleContextDX12(ffx::Context& context, rhi::Device device, ffx::Cr
     return api::CreateContext(context, nullptr, createUpscaling, backendDesc) == ffx::ReturnCode::Ok;
 }
 
-FfxApiResource GetApiResourceDX12(PixelBuffer* resource, FfxApiResourceState state) {
+FfxApiResource GetApiResourceDX12(org::PixelBuffer* resource, FfxApiResourceState state) {
     auto* nativeResource = rhi::dx12::get_resource(resource->GetAPIResource());
     return ffxApiGetResourceDX12(nativeResource, state);
 }
@@ -99,7 +99,7 @@ bool CreateHostBackendInterfaceDX12(FfxInterface& backendInterface, void*& scrat
     return true;
 }
 
-FfxResource GetHostResourceDX12(PixelBuffer* resource, const wchar_t* name, FfxResourceStates state) {
+FfxResource GetHostResourceDX12(org::PixelBuffer* resource, const wchar_t* name, FfxResourceStates state) {
     if (!LoadDx12Backend()) {
         return {};
     }

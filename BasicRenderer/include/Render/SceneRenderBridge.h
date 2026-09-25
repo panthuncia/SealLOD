@@ -7,12 +7,11 @@
 #include <flecs.h>
 
 #include "Render/SceneFrameSnapshot.h"
+#include "Render/SceneIngestionServices.h"
 #include "Scene/Scene.h"
 
-class ManagerInterface;
-class ViewManager;
-
 namespace br::render {
+class SceneSourceStateStore;
 
 class SceneRenderBridge {
 public:
@@ -25,14 +24,17 @@ public:
     };
 
     SceneFrameSnapshot ExportSnapshot(Scene& scene, uint64_t snapshotSequence, uint64_t sourceFrameNumber) const;
-    void IngestSnapshot(const SceneFrameSnapshot& snapshot, const ManagerInterface& managerInterface);
-    void Sync(Scene& scene, const ManagerInterface& managerInterface);
-    void Clear(const ManagerInterface& managerInterface);
+    void IngestSnapshot(const SceneFrameSnapshot& snapshot, const SceneIngestionServices& services,
+        const SceneIngestionConfiguration& configuration);
+    void Sync(Scene& scene, const SceneIngestionServices& services,
+        const SceneIngestionConfiguration& configuration);
+    void Clear(const SceneIngestionServices& services);
 
     bool HasPrimaryCamera() const;
     flecs::entity GetSceneRoot() const;
     flecs::entity GetPrimaryCameraEntity() const;
-    void ResyncPrimaryCameraDepth(ViewManager& viewManager, uint32_t renderWidth, uint32_t renderHeight);
+    void ResyncPrimaryCameraDepth(const SceneIngestionServices& services,
+        uint32_t renderWidth, uint32_t renderHeight, uint32_t primaryLodHeight);
 
 private:
     void EnsureExportQueries(flecs::world& sceneWorld) const;
@@ -42,6 +44,8 @@ private:
     uint64_t m_sceneRootEntityId = 0;
     uint64_t m_primaryCameraEntityId = 0;
     uint64_t m_currentIngestionFrame = 0;
+    SceneSourceStateStore* m_sourceStore = nullptr;
+    std::vector<std::shared_ptr<Mesh>> m_retainedSourceMeshes;
 
     // Cached export queries (mutable because ExportSnapshot is const)
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::MeshInstances> m_exportRenderableQuery;

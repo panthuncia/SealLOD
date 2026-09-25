@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesClassifyPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -8,20 +9,21 @@
 #include "ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodReyesRootConstants.h"
 #include "Resources/Buffers/Buffer.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 ReyesClassifyPass::ReyesClassifyPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClustersCounterBuffer,
-    std::shared_ptr<Buffer> visibleClustersReadBaseCounterBuffer,
-    std::shared_ptr<Buffer> fullClusterOutputsBuffer,
-    std::shared_ptr<Buffer> fullClusterCounterBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersReadBaseCounterBuffer,
+    std::shared_ptr<org::Buffer> fullClusterOutputsBuffer,
+    std::shared_ptr<org::Buffer> fullClusterCounterBuffer,
     uint32_t fullClusterOutputCapacity,
-    std::shared_ptr<Buffer> ownedClustersBuffer,
-    std::shared_ptr<Buffer> ownedClustersCounterBuffer,
+    std::shared_ptr<org::Buffer> ownedClustersBuffer,
+    std::shared_ptr<org::Buffer> ownedClustersCounterBuffer,
     uint32_t ownedClusterCapacity,
-    std::shared_ptr<Buffer> ownershipBitsetBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> ownershipBitsetBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t phaseIndex,
     ReyesClassifyMode classifyMode)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
@@ -50,16 +52,18 @@ ReyesClassifyPass::ReyesClassifyPass(
     };
 
     auto device = DeviceManager::GetInstance().GetDevice();
+    rhi::CommandSignaturePtr commandSignature;
     device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        m_commandSignature);
+        commandSignature);
+    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
-void ReyesClassifyPass::DeclareResourceUsages(ComputePassBuilder* builder)
+ReyesClassifyBindings ReyesClassifyPass::Declare(org::PassBuilder& builder)
 {
-    builder->WithShaderResource(m_visibleClustersBuffer, m_visibleClustersCounterBuffer)
-        .WithShaderResource(
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    builder.WithShaderResource(
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
@@ -77,71 +81,65 @@ void ReyesClassifyPass::DeclareResourceUsages(ComputePassBuilder* builder)
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
         .WithConstantBuffer(Builtin::PerFrameBuffer)
-        .WithIndirectArguments(m_indirectArgsBuffer)
-        .WithUnorderedAccess(
-            Builtin::Material::TextureStreamingFeedbackBuffer,
-            m_fullClusterOutputsBuffer,
-            m_fullClusterCounterBuffer,
-            m_ownedClustersBuffer,
-            m_ownedClustersCounterBuffer,
-            m_telemetryBuffer);
+        .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+    ReyesClassifyBindings bindings{builder.BindShaderResource(m_visibleClustersBuffer),
+        builder.BindShaderResource(m_visibleClustersCounterBuffer)};
+    bindings.fullClusters = builder.BindUnorderedAccess(m_fullClusterOutputsBuffer);
+    bindings.fullCounter = builder.BindUnorderedAccess(m_fullClusterCounterBuffer);
+    bindings.ownedClusters = builder.BindUnorderedAccess(m_ownedClustersBuffer);
+    bindings.ownedCounter = builder.BindUnorderedAccess(m_ownedClustersCounterBuffer);
+    bindings.indirectArgs = builder.BindIndirectArguments(m_indirectArgsBuffer);
+    bindings.telemetry = builder.BindUnorderedAccess(m_telemetryBuffer);
     if (m_ownershipBitsetBuffer) {
-        builder->WithUnorderedAccess(m_ownershipBitsetBuffer);
+        bindings.ownershipBitset = builder.BindUnorderedAccess(m_ownershipBitsetBuffer);
+        bindings.hasOwnershipBitset = true;
     }
     if (m_visibleClustersReadBaseCounterBuffer) {
-        builder->WithShaderResource(m_visibleClustersReadBaseCounterBuffer);
+        bindings.readBaseCounter = builder.BindShaderResource(m_visibleClustersReadBaseCounterBuffer);
+        bindings.hasReadBaseCounter = true;
     }
+    bindings.fullCapacity = m_fullClusterOutputCapacity;
+    bindings.ownedCapacity = m_ownedClusterCapacity;
+    bindings.phase = m_phaseIndex;
+    bindings.mode = static_cast<uint32_t>(m_classifyMode);
+    return bindings;
 }
 
-void ReyesClassifyPass::Setup() {
+br::render::PreparedComputeIndirect ReyesClassifyPass::Prepare(
+    const ReyesClassifyBindings& bindings, const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    br::render::PreparedComputeIndirect data{};
+    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    data.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
+    data.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
+    auto program = preparation.CaptureProgramBinding(m_pso);
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
+    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
+    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    data.constants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_READ_BASE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasReadBaseCounter ? srv(bindings.readBaseCounter) : 0xFFFFFFFFu;
+    data.constants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.visible);
+    data.constants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.visibleCounter);
+    data.constants[CLOD_REYES_CLASSIFY_FULL_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = uav(bindings.fullClusters);
+    data.constants[CLOD_REYES_CLASSIFY_FULL_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.fullCounter);
+    data.constants[CLOD_REYES_CLASSIFY_FULL_CLUSTERS_CAPACITY] = bindings.fullCapacity;
+    data.constants[CLOD_REYES_CLASSIFY_OWNED_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = uav(bindings.ownedClusters);
+    data.constants[CLOD_REYES_CLASSIFY_OWNED_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.ownedCounter);
+    data.constants[CLOD_REYES_CLASSIFY_OWNED_CLUSTERS_CAPACITY] = bindings.ownedCapacity;
+    data.constants[CLOD_REYES_CLASSIFY_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
+    data.constants[CLOD_REYES_CLASSIFY_PHASE_INDEX] = bindings.phase;
+    data.constants[CLOD_REYES_CLASSIFY_OWNERSHIP_BITSET_DESCRIPTOR_INDEX] = bindings.hasOwnershipBitset ? uav(bindings.ownershipBitset) : 0xFFFFFFFFu;
+    data.constants[CLOD_REYES_CLASSIFY_MODE] = bindings.mode;
+    return data;
 }
 
-PassReturn ReyesClassifyPass::Execute(PassExecutionContext& executionContext)
-{
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-
-    uint32_t uintRootConstants[NumMiscUintRootConstants] = {};
-    uintRootConstants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_READ_BASE_COUNTER_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetSRVInfo(0).slot.index;
-    if (m_visibleClustersReadBaseCounterBuffer) {
-        uintRootConstants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_READ_BASE_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersReadBaseCounterBuffer->GetSRVInfo(0).slot.index;
-    }
-    uintRootConstants[CLOD_REYES_CLASSIFY_FULL_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_fullClusterOutputsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_CLASSIFY_FULL_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_fullClusterCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_CLASSIFY_FULL_CLUSTERS_CAPACITY] = m_fullClusterOutputCapacity;
-    uintRootConstants[CLOD_REYES_CLASSIFY_OWNED_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_ownedClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_CLASSIFY_OWNED_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_ownedClustersCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_CLASSIFY_OWNED_CLUSTERS_CAPACITY] = m_ownedClusterCapacity;
-    uintRootConstants[CLOD_REYES_CLASSIFY_TELEMETRY_DESCRIPTOR_INDEX] = m_telemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_CLASSIFY_PHASE_INDEX] = m_phaseIndex;
-    uintRootConstants[CLOD_REYES_CLASSIFY_OWNERSHIP_BITSET_DESCRIPTOR_INDEX] = m_ownershipBitsetBuffer
-        ? m_ownershipBitsetBuffer->GetUAVShaderVisibleInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_CLASSIFY_MODE] = static_cast<uint32_t>(m_classifyMode);
-
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        uintRootConstants);
-
-    commandList.ExecuteIndirect(m_commandSignature->GetHandle(), m_indirectArgsBuffer->GetAPIResource().GetHandle(), 0, {}, 0, 1);
-
-    return {};
+void ReyesClassifyPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
 }
 
-void ReyesClassifyPass::Update(const UpdateExecutionContext& executionContext)
-{
+void ReyesClassifyPass::Record(const ReyesClassifyBindings&,
+    const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeIndirect(data, recording);
 }
-
-void ReyesClassifyPass::Cleanup() {}

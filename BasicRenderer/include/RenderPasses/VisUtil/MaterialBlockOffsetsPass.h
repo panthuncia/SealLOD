@@ -1,11 +1,13 @@
 #pragma once
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
+#include "Render/MaterialStateArtifacts.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 // Pass B: scan block sums, add block prefixes to per-element offsets, and write total pixel count.
 // Dispatch dimension: x = 1 (single group), unless we implement recursive scan for very large numBlocks.
-class MaterialBlockOffsetsPass : public ComputePass {
+class MaterialBlockOffsetsPass : public org::TypedRenderGraphPass<MaterialBlockOffsetsPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
 public:
     MaterialBlockOffsetsPass() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -16,48 +18,50 @@ public:
             "VisUtil_BlockOffsetsPSO");
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* b) override {
-        b->WithShaderResource("Builtin::VisUtil::MaterialPixelCountBuffer",
+    void Declare(org::PassBuilder& b) {
+        b.WithShaderResource("Builtin::VisUtil::MaterialPixelCountBuffer",
                               "Builtin::VisUtil::BlockSumsBuffer")
          .WithUnorderedAccess("Builtin::VisUtil::MaterialOffsetBuffer",
                               "Builtin::VisUtil::ScannedBlockSumsBuffer",
-                              "Builtin::VisUtil::TotalPixelCountBuffer");
+                              "Builtin::VisUtil::TotalPixelCountBuffer")
+         .PreferQueue(org::QueueKind::Compute);
     }
 
-    void Setup() override {
+    br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
+        const auto* update = preparation.preparationData->Get<UpdateContext>();
+        const auto* render = preparation.preparationData->Get<RenderContext>();
+        if (!update && !render) throw std::logic_error("MaterialBlockOffsetsPass requires frame context");
+        br::render::PreparedComputeDispatch data{};
+        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+        auto program = CaptureProgramBinding(preparation, m_pso);
+        data.program = program.program;
+        data.descriptorIndices = std::move(program.descriptorIndices);
+        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
+        const auto materialState = published
+            ? published->materials.payload.Get<br::render::PublishedMaterialState>()
+            : nullptr;
+        data.constants[0] = materialState ? materialState->compileFlagSlotsUsed : 0u;
+        data.constants[1] = (data.constants[0] + m_blockSize - 1u) / m_blockSize;
+        data.groupsX = 1;
+        return data;
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& ctx = *renderContext;
-        auto& pm = PSOManager::GetInstance();
-        auto& cl = executionContext.commandList;
-
-		auto numMaterials = ctx.materialManager->GetCompileFlagsSlotsUsed();
-        // numBlocks must match prior pass
-        const uint32_t numBlocks = (numMaterials + m_blockSize - 1) / m_blockSize;
-
-        cl.SetDescriptorHeaps(ctx.textureDescriptorHeap.GetHandle(), ctx.samplerDescriptorHeap.GetHandle());
-        cl.BindLayout(pm.GetComputeRootSignature().GetHandle());
-        cl.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-        BindResourceDescriptorIndices(cl, m_pso.GetResourceDescriptorSlots());
-
-        // Root constants:
-        // UintRootConstant0 = NumMaterials
-        // UintRootConstant1 = NumBlocks
-        unsigned int rc[NumMiscUintRootConstants] = {};
-        rc[0] = numMaterials;
-        rc[1] = numBlocks;
-        cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rc);
-
-        // Single-group: the shader loops across blocks and elements.
-        cl.Dispatch(1, 1, 1);
-        return {};
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const {
+        const auto* update = preparation.preparationData->Get<UpdateContext>();
+        const auto* render = preparation.preparationData->Get<RenderContext>();
+        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
+        const auto resolution = update ? update->renderResolution : render->renderResolution;
+        return {reinterpret_cast<uintptr_t>(m_pso.PeekPayload()),
+            published ? published->materials.revision : 0u, resolution.x, resolution.y};
     }
-
-    void Cleanup() override {}
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&,
+        const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedComputeDispatch(data, recording);
+    }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
     uint32_t m_blockSize = 1024;
 };

@@ -2,27 +2,26 @@
 
 #include <memory>
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
-class AVBOITAdaptiveFitUpdatePass final : public ComputePass {
+struct AVBOITAdaptiveFitUpdateBindings { org::ResourceBindingToken config, histogram, state; };
+class AVBOITAdaptiveFitUpdatePass final : public org::TypedRenderGraphPass<AVBOITAdaptiveFitUpdatePass, br::render::PreparedComputeDispatch, AVBOITAdaptiveFitUpdateBindings> {
 public:
     AVBOITAdaptiveFitUpdatePass(
-        std::shared_ptr<Buffer> configBuffer,
-        std::shared_ptr<Buffer> occupancyHistogramBuffer,
-        std::shared_ptr<Buffer> fitStateBuffer);
+        std::shared_ptr<org::Buffer> configBuffer,
+        std::shared_ptr<org::Buffer> occupancyHistogramBuffer,
+        std::shared_ptr<org::Buffer> fitStateBuffer);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    void Update(const UpdateExecutionContext& executionContext) override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    AVBOITAdaptiveFitUpdateBindings Declare(org::PassBuilder& builder);
+    br::render::PreparedComputeDispatch Prepare(const AVBOITAdaptiveFitUpdateBindings&, const org::PassPrepareContext&) const;
+    static void Record(const AVBOITAdaptiveFitUpdateBindings&, const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
 
 private:
-    std::shared_ptr<Buffer> m_configBuffer;
-    std::shared_ptr<Buffer> m_occupancyHistogramBuffer;
-    std::shared_ptr<Buffer> m_fitStateBuffer;
-    PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_configBuffer;
+    std::shared_ptr<org::Buffer> m_occupancyHistogramBuffer;
+    std::shared_ptr<org::Buffer> m_fitStateBuffer;
+    org::PipelineState m_pso;
 };

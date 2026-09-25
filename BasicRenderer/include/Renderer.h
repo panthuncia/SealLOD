@@ -12,7 +12,9 @@
 #include <memory>
 #include <mutex>
 #include <functional>
+#include <filesystem>
 #include <optional>
+#include <array>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,6 +28,12 @@
 #include "Managers/InputManager.h"
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Managers/ViewManager.h"
+#include "Render/DepthHistoryService.h"
+#include "Render/SceneAssetRequestService.h"
+#include "Render/StaticWorkloadRequestService.h"
+#include "Render/StaticObjectRequestService.h"
+#include "Render/StaticGeometryRequestService.h"
+#include "Render/StaticMaterialRequestService.h"
 #include "Managers/LightManager.h"
 #include "Managers/MeshManager.h"
 #include "Managers/ObjectManager.h"
@@ -45,15 +53,24 @@
 #include "Render/RendererSettings.h"
 #include "Render/OpenPBRLookupResources.h"
 #include "Render/SceneRenderBridge.h"
+#include "Render/SceneSourceStateStore.h"
+#include "Render/SceneEntityMaterializationService.h"
+#include "Render/SceneIngestionServices.h"
+#include "Render/PoseInstanceRegistrationService.h"
+#include "Render/SceneRenderableResidencyService.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodRayTracingSystem.h"
 #include "Render/ShaderVariantRequestService.h"
 #include "Render/Pipeline/PipelineRecipe.h"
-#include "Render/ProducerPassServices.h"
+#include "Render/MaterialEvaluationBuildInputs.h"
 #include "Render/ProducerPersistentState.h"
+#include "Render/AsyncStateGraph.h"
+#include "Render/PublishedRendererState.h"
+#include "Render/RendererStateRequestService.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/RendererFrameInputs.h"
 
-class DynamicResource;
+namespace org { class DynamicResource; }
 namespace org { class ExternalTextureResource; }
-using org::ExternalTextureResource;
 class CLodStreamingSystem;
 class VirtualShadowCasterRegistry;
 
@@ -86,6 +103,15 @@ private:
 class Renderer {
 public:
     struct SamplingReadinessSnapshot {
+        struct SchedulerDomainSnapshot {
+            uint64_t queued = 0, active = 0, completed = 0;
+            uint64_t queueWaitMicros = 0, maxQueueWaitMicros = 0;
+            uint64_t executionMicros = 0, maxExecutionMicros = 0;
+            uint64_t highWatermark = 0;
+            uint32_t concurrency = 0;
+            std::string maxQueueWaitTask;
+            std::string maxExecutionTask;
+        };
         bool sceneTaskInFlight = false;
         bool hasCommittedSceneSnapshot = false;
         uint64_t committedSceneSnapshotSequence = 0;
@@ -139,6 +165,9 @@ public:
         uint32_t ioTasks = 0;
         uint32_t backgroundTasks = 0;
         uint32_t shaderCompileTasks = 0;
+        uint32_t schedulerWorkerCount = 0;
+        std::array<SchedulerDomainSnapshot, static_cast<std::size_t>(TaskDomain::Count)> schedulerDomains{};
+        br::render::RendererStatePublisherStats rendererStatePublisher;
         uint64_t deferredRetireQueueDepth = 0;
         uint64_t drawRecordsAllocated = 0;
     };
@@ -157,6 +186,10 @@ public:
     InputManager& GetInputManager();
     void SetInputMode(InputMode mode);
     void SetCameraSpeed(float speed);
+    // Establishes the scene-mutation boundary for hosts that update ECS state
+    // outside Renderer::Update. Required when async graph preparation may have
+    // outlived a Render call that returned before its normal join point.
+    void WaitForAsyncPreparation();
     void SetEnvironment(std::string name);
     std::shared_ptr<Scene> AppendScene(std::shared_ptr<Scene> scene);
 	bool IsInitialized() const { return m_isInitialized; }
@@ -164,15 +197,19 @@ public:
     void SetSceneRenderOverlapEnabled(bool enabled);
     void IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snapshot);
     ObjectManager::Stats GetObjectManagerStats() const;
-    SamplingReadinessSnapshot GetSamplingReadinessSnapshot() const;
+    SamplingReadinessSnapshot GetSamplingReadinessSnapshot(bool includeExpensiveDiagnostics = true) const;
     void SetDeterministicSamplingMode(bool enabled);
     bool GetDeterministicSamplingMode() const { return m_deterministicSamplingMode; }
-    ManagerInterface& GetManagerInterface() { return m_managerInterface; }
-    const ManagerInterface& GetManagerInterface() const { return m_managerInterface; }
+    br::render::SceneIngestionServices& GetSceneIngestionServices() { return m_sceneIngestionServices; }
+    const br::render::SceneIngestionServices& GetSceneIngestionServices() const { return m_sceneIngestionServices; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
-    RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
-    const RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
+    org::RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
+    const org::RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
     bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
+    void StartAsyncStateGraphTrace(br::render::AsyncStateGraphTraceConfig config = {});
+    [[nodiscard]] bool AsyncStateGraphTraceActive() const;
+    br::render::AsyncStateGraphTraceReport StopAsyncStateGraphTraceAndWriteReport(
+        const std::filesystem::path& outputDirectory);
     void SetProducerPersistentState(std::shared_ptr<ProducerPersistentState> state) {
         if (m_isInitialized) throw std::logic_error("producer persistent state must be set before initialization");
         m_producerPersistentState = state ? std::move(state) : std::make_shared<ProducerPersistentState>();
@@ -192,8 +229,10 @@ private:
 
     rhi::DescriptorHeapPtr rtvHeap;
 	std::vector<rhi::ResourceHandle> renderTargets;
-	std::vector<std::shared_ptr<ExternalTextureResource>> m_backbufferResources;
-	std::shared_ptr<DynamicResource> m_dynamicBackbuffer;
+	std::vector<std::shared_ptr<org::ExternalTextureResource>> m_backbufferResources;
+	std::shared_ptr<org::DynamicResource> m_dynamicBackbuffer;
+	std::vector<std::shared_ptr<org::PixelBuffer>> m_presentationColorResources;
+	std::shared_ptr<org::DynamicResource> m_dynamicPresentationColor;
     //ComPtr<ID3D12DescriptorHeap> dsvHeap;
 	//std::vector<ComPtr<ID3D12Resource>> depthStencilBuffers;
 	//Components::DepthMap m_depthMap;
@@ -202,6 +241,9 @@ private:
     UINT rtvDescriptorSize;
     UINT dsvDescriptorSize;
     uint8_t m_frameIndex = 0;
+    // Logical-frame preparation advances independently once async queue
+    // prefill is enabled. m_frameIndex remains the acquired swapchain image.
+    uint8_t m_preparationFrameIndex = 0;
     uint64_t m_totalFramesRendered = 0;
 	uint8_t m_numFramesInFlight = 3;
     rhi::TimelinePtr m_frameFence;
@@ -219,7 +261,7 @@ private:
 
     std::shared_ptr<Scene> currentScene;
 
-    std::unique_ptr<RenderGraph> currentRenderGraph = nullptr;
+    std::unique_ptr<org::RenderGraph> currentRenderGraph = nullptr;
     bool m_renderGraphRuntimeInitialized = false;
     br::pipeline::PipelineRecipe m_pipelineRecipe;
     std::optional<br::pipeline::PipelineRecipe> m_pendingPipelineRecipe;
@@ -232,16 +274,23 @@ private:
     bool m_shaderReloadRequested = false;
 
     RenderContext m_context;
-    ProducerPassServices m_producerServices;
+    // Most recently accepted immutable logical-frame publication. The render
+    // half of the frame never exposes a pointer to mutable m_context.
+    std::shared_ptr<const br::render::RendererFrameInputs> m_frameInputs;
+    std::uint64_t m_lightArtifactRevision = 1;
+    std::uint64_t m_lastLightSourceRevision = 0;
+    std::uint64_t m_lastLightViewFamilyRevision = 0;
+    std::uint64_t m_lastPoseSourceRevision = 0;
+    MaterialEvaluationBuildInputs m_materialEvaluationInputs;
     // Persistent producer state survives graph rebuilds and full/producer
     // recipe switches. It is released only with the renderer/device lifetime.
     std::shared_ptr<ProducerPersistentState> m_producerPersistentState = std::make_shared<ProducerPersistentState>();
 
 	std::string m_environmentName;
 	std::unique_ptr<Environment> m_currentEnvironment = nullptr;
-    std::shared_ptr<PixelBuffer> m_defaultEnvironmentCubemap = nullptr;
-    std::shared_ptr<PixelBuffer> m_defaultEnvironmentPrefilteredCubemap = nullptr;
-    std::shared_ptr<PixelBuffer> m_blueNoiseTexture = nullptr;
+    std::shared_ptr<org::PixelBuffer> m_defaultEnvironmentCubemap = nullptr;
+    std::shared_ptr<org::PixelBuffer> m_defaultEnvironmentPrefilteredCubemap = nullptr;
+    std::shared_ptr<org::PixelBuffer> m_blueNoiseTexture = nullptr;
     OpenPBRLookupResources m_openPBRLookupResources;
     bool m_warnedUsingFallbackEnvironment = false;
     bool m_warnedNullScene = false;
@@ -253,16 +302,33 @@ private:
     std::unique_ptr<ObjectManager> m_pObjectManager = nullptr;
     std::unique_ptr<IndirectCommandBufferManager> m_pIndirectCommandBufferManager = nullptr;
     std::unique_ptr<ViewManager> m_pViewManager = nullptr;
+    br::render::DepthHistoryPublicationService m_depthHistory;
 	std::unique_ptr<EnvironmentManager> m_pEnvironmentManager = nullptr;
+	br::render::EnvironmentWorkServices m_environmentWorkServices;
     std::unique_ptr<MaterialManager> m_pMaterialManager = nullptr;
-	std::unique_ptr<SkeletonManager> m_pSkeletonManager = nullptr;
+	std::shared_ptr<SkeletonManager> m_pSkeletonManager = nullptr;
     std::unique_ptr<TerrainManager> m_pTerrainManager = nullptr;
     std::unique_ptr<br::ReadbackManager> m_pReadbackManager = nullptr;
     std::unique_ptr<TextureFactory> m_pTextureFactory = nullptr;
-    std::unique_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
+    std::shared_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
+    std::unique_ptr<br::render::AsyncStateGraph> m_asyncStateGraph;
+    std::optional<br::render::AsyncStateGraphTraceConfig> m_pendingAsyncStateGraphTrace;
+    std::unique_ptr<br::render::RendererStatePublisher> m_rendererStatePublisher;
+    std::unique_ptr<br::render::RendererStateRequestService> m_rendererStateRequests;
+    std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 5> m_lightTableFamilies;
+    std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 4> m_poseTableFamilies;
+    TaskScope m_rendererStateCommitScope;
+    TaskScope m_presentationTailScope;
     ShaderVariantRequestService m_shaderVariantRequestService;
 
-	ManagerInterface m_managerInterface;
+    br::render::SceneIngestionServices m_sceneIngestionServices;
+    br::render::PoseInstanceRegistrationService m_poseInstanceRegistrationService;
+    br::render::SceneRenderableResidencyService m_sceneRenderableResidencyService;
+    br::render::SceneAssetRequestService m_sceneAssetRequestService;
+	br::render::StaticWorkloadRequestService m_staticWorkloadRequestService;
+	br::render::StaticObjectRequestService m_staticObjectRequestService;
+	br::render::StaticGeometryRequestService m_staticGeometryRequestService;
+	br::render::StaticMaterialRequestService m_staticMaterialRequestService;
     DirectX::XMUINT3 m_lightClusterSize = { 12, 12, 24 };
     FrameTimer m_frameTimer;
 
@@ -289,7 +355,6 @@ private:
     bool HasCommittedSceneSnapshot() const;
     bool NeedsSceneSnapshotBootstrap() const;
     br::render::SceneOverlapStatus GetSceneOverlapStatus() const;
-
     void WaitForFrame(uint8_t frameIndex);
     void SignalFence(rhi::Queue commandQueue, uint8_t currentFrameIndex);
     void AdvanceFrameIndex();
@@ -370,6 +435,8 @@ private:
     DeferredFunctions m_preFrameDeferredFunctions;
     int32_t m_lastFrameTaskNodeIndex = -1;
     br::render::SceneRenderBridge m_sceneRenderBridge;
+    br::render::SceneSourceStateStore m_sceneSourceStateStore;
+    br::render::SceneEntityMaterializationService m_sceneEntityMaterializationService;
     bool m_sceneRenderOverlapEnabled = true;
     bool m_externalSceneMode = false;
     bool m_swapChainReady = true;
@@ -416,7 +483,9 @@ private:
     std::shared_ptr<org::runtime::IUploadPolicyService> m_uploadPolicyService = nullptr;
     uint64_t m_lastCLodVisibilityTelemetryRequestFrame = UINT64_MAX;
     bool m_clodTelemetryReadbackPending = false;
+    bool m_clodRasterArgsReadbackPending = false;
     bool m_clodVisibleCounterReadbackPending = false;
+    bool m_clodVisibleRecordsReadbackPending = false;
     bool m_clodReplayStateReadbackPending = false;
     bool m_loggedCLodVisibilityTelemetryEnabled = false;
     bool m_clodVisibilityTelemetryDebugEnabledByRenderer = false;
@@ -430,13 +499,13 @@ private:
     bool m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;
     bool m_loggedObjectReyesAtlasTelemetryEnabled = false;
 
-    class CoreResourceProvider : public IResourceProvider {
+    class CoreResourceProvider : public org::IResourceProvider {
 	public:
-        std::shared_ptr<PixelBuffer> m_HDRColorTarget = nullptr;
-		std::shared_ptr<PixelBuffer> m_upscaledHDRColorTarget = nullptr;
-		std::shared_ptr<PixelBuffer> m_gbufferDilatedMotionVectors = nullptr;
+        std::shared_ptr<org::PixelBuffer> m_HDRColorTarget = nullptr;
+		std::shared_ptr<org::PixelBuffer> m_upscaledHDRColorTarget = nullptr;
+		std::shared_ptr<org::PixelBuffer> m_gbufferDilatedMotionVectors = nullptr;
 
-		std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override { // TODO: don't use ifs
+		std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override { // TODO: don't use ifs
 			if (key.ToString() == Builtin::Surface::DilatedMotion)
 				return m_gbufferDilatedMotionVectors;
             if (key.ToString() == Builtin::Color::HDRColorTarget)
@@ -448,11 +517,11 @@ private:
 			return nullptr;
         }
 
-        std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override {
+        std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override {
             return nullptr;
 		}
 
-        std::vector<ResourceIdentifier> GetSupportedKeys() override {
+        std::vector<org::ResourceIdentifier> GetSupportedKeys() override {
 			return {
                 Builtin::Surface::DilatedMotion,
                 Builtin::Color::HDRColorTarget,
@@ -460,7 +529,7 @@ private:
 			};
         }
 
-        std::vector<ResourceIdentifier> GetSupportedResolverKeys() override {
+        std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override {
             return {};
 		}
 

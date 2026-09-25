@@ -14,12 +14,11 @@
 #include "Animation/Skeleton.h"
 #include "Managers/LightManager.h"
 #include "Import/MeshData.h"
-#include "Managers/ManagerInterface.h"
+#include "Render/SceneIngestionServices.h"
 #include "Managers/Singletons/SettingsManager.h"
 #include "Render/RasterBucketFlags.h"
 
 namespace org { class DynamicGloballyIndexedResource; }
-using org::DynamicGloballyIndexedResource;
 class Material;
 
 class SkeletonVariantSet {
@@ -94,7 +93,7 @@ public:
     void PropagateTransforms();
     void PostUpdate();
     std::shared_ptr<Scene> AppendScene(std::shared_ptr<Scene> scene);
-    void Activate(ManagerInterface managerInterface);
+    void Activate(br::render::SceneIngestionServices services);
     void Deactivate();
     bool SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t meshInstanceIndex, std::shared_ptr<Material> material);
     void AssignSkeletonVariants(SkeletonVariantSet& variantSet, const SkeletonVariantAssignmentOptions& options = {});
@@ -147,7 +146,7 @@ private:
     std::uint64_t m_renderableMeshInstanceCreateUs = 0;
     std::uint64_t m_renderableEntityReleaseUs = 0;
 
-    ManagerInterface m_managerInterface;
+    br::render::SceneIngestionServices m_sceneIngestionServices;
 
     std::function<void(std::vector<float>)> setDirectionalLightCascadeSplits;
     std::function<uint8_t()> getNumDirectionalLightCascades;

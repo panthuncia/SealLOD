@@ -1,11 +1,13 @@
 #pragma once
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
+#include "Render/MaterialStateArtifacts.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 // Pass A: per-block exclusive scan producing per-element local offsets and per-block totals.
 // Dispatch dimension: x = numBlocks, where numBlocks = ceil(NumMaterials / blockSize).
-class MaterialBlockScanPass : public ComputePass {
+class MaterialBlockScanPass : public org::TypedRenderGraphPass<MaterialBlockScanPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
 public:
     explicit MaterialBlockScanPass() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -16,45 +18,48 @@ public:
             "VisUtil_BlockScanPSO");
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* b) override {
-        b->WithShaderResource("Builtin::VisUtil::MaterialPixelCountBuffer")
+    void Declare(org::PassBuilder& b) {
+        b.WithShaderResource("Builtin::VisUtil::MaterialPixelCountBuffer")
          .WithUnorderedAccess("Builtin::VisUtil::MaterialOffsetBuffer",
-                              "Builtin::VisUtil::BlockSumsBuffer");
+                              "Builtin::VisUtil::BlockSumsBuffer")
+         .PreferQueue(org::QueueKind::Compute);
     }
 
-    void Setup() override {
-        // Removed redundant Register calls now covered by declared-resource auto descriptor registration
+    br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
+        const auto* update = preparation.preparationData->Get<UpdateContext>();
+        const auto* render = preparation.preparationData->Get<RenderContext>();
+        if (!update && !render) throw std::logic_error("MaterialBlockScanPass requires frame context");
+        br::render::PreparedComputeDispatch data{};
+        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+        auto program = CaptureProgramBinding(preparation, m_pso);
+        data.program = program.program;
+        data.descriptorIndices = std::move(program.descriptorIndices);
+        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
+        const auto materialState = published
+            ? published->materials.payload.Get<br::render::PublishedMaterialState>()
+            : nullptr;
+        data.constants[0] = materialState ? materialState->compileFlagSlotsUsed : 0u;
+        data.groupsX = (data.constants[0] + m_blockSize - 1u) / m_blockSize;
+        return data;
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& ctx = *renderContext;
-        auto& pm = PSOManager::GetInstance();
-        auto& cl = executionContext.commandList;
-
-		auto numMaterials = ctx.materialManager->GetCompileFlagsSlotsUsed();
-        // numBlocks = ceil(N / K)
-        const uint32_t numBlocks = (numMaterials + m_blockSize - 1) / m_blockSize;
-
-        cl.SetDescriptorHeaps(ctx.textureDescriptorHeap.GetHandle(), ctx.samplerDescriptorHeap.GetHandle());
-        cl.BindLayout(pm.GetComputeRootSignature().GetHandle());
-        cl.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-        BindResourceDescriptorIndices(cl, m_pso.GetResourceDescriptorSlots());
-
-        // Root constants:
-        // UintRootConstant0 = NumMaterials
-        unsigned int rc[NumMiscUintRootConstants] = {};
-        rc[0] = numMaterials;
-        cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rc);
-
-        cl.Dispatch(numBlocks, 1, 1);
-        return {};
+    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const {
+        const auto* update = preparation.preparationData->Get<UpdateContext>();
+        const auto* render = preparation.preparationData->Get<RenderContext>();
+        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
+        const auto resolution = update ? update->renderResolution : render->renderResolution;
+        return {reinterpret_cast<uintptr_t>(m_pso.PeekPayload()),
+            published ? published->materials.revision : 0u, resolution.x, resolution.y};
     }
-
-    void Cleanup() override {}
+    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&,
+        const org::PassPrepareContext&) const { return {}; }
+    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedComputeDispatch(data, recording);
+    }
 
 private:
-        PipelineState m_pso;
+        org::PipelineState m_pso;
         // block size used by the shader (materialPrefixSum.hlsl). Keep in sync.
         uint32_t m_blockSize = 1024;
 };

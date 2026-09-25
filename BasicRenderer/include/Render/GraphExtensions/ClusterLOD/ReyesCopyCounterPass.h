@@ -2,42 +2,42 @@
 
 #include <memory>
 
-#include "RenderPasses/Base/CopyPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "Resources/Buffers/Buffer.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
-class ReyesCopyCounterPass final : public CopyPass, public IHasImmediateModeCommands {
+struct ReyesCounterCopyBindings {
+    org::ResourceBindingToken source;
+    org::ResourceBindingToken destination;
+};
+
+class ReyesCopyCounterPass final
+    : public org::TypedRenderGraphPass<ReyesCopyCounterPass,
+        org::EmptyPassFrameData, ReyesCounterCopyBindings> {
 public:
-    ReyesCopyCounterPass(std::shared_ptr<Buffer> sourceCounterBuffer, std::shared_ptr<Buffer> destCounterBuffer)
+    ReyesCopyCounterPass(std::shared_ptr<org::Buffer> sourceCounterBuffer, std::shared_ptr<org::Buffer> destCounterBuffer)
         : m_sourceCounterBuffer(std::move(sourceCounterBuffer))
         , m_destCounterBuffer(std::move(destCounterBuffer))
     {
     }
 
-    void DeclareResourceUsages(CopyPassBuilder* builder) override
+    ReyesCounterCopyBindings Declare(org::PassBuilder& builder)
     {
-        builder->WithCopySource(m_sourceCounterBuffer)
-            .WithCopyDest(m_destCounterBuffer)
-            .PreferQueue(QueueKind::Copy);
+        builder.PreferQueue(org::QueueKind::Copy);
+        return {builder.BindCopySource(m_sourceCounterBuffer),
+            builder.BindCopyDestination(m_destCounterBuffer)};
     }
 
-    void Setup() override {}
-
-    void RecordImmediateCommands(ImmediateExecutionContext& context) override
+    static void Record(const ReyesCounterCopyBindings& data,
+        org::PassRecordContext& recording)
     {
-        context.list.CopyBufferRegion(m_destCounterBuffer.get(), 0, m_sourceCounterBuffer.get(), 0, sizeof(uint32_t));
+        recording.Commands().CopyBufferRegion(
+            recording.Resolve(data.destination).GetHandle(), 0,
+            recording.Resolve(data.source).GetHandle(), 0, sizeof(uint32_t));
     }
-
-    PassReturn Execute(PassExecutionContext& context) override
-    {
-        (void)context;
-        return {};
-    }
-
-    void Cleanup() override {}
 
 private:
-    std::shared_ptr<Buffer> m_sourceCounterBuffer;
-    std::shared_ptr<Buffer> m_destCounterBuffer;
+    std::shared_ptr<org::Buffer> m_sourceCounterBuffer;
+    std::shared_ptr<org::Buffer> m_destCounterBuffer;
 };

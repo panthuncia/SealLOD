@@ -264,20 +264,55 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     ReceiverSubpageMeshletRejects,
     DynamicWindSkinCachePositionBytesUsed,
     DynamicWindSkinCacheMetadataBytesUsed,
+    RasterArgsNonZeroBuckets,
+    RasterArgsDispatchGroups,
 
     Count
 };
 
 inline constexpr uint32_t CLodWorkGraphCounterCount =
     static_cast<uint32_t>(CLodWorkGraphCounterIndex::Count);
+inline constexpr uint32_t CLodWorkGraphTelemetryBufferCount =
+    CLodWorkGraphCounterCount;
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedGroups) == 264u);
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedOutputTriangles) == 266u);
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheEligibleClusters) == 267u);
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices) == 274u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterArgsNonZeroBuckets) == 279u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterArgsDispatchGroups) == 280u);
 
 struct CLodWorkGraphTelemetryCounters {
     std::array<uint32_t, CLodWorkGraphCounterCount> counters{};
 };
+
+[[nodiscard]] constexpr bool CLodRasterPipelineCollapsed(
+    uint32_t compactedTriangles, uint32_t argumentDispatchGroups,
+    uint32_t rasterGroups, uint32_t outputTriangles,
+    uint32_t pixelInvocations, uint32_t visibilityWrites) noexcept {
+    return (compactedTriangles != 0u && argumentDispatchGroups == 0u) ||
+        (argumentDispatchGroups != 0u && rasterGroups == 0u) ||
+        (rasterGroups != 0u && outputTriangles == 0u) ||
+        (outputTriangles != 0u && pixelInvocations == 0u) ||
+        visibilityWrites > pixelInvocations;
+}
+
+// Detect the partial failure mode where indirect mesh work produces a normal
+// triangle count but only the first few pixel waves appear to run. Keep this
+// deliberately conservative: sub-pixel geometry can legitimately produce
+// fewer invocations than triangles, but fewer than one invocation per 64
+// emitted triangles at this workload size is a pipeline failure, not ordinary
+// coverage variation.
+[[nodiscard]] constexpr bool CLodRasterPipelineSeverelyUndercovered(
+    uint32_t outputTriangles, uint32_t pixelInvocations) noexcept {
+    constexpr uint32_t minimumTriangleSample = 4096u;
+    return outputTriangles >= minimumTriangleSample &&
+        static_cast<uint64_t>(pixelInvocations) * 64u < outputTriangles;
+}
+
+static_assert(CLodRasterPipelineCollapsed(10u, 10u, 0u, 0u, 0u, 0u));
+static_assert(!CLodRasterPipelineCollapsed(10u, 10u, 10u, 20u, 100u, 80u));
+static_assert(CLodRasterPipelineSeverelyUndercovered(1'000'000u, 5'000u));
+static_assert(!CLodRasterPipelineSeverelyUndercovered(1'000'000u, 20'000u));
 
 inline constexpr uint32_t CLodVsmAttributionClipmapCapacity = 22u;
 
@@ -313,6 +348,11 @@ struct CLodPrimaryVisibilitySnapshot {
     uint32_t residentLeaves = 0u;
     uint32_t nonresidentLeaves = 0u;
     uint32_t visibleClusterWrites = 0u;
+    uint32_t bucketRecordsDispatched = 0u;
+    uint32_t histogramInputs = 0u;
+    uint32_t histogramTriangleContributors = 0u;
+    uint32_t compactionInputs = 0u;
+    uint32_t compactionTriangleEmitted = 0u;
     uint32_t rasterInitializationFailures = 0u;
     uint32_t sourceGroupMismatches = 0u;
     uint32_t outputTriangles = 0u;
@@ -386,10 +426,15 @@ struct CLodSourceGroupMismatchDetail {
     uint32_t viewId = 0xFFFFFFFFu;
     uint32_t bucketMeshletIndex = 0u;
     uint32_t bucketCount = 0u;
-    uint32_t pad0 = 0u;
+    uint32_t actualOwnerMeshMetadataIndex = 0xFFFFFFFFu;
+    uint32_t expectedTemplateMeshMetadataIndex = 0xFFFFFFFFu;
+    uint32_t expectedMeshIdentityLo = 0u;
+    uint32_t expectedMeshIdentityHi = 0u;
+    uint32_t actualMeshIdentityLo = 0u;
+    uint32_t actualMeshIdentityHi = 0u;
 };
 
-static_assert(sizeof(CLodSourceGroupMismatchDetail) == 88u, "CLodSourceGroupMismatchDetail size must match HLSL");
+static_assert(sizeof(CLodSourceGroupMismatchDetail) == 108u, "CLodSourceGroupMismatchDetail size must match HLSL");
 
 inline constexpr uint32_t CLodDirectionalShadowDebugMaxClipmaps = 16u;
 

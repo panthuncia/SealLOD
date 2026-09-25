@@ -10,12 +10,14 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <span>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cwctype>
 #include <string_view>
@@ -150,10 +152,42 @@ namespace CLodCache {
 		return false;
 #else
 		static std::mutex cacheMutex;
-		static std::unordered_map<
-			std::wstring,
-			std::weak_ptr<const MappedContainerLease>> cache;
+		struct CacheEntry {
+			std::weak_ptr<const MappedContainerLease> lease;
+			std::shared_ptr<const MappedContainerLease> retainedLease;
+			std::list<std::wstring>::iterator retainedPosition{};
+			bool retained = false;
+		};
+		// Static templates using the same CLod container are often prepared in
+		// separate waves. A weak-only cache discarded the mapping between those
+		// waves and paid CreateFileW again thousands of times. Retain a bounded
+		// working set: mapped views consume address space but only fault the blobs
+		// that streaming actually touches, while the bound prevents preprocessing
+		// large worlds from pinning every container for the process lifetime.
+		static constexpr size_t retainedLeaseLimit = 1024u;
+		static std::unordered_map<std::wstring, CacheEntry> cache;
+		static std::list<std::wstring> retainedLru;
+		static std::unordered_set<std::wstring> openedPaths;
 		static std::unordered_map<std::wstring, std::shared_ptr<std::mutex>> pathMutexes;
+		auto retain = [&](const std::wstring& path, CacheEntry& entry,
+			std::shared_ptr<const MappedContainerLease> lease) {
+			if (entry.retained) {
+				retainedLru.erase(entry.retainedPosition);
+			}
+			retainedLru.push_front(path);
+			entry.retainedPosition = retainedLru.begin();
+			entry.retained = true;
+			entry.retainedLease = std::move(lease);
+			while (retainedLru.size() > retainedLeaseLimit) {
+				auto oldest = std::prev(retainedLru.end());
+				if (auto it = cache.find(*oldest); it != cache.end()) {
+					it->second.retainedLease.reset();
+					it->second.retained = false;
+				}
+				retainedLru.erase(oldest);
+				basic_telemetry::AddCounter("CLodCache.MappedContainer.RetentionEvictions");
+			}
+		};
 		std::unique_lock<std::mutex> lock(cacheMutex, std::defer_lock);
 		std::shared_ptr<std::mutex> pathMutex;
 		{
@@ -168,9 +202,16 @@ namespace CLodCache {
 		}
 		if (auto it = cache.find(containerPath); it != cache.end()) {
 			ZoneScopedN("CLodCache::AcquireMappedContainer::CacheHit");
-			if (auto existing = it->second.lock(); existing && existing->GetPageCount() == expectedPageCount) {
+			if (auto existing = it->second.lease.lock(); existing && existing->GetPageCount() == expectedPageCount) {
+				basic_telemetry::AddCounter(it->second.retained
+					? "CLodCache.MappedContainer.RetainedHits"
+					: "CLodCache.MappedContainer.LiveLeaseHits");
+				retain(containerPath, it->second, existing);
 				outLease = std::move(existing);
 				return true;
+			}
+			if (it->second.retained) {
+				retainedLru.erase(it->second.retainedPosition);
 			}
 			cache.erase(it);
 		}
@@ -188,12 +229,26 @@ namespace CLodCache {
 			ZoneScopedN("CLodCache::AcquireMappedContainer::RecheckCache");
 			std::lock_guard cacheLock(cacheMutex);
 			if (auto it = cache.find(containerPath); it != cache.end()) {
-				if (auto existing = it->second.lock(); existing && existing->GetPageCount() == expectedPageCount) {
+				if (auto existing = it->second.lease.lock(); existing && existing->GetPageCount() == expectedPageCount) {
+					basic_telemetry::AddCounter(it->second.retained
+						? "CLodCache.MappedContainer.RetainedHits"
+						: "CLodCache.MappedContainer.LiveLeaseHits");
+					retain(containerPath, it->second, existing);
 					outLease = std::move(existing);
 					return true;
 				}
+				if (it->second.retained) {
+					retainedLru.erase(it->second.retainedPosition);
+				}
 				cache.erase(it);
 			}
+		}
+		{
+			std::lock_guard cacheLock(cacheMutex);
+			const bool firstOpen = openedPaths.insert(containerPath).second;
+			basic_telemetry::AddCounter(firstOpen
+				? "CLodCache.MappedContainer.FirstOpens"
+				: "CLodCache.MappedContainer.Reopens");
 		}
 
 		auto impl = std::make_shared<MappedContainerLease::Impl>();
@@ -246,12 +301,15 @@ namespace CLodCache {
 		{
 			ZoneScopedN("CLodCache::AcquireMappedContainer::PublishCache");
 			lock.lock();
-			if (auto existing = cache[containerPath].lock();
+			auto& entry = cache[containerPath];
+			if (auto existing = entry.lease.lock();
 				existing && existing->GetPageCount() == expectedPageCount) {
+				retain(containerPath, entry, existing);
 				outLease = std::move(existing);
 				return true;
 			}
-			cache[containerPath] = lease;
+			entry.lease = lease;
+			retain(containerPath, entry, lease);
 		}
 		outLease = std::move(lease);
 		return true;

@@ -2,59 +2,46 @@
 
 #include <unordered_map>
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
 
-class PrimaryDepthCopyPass : public ComputePass {
+class PrimaryDepthCopyPass : public org::TypedRenderGraphPass<PrimaryDepthCopyPass, br::render::PreparedComputeDispatch> {
 public:
 	PrimaryDepthCopyPass() {
 		CreatePSO();
 	}
 
-	void DeclareResourceUsages(ComputePassBuilder* builder) override {
+	void Declare(org::PassBuilder& declaration) {
+        declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        auto* builder = &declaration;
 		builder->WithShaderResource(
 			Builtin::PrimaryCamera::VisibilityTexture)
 			.WithUnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap);
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
 	}
 
-	void Setup() override {
-	}
+    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+        const auto& context = *preparation.preparationData->Get<UpdateContext>();
+        br::render::PreparedComputeDispatch data{};
+        data.resourceHeap = context.textureDescriptorHeap.GetHandle();
+        data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
+        auto program = preparation.CaptureProgramBinding(m_pso);
+        data.program = program.program;
+        data.descriptorIndices = std::move(program.descriptorIndices);
+        data.groupsX = (context.renderResolution.x + 7u) / 8u;
+        data.groupsY = (context.renderResolution.y + 7u) / 8u;
+        return data;
+    }
 
-	PassReturn Execute(PassExecutionContext& executionContext) override {
-	    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-	    auto& context = *renderContext;
-		auto& psoManager = PSOManager::GetInstance();
-		auto& commandList = executionContext.commandList;
-
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(),
-			context.samplerDescriptorHeap.GetHandle());
-
-		commandList.BindLayout(psoManager.GetComputeRootSignature().GetHandle());
-
-		commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-
-		BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-
-		uint32_t w = context.renderResolution.x;
-		uint32_t h = context.renderResolution.y;
-		const uint32_t groupSizeX = 8;
-		const uint32_t groupSizeY = 8;
-		uint32_t groupsX = (w + groupSizeX - 1) / groupSizeX;
-		uint32_t groupsY = (h + groupSizeY - 1) / groupSizeY;
-
-		commandList.Dispatch(groupsX, groupsY, 1);
-		return {};
-	}
-
-	void Cleanup() override {
-		// Cleanup the render pass
-	}
+    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+        br::render::RecordPreparedComputeDispatch(data, recording);
+    }
 
 private:
 
-	PipelineState m_pso;
+	org::PipelineState m_pso;
 
 	void CreatePSO() {
 		m_pso = PSOManager::GetInstance().MakeComputePipeline(

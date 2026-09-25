@@ -1,66 +1,49 @@
 #pragma once
 
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
+#include "RenderPasses/PreparedFullscreenDraw.h"
 
 #include <string>
 
-class BRDFIntegrationPass : public RenderPass {
+struct BRDFIntegrationBindings { org::ResourceBindingToken target; };
+
+class BRDFIntegrationPass
+    : public org::TypedRenderGraphPass<BRDFIntegrationPass,
+          br::render::PreparedFullscreenDraw, BRDFIntegrationBindings> {
 public:
     BRDFIntegrationPass() {
         CreatePSO();
     }
 
-    void DeclareResourceUsages(RenderPassBuilder* builder) override {
-        builder->WithRenderTarget(Builtin::BRDFLUT);
+    BRDFIntegrationBindings Declare(org::PassBuilder& builder) {
+        return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::BRDFLUT})};
     }
 
-    void Setup() override {
-		m_lutTexture = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::BRDFLUT);
+    br::render::PreparedFullscreenDraw Prepare(const BRDFIntegrationBindings& bindings,
+        const org::PassPrepareContext& preparation) const {
+        br::render::PreparedFullscreenDraw data{};
+        data.renderTargetReference = preparation.CaptureView(bindings.target,
+            {org::BindlessViewKind::RenderTarget});
+        data.loadOp = rhi::LoadOp::Clear;
+        data.clear = preparation.ClearValue(bindings.target);
+        const auto& desc = preparation.Describe(bindings.target);
+        data.width = desc.texture.width; data.height = desc.texture.height;
+        data.debugName = "BRDF Integration Pass";
+        br::render::BindPreparedProgram(
+            data, preparation, PSO);
+        return data;
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
-        auto& commandList = executionContext.commandList;
-        
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-
-		rhi::PassBeginInfo passInfo{};
-		rhi::ColorAttachment colorAttachment{};
-		colorAttachment.rtv = m_lutTexture->GetRTVInfo(0).slot;
-		colorAttachment.loadOp = rhi::LoadOp::Clear;
-		colorAttachment.storeOp = rhi::StoreOp::Store;
-		colorAttachment.clear = m_lutTexture->GetClearColor();
-		passInfo.colors = { &colorAttachment, 1 };
-		passInfo.width = 512;
-		passInfo.height = 512;
-		passInfo.debugName = "BRDF Integration Pass";
-		commandList.BeginPass(passInfo);
-
-		commandList.BindLayout(PSOManager::GetInstance().GetRootSignature().GetHandle());
-		commandList.BindPipeline(PSO->GetHandle());
-        BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
-
-        commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleStrip);
-        commandList.Draw(3, 1, 0, 0); // Fullscreen triangle
-
-        invalidated = false;
-
-        return { };
-    }
-
-    void Cleanup() override {
-        // Cleanup if necessary
+    static void Record(const BRDFIntegrationBindings&, const br::render::PreparedFullscreenDraw& data,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedFullscreenDraw(data, recording);
     }
 
 private:
-    PixelBuffer* m_lutTexture = nullptr;
-
-    rhi::PipelinePtr PSO;
-    PipelineResources m_resourceDescriptorBindings;
+    org::PipelineState PSO;
 
     void CreatePSO() {
         auto dev = DeviceManager::GetInstance().GetDevice();
@@ -70,7 +53,6 @@ private:
         sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6" };
         sib.pixelShader = { L"shaders/brdfIntegration.hlsl", L"PSMain", L"ps_6_6" };
         auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-        m_resourceDescriptorBindings = compiled.resourceDescriptorSlots;
 
         // Subobjects
         auto& layout = PSOManager::GetInstance().GetRootSignature(); // rhi::PipelineLayout&
@@ -120,7 +102,8 @@ private:
             rhi::Make(soSmp),
         };
 
-        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), PSO);
+        rhi::PipelinePtr pipeline;
+        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
         if (Failed(result)) {
             throw std::runtime_error(
                 std::string("Failed to create BRDF integration PSO (RHI): ") +
@@ -129,6 +112,9 @@ private:
                 std::to_string(static_cast<uint32_t>(result)) +
                 ")");
         }
-        PSO->SetName("BRDFIntegration.PSO");
+        pipeline->SetName("BRDFIntegration.PSO");
+        PSO = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+            compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
+            soLayout.layout);
     }
 };

@@ -66,7 +66,9 @@ enum OutputType {
 	MATERIAL_UV_DERIVATIVE = 62,
 	REYES_SOURCE_BARYCENTRICS = 63,
 	MATERIAL_EVAL_FEATURES = 64,
-	TERRAIN_GRASS_OVERLAY = 65,
+	// Retired with the far grass terrain overlay. The slot is kept because
+	// OutputTypeNames is indexed positionally by this value.
+	RETIRED_OUTPUT_65 = 65,
 	CLOD_ASSEMBLY_VOXEL_INHERITANCE = 66,
 	CLOD_ASSEMBLY_PARTS = 67,
 	SKELETONS = 68,
@@ -146,7 +148,7 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Material UV Derivative",
 	"Reyes Source Barycentrics",
 	"Material Eval Features",
-	"Terrain Grass Overlay",
+	"(retired)",
 	"CLod assembly voxel inheritance",
 	"CLod assembly parts",
 	"Skeletons",

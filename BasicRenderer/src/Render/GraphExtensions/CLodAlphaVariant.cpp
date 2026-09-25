@@ -54,9 +54,9 @@ DirectX::XMUINT2 GetAVBOITLowResolution(const DirectX::XMUINT2& renderResolution
     };
 }
 
-TextureDescription CreateAVBOITOccupancyDescription()
+org::TextureDescription CreateAVBOITOccupancyDescription()
 {
-    TextureDescription desc;
+    org::TextureDescription desc;
     const auto renderResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     const auto lowResolution = GetAVBOITLowResolution(renderResolution);
 
@@ -68,30 +68,30 @@ TextureDescription CreateAVBOITOccupancyDescription()
     desc.uavFormat = rhi::Format::R32_Float;
     desc.hasNonShaderVisibleUAV = true;
     desc.allowAlias = true;
-    desc.imageDimensions.push_back(ImageDimensions{ lowResolution.x, lowResolution.y, 0, 0 });
+    desc.imageDimensions.push_back(org::ImageDimensions{ lowResolution.x, lowResolution.y, 0, 0 });
     return desc;
 }
 
-TextureDescription CreateAVBOITSliceVolumeDescription()
+org::TextureDescription CreateAVBOITSliceVolumeDescription()
 {
-    TextureDescription desc = CreateAVBOITOccupancyDescription();
+    org::TextureDescription desc = CreateAVBOITOccupancyDescription();
     desc.isArray = true;
     desc.arraySize = CLodAVBOITDefaultSliceCount;
     return desc;
 }
 
-TextureDescription CreateAVBOITExtinctionDescription()
+org::TextureDescription CreateAVBOITExtinctionDescription()
 {
-    TextureDescription desc = CreateAVBOITSliceVolumeDescription();
+    org::TextureDescription desc = CreateAVBOITSliceVolumeDescription();
     desc.format = rhi::Format::R32_UInt;
     desc.srvFormat = rhi::Format::R32_UInt;
     desc.uavFormat = rhi::Format::R32_UInt;
     return desc;
 }
 
-TextureDescription CreateAVBOITChromaticExtinctionDescription()
+org::TextureDescription CreateAVBOITChromaticExtinctionDescription()
 {
-    TextureDescription desc = CreateAVBOITSliceVolumeDescription();
+    org::TextureDescription desc = CreateAVBOITSliceVolumeDescription();
     desc.channels = 1;
     desc.arraySize = CLodAVBOITDefaultSliceCount * 3u;
     desc.format = rhi::Format::R32_UInt;
@@ -100,9 +100,9 @@ TextureDescription CreateAVBOITChromaticExtinctionDescription()
     return desc;
 }
 
-TextureDescription CreateAVBOITIntegratedTransmittanceDescription()
+org::TextureDescription CreateAVBOITIntegratedTransmittanceDescription()
 {
-    TextureDescription desc = CreateAVBOITSliceVolumeDescription();
+    org::TextureDescription desc = CreateAVBOITSliceVolumeDescription();
     desc.channels = 4;
     desc.format = rhi::Format::R16G16B16A16_Float;
     desc.srvFormat = rhi::Format::R16G16B16A16_Float;
@@ -110,23 +110,23 @@ TextureDescription CreateAVBOITIntegratedTransmittanceDescription()
     return desc;
 }
 
-TextureDescription CreateAVBOITZeroTransmittanceSliceDescription()
+org::TextureDescription CreateAVBOITZeroTransmittanceSliceDescription()
 {
-    TextureDescription desc = CreateAVBOITOccupancyDescription();
+    org::TextureDescription desc = CreateAVBOITOccupancyDescription();
     desc.format = rhi::Format::R32_UInt;
     desc.srvFormat = rhi::Format::R32_UInt;
     desc.uavFormat = rhi::Format::R32_UInt;
     return desc;
 }
 
-TextureDescription CreateAVBOITOccupancySliceMaskDescription()
+org::TextureDescription CreateAVBOITOccupancySliceMaskDescription()
 {
     return CreateAVBOITZeroTransmittanceSliceDescription();
 }
 
-TextureDescription CreateAVBOITAccumulationDescription()
+org::TextureDescription CreateAVBOITAccumulationDescription()
 {
-    TextureDescription desc;
+    org::TextureDescription desc;
     const auto renderResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
 
     desc.channels = 4;
@@ -140,23 +140,23 @@ TextureDescription CreateAVBOITAccumulationDescription()
     desc.clearColor[2] = 0.0f;
     desc.clearColor[3] = 0.0f;
     desc.allowAlias = true;
-    desc.imageDimensions.push_back(ImageDimensions{ renderResolution.x, renderResolution.y, 0, 0 });
+    desc.imageDimensions.push_back(org::ImageDimensions{ renderResolution.x, renderResolution.y, 0, 0 });
     return desc;
 }
 
-TextureDescription CreateAVBOITNormalizationDescription()
+org::TextureDescription CreateAVBOITNormalizationDescription()
 {
     return CreateAVBOITAccumulationDescription();
 }
 
-TextureDescription CreateAVBOITShadingExtinctionDescription()
+org::TextureDescription CreateAVBOITShadingExtinctionDescription()
 {
     return CreateAVBOITAccumulationDescription();
 }
 
-TextureDescription CreateAVBOITEarlyDepthDescription()
+org::TextureDescription CreateAVBOITEarlyDepthDescription()
 {
-    TextureDescription desc;
+    org::TextureDescription desc;
     const auto renderResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
 
     desc.channels = 1;
@@ -170,13 +170,13 @@ TextureDescription CreateAVBOITEarlyDepthDescription()
     desc.clearColor[2] = 0.0f;
     desc.clearColor[3] = 0.0f;
     desc.allowAlias = true;
-    desc.imageDimensions.push_back(ImageDimensions{ renderResolution.x, renderResolution.y, 0, 0 });
+    desc.imageDimensions.push_back(org::ImageDimensions{ renderResolution.x, renderResolution.y, 0, 0 });
     return desc;
 }
 
-RenderGraph::ExternalInsertPoint MakeTransparentTailInsertPoint()
+org::RenderGraph::ExternalInsertPoint MakeTransparentTailInsertPoint()
 {
-    auto insertPoint = RenderGraph::ExternalInsertPoint::After("LightCullingPass");
+    auto insertPoint = org::RenderGraph::ExternalInsertPoint::After("LightCullingPass");
     insertPoint.after.push_back("CLodShadow::VirtualShadowClearDirtyBitsPass");
     insertPoint.before.push_back("Screen-Space Reflections Pass");
     insertPoint.before.push_back("UpscalingPass");
@@ -184,9 +184,9 @@ RenderGraph::ExternalInsertPoint MakeTransparentTailInsertPoint()
     return insertPoint;
 }
 
-RenderGraph::ExternalInsertPoint MakeTransparentCompositeInsertPoint()
+org::RenderGraph::ExternalInsertPoint MakeTransparentCompositeInsertPoint()
 {
-    auto insertPoint = RenderGraph::ExternalInsertPoint::After("Specular IBL & SSR Composite Pass");
+    auto insertPoint = org::RenderGraph::ExternalInsertPoint::After("Specular IBL & SSR Composite Pass");
     insertPoint.after.push_back("SkyboxPass");
     insertPoint.after.push_back("Forward render pass");
     insertPoint.after.push_back("Screen-Space Reflections Pass");
@@ -333,67 +333,67 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
         .set<Components::Resource>({ extension.m_AVBOITEarlyDepthTileCountBuffer })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITOccupancyTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancyDescription());
+    extension.m_AVBOITOccupancyTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancyDescription());
     extension.m_AVBOITOccupancyTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Occupancy"));
     extension.m_AVBOITOccupancyTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITOccupancyTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITCoverageTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancyDescription());
+    extension.m_AVBOITCoverageTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancyDescription());
     extension.m_AVBOITCoverageTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Coverage"));
     extension.m_AVBOITCoverageTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITCoverageTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITOccupancySliceMaskTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancySliceMaskDescription());
+    extension.m_AVBOITOccupancySliceMaskTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancySliceMaskDescription());
     extension.m_AVBOITOccupancySliceMaskTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Occupancy Slice Mask"));
     extension.m_AVBOITOccupancySliceMaskTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITOccupancySliceMaskTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITExtinctionTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITExtinctionDescription());
+    extension.m_AVBOITExtinctionTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITExtinctionDescription());
     extension.m_AVBOITExtinctionTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Extinction"));
     extension.m_AVBOITExtinctionTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITExtinctionTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITChromaticExtinctionTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITChromaticExtinctionDescription());
+    extension.m_AVBOITChromaticExtinctionTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITChromaticExtinctionDescription());
     extension.m_AVBOITChromaticExtinctionTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Chromatic Extinction"));
     extension.m_AVBOITChromaticExtinctionTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITChromaticExtinctionTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITIntegratedTransmittanceTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITIntegratedTransmittanceDescription());
+    extension.m_AVBOITIntegratedTransmittanceTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITIntegratedTransmittanceDescription());
     extension.m_AVBOITIntegratedTransmittanceTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Integrated Transmittance"));
     extension.m_AVBOITIntegratedTransmittanceTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITIntegratedTransmittanceTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITZeroTransmittanceSliceTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITZeroTransmittanceSliceDescription());
+    extension.m_AVBOITZeroTransmittanceSliceTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITZeroTransmittanceSliceDescription());
     extension.m_AVBOITZeroTransmittanceSliceTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Zero Transmittance Slice"));
     extension.m_AVBOITZeroTransmittanceSliceTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITZeroTransmittanceSliceTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITAccumulationTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITAccumulationDescription());
+    extension.m_AVBOITAccumulationTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITAccumulationDescription());
     extension.m_AVBOITAccumulationTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Accumulation"));
     extension.m_AVBOITAccumulationTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITAccumulationTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITNormalizationTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITNormalizationDescription());
+    extension.m_AVBOITNormalizationTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITNormalizationDescription());
     extension.m_AVBOITNormalizationTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Normalization"));
     extension.m_AVBOITNormalizationTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITNormalizationTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITShadingExtinctionTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITShadingExtinctionDescription());
+    extension.m_AVBOITShadingExtinctionTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITShadingExtinctionDescription());
     extension.m_AVBOITShadingExtinctionTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Shading Extinction"));
     extension.m_AVBOITShadingExtinctionTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITShadingExtinctionTexture })
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_AVBOITEarlyDepthTexture = PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITEarlyDepthDescription());
+    extension.m_AVBOITEarlyDepthTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITEarlyDepthDescription());
     extension.m_AVBOITEarlyDepthTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Early Depth"));
     extension.m_AVBOITEarlyDepthTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_AVBOITEarlyDepthTexture })
@@ -402,12 +402,12 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
 
 void CLodAlphaVariant::TagResourceUsages(CLodExtension& extension)
 {
-    auto tagBufferUsage = [](const std::shared_ptr<Buffer>& buffer, std::string_view usage) {
+    auto tagBufferUsage = [](const std::shared_ptr<org::Buffer>& buffer, std::string_view usage) {
         if (buffer) {
             org::memory::SetResourceUsageHint(*buffer, std::string(usage));
         }
     };
-    auto tagTextureUsage = [](const std::shared_ptr<PixelBuffer>& texture, std::string_view usage) {
+    auto tagTextureUsage = [](const std::shared_ptr<org::PixelBuffer>& texture, std::string_view usage) {
         if (texture) {
             org::memory::SetResourceUsageHint(*texture, std::string(usage));
         }
@@ -438,8 +438,8 @@ void CLodAlphaVariant::TagResourceUsages(CLodExtension& extension)
 
 void CLodAlphaVariant::ReleaseResourceBackings(CLodExtension& extension)
 {
-    std::unordered_set<Buffer*> releasedBuffers;
-    auto releaseBufferBacking = [&releasedBuffers](const std::shared_ptr<Buffer>& buffer) {
+    std::unordered_set<org::Buffer*> releasedBuffers;
+    auto releaseBufferBacking = [&releasedBuffers](const std::shared_ptr<org::Buffer>& buffer) {
         if (buffer && releasedBuffers.insert(buffer.get()).second) {
             buffer->Dematerialize();
         }
@@ -456,8 +456,8 @@ void CLodAlphaVariant::ReleaseResourceBackings(CLodExtension& extension)
     releaseBufferBacking(extension.m_AVBOITEarlyDepthTileCommandsBuffer);
     releaseBufferBacking(extension.m_AVBOITEarlyDepthTileCountBuffer);
 
-    std::unordered_set<PixelBuffer*> releasedTextures;
-    auto releaseTextureBacking = [&releasedTextures](const std::shared_ptr<PixelBuffer>& texture) {
+    std::unordered_set<org::PixelBuffer*> releasedTextures;
+    auto releaseTextureBacking = [&releasedTextures](const std::shared_ptr<org::PixelBuffer>& texture) {
         if (texture && releasedTextures.insert(texture.get()).second) {
             texture->Dematerialize();
         }
@@ -500,12 +500,12 @@ void CLodAlphaVariant::RefreshResourcesForCurrentSettings(CLodExtension& extensi
 void CLodAlphaVariant::AppendSinglePassStructuralPasses(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    const std::shared_ptr<ResourceGroup>& slabGroup,
+    const std::shared_ptr<org::ResourceGroup>& slabGroup,
     const RenderPhase& renderPhase,
     bool useAVBOIT,
     bool useReyesForThisVariant,
     bool disableReyesTessellation,
-    std::vector<RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
 {
     if (traits.type != CLodExtensionType::AlphaBlend) {
         return;
@@ -513,7 +513,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
 
     if (useAVBOIT) {
         outPasses.push_back(
-            RenderGraph::ExternalPassDesc::Render(
+            org::RenderGraph::ExternalPassDesc::Render(
                 MakeVariantPassName(traits, kTransparentExtinctionSetupPassName),
                 std::make_shared<AVBOITSetupPass>(
                     extension.m_AVBOITConfigBuffer,
@@ -530,18 +530,18 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
                     extension.m_AVBOITNormalizationTexture,
                     extension.m_AVBOITShadingExtinctionTexture)));
 
-        auto adaptiveFitPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto adaptiveFitPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionAdaptiveFitPassName),
             std::make_shared<AVBOITAdaptiveFitPass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITFitStateBuffer));
-        adaptiveFitPassDesc.At(RenderGraph::ExternalInsertPoint::After(
+        adaptiveFitPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionSetupPassName)));
         outPasses.push_back(std::move(adaptiveFitPassDesc));
     }
     else {
         outPasses.push_back(
-            RenderGraph::ExternalPassDesc::Render(
+            org::RenderGraph::ExternalPassDesc::Render(
                 MakeVariantPassName(traits, "ClearDeepVisibilityPass"),
                 std::make_shared<ClearDeepVisibilityPass>(
                     extension.m_deepVisibilityCounterBuffer,
@@ -550,7 +550,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
 
         if (useReyesForThisVariant) {
             outPasses.push_back(
-                RenderGraph::ExternalPassDesc::Compute(
+                org::RenderGraph::ExternalPassDesc::Compute(
                     MakeVariantPassName(traits, "ReyesPatchRasterPass1"),
                     std::make_shared<ReyesDeepVisibilityRasterizationPass>(
                         extension.m_visibleClustersBuffer,
@@ -579,7 +579,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
         occupancyPassInputs.wireframe = false;
         occupancyPassInputs.renderPhase = renderPhase;
         occupancyPassInputs.outputKind = CLodRasterOutputKind::AVBOITOccupancy;
-        auto occupancyPassDesc = RenderGraph::ExternalPassDesc::Render(
+        auto occupancyPassDesc = org::RenderGraph::ExternalPassDesc::Render(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyPassName),
             std::make_shared<ClusterRasterizationPass>(
                 occupancyPassInputs,
@@ -607,53 +607,53 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
                 nullptr,
                 extension.m_AVBOITOccupancySliceMaskTexture));
         occupancyPassDesc.GeometryPass();
-        occupancyPassDesc.At(RenderGraph::ExternalInsertPoint::After(
+        occupancyPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionAdaptiveFitPassName)));
         outPasses.push_back(std::move(occupancyPassDesc));
 
-        auto occupancyHistogramPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto occupancyHistogramPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyHistogramPassName),
             std::make_shared<AVBOITOccupancyHistogramPass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITOccupancyTexture,
                 extension.m_AVBOITOccupancySliceMaskTexture,
                 extension.m_AVBOITOccupancyHistogramBuffer));
-        occupancyHistogramPassDesc.At(RenderGraph::ExternalInsertPoint::After(
+        occupancyHistogramPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyPassName)));
         outPasses.push_back(std::move(occupancyHistogramPassDesc));
 
-        auto adaptiveFitUpdatePassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto adaptiveFitUpdatePassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionAdaptiveFitUpdatePassName),
             std::make_shared<AVBOITAdaptiveFitUpdatePass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITOccupancyHistogramBuffer,
                 extension.m_AVBOITFitStateBuffer));
-        adaptiveFitUpdatePassDesc.At(RenderGraph::ExternalInsertPoint::After(
+        adaptiveFitUpdatePassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyHistogramPassName)));
         outPasses.push_back(std::move(adaptiveFitUpdatePassDesc));
 
-        auto depthWarpPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto depthWarpPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionDepthWarpPassName),
             std::make_shared<AVBOITDepthWarpPass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITOccupancyHistogramBuffer,
                 extension.m_AVBOITDepthWarpLUTBuffer));
-        depthWarpPassDesc.At(RenderGraph::ExternalInsertPoint::After(
+        depthWarpPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionAdaptiveFitUpdatePassName)));
         outPasses.push_back(std::move(depthWarpPassDesc));
 
-        auto occupancyRemapPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto occupancyRemapPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyRemapPassName),
             std::make_shared<AVBOITOccupancyRemapPass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITOccupancyTexture,
                 extension.m_AVBOITOccupancySliceMaskTexture,
                 extension.m_AVBOITDepthWarpLUTBuffer));
-        occupancyRemapPassDesc.At(RenderGraph::ExternalInsertPoint::After(
+        occupancyRemapPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionDepthWarpPassName)));
         outPasses.push_back(std::move(occupancyRemapPassDesc));
 
-        auto sparseClearPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto sparseClearPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionSparseClearPassName),
             std::make_shared<AVBOITSparseClearPass>(
                 extension.m_AVBOITConfigBuffer,
@@ -662,7 +662,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
                 extension.m_AVBOITExtinctionTexture,
                 extension.m_AVBOITChromaticExtinctionTexture,
                 extension.m_AVBOITZeroTransmittanceSliceTexture));
-        sparseClearPassDesc.At(RenderGraph::ExternalInsertPoint::After(
+        sparseClearPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyRemapPassName)));
         outPasses.push_back(std::move(sparseClearPassDesc));
     }
@@ -674,7 +674,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
     rasterizePassInputs.outputKind = useAVBOIT
         ? CLodRasterOutputKind::AVBOIT
         : traits.rasterOutputKind;
-    auto rasterizeDeepVisibilityPassDesc = RenderGraph::ExternalPassDesc::Render(
+    auto rasterizeDeepVisibilityPassDesc = org::RenderGraph::ExternalPassDesc::Render(
         MakeVariantPassName(
             traits,
             useAVBOIT
@@ -717,18 +717,18 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
 void CLodAlphaVariant::AppendSinglePassResolveTail(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    const std::shared_ptr<ResourceGroup>& slabGroup,
+    const std::shared_ptr<org::ResourceGroup>& slabGroup,
     const RenderPhase& renderPhase,
     bool useAVBOIT,
     bool disableReyesTessellation,
-    std::vector<RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
 {
     if (traits.type != CLodExtensionType::AlphaBlend) {
         return;
     }
 
     if (useAVBOIT) {
-        auto integratePassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto integratePassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentTransmittanceIntegratePassName),
             std::make_shared<AVBOITIntegratePass>(
                 extension.m_AVBOITConfigBuffer,
@@ -743,7 +743,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         integratePassDesc.At(MakeTransparentTailInsertPoint());
         outPasses.push_back(std::move(integratePassDesc));
 
-        auto earlyDepthBuildPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto earlyDepthBuildPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentVBOITEarlyDepthBuildPassName),
             std::make_shared<AVBOITEarlyDepthBuildPass>(
                 extension.m_AVBOITConfigBuffer,
@@ -757,7 +757,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         }
         outPasses.push_back(std::move(earlyDepthBuildPassDesc));
 
-        auto earlyDepthPassDesc = RenderGraph::ExternalPassDesc::Render(
+        auto earlyDepthPassDesc = org::RenderGraph::ExternalPassDesc::Render(
             MakeVariantPassName(traits, kTransparentVBOITEarlyDepthPassName),
             std::make_shared<AVBOITEarlyDepthPass>(
                 extension.m_AVBOITConfigBuffer,
@@ -776,7 +776,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         shadePassInputs.wireframe = false;
         shadePassInputs.renderPhase = renderPhase;
         shadePassInputs.outputKind = CLodRasterOutputKind::AVBOITShading;
-        auto shadePassDesc = RenderGraph::ExternalPassDesc::Render(
+        auto shadePassDesc = org::RenderGraph::ExternalPassDesc::Render(
             MakeVariantPassName(traits, kTransparentVBOITShadePassName),
             std::make_shared<ClusterRasterizationPass>(
                 shadePassInputs,
@@ -812,7 +812,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         }
         outPasses.push_back(std::move(shadePassDesc));
 
-        auto resolvePassDesc = RenderGraph::ExternalPassDesc::Compute(
+        auto resolvePassDesc = org::RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentVBOITResolvePassName),
             std::make_shared<AVBOITResolvePass>(
                 extension.m_AVBOITConfigBuffer,
@@ -828,7 +828,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         return;
     }
 
-    auto resolveDeepVisibilityPassDesc = RenderGraph::ExternalPassDesc::Compute(
+    auto resolveDeepVisibilityPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
         MakeVariantPassName(traits, "DeepVisibilityResolvePass"),
         std::make_shared<DeepVisibilityResolvePass>(
             extension.m_visibleClustersBuffer,

@@ -8,10 +8,10 @@
 #include "../shaders/PerPassRootConstants/clodAVBOITResolveRootConstants.h"
 
 AVBOITResolvePass::AVBOITResolvePass(
-    std::shared_ptr<Buffer> configBuffer,
-    std::shared_ptr<PixelBuffer> accumulationTexture,
-    std::shared_ptr<PixelBuffer> normalizationTexture,
-    std::shared_ptr<PixelBuffer> shadingExtinctionTexture)
+    std::shared_ptr<org::Buffer> configBuffer,
+    std::shared_ptr<org::PixelBuffer> accumulationTexture,
+    std::shared_ptr<org::PixelBuffer> normalizationTexture,
+    std::shared_ptr<org::PixelBuffer> shadingExtinctionTexture)
     : m_configBuffer(std::move(configBuffer))
     , m_accumulationTexture(std::move(accumulationTexture))
     , m_normalizationTexture(std::move(normalizationTexture))
@@ -25,61 +25,51 @@ AVBOITResolvePass::AVBOITResolvePass(
         "CLod.AVBOITResolve.PSO");
 }
 
-void AVBOITResolvePass::DeclareResourceUsages(ComputePassBuilder* builder)
+AVBOITResolveBindings AVBOITResolvePass::Declare(org::PassBuilder& builder)
 {
-    builder->WithShaderResource(
-            m_configBuffer,
-            m_accumulationTexture,
-            m_normalizationTexture,
-            m_shadingExtinctionTexture)
-        .WithUnorderedAccess(Builtin::Color::HDRColorTarget);
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    builder.WithUnorderedAccess(Builtin::Color::HDRColorTarget);
+    return {
+        builder.BindShaderResource(m_configBuffer),
+        builder.BindShaderResource(m_accumulationTexture),
+        builder.BindShaderResource(m_normalizationTexture),
+        builder.BindShaderResource(m_shadingExtinctionTexture) };
 }
 
-void AVBOITResolvePass::Setup()
-{
-}
-
-void AVBOITResolvePass::Update(const UpdateExecutionContext& executionContext)
-{
-    (void)executionContext;
-}
-
-PassReturn AVBOITResolvePass::Execute(PassExecutionContext& executionContext)
-{
+br::render::PreparedComputeDispatch AVBOITResolvePass::Prepare(
+    const AVBOITResolveBindings& bindings, const org::PassPrepareContext& preparation) const {
+    br::render::PreparedComputeDispatch data{};
     if (!m_configBuffer || !m_accumulationTexture || !m_normalizationTexture || !m_shadingExtinctionTexture) {
         return {};
     }
 
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
+    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
     auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
 
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
+    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
+    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
+    auto program = preparation.CaptureProgramBinding(m_pso);
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
 
-    uint32_t misc[NumMiscUintRootConstants] = {};
-    misc[CLOD_AVBOIT_VBOIT_RESOLVE_CONFIG_DESCRIPTOR_INDEX] = m_configBuffer->GetSRVInfo(0).slot.index;
-    misc[CLOD_AVBOIT_VBOIT_RESOLVE_ACCUMULATION_DESCRIPTOR_INDEX] = m_accumulationTexture->GetSRVInfo(0).slot.index;
+    auto& misc = data.constants;
+    misc[CLOD_AVBOIT_VBOIT_RESOLVE_CONFIG_DESCRIPTOR_INDEX] =
+        preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
+    misc[CLOD_AVBOIT_VBOIT_RESOLVE_ACCUMULATION_DESCRIPTOR_INDEX] =
+        preparation.ResolveView(bindings.accumulation, {org::BindlessViewKind::ShaderResource}).index;
     misc[CLOD_AVBOIT_VBOIT_RESOLVE_NORMALIZATION_DESCRIPTOR_INDEX] =
-        m_normalizationTexture->GetSRVInfo(0).slot.index;
+        preparation.ResolveView(bindings.normalization, {org::BindlessViewKind::ShaderResource}).index;
     misc[CLOD_AVBOIT_VBOIT_RESOLVE_SHADING_EXTINCTION_DESCRIPTOR_INDEX] =
-        m_shadingExtinctionTexture->GetSRVInfo(0).slot.index;
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        misc);
+        preparation.ResolveView(bindings.extinction, {org::BindlessViewKind::ShaderResource}).index;
 
-    const uint32_t groupCountX = (m_accumulationTexture->GetWidth() + 7u) / 8u;
-    const uint32_t groupCountY = (m_accumulationTexture->GetHeight() + 7u) / 8u;
-    commandList.Dispatch(groupCountX, groupCountY, 1u);
-    return {};
+    const auto& accumulation = preparation.Describe(bindings.accumulation);
+    const uint32_t groupCountX = (accumulation.texture.width + 7u) / 8u;
+    const uint32_t groupCountY = (accumulation.texture.height + 7u) / 8u;
+    data.groupsX = groupCountX; data.groupsY = groupCountY; data.groupsZ = 1u;
+    return data;
 }
 
-void AVBOITResolvePass::Cleanup()
-{
+void AVBOITResolvePass::Record(const AVBOITResolveBindings&,
+    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeDispatch(data, recording);
 }

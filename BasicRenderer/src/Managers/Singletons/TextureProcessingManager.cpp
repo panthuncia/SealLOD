@@ -196,7 +196,7 @@ std::mutex& GetCacheWriteMutexForKey(const std::string& key) {
 	return *entry;
 }
 
-uint32_t GetTextureTotalArraySlices(const TextureDescription& desc) {
+uint32_t GetTextureTotalArraySlices(const org::TextureDescription& desc) {
 	if (desc.isCubemap) {
 		return 6u * (std::max)(1u, desc.arraySize);
 	}
@@ -467,7 +467,7 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromScratchImage(const Scratch
 			throw std::runtime_error("Texture dimensions exceed uint32_t range");
 		}
 
-		ImageDimensions dims{};
+		org::ImageDimensions dims{};
 		dims.width = static_cast<uint32_t>(src.width);
 		dims.height = static_cast<uint32_t>(src.height);
 		dims.rowPitch = src.rowPitch;
@@ -749,7 +749,7 @@ std::shared_ptr<TextureSourceData> BuildMipmappedUnormSourceData(
 	uint32_t mipHeight = height;
 	std::vector<uint8_t> mipPixels = std::move(basePixels);
 	for (;;) {
-		ImageDimensions dims{};
+		org::ImageDimensions dims{};
 		dims.width = mipWidth;
 		dims.height = mipHeight;
 		dims.rowPitch = static_cast<uint64_t>(mipWidth) * channels;
@@ -886,7 +886,7 @@ std::shared_ptr<TextureSourceData> BuildInverseLutSourceData(
 	result->desc.generateMipMaps = false;
 	result->hasFullMipChain = true;
 	result->isBlockCompressed = false;
-	ImageDimensions dims{};
+	org::ImageDimensions dims{};
 	dims.width = lutWidth;
 	dims.height = lutHeight;
 	dims.rowPitch = static_cast<uint64_t>(lutWidth) * channels;
@@ -1767,7 +1767,7 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 		}
 	}
 
-	TaskSchedulerManager::GetInstance().RunBackgroundTask("TextureProcessingManager::RequestProcessing", [handle, sourceData, meta, key, cacheKey]() {
+	TaskSchedulerManager::GetInstance().Submit(TaskLane::Background, TaskDomain::TextureProcessing, "TextureProcessingManager::RequestProcessing", [handle, sourceData, meta, key, cacheKey]() {
 		handle->state.store(TextureProcessingJobState::CpuPreparing, std::memory_order_release);
 		try {
 			const std::wstring conditionedCachePath = BuildProcessingConditionedCachePath(cacheKey);
@@ -1924,7 +1924,7 @@ void TextureProcessingManager::MarkGpuJobReadbackPending(const std::shared_ptr<T
 void TextureProcessingManager::CompleteGpuProcessing(
 	const std::shared_ptr<TextureProcessingJobHandle>& handle,
 	std::shared_ptr<TextureSourceData> result,
-	std::shared_ptr<PixelBuffer> uploadedImage,
+	std::shared_ptr<org::PixelBuffer> uploadedImage,
 	bool writeCacheArtifact)
 {
 	if (!handle) {
@@ -1955,7 +1955,9 @@ void TextureProcessingManager::CompleteGpuProcessing(
 			"TextureProcessingManager: rejected unexpected transparent-black GPU BC7 output for '{}'; retrying this texture on CPU",
 			processingKey);
 		handle->state.store(TextureProcessingJobState::CpuPreparing, std::memory_order_release);
-		TaskSchedulerManager::GetInstance().RunBackgroundTask(
+		TaskSchedulerManager::GetInstance().Submit(
+			TaskLane::Background,
+			TaskDomain::TextureProcessing,
 			"TextureProcessingManager::GpuBc7ValidationFallback",
 			[handle, preparedSourceData, requestMeta, cacheKey, processingKey]() {
 				try {

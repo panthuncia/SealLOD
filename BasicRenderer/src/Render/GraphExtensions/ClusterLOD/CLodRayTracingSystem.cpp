@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodRayTracingSystem.h"
+#include "Render/Runtime/IUploadService.h"
 
 #include <algorithm>
 #include <cstring>
@@ -8,7 +9,6 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
-#include "Render/Runtime/UploadServiceAccess.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 #include "../shaders/PerPassRootConstants/clodRayTracingSetupRootConstants.h"
@@ -17,6 +17,32 @@
 #include <rhi_interop_dx12.h>
 
 namespace br::render {
+
+CLodRayTracingSystem::CLodRayTracingSystem(
+    std::shared_ptr<org::runtime::IUploadService> uploads)
+    : m_uploadService(std::move(uploads)) {}
+
+void CLodRayTracingSystem::SetUploadService(
+    std::shared_ptr<org::runtime::IUploadService> uploads) noexcept {
+    m_uploadService = std::move(uploads);
+}
+
+org::runtime::IUploadService& CLodRayTracingSystem::UploadService() const {
+    auto uploads = m_uploadService.lock();
+    if (!uploads) throw std::runtime_error("CLod ray tracing upload service is unavailable");
+    return *uploads;
+}
+
+void CLodRayTracingSystem::UploadBufferData(const void* data, size_t size,
+    org::runtime::UploadTarget target, size_t offset, std::source_location source) const {
+#if BUILD_TYPE == BUILD_TYPE_DEBUG
+    UploadService().UploadData(data, size, std::move(target), offset,
+        source.file_name(), static_cast<int>(source.line()));
+#else
+    (void)source;
+    UploadService().UploadData(data, size, std::move(target), offset);
+#endif
+}
 
 namespace {
 
@@ -44,7 +70,7 @@ uint64_t AlignUp(uint64_t value, uint64_t alignment) noexcept
     return (value + mask) & ~mask;
 }
 
-void SetBufferNameAndUsage(const std::shared_ptr<Buffer>& buffer, const char* name, std::string_view usage)
+void SetBufferNameAndUsage(const std::shared_ptr<org::Buffer>& buffer, const char* name, std::string_view usage)
 {
     buffer->SetName(name);
     org::memory::SetResourceUsageHint(*buffer, std::string(usage));
@@ -344,7 +370,7 @@ void CLodRayTracingSystem::UpdateGpuResources(rhi::Device device, const RayTraci
             continue;
         }
 
-        std::shared_ptr<Buffer> slab = m_snapshot.pagePool->GetSlab(source.slabIndex);
+        std::shared_ptr<org::Buffer> slab = m_snapshot.pagePool->GetSlab(source.slabIndex);
         if (!slab) {
             continue;
         }
@@ -369,7 +395,7 @@ void CLodRayTracingSystem::UpdateGpuResources(rhi::Device device, const RayTraci
     }
 
     m_stats.buildableClusters = outputClusterBase;
-    BUFFER_UPLOAD(
+    UploadBufferData(
         m_gpuPageSources.data(),
         static_cast<uint32_t>(m_gpuPageSources.size() * sizeof(GpuPageSource)),
         org::runtime::UploadTarget::FromShared(m_pageSourceBuffer),
@@ -458,7 +484,7 @@ void CLodRayTracingSystem::UpdateGpuResources(rhi::Device device, const RayTraci
         m_tlasStorageBytes = m_tlasDataBytes;
     }
 
-    BUFFER_UPLOAD(
+    UploadBufferData(
         &aggregateBlasInfo,
         sizeof(aggregateBlasInfo),
         org::runtime::UploadTarget::FromShared(m_blasBuildInfoBuffer),
@@ -592,7 +618,7 @@ void CLodRayTracingSystem::EnsureRayTracingPipeline(rhi::Device device, const Ra
     }
 
     if (!m_hasTlasSrvSlot) {
-        const auto& heap = DescriptorHeapManager::GetInstance().GetCBVSRVUAVHeap();
+        const auto& heap = org::DescriptorHeapManager::GetInstance().GetCBVSRVUAVHeap();
         if (!heap) {
             return;
         }
@@ -654,7 +680,7 @@ void CLodRayTracingSystem::EnsureRayTracingPipeline(rhi::Device device, const Ra
             return;
         }
 
-        m_rayTracingPso = PipelineState(std::move(pso), library.resourceIDsHash, library.resourceDescriptorSlots);
+        m_rayTracingPso = org::PipelineState(std::move(pso), library.resourceIDsHash, library.resourceDescriptorSlots);
     }
 
     m_shaderGroupHandleSize = rayTracingFeatures.shaderGroupHandleSize;
@@ -697,7 +723,7 @@ void CLodRayTracingSystem::EnsureRayTracingPipeline(rhi::Device device, const Ra
         }
     }
 
-    BUFFER_UPLOAD(
+    UploadBufferData(
         shaderTable.data(),
         static_cast<uint32_t>(shaderTable.size()),
         org::runtime::UploadTarget::FromShared(m_shaderTableBuffer),
@@ -706,7 +732,8 @@ void CLodRayTracingSystem::EnsureRayTracingPipeline(rhi::Device device, const Ra
     m_stats.rayPipelineReady = true;
 }
 
-void CLodRayTracingSystem::ExecuteTraceRays(rhi::Device device, rhi::CommandList commandList, PixelBuffer& output, uint32_t width, uint32_t height) {
+void CLodRayTracingSystem::ExecuteTraceRays(rhi::Device device, rhi::CommandList commandList,
+    org::PixelBuffer& output, uint32_t outputUAVIndex, uint32_t width, uint32_t height) {
     if (!device || !commandList || !HasRayTracingPipeline() || !m_shaderTableBuffer || width == 0u || height == 0u) {
         return;
     }
@@ -719,7 +746,7 @@ void CLodRayTracingSystem::ExecuteTraceRays(rhi::Device device, rhi::CommandList
 
     uint32_t rootConstants[NumMiscUintRootConstants] = {};
     rootConstants[CLOD_RT_TLAS_DESCRIPTOR_INDEX] = m_tlasSrvSlot.index;
-    rootConstants[CLOD_RT_REFLECTION_OUTPUT_DESCRIPTOR_INDEX] = output.GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_RT_REFLECTION_OUTPUT_DESCRIPTOR_INDEX] = outputUAVIndex;
     commandList.PushConstants(
         rhi::ShaderStage::AllRayTracing,
         0,

@@ -16,9 +16,11 @@
 #include "Import/CLodCache.h"
 #include "Materials/Material.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/CLodResidencyStorageArtifacts.h"
 #include <BasicTelemetry/Telemetry.h>
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -34,6 +36,11 @@
 
 #include "../../generated/BuiltinResources.h"
 #include "Render/MemoryIntrospectionAPI.h"
+#include "Render/GeometryResidencyStateArtifacts.h"
+#include "Render/RendererStateRequestService.h"
+#include "Render/GeometryBufferStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 
 namespace {
 
@@ -58,7 +65,7 @@ uint32_t CLodIoAdmissionTarget() {
 		// workers do not go idle between service ticks, while remaining far
 		// below the previous 512--2048 fire-and-forget backlog.
 		uint32_t result = std::max<uint32_t>(
-			TaskSchedulerManager::GetInstance().GetNumIoThreads() * 48u,
+			TaskSchedulerManager::GetInstance().BlockingThreadCount() * 48u,
 			96u);
 		char* value = nullptr;
 		size_t length = 0u;
@@ -102,6 +109,7 @@ uint32_t CLodIoTaskBatchSize() {
 }
 
 MeshManager::MeshManager() {
+	m_clodGeometryStorage = std::make_unique<MeshManagerCLodGeometryStorage>(*this);
 	auto& resourceManager = ::ResourceManager::GetInstance();
 
 	try {
@@ -129,25 +137,25 @@ MeshManager::MeshManager() {
 		}
 	}
 
-	m_perMeshBuffers = DynamicBuffer::CreateShared(sizeof(PerMeshCB), 1, "PerMeshBuffers");
-	m_perMeshInstanceBuffers = DynamicBuffer::CreateShared(sizeof(PerMeshInstanceCB), 1, "perMeshInstanceBuffers");
+	m_perMeshBuffers = org::DynamicBuffer::CreateShared(sizeof(PerMeshCB), 1, "PerMeshBuffers");
+	m_perMeshInstanceBuffers = org::DynamicBuffer::CreateShared(sizeof(PerMeshInstanceCB), 1, "perMeshInstanceBuffers");
 
 	// Cluster LOD data
-	m_perMeshInstanceClodOffsets = DynamicBuffer::CreateShared(sizeof(MeshInstanceClodOffsets), 10000, "perMeshInstanceClodOffsets");
-	m_clodSharedGroupChunks = DynamicBuffer::CreateShared(sizeof(ClusterLODGroupChunk), 10000, "clodSharedGroupChunks");
-	m_clodMeshMetadata = DynamicBuffer::CreateShared(sizeof(CLodMeshMetadata), 10000, "clodMeshMetadata");
-	m_clodHierarchyLevelInfos = DynamicBuffer::CreateShared(sizeof(CLodHierarchyLevelInfo), 10000, "clodHierarchyLevelInfos");
-	m_clusterLODGroups = DynamicBuffer::CreateShared(sizeof(ClusterLODGroup), 10000, "clusterLODGroups");
-	m_clusterLODSegments = DynamicBuffer::CreateShared(sizeof(ClusterLODGroupSegment), 10000, "clusterLODSegments");
+	m_perMeshInstanceClodOffsets = org::DynamicBuffer::CreateShared(sizeof(MeshInstanceClodOffsets), 10000, "perMeshInstanceClodOffsets");
+	m_clodSharedGroupChunks = org::DynamicBuffer::CreateShared(sizeof(ClusterLODGroupChunk), 10000, "clodSharedGroupChunks");
+	m_clodMeshMetadata = org::DynamicBuffer::CreateShared(sizeof(CLodMeshMetadata), 10000, "clodMeshMetadata");
+	m_clodHierarchyLevelInfos = org::DynamicBuffer::CreateShared(sizeof(CLodHierarchyLevelInfo), 10000, "clodHierarchyLevelInfos");
+	m_clusterLODGroups = org::DynamicBuffer::CreateShared(sizeof(ClusterLODGroup), 10000, "clusterLODGroups");
+	m_clusterLODSegments = org::DynamicBuffer::CreateShared(sizeof(ClusterLODGroupSegment), 10000, "clusterLODSegments");
 	//m_clusterLODMeshletBounds = DynamicBuffer::CreateShared(sizeof(BoundingSphere), 10000, "clusterLODMeshletBounds", false, true);
-	m_clusterLODNodes = DynamicBuffer::CreateShared(sizeof(ClusterLODNode), 10000, "clusterLODNodes");
-	m_clusterLODNodeSkinningInfos = DynamicBuffer::CreateShared(sizeof(ClusterLODNodeSkinningInfo), 10000, "clusterLODNodeSkinningInfos");
-	m_clusterLODNodeBoneIndices = DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODNodeBoneIndices");
-	m_clusterLODAssemblyTransforms = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyTransform), 10000, "clusterLODAssemblyTransforms");
-	m_clusterLODAssemblyInstances = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyInstance), 10000, "clusterLODAssemblyInstances");
-	m_clusterLODAssemblyBoneRemaps = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyBoneRemap), 10000, "clusterLODAssemblyBoneRemaps");
-	m_clusterLODAssemblyBoneRemapIndices = DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODAssemblyBoneRemapIndices");
-	m_clodGroupPageMap = DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
+	m_clusterLODNodes = org::DynamicBuffer::CreateShared(sizeof(ClusterLODNode), 10000, "clusterLODNodes");
+	m_clusterLODNodeSkinningInfos = org::DynamicBuffer::CreateShared(sizeof(ClusterLODNodeSkinningInfo), 10000, "clusterLODNodeSkinningInfos");
+	m_clusterLODNodeBoneIndices = org::DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODNodeBoneIndices");
+	m_clusterLODAssemblyTransforms = org::DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyTransform), 10000, "clusterLODAssemblyTransforms");
+	m_clusterLODAssemblyInstances = org::DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyInstance), 10000, "clusterLODAssemblyInstances");
+	m_clusterLODAssemblyBoneRemaps = org::DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyBoneRemap), 10000, "clusterLODAssemblyBoneRemaps");
+	m_clusterLODAssemblyBoneRemapIndices = org::DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODAssemblyBoneRemapIndices");
+	m_clodGroupPageMap = org::DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
 
 	m_clodSharedGroupChunks->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
 	m_clodGroupPageMap->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
@@ -199,7 +207,7 @@ MeshManager::MeshManager() {
 		// This consumes the same eight 128 MiB slabs as the old fixed pool.
 		ppConfig.initialStreamingSlabs = { 2u, 2u, 2u, 4u, 6u };
 		ppConfig.debugName    = "CLodPagePool";
-		m_clodPagePool = std::make_unique<PagePool>(ppConfig);
+		m_clodPagePool = std::make_shared<PagePool>(ppConfig);
 	}
 	org::memory::SetResourceUsageHint(*m_clodPagePool->GetPageTableBuffer(), "Cluster LOD streaming");
 	m_resources[Builtin::CLod::PageTable] = m_clodPagePool->GetPageTableBuffer();
@@ -208,10 +216,18 @@ MeshManager::MeshManager() {
 
 }
 
+ICLodGeometryStorage& MeshManager::GetCLodGeometryStorage() noexcept {
+	return *m_clodGeometryStorage;
+}
+
 MeshManager::~MeshManager() {
+	for (auto& binding : m_graphBufferBindings) {
+		if (binding.buffer) binding.buffer->SetVersionedGraphMutationCallback({});
+	}
 }
 
 void MeshManager::InvalidateCLodDiskStreamingPipeline() {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	std::vector<DirectStorageAsyncRequestHandle> pendingDirectStorageUploads;
 	pendingDirectStorageUploads.reserve(m_clodPendingDirectStorageUploads.size());
 	for (const auto& pendingUpload : m_clodPendingDirectStorageUploads) {
@@ -295,7 +311,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 		for (size_t requestIndex = batchBegin; requestIndex < batchEnd; ++requestIndex) {
 			taskRequests.push_back(std::move(batch[requestIndex]));
 		}
-		scheduler.QueueIoTask("CLodDiskStreaming",
+		scheduler.Submit(TaskLane::Streaming, TaskDomain::AssetImport, "CLodDiskStreaming",
 			[this, requests = std::move(taskRequests)]() mutable {
 			std::vector<CLodDiskStreamingResult> completedResults;
 			completedResults.reserve(requests.size());
@@ -640,6 +656,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 }
 
 bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	ZoneScopedN("MeshManager::AddMesh");
 	if (!mesh) {
 		return false;
@@ -653,18 +670,18 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 
 	const auto& pageDiskLocators = mesh->GetCLodPageDiskLocators();
 
-	std::unique_ptr<BufferView> postSkinningView = nullptr;
-	std::unique_ptr<BufferView> preSkinningView = nullptr;
+	std::unique_ptr<org::BufferView> postSkinningView = nullptr;
+	std::unique_ptr<org::BufferView> preSkinningView = nullptr;
 	size_t vertexByteSize = mesh->GetPerMeshCBData().vertexByteSize;
-	std::vector<std::unique_ptr<BufferView>> clodPreSkinningChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodPostSkinningChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodMeshletVertexChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodCompressedPositionChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodCompressedNormalChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodCompressedMeshletVertexChunkViews;
- 	std::vector<std::unique_ptr<BufferView>> clodMeshletChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodMeshletTriangleChunkViews;
-	std::vector<std::unique_ptr<BufferView>> clodMeshletBoundsChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodPreSkinningChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodPostSkinningChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodMeshletVertexChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodCompressedPositionChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodCompressedNormalChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodCompressedMeshletVertexChunkViews;
+ 	std::vector<std::unique_ptr<org::BufferView>> clodMeshletChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodMeshletTriangleChunkViews;
+	std::vector<std::unique_ptr<org::BufferView>> clodMeshletBoundsChunkViews;
 
 	const bool hasDiskBackedGroupChunks = !pageDiskLocators.empty() && mesh->HasCLodDiskStreamingSource();
 	const bool hasCLodHierarchy = mesh->IsCLodMesh() &&
@@ -749,8 +766,8 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	auto clusterLODSegmentsView = m_clusterLODSegments->AddData(mesh->GetCLodSegments().data(), mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment), sizeof(ClusterLODGroupSegment));
 	
 	auto clusterLODNodesView = m_clusterLODNodes->AddData(mesh->GetCLodNodes().data(), mesh->GetCLodNodes().size() * sizeof(ClusterLODNode), sizeof(ClusterLODNode));
-	std::unique_ptr<BufferView> clusterLODNodeSkinningInfosView = nullptr;
-	std::unique_ptr<BufferView> clusterLODNodeBoneIndicesView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODNodeSkinningInfosView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODNodeBoneIndicesView = nullptr;
 	if (requiresNodeSkinningSidecar) {
 		clusterLODNodeSkinningInfosView = m_clusterLODNodeSkinningInfos->AddData(
 			nodeSkinningInfos.data(),
@@ -763,28 +780,28 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			(hasNodeBoneIndices ? nodeBoneIndices.size() : 1u) * sizeof(uint32_t),
 			sizeof(uint32_t));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyTransformsView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODAssemblyTransformsView = nullptr;
 	if (!mesh->GetCLodAssemblyTransforms().empty()) {
 		clusterLODAssemblyTransformsView = m_clusterLODAssemblyTransforms->AddData(
 			mesh->GetCLodAssemblyTransforms().data(),
 			mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform),
 			sizeof(ClusterLODAssemblyTransform));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODAssemblyInstancesView = nullptr;
 	if (!mesh->GetCLodAssemblyInstances().empty()) {
 		clusterLODAssemblyInstancesView = m_clusterLODAssemblyInstances->AddData(
 			mesh->GetCLodAssemblyInstances().data(),
 			mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance),
 			sizeof(ClusterLODAssemblyInstance));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapIndicesView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODAssemblyBoneRemapIndicesView = nullptr;
 	if (!mesh->GetCLodAssemblyBoneRemapIndices().empty()) {
 		clusterLODAssemblyBoneRemapIndicesView = m_clusterLODAssemblyBoneRemapIndices->AddData(
 			mesh->GetCLodAssemblyBoneRemapIndices().data(),
 			mesh->GetCLodAssemblyBoneRemapIndices().size() * sizeof(uint32_t),
 			sizeof(uint32_t));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView = nullptr;
+	std::unique_ptr<org::BufferView> clusterLODAssemblyBoneRemapsView = nullptr;
 	if (!mesh->GetCLodAssemblyBoneRemaps().empty()) {
 		// CLOD wind skinning keeps vertex joint indices local to each assembly transform.
 		// Validate the local-to-expanded-joint tables at the CPU/GPU upload boundary so
@@ -908,7 +925,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			materializedGroupChunks[groupIndex] = chunk;
 		}
 
-		std::unique_ptr<BufferView> sharedGroupChunksView = nullptr;
+		std::unique_ptr<org::BufferView> sharedGroupChunksView = nullptr;
 		if (!materializedGroupChunks.empty())
 		{
 			sharedGroupChunksView = m_clodSharedGroupChunks->AddData(
@@ -946,17 +963,13 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			ZoneScopedN("MeshManager::AddMesh::ResolveContainerPathFallback");
 			sharedState->resolvedContainerPath = CLodCache::ResolveContainerPath(sharedState->cacheSource);
 		}
+		// Opening every CLod container while static templates are admitted makes
+		// thousands of meshes pay filesystem namespace and handle-creation costs
+		// even when their pages are never streamed. The disk-streaming worker
+		// acquires the mapped lease on first use; warm-state tracking only depends
+		// on the locator table and can be initialized eagerly without a mapping.
 		if (!sharedState->resolvedContainerPath.empty() &&
-			!sharedState->pageDiskLocators.empty() &&
-			sharedState->mappedContainerLease == nullptr) {
-			ZoneScopedN("MeshManager::AddMesh::AcquireMappedContainerFallback");
-			CLodCache::AcquireMappedContainer(
-				sharedState->resolvedContainerPath,
-				static_cast<uint32_t>(
-					sharedState->pageDiskLocators.size()),
-				sharedState->mappedContainerLease);
-		}
-		if (sharedState->mappedContainerLease != nullptr) {
+			!sharedState->pageDiskLocators.empty()) {
 			ZoneScopedN("MeshManager::AddMesh::InitializeMappedPageWarmStates");
 			sharedState->mappedPageWarmStateCount =
 				static_cast<uint32_t>(
@@ -1004,7 +1017,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			sharedState->coarsestRanges = summary.coarsestRanges;
 		}
 
-		std::unique_ptr<BufferView> hierarchyLevelInfoView = nullptr;
+		std::unique_ptr<org::BufferView> hierarchyLevelInfoView = nullptr;
 		uint32_t hierarchyLevelInfoBase = 0;
 		const auto& lodNodeRanges = mesh->GetCLodLodNodeRanges();
 		const auto& lodLevelRoots = mesh->GetCLodLodLevelRoots();
@@ -1032,7 +1045,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		}
 
 		// Allocate a contiguous range in the GroupPageMap buffer.
-		std::unique_ptr<BufferView> pageMapView = nullptr;
+		std::unique_ptr<org::BufferView> pageMapView = nullptr;
 		uint32_t pageMapGlobalBase = 0;
 		if (totalPageMapEntries > 0) {
 			ZoneScopedN("MeshManager::AddMesh::InitializePageMap");
@@ -1095,6 +1108,10 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			? static_cast<uint32_t>(mesh->GetCLodNodeBoneIndices().size())
 			: 0u;
 		clodMeshMetadata.nodeBoneLimit = requiresNodeSkinningSidecar ? mesh->GetCLodNodeBoneLimit() : 0u;
+		const uint64_t meshIdentity = mesh->GetGlobalID();
+		clodMeshMetadata.meshIdentityLo = static_cast<uint32_t>(meshIdentity);
+		clodMeshMetadata.meshIdentityHi = static_cast<uint32_t>(meshIdentity >> 32u);
+		clodMeshMetadata.meshIdentityClass = 0u;
 		sharedState->ownedMeshMetadataView = m_clodMeshMetadata->AddData(&clodMeshMetadata, sizeof(CLodMeshMetadata), sizeof(CLodMeshMetadata));
 		if (!sharedState->ownedMeshMetadataView) {
 			spdlog::error("MeshManager::AddMesh: failed to allocate logical mesh metadata view for mesh globalID={}", mesh->GetGlobalID());
@@ -1184,6 +1201,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 }
 
 void MeshManager::RemoveMesh(Mesh* mesh) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	if (mesh == nullptr) {
 		return;
 	}
@@ -1204,6 +1222,7 @@ void MeshManager::RemoveMesh(Mesh* mesh) {
 }
 
 void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	ZoneScopedN("MeshManager::AddMeshesBulk");
 	ZoneValue(static_cast<int64_t>(meshes.size()));
 	if (meshes.empty()) {
@@ -1360,6 +1379,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 }
 
 void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<StaticMeshTemplateRequest>& requests) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
 	BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
 	ZoneValue(static_cast<int64_t>(requests.size()));
@@ -1428,8 +1448,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	TracyPlot("MeshManager.StaticTemplate.AsyncTemplateRows", static_cast<int64_t>(templateRowsToAdd));
 
 	if (!meshesToPrepare.empty()) {
-		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareMappedContainers");
-		BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareMappedContainers");
+		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareContainerPaths");
+		BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareContainerPaths");
 		std::vector<std::pair<Mesh*, PreparedCLodContainer>> preparedContainers;
 		preparedContainers.reserve(meshesToPrepare.size());
 		for (const auto& mesh : meshesToPrepare) {
@@ -1447,7 +1467,6 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 			}
 
 			std::wstring resolvedPath;
-			std::shared_ptr<const CLodCache::MappedContainerLease> lease;
 			{
 				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::ResolveContainerPath");
 				BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::ResolveContainerPath");
@@ -1456,24 +1475,12 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 			if (resolvedPath.empty()) {
 				continue;
 			}
-			{
-				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::AcquireMappedContainer");
-				BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::AcquireMappedContainer");
-				CLodCache::AcquireMappedContainer(
-					resolvedPath,
-					static_cast<uint32_t>(pageDiskLocators.size()),
-					lease);
-			}
-			if (!lease) {
-				continue;
-			}
-
 			preparedContainers.emplace_back(
 				mesh.get(),
 				PreparedCLodContainer{
 					.mesh = mesh,
 					.resolvedPath = std::move(resolvedPath),
-					.lease = std::move(lease),
+					.lease = {},
 					.pageCount = static_cast<uint32_t>(pageDiskLocators.size()),
 				});
 		}
@@ -1524,6 +1531,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 }
 
 std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticMeshTemplatesBulk(const std::vector<StaticMeshTemplateRequest>& requests) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk");
 	ZoneValue(static_cast<int64_t>(requests.size()));
 	std::vector<StaticMeshTemplateRegistration> registrations(requests.size());
@@ -1591,6 +1599,10 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 
 			MeshInstanceClodOffsets clodOffsets{};
 			clodOffsets.clodMeshMetadataIndex = sharedState ? sharedState->clodMeshMetadataIndex : 0u;
+			row.expectedClodMeshMetadataIndex = clodOffsets.clodMeshMetadataIndex;
+			const uint64_t meshIdentity = request.mesh->GetGlobalID();
+			row.expectedClodMeshIdentityLo = static_cast<uint32_t>(meshIdentity);
+			row.expectedClodMeshIdentityHi = static_cast<uint32_t>(meshIdentity >> 32u);
 
 			validRequestIndices.push_back(requestIndex);
 			perMeshInstanceRows.push_back(row);
@@ -1696,6 +1708,7 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 }
 
 bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	if (mesh == nullptr || !mesh->GetMesh()) {
 		return false;
 	}
@@ -1755,6 +1768,8 @@ bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 
 	MeshInstanceClodOffsets clodOffsets = {};
 	clodOffsets.clodMeshMetadataIndex = (sharedState != nullptr) ? sharedState->clodMeshMetadataIndex : 0u;
+	mesh->SetExpectedClodMeshMetadataIndex(clodOffsets.clodMeshMetadataIndex);
+	mesh->SetExpectedClodMeshIdentity(mesh->GetMesh()->GetGlobalID());
 	//clodOffsets.rootGroup = mesh->GetMesh()->GetCLodRootGroup();
 	auto clodOffsetsView = m_perMeshInstanceClodOffsets->AddData(&clodOffsets, sizeof(MeshInstanceClodOffsets), sizeof(MeshInstanceClodOffsets)); // Indexable by mesh instance
 	if (!clodOffsetsView) {
@@ -1782,6 +1797,7 @@ bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 }
 
 void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 
 	// Things to remove:
 	// - Post-skinning vertices
@@ -1832,6 +1848,7 @@ void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
 
 void MeshManager::RecomputeCLodActiveMaxTraversalDepth()
 {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	uint32_t maxTraversalDepth = 0u;
 	for (const auto& [_, sharedState] : m_clodSharedStreamingStateByMesh) {
 		if (sharedState == nullptr || sharedState->activeInstanceCount == 0u) {
@@ -1929,6 +1946,7 @@ void MeshManager::ProcessCLodDiskStreamingIO() {
 
 
 void MeshManager::RebuildCLodSharedStreamingRangeIndex() {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	if (!m_clodSharedStreamingRangesDirty) {
 		return;
 	}
@@ -1960,11 +1978,283 @@ void MeshManager::PublishCLodStreamingDomainEvent(CLodStreamingDomainEvent event
 		return;
 	}
 
+	const auto publicationEvent = event;
 	{
 		std::lock_guard lock(m_clodStreamingDomainEventsMutex);
 		m_clodStreamingDomainEvents.push_back(std::move(event));
 	}
 	m_clodStreamingDomainEventGeneration.fetch_add(1u, std::memory_order_release);
+	PublishGeometryResidencyDelta(publicationEvent);
+}
+
+void MeshManager::SetRendererStateRequestService(br::render::RendererStateRequestService* service) {
+	std::lock_guard lock(m_geometryResidencyPublicationMutex);
+	m_rendererStateRequests = service;
+	m_geometryResidencyVersion = {};
+	m_geometryResidencyRevision = 0;
+	{
+		std::lock_guard graphLock(m_geometryBufferGraphMutex);
+		m_clodResidencyStorages = service
+			? std::make_shared<br::render::CLodResidencyStorageDirectory>(*service) : nullptr;
+		m_clodResidencyGates.clear();
+	}
+	if (service == nullptr) return;
+
+	auto input = std::make_shared<br::render::GeometryResidencyDeltaInput>();
+	input->kind = br::render::GeometryResidencyDeltaKind::Reset;
+	input->pagePool = m_clodPagePool;
+	input->slabResources = GetCLodSlabResourceGroup();
+	input->storageGeneration = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
+	const auto revision = ++m_geometryResidencyRevision;
+	std::shared_ptr<const br::render::GeometryResidencyDeltaInput> immutableInput = std::move(input);
+	const auto result = service->Request(
+		{ br::render::ArtifactKind::GeometryResidency, 1u, 0u }, revision,
+		{}, br::render::ArtifactPayload::Make<br::render::GeometryResidencyDeltaInput>(
+			std::move(immutableInput)), revision);
+	if (result) m_geometryResidencyVersion = result.Handle();
+}
+
+void MeshManager::SetRendererStateServices(br::render::RendererStateRequestService* service,
+	std::shared_ptr<org::runtime::IUploadService> uploads, std::uint32_t framesInFlight) {
+	SetRendererStateRequestService(service);
+	m_geometryUploadService = std::move(uploads);
+	m_geometryFramesInFlight = (std::max)(framesInFlight, 1u);
+	if (!service || !m_geometryUploadService || !m_graphBufferBindings.empty()) return;
+	const std::array definitions{
+		std::tuple{ org::ResourceIdentifier{ Builtin::PerMeshBuffer }, m_perMeshBuffers, 1ull, uint32_t(sizeof(PerMeshCB)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::PerMeshInstanceBuffer }, m_perMeshInstanceBuffers, 2ull, uint32_t(sizeof(PerMeshInstanceCB)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::Offsets }, m_perMeshInstanceClodOffsets, 3ull, uint32_t(sizeof(MeshInstanceClodOffsets)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::MeshMetadata }, m_clodMeshMetadata, 5ull, uint32_t(sizeof(CLodMeshMetadata)) },
+		std::tuple{ org::ResourceIdentifier{ CLodLevelInfosBufferId }, m_clodHierarchyLevelInfos, 6ull, uint32_t(sizeof(CLodHierarchyLevelInfo)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::Groups }, m_clusterLODGroups, 7ull, uint32_t(sizeof(ClusterLODGroup)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::Segments }, m_clusterLODSegments, 8ull, uint32_t(sizeof(ClusterLODGroupSegment)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::Nodes }, m_clusterLODNodes, 9ull, uint32_t(sizeof(ClusterLODNode)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::NodeSkinningInfos }, m_clusterLODNodeSkinningInfos, 10ull, uint32_t(sizeof(ClusterLODNodeSkinningInfo)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::NodeBoneIndices }, m_clusterLODNodeBoneIndices, 11ull, uint32_t(sizeof(uint32_t)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyTransforms }, m_clusterLODAssemblyTransforms, 12ull, uint32_t(sizeof(ClusterLODAssemblyTransform)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyInstances }, m_clusterLODAssemblyInstances, 13ull, uint32_t(sizeof(ClusterLODAssemblyInstance)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemaps }, m_clusterLODAssemblyBoneRemaps, 14ull, uint32_t(sizeof(ClusterLODAssemblyBoneRemap)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemapIndices }, m_clusterLODAssemblyBoneRemapIndices, 15ull, uint32_t(sizeof(uint32_t)) }
+	};
+	// GroupChunks and GroupPageMap are mutable CLOD residency state, not immutable
+	// mesh topology. CLodStreamingSystem owns their stable backing and updates it
+	// through ticketed frame snapshots. Publishing alternate geometry backings for
+	// them makes the upload stream write one resource while render passes resolve
+	// another, and can leave captured copy offsets beyond the stale backing size.
+	const auto source = br::render::PublishedStateSource::ProcessSource();
+	for (const auto& [identifier, buffer, variant, stride] : definitions) {
+		buffer->EnableVersionedGraphJournal();
+		buffer->SetVersionedGraphMutationCallback([this] {
+			m_geometryBufferGraphDirty.store(true, std::memory_order_release);
+		});
+		GraphBufferBinding binding{ identifier, buffer,
+			{ br::render::ArtifactKind::BufferVersion, 0x47454f4255460000ull, variant },
+			variant, stride, {}, std::make_shared<br::render::VersionedGpuBufferBackingPool>() };
+		m_graphBufferBindings.push_back(std::move(binding));
+		buffer->ReleaseECSEntity();
+		m_graphBufferResolvers.emplace(identifier,
+			std::make_shared<PublishedStateResourceResolver>(source,
+				br::render::PublishedResourceKey{ br::render::PublishedFragmentKind::Geometry,
+					br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant }, buffer, true));
+		buffer->SetVersionedGraphExclusive(true);
+		// Keep the inert bootstrap wrapper advertised as a symbolic resource as
+		// well as a resolver. Several CLOD setup passes mint handles before the
+		// first manifest exists; graph-exclusive mode prevents this wrapper from
+		// participating in legacy upload or backing-resize traversal.
+	}
+	(void)PublishDesiredBufferState();
+}
+
+std::uint64_t MeshManager::PublishDesiredBufferState() {
+	if (!m_rendererStateRequests || !m_geometryUploadService || m_graphBufferBindings.empty()) return 0;
+	// A GeometryBufferState is one publication cut, not fourteen independently
+	// meaningful buffer snapshots. Static-template acceptance appends related
+	// rows to several journals under this serialized acceptance lock. Capturing
+	// between those appends can pair new indices with old group/segment tables
+	// (or vice versa), which presents as valid pages rendering another asset's
+	// geometry. This lock is confined to the off-thread authoring/publication
+	// lane; render-side manager access remains lock-free and consumes only the
+	// immutable published state.
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
+	std::lock_guard lock(m_geometryBufferGraphMutex);
+	if (!m_geometryBufferGraphDirty.exchange(false, std::memory_order_acq_rel)) return m_geometryBufferStateRevision;
+	std::uint64_t coverage = 0;
+	std::vector<br::render::ArtifactIntent> intents;
+	std::vector<br::render::VersionedGpuBufferJournal::Capture> captures;
+	captures.reserve(m_graphBufferBindings.size());
+	std::uint64_t fingerprint = 1469598103934665603ull;
+	for (auto& binding : m_graphBufferBindings) {
+		auto capture = binding.buffer->CaptureVersionedGraphState();
+		coverage += capture.writeSequence;
+		const auto revision = (std::max<std::uint64_t>)(capture.writeSequence, 1u);
+		fingerprint ^= revision + 0x9e3779b97f4a7c15ull + (fingerprint << 6u) + (fingerprint >> 2u);
+		if (binding.submittedVersion.revision != revision) {
+			auto input = std::make_shared<br::render::VersionedGpuBufferBuildInput>();
+			input->uploadOwner = m_geometryUploadService;
+			input->uploadService = input->uploadOwner.get();
+			input->debugName = "Published::" + binding.identifier.ToString();
+			input->writeSequence = capture.writeSequence;
+			input->elementStride = binding.elementStride;
+			input->elementCount = capture.elementCount;
+			input->capacity = capture.capacity;
+			input->catalogOwner = br::render::PublishedFragmentKind::Geometry;
+			input->catalogVariant = binding.catalogVariant;
+			input->previous = capture.previous;
+			input->backingPool = binding.backingPool;
+			input->writes = capture.writes;
+			input->image = capture.image;
+			input->journalBaseSequence = capture.journalBaseSequence;
+			intents.push_back({ binding.key, revision, {},
+				br::render::ArtifactPayload::Make<br::render::VersionedGpuBufferBuildInput>(std::move(input)),
+				(revision << 8u) ^ binding.catalogVariant });
+		}
+		captures.push_back(std::move(capture));
+	}
+	if (!intents.empty()) {
+		auto results = m_rendererStateRequests->SubmitLatestBatch(std::move(intents));
+		std::size_t resultIndex = 0;
+		for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
+			const auto revision = (std::max<std::uint64_t>)(captures[i].writeSequence, 1u);
+			if (m_graphBufferBindings[i].submittedVersion.revision == revision) continue;
+			if (resultIndex >= results.size() || !results[resultIndex]) {
+				m_geometryBufferGraphDirty.store(true, std::memory_order_release);
+				return m_geometryBufferStateRevision;
+			}
+			m_graphBufferBindings[i].submittedVersion = results[resultIndex++].version;
+		}
+	}
+	if (fingerprint == m_geometryBufferFingerprint) return m_geometryBufferStateRevision;
+	auto rootInput = std::make_shared<br::render::GeometryBufferStateBuildInput>();
+	rootInput->coveredMutationSequence = coverage;
+	std::vector<br::render::ArtifactRequirement> requirements;
+	std::uint32_t clodGroupCount = 0;
+	for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
+		const auto& binding = m_graphBufferBindings[i];
+		const auto revision = (std::max<std::uint64_t>)(captures[i].writeSequence, 1u);
+		rootInput->buffers.push_back({ binding.key, revision, binding.elementStride, binding.catalogVariant });
+		requirements.push_back(br::render::Exact(binding.submittedVersion,
+			br::render::ArtifactReadiness::GpuReady));
+		if (binding.identifier == org::ResourceIdentifier{ Builtin::CLod::Groups }) {
+			clodGroupCount = static_cast<std::uint32_t>(captures[i].elementCount);
+		}
+	}
+	// Every group this cut's table references needs a published non-resident
+	// bitset that covers it: the cut, and so every draw of those groups, waits for
+	// a filled storage of sufficient capacity instead of reading past or into an
+	// unfilled bitset. One gate per power-of-two capacity; each is immutable.
+	if (clodGroupCount != 0u && m_clodResidencyStorages && m_clodResidencyStorages->HasProducer()) {
+		const auto capacity = CLodRoundUpCapacity(clodGroupCount);
+		auto& gate = m_clodResidencyGates[capacity];
+		if (!gate) {
+			auto gateInput = std::make_shared<br::render::CLodResidencyCapacityGateInput>();
+			gateInput->capacity = capacity;
+			gateInput->directory = m_clodResidencyStorages;
+			const auto gateResult = m_rendererStateRequests->Request(
+				br::render::CLodResidencyCapacityGateAddress(capacity), 1u, {},
+				br::render::ArtifactPayload::Make<br::render::CLodResidencyCapacityGateInput>(std::move(gateInput)),
+				capacity);
+			if (!gateResult) {
+				m_clodResidencyGates.erase(capacity);
+				m_geometryBufferGraphDirty.store(true, std::memory_order_release);
+				return m_geometryBufferStateRevision;
+			}
+			gate = gateResult.Handle();
+		}
+		requirements.push_back(br::render::Exact(gate, br::render::ArtifactReadiness::CpuReady));
+	}
+	const auto result = m_rendererStateRequests->SubmitLatest({
+		{ br::render::ArtifactKind::GeometryBufferState, 0, 0 }, ++m_geometryBufferStateRevision,
+		std::move(requirements),
+		br::render::ArtifactPayload::Make<br::render::GeometryBufferStateBuildInput>(std::move(rootInput)), fingerprint });
+	if (!result) {
+		--m_geometryBufferStateRevision;
+		m_geometryBufferGraphDirty.store(true, std::memory_order_release);
+		return m_geometryBufferStateRevision;
+	}
+	m_geometryBufferFingerprint = fingerprint;
+	m_geometryBufferStateVersion = result.Handle();
+	m_geometryBufferStateCoverage = coverage;
+	return m_geometryBufferStateRevision;
+}
+
+std::uint64_t MeshManager::GeometryMutationSequence() const {
+	// Bindings are fixed once renderer-state services are configured.
+	std::uint64_t sequence = 0;
+	for (const auto& binding : m_graphBufferBindings) sequence += binding.buffer->VersionedGraphWriteSequence();
+	return sequence;
+}
+
+std::optional<br::render::ArtifactRequirement> MeshManager::DesiredBufferStateRequirement() const {
+	std::uint64_t coverage = 0;
+	return DesiredBufferStateRequirement(coverage);
+}
+
+std::optional<br::render::ArtifactRequirement> MeshManager::DesiredBufferStateRequirement(std::uint64_t& coverage) const {
+	std::lock_guard lock(m_geometryBufferGraphMutex);
+	coverage = m_geometryBufferStateCoverage;
+	if (!m_geometryBufferStateVersion) return std::nullopt;
+	return br::render::Exact(m_geometryBufferStateVersion,
+		br::render::ArtifactReadiness::GpuReady);
+}
+
+std::optional<br::render::ArtifactVersionHandle> MeshManager::GeometryResidencyVersion() const {
+	std::lock_guard lock(m_geometryResidencyPublicationMutex);
+	if (!m_geometryResidencyVersion) return std::nullopt;
+	return m_geometryResidencyVersion;
+}
+
+void MeshManager::PublishGeometryResidencyDelta(const CLodStreamingDomainEvent& event) {
+	if (event.kind == CLodStreamingDomainEventKind::SharedMeshAdded) return;
+	std::lock_guard lock(m_geometryResidencyPublicationMutex);
+	if (m_rendererStateRequests == nullptr) return;
+
+	auto input = std::make_shared<br::render::GeometryResidencyDeltaInput>();
+	input->pagePool = m_clodPagePool;
+	input->slabResources = GetCLodSlabResourceGroup();
+	input->storageGeneration = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
+	switch (event.kind) {
+	case CLodStreamingDomainEventKind::ActiveRangeAdded:
+		input->kind = br::render::GeometryResidencyDeltaKind::AddOrReplace;
+		break;
+	case CLodStreamingDomainEventKind::ActiveRangeRemoved:
+		input->kind = br::render::GeometryResidencyDeltaKind::Remove;
+		break;
+	case CLodStreamingDomainEventKind::FullReset:
+		input->kind = br::render::GeometryResidencyDeltaKind::Reset;
+		break;
+	case CLodStreamingDomainEventKind::SharedMeshAdded:
+		return;
+	}
+	input->range.groupsBase = event.groupsBase;
+	input->range.groupCount = event.groupCount;
+	input->range.maxTraversalDepth = event.maxTraversalDepth;
+	auto coarsestRanges = std::make_shared<std::vector<std::pair<std::uint32_t, std::uint32_t>>>();
+	coarsestRanges->reserve(event.coarsestRanges.size());
+	for (const auto& range : event.coarsestRanges) {
+		coarsestRanges->emplace_back(range.groupsBase, range.groupCount);
+	}
+	input->range.coarsestRanges = std::move(coarsestRanges);
+
+	std::vector<br::render::ArtifactRequirement> requirements;
+	if (m_geometryResidencyVersion) {
+		requirements.push_back(br::render::Exact(m_geometryResidencyVersion));
+	}
+	const auto revision = ++m_geometryResidencyRevision;
+	const std::uint64_t fingerprint = revision ^
+		(static_cast<std::uint64_t>(event.groupsBase) << 32u) ^ event.groupCount ^
+		(static_cast<std::uint64_t>(event.maxTraversalDepth) << 48u) ^
+		input->storageGeneration;
+	std::shared_ptr<const br::render::GeometryResidencyDeltaInput> immutableInput = std::move(input);
+	const auto result = m_rendererStateRequests->Request(
+		{ br::render::ArtifactKind::GeometryResidency, 1u, 0u }, revision,
+		std::move(requirements),
+		br::render::ArtifactPayload::Make<br::render::GeometryResidencyDeltaInput>(
+			std::move(immutableInput)), fingerprint);
+	if (result) {
+		m_geometryResidencyVersion = result.Handle();
+	} else {
+		basic_telemetry::AddCounter("BasicRenderer.GeometryResidency.RequestRejected");
+	}
 }
 
 void MeshManager::PublishCLodStreamingDomainEventForSharedState(
@@ -1978,6 +2268,7 @@ void MeshManager::PublishCLodStreamingDomainEventForSharedState(
 	event.kind = kind;
 	event.groupsBase = sharedState->groupsBase;
 	event.groupCount = sharedState->groupCount;
+	event.maxTraversalDepth = sharedState->maxTraversalDepth;
 	event.coarsestRanges.reserve(sharedState->coarsestRanges.size());
 	for (const auto& localRange : sharedState->coarsestRanges) {
 		if (localRange.groupCount == 0u || localRange.firstGroup >= sharedState->groupCount) {
@@ -2624,11 +2915,19 @@ bool MeshManager::CommitCLodGroupResidency(
 		for (size_t i = 0; i < meshPageIndices.size(); ++i) {
 			const uint32_t pageMapOffset = expectedPageMapOffsets[i];
 			if (pageMapOffset < sharedState->pageMapEntriesCPU.size()) {
-				sharedState->pageMapEntriesCPU[pageMapOffset] = pageMapEntries[i];
+				auto ownedEntry = pageMapEntries[i];
+				ownedEntry.ownerMeshMetadataIndex = sharedState->clodMeshMetadataIndex;
+				ownedEntry.ownerPageMapBase = sharedState->pageMapGlobalBase;
+				sharedState->pageMapEntriesCPU[pageMapOffset] = ownedEntry;
 			}
 		}
 		for (size_t i = 0; i < expectedPageMapOffsets.size(); ++i) {
-			UploadCLodGroupPageMapRange(*sharedState, expectedPageMapOffsets[i], std::span<const GroupPageMapEntry>(&pageMapEntries[i], 1));
+			const auto pageMapOffset = expectedPageMapOffsets[i];
+			if (pageMapOffset < sharedState->pageMapEntriesCPU.size()) {
+				UploadCLodGroupPageMapRange(*sharedState, pageMapOffset,
+					std::span<const GroupPageMapEntry>(
+						&sharedState->pageMapEntriesCPU[pageMapOffset], 1));
+			}
 		}
 	}
 
@@ -3132,6 +3431,10 @@ void MeshManager::UploadCLodGroupChunkTable(const CLodSharedStreamingState& stat
 	}
 
 	if (m_clodStreamingUploadFn) {
+		m_clodSharedGroupChunks->RetainExternalUpload(
+			materializedGroupChunks.data(),
+			materializedGroupChunks.size() * sizeof(ClusterLODGroupChunk),
+			state.groupChunksView->GetOffset());
 		m_clodStreamingUploadFn(
 			materializedGroupChunks.data(),
 			materializedGroupChunks.size() * sizeof(ClusterLODGroupChunk),
@@ -3159,6 +3462,8 @@ void MeshManager::UploadCLodGroupChunk(const CLodSharedStreamingState& state, ui
 		state.groupChunksView->GetOffset() + static_cast<size_t>(groupLocalIndex) * sizeof(ClusterLODGroupChunk);
 	const size_t byteSize = sizeof(ClusterLODGroupChunk);
 	if (m_clodStreamingUploadFn) {
+		m_clodSharedGroupChunks->RetainExternalUpload(
+			&materializedGroupChunk, byteSize, byteOffset);
 		m_clodStreamingUploadFn(
 			&materializedGroupChunk,
 			byteSize,
@@ -3189,6 +3494,8 @@ void MeshManager::UploadCLodGroupPageMapRange(
 		state.ownedPageMapView->GetOffset() + static_cast<size_t>(pageMapOffset) * sizeof(GroupPageMapEntry);
 	const size_t byteSize = pageMapEntries.size_bytes();
 	if (m_clodStreamingUploadFn) {
+		m_clodGroupPageMap->RetainExternalUpload(
+			pageMapEntries.data(), byteSize, byteOffset);
 		m_clodStreamingUploadFn(
 			pageMapEntries.data(),
 			byteSize,
@@ -3205,6 +3512,10 @@ void MeshManager::UploadCLodGroupPageMapRange(
 	}
 
 	if (m_clodStreamingUploadFn) {
+		m_clodGroupPageMap->RetainExternalUpload(
+			state.pageMapEntriesCPU.data(),
+			state.pageMapEntriesCPU.size() * sizeof(GroupPageMapEntry),
+			state.ownedPageMapView->GetOffset());
 		m_clodStreamingUploadFn(
 			state.pageMapEntriesCPU.data(),
 			state.pageMapEntriesCPU.size() * sizeof(GroupPageMapEntry),
@@ -3283,6 +3594,7 @@ bool MeshManager::ApplyCLodGroupEviction(CLodSharedStreamingState& state, uint32
 }
 
 void MeshManager::GetCLodActiveUniqueAssetGroupRanges(std::vector<CLodActiveGroupRange>& outRanges, uint32_t& outMaxGroupIndex) const {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	outRanges.clear();
 	outMaxGroupIndex = 0u;
 
@@ -3310,6 +3622,7 @@ void MeshManager::GetCLodActiveUniqueAssetGroupRanges(std::vector<CLodActiveGrou
 }
 
 void MeshManager::GetCLodCoarsestUniqueAssetGroupRanges(std::vector<CLodActiveGroupRange>& outRanges) const {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	outRanges.clear();
 
 	std::unordered_set<uint64_t> seenRanges;
@@ -3351,6 +3664,7 @@ void MeshManager::GetCLodCoarsestUniqueAssetGroupRanges(std::vector<CLodActiveGr
 }
 
 void MeshManager::GetCLodStreamingDomainSnapshot(CLodStreamingDomainSnapshot& outSnapshot) const {
+	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
 	outSnapshot.activeRanges.clear();
 	outSnapshot.coarsestRanges.clear();
 	outSnapshot.maxGroupIndex = 0;
@@ -3420,7 +3734,7 @@ MeshManager::CLodStreamingDebugStats MeshManager::GetCLodStreamingDebugStats() c
 		m_debugResidentAllocationBytes.load(std::memory_order_relaxed);
 	stats.totalStreamedBytes = m_debugTotalStreamedBytes.load(std::memory_order_relaxed);
 	stats.ioAdmissionTarget = CLodIoAdmissionTarget();
-	stats.ioWorkerCount = TaskSchedulerManager::GetInstance().GetNumIoThreads();
+	stats.ioWorkerCount = TaskSchedulerManager::GetInstance().BlockingThreadCount();
 	stats.ioTaskBatchSize = CLodIoTaskBatchSize();
 	{
 		std::lock_guard<std::mutex> lock(m_clodDiskStreamingMutex);
@@ -3465,7 +3779,7 @@ MeshManager::CLodStreamingDebugStats MeshManager::GetCLodStreamingDebugStats() c
 
 void MeshManager::GetCLodRayTracingResidencySnapshot(CLodRayTracingResidencySnapshot& outSnapshot) const {
 	outSnapshot.residentGroups.clear();
-	outSnapshot.pagePool = m_clodPagePool.get();
+	outSnapshot.pagePool = m_clodPagePool;
 	outSnapshot.pagePoolGeneration = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
 
 	const_cast<MeshManager*>(this)->RebuildCLodSharedStreamingRangeIndex();
@@ -3520,40 +3834,68 @@ void MeshManager::GetCLodRayTracingResidencySnapshot(CLodRayTracingResidencySnap
 	}
 }
 
-void MeshManager::UpdatePerMeshBuffer(std::unique_ptr<BufferView>& view, PerMeshCB& data) {
+void MeshManager::UpdatePerMeshBuffer(std::unique_ptr<org::BufferView>& view, PerMeshCB& data) {
 	if (!view || !view->GetBuffer()) {
 		return;
 	}
 	view->GetBuffer()->UpdateView(view.get(), &data);
 }
 
-std::unique_ptr<BufferView> MeshManager::AllocatePerMeshOverrideBuffer(const PerMeshCB& data) {
+std::unique_ptr<org::BufferView> MeshManager::AllocatePerMeshOverrideBuffer(const PerMeshCB& data) {
 	return m_perMeshBuffers->AddData(&data, sizeof(PerMeshCB), sizeof(PerMeshCB));
 }
 
-void MeshManager::ReleasePerMeshOverrideBuffer(std::unique_ptr<BufferView>& view) {
+void MeshManager::ReleasePerMeshOverrideBuffer(std::unique_ptr<org::BufferView>& view) {
 	if (view != nullptr) {
 		m_perMeshBuffers->Deallocate(view.get());
 		view.reset();
 	}
 }
 
-void MeshManager::UpdatePerMeshInstanceBuffer(std::unique_ptr<BufferView>& view, PerMeshInstanceCB& data) {
+void MeshManager::UpdatePerMeshInstanceBuffer(std::unique_ptr<org::BufferView>& view, PerMeshInstanceCB& data) {
 	if (!view || !view->GetBuffer()) {
 		return;
 	}
 	view->GetBuffer()->UpdateView(view.get(), &data);
 }
 
-std::shared_ptr<Resource> MeshManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> MeshManager::ProvideResource(org::ResourceIdentifier const& key) {
 	return m_resources[key];
 }
 
-std::vector<ResourceIdentifier> MeshManager::GetSupportedKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> MeshManager::GetSupportedKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources)
 		keys.push_back(key);
 
 	return keys;
+}
+
+std::shared_ptr<org::IResourceResolver> MeshManager::ProvideResolver(org::ResourceIdentifier const& key) {
+	const auto it = m_graphBufferResolvers.find(key);
+	return it != m_graphBufferResolvers.end() ? it->second : nullptr;
+}
+
+std::vector<org::ResourceIdentifier> MeshManager::GetSupportedResolverKeys() {
+	std::vector<org::ResourceIdentifier> keys;
+	keys.reserve(m_graphBufferResolvers.size());
+	for (const auto& [key, _] : m_graphBufferResolvers) keys.push_back(key);
+	return keys;
+}
+
+void MeshManager::AcknowledgePublishedBufferState(
+	const std::shared_ptr<const br::render::PublishedRendererState>& published) {
+	if (!published) return;
+	const auto state = published->geometry.selectedState
+		.Get<br::render::PublishedGeometryBufferState>();
+	if (!state || state->versions.size() != m_graphBufferBindings.size()) return;
+	for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
+		const auto& version = state->versions[i];
+		if (!version) return;
+		m_graphBufferBindings[i].buffer->AcknowledgeVersionedGraphState(version);
+		if (auto pool = version->backingPool.lock(); pool && version->backing) {
+			pool->AcknowledgePublished(version->backing->backingGeneration, m_geometryFramesInFlight);
+		}
+	}
 }

@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesRasterWorkHistogramPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/MaterialManager.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -6,15 +7,16 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
 #include "BuiltinResources.h"
+#include "RenderPasses/PreparedComputeBarrier.h"
 #include "Resources/Buffers/Buffer.h"
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodReyesRasterWorkBucketRootConstants.h"
 
 ReyesRasterWorkHistogramPass::ReyesRasterWorkHistogramPass(
-    std::shared_ptr<Buffer> rasterWorkBuffer,
-    std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> histogramIndirectCommand,
-    std::shared_ptr<Buffer> histogramBuffer)
+    std::shared_ptr<org::Buffer> rasterWorkBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> histogramIndirectCommand,
+    std::shared_ptr<org::Buffer> histogramBuffer)
     : m_rasterWorkBuffer(std::move(rasterWorkBuffer))
     , m_rasterWorkCounterBuffer(std::move(rasterWorkCounterBuffer))
     , m_histogramIndirectCommand(std::move(histogramIndirectCommand))
@@ -31,97 +33,79 @@ ReyesRasterWorkHistogramPass::ReyesRasterWorkHistogramPass(
     };
 
     auto device = DeviceManager::GetInstance().GetDevice();
+    m_histogramCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
     device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(histogramArgs, 2), sizeof(RasterBucketsHistogramIndirectCommand) },
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        m_histogramCommandSignature);
+        *m_histogramCommandSignature);
 }
 
-void ReyesRasterWorkHistogramPass::DeclareResourceUsages(ComputePassBuilder* builder) {
-    builder->WithShaderResource(m_rasterWorkBuffer, m_rasterWorkCounterBuffer)
-        .WithIndirectArguments(m_histogramIndirectCommand)
-        .WithUnorderedAccess(m_histogramBuffer)
-        .WithConstantBuffer(Builtin::PerFrameBuffer);
+ReyesRasterWorkHistogramBindings ReyesRasterWorkHistogramPass::Declare(org::PassBuilder& declaration) {
+    declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    declaration.WithConstantBuffer(Builtin::PerFrameBuffer);
+    return {declaration.BindShaderResource(m_rasterWorkBuffer), declaration.BindShaderResource(m_rasterWorkCounterBuffer),
+        declaration.BindIndirectArguments(m_histogramIndirectCommand), declaration.BindUnorderedAccess(m_histogramBuffer), m_numBuckets};
 }
 
-void ReyesRasterWorkHistogramPass::Setup() {}
-
-PassReturn ReyesRasterWorkHistogramPass::Execute(PassExecutionContext& executionContext) {
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-    const uint32_t numRasterBuckets = context.materialManager->GetRasterBucketCount();
-    if (numRasterBuckets == 0u) {
-        return {};
-    }
-
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-
-    BindResourceDescriptorIndices(commandList, m_clearPipeline.GetResourceDescriptorSlots());
-    commandList.BindPipeline(m_clearPipeline.GetAPIPipelineState().GetHandle());
-
-    uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
-    clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = m_histogramBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
-    clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = numRasterBuckets;
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        clearRootConstants);
-    commandList.Dispatch((numRasterBuckets + 63u) / 64u, 1u, 1u);
-
-    rhi::BufferBarrier histogramBarrier{};
-    histogramBarrier.buffer = m_histogramBuffer->GetAPIResource().GetHandle();
-    histogramBarrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
-    histogramBarrier.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
-    histogramBarrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
-    histogramBarrier.afterSync = rhi::ResourceSyncState::ComputeShading;
-
-    rhi::BarrierBatch barrierBatch{};
-    barrierBatch.buffers = { &histogramBarrier };
-    commandList.Barriers(barrierBatch);
-
-    commandList.BindPipeline(m_histogramPipeline.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_histogramPipeline.GetResourceDescriptorSlots());
-
-    uint32_t uintRootConstants[NumMiscUintRootConstants] = {};
-    uintRootConstants[CLOD_REYES_RASTER_BUCKET_WORK_BUFFER_DESCRIPTOR_INDEX] = m_rasterWorkBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_RASTER_BUCKET_WORK_COUNTER_DESCRIPTOR_INDEX] = m_rasterWorkCounterBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_RASTER_BUCKET_HISTOGRAM_DESCRIPTOR_INDEX] = m_histogramBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        uintRootConstants);
-
-    commandList.ExecuteIndirect(m_histogramCommandSignature->GetHandle(), m_histogramIndirectCommand->GetAPIResource().GetHandle(), 0, {}, 0, 1);
-    return {};
+ReyesHistogramFrameData ReyesRasterWorkHistogramPass::Prepare(
+    const ReyesRasterWorkHistogramBindings& bindings, const org::PassPrepareContext& preparation) const {
+    const auto& context = *preparation.preparationData->Get<UpdateContext>();
+    ReyesHistogramFrameData data{};
+    const auto numRasterBuckets = bindings.numBuckets;
+    if (numRasterBuckets == 0u) return data;
+    const auto capture = [&](auto& dispatch, const org::PipelineState& pipeline) {
+        dispatch.resourceHeap = context.textureDescriptorHeap.GetHandle();
+        dispatch.samplerHeap = context.samplerDescriptorHeap.GetHandle();
+        auto binding = preparation.CaptureProgramBinding(pipeline);
+        dispatch.program = binding.program;
+        dispatch.descriptorIndices = std::move(binding.descriptorIndices);
+    };
+    capture(data.clear, m_clearPipeline);
+    data.clear.constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::UnorderedAccess}).index;
+    data.clear.constants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
+    data.clear.constants[CLOD_CLEAR_UINT_BUFFER_COUNT] = numRasterBuckets;
+    data.clear.groupsX = (numRasterBuckets + 63u) / 64u;
+    capture(data.histogram, m_histogramPipeline);
+    data.histogram.commandSignature = preparation.CaptureCommandSignature(m_histogramCommandSignature);
+    data.histogram.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
+    data.histogramBarrier = preparation.CaptureResource(bindings.histogram);
+    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_WORK_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.work, {org::BindlessViewKind::ShaderResource}).index;
+    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_WORK_COUNTER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.counter, {org::BindlessViewKind::ShaderResource}).index;
+    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::UnorderedAccess}).index;
+    return data;
 }
 
-void ReyesRasterWorkHistogramPass::Update(const UpdateExecutionContext& executionContext) {
+void ReyesRasterWorkHistogramPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_clearPipeline));
+    out.push_back(br::render::PipelineRevision(m_histogramPipeline));
+    out.push_back(br::render::OwnerRevision(m_histogramCommandSignature));
+}
+
+void ReyesRasterWorkHistogramPass::Record(const ReyesRasterWorkHistogramBindings&,
+    const ReyesHistogramFrameData& data, org::PassRecordContext& recording) {
+    if (data.clear.groupsX == 0) return;
+    br::render::RecordPreparedComputeDispatch(data.clear, recording);
+    br::render::RecordPreparedComputeUavBarrier(data.histogramBarrier, recording);
+    br::render::RecordPreparedComputeIndirect(data.histogram, recording);
+}
+
+void ReyesRasterWorkHistogramPass::Update(const org::UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
-    const auto numRasterBuckets = context.materialManager->GetRasterBucketCount();
+    const auto numRasterBuckets = context.preparedRasterBucketCount;
+    m_numBuckets = numRasterBuckets;
 
     if (m_histogramBuffer->GetSize() < static_cast<size_t>(numRasterBuckets) * sizeof(uint32_t)) {
         m_histogramBuffer->ResizeStructured(numRasterBuckets);
     }
 }
 
-void ReyesRasterWorkHistogramPass::Cleanup() {}
-
 void ReyesRasterWorkHistogramPass::CreatePipelines(
     rhi::Device device,
     rhi::PipelineLayoutHandle globalRootSignature,
-    PipelineState& outHistogramPipeline,
-    PipelineState& outClearPipeline)
+    org::PipelineState& outHistogramPipeline,
+    org::PipelineState& outClearPipeline)
 {
     (void)device;
     outHistogramPipeline = PSOManager::GetInstance().MakeComputePipeline(

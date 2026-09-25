@@ -1,4 +1,5 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesSplitPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -12,31 +13,31 @@
 #include "Utilities/Utilities.h"
 
 ReyesSplitPass::ReyesSplitPass(
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> inputSplitQueueBuffer,
-    std::shared_ptr<Buffer> inputSplitQueueCounterBuffer,
-    std::shared_ptr<Buffer> outputSplitQueueBuffer,
-    std::shared_ptr<Buffer> outputSplitQueueCounterBuffer,
-    std::shared_ptr<Buffer> outputSplitQueueOverflowBuffer,
-    std::shared_ptr<Buffer> diceQueueBuffer,
-    std::shared_ptr<Buffer> diceQueueCounterBuffer,
-    std::shared_ptr<Buffer> diceQueueOverflowBuffer,
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> tessTableVerticesBuffer,
-    std::shared_ptr<Buffer> tessTableTrianglesBuffer,
-    std::shared_ptr<Buffer> shadowClipmapInfoBuffer,
-    std::shared_ptr<PixelBuffer> shadowDirtyHierarchyTexture,
-    std::shared_ptr<PixelBuffer> shadowNonRasterableHierarchyTexture,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> inputSplitQueueBuffer,
+    std::shared_ptr<org::Buffer> inputSplitQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> outputSplitQueueBuffer,
+    std::shared_ptr<org::Buffer> outputSplitQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> outputSplitQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> diceQueueBuffer,
+    std::shared_ptr<org::Buffer> diceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> diceQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
+    std::shared_ptr<org::Buffer> shadowClipmapInfoBuffer,
+    std::shared_ptr<org::PixelBuffer> shadowDirtyHierarchyTexture,
+    std::shared_ptr<org::PixelBuffer> shadowNonRasterableHierarchyTexture,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t maxSplitQueueEntries,
     uint32_t splitPassIndex,
     uint32_t maxSplitPassCount,
     uint32_t phaseIndex,
-    std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer,
-    std::shared_ptr<Buffer> replaySplitQueueBuffer,
-    std::shared_ptr<Buffer> replaySplitQueueCounterBuffer,
-    std::shared_ptr<Buffer> replaySplitQueueOverflowBuffer)
+    bool enableViewDepthOcclusion,
+    std::shared_ptr<org::Buffer> replaySplitQueueBuffer,
+    std::shared_ptr<org::Buffer> replaySplitQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> replaySplitQueueOverflowBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_inputSplitQueueBuffer(std::move(inputSplitQueueBuffer))
     , m_inputSplitQueueCounterBuffer(std::move(inputSplitQueueCounterBuffer))
@@ -54,7 +55,7 @@ ReyesSplitPass::ReyesSplitPass(
     , m_shadowNonRasterableHierarchyTexture(std::move(shadowNonRasterableHierarchyTexture))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
-    , m_viewDepthSrvIndicesBuffer(std::move(viewDepthSrvIndicesBuffer))
+    , m_enableViewDepthOcclusion(enableViewDepthOcclusion)
     , m_replaySplitQueueBuffer(std::move(replaySplitQueueBuffer))
     , m_replaySplitQueueCounterBuffer(std::move(replaySplitQueueCounterBuffer))
     , m_replaySplitQueueOverflowBuffer(std::move(replaySplitQueueOverflowBuffer))
@@ -81,21 +82,19 @@ ReyesSplitPass::ReyesSplitPass(
     };
 
     auto device = DeviceManager::GetInstance().GetDevice();
+    rhi::CommandSignaturePtr commandSignature;
     device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        m_commandSignature);
+        commandSignature);
+    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
-void ReyesSplitPass::DeclareResourceUsages(ComputePassBuilder* builder)
+ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
 {
+    declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    auto* builder = &declaration;
     builder->WithShaderResource(
-            m_visibleClustersBuffer,
-            m_inputSplitQueueBuffer,
-            m_inputSplitQueueCounterBuffer,
-            m_tessTableConfigsBuffer,
-            m_tessTableVerticesBuffer,
-            m_tessTableTrianglesBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
@@ -106,131 +105,130 @@ void ReyesSplitPass::DeclareResourceUsages(ComputePassBuilder* builder)
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CullingCameraBuffer,
             Builtin::CameraBuffer)
-		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
-        .WithIndirectArguments(m_indirectArgsBuffer)
-        .WithUnorderedAccess(
-            m_outputSplitQueueBuffer,
-            m_outputSplitQueueCounterBuffer,
-            m_outputSplitQueueOverflowBuffer,
-            m_diceQueueBuffer,
-            m_diceQueueCounterBuffer,
-            m_diceQueueOverflowBuffer,
-            m_telemetryBuffer);
-    if (m_viewDepthSrvIndicesBuffer) {
-        builder->WithShaderResource(m_viewDepthSrvIndicesBuffer);
+		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+    ReyesSplitBindings bindings;
+    bindings.visible = builder->BindShaderResource(m_visibleClustersBuffer);
+    bindings.inputQueue = builder->BindShaderResource(m_inputSplitQueueBuffer);
+    bindings.inputCounter = builder->BindShaderResource(m_inputSplitQueueCounterBuffer);
+    bindings.outputQueue = builder->BindUnorderedAccess(m_outputSplitQueueBuffer);
+    bindings.outputCounter = builder->BindUnorderedAccess(m_outputSplitQueueCounterBuffer);
+    bindings.outputOverflow = builder->BindUnorderedAccess(m_outputSplitQueueOverflowBuffer);
+    bindings.diceQueue = builder->BindUnorderedAccess(m_diceQueueBuffer);
+    bindings.diceCounter = builder->BindUnorderedAccess(m_diceQueueCounterBuffer);
+    bindings.diceOverflow = builder->BindUnorderedAccess(m_diceQueueOverflowBuffer);
+    bindings.tessConfigs = builder->BindShaderResource(m_tessTableConfigsBuffer);
+    bindings.tessVertices = builder->BindShaderResource(m_tessTableVerticesBuffer);
+    bindings.tessTriangles = builder->BindShaderResource(m_tessTableTrianglesBuffer);
+    bindings.indirectArgs = builder->BindIndirectArguments(m_indirectArgsBuffer);
+    bindings.telemetry = builder->BindUnorderedAccess(m_telemetryBuffer);
+    if (m_enableViewDepthOcclusion) {
+        builder->WithShaderResource(Builtin::PrimaryCamera::LinearDepthMap);
+        bindings.hasViewDepth = true;
     }
     if (m_replaySplitQueueBuffer) {
-        builder->WithUnorderedAccess(m_replaySplitQueueBuffer);
+        bindings.replayQueue = builder->BindUnorderedAccess(m_replaySplitQueueBuffer); bindings.hasReplayQueue = true;
     }
     if (m_replaySplitQueueCounterBuffer) {
-        builder->WithUnorderedAccess(m_replaySplitQueueCounterBuffer);
+        bindings.replayCounter = builder->BindUnorderedAccess(m_replaySplitQueueCounterBuffer); bindings.hasReplayCounter = true;
     }
     if (m_replaySplitQueueOverflowBuffer) {
-        builder->WithUnorderedAccess(m_replaySplitQueueOverflowBuffer);
+        bindings.replayOverflow = builder->BindUnorderedAccess(m_replaySplitQueueOverflowBuffer); bindings.hasReplayOverflow = true;
     }
     if (m_shadowClipmapInfoBuffer) {
-        builder->WithShaderResource(m_shadowClipmapInfoBuffer, Builtin::Shadows::CLodCompactShadowCameras);
+        bindings.shadowClipmap = builder->BindShaderResource(m_shadowClipmapInfoBuffer);
+        builder->WithShaderResource(Builtin::Shadows::CLodCompactShadowCameras);
+        bindings.hasShadowClipmap = true;
     }
     if (m_shadowDirtyHierarchyTexture) {
-        builder->WithShaderResource(m_shadowDirtyHierarchyTexture);
+        bindings.shadowDirty = builder->BindShaderResource(m_shadowDirtyHierarchyTexture); bindings.hasShadowDirty = true;
     }
     if (m_shadowNonRasterableHierarchyTexture) {
-        builder->WithShaderResource(m_shadowNonRasterableHierarchyTexture);
+        bindings.shadowNonRasterable = builder->BindShaderResource(m_shadowNonRasterableHierarchyTexture); bindings.hasShadowNonRasterable = true;
     }
 
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    bindings.capacity = m_maxSplitQueueEntries;
+    bindings.maxPassCount = m_maxSplitPassCount;
+    bindings.phase = m_phaseIndex;
+    bindings.useAabbOcclusion = SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)();
+    bindings.coarseTargetBits = as_uint(std::max(SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesShadowCoarseTargetPagesPerTriangleSettingName)(), CLodReyesShadowCoarseTargetPagesPerTriangleMin));
+    return bindings;
 }
 
-void ReyesSplitPass::Setup() {
-}
 
-PassReturn ReyesSplitPass::Execute(PassExecutionContext& executionContext)
+
+ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
+    const org::PassPrepareContext& preparation) const
 {
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-
-    uint32_t uintRootConstants[NumMiscUintRootConstants] = {};
-    uintRootConstants[CLOD_REYES_SPLIT_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_MAX_PASS_COUNT] = m_maxSplitPassCount;
-    uintRootConstants[CLOD_REYES_SPLIT_INPUT_QUEUE_DESCRIPTOR_INDEX] = m_inputSplitQueueBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_INPUT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_inputSplitQueueCounterBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_OUTPUT_SPLIT_QUEUE_DESCRIPTOR_INDEX] = m_outputSplitQueueBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_OUTPUT_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_outputSplitQueueCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_OUTPUT_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = m_outputSplitQueueOverflowBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_OUTPUT_DICE_QUEUE_DESCRIPTOR_INDEX] = m_diceQueueBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_OUTPUT_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_diceQueueCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_OUTPUT_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = m_diceQueueOverflowBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = m_tessTableConfigsBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = m_tessTableVerticesBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = m_tessTableTrianglesBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_QUEUE_CAPACITY] = m_maxSplitQueueEntries;
-    uintRootConstants[CLOD_REYES_SPLIT_TELEMETRY_DESCRIPTOR_INDEX] = m_telemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_shadowClipmapInfoBuffer
-        ? m_shadowClipmapInfoBuffer->GetSRVInfo(0).slot.index
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    ReyesSplitFrameData data{};
+    data.clear.resourceHeap = data.split.resourceHeap = context->textureDescriptorHeap.GetHandle();
+    data.clear.samplerHeap = data.split.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    auto clearProgram = preparation.CaptureProgramBinding(m_clearCountersPso);
+    data.clear.program = clearProgram.program;
+    data.clear.descriptorIndices = std::move(clearProgram.descriptorIndices);
+    data.clear.groupsX = 1;
+    auto splitProgram = preparation.CaptureProgramBinding(m_pso);
+    data.split.program = splitProgram.program;
+    data.split.descriptorIndices = std::move(splitProgram.descriptorIndices);
+    data.split.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
+    data.split.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
+    data.outputCounters = {preparation.CaptureResource(bindings.outputCounter), preparation.CaptureResource(bindings.outputOverflow)};
+    auto& c = data.split.constants;
+    const auto srv = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource, variant}).index; };
+    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    c[CLOD_REYES_SPLIT_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.visible);
+    c[CLOD_REYES_SPLIT_MAX_PASS_COUNT] = bindings.maxPassCount;
+    c[CLOD_REYES_SPLIT_INPUT_QUEUE_DESCRIPTOR_INDEX] = srv(bindings.inputQueue);
+    c[CLOD_REYES_SPLIT_INPUT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.inputCounter);
+    c[CLOD_REYES_SPLIT_OUTPUT_SPLIT_QUEUE_DESCRIPTOR_INDEX] = uav(bindings.outputQueue);
+    c[CLOD_REYES_SPLIT_OUTPUT_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.outputCounter);
+    c[CLOD_REYES_SPLIT_OUTPUT_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = uav(bindings.outputOverflow);
+    c[CLOD_REYES_SPLIT_OUTPUT_DICE_QUEUE_DESCRIPTOR_INDEX] = uav(bindings.diceQueue);
+    c[CLOD_REYES_SPLIT_OUTPUT_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.diceCounter);
+    c[CLOD_REYES_SPLIT_OUTPUT_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = uav(bindings.diceOverflow);
+    c[CLOD_REYES_SPLIT_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = srv(bindings.tessConfigs);
+    c[CLOD_REYES_SPLIT_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = srv(bindings.tessVertices);
+    c[CLOD_REYES_SPLIT_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = srv(bindings.tessTriangles);
+    c[CLOD_REYES_SPLIT_QUEUE_CAPACITY] = bindings.capacity;
+    c[CLOD_REYES_SPLIT_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
+    c[CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = bindings.hasShadowClipmap ? srv(bindings.shadowClipmap) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty ? srv(bindings.shadowDirty, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowNonRasterable ? srv(bindings.shadowNonRasterable, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.hasViewDepth
+        ? BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).Publish(preparation, m_viewDepthPublisher)
         : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = m_shadowDirtyHierarchyTexture
-        ? m_shadowDirtyHierarchyTexture->GetSRVInfo(SRVViewType::Texture2DArrayFull, 0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = m_shadowNonRasterableHierarchyTexture
-        ? m_shadowNonRasterableHierarchyTexture->GetSRVInfo(SRVViewType::Texture2DArrayFull, 0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = m_viewDepthSrvIndicesBuffer
-        ? m_viewDepthSrvIndicesBuffer->GetSRVInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_DESCRIPTOR_INDEX] = m_replaySplitQueueBuffer
-        ? m_replaySplitQueueBuffer->GetUAVShaderVisibleInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_replaySplitQueueCounterBuffer
-        ? m_replaySplitQueueCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = m_replaySplitQueueOverflowBuffer
-        ? m_replaySplitQueueOverflowBuffer->GetUAVShaderVisibleInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_SPLIT_ENABLE_PATCH_OCCLUSION] =
-        (m_viewDepthSrvIndicesBuffer && m_replaySplitQueueBuffer && m_replaySplitQueueCounterBuffer && m_replaySplitQueueOverflowBuffer)
-            ? 1u
-            : 0u;
-    uintRootConstants[CLOD_REYES_SPLIT_PHASE_INDEX] = m_phaseIndex;
-    uintRootConstants[CLOD_REYES_SPLIT_USE_AABB_OCCLUSION] =
-        SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)() ? 1u : 0u;
-    uintRootConstants[UintRootConstant18] = as_uint(std::max(
-        SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesShadowCoarseTargetPagesPerTriangleSettingName)(),
-        CLodReyesShadowCoarseTargetPagesPerTriangleMin));
-
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_clearCountersPso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_clearCountersPso.GetResourceDescriptorSlots());
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        uintRootConstants);
-    commandList.Dispatch(1, 1, 1);
-
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        uintRootConstants);
-
-    commandList.ExecuteIndirect(m_commandSignature->GetHandle(), m_indirectArgsBuffer->GetAPIResource().GetHandle(), 0, {}, 0, 1);
-
-    return {};
+    c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_DESCRIPTOR_INDEX] = bindings.hasReplayQueue ? uav(bindings.replayQueue) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasReplayCounter ? uav(bindings.replayCounter) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = bindings.hasReplayOverflow ? uav(bindings.replayOverflow) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_ENABLE_PATCH_OCCLUSION] = bindings.hasViewDepth && bindings.hasReplayQueue && bindings.hasReplayCounter && bindings.hasReplayOverflow;
+    c[CLOD_REYES_SPLIT_PHASE_INDEX] = bindings.phase;
+    c[CLOD_REYES_SPLIT_USE_AABB_OCCLUSION] = bindings.useAabbOcclusion ? 1u : 0u;
+    c[UintRootConstant18] = bindings.coarseTargetBits;
+    data.clear.constants = data.split.constants;
+    return data;
 }
 
-void ReyesSplitPass::Update(const UpdateExecutionContext& executionContext)
-{
-    (void)executionContext;
+void ReyesSplitPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_clearCountersPso));
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
+    if (m_enableViewDepthOcclusion)
+        BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).AppendRevision(preparation, out);
 }
 
-void ReyesSplitPass::Cleanup() {}
+void ReyesSplitPass::Record(const ReyesSplitBindings&, const ReyesSplitFrameData& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeDispatch(data.clear, recording);
+    // Split atomics must observe the preceding counter reset.
+    std::array<rhi::BufferBarrier, 2> counters{};
+    for (size_t index = 0; index < counters.size(); ++index) {
+        counters[index].buffer = recording.Resolve(data.outputCounters[index]).GetHandle();
+        counters[index].beforeAccess = counters[index].afterAccess = rhi::ResourceAccessType::UnorderedAccess;
+        counters[index].beforeSync = counters[index].afterSync = rhi::ResourceSyncState::ComputeShading;
+    }
+    rhi::BarrierBatch barriers{};
+    barriers.buffers = {counters.data(), static_cast<uint32_t>(counters.size())};
+    recording.Commands().Barriers(barriers);
+    br::render::RecordPreparedComputeIndirect(data.split, recording);
+}

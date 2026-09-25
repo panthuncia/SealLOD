@@ -1,58 +1,49 @@
 #pragma once
 
-#include "RenderPasses/Base/RenderPass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
+#include "RenderPasses/PreparedFullscreenDraw.h"
 
-class DebugResolvePass : public RenderPass {
+struct DebugResolveBindings { org::ResourceBindingToken target; };
+
+class DebugResolvePass
+    : public org::TypedRenderGraphPass<DebugResolvePass,
+          br::render::PreparedFullscreenDraw, DebugResolveBindings> {
 public:
 	DebugResolvePass() {
 		CreatePSO();
 	}
 
-	void DeclareResourceUsages(RenderPassBuilder* builder) override {
-		builder->WithShaderResource(Builtin::DebugVisualization, Builtin::CameraBuffer)
-			.WithRenderTarget(Builtin::Backbuffer);
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+	DebugResolveBindings Declare(org::PassBuilder& builder) {
+		builder.WithShaderResource(Builtin::DebugVisualization, Builtin::CameraBuffer);
+		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+		return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
 	}
 
-	void Setup() override {
+	br::render::PreparedFullscreenDraw Prepare(const DebugResolveBindings& bindings,
+		const org::PassPrepareContext& preparation) const {
+		const auto* context = preparation.preparationData->Get<UpdateContext>();
+		br::render::PreparedFullscreenDraw data{};
+		data.targetResource = preparation.CaptureResource(bindings.target);
+		data.renderTargetReference = preparation.CaptureView(
+			bindings.target, {org::BindlessViewKind::RenderTarget});
+		data.loadOp = rhi::LoadOp::Load;
+		data.width = context->outputResolution.x; data.height = context->outputResolution.y;
+
+		br::render::BindPreparedProgram(
+			data, preparation, m_pso);
+		return data;
 	}
 
-	PassReturn Execute(PassExecutionContext& executionContext) override {
-		auto* renderContext = executionContext.hostData->Get<RenderContext>();
-		auto& context = *renderContext;
-		auto& commandList = executionContext.commandList;
-
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-
-		rhi::PassBeginInfo passInfo{};
-		rhi::ColorAttachment colorAttachment{};
-		colorAttachment.rtv = { context.rtvHeap.GetHandle(), context.frameIndex };
-		colorAttachment.loadOp = rhi::LoadOp::Load;
-		colorAttachment.storeOp = rhi::StoreOp::Store;
-		passInfo.colors = { &colorAttachment };
-		passInfo.width = context.outputResolution.x;
-		passInfo.height = context.outputResolution.y;
-		commandList.BeginPass(passInfo);
-
-		commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleStrip);
-
-		commandList.BindLayout(PSOManager::GetInstance().GetRootSignature().GetHandle());
-		commandList.BindPipeline(m_pso->GetHandle());
-
-		BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
-
-		commandList.Draw(3, 1, 0, 0); // Fullscreen triangle
-		return {};
+	static void Record(const DebugResolveBindings&, const br::render::PreparedFullscreenDraw& data,
+		org::PassRecordContext& recording) {
+		br::render::RecordPreparedFullscreenDraw(data, recording);
 	}
-
-	void Cleanup() override {}
 
 private:
-	rhi::PipelinePtr m_pso;
-	PipelineResources m_resourceDescriptorBindings;
+	org::PipelineState m_pso;
 
 	void CreatePSO() {
 		auto dev = DeviceManager::GetInstance().GetDevice();
@@ -61,7 +52,6 @@ private:
 		sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6" };
 		sib.pixelShader = { L"shaders/PostProcessing/debugResolve.hlsl", L"PSMain", L"ps_6_6" };
 		auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-		m_resourceDescriptorBindings = compiled.resourceDescriptorSlots;
 
 		auto& layout = PSOManager::GetInstance().GetRootSignature();
 		rhi::SubobjLayout soLayout{ layout.GetHandle() };
@@ -119,10 +109,14 @@ private:
 			rhi::Make(soTopo)
 		};
 
-		auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), m_pso);
+		rhi::PipelinePtr pipeline;
+		auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
 		if (Failed(result)) {
 			throw std::runtime_error("Failed to create DebugResolve PSO");
 		}
-		m_pso->SetName("DebugResolve.PSO");
+		pipeline->SetName("DebugResolve.PSO");
+		m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
+            compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
+            soLayout.layout);
 	}
 };

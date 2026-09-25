@@ -232,3 +232,109 @@ After the retained changes above, the targeted replay measured:
 Relative to the original counter capture, this is an 18.5% instruction
 reduction, including 25.5% fewer FMA and 9.1% fewer TEX instructions. The
 settled render-graph timing improved from 4.10624 to 3.56533 ms (-13.2%).
+
+## Saved-camera MO2 run: receiver camera-depth trace
+
+This run used world `0000003C`, radius 100, the saved camera, and one persistent
+MO2-launched renderer host (PID 20132). A one-sample NVPerf validation measured
+7.01248 ms before switching the same control workflow to render-graph timestamp
+statistics for fast iteration.
+
+### Reuse projection W as camera-space depth
+
+- Change: in `CLodVirtualShadowReceiverTraceEscapedAt`, reuse `sampleClip.w` as
+  `-view.z` instead of applying a second world-to-view matrix multiply. The
+  camera projection contract guarantees those values are equal. Also remove an
+  unreachable explicit `0xFFFFFFFF` depth-bit comparison; the NaN already fails
+  `depth > 0`.
+- Initial baseline: 8.16729 ms (120 samples; noisy maximum-sample stop).
+- Candidate: 7.69049 ms (56 samples; converged).
+- Candidate replication: 7.58238 ms (46 samples; converged).
+- Control replication after reactivating generation 1: 7.95151 ms (87 samples;
+  converged).
+- Same-process one-sample NVPerf check: 8.19184 ms control versus 7.38240 ms
+  candidate (-0.80944 ms / -9.88%).
+- Decision: retained. Candidate replication is 0.36913 ms / 4.64% faster than
+  the interleaved control replication; the first comparison was 5.84% faster.
+
+### Reuse projected light depth
+
+- Change: consume the already-interpolated preferred light depth and the depth
+  returned by fallback projection instead of explicitly transforming to light
+  view space again.
+- Result: 7.69315 ms (42 samples; converged), effectively unchanged from the
+  preceding 7.69049 ms result.
+- Decision: rejected and reverted; the shader compiler already eliminated the
+  redundant work.
+
+### Increment camera receiver tracing in clip space
+
+- Change: project the receiver and trace direction once, then form each trace
+  and binary-refinement point with a clip-space multiply-add.
+- Result: 7.71678 ms (84 samples; converged).
+- Decision: rejected and reverted. The extra live clip vectors likely offset
+  the saved matrix work through register pressure.
+
+## Projected lookup follow-up
+
+All results below used the same persistent MO2 host (PID 20132), with generation
+switches through the live PSO controller.
+
+### Reuse validated receiver-page state
+
+- Change: pass the receiver lookup's sampled clipmap and physical-page indices
+  into projected SMRT lookups. Samples resolving to that exact page skip
+  duplicate ownership/tag validation already completed earlier in the same
+  shader invocation.
+- Result: 7.58048 -> 7.50159 ms (-1.04%).
+- Decision: retained.
+
+### Remove duplicate projected-path metadata reads
+
+- Change: projected lookups rely on the sampleable page-table state plus the
+  cached absolute-page tag, rather than rereading the physical ownership
+  metadata for every ray sample. The authoritative receiver lookup retains the
+  complete resident/owner/layer validation.
+- Result: 7.50159 -> 7.43495 ms (-0.89%).
+- Decision: retained.
+
+### Hoist preferred clipmap and camera descriptors
+
+- Change: pass the already-loaded preferred clipmap info and compact shadow
+  camera into `CLodVirtualShadowLookupDirectionalOcclusionProjected`. Attempt
+  zero no longer reloads two large structured-buffer records for every SMRT
+  sample; fallback attempts preserve the original loads and behavior.
+- Statistical result: 7.41960 ms pre-hoist control replication versus 4.77577
+  ms final candidate (84 samples, converged), -2.64383 ms / -35.63%.
+- Same-process one-sample NVPerf result: 7.765248 ms control versus 5.181056 ms
+  final candidate, -2.584192 ms / -33.28%.
+- Decision: retained.
+
+### Rejected coverage/address experiments
+
+- Returning immediately for a valid cleared receiver texel measured 7.71226 ms
+  and was reverted. The expensive lit pixels generally contain finite
+  receiver/self depth, so this did not identify the actual no-coverage case.
+- A 128-page-wide atlas bit-address specialization measured 7.49932 ms versus
+  7.50159 ms and was removed because it was neutral and affected unrelated
+  shader paths.
+
+## SMRT projected-page coherence (2026-09-04)
+
+- Hoisted the adaptive receiver screen-trace's ray-invariant camera-depth
+  validation and trace-spacing setup out of the per-ray loop. Ray directions
+  produced by SMRT are already normalized, so the redundant normalization was
+  also removed.
+- Added a per-ray projected-page cache. Consecutive SMRT samples in the same
+  virtual page now reuse the validated page entry, physical-page index, and
+  cached page-view row. This bypasses toroidal wrapping, the page-table load,
+  absolute-page-tag packing/validation, and the page-view-info load.
+- Same-process render-graph timing, generation 1 versus generation 3:
+  4.880869 ms (30 samples) to 4.707767 ms (97 samples), a 3.55% reduction.
+- Same-process single-sample NVPerf validation:
+  5.142560 ms to 4.506496 ms, a 12.37% reduction. The statistical timing is
+  the reliable estimator; the NVPerf result confirms the candidate remains a
+  strong improvement under counter collection.
+- Receiver-hoist-only generation 2 measured 4.910955 ms, so it was not a win
+  in isolation. The retained combined form is justified by the page-cache
+  result and should be reconsidered independently if the cache layout changes.

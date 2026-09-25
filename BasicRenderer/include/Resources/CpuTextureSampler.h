@@ -234,6 +234,9 @@ namespace SARP::Resources
 			}
 		}
 
+		[[nodiscard]] std::uint32_t Width() const noexcept { return _width; }
+		[[nodiscard]] std::uint32_t Height() const noexcept { return _height; }
+
 	private:
 		std::shared_ptr<TextureSourceData> _source;
 		TextureSourceData::BytesPtr _bytes;

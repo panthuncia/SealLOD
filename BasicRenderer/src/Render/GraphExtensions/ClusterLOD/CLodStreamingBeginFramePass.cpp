@@ -7,34 +7,31 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/PassBuilders.h"
 #include "Render/RenderContext.h"
-#include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/Runtime/UploadTypes.h"
 #include "Managers/UploadInstance.h"
 #include "BuiltinResources.h"
 #include "ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
-    std::function<UploadInstance*()> getUploadInstance,
-    std::shared_ptr<Buffer> loadCounter,
-    std::shared_ptr<Buffer> loadRequestKeys,
-    std::shared_ptr<Buffer> usedGroupsCounter,
-    std::shared_ptr<Buffer> sourceGroupMismatchCounter,
-    std::shared_ptr<Buffer> nonResidentBits,
-    std::shared_ptr<Buffer> activeGroupsBits,
-    std::shared_ptr<Buffer> runtimeState,
-    std::function<bool(std::vector<uint32_t>&, uint32_t&, UploadInstance*)> queueNonResidentBitsUpload,
-    std::function<bool(std::vector<uint32_t>&, uint32_t&)> getActiveGroupsBitsUpload,
+    std::function<org::UploadInstance*()> getUploadInstance,
+    std::shared_ptr<org::Buffer> loadCounter,
+    std::shared_ptr<org::Buffer> loadRequestKeys,
+    std::shared_ptr<org::Buffer> usedGroupsCounter,
+    std::shared_ptr<org::Buffer> sourceGroupMismatchCounter,
+    std::shared_ptr<org::Buffer> runtimeState,
+    std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> queueNonResidentBitsUpload,
+    std::function<uint32_t(const UpdateContext&)> getActiveGroupScanCount,
     std::function<void()> scheduleStreamingReadbacks,
     std::function<void()> processStreamingRequests)
     : m_loadCounter(std::move(loadCounter))
     , m_loadRequestKeys(std::move(loadRequestKeys))
     , m_usedGroupsCounter(std::move(usedGroupsCounter))
     , m_sourceGroupMismatchCounter(std::move(sourceGroupMismatchCounter))
-    , m_nonResidentBits(std::move(nonResidentBits))
-    , m_activeGroupsBits(std::move(activeGroupsBits))
     , m_runtimeState(std::move(runtimeState))
     , m_queueNonResidentBitsUpload(std::move(queueNonResidentBitsUpload))
-    , m_getActiveGroupsBitsUpload(std::move(getActiveGroupsBitsUpload))
+    , m_getActiveGroupScanCount(std::move(getActiveGroupScanCount))
     , m_scheduleStreamingReadbacks(std::move(scheduleStreamingReadbacks))
     , m_processStreamingRequests(std::move(processStreamingRequests))
     , m_getUploadInstance(std::move(getUploadInstance))
@@ -47,59 +44,45 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
         "CLodStreamingBeginFrameClearUint");
 }
 
-void CLodStreamingBeginFramePass::DeclareResourceUsages(ComputePassBuilder* builder) {
-    builder->WithUnorderedAccess(m_loadCounter, m_loadRequestKeys, m_usedGroupsCounter, m_nonResidentBits, m_activeGroupsBits, m_runtimeState);
+CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBuilder& builder) {
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    CLodStreamingBeginFrameBindings bindings{builder.BindUnorderedAccess(m_loadCounter),
+        builder.BindUnorderedAccess(m_loadRequestKeys), builder.BindUnorderedAccess(m_usedGroupsCounter)};
+    builder.WithUnorderedAccess(m_runtimeState);
     if (m_sourceGroupMismatchCounter) {
-        builder->WithUnorderedAccess(m_sourceGroupMismatchCounter);
+        bindings.sourceMismatchCounter = builder.BindUnorderedAccess(m_sourceGroupMismatchCounter);
+        bindings.hasSourceMismatchCounter = true;
     }
+    return bindings;
 }
 
-void CLodStreamingBeginFramePass::Setup() {}
-
-PassReturn CLodStreamingBeginFramePass::Execute(PassExecutionContext& executionContext) {
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-
-    auto clearUintBuffer = [&](const std::shared_ptr<Buffer>& buffer, uint32_t value, uint32_t count) {
-        if (!buffer || count == 0u) {
-            return;
-        }
-
-        BindResourceDescriptorIndices(commandList, m_clearUintPipeline.GetResourceDescriptorSlots());
-        commandList.BindPipeline(m_clearUintPipeline.GetAPIPipelineState().GetHandle());
-
-        uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
-        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = buffer->GetUAVShaderVisibleInfo(0).slot.index;
-        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = value;
-        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = count;
-        commandList.PushConstants(
-            rhi::ShaderStage::Compute,
-            0,
-            MiscUintRootSignatureIndex,
-            0,
-            NumMiscUintRootConstants,
-            clearRootConstants);
-        commandList.Dispatch((count + 63u) / 64u, 1u, 1u);
+br::render::PreparedComputeDispatchSequence CLodStreamingBeginFramePass::Prepare(
+    const CLodStreamingBeginFrameBindings& bindings, const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    br::render::PreparedComputeDispatchSequence data{};
+    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
+    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+    auto program = preparation.CaptureProgramBinding(m_clearUintPipeline);
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
+    auto appendClear = [&](org::ResourceBindingToken token, bool present, uint32_t value, uint32_t count) {
+        if (!present || count == 0u) return;
+        br::render::PreparedComputeDispatchSequence::Step step{};
+        step.constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index;
+        step.constants[CLOD_CLEAR_UINT_BUFFER_VALUE] = value;
+        step.constants[CLOD_CLEAR_UINT_BUFFER_COUNT] = count;
+        step.groupsX = (count + 63u) / 64u;
+        data.steps.push_back(step);
     };
-
-    {
-        ZoneScopedN("CLodStreamingBeginFramePass::ClearFeedbackCounters");
-        clearUintBuffer(m_loadCounter, 0u, 1u);
-        clearUintBuffer(m_usedGroupsCounter, 0u, 1u);
-        clearUintBuffer(m_sourceGroupMismatchCounter, 0u, 1u);
-    }
-
-    if (m_loadRequestKeys) {
-        ZoneScopedN("CLodStreamingBeginFramePass::ClearRequestKeys");
-        clearUintBuffer(m_loadRequestKeys, 0xffffffffu, CLodStreamingRequestCapacity);
-    }
-    return {};
+    appendClear(bindings.loadCounter, true, 0u, 1u);
+    appendClear(bindings.usedGroupsCounter, true, 0u, 1u);
+    appendClear(bindings.sourceMismatchCounter, bindings.hasSourceMismatchCounter, 0u, 1u);
+    appendClear(bindings.loadRequestKeys, true, 0xffffffffu, CLodStreamingRequestCapacity);
+    return data;
 }
 
-void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& executionContext) {
+void CLodStreamingBeginFramePass::Update(const org::UpdateExecutionContext& executionContext) {
     ZoneScopedN("CLodStreamingBeginFramePass::Update");
 
     auto* updateContext = executionContext.hostData ? executionContext.hostData->Get<UpdateContext>() : nullptr;
@@ -108,7 +91,7 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
     }
 
     // Retire upload-heap pages from completed frames.
-    UploadInstance* uploadInstance = m_getUploadInstance ? m_getUploadInstance() : nullptr;
+    org::UploadInstance* uploadInstance = m_getUploadInstance ? m_getUploadInstance() : nullptr;
     if (uploadInstance) {
         ZoneScopedN("CLodStreamingBeginFramePass::ProcessDeferredReleases");
         uploadInstance->ProcessDeferredReleases(static_cast<uint8_t>(executionContext.frameIndex));
@@ -123,19 +106,9 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
         m_processStreamingRequests();
     }
 
-    uint32_t activeGroupScanCount = 0u;
-    {
-        ZoneScopedN("CLodStreamingBeginFramePass::UploadActiveGroupsBits");
-        const bool activeGroupsBitsUploadPending = m_getActiveGroupsBitsUpload
-            && m_getActiveGroupsBitsUpload(m_activeGroupsBitsUploadScratch, activeGroupScanCount);
-        if (activeGroupsBitsUploadPending && !m_activeGroupsBitsUploadScratch.empty()) {
-            BUFFER_UPLOAD(
-                m_activeGroupsBitsUploadScratch.data(),
-                static_cast<uint32_t>(m_activeGroupsBitsUploadScratch.size() * sizeof(uint32_t)),
-                org::runtime::UploadTarget::FromShared(m_activeGroupsBits),
-                0);
-        }
-    }
+    // Bounded by the capacity of the residency bitset this frame's published
+    // state binds, so the scan never reaches past it.
+    const uint32_t activeGroupScanCount = m_getActiveGroupScanCount ? m_getActiveGroupScanCount(*updateContext) : 0u;
 
     {
         ZoneScopedN("CLodStreamingBeginFramePass::UploadRuntimeState");
@@ -143,7 +116,7 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
         state.activeGroupScanCount = activeGroupScanCount;
         state.unloadAfterFrames = 0u;
         state.activeGroupsBitsetWordCount = CLodBitsetWordCount(activeGroupScanCount);
-        BUFFER_UPLOAD(
+        UploadBufferData(
             &state,
             sizeof(CLodStreamingRuntimeState),
             org::runtime::UploadTarget::FromShared(m_runtimeState),
@@ -172,4 +145,7 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
     }
 }
 
-void CLodStreamingBeginFramePass::Cleanup() {}
+void CLodStreamingBeginFramePass::Record(const CLodStreamingBeginFrameBindings&,
+    const br::render::PreparedComputeDispatchSequence& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeDispatchSequence(data, recording);
+}

@@ -1,67 +1,77 @@
 #pragma once
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
-#include "Render/Runtime/DescriptorServiceAccess.h"
+#include "Render/Runtime/IDescriptorService.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
-class GTAODenoisePass : public ComputePass {
+struct GTAODenoiseBindings {
+    org::ResourceBindingToken workingAO, workingEdges, outputAO;
+};
+
+class GTAODenoisePass : public org::TypedRenderGraphPass<GTAODenoisePass,
+    br::render::PreparedComputeDispatch, GTAODenoiseBindings> {
 public:
     GTAODenoisePass() {
         CreatePointClampSampler();
         CreateXeGTAOComputePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override {
-        builder->WithShaderResource(Builtin::GTAO::WorkingEdges, Builtin::GTAO::WorkingAOTerm1)
-            .WithUnorderedAccess(Builtin::GTAO::OutputAOTerm)
-            .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    GTAODenoiseBindings Declare(org::PassBuilder& builder) {
+        builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        builder.WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
+		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+        return {
+            builder.BindShaderResource(Builtin::GTAO::WorkingAOTerm1),
+            builder.BindShaderResource(Builtin::GTAO::WorkingEdges),
+            builder.BindUnorderedAccess(Builtin::GTAO::OutputAOTerm) };
     }
 
-    void Setup() override {
+    void Initialize() {
         // Removed redundant Register calls now covered by declared-resource auto descriptor registration
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
 
-        auto& psoManager = PSOManager::GetInstance();
-        auto& commandList = executionContext.commandList;
-        auto workingAOTerm = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingAOTerm1);
-        auto workingEdges = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingEdges);
-        auto outputAO = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::OutputAOTerm);
 
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
+    br::render::PreparedComputeDispatch Prepare(const GTAODenoiseBindings& bindings,
+        const org::PassPrepareContext& preparation) const {
+        const auto* context = preparation.preparationData->Get<UpdateContext>();
+        auto payload = DenoiseLastPassPSO.GetPayload();
+        br::render::PreparedComputeDispatch data{};
+        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
+        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+        data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle();
+        auto program = preparation.CaptureProgramBinding(std::move(payload));
+        data.program = program.program;
+        data.descriptorIndices = std::move(program.descriptorIndices);
 
-		// Set the root signature
-		commandList.BindLayout(psoManager.GetRootSignature().GetHandle());
-		commandList.BindPipeline(DenoiseLastPassPSO.GetAPIPipelineState().GetHandle());
 
-		BindResourceDescriptorIndices(commandList, DenoiseLastPassPSO.GetResourceDescriptorSlots());
-
-        unsigned int gtaoConstants[NumMiscUintRootConstants] = {};
-        gtaoConstants[UintRootConstant0] = workingAOTerm->GetSRVInfo(0).slot.index;
-        gtaoConstants[UintRootConstant1] = workingEdges->GetSRVInfo(0).slot.index;
-        gtaoConstants[UintRootConstant2] = m_samplerIndex;
-        gtaoConstants[UintRootConstant3] = outputAO->GetUAVShaderVisibleInfo(0).slot.index;
-            
-		commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, gtaoConstants);
-
-        commandList.Dispatch((context.renderResolution.x + (XE_GTAO_NUMTHREADS_X*2)-1) / (XE_GTAO_NUMTHREADS_X*2), (context.renderResolution.y + XE_GTAO_NUMTHREADS_Y-1) / XE_GTAO_NUMTHREADS_Y, 1 );
-    
-        return {};
+        data.constants[UintRootConstant0] = preparation.ResolveView(bindings.workingAO,
+            {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[UintRootConstant1] = preparation.ResolveView(bindings.workingEdges,
+            {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[UintRootConstant2] = m_samplerIndex;
+        data.constants[UintRootConstant3] = preparation.ResolveView(bindings.outputAO,
+            {org::BindlessViewKind::UnorderedAccess}).index;
+        data.groupsX = (context->renderResolution.x + XE_GTAO_NUMTHREADS_X * 2u - 1u) / (XE_GTAO_NUMTHREADS_X * 2u);
+        data.groupsY = (context->renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1u) / XE_GTAO_NUMTHREADS_Y;
+        return data;
     }
 
-    void Cleanup() override {
+    static void Record(const GTAODenoiseBindings&, const br::render::PreparedComputeDispatch& data,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedComputeDispatch(data, recording);
+    }
+
+    void ShutdownPass() {
         // Cleanup if necessary
     }
 
 private:
-    PipelineState DenoisePassPSO;
-    PipelineState DenoiseLastPassPSO;
+    org::PipelineState DenoisePassPSO;
+    org::PipelineState DenoiseLastPassPSO;
     uint32_t m_samplerIndex = 0;
 
     void CreatePointClampSampler()
@@ -79,7 +89,7 @@ private:
         samplerDesc.borderPreset = rhi::BorderPreset::TransparentBlack;
         samplerDesc.minLod = 0.0f;
         samplerDesc.maxLod = 0.0f;
-        m_samplerIndex = org::runtime::CreateIndexedSamplerFromActiveDescriptorService(samplerDesc);
+        m_samplerIndex = DescriptorService().CreateIndexedSampler(samplerDesc);
     }
 
     void CreateXeGTAOComputePSO()

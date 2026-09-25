@@ -7,10 +7,8 @@
 
 class TextureAsset;
 namespace org { class BufferView; }
-using org::BufferView;
 class EnvironmentManager;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 class Environment {
 public:
     Environment(EnvironmentManager* manager, std::wstring name = L"") : m_currentManager(manager), m_name(name) {
@@ -20,9 +18,9 @@ public:
         return m_environmentCubemap;
     }
 
-    std::shared_ptr<PixelBuffer> GetEnvironmentPrefilteredCubemap() const;
+    std::shared_ptr<org::PixelBuffer> GetEnvironmentPrefilteredCubemap() const;
 
-    BufferView* GetEnvironmentBufferView() const {
+    org::BufferView* GetEnvironmentBufferView() const {
         return m_environmentBufferView.get();
     }
 
@@ -49,7 +47,7 @@ private:
     std::shared_ptr<TextureAsset> m_hdriTexture;
     std::shared_ptr<TextureAsset> m_environmentCubemap;
     std::shared_ptr<TextureAsset> m_environmentPrefilteredCubemap;
-    std::shared_ptr<BufferView> m_environmentBufferView;
+    std::shared_ptr<org::BufferView> m_environmentBufferView;
 
     unsigned int reflectionCubemapResolution = 512;
 
@@ -57,7 +55,7 @@ private:
 
     void SetEnvironmentPrefilteredCubemap(std::shared_ptr<TextureAsset> texture);
 
-    void SetEnvironmentBufferView(std::shared_ptr<BufferView> bufferView) {
+    void SetEnvironmentBufferView(std::shared_ptr<org::BufferView> bufferView) {
         m_environmentBufferView = bufferView;
     }
 

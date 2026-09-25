@@ -54,6 +54,8 @@ static const uint WG_COUNTER_RASTER_SORT_COMPACTION_INPUTS = 113u;
 static const uint WG_COUNTER_RASTER_SORT_COMPACTION_VOXEL_SKIPPED = 114u;
 static const uint WG_COUNTER_RASTER_SORT_COMPACTION_REYES_SKIPPED = 115u;
 static const uint WG_COUNTER_RASTER_SORT_COMPACTION_TRIANGLE_EMITTED = 116u;
+static const uint WG_COUNTER_RASTER_ARGS_NONZERO_BUCKETS = 279u;
+static const uint WG_COUNTER_RASTER_ARGS_DISPATCH_GROUPS = 280u;
 
 void CLodSortTelemetryAdd(uint descriptorIndex, uint counterIndex, uint value)
 {
@@ -4223,6 +4225,10 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
             cmd.dispatchX = dispatchX;
             cmd.dispatchY = dispatchY;
             cmd.dispatchZ = 1;
+            CLodSortTelemetryAdd(CLOD_COMPACTION_TELEMETRY_DESCRIPTOR_INDEX,
+                WG_COUNTER_RASTER_ARGS_NONZERO_BUCKETS, 1u);
+            CLodSortTelemetryAdd(CLOD_COMPACTION_TELEMETRY_DESCRIPTOR_INDEX,
+                WG_COUNTER_RASTER_ARGS_DISPATCH_GROUPS, dispatchX * dispatchY);
         }
         outArgs[linearizedID] = cmd;
     }

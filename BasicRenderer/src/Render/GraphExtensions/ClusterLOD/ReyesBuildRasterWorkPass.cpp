@@ -1,36 +1,38 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesBuildRasterWorkPass.h"
+#include "Render/InvocationRevision.h"
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Managers/Singletons/SettingsManager.h"
 #include "BuiltinResources.h"
 #include "Render/RenderContext.h"
-#include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/Runtime/UploadTypes.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodReyesBuildRasterWorkRootConstants.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 ReyesBuildRasterWorkPass::ReyesBuildRasterWorkPass(
-    std::shared_ptr<Buffer> diceQueueBuffer,
-    std::shared_ptr<Buffer> diceQueueCounterBuffer,
-    std::shared_ptr<Buffer> diceQueueReadOffsetBuffer,
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> rasterWorkBuffer,
-    std::shared_ptr<Buffer> rasterWorkCounterBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
+    std::shared_ptr<org::Buffer> diceQueueBuffer,
+    std::shared_ptr<org::Buffer> diceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> diceQueueReadOffsetBuffer,
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkBuffer,
+    std::shared_ptr<org::Buffer> rasterWorkCounterBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t rasterWorkCapacity,
     uint32_t phaseIndex,
-    std::shared_ptr<Buffer> visibleClustersBuffer,
-    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer,
-    std::shared_ptr<Buffer> replayDiceQueueBuffer,
-    std::shared_ptr<Buffer> replayDiceQueueCounterBuffer,
-    std::shared_ptr<Buffer> replayDiceQueueOverflowBuffer,
+    std::shared_ptr<org::Buffer> visibleClustersBuffer,
+    std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
+    bool enableViewDepthOcclusion,
+    std::shared_ptr<org::Buffer> replayDiceQueueBuffer,
+    std::shared_ptr<org::Buffer> replayDiceQueueCounterBuffer,
+    std::shared_ptr<org::Buffer> replayDiceQueueOverflowBuffer,
     uint32_t replayDiceQueueCapacity,
-    std::shared_ptr<ResourceGroup> slabResourceGroup)
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup)
     : m_diceQueueBuffer(std::move(diceQueueBuffer))
     , m_diceQueueCounterBuffer(std::move(diceQueueCounterBuffer))
     , m_diceQueueReadOffsetBuffer(std::move(diceQueueReadOffsetBuffer))
@@ -41,7 +43,7 @@ ReyesBuildRasterWorkPass::ReyesBuildRasterWorkPass(
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
-    , m_viewDepthSrvIndicesBuffer(std::move(viewDepthSrvIndicesBuffer))
+    , m_enableViewDepthOcclusion(enableViewDepthOcclusion)
     , m_replayDiceQueueBuffer(std::move(replayDiceQueueBuffer))
     , m_replayDiceQueueCounterBuffer(std::move(replayDiceQueueCounterBuffer))
     , m_replayDiceQueueOverflowBuffer(std::move(replayDiceQueueOverflowBuffer))
@@ -61,18 +63,18 @@ ReyesBuildRasterWorkPass::ReyesBuildRasterWorkPass(
     };
 
     auto device = DeviceManager::GetInstance().GetDevice();
+    rhi::CommandSignaturePtr commandSignature;
     device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        m_commandSignature);
+        commandSignature);
+    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
-void ReyesBuildRasterWorkPass::DeclareResourceUsages(ComputePassBuilder* builder)
+ReyesBuildRasterWorkBindings ReyesBuildRasterWorkPass::Declare(org::PassBuilder& builder)
 {
-    builder->WithShaderResource(
-            m_diceQueueBuffer,
-            m_diceQueueCounterBuffer,
-            m_tessTableConfigsBuffer,
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    builder.WithShaderResource(
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
@@ -89,108 +91,104 @@ void ReyesBuildRasterWorkPass::DeclareResourceUsages(ComputePassBuilder* builder
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
-        .WithIndirectArguments(m_indirectArgsBuffer)
-        .WithUnorderedAccess(
-            m_rasterWorkBuffer,
-            m_rasterWorkCounterBuffer,
-            m_telemetryBuffer)
         .WithConstantBuffer(Builtin::PerFrameBuffer);
+    ReyesBuildRasterWorkBindings bindings{builder.BindShaderResource(m_diceQueueBuffer),
+        builder.BindShaderResource(m_diceQueueCounterBuffer)};
     if (m_diceQueueReadOffsetBuffer) {
-        builder->WithShaderResource(m_diceQueueReadOffsetBuffer);
+        bindings.readOffset = builder.BindShaderResource(m_diceQueueReadOffsetBuffer);
+        bindings.hasReadOffset = true;
     }
+    bindings.tessConfigs = builder.BindShaderResource(m_tessTableConfigsBuffer);
+    bindings.output = builder.BindUnorderedAccess(m_rasterWorkBuffer);
+    bindings.outputCounter = builder.BindUnorderedAccess(m_rasterWorkCounterBuffer);
+    bindings.indirectArgs = builder.BindIndirectArguments(m_indirectArgsBuffer);
+    bindings.telemetry = builder.BindUnorderedAccess(m_telemetryBuffer);
     if (m_visibleClustersBuffer) {
-        builder->WithShaderResource(m_visibleClustersBuffer);
+        bindings.visibleClusters = builder.BindShaderResource(m_visibleClustersBuffer);
+        bindings.hasVisibleClusters = true;
     }
     if (m_visibleClusterTransformIndicesBuffer) {
-        builder->WithShaderResource(m_visibleClusterTransformIndicesBuffer);
+        bindings.visibleTransforms = builder.BindShaderResource(m_visibleClusterTransformIndicesBuffer);
+        bindings.hasVisibleTransforms = true;
     }
-    if (m_viewDepthSrvIndicesBuffer) {
-        builder->WithShaderResource(m_viewDepthSrvIndicesBuffer);
+    if (m_enableViewDepthOcclusion) {
+        builder.WithShaderResource(Builtin::PrimaryCamera::LinearDepthMap);
+        bindings.hasViewDepthIndices = true;
     }
     if (m_replayDiceQueueBuffer) {
-        builder->WithUnorderedAccess(m_replayDiceQueueBuffer);
+        bindings.replayQueue = builder.BindUnorderedAccess(m_replayDiceQueueBuffer);
+        bindings.hasReplayQueue = true;
     }
     if (m_replayDiceQueueCounterBuffer) {
-        builder->WithUnorderedAccess(m_replayDiceQueueCounterBuffer);
+        bindings.replayCounter = builder.BindUnorderedAccess(m_replayDiceQueueCounterBuffer);
+        bindings.hasReplayCounter = true;
     }
     if (m_replayDiceQueueOverflowBuffer) {
-        builder->WithUnorderedAccess(m_replayDiceQueueOverflowBuffer);
+        bindings.replayOverflow = builder.BindUnorderedAccess(m_replayDiceQueueOverflowBuffer);
+        bindings.hasReplayOverflow = true;
     }
     if (m_slabResourceGroup) {
-        builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+        builder.WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
+    bindings.capacity = m_rasterWorkCapacity;
+    bindings.phase = m_phaseIndex;
+    bindings.replayCapacity = m_replayDiceQueueCapacity;
+    bindings.useAabbOcclusion = SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)();
+    return bindings;
 }
 
-void ReyesBuildRasterWorkPass::Setup() {}
-
-void ReyesBuildRasterWorkPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesBuildRasterWorkPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
     const uint32_t zero = 0u;
-    BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_rasterWorkCounterBuffer), 0);
+    UploadBufferData(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_rasterWorkCounterBuffer), 0);
 }
 
-PassReturn ReyesBuildRasterWorkPass::Execute(PassExecutionContext& executionContext)
-{
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-
-    uint32_t uintRootConstants[NumMiscUintRootConstants] = {};
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_DICE_QUEUE_DESCRIPTOR_INDEX] = m_diceQueueBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_diceQueueCounterBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_DICE_QUEUE_READ_OFFSET_DESCRIPTOR_INDEX] = m_diceQueueReadOffsetBuffer
-        ? m_diceQueueReadOffsetBuffer->GetSRVInfo(0).slot.index
+br::render::PreparedComputeIndirect ReyesBuildRasterWorkPass::Prepare(
+    const ReyesBuildRasterWorkBindings& bindings, const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    br::render::PreparedComputeIndirect data{};
+    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    data.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
+    data.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
+    auto program = preparation.CaptureProgramBinding(m_pso);
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
+    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
+    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_DICE_QUEUE_DESCRIPTOR_INDEX] = srv(bindings.diceQueue);
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.diceCounter);
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_DICE_QUEUE_READ_OFFSET_DESCRIPTOR_INDEX] = bindings.hasReadOffset ? srv(bindings.readOffset) : 0xFFFFFFFFu;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = srv(bindings.tessConfigs);
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_OUTPUT_DESCRIPTOR_INDEX] = uav(bindings.output);
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_OUTPUT_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.outputCounter);
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_CAPACITY] = bindings.capacity;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = bindings.hasVisibleClusters ? srv(bindings.visibleClusters) : 0xFFFFFFFFu;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = bindings.hasVisibleTransforms ? srv(bindings.visibleTransforms) : 0xFFFFFFFFu;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.hasViewDepthIndices
+        ? BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).Publish(preparation, m_viewDepthPublisher)
         : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = m_tessTableConfigsBuffer->GetSRVInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_OUTPUT_DESCRIPTOR_INDEX] = m_rasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_OUTPUT_COUNTER_DESCRIPTOR_INDEX] = m_rasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_TELEMETRY_DESCRIPTOR_INDEX] = m_telemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_CAPACITY] = m_rasterWorkCapacity;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_visibleClustersBuffer
-        ? m_visibleClustersBuffer->GetSRVInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
-        m_visibleClusterTransformIndicesBuffer
-            ? m_visibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index
-            : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = m_viewDepthSrvIndicesBuffer
-        ? m_viewDepthSrvIndicesBuffer->GetSRVInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_DESCRIPTOR_INDEX] = m_replayDiceQueueBuffer
-        ? m_replayDiceQueueBuffer->GetUAVShaderVisibleInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_replayDiceQueueCounterBuffer
-        ? m_replayDiceQueueCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = m_replayDiceQueueOverflowBuffer
-        ? m_replayDiceQueueOverflowBuffer->GetUAVShaderVisibleInfo(0).slot.index
-        : 0xFFFFFFFFu;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION] =
-        (m_visibleClustersBuffer && m_viewDepthSrvIndicesBuffer && m_replayDiceQueueBuffer && m_replayDiceQueueCounterBuffer && m_replayDiceQueueOverflowBuffer)
-            ? 1u
-            : 0u;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_PHASE_INDEX] = m_phaseIndex;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_CAPACITY] = m_replayDiceQueueCapacity;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_USE_AABB_OCCLUSION] =
-        SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)() ? 1u : 0u;
-    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_TERRAIN_RVT_ENABLED] = 0u;
-
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        uintRootConstants);
-
-    commandList.ExecuteIndirect(m_commandSignature->GetHandle(), m_indirectArgsBuffer->GetAPIResource().GetHandle(), 0, {}, 0, 1);
-    return {};
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_DESCRIPTOR_INDEX] = bindings.hasReplayQueue ? uav(bindings.replayQueue) : 0xFFFFFFFFu;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasReplayCounter ? uav(bindings.replayCounter) : 0xFFFFFFFFu;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = bindings.hasReplayOverflow ? uav(bindings.replayOverflow) : 0xFFFFFFFFu;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION] = (bindings.hasVisibleClusters && bindings.hasViewDepthIndices && bindings.hasReplayQueue && bindings.hasReplayCounter && bindings.hasReplayOverflow) ? 1u : 0u;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_PHASE_INDEX] = bindings.phase;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_CAPACITY] = bindings.replayCapacity;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_USE_AABB_OCCLUSION] = bindings.useAabbOcclusion ? 1u : 0u;
+    data.constants[CLOD_REYES_BUILD_RASTER_WORK_TERRAIN_RVT_ENABLED] = 0u;
+    return data;
 }
 
-void ReyesBuildRasterWorkPass::Cleanup() {}
+void ReyesBuildRasterWorkPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
+    br::render::AppendFrameHeapRevision(preparation, out);
+    out.push_back(br::render::PipelineRevision(m_pso));
+    out.push_back(br::render::OwnerRevision(m_commandSignature));
+    if (m_enableViewDepthOcclusion)
+        BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).AppendRevision(preparation, out);
+}
+
+void ReyesBuildRasterWorkPass::Record(const ReyesBuildRasterWorkBindings&,
+    const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeIndirect(data, recording);
+}

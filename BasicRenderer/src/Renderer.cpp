@@ -3,12 +3,15 @@
 //
 
 #include "Renderer.h"
+#include "Render/PersistentRendererPublication.h"
 
 #define _USE_MATH_DEFINES
+#include <optional>
 #include <math.h>
 #include <atlbase.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
@@ -16,13 +19,14 @@
 #include <array>
 #include <stacktrace>
 #include <thread>
+#include <future>
 #include <unordered_map>
 #include <unordered_set>
 #include <typeindex>
 #include <utility>
 
 #include <rhi_debug.h>
-#include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Tracy.h>
 #include <spdlog/spdlog.h>
 #include "Utilities/Utilities.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -30,6 +34,11 @@
 #include "Managers/Singletons/ResourceManager.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Render/RenderContext.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/TextureImageTableArtifacts.h"
+#include "Render/ViewStateArtifacts.h"
+#include "Render/PoseStateArtifacts.h"
+#include "Render/LightStateArtifacts.h"
 #include "Telemetry/NvPerfIntegration.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Render/PassBuilders.h"
@@ -40,7 +49,6 @@
 #include "Materials/MaterialTextureStreaming.h"
 #include "RenderPasses/SkyboxRenderPass.h"
 #include "RenderPasses/EnvironmentFilterPass.h"
-#include "RenderPasses/ClearUAVsPass.h"
 #include "RenderPasses/DebugSpheresPass.h"
 #include "RenderPasses/DebugSkeletonPass.h"
 #include "RenderPasses/Base/ComputePass.h"
@@ -55,6 +63,7 @@
 #include "RenderPasses/PostProcessing/DebugResolvePass.h"
 #include "RenderPasses/MenuRenderPass.h"
 #include "RenderPasses/PresentPass.h"
+#include "RenderPasses/PrimaryCameraUploadPass.h"
 #include "Resources/TextureDescription.h"
 #include "Menu/Menu.h"
 #include "Managers/Singletons/DeletionManager.h"
@@ -89,19 +98,29 @@
 #include "RenderPasses/DebugGridPass.h"
 #include "Render/GraphExtensions/ReadbackCaptureExtension.h"
 #include "Render/Runtime/IReadbackService.h"
+#include "Render/Runtime/ScopedActiveGraphServices.h"
 #include "Resources/Resource.h"
 #include "Resources/components.h"
 #include "Resources/ReadbackRequest.h"
 #include "Resources/DynamicResource.h"
 #include "Resources/ExternalTextureResource.h"
 #include "Render/MemoryIntrospectionBackend.h"
-#include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
-#include "Render/Runtime/DescriptorServiceAccess.h"
 #include "Render/TbbTaskService.h"
 #include "Mesh/MeshInstance.h"
 #include "Render/DrawWorkload.h"
+#include "Render/IndirectStateArtifacts.h"
+#include "Render/MaterialStateArtifacts.h"
+#include "Render/TextureBindingArtifacts.h"
+#include "Render/CLodResidencyStorageArtifacts.h"
+#include "Render/TerrainStateArtifacts.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
+#include "Render/StaticStateArtifacts.h"
+#include "Render/GeometryResidencyStateArtifacts.h"
+#include "Render/GeometryBufferStateArtifacts.h"
+#include "Render/ObjectBufferStateArtifacts.h"
 #include "Render/RasterBucketFlags.h"
+#include "Render/ObjectReyesAtlasTelemetry.h"
 #include "Render/TerrainRvtTelemetry.h"
 
 void D3D12DebugCallback(
@@ -138,6 +157,31 @@ constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityT
 constexpr const char* CLodVirtualShadowTelemetryDebugSettingName = "clodVirtualShadowTelemetryDebug";
 constexpr const char* ObjectReyesAtlasTelemetryDebugSettingName = "objectReyesAtlasTelemetryDebug";
 constexpr size_t TerrainRvtTelemetryMipBins = 16u;
+
+br::render::SceneIngestionConfiguration CaptureSceneIngestionConfiguration()
+{
+    auto& settings = SettingsManager::GetInstance();
+    br::render::SceneIngestionConfiguration result{};
+    result.renderResolution = settings.getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    result.outputResolution = settings.getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+    result.shadowResolution = settings.getSettingGetter<uint16_t>("shadowResolution")();
+    result.directionalCascadeCount = settings.getSettingGetter<uint8_t>("numDirectionalLightCascades")();
+    result.maxShadowDistance = settings.getSettingGetter<float>("maxShadowDistance")();
+    result.directionalShadowDistanceLowerBound =
+        settings.getSettingGetter<float>("directionalShadowDistanceLowerBound")();
+    result.directionalShadowSceneExtent =
+        settings.getSettingGetter<float>("directionalShadowSceneExtent")();
+    result.primaryCameraUsesOutputHeight =
+        settings.getSettingGetter<CLodLodHeightMode>(CLodLodHeightModeSettingName)() ==
+        CLodLodHeightMode::OutputHeight;
+    return result;
+}
+
+uint32_t PrimaryCameraLodHeight(const br::render::SceneIngestionConfiguration& configuration)
+{
+    return configuration.primaryCameraUsesOutputHeight && configuration.outputResolution.y != 0u
+        ? configuration.outputResolution.y : configuration.renderResolution.y;
+}
 
 bool OutputTypeRequiresRenderGraphRebuild(unsigned int outputType)
 {
@@ -351,13 +395,18 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.collectPassStatistics = sm.getSettingGetter<bool>("collectPassStatistics")();
     orgSettings.collectPipelineStatistics = sm.getSettingGetter<bool>("collectPipelineStatistics")();
     orgSettings.useAsyncCompute = sm.getSettingGetter<bool>("useAsyncCompute")();
+    const auto requestedCompileMode = sm.getSettingGetter<int>("experimentalAsyncCompileMode")();
+    orgSettings.experimentalAsyncCompileMode = requestedCompileMode == 2
+        ? org::runtime::AsyncCompileMode::Async : org::runtime::AsyncCompileMode::Off;
+    orgSettings.experimentalCompileConcurrency = static_cast<uint8_t>(std::clamp(
+        sm.getSettingGetter<int>("experimentalCompileConcurrency")(), 1, 4));
     orgSettings.renderGraphCompileDumpEnabled = sm.getSettingGetter<bool>("renderGraphCompileDumpEnabled")();
     orgSettings.renderGraphVramDumpEnabled = sm.getSettingGetter<bool>("renderGraphVramDumpEnabled")();
     orgSettings.renderGraphBatchTraceEnabled = sm.getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
     orgSettings.renderGraphLightweightCompileSummaryEnabled = sm.getSettingGetter<bool>("renderGraphLightweightCompileSummaryEnabled")();
     orgSettings.readOnlyUniformTransitionElisionEnabled = true;
-    orgSettings.autoAliasMode = static_cast<uint8_t>(sm.getSettingGetter<AutoAliasMode>("autoAliasMode")());
-    orgSettings.autoAliasPackingStrategy = static_cast<uint8_t>(sm.getSettingGetter<AutoAliasPackingStrategy>("autoAliasPackingStrategy")());
+    orgSettings.autoAliasMode = static_cast<uint8_t>(sm.getSettingGetter<org::AutoAliasMode>("autoAliasMode")());
+    orgSettings.autoAliasPackingStrategy = static_cast<uint8_t>(sm.getSettingGetter<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy")());
     orgSettings.autoAliasEnableLogging = sm.getSettingGetter<bool>("autoAliasEnableLogging")();
     orgSettings.autoAliasLogExclusionReasons = sm.getSettingGetter<bool>("autoAliasLogExclusionReasons")();
     orgSettings.autoAliasBuildDebugData = sm.getSettingGetter<bool>("autoAliasBuildDebugData")();
@@ -484,6 +533,23 @@ Renderer::~Renderer() {
     org::runtime::SetActiveUploadPolicyService(nullptr);
 }
 
+void Renderer::StartAsyncStateGraphTrace(br::render::AsyncStateGraphTraceConfig config) {
+    m_pendingAsyncStateGraphTrace = config;
+    if (m_asyncStateGraph) m_asyncStateGraph->StartTrace(config);
+}
+
+bool Renderer::AsyncStateGraphTraceActive() const {
+    return m_asyncStateGraph && m_asyncStateGraph->TraceActive();
+}
+
+br::render::AsyncStateGraphTraceReport Renderer::StopAsyncStateGraphTraceAndWriteReport(
+    const std::filesystem::path& outputDirectory) {
+    m_pendingAsyncStateGraphTrace.reset();
+    return m_asyncStateGraph
+        ? m_asyncStateGraph->StopTraceAndWriteReport(outputDirectory)
+        : br::render::AsyncStateGraphTraceReport{};
+}
+
 void Renderer::Initialize(
     HWND hwnd,
     UINT x_res,
@@ -507,7 +573,7 @@ void Renderer::Initialize(
         m_pipelineReplacementDebugBreakHandler = [] { __debugbreak(); };
     }
 #endif
-    BufferBase::ScopedBackingMutation initializationBackingMutation;
+    org::BufferBase::ScopedBackingMutation initializationBackingMutation;
     m_hwnd = hwnd;
 
     auto& settingsManager = SettingsManager::GetInstance();
@@ -537,6 +603,15 @@ void Renderer::Initialize(
         "renderGraphBatchTraceEnabled",
         ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_BATCH_TRACE"));
     settingsManager.registerSetting<bool>("renderGraphLightweightCompileSummaryEnabled", false);
+    settingsManager.registerSetting<int>("experimentalAsyncCompileMode", 0);
+    settingsManager.registerSetting<int>("experimentalCompileConcurrency", 2);
+    if (const auto* mode = std::getenv("SARP_ASYNC_COMPILE_MODE")) {
+        const std::string_view value(mode);
+        const int parsed = value == "Async" || value == "async" || value == "2" ? 2 : 0;
+        settingsManager.getSettingSetter<int>("experimentalAsyncCompileMode")(parsed);
+        spdlog::info("Experimental async compile mode requested through environment: '{}' ({})",
+            value, parsed);
+    }
     LoadPipeline(hwnd, x_res, y_res);
     DirectStorageManager::GetInstance().Initialize();
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after LoadPipeline");
@@ -544,14 +619,14 @@ void Renderer::Initialize(
     SetSettings();
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
     RendererECSManager::GetInstance().Initialize();
-    TrackedEntityToken::Hooks trackedEntityHooks{};
+    org::TrackedEntityToken::Hooks trackedEntityHooks{};
     trackedEntityHooks.createEntity = [](flecs::entity existing) {
             auto& ecsManager = RendererECSManager::GetInstance();
             if (!ecsManager.IsAlive()) {
-                return TrackedEntityToken{};
+                return org::TrackedEntityToken{};
             }
 
-            TrackedEntityToken token = TrackedEntityToken::CreateDeferred();
+            org::TrackedEntityToken token = org::TrackedEntityToken::CreateDeferred();
             const flecs::entity_t existingId = existing.id();
             auto deferredState = token.deferredState;
             ecsManager.EnqueueDeferredWorldOperation([deferredState, existingId](flecs::world& world) mutable {
@@ -562,7 +637,7 @@ void Renderer::Initialize(
                     entity = world.entity();
                 }
 
-                if (!TrackedEntityToken::ResolveDeferredState(
+                if (!org::TrackedEntityToken::ResolveDeferredState(
                     deferredState,
                     world,
                     entity.id(),
@@ -571,7 +646,7 @@ void Renderer::Initialize(
                     if (entity.is_alive()) {
                         entity.destruct();
                     }
-                    TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
+                    org::TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
                     return;
                 }
 
@@ -581,7 +656,7 @@ void Renderer::Initialize(
 
                 if (destroyRequested && entity.is_alive()) {
                     entity.destruct();
-                    TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
+                    org::TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
                 }
             });
             return std::move(token);
@@ -592,7 +667,7 @@ void Renderer::Initialize(
     trackedEntityHooks.isMainThread = []() {
         return RendererECSManager::GetInstance().IsMainThread();
     };
-    trackedEntityHooks.enqueueAttachBundle = [](flecs::entity_t id, EntityComponentBundle bundle) {
+    trackedEntityHooks.enqueueAttachBundle = [](flecs::entity_t id, org::EntityComponentBundle bundle) {
         auto& ecsManager = RendererECSManager::GetInstance();
         if (!ecsManager.IsAlive()) {
             return;
@@ -626,21 +701,21 @@ void Renderer::Initialize(
             entity.destruct();
         }
     };
-    TrackedEntityToken::SetHooks(std::move(trackedEntityHooks));
+    org::TrackedEntityToken::SetHooks(std::move(trackedEntityHooks));
 
-    Resource::ECSEntityHooks resourceEntityHooks{};
-    resourceEntityHooks.createEntity = []() -> Resource::ECSEntityHandle {
+    org::Resource::ECSEntityHooks resourceEntityHooks{};
+    resourceEntityHooks.createEntity = []() -> org::Resource::ECSEntityHandle {
 		auto& ecsManager = RendererECSManager::GetInstance();
 		if (!ecsManager.IsAlive()) {
 			return {};
 		}
 
 		if (!ecsManager.IsMainThread()) {
-			auto handle = Resource::ECSEntityHandle::CreateDeferred();
+			auto handle = org::Resource::ECSEntityHandle::CreateDeferred();
                 auto deferredState = handle.deferredState;
                 ecsManager.EnqueueDeferredWorldOperation([deferredState](flecs::world& world) mutable {
 					flecs::entity entity = world.entity();
-                    Resource::ECSEntityHandle deferredHandle;
+                    org::Resource::ECSEntityHandle deferredHandle;
                     deferredHandle.deferredState = deferredState;
                     if (!deferredHandle.Resolve(world, entity.id())) {
                         deferredHandle.MarkDestroyed();
@@ -651,12 +726,12 @@ void Renderer::Initialize(
 
         auto& world = RendererECSManager::GetInstance().GetWorld();
         auto entity = world.entity();
-        Resource::ECSEntityHandle handle{};
+        org::Resource::ECSEntityHandle handle{};
         handle.world = &world;
         handle.id = entity.id();
         return handle;
     };
-    resourceEntityHooks.destroyEntity = [](const Resource::ECSEntityHandle& handle) {
+    resourceEntityHooks.destroyEntity = [](const org::Resource::ECSEntityHandle& handle) {
         auto& ecsManager = RendererECSManager::GetInstance();
         if (!ecsManager.IsAlive()) {
             return;
@@ -678,7 +753,7 @@ void Renderer::Initialize(
         handle.RequestDestroy();
             auto deferredState = handle.deferredState;
             ecsManager.EnqueueDeferredWorldOperation([deferredState](flecs::world&) mutable {
-                Resource::ECSEntityHandle deferredHandle;
+                org::Resource::ECSEntityHandle deferredHandle;
                 deferredHandle.deferredState = deferredState;
 				flecs::world* world = nullptr;
 				flecs::entity_t id = 0;
@@ -696,10 +771,10 @@ void Renderer::Initialize(
     resourceEntityHooks.isRuntimeAlive = []() {
         return RendererECSManager::GetInstance().IsAlive();
     };
-    Resource::SetEntityHooks(std::move(resourceEntityHooks));
+    org::Resource::SetEntityHooks(std::move(resourceEntityHooks));
 
     if (!currentRenderGraph) {
-		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
+		currentRenderGraph = std::make_unique<org::RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}
@@ -707,10 +782,10 @@ void Renderer::Initialize(
 
     if (auto* uploadService = currentRenderGraph->GetUploadService()) {
             uploadService->Initialize();
-        org::runtime::SetActiveUploadService(uploadService);
+            uploadService->SetOwnerThread();
     }
     if (!m_uploadPolicyService) {
-        m_uploadPolicyService = org::runtime::CreateDefaultUploadPolicyService();
+        m_uploadPolicyService = org::runtime::CreateDefaultUploadPolicyService(currentRenderGraph->RetainUploadService());
     }
     if (m_uploadPolicyService) {
         m_uploadPolicyService->Initialize();
@@ -718,20 +793,67 @@ void Renderer::Initialize(
     }
     if (auto* descriptorService = currentRenderGraph->GetDescriptorService()) {
         descriptorService->Initialize();
-        org::runtime::SetActiveDescriptorService(descriptorService);
     }
-    ::ResourceManager::GetInstance().Initialize();
-    const uint32_t ioWorkerCount = ReadBoundedEnvironmentUint(
-        "SARP_CLOD_IO_WORKER_COUNT", 32u, 1u, 64u);
-    TaskSchedulerManager::GetInstance().Initialize(ioWorkerCount);
-    SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
-        TaskSchedulerManager::GetInstance().RunBackgroundTask(taskName, std::move(task));
+    ::ResourceManager::GetInstance().Initialize(currentRenderGraph->RetainUploadService());
+    TaskSchedulerManager::GetInstance().Initialize();
+    m_rendererStateCommitScope = TaskSchedulerManager::GetInstance().CreateScope(
+        "RendererStateCommitCleanup");
+    m_presentationTailScope = TaskSchedulerManager::GetInstance().CreateScope(
+        "RendererPresentationTail");
+    m_asyncStateGraph = std::make_unique<br::render::AsyncStateGraph>(
+        TaskSchedulerManager::GetInstance(), "RendererStateGraph");
+    // The renderer thread observes published leases only; any graph lock it
+    // takes is a design regression and is counted (SARP.AsyncStateGraph.OwnerThreadLocks).
+    m_asyncStateGraph->SetOwnerThread();
+    if (m_pendingAsyncStateGraphTrace) {
+        m_asyncStateGraph->StartTrace(*m_pendingAsyncStateGraphTrace);
+    }
+    m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight);
+    if (const auto* persistent = std::getenv("SARP_PERSISTENT_PUBLICATIONS"); persistent && persistent[0] == '1') {
+        m_rendererStatePublisher->SetExecutablePreparation(br::render::PreparePersistentRendererPublication);
+        spdlog::info("Persistent material/geometry publication preparation enabled; pass execution remains transitional");
+    }
+    m_rendererStatePublisher->SetPreparationScheduler([scope = m_rendererStateCommitScope](std::function<void()>&& work) {
+        return TaskSchedulerManager::GetInstance().Submit(scope, TaskLane::Background, TaskDomain::RendererState,
+            "PublicationBindingBundles", [work = std::move(work)](const br::TaskContext& context) mutable {
+                auto operation = std::move(work);
+                if (!context.StopRequested()) operation();
+            });
+    });
+    br::render::PublishedStateSource::SetProcessSource(m_rendererStatePublisher->ResourceSource());
+    m_rendererStateRequests = std::make_unique<br::render::RendererStateRequestService>(
+        *m_asyncStateGraph, *m_rendererStatePublisher);
+    br::render::RegisterIndirectStateProducer(*m_asyncStateGraph);
+    br::render::RegisterMaterialStateProducer(*m_asyncStateGraph);
+	br::render::RegisterTextureBindingProducer(*m_asyncStateGraph);
+	br::render::RegisterTextureDisplayGateProducer(*m_asyncStateGraph);
+	br::render::RegisterTerrainStateProducer(*m_asyncStateGraph);
+    br::render::RegisterVersionedGpuBufferProducer(*m_asyncStateGraph);
+	br::render::RegisterTextureImageTableProducer(*m_asyncStateGraph);
+    br::render::RegisterObjectBufferStateProducer(*m_asyncStateGraph);
+    br::render::RegisterGeometryCoverageGateProducer(*m_asyncStateGraph);
+    br::render::RegisterCLodResidencyStorageProducers(*m_asyncStateGraph);
+    br::render::RegisterGeometryBufferStateProducer(*m_asyncStateGraph);
+    br::render::RegisterStaticStateProducers(*m_asyncStateGraph);
+    br::render::RegisterGeometryResidencyStateProducer(*m_asyncStateGraph);
+	br::render::RegisterViewStateProducer(*m_asyncStateGraph);
+	br::render::RegisterPoseStateProducer(*m_asyncStateGraph);
+	br::render::RegisterLightStateProducer(*m_asyncStateGraph);
+    m_asyncStateGraph->SetReadyCallback([this](const br::render::ArtifactSnapshot& artifact) {
+        if (m_rendererStateRequests) m_rendererStateRequests->OnArtifactReady(artifact);
+    });
+    m_rendererStatePublisher->SetCandidateRejectedCallback([this](std::uint64_t epoch) {
+        if (m_rendererStateRequests) m_rendererStateRequests->OnCandidateRejected(epoch);
+    });
+    org::SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
+        return TaskSchedulerManager::GetInstance().Submit(
+            TaskLane::Background, TaskDomain::Cleanup, taskName, std::move(task));
     });
     currentRenderGraph->SetTaskService(std::make_shared<br::TbbTaskService>());
     spdlog::info("Renderer initialization: initializing PSO manager");
     PSOManager::GetInstance().initialize();
     spdlog::info("Renderer initialization: initializing deletion manager");
-    DeletionManager::GetInstance().Initialize();
+    org::DeletionManager::GetInstance().Initialize();
 	spdlog::info("Renderer initialization: initializing command signatures");
 	CommandSignatureManager::GetInstance().Initialize();
     spdlog::info("Renderer initialization: command signatures initialized");
@@ -761,12 +883,26 @@ void Renderer::Initialize(
     // Initialize GPU resource managers
     m_pLightManager = LightManager::CreateUnique();
     m_pMeshManager = MeshManager::CreateUnique();
+	m_pMeshManager->SetRendererStateServices(
+		m_rendererStateRequests.get(),
+		currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
+		m_numFramesInFlight);
 	m_pObjectManager = ObjectManager::CreateUnique();
+	m_pObjectManager->SetRendererStateServices(
+		m_rendererStateRequests.get(),
+		currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
+		m_numFramesInFlight);
+	// Static draw-record roots publish only with a Geometry root covering the
+	// mesh templates they reference (see ObjectManager::SetGeometryCoverageSource).
+	m_pObjectManager->SetGeometryCoverageSource([meshes = m_pMeshManager.get()] {
+		return meshes->GeometryMutationSequence();
+	});
 	m_pIndirectCommandBufferManager = IndirectCommandBufferManager::CreateUnique();
 	m_pViewManager = ViewManager::CreateUnique();
-	m_pEnvironmentManager = EnvironmentManager::CreateUnique();
+	m_pEnvironmentManager = EnvironmentManager::CreateUnique(currentRenderGraph->RetainUploadService());
+	m_pEnvironmentManager->SetWorkServices(m_environmentWorkServices);
     CreateDefaultEnvironmentResources();
-    m_pEnvironmentManager->SetRequestReadbackFn([this](std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap) {
+    m_pEnvironmentManager->SetRequestReadbackFn([this](std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap) {
         if (!m_pReadbackManager) {
             return;
         }
@@ -774,8 +910,14 @@ void Renderer::Initialize(
         m_pReadbackManager->RequestReadback(std::move(texture), std::move(outputFile), std::move(callback), cubemap);
     });
 	m_pMaterialManager = MaterialManager::CreateUnique();
+	br::render::RegisterMaterialRowProducer(*m_asyncStateGraph);
+	br::render::RegisterMaterialUsageBatchProducer(*m_asyncStateGraph);
+    m_pMaterialManager->SetRendererStateServices(
+        m_rendererStateRequests.get(),
+        currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
+    m_pMaterialManager->SetDescriptorService(currentRenderGraph->RetainDescriptorService());
     m_pMaterialManager->SetRequestTextureReadbackFn(
-        [this](std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
+        [this](std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
             if (m_pMaterialManager &&
                 m_pMaterialManager->RequestExternalMaterialTextureReadback(
                     texture, outputFile, callback)) {
@@ -791,16 +933,68 @@ void Renderer::Initialize(
                 false);
         });
     m_pTerrainManager = TerrainManager::CreateUnique();
+	m_pTerrainManager->SetRendererStateServices(
+		m_rendererStateRequests.get(),
+		currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
+		currentRenderGraph ? currentRenderGraph->RetainDescriptorService() : nullptr);
 	//ResourceManager::GetInstance().SetEnvironmentBufferDescriptorIndex(m_pEnvironmentManager->GetEnvironmentBufferSRVDescriptorIndex());
-	m_pLightManager->SetViewManager(m_pViewManager.get()); // Light manager needs access to view manager for shadow cameras
-	m_pViewManager->SetIndirectCommandBufferManager(m_pIndirectCommandBufferManager.get()); // View manager needs to make indirect command buffers
+	m_pLightManager->SetShadowViewService(m_pViewManager.get());
+	m_pViewManager->SetEvents({
+        .onCreated = [this](const View& view) {
+            m_pIndirectCommandBufferManager->CreateBuffersForView(
+                view.id, view.flags.primaryCamera);
+        },
+        .onDestroyed = [this](uint64_t viewID) {
+            m_pIndirectCommandBufferManager->UnregisterBuffers(viewID);
+        },
+    });
     m_pMeshManager->SetViewManager(m_pViewManager.get());
-	m_pSkeletonManager = SkeletonManager::CreateUnique();
+	m_pIndirectCommandBufferManager->AttachActiveDrawSource(*m_pObjectManager);
+	const auto transientWindMatrixCapacity = std::clamp(
+		SettingsManager::GetInstance().getSettingGetter<std::uint32_t>(
+			ProceduralWindTransientBoneCapacitySettingName)(),
+		1024u, 1048576u);
+	m_pSkeletonManager = SkeletonManager::CreateShared(
+		currentRenderGraph->RetainUploadService(), transientWindMatrixCapacity);
 	m_pMeshManager->SetSkeletonManager(m_pSkeletonManager.get());
-    m_pTextureFactory = TextureFactory::CreateUnique();
-    m_clodRayTracingSystem = std::make_unique<br::render::CLodRayTracingSystem>();
+	m_poseInstanceRegistrationService.Configure(m_pSkeletonManager.get());
+	m_sceneRenderableResidencyService.Configure(m_pMeshManager.get(), m_pMaterialManager.get());
+    const auto makeFrameTableFamily = [](std::uint64_t id, const char* name,
+        std::uint32_t stride, br::render::PublishedFragmentKind owner,
+        std::uint64_t variant, bool unorderedAccess = false) {
+        return std::make_unique<br::render::VersionedBufferFamily>(
+            br::render::VersionedBufferFamily::Config{
+                { br::render::ArtifactKind::BufferVersion, id, 0 }, name, stride,
+                unorderedAccess, false, owner,
+                br::render::PublishedResourceUsage::ShaderResource, variant, false });
+    };
+    constexpr std::array<std::uint64_t, 5> lightVariants{
+        br::render::LightInfoTableVariant, br::render::LightSpotViewTableVariant,
+        br::render::LightPointViewTableVariant, br::render::LightDirectionalViewTableVariant,
+        br::render::LightActiveIndexTableVariant };
+    constexpr std::array<std::uint32_t, 5> lightStrides{
+        sizeof(LightInfo), sizeof(std::uint32_t), sizeof(std::uint32_t), sizeof(std::uint32_t),
+        sizeof(std::uint32_t) };
+    for (std::size_t i = 0; i < m_lightTableFamilies.size(); ++i)
+        m_lightTableFamilies[i] = makeFrameTableFamily(110 + i, "LightFrameTable", lightStrides[i],
+            br::render::PublishedFragmentKind::Lights, lightVariants[i]);
+    constexpr std::array<std::uint64_t, 4> poseVariants{
+        br::render::PoseInverseBindTableVariant, br::render::PoseBoneTransformTableVariant,
+        br::render::PoseInverseSkinTableVariant, br::render::PoseInstanceInfoTableVariant };
+    constexpr std::array<std::uint32_t, 4> poseStrides{
+        sizeof(DirectX::XMMATRIX), sizeof(DirectX::XMMATRIX), sizeof(DirectX::XMMATRIX),
+        sizeof(SkinningInstanceGPUInfo) };
+    // Inverse-bind matrices are immutable pose source data. The remaining
+    // tables are GPU-written frame outputs (including procedural wind) and
+    // cannot be republished from their CPU shadows; they stay owned by the
+    // palette service until slot-local palette outputs are introduced.
+    m_poseTableFamilies[0] = makeFrameTableFamily(120, "PoseInverseBindTable", poseStrides[0],
+        br::render::PublishedFragmentKind::Poses, poseVariants[0]);
+    m_pTextureFactory = TextureFactory::CreateUnique(currentRenderGraph->RetainUploadService());
+    m_clodRayTracingSystem = std::make_shared<br::render::CLodRayTracingSystem>(
+        currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
     if (currentRenderGraph) {
-        m_pTextureFactory->SetReadbackService(currentRenderGraph->GetReadbackService());
+        m_pTextureFactory->SetReadbackService(currentRenderGraph->GetReadbackServiceOwner());
     }
 	if (m_pMaterialManager) {
 		m_pMaterialManager->InitializeTextureStreaming(*m_pTextureFactory, m_numFramesInFlight);
@@ -809,20 +1003,38 @@ void Renderer::Initialize(
     CreateGlobalResources();
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after CreateGlobalResources");
 
-	m_managerInterface.SetManagers(
-        m_pMeshManager.get(), 
-        m_pObjectManager.get(), 
-        m_pIndirectCommandBufferManager.get(), 
-        m_pViewManager.get(), 
-        m_pLightManager.get(), 
-        m_pEnvironmentManager.get(), 
-        m_pMaterialManager.get(),
-        m_pSkeletonManager.get(),
-        m_pTextureFactory.get(),
-        m_pTerrainManager.get(),
-        std::addressof(m_shaderVariantRequestService),
-		currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr,
-		currentRenderGraph ? currentRenderGraph->GetDescriptorService() : nullptr);
+    m_sceneAssetRequestService.Configure(
+        m_pTextureFactory.get(), m_pTerrainManager.get(), m_pMaterialManager.get());
+	m_staticWorkloadRequestService.Configure(m_pIndirectCommandBufferManager.get());
+	m_staticObjectRequestService.Configure(m_pObjectManager.get());
+	m_staticGeometryRequestService.Configure(m_pMeshManager.get());
+    m_staticMaterialRequestService.Configure(m_pMaterialManager.get());
+    m_sceneSourceStateStore.Configure(
+        RendererECSManager::GetInstance().GetWorld(),
+        RendererECSManager::GetInstance().GetRenderPhaseEntities());
+    m_sceneEntityMaterializationService.Configure(
+        m_pObjectManager.get(), m_pViewManager.get(), m_pLightManager.get(),
+        std::addressof(m_sceneRenderableResidencyService));
+    m_sceneIngestionServices = {
+        .source = std::addressof(m_sceneSourceStateStore),
+        .sceneEntities = std::addressof(m_sceneEntityMaterializationService),
+        .poseInstances = std::addressof(m_poseInstanceRegistrationService),
+        .renderables = std::addressof(m_sceneRenderableResidencyService),
+        .shaderVariants = std::addressof(m_shaderVariantRequestService),
+        .execution = {
+            .stateRequests = m_rendererStateRequests.get(),
+			.generation = std::make_shared<br::render::ArtifactExecutionAccess::Generation>(
+				currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
+				currentRenderGraph ? currentRenderGraph->RetainDescriptorService() : nullptr) },
+		.sceneAssetRequests = std::addressof(m_sceneAssetRequestService),
+		.geometryRequests = std::addressof(m_staticGeometryRequestService),
+		.materialRequests = std::addressof(m_staticMaterialRequestService),
+		.objectRequests = std::addressof(m_staticObjectRequestService),
+		.workloadRequests = std::addressof(m_staticWorkloadRequestService)
+    };
+    m_pIndirectCommandBufferManager->SetRendererStateServices(
+        m_rendererStateRequests.get(),
+        currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
 
     m_warnedNullScene = false;
     m_warnedMissingPrimaryCamera = false;
@@ -832,27 +1044,28 @@ void Renderer::Initialize(
 }
 
 void Renderer::RunGameUpdateStage(float elapsedSeconds) {
-    ZoneScopedN("Renderer::Update::GameUpdate");
+    BT_ZONE_SCOPE("Renderer::Update::GameUpdate");
     currentScene->Update(elapsedSeconds);
 }
 
 void Renderer::RunAnimationUpdateStage(float elapsedSeconds) {
-    ZoneScopedN("Renderer::Update::AnimationUpdate");
+    BT_ZONE_SCOPE("Renderer::Update::AnimationUpdate");
     m_pSkeletonManager->TickAnimations(elapsedSeconds);
     m_pSkeletonManager->UpdateAllDirtyInstances();
 }
 
 void Renderer::RunTransformPropagationStage() {
-    ZoneScopedN("Renderer::Update::TransformPropagation");
+    BT_ZONE_SCOPE("Renderer::Update::TransformPropagation");
     currentScene->PropagateTransforms();
 }
 
 void Renderer::RunSceneBridgeSyncStage() {
-    ZoneScopedN("Renderer::Update::SceneBridgeSync");
+    BT_ZONE_SCOPE("Renderer::Update::SceneBridgeSync");
     if (!currentScene) {
         return;
     }
-    m_sceneRenderBridge.Sync(*currentScene, m_managerInterface);
+    m_sceneRenderBridge.Sync(*currentScene, GetSceneIngestionServices(),
+        CaptureSceneIngestionConfiguration());
 }
 
 void Renderer::SetExternalSceneMode(bool enabled) {
@@ -872,7 +1085,8 @@ void Renderer::SetExternalSceneMode(bool enabled) {
 void Renderer::IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snapshot) {
     SetExternalSceneMode(true);
     RegisterExternalSnapshotMeshes(snapshot);
-    m_sceneRenderBridge.IngestSnapshot(snapshot, m_managerInterface);
+    m_sceneRenderBridge.IngestSnapshot(snapshot, GetSceneIngestionServices(),
+        CaptureSceneIngestionConfiguration());
     m_hasCommittedSceneSnapshot = true;
     m_lastCommittedSceneSnapshotSequence = snapshot.snapshotSequence;
     m_lastCommittedSceneSourceFrame = snapshot.sourceFrameNumber;
@@ -882,7 +1096,7 @@ ObjectManager::Stats Renderer::GetObjectManagerStats() const {
     return m_pObjectManager ? m_pObjectManager->GetStats() : ObjectManager::Stats{};
 }
 
-Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() const {
+Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot(bool includeExpensiveDiagnostics) const {
     SamplingReadinessSnapshot snapshot;
     const auto sceneStatus = GetSceneOverlapStatus();
     snapshot.sceneTaskInFlight = sceneStatus.taskInFlight;
@@ -890,7 +1104,12 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
     snapshot.committedSceneSnapshotSequence = sceneStatus.committedSnapshotSequence;
     snapshot.pendingSceneSnapshotSequence = sceneStatus.pendingSnapshotSequence;
 
-    if (m_pMaterialManager) {
+    if (m_pMaterialManager && !includeExpensiveDiagnostics) {
+        const auto textureStats = m_pMaterialManager->GetMaterialTextureStreamingReadinessStats();
+        snapshot.pendingTextureReloads = textureStats.pendingReloadTextureCount;
+        snapshot.fullResolutionTextures = textureStats.fullResolutionResidentTextureCount;
+    }
+    else if (m_pMaterialManager) {
         const auto textureStats = m_pMaterialManager->GetMaterialTextureStreamingStats();
         snapshot.pendingTextureReloads = textureStats.pendingReloadTextureCount;
         snapshot.fullResolutionTextures = textureStats.fullResolutionResidentTextureCount;
@@ -922,7 +1141,10 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
         for (const auto& record : textureStats.largestResidentTextures) {
             std::ostringstream stream;
             stream
-                << "bytes=" << record.residentBytes
+                << "streaming_id=" << record.streamingTextureID
+                << " descriptor=" << record.imageDescriptorIndex
+                << " resource=" << record.imageResourceID
+                << " bytes=" << record.residentBytes
                 << " resident_dimensions=" << record.residentWidth << "x" << record.residentHeight
                 << " expected_resident_dimensions=" << record.expectedResidentWidth << "x" << record.expectedResidentHeight
                 << " total_mips=" << record.totalMipCount
@@ -957,21 +1179,43 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
         snapshot.pendingDirectStorageUploads = clodStats.pendingDirectStorageUploads;
     }
     const auto taskStats = TaskSchedulerManager::GetInstance().GetQueueStats();
+    snapshot.schedulerWorkerCount = TaskSchedulerManager::GetInstance().WorkerCount();
+    for (std::size_t index = 0; index < snapshot.schedulerDomains.size(); ++index) {
+        const auto& source = taskStats.domains[index];
+        auto& target = snapshot.schedulerDomains[index];
+        target.queued = source.queued;
+        target.active = source.active;
+        target.completed = source.completed;
+        target.queueWaitMicros = source.queueWaitMicros;
+        target.maxQueueWaitMicros = source.maxQueueWaitMicros;
+        target.executionMicros = source.executionMicros;
+        target.maxExecutionMicros = source.maxExecutionMicros;
+        target.highWatermark = source.highWatermark;
+        target.concurrency = TaskSchedulerManager::GetInstance().DomainConcurrency(
+            static_cast<TaskDomain>(index));
+        target.maxQueueWaitTask = source.maxQueueWaitTask;
+        target.maxExecutionTask = source.maxExecutionTask;
+    }
+    if (m_rendererStatePublisher) {
+        snapshot.rendererStatePublisher = m_rendererStatePublisher->Stats();
+    }
     snapshot.ioTasks = taskStats.ioQueued + taskStats.ioActive;
     snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;
     snapshot.shaderCompileTasks = taskStats.shaderCompileQueued + taskStats.shaderCompileActive;
-    const auto deferredReleaseStats = DescriptorHeapManager::GetInstance().GetDeferredReleaseStats();
-    snapshot.deferredGpuReleaseCount = deferredReleaseStats.releaseCount;
-    snapshot.deferredGpuReleaseResourceCount = deferredReleaseStats.resourceCount;
-    snapshot.blockedGpuReleaseCount = deferredReleaseStats.blockedReleaseCount;
-    snapshot.invalidGpuReleaseTimelineCount = deferredReleaseStats.invalidTimelineCount;
-    snapshot.deviceErrorGpuReleaseTimelineCount = deferredReleaseStats.deviceErrorTimelineCount;
-    snapshot.incompleteGpuReleaseTimelineCount = deferredReleaseStats.incompleteTimelineCount;
-    snapshot.deferredGpuReleaseResourceIDs = std::move(deferredReleaseStats.resourceIDs);
-    const auto deletionStats = DeletionManager::GetInstance().GetStats();
-    snapshot.deletionQueueObjectCount = deletionStats.objectCount;
-    snapshot.deletionQueueAllocationCount = deletionStats.allocationCount;
-    snapshot.deletionQueueTrackedAllocationCount = deletionStats.trackedAllocationCount;
+    if (includeExpensiveDiagnostics) {
+        const auto deferredReleaseStats = org::DescriptorHeapManager::GetInstance().GetDeferredReleaseStats();
+        snapshot.deferredGpuReleaseCount = deferredReleaseStats.releaseCount;
+        snapshot.deferredGpuReleaseResourceCount = deferredReleaseStats.resourceCount;
+        snapshot.blockedGpuReleaseCount = deferredReleaseStats.blockedReleaseCount;
+        snapshot.invalidGpuReleaseTimelineCount = deferredReleaseStats.invalidTimelineCount;
+        snapshot.deviceErrorGpuReleaseTimelineCount = deferredReleaseStats.deviceErrorTimelineCount;
+        snapshot.incompleteGpuReleaseTimelineCount = deferredReleaseStats.incompleteTimelineCount;
+        snapshot.deferredGpuReleaseResourceIDs = std::move(deferredReleaseStats.resourceIDs);
+        const auto deletionStats = org::DeletionManager::GetInstance().GetStats();
+        snapshot.deletionQueueObjectCount = deletionStats.objectCount;
+        snapshot.deletionQueueAllocationCount = deletionStats.allocationCount;
+        snapshot.deletionQueueTrackedAllocationCount = deletionStats.trackedAllocationCount;
+    }
     if (m_pObjectManager) {
         const auto objectStats = m_pObjectManager->GetStats();
         snapshot.deferredRetireQueueDepth = objectStats.deferredRetireQueueDepth;
@@ -1015,9 +1259,9 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
             const bool needsExternalInstanceRegistration =
                 !externalInstanceKnown || meshInstance->GetPerMeshInstanceBufferView() == nullptr;
             if (needsExternalInstanceRegistration && meshInstance->HasSkin() && m_pSkeletonManager) {
-                meshInstance->SetCurrentSkeletonManager(m_pSkeletonManager.get());
+                meshInstance->SetPoseRegistrationService(std::addressof(m_poseInstanceRegistrationService));
                 auto skinInst = meshInstance->GetSkin();
-                m_pSkeletonManager->AcquireSkinningInstance(skinInst);
+                m_poseInstanceRegistrationService.Acquire(skinInst);
                 meshInstance->SetSkinningInstanceSlot(skinInst->GetSkinningInstanceSlot());
                 meshInstance->SyncSkinningStateFromSkeleton();
             }
@@ -1223,7 +1467,8 @@ void Renderer::BootstrapCommittedSceneSnapshot() {
 
     auto snapshot = std::make_shared<br::render::SceneFrameSnapshot>(
         m_sceneRenderBridge.ExportSnapshot(*currentScene, m_nextSceneSnapshotSequence++, m_totalFramesRendered));
-    m_sceneRenderBridge.IngestSnapshot(*snapshot, m_managerInterface);
+    m_sceneRenderBridge.IngestSnapshot(*snapshot, GetSceneIngestionServices(),
+        CaptureSceneIngestionConfiguration());
 
     std::scoped_lock lock(m_sceneSnapshotMutex);
     m_hasCommittedSceneSnapshot = true;
@@ -1232,7 +1477,7 @@ void Renderer::BootstrapCommittedSceneSnapshot() {
 }
 
 void Renderer::CommitCompletedSceneSnapshot() {
-    ZoneScopedN("Renderer::CommitCompletedSceneSnapshot");
+    BT_ZONE_SCOPE("Renderer::CommitCompletedSceneSnapshot");
 
     if (!m_sceneTaskCompleted.exchange(false)) {
         return;
@@ -1240,7 +1485,7 @@ void Renderer::CommitCompletedSceneSnapshot() {
 
     std::shared_ptr<br::render::SceneFrameSnapshot> completedSnapshot;
     {
-        ZoneScopedN("Renderer::CommitCompletedSceneSnapshot::TakeCompletedSnapshot");
+        BT_ZONE_SCOPE("Renderer::CommitCompletedSceneSnapshot::TakeCompletedSnapshot");
         std::scoped_lock lock(m_sceneSnapshotMutex);
         completedSnapshot = std::exchange(m_completedSceneSnapshot, nullptr);
     }
@@ -1254,11 +1499,12 @@ void Renderer::CommitCompletedSceneSnapshot() {
     }
 
     {
-        ZoneScopedN("Renderer::CommitCompletedSceneSnapshot::IngestSnapshot");
-        m_sceneRenderBridge.IngestSnapshot(*completedSnapshot, m_managerInterface);
+        BT_ZONE_SCOPE("Renderer::CommitCompletedSceneSnapshot::IngestSnapshot");
+        m_sceneRenderBridge.IngestSnapshot(*completedSnapshot, GetSceneIngestionServices(),
+            CaptureSceneIngestionConfiguration());
     }
     {
-        ZoneScopedN("Renderer::CommitCompletedSceneSnapshot::PublishCommittedSnapshot");
+        BT_ZONE_SCOPE("Renderer::CommitCompletedSceneSnapshot::PublishCommittedSnapshot");
         std::scoped_lock lock(m_sceneSnapshotMutex);
         m_hasCommittedSceneSnapshot = true;
         m_lastCommittedSceneSnapshotSequence = completedSnapshot->snapshotSequence;
@@ -1283,7 +1529,7 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
     verticalAngle = 0.0f;
     horizontalAngle = 0.0f;
 
-    TaskSchedulerManager::GetInstance().RunBackgroundTask("SceneUpdateOverlap", [this, scene, elapsedSeconds, movementSnapshot, verticalAngleSnapshot, horizontalAngleSnapshot, overlapEpoch, snapshotSequence, sourceFrameNumber]() mutable {
+    TaskSchedulerManager::GetInstance().Submit(TaskLane::Streaming, TaskDomain::General, "SceneUpdateOverlap", [this, scene, elapsedSeconds, movementSnapshot, verticalAngleSnapshot, horizontalAngleSnapshot, overlapEpoch, snapshotSequence, sourceFrameNumber]() mutable {
         ZoneScopedN("Renderer::SceneUpdateOverlap");
         const auto taskStart = std::chrono::steady_clock::now();
 
@@ -1377,12 +1623,12 @@ br::render::SceneOverlapStatus Renderer::GetSceneOverlapStatus() const {
 }
 
 void Renderer::RunRenderResourceSyncStage() {
-    ZoneScopedN("Renderer::Update::RenderResourceSync");
+    BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync");
 
     auto& world = RendererECSManager::GetInstance().GetWorld();
 
     if (!m_renderSyncQueriesBuilt) {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::BuildQueries");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::BuildQueries");
         m_renderSyncObjectQuery = world.query_builder<Components::Matrix, Components::RenderableObject, Components::ObjectDrawInfo, Components::MeshInstances>()
             .with<Components::Active>()
             .with<Components::RenderTransformUpdated>()
@@ -1409,7 +1655,7 @@ void Renderer::RunRenderResourceSyncStage() {
     };
     std::vector<ObjectSyncItem> objectItems;
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::CollectObjectsAndMaterials");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CollectObjectsAndMaterials");
         m_renderSyncObjectQuery.run([&](flecs::iter& it) {
             while (it.next()) {
                 auto matrices = it.field<Components::Matrix>(0);
@@ -1429,12 +1675,12 @@ void Renderer::RunRenderResourceSyncStage() {
         });
     }
 
-    if (auto* terrainManager = m_managerInterface.GetTerrainManager()) {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::ProcessPendingTerrainUpdates");
-        terrainManager->ProcessPendingUpdates();
+    if (auto* terrainService = m_sceneIngestionServices.sceneAssetRequests) {
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::ProcessPendingTerrainUpdates");
+        terrainService->ProcessPendingTerrainUpdates();
     }
 
-    auto* objectManager = m_managerInterface.GetObjectManager();
+    auto* objectManager = m_pObjectManager.get();
     std::vector<std::pair<size_t, size_t>> perObjectDirtyRanges;
     std::vector<std::pair<size_t, size_t>> perInstanceTransformDirtyRanges;
     std::vector<std::pair<size_t, size_t>> normalMatrixDirtyRanges;
@@ -1443,8 +1689,8 @@ void Renderer::RunRenderResourceSyncStage() {
     normalMatrixDirtyRanges.reserve(objectItems.size());
 
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::ScanObjectDirtyRanges");
-        const auto appendRanges = [](std::vector<std::pair<size_t, size_t>>& ranges, const std::vector<std::shared_ptr<BufferView>>& views, size_t stride) {
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::ScanObjectDirtyRanges");
+        const auto appendRanges = [](std::vector<std::pair<size_t, size_t>>& ranges, const std::vector<std::shared_ptr<org::BufferView>>& views, size_t stride) {
             for (const auto& view : views) {
                 if (!view) {
                     continue;
@@ -1477,7 +1723,7 @@ void Renderer::RunRenderResourceSyncStage() {
     auto normalMatrixHandle = objectManager->BeginNormalMatrixBulkWrite();
 
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::ObjectSync");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::ObjectSync");
         TaskSchedulerManager::GetInstance().ParallelFor("ObjectSync", objectItems.size(),
             [&objectItems, &perObjectHandle, &perInstanceTransformHandle, &normalMatrixHandle](size_t idx) {
                 auto& item = objectItems[idx];
@@ -1581,7 +1827,7 @@ void Renderer::RunRenderResourceSyncStage() {
     // Upload only the range actually written this frame. Uploading the entire
     // grown backing every frame scales badly
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::CommitObjectBulkWrites");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CommitObjectBulkWrites");
         const auto commitRanges = [](auto& ranges, auto&& commit) {
             if (ranges.empty()) {
                 return;
@@ -1606,19 +1852,19 @@ void Renderer::RunRenderResourceSyncStage() {
         };
 
         {
-            ZoneScopedN("Renderer::Update::RenderResourceSync::CommitPerObjectRanges");
+            BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CommitPerObjectRanges");
             commitRanges(perObjectDirtyRanges, [objectManager](size_t offset, size_t size) {
                 objectManager->EndPerObjectBulkWrite(offset, size);
             });
         }
         {
-            ZoneScopedN("Renderer::Update::RenderResourceSync::CommitPerInstanceTransformRanges");
+            BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CommitPerInstanceTransformRanges");
             commitRanges(perInstanceTransformDirtyRanges, [objectManager](size_t offset, size_t size) {
                 objectManager->EndPerInstanceTransformBulkWrite(offset, size);
             });
         }
         {
-            ZoneScopedN("Renderer::Update::RenderResourceSync::CommitNormalMatrixRanges");
+            BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CommitNormalMatrixRanges");
             commitRanges(normalMatrixDirtyRanges, [objectManager](size_t offset, size_t size) {
                 objectManager->EndNormalMatrixBulkWrite(offset, size);
             });
@@ -1626,7 +1872,7 @@ void Renderer::RunRenderResourceSyncStage() {
     }
 
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::CameraSync");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::CameraSync");
         m_renderSyncCameraQuery.each([&](flecs::entity entity, Components::Matrix& worldMatrix, Components::Camera& camera, Components::RenderViewRef& renderView) {
             const auto* externalCamera = entity.try_get<Components::ExternalCameraMatrices>();
             const XMMATRIX cameraModel = externalCamera ? externalCamera->info.viewInverse : RemoveScalingFromMatrix(worldMatrix.matrix);
@@ -1673,12 +1919,12 @@ void Renderer::RunRenderResourceSyncStage() {
                 camera.info.positionWorldSpace = { pos.x, pos.y, pos.z, 1.0f };
             }
 
-            m_managerInterface.GetViewManager()->UpdateCamera(renderView.viewID, camera.info);
+            m_pViewManager->UpdateCamera(renderView.viewID, camera.info);
         });
     }
 
     {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::LightSync");
+        BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::LightSync");
         m_renderSyncLightQuery.each([&](flecs::entity entity, Components::Matrix& worldMatrix, Components::Light& light) {
             const XMVECTOR worldForward = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
             light.lightInfo.dirWorldSpace = XMVector3Normalize(XMVector3TransformNormal(worldForward, worldMatrix.matrix));
@@ -1704,8 +1950,8 @@ void Renderer::RunRenderResourceSyncStage() {
 
             if (light.lightInfo.shadowCaster && entity.has<Components::LightViewInfo>()) {
                 const Components::LightViewInfo& viewInfo = entity.get<Components::LightViewInfo>();
-                m_managerInterface.GetLightManager()->UpdateLightBufferView(viewInfo.lightBufferView.get(), light.lightInfo);
-                m_managerInterface.GetLightManager()->UpdateLightViewInfo(entity);
+                m_pLightManager->UpdateLightBufferView(viewInfo.lightBufferView.get(), light.lightInfo);
+                m_pLightManager->UpdateLightViewInfo(entity);
             }
         });
     }
@@ -1745,14 +1991,14 @@ void Renderer::CreateGlobalResources() {
 
 void Renderer::CreateDefaultEnvironmentResources() {
     auto makeFallbackCubemap = [](uint32_t resolution, bool generateMipMaps, const char* name) {
-        TextureDescription desc;
+        org::TextureDescription desc;
         desc.channels = 4;
         desc.isCubemap = true;
         desc.format = rhi::Format::R8G8B8A8_UNorm;
         desc.hasSRV = true;
         desc.generateMipMaps = generateMipMaps;
 
-        ImageDimensions dims;
+        org::ImageDimensions dims;
         dims.width = resolution;
         dims.height = resolution;
         dims.rowPitch = resolution * 4;
@@ -1761,7 +2007,7 @@ void Renderer::CreateDefaultEnvironmentResources() {
             desc.imageDimensions.push_back(dims);
         }
 
-        auto cubemap = PixelBuffer::CreateShared(desc);
+        auto cubemap = org::PixelBuffer::CreateShared(desc);
         cubemap->SetName(name);
         return cubemap;
     };
@@ -1861,7 +2107,8 @@ flecs::entity Renderer::GetValidatedPrimaryRenderCamera(bool attemptResync) {
 
     auto primaryCamera = m_sceneRenderBridge.GetPrimaryCameraEntity();
     if (!m_externalSceneMode && !validateCamera(primaryCamera) && attemptResync && !m_sceneRenderOverlapEnabled) {
-        m_sceneRenderBridge.Sync(*currentScene, m_managerInterface);
+        m_sceneRenderBridge.Sync(*currentScene, GetSceneIngestionServices(),
+            CaptureSceneIngestionConfiguration());
         primaryCamera = m_sceneRenderBridge.GetPrimaryCameraEntity();
     }
 
@@ -1912,6 +2159,11 @@ void Renderer::SetSettings() {
 		ReadUintEnvironmentValue(
 			"SARP_ALPHA_TESTED_TEXTURE_MAX_RESIDENT_TOP_MIP",
 			AlphaTestedMaterialTextureMaxResidentTopMipDefault));
+	settingsManager.registerSetting<uint32_t>(
+		AlphaTestedMaterialTextureMinResidentDimensionSettingName,
+		ReadUintEnvironmentValue(
+			"SARP_ALPHA_TESTED_TEXTURE_MIN_RESIDENT_DIMENSION",
+			AlphaTestedMaterialTextureMinResidentDimensionDefault));
 	int32_t forcedSkeletonLod = -1;
 	char* forcedSkeletonLodValue = nullptr;
 	size_t forcedSkeletonLodValueSize = 0;
@@ -2045,9 +2297,6 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<std::function<std::shared_ptr<Scene>(std::shared_ptr<Scene>)>>("appendScene", [this](std::shared_ptr<Scene> scene) -> std::shared_ptr<Scene> {
         return AppendScene(scene);
         });
-    settingsManager.registerSetting<std::function<MeshManager*()>>("getMeshManager", [this]() -> MeshManager* {
-        return m_pMeshManager.get();
-        });
 	settingsManager.registerSetting<bool>("enableScreenSpaceReflections", m_screenSpaceReflections);
     settingsManager.registerSetting<bool>("enableRayTracedReflections", m_rayTracedReflections);
     settingsManager.registerSetting<float>("rayTracedReflectionMaxDistance", 100.0f);
@@ -2061,8 +2310,8 @@ void Renderer::SetSettings() {
         "renderGraphVramDumpEnabled",
         ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_VRAM_DUMP"));
     settingsManager.registerSetting<bool>("renderGraphQueueSyncTraceEnabled", false);
-	settingsManager.registerSetting<AutoAliasMode>("autoAliasMode", AutoAliasMode::Balanced);
-    settingsManager.registerSetting<AutoAliasPackingStrategy>("autoAliasPackingStrategy", AutoAliasPackingStrategy::GreedySweepLine);
+	settingsManager.registerSetting<org::AutoAliasMode>("autoAliasMode", org::AutoAliasMode::Balanced);
+    settingsManager.registerSetting<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy", org::AutoAliasPackingStrategy::GreedySweepLine);
     settingsManager.registerSetting<bool>("autoAliasEnableLogging", false);
     settingsManager.registerSetting<bool>("autoAliasLogExclusionReasons", false);
     settingsManager.registerSetting<bool>("autoAliasBuildDebugData", false);
@@ -2444,8 +2693,10 @@ void Renderer::SetSettings() {
             FFXManager::GetInstance().InitFFX();
 
             CreateTextures();
-            auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-            m_sceneRenderBridge.ResyncPrimaryCameraDepth(*m_pViewManager, renderRes.x, renderRes.y);
+            const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
+            m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
+                ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
+                PrimaryCameraLodHeight(ingestionConfiguration));
             rebuildRenderGraph = true;
             });
 		}));
@@ -2460,8 +2711,10 @@ void Renderer::SetSettings() {
             FFXManager::GetInstance().Shutdown();
             FFXManager::GetInstance().InitFFX();
             CreateTextures();
-            auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-            m_sceneRenderBridge.ResyncPrimaryCameraDepth(*m_pViewManager, renderRes.x, renderRes.y);
+            const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
+            m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
+                ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
+                PrimaryCameraLodHeight(ingestionConfiguration));
             rebuildRenderGraph = true;
             });
         }));
@@ -2596,11 +2849,11 @@ void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
     // Wrap swapchain images for render-graph tracking
     m_backbufferResources.resize(m_numFramesInFlight);
     for (UINT n = 0; n < m_numFramesInFlight; n++) {
-        m_backbufferResources[n] = std::make_shared<ExternalTextureResource>(
+        m_backbufferResources[n] = std::make_shared<org::ExternalTextureResource>(
             renderTargets[n], x_res, y_res, rhi::Format::R8G8B8A8_UNorm);
         m_backbufferResources[n]->SetName("Backbuffer " + std::to_string(n));
     }
-    m_dynamicBackbuffer = std::make_shared<DynamicResource>(m_backbufferResources[0]);
+    m_dynamicBackbuffer = std::make_shared<org::DynamicResource>(m_backbufferResources[0]);
     m_dynamicBackbuffer->SetName("Backbuffer");
 
     CreateRTVs();
@@ -2628,6 +2881,7 @@ void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
 	}
 
     m_frameIndex = static_cast<uint8_t>(m_swapChain->CurrentImageIndex());
+    m_preparationFrameIndex = m_frameIndex;
     if (m_dynamicBackbuffer && m_frameIndex < m_backbufferResources.size()) {
         m_dynamicBackbuffer->SetResource(m_backbufferResources[m_frameIndex]);
     }
@@ -2641,7 +2895,7 @@ void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
 void Renderer::CreateTextures() {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     // Create HDR color target
-    TextureDescription hdrDesc;
+    org::TextureDescription hdrDesc;
     hdrDesc.arraySize = 1;
     hdrDesc.channels = 4; // RGBA
     hdrDesc.isCubemap = false;
@@ -2650,12 +2904,12 @@ void Renderer::CreateTextures() {
     hdrDesc.hasNonShaderVisibleUAV = true;
     hdrDesc.format = rhi::Format::R16G16B16A16_Float; // HDR format
     hdrDesc.generateMipMaps = false; // For bloom downsampling
-    ImageDimensions dims;
+    org::ImageDimensions dims;
     dims.height = resolution.y;
     dims.width = resolution.x;
     hdrDesc.imageDimensions.push_back(dims);
     hdrDesc.allowAlias = true;
-    auto hdrColorTarget = PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
+    auto hdrColorTarget = org::PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
     hdrColorTarget->SetName("Primary Camera HDR Color Target");
     org::memory::SetResourceUsageHint(*hdrColorTarget, "Primary color buffers");
 	m_coreResourceProvider.m_HDRColorTarget = hdrColorTarget;
@@ -2668,12 +2922,36 @@ void Renderer::CreateTextures() {
     // mip chain so removing bloom also removes that allocation.
     hdrDesc.generateMipMaps = false;
     hdrDesc.allowAlias = true;
-	auto upscaledHDRColorTarget = PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
+	auto upscaledHDRColorTarget = org::PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
 	upscaledHDRColorTarget->SetName("Upscaled HDR Color Target");
     org::memory::SetResourceUsageHint(*upscaledHDRColorTarget, "Upscaled color buffers");
 	m_coreResourceProvider.m_upscaledHDRColorTarget = upscaledHDRColorTarget;
 
-    TextureDescription motionVectors;
+    // Scene recording targets a logical-frame-owned LDR surface.  Only the
+    // presentation copy depends on the acquired swapchain image, so compiled
+    // scene work can eventually be planned and recorded before acquisition.
+    org::TextureDescription presentationDesc{};
+    presentationDesc.arraySize = 1;
+    presentationDesc.channels = 4;
+    presentationDesc.hasRTV = true;
+    presentationDesc.format = rhi::Format::R8G8B8A8_UNorm;
+    presentationDesc.rtvFormat = rhi::Format::R8G8B8A8_UNorm;
+    presentationDesc.imageDimensions.push_back({outputResolution.x, outputResolution.y, 0, 0});
+    presentationDesc.allowAlias = false;
+    m_presentationColorResources.clear();
+    m_presentationColorResources.reserve(m_numFramesInFlight);
+    for (uint32_t slot = 0; slot < m_numFramesInFlight; ++slot) {
+        auto target = org::PixelBuffer::CreateSharedUnmaterialized(presentationDesc);
+        target->SetName("Frame Presentation Color " + std::to_string(slot));
+        org::memory::SetResourceUsageHint(*target, "Frame presentation surfaces");
+        m_presentationColorResources.push_back(std::move(target));
+    }
+    if (!m_presentationColorResources.empty()) {
+        m_dynamicPresentationColor = std::make_shared<org::DynamicResource>(m_presentationColorResources.front());
+        m_dynamicPresentationColor->SetName("Frame Presentation Color");
+    }
+
+    org::TextureDescription motionVectors;
     motionVectors.arraySize = 1;
     motionVectors.channels = 2;
     motionVectors.isCubemap = false;
@@ -2684,10 +2962,10 @@ void Renderer::CreateTextures() {
     motionVectors.hasUAV = true;
     motionVectors.hasNonShaderVisibleUAV = true;
     motionVectors.srvFormat = rhi::Format::R16G16_Float;
-    ImageDimensions motionVectorsDims = { resolution.x, resolution.y, 0, 0 };
+    org::ImageDimensions motionVectorsDims = { resolution.x, resolution.y, 0, 0 };
     motionVectors.imageDimensions.push_back(motionVectorsDims);
 	motionVectors.allowAlias = true;
-    auto dilatedMotionVectorsBuffer = PixelBuffer::CreateSharedUnmaterialized(motionVectors);
+    auto dilatedMotionVectorsBuffer = org::PixelBuffer::CreateSharedUnmaterialized(motionVectors);
     dilatedMotionVectorsBuffer->SetName("Dilated Motion Vectors");
     org::memory::SetResourceUsageHint(*dilatedMotionVectorsBuffer, "Upscaling resources");
 	m_coreResourceProvider.m_gbufferDilatedMotionVectors = dilatedMotionVectorsBuffer;
@@ -2769,8 +3047,10 @@ void Renderer::OnResize(UINT newWidth, UINT newHeight) {
 
     CreateTextures();
 
-    auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-    m_sceneRenderBridge.ResyncPrimaryCameraDepth(*m_pViewManager, renderRes.x, renderRes.y);
+    const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
+    m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
+        ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
+        PrimaryCameraLodHeight(ingestionConfiguration));
 
 	//Rebuild the render graph
 	rebuildRenderGraph = true;
@@ -2866,11 +3146,20 @@ void Renderer::Update(float elapsedSeconds) {
     if (m_deterministicSamplingMode) {
         elapsedSeconds = 0.0f;
     }
-    ZoneScopedN("Renderer::Update");
-    BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
+    BT_ZONE_SCOPE("Renderer::Update");
+    // Capture input before camera application clears the per-frame mouse delta.
+    // Used only by the opt-in camera telemetry stream below.
+    const auto cameraTelemetryMovement = movementState;
+    const float cameraTelemetryPitch = verticalAngle;
+    const float cameraTelemetryYaw = horizontalAngle;
+    // The previous accepted owner remains retained by its queued graph work.
+    // Clear the renderer-side alias so any early return applies backpressure
+    // instead of rendering the preceding logical frame twice.
+    m_frameInputs.reset();
+    org::BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
 
 	std::vector<PSOManager::PipelineRetirementPoint> pipelineRetirementPoints;
-	for (const auto& point : DescriptorHeapManager::GetInstance().GetQueueFenceSnapshot()) {
+	for (const auto& point : org::DescriptorHeapManager::GetInstance().GetQueueFenceSnapshot()) {
 		pipelineRetirementPoints.push_back({ point.timeline, point.value });
 	}
 	PSOManager::GetInstance().PublishPendingLivePipelines(std::move(pipelineRetirementPoints));
@@ -2890,8 +3179,11 @@ void Renderer::Update(float elapsedSeconds) {
     };
 
     runCapturedStage("PublishDeferredBackingResizesEarly", []() {
-        ZoneScopedN("Renderer::Update::PublishDeferredBackingResizesEarly");
-        (void)PublishReadyDeferredBackingResizes(true);
+        BT_ZONE_SCOPE("Renderer::Update::PublishDeferredBackingResizesEarly");
+        // Publication is opportunistic at the frame boundary. Waiting here
+        // defeats the asynchronous resize path and can park the render thread
+        // behind backing creation for tens of milliseconds.
+        (void)org::PublishReadyDeferredBackingResizes(false);
     });
 
     if (!IsSceneReadyForFrame()) {
@@ -2900,7 +3192,7 @@ void Renderer::Update(float elapsedSeconds) {
 
     if (m_shaderReloadRequested) {
         runCapturedStage("ShaderReload", [&]() {
-            ZoneScopedN("Renderer::Update::ShaderReload");
+            BT_ZONE_SCOPE("Renderer::Update::ShaderReload");
             spdlog::info("Renderer: draining GPU work before shader reload.");
             StallPipeline();
             std::string rebuildError;
@@ -2914,19 +3206,19 @@ void Renderer::Update(float elapsedSeconds) {
     }
 
     runCapturedStage("SceneExplorerEdits", [&]() {
-        ZoneScopedN("Renderer::Update::SceneExplorerEdits");
+        BT_ZONE_SCOPE("Renderer::Update::SceneExplorerEdits");
         if (!m_externalSceneMode) {
             FlushPendingSceneExplorerEdits();
         }
     });
     if (m_externalSceneMode) {
         runCapturedStage("ExternalScene", []() {
-            ZoneScopedN("Renderer::Update::ExternalScene");
+            BT_ZONE_SCOPE("Renderer::Update::ExternalScene");
         });
     } else if (m_sceneRenderOverlapEnabled) {
         if (NeedsSceneSnapshotBootstrap()) {
             runCapturedStage("BootstrapSceneSnapshot", [&]() {
-                ZoneScopedN("Renderer::Update::BootstrapSceneSnapshot");
+                BT_ZONE_SCOPE("Renderer::Update::BootstrapSceneSnapshot");
                 ApplyPrimaryCameraInput(elapsedSeconds);
                 RunGameUpdateStage(elapsedSeconds);
                 RunTransformPropagationStage();
@@ -2934,13 +3226,13 @@ void Renderer::Update(float elapsedSeconds) {
             });
         } else {
             runCapturedStage("CommitSceneSnapshot", [&]() {
-                ZoneScopedN("Renderer::Update::CommitSceneSnapshot");
+                BT_ZONE_SCOPE("Renderer::Update::CommitSceneSnapshot");
                 CommitCompletedSceneSnapshot();
             });
         }
     } else {
         runCapturedStage("SynchronousSceneUpdate", [&]() {
-            ZoneScopedN("Renderer::Update::SynchronousSceneUpdate");
+            BT_ZONE_SCOPE("Renderer::Update::SynchronousSceneUpdate");
             ApplyPrimaryCameraInput(elapsedSeconds);
             RunGameUpdateStage(elapsedSeconds);
             RunTransformPropagationStage();
@@ -2961,16 +3253,19 @@ void Renderer::Update(float elapsedSeconds) {
     // are visible when the graph is constructed.
     if (!m_preFrameDeferredFunctions.empty()) {
         runCapturedStage("DeferredWorkEarly", [&]() {
-            ZoneScopedN("Renderer::Update::DeferredWorkEarly");
+            BT_ZONE_SCOPE("Renderer::Update::DeferredWorkEarly");
             m_preFrameDeferredFunctions.flush();
         });
     }
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
+    const bool asyncFrameQueue = SettingsManager::GetInstance()
+        .getSettingGetter<int>("experimentalAsyncCompileMode")() == 2;
+    if (!asyncFrameQueue) m_preparationFrameIndex = m_frameIndex;
     ApplyPendingPipelineReplacement();
 
     if (rebuildRenderGraph) {
         runCapturedStage("RenderGraphBuild", [&]() {
-            ZoneScopedN("Renderer::Update::RenderGraphBuild");
+            BT_ZONE_SCOPE("Renderer::Update::RenderGraphBuild");
             try {
 		        CreateRenderGraph();
                 m_pipelineRollbackRecipe.reset();
@@ -3002,8 +3297,8 @@ void Renderer::Update(float elapsedSeconds) {
     unsigned int cameraIndex = m_pViewManager->Get(camera.get<Components::RenderViewRef>().viewID)->gpu.cameraBufferIndex;
 
     runCapturedStage("WaitForFrame", [&]() {
-        ZoneScopedN("Renderer::Update::WaitForFrame");
-        WaitForFrame(m_frameIndex);
+        BT_ZONE_SCOPE("Renderer::Update::WaitForFrame");
+        WaitForFrame(m_preparationFrameIndex);
         if (m_pObjectManager) {
             const std::uint64_t retireDelayFrames = static_cast<std::uint64_t>(m_numFramesInFlight) + 1u;
             const std::uint64_t safeFrameNumber = m_totalFramesRendered > retireDelayFrames
@@ -3011,7 +3306,7 @@ void Renderer::Update(float elapsedSeconds) {
                 : 0u;
             m_pObjectManager->PublishDeferredRetireCompletedFrame(safeFrameNumber, retireDelayFrames);
         }
-        DescriptorHeapManager::GetInstance().ProcessDeferredReleases(m_frameIndex);
+        org::DescriptorHeapManager::GetInstance().ProcessDeferredReleases(m_preparationFrameIndex);
         RendererECSManager::GetInstance().FlushDeferredWorldOperations();
 
 		// Retire upload pages only after the previous use of this frame slot has
@@ -3021,17 +3316,170 @@ void Renderer::Update(float elapsedSeconds) {
 		// submitted their copies.
 		if (currentRenderGraph) {
 			if (auto* uploadService = currentRenderGraph->GetUploadService()) {
-				uploadService->ProcessDeferredReleases(m_frameIndex);
+				uploadService->ProcessDeferredReleases(m_preparationFrameIndex);
 			}
 		}
         });
+
+    runCapturedStage("CommitPublishedRendererState", [&]() {
+        BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState");
+        try {
+            if (m_rendererStatePublisher) {
+                auto commit = [&] {
+                    BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::PublisherCommit");
+                    return m_rendererStatePublisher->Commit(m_preparationFrameIndex);
+                }();
+				if (m_asyncStateGraph && m_asyncStateGraph->TraceActive()) {
+					m_asyncStateGraph->TraceEvent(
+						commit.committed ? br::render::AsyncStateGraphTraceEventID::ManifestCommitAccepted :
+							br::render::AsyncStateGraphTraceEventID::ManifestCommitUnchanged,
+						{ br::render::ArtifactKind::FrameManifest, 0, 0 },
+						commit.state ? commit.state->epoch : 0, 0,
+						{ { m_preparationFrameIndex } });
+					if (commit.committed && commit.state) {
+						for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
+							const auto& fragment = commit.state->Fragment(
+								static_cast<br::render::PublishedFragmentKind>(index));
+							if (!fragment.publicationRoot) continue;
+							m_asyncStateGraph->TraceEvent(br::render::AsyncStateGraphTraceEventID::ManifestFragmentCommitted,
+								fragment.publicationRoot.address, fragment.publicationRoot.revision,
+								fragment.publicationRoot.generation,
+								{ { commit.state->epoch, m_preparationFrameIndex, index } });
+						}
+					}
+				}
+                {
+                    BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::InstallFrameLease");
+                m_context.publishedRendererState = commit.state;
+                m_context.publishedManifestLease = commit.lease;
+                }
+                if (commit.committed && commit.state) {
+                    // Versioned table families need the same publication
+                    // acknowledgement as object/material tables. Without it,
+                    // their bounded backing rings retain the original active
+                    // generation forever; after a few camera updates the next
+                    // view build suspends permanently on ring exhaustion.
+                    const auto acknowledgeTables = [](const auto& families, const auto& state) {
+                        if (!state) return;
+                        const auto count = (std::min)(families.size(), state->tableVersions.size());
+                        for (std::size_t i = 0; i < count; ++i) {
+                            if (families[i]) families[i]->Acknowledge(state->tableVersions[i]);
+                        }
+                    };
+                    acknowledgeTables(m_lightTableFamilies,
+                        commit.state->lights.payload.Get<br::render::PublishedLightTableState>());
+                    const auto poseState = commit.state->poses.payload.Get<br::render::PublishedPoseState>();
+                    acknowledgeTables(m_poseTableFamilies, poseState);
+                    if (poseState && m_pSkeletonManager) {
+                        for (const auto& version : poseState->tableVersions)
+                            m_pSkeletonManager->AcknowledgeInverseBindGraphState(version);
+                    }
+                }
+                if (m_rendererStateRequests) {
+                    m_rendererStateRequests->RefreshPublication();
+                }
+                if (commit.committed && commit.state && m_asyncStateGraph) {
+                    auto publishedVersions = std::make_shared<
+                        std::vector<br::render::ArtifactVersionID>>();
+                    for (std::size_t index = 0; index < br::render::kPublishedFragmentCount; ++index) {
+                        const auto& fragment = commit.state->Fragment(
+                            static_cast<br::render::PublishedFragmentKind>(index));
+                        if (fragment.publicationBundle) {
+                            for (const auto& version : fragment.publicationBundle->versions) {
+                                if (version && !std::ranges::contains(*publishedVersions, version))
+                                    publishedVersions->push_back(version);
+                            }
+                        } else if (fragment.publicationRoot) {
+                            publishedVersions->push_back(fragment.publicationRoot);
+                        }
+                    }
+                    // The acknowledgement is deliberately level-triggered: a
+                    // version whose node is not yet in a publishable state is
+                    // skipped by the graph and must be re-acknowledged by the next
+                    // commit. Sending only the delta against the previous commit
+                    // turns such a skip into a permanent loss of publication.
+                    // MarkPublished itself now ignores already-published versions.
+                    const bool acknowledgementSubmitted =
+                        TaskSchedulerManager::GetInstance().Submit(
+                        m_rendererStateCommitScope, TaskLane::FrameCritical,
+                        TaskDomain::GraphPublication, "RendererStatePublisher::MarkPublished",
+                        [stateGraph = m_asyncStateGraph.get(), publishedVersions](
+                            const br::TaskContext& context) {
+                            if (!context.StopRequested() && stateGraph) {
+                                stateGraph->MarkPublished(*publishedVersions);
+                            }
+                        });
+                    if (!acknowledgementSubmitted) {
+                        spdlog::warn("Renderer-state graph publication acknowledgement was rejected");
+                    }
+                }
+                // Every commit, not only those with deferred cleanup: a manifest
+                // that installs covering geometry may carry no deferred work.
+                if (commit.committed && commit.state && m_pObjectManager) {
+                    m_pObjectManager->ObserveResidentGeometry(*commit.state);
+                }
+                if (commit.HasDeferredWork()) {
+                    BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::ScheduleDeferredCommit");
+                    auto* objectManager = commit.committed ? m_pObjectManager.get() : nullptr;
+					auto* meshManager = commit.committed ? m_pMeshManager.get() : nullptr;
+					auto* materialManager = commit.committed ? m_pMaterialManager.get() : nullptr;
+                    auto committedState = commit.committed ? commit.state : nullptr;
+                    // Publication acknowledgement advances object-buffer mutation
+                    // coverage and wakes the next admissible graph cut.  Keeping it
+                    // in Background/Cleanup allowed an import-time cleanup flood to
+                    // strand otherwise committed renderer state indefinitely.  Run
+                    // the deferred handoff off-thread in the serialized renderer-
+                    // state domain, where streaming work has bounded precedence.
+                    const bool submitted = TaskSchedulerManager::GetInstance().Submit(
+                        m_rendererStateCommitScope, TaskLane::Streaming, TaskDomain::RendererState,
+                        "RendererStatePublisher::DeferredCommit",
+						[commit = std::move(commit), objectManager, meshManager, materialManager,
+                            committedState = std::move(committedState)](
+                            const br::TaskContext& context) mutable {
+                            auto deferred = std::move(commit);
+                            auto state = std::move(committedState);
+                            if (context.StopRequested()) return;
+                            if (objectManager && state) {
+                                objectManager->AcknowledgePublishedBufferState(state);
+                            }
+							if (meshManager && state) {
+								meshManager->AcknowledgePublishedBufferState(state);
+							}
+							if (materialManager && state) {
+								materialManager->AcknowledgePublishedTextureImageTable(state);
+							}
+                            deferred.RunDeferred();
+                        });
+                    if (!submitted) {
+                        spdlog::warn("Renderer-state deferred commit cleanup was rejected by the scheduler");
+                    }
+                }
+            } else {
+                m_context.publishedRendererState.reset();
+                m_context.publishedManifestLease.reset();
+            }
+        } catch (const std::exception& exception) {
+            spdlog::critical("CommitPublishedRendererState: publisher Commit failed: {}", exception.what());
+            throw;
+        }
+		if (m_pMaterialManager) {
+			BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::ActivateMaterials");
+			(void)m_pMaterialManager->TryActivatePublishedMaterialState(
+				m_context.publishedRendererState);
+		}
+		if (m_sceneIngestionServices.sceneAssetRequests) {
+			BT_ZONE_SCOPE("Renderer::Update::CommitPublishedRendererState::ActivateTerrain");
+			(void)m_sceneIngestionServices.sceneAssetRequests->ActivatePublishedTerrainState(
+				m_context.publishedRendererState);
+		}
+    });
 
 	// Final material bindings are published only after the reusable frame slot is
 	// known idle. The transfer service pumps its own graphics work here, before
 	// material-buffer uploads are captured by CompileFrame.
 	if (m_pMaterialManager) {
 		runCapturedStage("MaterialTexturePublication", [&]() {
-			ZoneScopedN("Renderer::Update::MaterialTexturePublication");
+			BT_ZONE_SCOPE("Renderer::Update::MaterialTexturePublication");
 			m_pMaterialManager->ProcessPendingMaterialUpdates(m_totalFramesRendered + 1u);
 		});
 	}
@@ -3043,76 +3491,779 @@ void Renderer::Update(float elapsedSeconds) {
     auto& resourceManager = ::ResourceManager::GetInstance();
     auto res = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     runCapturedStage("PerFrameBuffer", [&]() {
-        ZoneScopedN("Renderer::Update::PerFrameBuffer");
+        BT_ZONE_SCOPE("Renderer::Update::PerFrameBuffer");
         resourceManager.UpdatePerFrameBuffer(cameraIndex, m_pLightManager->GetNumLights(), { res.x, res.y }, m_lightClusterSize, static_cast<uint32_t>(m_totalFramesRendered));
     });
 
+    static const basic_telemetry::Callsite captureFrameInputsCallsite("Renderer::Update::CaptureFrameInputs");
+    std::optional<basic_telemetry::Scope> captureFrameInputsScope;
+    captureFrameInputsScope.emplace(captureFrameInputsCallsite);
     const Components::DrawStats& drawStats = world.get<Components::DrawStats>();
     auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     auto outputRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
     UpdateContext updateData{};
+    updateData.publishedRendererState = m_context.publishedRendererState;
+    updateData.publishedManifestLease = m_context.publishedManifestLease;
     updateData.drawStats = drawStats;
-    updateData.objectManager = m_pObjectManager.get();
-    updateData.meshManager = m_pMeshManager.get();
-    updateData.indirectCommandBufferManager = m_pIndirectCommandBufferManager.get();
-    updateData.viewManager = m_pViewManager.get();
-    updateData.lightManager = m_pLightManager.get();
-    updateData.environmentManager = m_pEnvironmentManager.get();
-    updateData.materialManager = m_pMaterialManager.get();
-    updateData.skeletonManager = m_pSkeletonManager.get();
-    updateData.currentScene = m_sceneRenderOverlapEnabled ? nullptr : currentScene.get();
+    {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::StreamingStats");
+        updateData.materialTextureStreamingStats = m_pMaterialManager
+            ? m_pMaterialManager->GetMaterialTextureStreamingStats()
+            : MaterialTextureStreamingStats{};
+    }
+    updateData.environmentWork = m_environmentWorkServices;
+    {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::EnvironmentTelemetry");
+        m_environmentWorkServices.PublishTelemetry();
+    }
+    updateData.clodRayTracingSystem = m_clodRayTracingSystem;
+    updateData.terrainRegionMaterialEvaluationEnabled =
+        SettingsManager::GetInstance().getSettingGetter<bool>(
+            "enableTerrainRegionMaterialEvaluation")();
+    updateData.outputType = SettingsManager::GetInstance()
+        .getSettingGetter<unsigned int>("outputType")();
+    updateData.tonemapType = SettingsManager::GetInstance()
+        .getSettingGetter<unsigned int>("tonemapType")();
+    updateData.lightClusterSize = SettingsManager::GetInstance()
+        .getSettingGetter<DirectX::XMUINT3>("lightClusterSize")();
+    updateData.lighting = {
+        .imageBasedLightingEnabled = SettingsManager::GetInstance()
+            .getSettingGetter<bool>("enableImageBasedLighting")(),
+        .punctualLightingEnabled = SettingsManager::GetInstance()
+            .getSettingGetter<bool>("enablePunctualLighting")(),
+        .shadowsEnabled = SettingsManager::GetInstance()
+            .getSettingGetter<bool>("enableShadows")(),
+        .gtaoEnabled = SettingsManager::GetInstance()
+            .getSettingGetter<bool>("enableGTAO")(),
+        .clusteredLightingEnabled = SettingsManager::GetInstance()
+            .getSettingGetter<bool>("enableClusteredLighting")() };
+    {
+    BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::Settings");
+    updateData.proceduralWind = {
+        .displacementScale = SettingsManager::GetInstance().getSettingGetter<float>(
+            ProceduralWindDisplacementScaleSettingName)(),
+        .innerRadius = SettingsManager::GetInstance().getSettingGetter<float>(
+            ProceduralWindInnerRadiusSettingName)(),
+        .outerRadius = SettingsManager::GetInstance().getSettingGetter<float>(
+            ProceduralWindOuterRadiusSettingName)(),
+        .skeletonLodQualityCurve = SettingsManager::GetInstance().getSettingGetter<std::vector<float>>(
+            ProceduralWindSkeletonLodQualityCurveSettingName)(),
+        .skeletonLodStaticCutoff = SettingsManager::GetInstance().getSettingGetter<float>(
+            ProceduralWindSkeletonLodStaticCutoffSettingName)(),
+        .skeletonLodHysteresis = SettingsManager::GetInstance().getSettingGetter<float>(
+            ProceduralWindSkeletonLodHysteresisSettingName)(),
+        .forcedSkeletonLod = SettingsManager::GetInstance().getSettingGetter<int32_t>(
+            ProceduralWindForcedSkeletonLodSettingName)(),
+        .skeletonLodCapacityTarget = SettingsManager::GetInstance().getSettingGetter<float>(
+            ProceduralWindSkeletonLodCapacityTargetSettingName)(),
+        .skeletonLodLateReserve = SettingsManager::GetInstance().getSettingGetter<float>(
+            ProceduralWindSkeletonLodLateReserveSettingName)(),
+        .occlusionCullingEnabled = SettingsManager::GetInstance().getSettingGetter<bool>(
+            "enableOcclusionCulling")() };
+    }
+    const auto publishedMaterialState = updateData.publishedRendererState
+        ? updateData.publishedRendererState->materials.payload
+            .Get<br::render::PublishedMaterialState>()
+        : nullptr;
+    if (publishedMaterialState) {
+        updateData.preparedRasterBucketFlags = publishedMaterialState->rasterBucketFlags;
+        updateData.preparedRasterBucketCount =
+            static_cast<uint32_t>(updateData.preparedRasterBucketFlags.size());
+        basic_telemetry::AddCounter("SARP.FrameInputs.PublishedRasterBuckets");
+    }
+    updateData.windPaletteService = m_pSkeletonManager;
+    updateData.textureDescriptorHeap = m_context.textureDescriptorHeap;
+    updateData.samplerDescriptorHeap = m_context.samplerDescriptorHeap;
+    updateData.rtvHeap = rtvHeap->GetHandle();
     updateData.primaryCamera = camera.get<Components::Camera>();
+    const auto desiredPrimaryCamera = updateData.primaryCamera;
+    updateData.primaryViewID = m_context.primaryViewID;
     updateData.hasPrimaryCamera = true;
-    updateData.frameIndex = m_frameIndex;
+    updateData.frameSlot = m_preparationFrameIndex;
+    updateData.frameIndex = updateData.frameSlot;
     updateData.frameFenceValue = m_currentFrameFenceValue;
     updateData.frameNumber = m_totalFramesRendered;
     updateData.renderResolution = renderRes;
     updateData.outputResolution = outputRes;
+    if (m_imageBasedLighting) updateData.globalPSOFlags |= PSOFlags::PSO_IMAGE_BASED_LIGHTING;
+    if (m_clusteredLighting) updateData.globalPSOFlags |= PSOFlags::PSO_CLUSTERED_LIGHTING;
+    if (m_screenSpaceReflections || (m_rayTracedReflections && DeviceManager::GetInstance().GetCLodRayTracingSupported()))
+        updateData.globalPSOFlags |= PSOFlags::PSO_SCREENSPACE_REFLECTIONS;
     updateData.deltaTime = elapsedSeconds;
 
-    struct RendererUpdateHostData : IHostExecutionData {
-        const UpdateContext* data = nullptr;
-
-        const void* TryGet(std::type_index t) const noexcept override {
-            if (t == std::type_index(typeid(UpdateContext))) {
-                return data;
+    // The executable-frame request owns the logical render snapshot used by
+    // transitional packets. It must never reinterpret UpdateContext as the
+    // differently-laid-out RenderContext during delayed recording.
+    std::optional<basic_telemetry::Scope> snapshotCopyScope;
+    static const basic_telemetry::Callsite snapshotCopyCallsite("Renderer::Update::CaptureFrameInputs::SnapshotCopy");
+    snapshotCopyScope.emplace(snapshotCopyCallsite);
+    auto renderSnapshot = m_context;
+    snapshotCopyScope.reset();
+    renderSnapshot.publishedRendererState = updateData.publishedRendererState;
+    renderSnapshot.publishedManifestLease = updateData.publishedManifestLease;
+    renderSnapshot.primaryCamera = updateData.primaryCamera;
+    renderSnapshot.primaryViewID = updateData.primaryViewID;
+    renderSnapshot.hasPrimaryCamera = updateData.hasPrimaryCamera;
+    renderSnapshot.frameSlot = updateData.frameSlot;
+    renderSnapshot.frameIndex = renderSnapshot.frameSlot;
+    renderSnapshot.swapchainImageIndex = UINT_MAX;
+    renderSnapshot.frameFenceValue = updateData.frameFenceValue;
+    renderSnapshot.frameNumber = updateData.frameNumber;
+    renderSnapshot.renderResolution = updateData.renderResolution;
+    renderSnapshot.outputResolution = updateData.outputResolution;
+    renderSnapshot.globalPSOFlags = updateData.globalPSOFlags;
+    renderSnapshot.terrainRegionMaterialEvaluationEnabled =
+        updateData.terrainRegionMaterialEvaluationEnabled;
+    renderSnapshot.outputType = updateData.outputType;
+    renderSnapshot.tonemapType = updateData.tonemapType;
+    renderSnapshot.lightClusterSize = updateData.lightClusterSize;
+    renderSnapshot.lighting = updateData.lighting;
+    renderSnapshot.proceduralWind = updateData.proceduralWind;
+    renderSnapshot.deltaTime = updateData.deltaTime;
+    auto currentViews = std::make_shared<br::render::PreparedViewFamilyState>();
+    br::render::PrimaryCameraFrameUpload primaryCameraUpload{};
+    if (m_pViewManager) {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::ViewFamily");
+        currentViews->revision = m_pViewManager->GetPublicationRevision();
+        currentViews->cameraBufferSize = m_pViewManager->GetCameraBufferSize();
+        primaryCameraUpload = m_pViewManager->CapturePrimaryCameraUpload(updateData.frameNumber);
+        if (auto cameraBuffer = m_pViewManager->ProvideResource(Builtin::CameraBuffer))
+            currentViews->retainedResources.push_back(std::move(cameraBuffer));
+        if (auto cullingBuffer = m_pViewManager->ProvideResource(Builtin::CullingCameraBuffer))
+            currentViews->retainedResources.push_back(std::move(cullingBuffer));
+        const auto appendView = [&](uint64_t viewID) {
+            auto* view = m_pViewManager->Get(viewID);
+            if (!view) return;
+            if (view->gpu.visibilityBuffer && !view->gpu.clodDeepVisibilityHeadPointers) {
+                (void)m_pViewManager->EnsureCLodDeepVisibilityHeadPointers(viewID);
+                view = m_pViewManager->Get(viewID);
+                if (!view) return;
             }
-            return nullptr;
+            currentViews->views.push_back({
+                .id = view->id,
+                .cameraBufferIndex = view->gpu.cameraBufferIndex,
+                .primary = view->flags.primaryCamera,
+                .shadow = view->flags.shadow,
+                .cascade = view->flags.cascaded,
+                .lightType = view->lightType,
+                .cameraInfo = view->cameraInfo,
+                .jitterPixelSpace = view->flags.primaryCamera
+                    ? desiredPrimaryCamera.jitterPixelSpace : DirectX::XMFLOAT2{},
+                .jitterNDC = view->flags.primaryCamera
+                    ? desiredPrimaryCamera.jitterNDC : DirectX::XMFLOAT2{},
+                .visibilityBuffer = view->gpu.visibilityBuffer,
+                .deepVisibilityHeadPointers = view->gpu.clodDeepVisibilityHeadPointers,
+                .linearDepthMap = view->gpu.linearDepthMap,
+                .depthHistory = m_depthHistory.Select(view->id, view->gpu.linearDepthMap),
+                .depthBufferArrayIndex = view->cameraInfo.depthBufferArrayIndex,
+            });
+            if (view->gpu.visibilityBuffer)
+                currentViews->retainedResources.push_back(view->gpu.visibilityBuffer);
+            if (view->gpu.clodDeepVisibilityHeadPointers)
+                currentViews->retainedResources.push_back(view->gpu.clodDeepVisibilityHeadPointers);
+            if (view->gpu.linearDepthMap)
+                currentViews->retainedResources.push_back(view->gpu.linearDepthMap);
+        };
+        // Primary is a structural invariant: every frame snapshot starts with it.
+        appendView(updateData.primaryViewID);
+        m_pViewManager->ForEachView([&](uint64_t viewID) {
+            if (viewID != updateData.primaryViewID) appendView(viewID);
+        });
+        currentViews->resourceLayoutRevision = m_pViewManager->GetResourceLayoutRevision();
+        if (currentViews->views.empty() || !currentViews->views.front().primary ||
+            currentViews->views.front().cameraBufferIndex != 0) {
+            throw std::logic_error("Accepted frame is missing primary view slot zero");
         }
-    };
+    }
+    updateData.viewFamily = currentViews;
+    renderSnapshot.viewFamily = currentViews;
+    const auto& desiredCameraPosition = desiredPrimaryCamera.info.positionWorldSpace;
+    BT_PLOT("SARP.Camera.Desired.X", static_cast<int64_t>(desiredCameraPosition.x));
+    BT_PLOT("SARP.Camera.Desired.Y", static_cast<int64_t>(desiredCameraPosition.y));
+    BT_PLOT("SARP.Camera.Desired.Z", static_cast<int64_t>(desiredCameraPosition.z));
+    BT_PLOT("SARP.Camera.CapturedRevision", static_cast<int64_t>(primaryCameraUpload.revision));
+    static const std::filesystem::path cameraTelemetryPath = [] {
+        wchar_t* value = nullptr;
+        size_t length = 0;
+        _wdupenv_s(&value, &length, L"SARP_CAMERA_TELEMETRY_PATH");
+        std::filesystem::path result = value && value[0] ? value : L"";
+        std::free(value);
+        return result;
+    }();
+    if (!cameraTelemetryPath.empty()) {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::CameraTelemetryFile");
+        std::error_code fileError;
+        if (cameraTelemetryPath.has_parent_path())
+            std::filesystem::create_directories(cameraTelemetryPath.parent_path(), fileError);
+        const bool writeHeader = !std::filesystem::exists(cameraTelemetryPath, fileError) ||
+            std::filesystem::file_size(cameraTelemetryPath, fileError) == 0u;
+        std::ofstream output(cameraTelemetryPath, std::ios::app);
+        if (writeHeader) {
+            output << "frame,dt,forward,backward,left,right,up,down,pitch,yaw,camera_revision,x,y,z\n";
+        }
+        output << m_totalFramesRendered << ',' << elapsedSeconds << ','
+            << cameraTelemetryMovement.forwardMagnitude << ',' << cameraTelemetryMovement.backwardMagnitude << ','
+            << cameraTelemetryMovement.leftMagnitude << ',' << cameraTelemetryMovement.rightMagnitude << ','
+            << cameraTelemetryMovement.upMagnitude << ',' << cameraTelemetryMovement.downMagnitude << ','
+            << cameraTelemetryPitch << ',' << cameraTelemetryYaw << ',' << primaryCameraUpload.revision << ','
+            << desiredCameraPosition.x << ',' << desiredCameraPosition.y << ',' << desiredCameraPosition.z << '\n';
+    }
+    basic_telemetry::SetGauge("SARP.FrameInputs.ViewFamily.ViewCount",
+        static_cast<std::int64_t>(renderSnapshot.Views().size()));
+	const auto publishedObjects = updateData.publishedRendererState
+		? updateData.publishedRendererState->drawRecords.payload
+			.Get<br::render::PublishedObjectBufferState>()
+		: nullptr;
+	if (publishedObjects) {
+		basic_telemetry::AddCounter("SARP.FrameInputs.PublishedObjectSelection");
+		basic_telemetry::SetGauge("SARP.FrameInputs.ObjectSnapshot.PlacementCount",
+			publishedObjects->placementRecords
+				? static_cast<std::int64_t>(publishedObjects->placementRecords->size()) : 0);
+		basic_telemetry::SetGauge("SARP.FrameInputs.ObjectSnapshot.ActivePlacementCount",
+			publishedObjects->activePlacementEntries
+				? static_cast<std::int64_t>(publishedObjects->activePlacementEntries->size()) : 0);
+	}
+	const auto publishedStaticScene = updateData.publishedRendererState
+		? updateData.publishedRendererState->geometry.payload
+			.Get<br::render::PublishedStaticSceneState>()
+		: nullptr;
+	if (publishedStaticScene) {
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.DesiredPlacements",
+			static_cast<std::int64_t>(publishedStaticScene->desiredPlacementCount));
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.PublishedPlacements",
+			static_cast<std::int64_t>(publishedStaticScene->publishedPlacementCount));
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.MaterializedPlacements",
+			static_cast<std::int64_t>(publishedStaticScene->materializedPlacementCount));
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.GeometryRevision",
+			static_cast<std::int64_t>(updateData.publishedRendererState->geometry.revision));
+		basic_telemetry::SetGauge("SARP.FrameInputs.StaticScene.ManifestEpoch",
+			static_cast<std::int64_t>(updateData.publishedRendererState->epoch));
+	}
+    renderSnapshot.preparedRasterBucketCount = updateData.preparedRasterBucketCount;
+    renderSnapshot.preparedRasterBucketFlags = updateData.preparedRasterBucketFlags;
 
-    RendererUpdateHostData updateHostData;
-    updateHostData.data = &updateData;
+    // Frame-input artifacts are posted, never submitted: the owner thread
+    // does not enter the state-graph mutex. Buffer snapshots precede the
+    // fragment intents that reference them by revision.
+    std::vector<br::render::ArtifactIntent> frameIntents;
+    std::shared_ptr<br::render::LightTableBuildInput> desiredLights;
+    if (m_pLightManager && m_rendererStateRequests) {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::LightTables");
+        const auto lightSourceRevision = (std::max<std::uint64_t>)(
+            m_pLightManager->GetPublicationRevision(), 1u);
+        const auto lightViewRevision = std::uint64_t{0};
+        if (lightSourceRevision != m_lastLightSourceRevision ||
+            lightViewRevision != m_lastLightViewFamilyRevision) {
+            ++m_lightArtifactRevision;
+            m_lastLightSourceRevision = lightSourceRevision;
+            m_lastLightViewFamilyRevision = lightViewRevision;
+            desiredLights = std::make_shared<br::render::LightTableBuildInput>();
+        desiredLights->revision = m_lightArtifactRevision;
+        desiredLights->lightCount = m_pLightManager->GetNumLights();
+        desiredLights->lightPagePoolSize = m_pLightManager->GetLightPagePoolSize();
+        desiredLights->tableImages = m_pLightManager->CaptureTableImages();
+        auto& lightWorld = RendererECSManager::GetInstance().GetWorld();
+        auto directionalLights = lightWorld.query_builder<const Components::Light,
+            const Components::LightViewInfo>().build();
+        directionalLights.each([&](flecs::entity, const Components::Light& light,
+            const Components::LightViewInfo& viewInfo) {
+            if (!light.lightInfo.shadowCaster || light.type != Components::LightType::Directional) return;
+            br::render::PublishedDirectionalShadowLight shadow{};
+            DirectX::XMStoreFloat3(&shadow.direction,
+                DirectX::XMVector3Normalize(light.lightInfo.dirWorldSpace));
+            shadow.viewIDs = viewInfo.viewIDs;
+            shadow.unwrappedPageOffsetX.assign(viewInfo.virtualShadowUnwrappedPageOffsetX.begin(),
+                viewInfo.virtualShadowUnwrappedPageOffsetX.end());
+            shadow.unwrappedPageOffsetY.assign(viewInfo.virtualShadowUnwrappedPageOffsetY.begin(),
+                viewInfo.virtualShadowUnwrappedPageOffsetY.end());
+            desiredLights->directionalShadows.push_back(std::move(shadow));
+        });
+        for (const auto& key : m_pLightManager->GetSupportedKeys()) {
+            if (auto resource = m_pLightManager->ProvideResource(key))
+                desiredLights->retainedResources.push_back(std::move(resource));
+        }
+        std::vector<br::render::ArtifactRequirement> lightRequirements;
+        if (auto uploads = currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr) {
+            const std::array<std::uint32_t, 5> strides{
+                sizeof(LightInfo), sizeof(std::uint32_t), sizeof(std::uint32_t), sizeof(std::uint32_t),
+                sizeof(std::uint32_t) };
+            for (std::size_t i = 0; i < desiredLights->tableImages.size() && i < strides.size(); ++i) {
+                const auto& image = desiredLights->tableImages[i];
+                const auto count = image ? image->size() / strides[i] : 0;
+                const auto version = m_lightTableFamilies[i]->PostContentSnapshot(
+                    *m_rendererStateRequests, uploads,
+                    image ? std::span<const std::byte>(*image) : std::span<const std::byte>{},
+                    count, (std::max<std::uint64_t>)(count, 1));
+                if (version.revision != 0) lightRequirements.push_back(br::render::Exact(version));
+            }
+        }
+        frameIntents.push_back({
+            { br::render::ArtifactKind::LightTable, 0, 0 }, desiredLights->revision,
+            std::move(lightRequirements),
+            br::render::ArtifactPayload::Make<br::render::LightTableBuildInput>(desiredLights),
+            desiredLights->revision });
+        }
+    }
+    auto selectedLights = updateData.publishedRendererState
+        ? updateData.publishedRendererState->lights.payload.Get<br::render::PublishedLightTableState>()
+        : nullptr;
+    if (selectedLights) {
+        basic_telemetry::AddCounter("SARP.FrameInputs.PublishedLightTableSelection");
+    }
+    updateData.lightTables = selectedLights;
+    renderSnapshot.lightTables = selectedLights;
 
+    // Snapshot active skeleton membership and immutable base-skeleton data into
+    // the state graph. Accepted frames can now outlive later manager mutations.
+    std::shared_ptr<br::render::PoseStateBuildInput> desiredPoses;
+    if (m_pSkeletonManager && m_rendererStateRequests) {
+        BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::PoseState");
+        const auto poseSourceRevision = (std::max<std::uint64_t>)(
+            m_pSkeletonManager->GetActiveInstanceRevision(), 1u);
+        if (poseSourceRevision != m_lastPoseSourceRevision) {
+        m_lastPoseSourceRevision = poseSourceRevision;
+        desiredPoses = std::make_shared<br::render::PoseStateBuildInput>();
+        desiredPoses->activeInstanceRevision = poseSourceRevision;
+        // The inverse-bind table is the only pose table with a versioned
+        // consumer; it is captured from the buffer's journal (no CPU copy, no
+        // hash) and posted. The frame-written palettes are graph resources.
+        std::vector<br::render::ArtifactRequirement> poseRequirements;
+        if (auto uploads = currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr) {
+            auto capture = m_pSkeletonManager->CaptureInverseBindGraphState();
+            const auto revision = capture.writeSequence;
+            const auto version = m_poseTableFamilies[0]->PostCapture(
+                *m_rendererStateRequests, uploads, revision, std::move(capture));
+            if (version.revision != 0) poseRequirements.push_back(br::render::Exact(version));
+        }
+        for (const auto& instance : m_pSkeletonManager->GetActiveInstanceViews()) {
+            if (!instance.skeleton) continue;
+            desiredPoses->activeInstances.push_back({
+                .baseSkeleton = instance.skeleton->GetBaseSkeletonShared(),
+                .instanceSlot = instance.instanceSlot,
+                .transformOffsetMatrices = instance.transformOffsetMatrices,
+                .inverseSkinOffsetMatrices = instance.inverseSkinOffsetMatrices,
+                .boneCount = instance.boneCount,
+            });
+        }
+        for (const auto& key : m_pSkeletonManager->GetSupportedKeys()) {
+            if (auto resource = m_pSkeletonManager->ProvideResource(key))
+                desiredPoses->retainedResources.push_back(std::move(resource));
+        }
+        frameIntents.push_back({
+            { br::render::ArtifactKind::PoseState, 0, 0 }, desiredPoses->activeInstanceRevision,
+            std::move(poseRequirements),
+            br::render::ArtifactPayload::Make<br::render::PoseStateBuildInput>(desiredPoses),
+            desiredPoses->activeInstanceRevision });
+        }
+    }
+    if (!frameIntents.empty() && m_rendererStateRequests) {
+        m_rendererStateRequests->PostLatestBatch(std::move(frameIntents));
+    }
+    auto selectedPoses = updateData.publishedRendererState
+        ? updateData.publishedRendererState->poses.payload.Get<br::render::PublishedPoseState>()
+        : nullptr;
+    if (selectedPoses) {
+        basic_telemetry::AddCounter("SARP.FrameInputs.PublishedPoseSelection");
+    }
+    updateData.poses = selectedPoses;
+    renderSnapshot.poses = std::move(selectedPoses);
+    captureFrameInputsScope.reset();
     runCapturedStage("PublishDeferredBackingResizesLate", []() {
-        ZoneScopedN("Renderer::Update::PublishDeferredBackingResizesLate");
-        (void)PublishReadyDeferredBackingResizes(false);
+        BT_ZONE_SCOPE("Renderer::Update::PublishDeferredBackingResizesLate");
+        (void)org::PublishReadyDeferredBackingResizes(false);
     });
 
     runCapturedStage("FlushUploadPolicies", [&]() {
-        ZoneScopedN("Renderer::Update::FlushUploadPolicies");
+        BT_ZONE_SCOPE("Renderer::Update::FlushUploadPolicies");
         org::runtime::FlushUploadPolicies();
     });
 
     runCapturedStage("CommitGpuVisibleSnapshots", [&]() {
-        ZoneScopedN("Renderer::Update::CommitGpuVisibleSnapshots");
+        BT_ZONE_SCOPE("Renderer::Update::CommitGpuVisibleSnapshots");
         if (m_pMaterialManager) {
-            m_pMaterialManager->CommitGpuVisibleSnapshot();
+			m_pMaterialManager->ScheduleGpuVisibleSnapshotCommit();
         }
+		if (m_pObjectManager) {
+			m_pObjectManager->ScheduleDesiredBufferStatePublish();
+		}
         if (m_pIndirectCommandBufferManager && m_pObjectManager) {
-            m_pIndirectCommandBufferManager->CommitGpuVisibleSnapshot(*m_pObjectManager);
+			m_pIndirectCommandBufferManager->PublishDesiredState(
+				m_pObjectManager->DesiredBufferStateRequirement(),
+				m_pObjectManager->GetResidentInstanceDrawRecordCount(),
+				m_context.publishedRendererState);
         }
     });
 
-    UpdateExecutionContext context{};
-    context.frameIndex = m_frameIndex;
+    const bool publicationsReady = publishedMaterialState
+        && updateData.lightTables && updateData.poses;
+    if (!publicationsReady) {
+        m_frameInputs.reset();
+        basic_telemetry::AddCounter("SARP.FrameInputs.PublicationAdmissionBackpressure");
+        basic_telemetry::SetGauge("SARP.FrameInputs.PublicationAdmissionReady", 0);
+        return;
+    }
+    basic_telemetry::SetGauge("SARP.FrameInputs.PublicationAdmissionReady", 1);
+    renderSnapshot.uiDrawData = Menu::GetInstance().PrepareDrawData(renderSnapshot);
+    auto immutableUpdate = std::make_shared<const UpdateContext>(updateData);
+    m_frameInputs = std::make_shared<const br::render::RendererFrameInputs>(
+        std::move(immutableUpdate),
+        std::make_shared<const RenderContext>(std::move(renderSnapshot)),
+        primaryCameraUpload);
+
+    org::UpdateExecutionContext context{};
+    context.resolverCaptureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease,
+        m_context.publishedRendererState ? m_context.publishedRendererState->bindingBundle : nullptr);
+    context.frameIndex = m_preparationFrameIndex;
+    context.preparationSlot = m_preparationFrameIndex;
     context.frameFenceValue = m_currentFrameFenceValue;
     context.deltaTime = elapsedSeconds;
-    context.hostData = &updateHostData;
+    context.hostData = m_frameInputs.get();
+    context.ownedHostData = m_frameInputs;
     context.beforeCompileFrame = [this]() {
-        ZoneScopedN("Renderer::Update::TerrainRvtTelemetry");
+        BT_ZONE_SCOPE("Renderer::Update::TerrainRvtTelemetry");
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
+        // Opt-in, bounded camera-buffer stream. At most one capture may be in
+        // flight, which preserves request/completion ordering and avoids
+        // retaining an unbounded readback tail during shutdown.
+        struct CameraReadbackStreamState {
+            std::atomic_bool inFlight{ false };
+            std::atomic_uint64_t completionSequence{ 0 };
+            std::mutex outputMutex;
+        };
+        static auto cameraReadbackState = std::make_shared<CameraReadbackStreamState>();
+        static const std::filesystem::path cameraReadbackPath = [] {
+            wchar_t* value = nullptr;
+            size_t length = 0;
+            _wdupenv_s(&value, &length, L"SARP_CAMERA_READBACK_PATH");
+            std::filesystem::path result = value && value[0] ? value : L"";
+            std::free(value);
+            return result;
+        }();
+        if (!cameraReadbackPath.empty() && currentRenderGraph && m_frameInputs &&
+            !cameraReadbackState->inFlight.exchange(true, std::memory_order_acq_rel)) {
+            const auto renderInputs = m_frameInputs->Render();
+            const auto views = renderInputs ? renderInputs->viewFamily : nullptr;
+            const auto primary = views ? std::find_if(views->views.begin(), views->views.end(),
+                [](const auto& view) { return view.primary; }) : decltype(views->views.begin()){};
+            const auto cameraResource = m_pViewManager ? m_pViewManager->GetCameraBuffer() : nullptr;
+            if (cameraResource && views && primary != views->views.end()) {
+                if (auto* service = currentRenderGraph->GetReadbackService()) {
+                    const auto requestFrame = m_totalFramesRendered;
+                    const auto cameraRevision = m_frameInputs->PrimaryCameraUpload().revision;
+                    const auto expected = primary->cameraInfo;
+                    try {
+                        service->RequestReadbackCaptureAfterGraph(
+                            cameraResource.get(), org::RangeSpec{},
+                            [state = cameraReadbackState, path = cameraReadbackPath, requestFrame,
+                                cameraRevision, expected](org::ReadbackCaptureResult&& result) {
+                            CameraInfo camera{};
+                            if (result.data.size() >= sizeof(camera))
+                                std::memcpy(&camera, result.data.data(), sizeof(camera));
+                            const auto expectedPreviousInverse = DirectX::XMMatrixInverse(nullptr, expected.prevView);
+                            const auto gpuPreviousInverse = DirectX::XMMatrixInverse(nullptr, camera.prevView);
+                            const auto completion = state->completionSequence.fetch_add(1,
+                                std::memory_order_relaxed) + 1u;
+                            {
+                                std::scoped_lock lock(state->outputMutex);
+                                std::error_code fileError;
+                                if (path.has_parent_path())
+                                    std::filesystem::create_directories(path.parent_path(), fileError);
+                                const bool writeHeader = !std::filesystem::exists(path, fileError) ||
+                                    std::filesystem::file_size(path, fileError) == 0u;
+                                std::ofstream output(path, std::ios::app);
+                                if (writeHeader) {
+                                    output << "completion,request_frame,camera_revision,bytes,cpu_x,cpu_y,cpu_z,cpu_prev_x,cpu_prev_y,cpu_prev_z,gpu_x,gpu_y,gpu_z,gpu_prev_x,gpu_prev_y,gpu_prev_z\n";
+                                }
+                                output << completion << ',' << requestFrame << ',' << cameraRevision << ','
+                                    << result.data.size() << ','
+                                    << expected.positionWorldSpace.x << ',' << expected.positionWorldSpace.y << ','
+                                    << expected.positionWorldSpace.z << ','
+                                    << DirectX::XMVectorGetX(expectedPreviousInverse.r[3]) << ','
+                                    << DirectX::XMVectorGetY(expectedPreviousInverse.r[3]) << ','
+                                    << DirectX::XMVectorGetZ(expectedPreviousInverse.r[3]) << ','
+                                    << camera.positionWorldSpace.x << ',' << camera.positionWorldSpace.y << ','
+                                    << camera.positionWorldSpace.z << ','
+                                    << DirectX::XMVectorGetX(gpuPreviousInverse.r[3]) << ','
+                                    << DirectX::XMVectorGetY(gpuPreviousInverse.r[3]) << ','
+                                    << DirectX::XMVectorGetZ(gpuPreviousInverse.r[3]) << '\n';
+                            }
+                                if (result.data.size() < sizeof(camera) ||
+                                    std::memcmp(&camera, &expected, sizeof(camera)) != 0)
+                                    basic_telemetry::AddCounter("SARP.Camera.Upload.ReadbackMismatch");
+                                state->inFlight.store(false, std::memory_order_release);
+                            });
+                    } catch (...) {
+                        cameraReadbackState->inFlight.store(false, std::memory_order_release);
+                        throw;
+                    }
+                } else {
+                    cameraReadbackState->inFlight.store(false, std::memory_order_release);
+                }
+            } else {
+                cameraReadbackState->inFlight.store(false, std::memory_order_release);
+            }
+        }
+        // Opt-in, one-frame GPU work snapshot. Capture producers as well as their
+        // indirect consumers so visual failures can be localized without GPU printf.
+        static const uint64_t diagnosticCaptureFrame = [] {
+            char* value = nullptr;
+            size_t length = 0;
+            _dupenv_s(&value, &length, "SARP_GPU_WORK_READBACK_FRAME");
+            const uint64_t frame = value ? std::strtoull(value, nullptr, 10) : 120u;
+            std::free(value);
+            return frame;
+        }();
+        static bool gpuWorkReadbackRequested = false;
+        if (!gpuWorkReadbackRequested && m_totalFramesRendered >= diagnosticCaptureFrame && currentRenderGraph) {
+            wchar_t* value = nullptr;
+            size_t length = 0;
+            _wdupenv_s(&value, &length, L"SARP_GPU_WORK_READBACK_DIR");
+            if (value && value[0]) {
+                const std::filesystem::path directory(value);
+                std::filesystem::create_directories(directory);
+                if (auto* service = currentRenderGraph->GetReadbackService()) {
+                    gpuWorkReadbackRequested = true;
+                    const auto captureResource = [&](const char* label, const char* anchor,
+                        std::shared_ptr<org::Resource> resource,
+                        std::shared_ptr<const br::render::PublishedGpuBufferVersion> version = {}) {
+                        if (!resource) return;
+                        // DynamicResource is a mutable indirection used by the
+                        // frame graph for slot rotation. Capture the backing
+                        // resource selected at acceptance time so an async
+                        // frame cannot observe a later slot's contents.
+                        if (auto* dynamic = dynamic_cast<org::DynamicResource*>(resource.get())) {
+                            if (auto backing = dynamic->GetResource()) resource = std::move(backing);
+                        }
+                        const auto frame = m_totalFramesRendered;
+                        const auto published = m_context.publishedRendererState;
+                        const auto drawRecordsRevision = published ? published->drawRecords.revision : 0u;
+                        const auto indirectRevision = published ? published->indirectWorkloads.revision : 0u;
+                        const auto desiredDrawRecordsRevision = m_pObjectManager
+                            ? m_pObjectManager->DesiredBufferStateRequirement()
+                                .transform([](const auto& requirement) { return requirement.minimumRevision; })
+                                .value_or(0u)
+                            : 0u;
+                        const auto indirectState = published
+                            ? published->indirectWorkloads.payload.Get<br::render::PublishedIndirectState>()
+                            : nullptr;
+                        const auto indirectDrawRecordsRevision = indirectState
+                            ? indirectState->drawRecordsRoot.revision : 0u;
+                        const auto path = directory / (std::string(label) + ".bin");
+                        service->RequestReadbackCapture(anchor, resource.get(), org::RangeSpec{},
+                            [path, frame, drawRecordsRevision, indirectRevision,
+                                desiredDrawRecordsRevision, indirectDrawRecordsRevision,
+                                version = std::move(version)](org::ReadbackCaptureResult&& result) {
+                                std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                                output.write(reinterpret_cast<const char*>(result.data.data()),
+                                    static_cast<std::streamsize>(result.data.size()));
+                                auto metadataPath = path;
+                                metadataPath += L".meta.txt";
+                                std::ofstream metadata(metadataPath);
+                                metadata << "frame=" << frame << '\n'
+                                    << "draw_records_revision=" << drawRecordsRevision << '\n'
+                                    << "desired_draw_records_revision=" << desiredDrawRecordsRevision << '\n'
+                                    << "indirect_revision=" << indirectRevision << '\n'
+                                    << "indirect_draw_records_revision=" << indirectDrawRecordsRevision << '\n'
+                                    << "resource=" << result.desc.resourceId << '\n'
+                                    << "format=" << static_cast<uint32_t>(result.format) << '\n'
+                                    << "width=" << result.width << '\n'
+                                    << "height=" << result.height << '\n'
+                                    << "bytes=" << result.data.size() << '\n';
+                                if (version) metadata
+                                    << "buffer_revision=" << version->revision << '\n'
+                                    << "write_sequence=" << version->writeSequence << '\n'
+                                    << "element_count=" << version->elementCount << '\n'
+                                    << "capacity=" << version->capacity << '\n'
+                                    << "element_stride=" << version->elementStride << '\n'
+                                    << "content_version=" << version->contentVersion << '\n'
+                                    << "content_epoch=" << version->contentEpoch << '\n'
+                                    << "backing_epoch=" << version->backingEpoch << '\n'
+                                    << "backing_generation=" << (version->backing
+                                        ? version->backing->backingGeneration : 0u) << '\n';
+                                if (!result.layouts.empty()) metadata
+                                    << "offset=" << result.layouts.front().offset << '\n'
+                                    << "row_pitch=" << result.layouts.front().rowPitch << '\n';
+                            });
+                    };
+                    const auto capture = [&](const char* label, const char* anchor, org::ResourceIdentifier id) {
+                        captureResource(label, anchor, currentRenderGraph->RequestResourcePtr(id, true));
+                    };
+                    // Preserve the visibility target at the two phase-1 producer
+                    // boundaries as well as at its first material consumer.  The
+                    // fixed benchmark camera expects phase 1 to cover the scene;
+                    // shader invocation counts alone did not catch descriptor-table
+                    // mismatches that discarded almost every raster write.
+                    capture("visibility-after-phase1-hw", "CLodOpaque::RasterizeClustersPass1",
+                        Builtin::PrimaryCamera::VisibilityTexture);
+                    capture("visibility-after-phase1-sw", "CLodOpaque::SoftwareRasterizeClustersPass1",
+                        Builtin::PrimaryCamera::VisibilityTexture);
+                    capture("visibility", "MaterialHistogramPass", Builtin::PrimaryCamera::VisibilityTexture);
+                    capture("material-counts", "BuildMaterialIndirectCommandBufferPass", "Builtin::VisUtil::MaterialPixelCountBuffer");
+                    capture("material-offsets", "BuildMaterialIndirectCommandBufferPass", "Builtin::VisUtil::MaterialOffsetBuffer");
+                    capture("material-args", "BuildMaterialIndirectCommandBufferPass", "Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+                    capture("pixel-list", "BuildPixelListPass", "Builtin::VisUtil::PixelListBuffer");
+                    capture("surface-identity", "EvaluateMaterialGroupsPass", Builtin::Surface::Identity);
+                    // Publication audit: retain the exact object buffer backing
+                    // selected for this graph generation alongside visibility.
+                    // Its byte count and resource id are written by the
+                    // readback service, allowing CPU publication cuts to be
+                    // compared with the GPU-consumed object data.
+                    if (const auto published = m_context.publishedRendererState) {
+                        if (const auto objects = published->drawRecords.payload
+                                .Get<br::render::PublishedObjectBufferState>()) {
+                            const auto capturePublishedObjectVersion = [&](const char* label,
+                                std::uint64_t variant) {
+                                const auto version = objects->FindVersion(variant);
+                                captureResource(label, "CLodOpaque::RasterizeClustersPass1",
+                                    version ? version->resource : nullptr, version);
+                            };
+                            // Capture the immutable resources selected by the
+                            // accepted manifest.  The manager-facing logical
+                            // resources can point at a newer backing by the
+                            // time this async frame reaches the readback pass.
+                            capturePublishedObjectVersion("published-per-object",
+                                br::render::kObjectPerObjectVariant);
+                            capturePublishedObjectVersion("published-instance-transforms",
+                                br::render::kObjectInstanceTransformVariant);
+                            capturePublishedObjectVersion("published-draw-records",
+                                br::render::kObjectDrawRecordVariant);
+                        }
+                        if (const auto indirect = published->indirectWorkloads.payload
+                                .Get<br::render::PublishedIndirectState>()) {
+                            captureResource("published-visibility-generations",
+                                "CLodOpaque::RasterizeClustersPass1", indirect->visibilityGenerations);
+                            std::unordered_set<std::uint64_t> capturedActiveResources;
+                            std::unordered_set<std::uint64_t> capturedArgumentResources;
+                            for (std::size_t workloadIndex = 0;
+                                workloadIndex < indirect->workloads.size(); ++workloadIndex) {
+                                const auto& workload = indirect->workloads[workloadIndex];
+                                // Multiple views commonly retain the same
+                                // immutable buffer version.  Read each backing
+                                // once; its label still records the retained
+                                // revision and advertised element count.
+                                const auto label = std::format("published-active-draw-{}-rev-{}-count-{}",
+                                    workloadIndex, workload.activeListRevision, workload.count);
+                                if (workload.activeDrawList && capturedActiveResources.insert(
+                                        workload.activeDrawList->GetGlobalResourceID()).second) {
+                                    captureResource(label.c_str(), "CLodOpaque::RasterizeClustersPass1",
+                                        workload.activeDrawList);
+                                }
+                                const auto argsLabel = std::format(
+                                    "published-indirect-args-{}-active-rev-{}-count-{}",
+                                    workloadIndex, workload.activeListRevision, workload.count);
+                                if (workload.indirectArguments && capturedArgumentResources.insert(
+                                        workload.indirectArguments->GetGlobalResourceID()).second) {
+                                    captureResource(argsLabel.c_str(), "CLodOpaque::RasterizeClustersPass1",
+                                        workload.indirectArguments);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            std::free(value);
+        }
+        static bool colorOutputReadbackRequested = false;
+        if (!colorOutputReadbackRequested && m_totalFramesRendered >= diagnosticCaptureFrame &&
+            currentRenderGraph && m_dynamicPresentationColor) {
+            wchar_t* outputPath = nullptr;
+            size_t outputPathLength = 0;
+            if (_wdupenv_s(
+                    &outputPath,
+                    &outputPathLength,
+                    L"SARP_COLOR_OUTPUT_READBACK_PATH") == 0 &&
+                outputPath != nullptr && outputPath[0] != L'\0') {
+                const std::filesystem::path path(outputPath);
+                std::free(outputPath);
+                outputPath = nullptr;
+                if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+                    colorOutputReadbackRequested = true;
+                    readbackService->RequestReadbackCaptureAfterGraph(
+                        m_dynamicPresentationColor.get(),
+                        org::RangeSpec{},
+                        [path](org::ReadbackCaptureResult&& result) {
+                            BT_ZONE_SCOPE("Renderer::ColorOutputReadback::Analyze");
+                            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                            if (output && !result.data.empty()) {
+                                output.write(
+                                    reinterpret_cast<const char*>(result.data.data()),
+                                    static_cast<std::streamsize>(result.data.size()));
+                            }
+
+                            std::uint64_t whitePixels = 0;
+                            std::uint64_t opaquePixels = 0;
+                            std::uint64_t allWhiteTiles = 0;
+                            constexpr std::uint32_t tileSize = 16;
+                            if (!result.layouts.empty() && result.width && result.height) {
+                                const auto& layout = result.layouts.front();
+                                const auto rowPitch = static_cast<std::size_t>(layout.rowPitch);
+                                const auto baseOffset = static_cast<std::size_t>(layout.offset);
+                                if (rowPitch >= static_cast<std::size_t>(result.width) * 4u &&
+                                    baseOffset + rowPitch * result.height <= result.data.size()) {
+                                    for (std::uint32_t y = 0; y < result.height; ++y) {
+                                        const auto* row = result.data.data() + baseOffset + rowPitch * y;
+                                        for (std::uint32_t x = 0; x < result.width; ++x) {
+                                            const auto* pixel = row + static_cast<std::size_t>(x) * 4u;
+                                            const bool white = std::to_integer<std::uint8_t>(pixel[0]) >= 250u &&
+                                                std::to_integer<std::uint8_t>(pixel[1]) >= 250u &&
+                                                std::to_integer<std::uint8_t>(pixel[2]) >= 250u;
+                                            whitePixels += white ? 1u : 0u;
+                                            opaquePixels += std::to_integer<std::uint8_t>(pixel[3]) >= 250u ? 1u : 0u;
+                                        }
+                                    }
+                                    for (std::uint32_t y = 0; y + tileSize <= result.height; y += tileSize) {
+                                        for (std::uint32_t x = 0; x + tileSize <= result.width; x += tileSize) {
+                                            bool allWhite = true;
+                                            for (std::uint32_t tileY = 0; tileY < tileSize && allWhite; ++tileY) {
+                                                const auto* row = result.data.data() + baseOffset +
+                                                    rowPitch * (y + tileY) + static_cast<std::size_t>(x) * 4u;
+                                                for (std::uint32_t tileX = 0; tileX < tileSize; ++tileX) {
+                                                    const auto* pixel = row + static_cast<std::size_t>(tileX) * 4u;
+                                                    if (std::to_integer<std::uint8_t>(pixel[0]) < 250u ||
+                                                        std::to_integer<std::uint8_t>(pixel[1]) < 250u ||
+                                                        std::to_integer<std::uint8_t>(pixel[2]) < 250u) {
+                                                        allWhite = false;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            allWhiteTiles += allWhite ? 1u : 0u;
+                                        }
+                                    }
+                                }
+                            }
+                            BT_PLOT("Renderer.ColorOutputReadback.WhitePixels", static_cast<int64_t>(whitePixels));
+                            BT_PLOT("Renderer.ColorOutputReadback.AllWhite16x16Tiles", static_cast<int64_t>(allWhiteTiles));
+                            BT_PLOT("Renderer.ColorOutputReadback.Bytes", static_cast<int64_t>(result.data.size()));
+
+                            auto metadataPath = path;
+                            metadataPath += L".meta.txt";
+                            std::ofstream metadata(metadataPath, std::ios::trunc);
+                            if (metadata) {
+                                metadata << "format=" << static_cast<std::uint32_t>(result.format) << '\n';
+                                metadata << "width=" << result.width << '\n';
+                                metadata << "height=" << result.height << '\n';
+                                metadata << "bytes=" << result.data.size() << '\n';
+                                metadata << "white_pixels=" << whitePixels << '\n';
+                                metadata << "opaque_pixels=" << opaquePixels << '\n';
+                                metadata << "all_white_16x16_tiles=" << allWhiteTiles << '\n';
+                                if (!result.layouts.empty()) {
+                                    metadata << "offset=" << result.layouts.front().offset << '\n';
+                                    metadata << "row_pitch=" << result.layouts.front().rowPitch << '\n';
+                                }
+                            }
+                            spdlog::info(
+                                "Color output readback: bytes={} dimensions={}x{} white_pixels={} all_white_16x16_tiles={} output='{}'.",
+                                result.data.size(), result.width, result.height, whitePixels, allWhiteTiles,
+                                path.string());
+                        });
+                }
+            }
+            if (outputPath) {
+                std::free(outputPath);
+            }
+        }
         static bool materialBufferReadbackRequested = false;
         if (!materialBufferReadbackRequested && m_totalFramesRendered >= 120u &&
             currentRenderGraph && m_pMaterialManager) {
@@ -3127,39 +4278,236 @@ void Renderer::Update(float elapsedSeconds) {
                 std::free(outputPath);
                 outputPath = nullptr;
                 if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
-                    auto resource = m_pMaterialManager->ProvideResource(
-                        ResourceIdentifier("Builtin::PerMaterialEvalDataBuffer"));
-                    if (resource) {
-                        materialBufferReadbackRequested = true;
-                        readbackService->RequestReadbackCapture(
-                            "MenuRenderPass",
-                            resource.get(),
-                            RangeSpec{},
-                            [path](ReadbackCaptureResult&& result) {
-                                std::ofstream output(path, std::ios::binary | std::ios::trunc);
-                                if (output && !result.data.empty()) {
-                                    output.write(
-                                        reinterpret_cast<const char*>(result.data.data()),
-                                        static_cast<std::streamsize>(result.data.size()));
+                    const auto lease = m_context.publishedManifestLease;
+                    const auto published = lease ? lease->state : nullptr;
+                    const auto materialState = published
+                        ? published->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
+                    if (materialState && materialState->baseTable && materialState->evalTable &&
+                        materialState->openPbrTable) {
+                        auto metadataPath = path;
+                        metadataPath += L".meta.txt";
+                        std::ofstream metadata(metadataPath, std::ios::trunc);
+                        if (metadata) {
+                            metadata << "epoch=" << published->epoch << '\n';
+                            metadata << "lease_sequence=" << lease->sequence << '\n';
+                            metadata << "lease_frame_slot=" << lease->frameSlot << '\n';
+                            metadata << "revision=" << published->materials.revision << '\n';
+                            metadata << "compile_flag_slots=" << materialState->compileFlagSlotsUsed << '\n';
+                            metadata << "active_compile_flags=" << materialState->activeCompileFlags.size() << '\n';
+                            for (std::size_t index = 0;
+                                index < materialState->activeCompileFlags.size() &&
+                                index < materialState->activeCompileFlagSlots.size(); ++index) {
+                                metadata << "active[" << index << "].flags="
+                                    << static_cast<std::uint64_t>(materialState->activeCompileFlags[index])
+                                    << " slot=" << materialState->activeCompileFlagSlots[index] << '\n';
+                            }
+                        }
+                        const auto requestTable = [readbackService, &path, published](
+                            const char* label,
+                            const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& table,
+                            org::Resource* captureResource = nullptr) {
+                            if (!table || !table->resource || !table->image) return;
+                            auto tablePath = path;
+                            tablePath += std::filesystem::path(fmt::format(".{}.bin", label));
+                            const auto expected = table->MaterializeCpuImage();
+							auto expectedPath = tablePath;
+							expectedPath += L".expected";
+							std::ofstream expectedOutput(expectedPath, std::ios::binary | std::ios::trunc);
+							if (expectedOutput && !expected->empty()) {
+								expectedOutput.write(reinterpret_cast<const char*>(expected->data()),
+									static_cast<std::streamsize>(expected->size()));
+							}
+                            const auto resourceID = table->resource->GetGlobalResourceID();
+                            const br::render::ArtifactSnapshot* tableArtifact = nullptr;
+                            for (const auto& dependency : published->materials.dependencyClosure) {
+                                const auto root = dependency.payload
+                                    .Get<br::render::RendererStateFragmentArtifact>();
+                                const auto dependencyTable = root
+                                    ? root->fragment.payload
+                                        .Get<br::render::PublishedGpuBufferVersion>() : nullptr;
+                                if (dependencyTable == table) {
+                                    tableArtifact = &dependency;
+                                    break;
                                 }
-                                spdlog::info(
-                                    "SARP material texture trace: material eval GPU readback bytes={} output='{}'.",
-                                    result.data.size(),
-                                    path.string());
-                            });
+                            }
+                            auto tableMetadataPath = tablePath;
+                            tableMetadataPath += L".meta.txt";
+                            std::ofstream tableMetadata(tableMetadataPath, std::ios::trunc);
+                            if (tableMetadata) {
+                                tableMetadata << "manifest_epoch=" << published->epoch << '\n';
+                                tableMetadata << "manifest_material_revision="
+                                    << published->materials.revision << '\n';
+                                tableMetadata << "manifest_material_root_kind="
+                                    << static_cast<std::uint32_t>(
+                                        published->materials.publicationRoot.address.kind) << '\n';
+                                tableMetadata << "manifest_material_root_primary="
+                                    << published->materials.publicationRoot.address.primaryID << '\n';
+                                tableMetadata << "manifest_material_root_variant="
+                                    << published->materials.publicationRoot.address.variantID << '\n';
+                                tableMetadata << "buffer_revision=" << table->revision << '\n';
+                                tableMetadata << "buffer_write_sequence="
+                                    << table->writeSequence << '\n';
+                                tableMetadata << "buffer_content_version="
+                                    << table->contentVersion << '\n';
+                                tableMetadata << "buffer_backing_generation="
+                                    << (table->backing ? table->backing->backingGeneration : 0u) << '\n';
+                                tableMetadata << "resource_id=" << resourceID << '\n';
+                                tableMetadata << "capture_resource_id="
+                                    << (captureResource
+                                        ? captureResource->GetGlobalResourceID() : resourceID) << '\n';
+                                tableMetadata << "capture_matches_published="
+                                    << (!captureResource || captureResource == table->resource.get()) << '\n';
+                                if (tableArtifact) {
+                                    tableMetadata << "artifact_kind="
+                                        << static_cast<std::uint32_t>(tableArtifact->key.kind) << '\n';
+                                    tableMetadata << "artifact_primary="
+                                        << tableArtifact->key.primaryID << '\n';
+                                    tableMetadata << "artifact_variant="
+                                        << tableArtifact->key.variantID << '\n';
+                                    tableMetadata << "artifact_revision="
+                                        << tableArtifact->revision << '\n';
+                                    tableMetadata << "artifact_generation="
+                                        << tableArtifact->generation << '\n';
+                                    tableMetadata << "artifact_readiness="
+                                        << static_cast<std::uint32_t>(
+                                            tableArtifact->readiness) << '\n';
+                                }
+                            }
+                            readbackService->RequestReadbackCapture(
+                                "EvaluateMaterialGroupsPass",
+                                captureResource ? captureResource : table->resource.get(), org::RangeSpec{},
+                                [tablePath, expected, resourceID, label](org::ReadbackCaptureResult&& result) {
+                                    std::ofstream output(tablePath, std::ios::binary | std::ios::trunc);
+                                    if (output && !result.data.empty()) {
+                                        output.write(reinterpret_cast<const char*>(result.data.data()),
+                                            static_cast<std::streamsize>(result.data.size()));
+                                    }
+                                    const auto comparedBytes = (std::min)(result.data.size(), expected->size());
+                                    std::size_t firstMismatch = comparedBytes;
+                                    for (std::size_t offset = 0; offset < comparedBytes; ++offset) {
+                                        if (result.data[offset] != (*expected)[offset]) {
+                                            firstMismatch = offset;
+                                            break;
+                                        }
+                                    }
+                                    const bool exactPrefix = result.data.size() >= expected->size() &&
+                                        firstMismatch == comparedBytes;
+                                    spdlog::info(
+                                        "Published material GPU readback: table={} resource={} gpuBytes={} expectedBytes={} exactPrefix={} firstMismatch={} output='{}'.",
+                                        label, resourceID, result.data.size(), expected->size(), exactPrefix,
+                                        firstMismatch == comparedBytes ? UINT64_MAX : firstMismatch,
+                                        tablePath.string());
+                                });
+                        };
+                        materialBufferReadbackRequested = true;
+                        requestTable("base", materialState->baseTable);
+                        requestTable("eval", materialState->evalTable);
+                        requestTable("openpbr", materialState->openPbrTable);
+                        const auto textureImages = published->textureImages.payload
+                            .Get<br::render::PublishedTextureImageTable>();
+                        if (textureImages && textureImages->table) {
+                            const auto* textureStreaming = m_pMaterialManager
+                                ? m_pMaterialManager->GetTextureStreamingManager() : nullptr;
+                            const auto boundTextureTable = textureStreaming
+                                ? textureStreaming->ResolvePublishedImageTableResourceForDiagnostics()
+                                : std::shared_ptr<org::Resource>{};
+							const auto readbackAnchor = textureStreaming
+								? textureStreaming->PublishedImageTableReadbackAnchorForDiagnostics()
+								: std::shared_ptr<org::Resource>{};
+                            // Request the resolver-selected published backing directly.  The
+                            // logical bootstrap resource is only the resolver fallback; passing
+                            // it to the readback service captures that stale backing rather than
+                            // the resource whose descriptor is selected for this pass.
+                            requestTable("texture-images", textureImages->table,
+								boundTextureTable ? boundTextureTable.get() :
+									(readbackAnchor ? readbackAnchor.get() : nullptr));
+                        }
+
+                        const auto requestTexture = [readbackService, &path](
+                            const char* label, const std::shared_ptr<org::Resource>& texture) {
+                            if (!texture) return;
+                            auto texturePath = path;
+                            texturePath += std::filesystem::path(fmt::format(".{}.bin", label));
+                            const auto resourceID = texture->GetGlobalResourceID();
+                            readbackService->RequestReadbackCapture(
+                                "EvaluateMaterialGroupsPass", texture.get(), org::RangeSpec{},
+                                [texturePath, resourceID, label](org::ReadbackCaptureResult&& result) {
+                                    std::ofstream output(texturePath, std::ios::binary | std::ios::trunc);
+                                    if (output && !result.data.empty()) {
+                                        output.write(reinterpret_cast<const char*>(result.data.data()),
+                                            static_cast<std::streamsize>(result.data.size()));
+                                    }
+                                    auto textureMetadataPath = texturePath;
+                                    textureMetadataPath += L".meta.txt";
+                                    std::ofstream textureMetadata(textureMetadataPath, std::ios::trunc);
+                                    if (textureMetadata) {
+                                        textureMetadata << "resource_id=" << resourceID << '\n';
+                                        textureMetadata << "format="
+                                            << static_cast<std::uint32_t>(result.format) << '\n';
+                                        textureMetadata << "width=" << result.width << '\n';
+                                        textureMetadata << "height=" << result.height << '\n';
+                                        textureMetadata << "depth=" << result.depth << '\n';
+                                        textureMetadata << "bytes=" << result.data.size() << '\n';
+                                        textureMetadata << "layouts=" << result.layouts.size() << '\n';
+                                        for (std::size_t index = 0; index < result.layouts.size(); ++index) {
+                                            const auto& layout = result.layouts[index];
+                                            textureMetadata << "layout[" << index << "].offset="
+                                                << layout.offset << '\n';
+                                            textureMetadata << "layout[" << index << "].row_pitch="
+                                                << layout.rowPitch << '\n';
+                                        }
+                                    }
+                                    spdlog::info(
+                                        "Published material pixel readback: texture={} resource={} bytes={} dimensions={}x{} output='{}'.",
+                                        label, resourceID, result.data.size(), result.width, result.height,
+                                        texturePath.string());
+                                });
+                            auto requestMetadataPath = texturePath;
+                            requestMetadataPath += L".request.txt";
+                            std::ofstream requestMetadata(requestMetadataPath, std::ios::trunc);
+                            if (requestMetadata) {
+                                requestMetadata << "resource_id=" << resourceID << '\n';
+                                requestMetadata << "requested=1\n";
+                            }
+                        };
+                        requestTexture("hdr", m_coreResourceProvider.m_HDRColorTarget);
+                        if (const auto* primaryView = m_pViewManager
+                                ? m_pViewManager->Get(m_context.primaryViewID) : nullptr) {
+                            requestTexture("visibility", primaryView->gpu.visibilityBuffer);
+                        }
+                        requestTexture("surface-base-color", currentRenderGraph->RequestResourcePtr(
+                            Builtin::Surface::BaseColorOpacity, true));
+                        requestTexture("surface-records", currentRenderGraph->RequestResourcePtr(
+                            Builtin::Surface::Records, true));
                     }
                 }
             }
             std::free(outputPath);
         }
+
     };
 
     auto& deviceManager = DeviceManager::GetInstance();
 
     runCapturedStage("RenderGraphUpdate", [&]() {
-        ZoneScopedN("Renderer::Update::RenderGraphUpdate");
+        BT_ZONE_SCOPE("Renderer::Update::RenderGraphUpdate");
+        // Dynamic wrapper selection is part of serialized preparation state.
+        // Do not mutate it while the preceding preparation owner may still be
+        // freezing that frame's concrete resource table.
+        currentRenderGraph->WaitForPreparation();
+        if (m_dynamicPresentationColor &&
+            m_preparationFrameIndex < m_presentationColorResources.size()) {
+            m_dynamicPresentationColor->SetResource(
+                m_presentationColorResources[m_preparationFrameIndex]);
+        }
         currentRenderGraph->Update(context, deviceManager.GetDevice());
     });
+    if (asyncFrameQueue) {
+        m_preparationFrameIndex = static_cast<uint8_t>(
+            (m_preparationFrameIndex + 1) % m_numFramesInFlight);
+        BT_PLOT("ORG.AsyncExecution.NextPreparationSlot",
+            static_cast<int64_t>(m_preparationFrameIndex));
+    }
     ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "after RenderGraphUpdate");
 
     // Clear transform-update tags only after render-graph update so passes such as
@@ -3182,13 +4530,13 @@ void Renderer::Update(float elapsedSeconds) {
 
     if (!m_externalSceneMode) {
         runCapturedStage("ScheduleSceneUpdate", [&]() {
-            ZoneScopedN("Renderer::Update::ScheduleSceneUpdate");
+            BT_ZONE_SCOPE("Renderer::Update::ScheduleSceneUpdate");
             ScheduleSceneUpdateTask(elapsedSeconds);
         });
     }
 
     runCapturedStage("BeginUploadPolicyFrame", [&]() {
-        ZoneScopedN("Renderer::Update::BeginUploadPolicyFrame");
+        BT_ZONE_SCOPE("Renderer::Update::BeginUploadPolicyFrame");
         org::runtime::BeginUploadPolicyFrame();
     });
 
@@ -3196,7 +4544,7 @@ void Renderer::Update(float elapsedSeconds) {
     auto computeQueue = deviceManager.GetComputeQueue();
     runCapturedStage("FrameMaintenance", [&]() {
         if (currentRenderGraph) {
-            ZoneScopedN("Renderer::Update::FrameStatistics");
+            BT_ZONE_SCOPE("Renderer::Update::FrameStatistics");
             if (auto* statisticsService = currentRenderGraph->GetStatisticsService()) {
                 statisticsService->OnFrameComplete(m_frameIndex, computeQueue); // Gather statistics for the last iteration of the frame
                 statisticsService->OnFrameComplete(m_frameIndex, graphicsQueue); // Gather statistics for the last iteration of the frame
@@ -3207,7 +4555,7 @@ void Renderer::Update(float elapsedSeconds) {
 }
 
 void Renderer::PostUpdate() {
-    ZoneScopedN("Renderer::PostUpdate");
+    BT_ZONE_SCOPE("Renderer::PostUpdate");
 	if (!currentScene) {
         return;
     }
@@ -3329,7 +4677,9 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         return;
     }
     if (m_clodTelemetryReadbackPending ||
+        m_clodRasterArgsReadbackPending ||
         m_clodVisibleCounterReadbackPending ||
+        m_clodVisibleRecordsReadbackPending ||
         m_clodReplayStateReadbackPending) {
         return;
     }
@@ -3342,7 +4692,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     auto& world = RendererECSManager::GetInstance().GetWorld();
     const auto visibilityTag = world.component<CLodExtensionVisibilityBufferTag>();
 
-    std::shared_ptr<Resource> telemetryResource;
+    std::shared_ptr<org::Resource> telemetryResource;
     world.query_builder<const Components::Resource>()
         .with<CLodWorkGraphTelemetryBufferTag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -3353,7 +4703,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             }
         });
 
-    std::shared_ptr<Resource> visibleCounterResource;
+    std::shared_ptr<org::Resource> visibleCounterResource;
     world.query_builder<const Components::Resource>()
         .with<VisibleClustersCounterTag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -3364,7 +4714,27 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             }
         });
 
-    std::shared_ptr<Resource> replayStateResource;
+    std::shared_ptr<org::Resource> visibleRecordsResource;
+    world.query_builder<const Components::Resource>()
+        .with<VisibleClustersBufferTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!visibleRecordsResource) visibleRecordsResource = component.resource.lock();
+        });
+
+    std::shared_ptr<org::Resource> rasterArgsResource;
+    world.query_builder<const Components::Resource>()
+        .with<CLodPrimaryPhase1RasterIndirectArgsTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!rasterArgsResource) {
+                rasterArgsResource = component.resource.lock();
+            }
+        });
+
+    std::shared_ptr<org::Resource> replayStateResource;
     world.query_builder<const Components::Resource>()
         .with<CLodOcclusionReplayStateBufferTag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -3375,19 +4745,91 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             }
         });
 
-    if (!telemetryResource || !visibleCounterResource || !replayStateResource) {
+    if (!telemetryResource || !rasterArgsResource || !visibleCounterResource ||
+        !visibleRecordsResource || !replayStateResource) {
         return;
     }
 
     const uint64_t requestedFrame = m_totalFramesRendered;
     m_lastCLodVisibilityTelemetryRequestFrame = requestedFrame;
     m_clodTelemetryReadbackPending = true;
+    m_clodRasterArgsReadbackPending = true;
     m_clodVisibleCounterReadbackPending = true;
+    m_clodVisibleRecordsReadbackPending = true;
     m_clodReplayStateReadbackPending = true;
 
     uint32_t primaryActiveSetWorkloads = 0u;
     uint32_t primaryActiveSetMembers = 0u;
-    if (auto* objectManager = m_managerInterface.GetObjectManager()) {
+    struct VisibleRecordAudit {
+        std::mutex mutex;
+        std::optional<std::uint32_t> count;
+        std::optional<std::vector<std::byte>> indices;
+        std::unordered_set<std::uint32_t> allowed;
+        std::uint32_t residentDrawRecordCount = 0;
+        std::uint64_t drawRecordsRevision = 0;
+        std::uint64_t indirectRevision = 0;
+        bool reported = false;
+
+        void TryReport(std::uint64_t frame) {
+            std::lock_guard lock(mutex);
+            if (reported || !count || !indices) return;
+            constexpr std::size_t recordBytes = sizeof(std::uint32_t) * 4u;
+            const auto available = static_cast<std::uint32_t>(indices->size() / recordBytes);
+            const auto used = (std::min)(*count, available);
+            std::uint32_t matched = 0, unpublished = 0, outOfRange = 0;
+            for (std::uint32_t i = 0; i < used; ++i) {
+                std::uint32_t packedIdentity = 0;
+                std::memcpy(&packedIdentity, indices->data() + i * recordBytes, sizeof(packedIdentity));
+                const auto drawRecordIndex = (packedIdentity >> 8u) & 0xFFFFFFu;
+                if (drawRecordIndex >= residentDrawRecordCount) ++outOfRange;
+                if (allowed.contains(drawRecordIndex)) ++matched; else ++unpublished;
+            }
+            reported = true;
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.VisibleRecordsMatched", matched);
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.VisibleRecordsUnpublished", unpublished);
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.VisibleRecordsOutOfRange", outOfRange);
+            spdlog::info(
+                "SARP CLOD visible-record audit: frame={} draw_revision={} indirect_revision={} "
+                "visible={} available={} allowed={} matched={} unpublished={} out_of_range={}",
+                frame, drawRecordsRevision, indirectRevision, *count, available, allowed.size(),
+                matched, unpublished, outOfRange);
+        }
+    };
+    auto visibleTransformAudit = std::make_shared<VisibleRecordAudit>();
+    if (const auto published = m_context.publishedRendererState) {
+        visibleTransformAudit->drawRecordsRevision = published->drawRecords.revision;
+        visibleTransformAudit->indirectRevision = published->indirectWorkloads.revision;
+        const auto objects = published->drawRecords.payload.Get<br::render::PublishedObjectBufferState>();
+        const auto indirect = published->indirectWorkloads.payload.Get<br::render::PublishedIndirectState>();
+        const auto drawVersion = objects ? objects->FindVersion(br::render::kObjectDrawRecordVariant) : nullptr;
+        const auto generationVersion = objects ? objects->FindVersion(br::render::kObjectVisibilityGenerationVariant) : nullptr;
+        visibleTransformAudit->residentDrawRecordCount = drawVersion
+            ? static_cast<std::uint32_t>((std::min<std::uint64_t>)(drawVersion->elementCount, UINT32_MAX)) : 0u;
+        const auto drawBytes = drawVersion ? drawVersion->MaterializeCpuImage() : nullptr;
+        const auto generationBytes = generationVersion ? generationVersion->MaterializeCpuImage() : nullptr;
+        if (drawBytes && generationBytes && indirect) {
+            for (const auto& active : indirect->activeListVersions) {
+                const auto activeBytes = active.version ? active.version->MaterializeCpuImage() : nullptr;
+                if (!activeBytes) continue;
+                const auto activeByteCount = (std::min<std::size_t>)(activeBytes->size(),
+                    static_cast<std::size_t>(active.version->elementCount) * sizeof(br::render::ActiveDrawEntryDTO));
+                for (std::size_t offset = 0; offset + sizeof(br::render::ActiveDrawEntryDTO) <= activeByteCount;
+                    offset += sizeof(br::render::ActiveDrawEntryDTO)) {
+                    br::render::ActiveDrawEntryDTO entry{};
+                    std::memcpy(&entry, activeBytes->data() + offset, sizeof(entry));
+                    const auto generationOffset = static_cast<std::size_t>(entry.drawRecordIndex) * sizeof(std::uint32_t);
+                    const auto drawOffset = static_cast<std::size_t>(entry.drawRecordIndex) * sizeof(InstanceDrawRecordCB);
+                    if (generationOffset + sizeof(std::uint32_t) > generationBytes->size() ||
+                        drawOffset + sizeof(InstanceDrawRecordCB) > drawBytes->size()) continue;
+                    std::uint32_t generation = 0;
+                    std::memcpy(&generation, generationBytes->data() + generationOffset, sizeof(generation));
+                    if (generation != entry.generation) continue;
+                    visibleTransformAudit->allowed.insert(entry.drawRecordIndex);
+                }
+            }
+        }
+    }
+    if (auto* objectManager = m_pObjectManager.get()) {
         auto activeStats = objectManager->SnapshotActiveDrawSetDebugStats();
         std::uint64_t totalSpan = 0;
         std::uint64_t totalLive = 0;
@@ -3442,8 +4884,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     readbackService->RequestReadbackCapture(
         "CLodOpaque::RasterizeClustersPass2",
         telemetryResource.get(),
-        RangeSpec{},
-        [this, requestedFrame, primaryActiveSetWorkloads, primaryActiveSetMembers](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame, primaryActiveSetWorkloads, primaryActiveSetMembers](org::ReadbackCaptureResult&& result) {
             m_clodTelemetryReadbackPending = false;
 
             constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
@@ -3459,6 +4901,11 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             std::memcpy(decoded.counters.data(), result.data.data(), telemetryBytes);
             auto counter = [&](CLodWorkGraphCounterIndex idx) -> uint32_t {
                 return decoded.counters[static_cast<size_t>(idx)];
+            };
+            const auto publishCounter = [&](std::string_view name,
+                CLodWorkGraphCounterIndex index) {
+                basic_telemetry::SetGauge(name,
+                    static_cast<std::int64_t>(counter(index)));
             };
             auto distributionCounter = [&](uint32_t depthBin, uint32_t footprintBin) -> uint32_t {
                 constexpr uint32_t footprintBinCount = 6u;
@@ -3476,6 +4923,11 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 .residentLeaves = traversalLeaves > nonresidentLeaves ? traversalLeaves - nonresidentLeaves : 0u,
                 .nonresidentLeaves = nonresidentLeaves,
                 .visibleClusterWrites = counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
+                .bucketRecordsDispatched = counter(CLodWorkGraphCounterIndex::ClusterCullBucketRecordsDispatched),
+                .histogramInputs = counter(CLodWorkGraphCounterIndex::RasterSortHistogramInputs),
+                .histogramTriangleContributors = counter(CLodWorkGraphCounterIndex::RasterSortHistogramTriangleContributors),
+                .compactionInputs = counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
+                .compactionTriangleEmitted = counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted),
                 .rasterInitializationFailures = counter(CLodWorkGraphCounterIndex::RasterMeshShaderInitFailed),
                 .sourceGroupMismatches = counter(CLodWorkGraphCounterIndex::RasterMeshShaderSourceGroupMismatch),
                 .outputTriangles = counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
@@ -3483,6 +4935,76 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 .activeSetMembers = primaryActiveSetMembers,
                 .depthTileOccupancyAvailable = false,
             });
+
+            // Keep the GPU readback boundaries in structured telemetry.  These
+            // counters are specifically intended to distinguish missing scene
+            // admission from traversal, bucket, mesh-shader, and pixel-stage
+            // collapses in automated runs; the log-only diagnostic was too easy
+            // to lose when the host exits immediately after benchmarking.
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.Frame",
+                static_cast<std::int64_t>(requestedFrame));
+            publishCounter("BasicRenderer.CLod.Readback.ObjectCullInRange",
+                CLodWorkGraphCounterIndex::ObjectCullInRangeThreads);
+            publishCounter("BasicRenderer.CLod.Readback.ObjectCullVisible",
+                CLodWorkGraphCounterIndex::ObjectCullVisibleThreads);
+            publishCounter("BasicRenderer.CLod.Readback.TraversalLeaves",
+                CLodWorkGraphCounterIndex::TraverseNodesLeafNodeRecords);
+            publishCounter("BasicRenderer.CLod.Readback.TraversalEmitted",
+                CLodWorkGraphCounterIndex::TraverseNodesTraverseRecordsEmitted);
+            publishCounter("BasicRenderer.CLod.Readback.ClusterVisibleWrites",
+                CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites);
+            publishCounter("BasicRenderer.CLod.Readback.BucketRecords",
+                CLodWorkGraphCounterIndex::ClusterCullBucketRecordsDispatched);
+            publishCounter("BasicRenderer.CLod.Readback.HistogramInputs",
+                CLodWorkGraphCounterIndex::RasterSortHistogramInputs);
+            publishCounter("BasicRenderer.CLod.Readback.CompactionInputs",
+                CLodWorkGraphCounterIndex::RasterSortCompactionInputs);
+            publishCounter("BasicRenderer.CLod.Readback.CompactionTriangles",
+                CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted);
+            publishCounter("BasicRenderer.CLod.Readback.RasterArgsNonZeroBuckets",
+                CLodWorkGraphCounterIndex::RasterArgsNonZeroBuckets);
+            publishCounter("BasicRenderer.CLod.Readback.RasterArgsDispatchGroups",
+                CLodWorkGraphCounterIndex::RasterArgsDispatchGroups);
+            publishCounter("BasicRenderer.CLod.Readback.RasterGroups",
+                CLodWorkGraphCounterIndex::RasterMeshShaderGroups);
+            publishCounter("BasicRenderer.CLod.Readback.RasterInRange",
+                CLodWorkGraphCounterIndex::RasterMeshShaderInRange);
+            publishCounter("BasicRenderer.CLod.Readback.RasterInitFailures",
+                CLodWorkGraphCounterIndex::RasterMeshShaderInitFailed);
+            publishCounter("BasicRenderer.CLod.Readback.RasterSourceGroupMismatches",
+                CLodWorkGraphCounterIndex::RasterMeshShaderSourceGroupMismatch);
+            publishCounter("BasicRenderer.CLod.Readback.RasterOutputTriangles",
+                CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles);
+            publishCounter("BasicRenderer.CLod.Readback.PixelInvocations",
+                CLodWorkGraphCounterIndex::RasterPixelShaderInvocations);
+            publishCounter("BasicRenderer.CLod.Readback.PixelVisibilityWrites",
+                CLodWorkGraphCounterIndex::RasterPixelVisibilityWrites);
+            publishCounter("BasicRenderer.CLod.Readback.PixelScissorRejected",
+                CLodWorkGraphCounterIndex::RasterPixelScissorRejected);
+            publishCounter("BasicRenderer.CLod.Readback.PixelTargetBoundsRejected",
+                CLodWorkGraphCounterIndex::RasterPixelTargetBoundsRejected);
+
+            const auto compactedTriangles = counter(
+                CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted);
+            const auto argumentDispatchGroups = counter(
+                CLodWorkGraphCounterIndex::RasterArgsDispatchGroups);
+            const auto rasterGroups = counter(
+                CLodWorkGraphCounterIndex::RasterMeshShaderGroups);
+            const auto outputTriangles = counter(
+                CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles);
+            const auto pixelInvocations = counter(
+                CLodWorkGraphCounterIndex::RasterPixelShaderInvocations);
+            const auto visibilityWrites = counter(
+                CLodWorkGraphCounterIndex::RasterPixelVisibilityWrites);
+            const bool collapsed = CLodRasterPipelineCollapsed(compactedTriangles,
+                argumentDispatchGroups, rasterGroups, outputTriangles,
+                pixelInvocations, visibilityWrites);
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.RasterPipelineCollapsed",
+                collapsed ? 1 : 0);
+            if (collapsed) {
+                basic_telemetry::AddCounter(
+                    "BasicRenderer.CLod.Readback.RasterPipelineCollapseSamples");
+            }
 
 			spdlog::info(
 				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} rejected_occlusion={} replay_rejected_occlusion={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) stream(request_attempts={} range_rejects={} resident_hits={} request_appends={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_condition2={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={} nonresident_leaf={} emit_bucket={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} rigid={} skinned={} cube_candidates={} skin_bone_groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={})",
@@ -3660,10 +5182,71 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         });
 
     readbackService->RequestReadbackCapture(
+        "CLodOpaque::RasterizeClustersPass1",
+        rasterArgsResource.get(),
+        org::RangeSpec{},
+        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
+            m_clodRasterArgsReadbackPending = false;
+
+            const size_t commandCount = result.data.size() / sizeof(RasterizeClustersCommand);
+            uint64_t dispatchGroups = 0u;
+            uint32_t nonZeroCommands = 0u;
+            RasterizeClustersCommand firstNonZero{};
+            bool foundFirst = false;
+            for (size_t i = 0; i < commandCount; ++i) {
+                RasterizeClustersCommand command{};
+                std::memcpy(&command,
+                    result.data.data() + i * sizeof(RasterizeClustersCommand),
+                    sizeof(command));
+                const uint64_t groups = static_cast<uint64_t>(command.dispatchX) *
+                    command.dispatchY * command.dispatchZ;
+                if (groups == 0u) {
+                    continue;
+                }
+                ++nonZeroCommands;
+                dispatchGroups += groups;
+                if (!foundFirst) {
+                    firstNonZero = command;
+                    foundFirst = true;
+                }
+            }
+
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.Phase1RasterArgsBufferBytes",
+                static_cast<std::int64_t>(result.data.size()));
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.Phase1RasterArgsBufferCommands",
+                static_cast<std::int64_t>(commandCount));
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.Phase1RasterArgsBufferNonZeroCommands",
+                static_cast<std::int64_t>(nonZeroCommands));
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.Phase1RasterArgsBufferDispatchGroups",
+                static_cast<std::int64_t>(dispatchGroups));
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.Phase1RasterArgsBufferFirstBase",
+                static_cast<std::int64_t>(firstNonZero.baseClusterOffset));
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.Phase1RasterArgsBufferFirstXDim",
+                static_cast<std::int64_t>(firstNonZero.xDim));
+            basic_telemetry::SetGauge("BasicRenderer.CLod.Readback.Phase1RasterArgsBufferFirstBucket",
+                static_cast<std::int64_t>(firstNonZero.rasterBucketID));
+
+            spdlog::info(
+                "SARP CLOD phase-1 raster-args readback: frame={} bytes={} commands={} nonzero={} groups={} "
+                "first(base={} xdim={} bucket={} dispatch={},{},{})",
+                requestedFrame,
+                result.data.size(),
+                commandCount,
+                nonZeroCommands,
+                dispatchGroups,
+                firstNonZero.baseClusterOffset,
+                firstNonZero.xDim,
+                firstNonZero.rasterBucketID,
+                firstNonZero.dispatchX,
+                firstNonZero.dispatchY,
+                firstNonZero.dispatchZ);
+        });
+
+    readbackService->RequestReadbackCapture(
         "CLodOpaque::HierarchicalCullingPass2",
         visibleCounterResource.get(),
-        RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame, visibleTransformAudit](org::ReadbackCaptureResult&& result) {
             m_clodVisibleCounterReadbackPending = false;
 
             if (result.data.size() < sizeof(uint32_t)) {
@@ -3676,6 +5259,11 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 
             uint32_t visibleClusters = 0;
             std::memcpy(&visibleClusters, result.data.data(), sizeof(uint32_t));
+            {
+                std::lock_guard lock(visibleTransformAudit->mutex);
+                visibleTransformAudit->count = visibleClusters;
+            }
+            visibleTransformAudit->TryReport(requestedFrame);
             spdlog::info(
                 "SARP CLOD visibility counter: frame={} visible_clusters={}",
                 requestedFrame,
@@ -3684,9 +5272,22 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 
     readbackService->RequestReadbackCapture(
         "CLodOpaque::HierarchicalCullingPass2",
+        visibleRecordsResource.get(),
+        org::RangeSpec{},
+        [this, requestedFrame, visibleTransformAudit](org::ReadbackCaptureResult&& result) {
+            m_clodVisibleRecordsReadbackPending = false;
+            {
+                std::lock_guard lock(visibleTransformAudit->mutex);
+                visibleTransformAudit->indices = std::move(result.data);
+            }
+            visibleTransformAudit->TryReport(requestedFrame);
+        });
+
+    readbackService->RequestReadbackCapture(
+        "CLodOpaque::HierarchicalCullingPass2",
         replayStateResource.get(),
-        RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
             m_clodReplayStateReadbackPending = false;
 
             if (result.data.size() < sizeof(CLodReplayBufferState)) {
@@ -3755,8 +5356,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     }
     auto& world = RendererECSManager::GetInstance().GetWorld();
     const auto shadowTag = world.component<CLodExtensionShadowTag>();
-    std::shared_ptr<Resource> statsResource;
-    std::shared_ptr<Resource> workTelemetryResource;
+    std::shared_ptr<org::Resource> statsResource;
+    std::shared_ptr<org::Resource> workTelemetryResource;
     world.query_builder<const Components::Resource>()
         .with<CLodVirtualShadowStatsTag>()
         .with<CLodExtensionTypeTag>(shadowTag)
@@ -3785,8 +5386,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     readbackService->RequestReadbackCapture(
         "DeferredShadingPass",
         statsResource.get(),
-        RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+        org::RangeSpec{},
+        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
             m_clodVirtualShadowTelemetryReadbackPending = false;
             if (result.data.size() < sizeof(CLodVirtualShadowStats)) {
                 spdlog::error(
@@ -3960,8 +5561,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
         readbackService->RequestReadbackCapture(
             "CLodShadow::RasterizeClustersPass1",
             workTelemetryResource.get(),
-            RangeSpec{},
-            [requestedFrame](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [requestedFrame](org::ReadbackCaptureResult&& result) {
                 constexpr size_t telemetryBytes =
                     sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
                 if (result.data.size() < telemetryBytes) {
@@ -3985,8 +5586,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
             // at either raster pass can observe only graphics or only compute.
             "CLodShadow::VirtualShadowComposePagesPass",
             workTelemetryResource.get(),
-            RangeSpec{},
-            [this, requestedFrame](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, requestedFrame](org::ReadbackCaptureResult&& result) {
                 m_clodVirtualShadowWorkTelemetryReadbackPending = false;
                 constexpr size_t telemetryBytes =
                     sizeof(uint32_t) *
@@ -4073,7 +5674,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     }
 
     struct CasterTelemetryResource {
-        std::shared_ptr<Resource> resource;
+        std::shared_ptr<org::Resource> resource;
         std::string providerId;
         std::string completionPassName;
     };
@@ -4092,8 +5693,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
         readbackService->RequestReadbackCapture(
             telemetry.completionPassName,
             telemetry.resource.get(),
-            RangeSpec{},
-            [this, requestedFrame, providerId = telemetry.providerId](ReadbackCaptureResult&& result) {
+            org::RangeSpec{},
+            [this, requestedFrame, providerId = telemetry.providerId](org::ReadbackCaptureResult&& result) {
                 if (m_virtualShadowCasterTelemetryReadbacksPending != 0u) {
                     --m_virtualShadowCasterTelemetryReadbacksPending;
                 }
@@ -4119,7 +5720,10 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         return;
     }
 
-    if (!SettingsManager::GetInstance().getSettingGetter<bool>(ObjectReyesAtlasTelemetryDebugSettingName)()) {
+    // Shares the environment override with the shader define in
+    // ReyesPatchRasterizationPass, so a benchmark run that cannot reach the debug
+    // menu still gets both the compiled-in counters and this readback.
+    if (!IsObjectReyesAtlasTelemetryDebugEnabled()) {
         m_loggedObjectReyesAtlasTelemetryEnabled = false;
         return;
     }
@@ -4131,9 +5735,20 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         m_loggedObjectReyesAtlasTelemetryEnabled = true;
     }
 
-    constexpr uint64_t kCaptureIntervalFrames = 300;
-    if (m_lastObjectReyesAtlasTelemetryRequestFrame != UINT64_MAX &&
-        m_totalFramesRendered - m_lastObjectReyesAtlasTelemetryRequestFrame < kCaptureIntervalFrames) {
+    // The first sample waits one interval: at frame 0 no Reyes geometry has
+    // streamed in, so it only ever reported zeros. Short benchmark runs set
+    // SARP_OBJECT_REYES_ATLAS_TELEMETRY_INTERVAL to sample within their window.
+    static const uint64_t captureIntervalFrames = [] {
+        char* value = nullptr;
+        size_t length = 0;
+        _dupenv_s(&value, &length, "SARP_OBJECT_REYES_ATLAS_TELEMETRY_INTERVAL");
+        const uint64_t frames = value ? std::strtoull(value, nullptr, 10) : 0u;
+        std::free(value);
+        return frames ? frames : 300u;
+    }();
+    const uint64_t lastRequestFrame = m_lastObjectReyesAtlasTelemetryRequestFrame == UINT64_MAX
+        ? 0u : m_lastObjectReyesAtlasTelemetryRequestFrame;
+    if (m_totalFramesRendered - lastRequestFrame < captureIntervalFrames) {
         return;
     }
     if (m_objectReyesAtlasTelemetryPhase1ReadbackPending ||
@@ -4149,7 +5764,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
     auto& world = RendererECSManager::GetInstance().GetWorld();
     const auto visibilityTag = world.component<CLodExtensionVisibilityBufferTag>();
 
-    std::shared_ptr<Resource> phase1Resource;
+    std::shared_ptr<org::Resource> phase1Resource;
     world.query_builder<const Components::Resource>()
         .with<CLodReyesTelemetryBufferPhase1Tag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -4160,7 +5775,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
             }
         });
 
-    std::shared_ptr<Resource> phase2Resource;
+    std::shared_ptr<org::Resource> phase2Resource;
     world.query_builder<const Components::Resource>()
         .with<CLodReyesTelemetryBufferPhase2Tag>()
         .with<CLodExtensionTypeTag>(visibilityTag)
@@ -4178,7 +5793,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
     const uint64_t requestedFrame = m_totalFramesRendered;
     m_lastObjectReyesAtlasTelemetryRequestFrame = requestedFrame;
 
-    auto logTelemetry = [requestedFrame](const char* phaseLabel, ReadbackCaptureResult&& result) {
+    auto logTelemetry = [requestedFrame](const char* phaseLabel, org::ReadbackCaptureResult&& result) {
         if (result.data.size() < sizeof(CLodReyesTelemetry)) {
             spdlog::warn(
                 "SARP Object Reyes atlas shader telemetry: frame={} phase={} payload too small ({} bytes).",
@@ -4194,7 +5809,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
             return value == 0xFFFFFFFFu ? 0u : value;
         };
         spdlog::info(
-            "SARP Object Reyes atlas shader telemetry: frame={} phase={} phaseIndex={} atlasMaterials={} displacementEnabled={} zeroDescriptor={} sourceSamples={} materialSlot=[{},{}] heightDescriptor=[{},{}] sampler=[{},{}] sourceHeightU16=[{},{}] patchSamples={} patchHeightU16=[{},{}] patchUvU16=([{},{}],[{},{}]) pageUvSets=[{},{}] heightUvSet=[{},{}] invalidHeightUvSet={} rasterWork={} patches={} microTris={}",
+            "SARP Object Reyes atlas shader telemetry: frame={} phase={} phaseIndex={} atlasMaterials={} displacementEnabled={} zeroDescriptor={} sourceSamples={} materialSlot=[{},{}] heightDescriptor=[{},{}] sampler=[{},{}] sourceHeightU16=[{},{}] patchSamples={} patchHeightU16=[{},{}] patchUvU16=([{},{}],[{},{}]) pageUvSets=[{},{}] heightUvSet=[{},{}] invalidHeightUvSet={} rasterWork={} patches={} microTris={} classify=[in={} full={} owned={} dropped={}] overflow=[split={} dice={} rasterWorkPatch={} rasterWorkBatch={} microTri={}] rasterCull=[clip={} preArea={} emptyBounds={} zeroMicroTri={} tinyFallback={} nearPlaneQuad={} windingSwap={}] occlusion=[splitTest={} splitDrop={} diceTest={} diceDrop={}] patchDomain=[invalidSplit={} invalidDice={} diced={} splitCollapse={} deepestSplit={} maxSplitPasses={} dicedTriEst={}]",
             requestedFrame,
             phaseLabel,
             telemetry.phaseIndex,
@@ -4224,16 +5839,61 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
             telemetry.objectReyesAtlasDebugInvalidHeightUvSetCount,
             telemetry.rasterWorkEntryCount,
             telemetry.patchRasterizedPatchCount,
-            telemetry.patchRasterizedMicroTriangleCount);
+            telemetry.patchRasterizedMicroTriangleCount,
+            // reyesClassify.hlsl routes every visible cluster to exactly one of
+            // the full or owned outputs, unless the destination buffer is full,
+            // in which case it returns without emitting anything and the cluster
+            // is never drawn by either path. "dropped" is that loss.
+            telemetry.visibleClusterInputCount,
+            telemetry.fullClusterOutputCount,
+            telemetry.ownedClusterOutputCount,
+            telemetry.visibleClusterInputCount >
+                    telemetry.fullClusterOutputCount + telemetry.ownedClusterOutputCount
+                ? telemetry.visibleClusterInputCount -
+                    (telemetry.fullClusterOutputCount + telemetry.ownedClusterOutputCount)
+                : 0u,
+            telemetry.splitQueueOverflowCounts[0] + telemetry.splitQueueOverflowCounts[1] +
+                telemetry.splitQueueOverflowCounts[2] + telemetry.splitQueueOverflowCounts[3],
+            telemetry.diceQueueOverflowCounts[0] + telemetry.diceQueueOverflowCounts[1] +
+                telemetry.diceQueueOverflowCounts[2] + telemetry.diceQueueOverflowCounts[3],
+            telemetry.rasterWorkOverflowPatchCount,
+            telemetry.rasterWorkOverflowBatchCount,
+            telemetry.rasterMicroTriangleOverflowCount,
+            // patchRasterizedMicroTriangleCount counts micro-triangles handed to
+            // the rasterizer, not visibility-buffer writes. These say how many
+            // were thrown away inside it, which is the difference between "Reyes
+            // ran" and "Reyes produced pixels".
+            telemetry.rasterClipCullCount,
+            telemetry.rasterPreAreaCullCount,
+            telemetry.rasterEmptyBoundsCullCount,
+            telemetry.rasterZeroMicroTriangleCount,
+            telemetry.rasterTinyTriangleFallbackCount,
+            telemetry.rasterNearPlaneClippedQuadCount,
+            telemetry.rasterWindingSwapCount,
+            telemetry.splitOcclusionTestCount,
+            telemetry.splitOcclusionDropCount,
+            telemetry.diceOcclusionTestCount,
+            telemetry.diceOcclusionDropCount,
+            // The patch domain is what maps a diced micro-triangle back onto its
+            // source triangle. A degenerate or out-of-range domain extrapolates
+            // the interpolated positions away from the source geometry, which is
+            // how a micro-triangle ends up projecting off-screen with real area
+            // and no near-plane clip.
+            telemetry.invalidSplitPatchDomainCount,
+            telemetry.invalidDicePatchDomainCount,
+            telemetry.dicedPatchCount,
+            telemetry.splitCollapseFallbackDiceCount,
+            telemetry.deepestSplitLevelReached,
+            telemetry.configuredMaxSplitPassCount,
+            telemetry.dicedTriangleEstimateCount);
     };
 
     if (phase1Resource) {
         m_objectReyesAtlasTelemetryPhase1ReadbackPending = true;
-        readbackService->RequestReadbackCapture(
-            "CLodOpaque::ReyesPatchRasterPass1",
+        readbackService->RequestReadbackCaptureAfterGraph(
             phase1Resource.get(),
-            RangeSpec{},
-            [this, logTelemetry](ReadbackCaptureResult&& result) mutable {
+            org::RangeSpec{},
+            [this, logTelemetry](org::ReadbackCaptureResult&& result) mutable {
                 m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;
                 logTelemetry("phase1", std::move(result));
             });
@@ -4241,11 +5901,10 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
 
     if (phase2Resource) {
         m_objectReyesAtlasTelemetryPhase2ReadbackPending = true;
-        readbackService->RequestReadbackCapture(
-            "CLodOpaque::ReyesPatchRasterPass2",
+        readbackService->RequestReadbackCaptureAfterGraph(
             phase2Resource.get(),
-            RangeSpec{},
-            [this, logTelemetry](ReadbackCaptureResult&& result) mutable {
+            org::RangeSpec{},
+            [this, logTelemetry](org::ReadbackCaptureResult&& result) mutable {
                 m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;
                 logTelemetry("phase2", std::move(result));
             });
@@ -4314,11 +5973,10 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
     const float mip0TexelWorldSize = basePageWorldSize / static_cast<float>((std::max)(pageSize, 1u));
     const auto forcedFallback = SettingsManager::GetInstance().getSettingGetter<bool>("forceDirectTerrainRvtFallback")();
 
-    readbackService->RequestReadbackCapture(
-        "EvaluateMaterialGroupsPass",
-        statsResource.get(),
-        RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+    readbackService->RequestReadbackCaptureAfterGraph(
+            statsResource.get(),
+        org::RangeSpec{},
+        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
             m_terrainRvtStatsReadbackPending = false;
 
             if (result.data.size() < sizeof(TerrainRvtTelemetryStatsReadback)) {
@@ -4439,12 +6097,11 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 stats.generationPageTableXor,
                 stats.generationPhysicalPageXor);
         },
-        QueueKind::Copy);
+        org::QueueKind::Copy);
 
-    readbackService->RequestReadbackCapture(
-        "EvaluateMaterialGroupsPass",
-        countersResource.get(),
-        RangeSpec{},
+    readbackService->RequestReadbackCaptureAfterGraph(
+            countersResource.get(),
+        org::RangeSpec{},
         [this,
          requestedFrame,
          pageSize,
@@ -4460,7 +6117,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
          maxClipLevels,
          maxGeneratedPagesPerFrame,
          mipCount,
-         forcedFallback](ReadbackCaptureResult&& result) {
+         forcedFallback](org::ReadbackCaptureResult&& result) {
             m_terrainRvtCountersReadbackPending = false;
 
             constexpr size_t counterBytes = sizeof(uint32_t) * 4u;
@@ -4496,11 +6153,11 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 mipCount,
                 forcedFallback ? 1 : 0);
         },
-        QueueKind::Copy);
+        org::QueueKind::Copy);
 }
 
 void Renderer::Render() {
-    ZoneScopedN("Renderer::Render");
+    BT_ZONE_SCOPE("Renderer::Render");
 
     const auto runCapturedStage = [this](const char* stageName, auto&& stageFn) {
         const auto stageStart = std::chrono::steady_clock::now();
@@ -4520,6 +6177,17 @@ void Renderer::Render() {
     if (!currentRenderGraph) {
         return;
     }
+
+    // Update may intentionally apply publication backpressure while the first
+    // complete immutable manifest is being produced.
+    if (!m_frameInputs) {
+        return;
+    }
+
+    // Async mode runs graph update/declaration/preparation on its serialized
+    // owner. Transitional render-context assembly still reads a few renderer
+    // services, so join before those reads until they are publication-only.
+    currentRenderGraph->WaitForPreparation();
 
     if (!m_swapChainReady) {
         if (!m_loggedSwapChainNotReady) {
@@ -4560,16 +6228,20 @@ void Renderer::Render() {
     auto& deviceManager = DeviceManager::GetInstance();
 
     {
-        ZoneScopedN("Renderer::Render::PrepareRenderContext");
+        BT_ZONE_SCOPE("Renderer::Render::PrepareRenderContext");
         runCapturedStage("PrepareRenderContext", [&]() {
-            m_context.currentScene = m_sceneRenderOverlapEnabled ? nullptr : currentScene.get();
+			if (!currentRenderGraph || !currentRenderGraph->GetDescriptorService()) {
+				throw std::runtime_error("Renderer: descriptor service unavailable while preparing render context");
+			}
+			auto* descriptorService = currentRenderGraph->GetDescriptorService();
             m_context.hasPrimaryCamera = false;
             m_context.primaryViewID = 0;
-            m_context.textureDescriptorHeap = org::runtime::GetActiveSRVDescriptorHeap();
-            m_context.samplerDescriptorHeap = org::runtime::GetActiveSamplerDescriptorHeap();
+			m_context.textureDescriptorHeap = descriptorService->GetSRVDescriptorHeap();
+			m_context.samplerDescriptorHeap = descriptorService->GetSamplerDescriptorHeap();
             m_context.rtvHeap = rtvHeap.Get();
             m_context.rtvDescriptorSize = rtvDescriptorSize;
             m_context.dsvDescriptorSize = dsvDescriptorSize;
+            m_context.swapchainImageIndex = renderedFrameIndex;
             m_context.frameIndex = renderedFrameIndex;
             m_context.frameNumber = m_totalFramesRendered;
             m_context.frameFenceValue = m_currentFrameFenceValue;
@@ -4577,20 +6249,19 @@ void Renderer::Render() {
             m_context.outputResolution = { outputRes.x, outputRes.y };
             m_context.clodRayTracingSupported = deviceManager.GetCLodRayTracingSupported();
             m_context.rayTracedReflectionsEnabled = m_rayTracedReflections && m_context.clodRayTracingSupported;
-            m_context.viewManager = m_pViewManager.get();
-            m_context.objectManager = m_pObjectManager.get();
-            m_context.meshManager = m_pMeshManager.get();
-            m_context.indirectCommandBufferManager = m_pIndirectCommandBufferManager.get();
-            m_context.lightManager = m_pLightManager.get();
-            m_context.environmentManager = m_pEnvironmentManager.get();
-            m_context.materialManager = m_pMaterialManager.get();
-            m_context.clodRayTracingSystem = m_clodRayTracingSystem.get();
+            m_context.materialTextureStreamingStats = m_pMaterialManager
+                ? m_pMaterialManager->GetMaterialTextureStreamingStats()
+                : MaterialTextureStreamingStats{};
+            m_context.environmentWork = m_environmentWorkServices;
+            m_context.clodRayTracingSystem = m_clodRayTracingSystem;
 
             if (m_context.rayTracedReflectionsEnabled && m_clodRayTracingSystem && m_pMeshManager) {
+                std::scoped_lock rayTracingLock(m_clodRayTracingSystem->FrameOperationMutex());
                 m_clodRayTracingSystem->Refresh(*m_pMeshManager);
                 m_clodRayTracingSystem->UpdateGpuResources(deviceManager.GetDevice(), deviceManager.GetRayTracingFeatures());
             }
             else if (m_clodRayTracingSystem) {
+                std::scoped_lock rayTracingLock(m_clodRayTracingSystem->FrameOperationMutex());
                 m_clodRayTracingSystem->Reset();
             }
             m_context.drawStats = drawStats;
@@ -4622,85 +6293,27 @@ void Renderer::Render() {
 
     }
 
-    struct RendererHostFrameData : IHostExecutionData {
-        rhi::DescriptorHeap textureDescriptorHeap;
-        rhi::DescriptorHeap samplerDescriptorHeap;
-        DirectX::XMUINT2 renderResolution{};
-        DirectX::XMUINT2 outputResolution{};
-        const RenderContext* renderContext = nullptr;
-
-        const void* TryGet(std::type_index t) const noexcept override {
-            if (t == std::type_index(typeid(RenderContext))) {
-                return renderContext;
-            }
-            if (t == std::type_index(typeid(RendererHostFrameData))) {
-                return this;
-            }
-            return nullptr;
-        }
-    };
-
-    RendererHostFrameData hostFrameData{};
-    hostFrameData.textureDescriptorHeap = m_context.textureDescriptorHeap;
-    hostFrameData.samplerDescriptorHeap = m_context.samplerDescriptorHeap;
-    hostFrameData.renderResolution = m_context.renderResolution;
-    hostFrameData.outputResolution = m_context.outputResolution;
-    hostFrameData.renderContext = &m_context;
-
-    PassExecutionContext passExecutionContext{};
+    org::PassExecutionContext passExecutionContext{};
     passExecutionContext.device = deviceManager.GetDevice();
     passExecutionContext.frameIndex = m_context.frameIndex;
+    passExecutionContext.executionSlot = renderedFrameIndex;
     passExecutionContext.frameFenceValue = m_context.frameFenceValue;
     passExecutionContext.deltaTime = m_context.deltaTime;
-    passExecutionContext.hostData = &hostFrameData;
+    passExecutionContext.ownedHostData = m_frameInputs;
+    passExecutionContext.hostData = passExecutionContext.ownedHostData.get();
 
     auto graphicsQueue = deviceManager.GetGraphicsQueue();
     auto computeQueue = deviceManager.GetComputeQueue();
 
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
 
-    std::shared_ptr<ExternalTextureResource> currentBackbufferResource;
-    if (renderedFrameIndex < m_backbufferResources.size()) {
-        currentBackbufferResource = m_backbufferResources[renderedFrameIndex];
-    }
-
-    if (!currentBackbufferResource) {
-        spdlog::error(
-            "Renderer: frame {} render slot {} has no backbuffer resource wrapper",
-            m_totalFramesRendered,
-            renderedFrameIndex);
-    } else {
-        const auto backbufferHandle = currentBackbufferResource->GetHandle();
-        const auto backbufferRtv = currentBackbufferResource->GetRTVSlot();
-        if (renderGraphBatchTraceEnabled) {
-            spdlog::info(
-                "Renderer: frame {} begin backbuffer diagnostics slot={} dynamicID={} backingID={} handle=({}, {}) rtv=({}, {})",
-                m_totalFramesRendered,
-                renderedFrameIndex,
-                m_dynamicBackbuffer ? m_dynamicBackbuffer->GetGlobalResourceID() : 0ull,
-                currentBackbufferResource->GetGlobalResourceID(),
-                backbufferHandle.index,
-                backbufferHandle.generation,
-                backbufferRtv.heap.index,
-                backbufferRtv.index);
-        }
-        if (!currentBackbufferResource->HasHandle() || !currentBackbufferResource->HasRTVSlot()) {
-            spdlog::error(
-                "Renderer: frame {} slot {} invalid backbuffer state before execute: hasHandle={} hasRTV={}",
-                m_totalFramesRendered,
-                renderedFrameIndex,
-                currentBackbufferResource->HasHandle(),
-                currentBackbufferResource->HasRTVSlot());
-        }
-    }
-
     {
-        ZoneScopedN("Renderer::Render::CLodVisibilityTelemetry");
+        BT_ZONE_SCOPE("Renderer::Render::CLodVisibilityTelemetry");
         MaybeRequestCLodVisibilityTelemetry();
         MaybeRequestCLodVirtualShadowTelemetry();
     }
     runCapturedStage("RenderGraphExecute", [&]() {
-        ZoneScopedN("Renderer::Render::RenderGraphExecute");
+        BT_ZONE_SCOPE("Renderer::Render::RenderGraphExecute");
         if (renderGraphBatchTraceEnabled) {
             ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "before RenderGraph::Execute");
             spdlog::info("Renderer: frame {} entering RenderGraph::Execute", m_totalFramesRendered);
@@ -4722,6 +6335,45 @@ void Renderer::Render() {
             currentRenderGraph->Execute(passExecutionContext); // Main render graph execution
             passExecutionContext.beginGpuPassRange = {};
             passExecutionContext.endGpuPassRange = {};
+            static const std::filesystem::path submittedCameraTracePath = [] {
+                wchar_t* value = nullptr;
+                size_t length = 0;
+                _wdupenv_s(&value, &length, L"SARP_SUBMITTED_CAMERA_TELEMETRY_PATH");
+                std::filesystem::path result = value && value[0] ? value : L"";
+                std::free(value);
+                return result;
+            }();
+            if (!submittedCameraTracePath.empty()) {
+                const auto submittedData = currentRenderGraph->GetLastSubmittedFrameData();
+                const auto* submitted = submittedData ? submittedData->Get<RenderContext>() : nullptr;
+                const auto views = submitted ? submitted->viewFamily : nullptr;
+                const auto primary = views ? std::find_if(views->views.begin(), views->views.end(),
+                    [](const auto& view) { return view.primary; }) : decltype(views->views.begin()){};
+                if (submitted && views && primary != views->views.end()) {
+                    const auto previousInverse = DirectX::XMMatrixInverse(nullptr, primary->cameraInfo.prevView);
+                    std::error_code fileError;
+                    if (submittedCameraTracePath.has_parent_path())
+                        std::filesystem::create_directories(submittedCameraTracePath.parent_path(), fileError);
+                    const bool writeHeader = !std::filesystem::exists(submittedCameraTracePath, fileError) ||
+                        std::filesystem::file_size(submittedCameraTracePath, fileError) == 0u;
+                    std::ofstream output(submittedCameraTracePath, std::ios::app);
+                    if (writeHeader)
+                        output << "present_call,owned_frame,preparation_slot,view_snapshot_revision,x,y,z,prev_x,prev_y,prev_z,context_x,context_y,context_z,jitter_x,jitter_y\n";
+                    output << m_totalFramesRendered << ',' << submitted->frameNumber << ','
+                        << submitted->frameSlot << ',' << views->revision << ','
+                        << primary->cameraInfo.positionWorldSpace.x << ','
+                        << primary->cameraInfo.positionWorldSpace.y << ','
+                        << primary->cameraInfo.positionWorldSpace.z << ','
+                        << DirectX::XMVectorGetX(previousInverse.r[3]) << ','
+                        << DirectX::XMVectorGetY(previousInverse.r[3]) << ','
+                        << DirectX::XMVectorGetZ(previousInverse.r[3]) << ','
+                        << submitted->primaryCamera.info.positionWorldSpace.x << ','
+                        << submitted->primaryCamera.info.positionWorldSpace.y << ','
+                        << submitted->primaryCamera.info.positionWorldSpace.z << ','
+                        << submitted->primaryCamera.jitterPixelSpace.x << ','
+                        << submitted->primaryCamera.jitterPixelSpace.y << '\n';
+                }
+            }
             if (renderGraphBatchTraceEnabled) {
                 spdlog::info("Renderer: frame {} completed RenderGraph::Execute", m_totalFramesRendered);
             }
@@ -4743,23 +6395,108 @@ void Renderer::Render() {
         }
     });
 
+    if (!currentRenderGraph->GetLastPresentDependency()) {
+        basic_telemetry::AddCounter("ORG.PresentationTail.DeferredForRecording");
+        br::telemetry::nvperf::EndFrameCapture(
+            deviceManager.GetBackend(), graphicsQueue, m_totalFramesRendered);
+        PublishFrameTaskGraphCapture();
+        FrameMark;
+        return;
+    }
+
+    // Acquire/bind the swapchain image only after scene recording and FIFO
+    // submission selected the logical frame. PresentationColor is slot-owned
+    // and was left in CopySource by PresentationReadyPass.
+    const auto presentationSlot = currentRenderGraph->GetLastExecutedPreparationSlot();
+    const auto sourceSlot = static_cast<size_t>(presentationSlot.value_or(renderedFrameIndex));
+    if (sourceSlot >= m_presentationColorResources.size()
+        || renderedFrameIndex >= m_backbufferResources.size()
+        || renderedFrameIndex >= m_commandAllocators.size()
+        || renderedFrameIndex >= m_commandLists.size()) {
+        throw std::runtime_error("Presentation tail has incomplete slot ownership");
+    }
+    auto presentationSource = m_presentationColorResources[sourceSlot];
+    auto currentBackbufferResource = m_backbufferResources[renderedFrameIndex];
+    if (!presentationSource || !currentBackbufferResource
+        || !presentationSource->HasValidBackingResource()
+        || !currentBackbufferResource->HasHandle()) {
+        throw std::runtime_error("Presentation tail has invalid resource bindings");
+    }
+    auto& presentationAllocator = m_commandAllocators[renderedFrameIndex];
+    auto& presentationList = m_commandLists[renderedFrameIndex];
+    auto recordPresentationTail = std::make_shared<std::packaged_task<void()>>(
+        [presentationSource, currentBackbufferResource,
+         &presentationAllocator, &presentationList]() {
+    presentationAllocator->Recycle();
+    presentationList->Recycle(presentationAllocator.Get());
+    rhi::TextureSubresourceRange presentationRange{};
+    presentationRange.mipCount = 1;
+    presentationRange.layerCount = 1;
+    rhi::TextureBarrier backbufferToCopy{};
+    backbufferToCopy.texture = currentBackbufferResource->GetHandle();
+    backbufferToCopy.range = presentationRange;
+    backbufferToCopy.beforeSync = rhi::ResourceSyncState::All;
+    backbufferToCopy.afterSync = rhi::ResourceSyncState::Copy;
+    backbufferToCopy.beforeAccess = rhi::ResourceAccessType::Present;
+    backbufferToCopy.afterAccess = rhi::ResourceAccessType::CopyDest;
+    backbufferToCopy.beforeLayout = rhi::ResourceLayout::Present;
+    backbufferToCopy.afterLayout = rhi::ResourceLayout::CopyDest;
+    rhi::BarrierBatch beforePresentationCopy{};
+    beforePresentationCopy.textures = {&backbufferToCopy, 1};
+    presentationList->Barriers(beforePresentationCopy);
+
+    rhi::TextureCopyRegion sourceRegion{};
+    sourceRegion.texture = presentationSource->GetAPIResource().GetHandle();
+    rhi::TextureCopyRegion destinationRegion{};
+    destinationRegion.texture = currentBackbufferResource->GetHandle();
+    presentationList->CopyTextureRegion(destinationRegion, sourceRegion);
+
+    auto backbufferToPresent = backbufferToCopy;
+    backbufferToPresent.beforeSync = rhi::ResourceSyncState::Copy;
+    backbufferToPresent.afterSync = rhi::ResourceSyncState::All;
+    backbufferToPresent.beforeAccess = rhi::ResourceAccessType::CopyDest;
+    backbufferToPresent.afterAccess = rhi::ResourceAccessType::Present;
+    backbufferToPresent.beforeLayout = rhi::ResourceLayout::CopyDest;
+    backbufferToPresent.afterLayout = rhi::ResourceLayout::Present;
+    rhi::BarrierBatch afterPresentationCopy{};
+    afterPresentationCopy.textures = {&backbufferToPresent, 1};
+    presentationList->Barriers(afterPresentationCopy);
+    presentationList->End();
+        });
+    auto presentationTailReady = recordPresentationTail->get_future();
+    const bool presentationTailSubmitted = m_presentationTailScope.Valid()
+        && TaskSchedulerManager::GetInstance().SubmitCpu(
+            m_presentationTailScope, TaskLane::FrameCritical, TaskDomain::General,
+            "Renderer::RecordPresentationTail",
+            [recordPresentationTail](const br::TaskContext&) { (*recordPresentationTail)(); });
+    if (!presentationTailSubmitted)
+        throw std::runtime_error("Presentation tail recording task was rejected");
+    recordPresentationTail.reset();
+    presentationTailReady.get();
+    basic_telemetry::AddCounter("ORG.PresentationTail.WorkerRecorded");
+
+    if (const auto dependency = currentRenderGraph->GetLastPresentDependency();
+        dependency && dependency->valid
+        && graphicsQueue.Wait(dependency->wait) != rhi::Result::Ok) {
+        throw std::runtime_error("Presentation tail failed to wait for scene output");
+    }
+    auto presentationCommandList = presentationList.Get();
+    if (graphicsQueue.Submit({&presentationCommandList, 1}) != rhi::Result::Ok) {
+        throw std::runtime_error("Presentation tail submission failed");
+    }
+    currentRenderGraph->ConfirmPresentationTailSubmission();
+    basic_telemetry::AddCounter("ORG.PresentationTail.Submitted");
+
     // Present the frame
     rhi::Result presentResult = rhi::Result::Ok;
     runCapturedStage("Present", [&]() {
-        ZoneScopedN("Renderer::Render::Present");
+        BT_ZONE_SCOPE("Renderer::Render::Present");
         if (renderGraphBatchTraceEnabled) {
             spdlog::info("Renderer: frame {} calling Present for slot {}", m_totalFramesRendered, renderedFrameIndex);
         }
-        if (auto presentDependency = currentRenderGraph->GetLastPresentDependency();
-            presentDependency && presentDependency->valid) {
-            rhi::PresentSyncDesc presentSync{
-                .queue = presentDependency->queue,
-                .wait = presentDependency->wait,
-            };
-            presentResult = m_swapChain->Present(!m_allowTearing, presentSync);
-        } else {
-            presentResult = m_swapChain->Present(!m_allowTearing);
-        }
+        // The tail was submitted on the presentation queue immediately before
+        // this call, so queue order covers the copy and Present transition.
+        presentResult = m_swapChain->Present(!m_allowTearing);
     });
 	if (presentResult == rhi::Result::ModeChanged) {
 		RECT clientRect{};
@@ -4784,8 +6521,10 @@ void Renderer::Render() {
 	}
 
     runCapturedStage("SignalFence", [&]() {
-        ZoneScopedN("Renderer::Render::SignalFence");
-        SignalFence(graphicsQueue, renderedFrameIndex);
+        BT_ZONE_SCOPE("Renderer::Render::SignalFence");
+        const auto preparationSlot = currentRenderGraph->GetLastExecutedPreparationSlot();
+        SignalFence(graphicsQueue,
+            static_cast<uint8_t>(preparationSlot.value_or(renderedFrameIndex)));
         br::telemetry::nvperf::EndFrameCapture(deviceManager.GetBackend(), graphicsQueue, m_totalFramesRendered);
     });
 
@@ -4793,7 +6532,7 @@ void Renderer::Render() {
 
     runCapturedStage("ReadbackRequests", [&]() {
         if (currentRenderGraph) {
-            ZoneScopedN("Renderer::Render::ReadbackRequests");
+            BT_ZONE_SCOPE("Renderer::Render::ReadbackRequests");
             if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
                 readbackService->ProcessReadbackRequests(); // Process readback captures
             }
@@ -4846,15 +6585,20 @@ void Renderer::StallPipeline() {
     }
     auto& devices = DeviceManager::GetInstance();
     spdlog::info("Renderer::StallPipeline waiting for all initialized devices idle");
-    devices.GetDevice().WaitIdle();
+    if (rhi::Failed(devices.GetDevice().WaitIdle()))
+        throw std::runtime_error("Primary device idle wait failed; GPU ownership must be retained");
     if (devices.IsMultiRHIEnabled()) {
-        devices.GetPeerDevice().WaitIdle();
+        if (rhi::Failed(devices.GetPeerDevice().WaitIdle()))
+            throw std::runtime_error("Peer device idle wait failed; GPU ownership must be retained");
     }
     spdlog::info("Renderer::StallPipeline all initialized devices idle complete");
 }
 
 void Renderer::Cleanup() {
     spdlog::info("In cleanup");
+    auto retiringDescriptors = currentRenderGraph ? currentRenderGraph->RetainDescriptorService() : nullptr;
+	auto retiringIngestionGeneration = m_sceneIngestionServices.execution.generation;
+    if (currentRenderGraph) currentRenderGraph->StopFrameProduction();
     // Wait for all GPU frames to complete
 	spdlog::info("Stalling pipeline for cleanup");
 	StallPipeline();
@@ -4867,7 +6611,8 @@ void Renderer::Cleanup() {
 		currentScene->Deactivate();
 	}
 	ClearExternalSnapshotMeshRegistrations();
-	m_sceneRenderBridge.Clear(m_managerInterface);
+	m_sceneRenderBridge.Clear(GetSceneIngestionServices());
+	m_sceneIngestionServices = {};
 	m_renderSyncObjectQuery = {};
 	m_renderSyncCameraQuery = {};
 	m_renderSyncLightQuery = {};
@@ -4877,7 +6622,57 @@ void Renderer::Cleanup() {
 		m_pMaterialManager->ShutdownTextureStreaming();
 	}
 	spdlog::info("Cleaning up resources");
+    // Desired-state jobs borrow the request service. Its Stop flag cannot be
+    // read safely after destruction: join the producer before closing/freeing
+    // that service (ASAN caught SubmitLatest racing the old reset order).
+    if (m_pIndirectCommandBufferManager) {
+        m_pIndirectCommandBufferManager->Shutdown();
+    }
+    // Close the renderer-state request boundary before any upload/descriptor
+    // service it can target is destroyed. CancelAndWait also prevents a late
+    // producer completion from publishing into manager teardown.
+    m_sceneIngestionServices.execution.stateRequests = nullptr;
+	if (m_pMeshManager) m_pMeshManager->SetRendererStateRequestService(nullptr);
+    if (m_rendererStateCommitScope.Valid()) {
+        m_rendererStateCommitScope.CancelAndWait();
+        m_rendererStateCommitScope = {};
+    }
+    if (m_presentationTailScope.Valid()) {
+        m_presentationTailScope.CancelAndWait();
+        m_presentationTailScope = {};
+    }
+    if (m_rendererStateRequests) {
+        m_rendererStateRequests->Stop();
+        m_rendererStateRequests.reset();
+    }
+    if (m_asyncStateGraph) {
+        m_asyncStateGraph->Shutdown();
+        m_asyncStateGraph.reset();
+    }
+	// Static-scene clients share this generation cell with the renderer. Clear it
+	// only after every request producer has joined, so late admission observes a
+	// closed service boundary and old backend generations can be destroyed.
+	if (retiringIngestionGeneration) {
+		retiringIngestionGeneration->uploads.store({}, std::memory_order_release);
+		retiringIngestionGeneration->descriptors.store({}, std::memory_order_release);
+	}
+    if (m_rendererStatePublisher) {
+        m_context.publishedRendererState.reset();
+        m_context.publishedManifestLease.reset();
+        br::render::PublishedStateSource::SetProcessSource({});
+        m_rendererStatePublisher->Shutdown();
+        m_rendererStatePublisher.reset();
+    }
+    // Version families retain their latest immutable GPU backing to seed a
+    // successor request.  Producer shutdown above guarantees there can be no
+    // more requests, so release those device-bound roots before descriptor and
+    // allocator teardown rather than waiting for Renderer destruction.
+    for (auto& family : m_lightTableFamilies) family.reset();
+    for (auto& family : m_poseTableFamilies) family.reset();
     if (currentRenderGraph) {
+        // Publication and texture-streaming producers have now stopped. Cover
+        // submissions made after the first wait before cleaning their services.
+        StallPipeline();
         if (auto* uploadService = currentRenderGraph->GetUploadService()) {
             uploadService->Cleanup();
         }
@@ -4887,14 +6682,16 @@ void Renderer::Cleanup() {
         if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
             readbackService->Cleanup();
         }
-        if (auto* descriptorService = currentRenderGraph->GetDescriptorService()) {
-            descriptorService->Cleanup();
-        }
     }
+    if (currentRenderGraph) {
+        currentRenderGraph->ShutdownTaskWorkers();
+    }
+    // Readback reservations are graph users. Join or cancel those users before
+    // closing admission and detaching the shared request state.
     if (m_pReadbackManager) {
         m_pReadbackManager->Cleanup();
     }
-    SetAsyncBufferBackingResizeScheduler({});
+    org::SetAsyncBufferBackingResizeScheduler({});
     TaskSchedulerManager::GetInstance().Cleanup();
     ::ResourceManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
@@ -4905,18 +6702,22 @@ void Renderer::Cleanup() {
     m_producerPersistentState->directionalVsm.InvalidateGpuState();
     m_producerPersistentState->virtualShadowCasters.reset();
     m_producerPersistentState->clodStreaming.reset();
-    org::runtime::SetActiveUploadService(nullptr);
     org::runtime::SetActiveUploadPolicyService(nullptr);
-    org::runtime::SetActiveDescriptorService(nullptr);
     m_uploadPolicyService.reset();
     m_renderGraphRuntimeInitialized = false;
     m_currentEnvironment.reset();
     m_defaultEnvironmentCubemap.reset();
     m_defaultEnvironmentPrefilteredCubemap.reset();
 	currentScene.reset();
+	m_sceneEntityMaterializationService.Configure(nullptr, nullptr, nullptr, nullptr);
+	m_poseInstanceRegistrationService.Configure(nullptr);
+	m_sceneRenderableResidencyService.Configure(nullptr, nullptr);
 	m_pIndirectCommandBufferManager.reset();
+	m_depthHistory.Clear();
 	m_pViewManager.reset();
 	m_pLightManager.reset();
+	// The object manager reads the mesh manager's geometry sequence on commit.
+	if (m_pObjectManager) m_pObjectManager->SetGeometryCoverageSource({});
 	m_pMeshManager.reset();
 	m_pObjectManager.reset();
     m_pMaterialManager.reset();
@@ -4927,11 +6728,14 @@ void Renderer::Cleanup() {
     m_pTextureFactory.reset();
     m_clodRayTracingSystem.reset();
     m_context = {};
-    m_producerServices = {};
+    m_frameInputs.reset();
+    m_materialEvaluationInputs = {};
     m_openPBRLookupResources = {};
     m_blueNoiseTexture.reset();
 	ReleaseSharedProcessingPlaceholderTextures();
     m_dynamicBackbuffer.reset();
+    m_dynamicPresentationColor.reset();
+    m_presentationColorResources.clear();
     m_backbufferResources.clear();
     renderTargets.clear();
     m_commandLists.clear();
@@ -4954,10 +6758,18 @@ void Renderer::Cleanup() {
 	FFXManager::GetInstance().Shutdown();
 	UpscalingManager::GetInstance().Shutdown();
     RendererECSManager::GetInstance().FlushDeferredWorldOperations();
-	RenderGraph::ShutdownRuntime();
-    TrackedEntityToken::ResetHooks();
-    Resource::ResetEntityHooks();
+    org::TrackedEntityToken::ResetHooks();
+    org::Resource::ResetEntityHooks();
+    // The ingestion source store borrows the renderer ECS world. Release that
+    // association before the singleton destroys the world so late availability
+    // checks cannot observe a dangling source boundary.
+    m_sceneSourceStateStore.Reset();
     RendererECSManager::GetInstance().Cleanup();
+	// ECS components and manager destructors can retire resources. Keep the
+	// runtime descriptor/backing services alive through their final release.
+    if (retiringDescriptors) retiringDescriptors->Cleanup();
+    retiringDescriptors.reset();
+	org::RenderGraph::ShutdownRuntime();
 	spdlog::info("Cleaning up swap chain");
     m_swapChain.Reset();
 	spdlog::info("Cleaning up device manager");
@@ -4985,7 +6797,7 @@ void Renderer::SetCurrentScene(std::shared_ptr<Scene> newScene) {
 	if (!newScene) {
     InvalidateSceneOverlapState();
         ClearExternalSnapshotMeshRegistrations();
-        m_sceneRenderBridge.Clear(m_managerInterface);
+        m_sceneRenderBridge.Clear(GetSceneIngestionServices());
         if (currentScene) {
             currentScene->Deactivate();
         }
@@ -4997,7 +6809,7 @@ void Renderer::SetCurrentScene(std::shared_ptr<Scene> newScene) {
 
 	if (currentScene != newScene) {
 		ClearExternalSnapshotMeshRegistrations();
-		m_sceneRenderBridge.Clear(m_managerInterface);
+		m_sceneRenderBridge.Clear(GetSceneIngestionServices());
         if (currentScene) {
             currentScene->Deactivate();
         }
@@ -5008,7 +6820,7 @@ void Renderer::SetCurrentScene(std::shared_ptr<Scene> newScene) {
 	newScene->GetRoot().add<Components::ActiveScene>();
     currentScene = newScene;
     //currentScene->SetDepthMap(m_depthMap);
-    currentScene->Activate(m_managerInterface);
+    currentScene->Activate(m_sceneIngestionServices);
     currentScene->PropagateTransforms();
     if (m_sceneRenderOverlapEnabled) {
         BootstrapCommittedSceneSnapshot();
@@ -5050,15 +6862,18 @@ std::shared_ptr<Scene> Renderer::AppendScene(std::shared_ptr<Scene> scene) {
 	}
 
 	{
-		BufferBase::ScopedBackingMutation appendBackingMutation;
-		(void)PublishReadyDeferredBackingResizes(true);
+		org::BufferBase::ScopedBackingMutation appendBackingMutation;
+		(void)org::PublishReadyDeferredBackingResizes(true);
 	}
 	org::runtime::FlushUploadPolicies();
 	if (m_pMaterialManager) {
 		m_pMaterialManager->CommitGpuVisibleSnapshot();
 	}
 	if (m_pIndirectCommandBufferManager && m_pObjectManager) {
-		m_pIndirectCommandBufferManager->CommitGpuVisibleSnapshot(*m_pObjectManager);
+		m_pIndirectCommandBufferManager->PublishDesiredState(
+			m_pObjectManager->DesiredBufferStateRequirement(),
+			m_pObjectManager->GetResidentInstanceDrawRecordCount(),
+			m_context.publishedRendererState);
 	}
 
 	m_warnedNullScene = false;
@@ -5090,6 +6905,10 @@ void Renderer::SetCameraSpeed(float speed) {
     if (setCameraSpeed) {
         setCameraSpeed(speed);
     }
+}
+
+void Renderer::WaitForAsyncPreparation() {
+    if (currentRenderGraph) currentRenderGraph->WaitForPreparation();
 }
 
 void Renderer::MoveForward() {
@@ -5154,18 +6973,20 @@ void Renderer::SetupInputHandlers() {
 
 void Renderer::RegisterPipelineExtensions() {
     currentRenderGraph->RegisterExtension(std::make_unique<RenderGraphIOExtension>(
-        m_managerInterface.GetTextureFactory(),
-        currentRenderGraph->GetUploadService(),
-        m_pReadbackManager.get(),
-        m_managerInterface.GetMaterialManager()),
+        std::make_shared<br::render::RenderGraphIOService>(
+            *m_pTextureFactory,
+            currentRenderGraph->RetainUploadService(),
+            *m_pReadbackManager,
+            *m_pMaterialManager)),
         "BuiltinIO");
     currentRenderGraph->RegisterExtension(std::make_unique<ReadbackCaptureExtension>(
-        currentRenderGraph->GetReadbackService()),
+        currentRenderGraph->GetReadbackServiceOwner()),
         "BuiltinReadbackCapture");
 
     if (!m_producerPersistentState->clodStreaming) m_producerPersistentState->clodStreaming = std::make_shared<CLodStreamingSystem>();
     if (!m_producerPersistentState->virtualShadowCasters) m_producerPersistentState->virtualShadowCasters = std::make_shared<VirtualShadowCasterRegistry>();
     auto clodStreamingSystem = m_producerPersistentState->clodStreaming;
+    clodStreamingSystem->SetGeometryStorage(&m_pMeshManager->GetCLodGeometryStorage());
     auto virtualShadowCasters = m_producerPersistentState->virtualShadowCasters;
     br::pipeline::PipelineBuildContext extensionContext(
         *currentRenderGraph,
@@ -5211,7 +7032,9 @@ void Renderer::RegisterPipelineExtensions() {
                         .voxelRasterWorkCapacity = voxelRasterWorkCapacity,
                         .streamingSystem = clodStreamingSystem,
                         .virtualShadowCasters = virtualShadowCasters,
-                        .persistentState = m_producerPersistentState }),
+                        .persistentState = m_producerPersistentState,
+                        .slabResourceGroup = m_pMeshManager
+                            ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr }),
                 extensionId);
         });
     // Recipe extensions may register resources consumed by technique extensions
@@ -5260,7 +7083,7 @@ void Renderer::CreateRenderGraph() {
     // Render-graph queue timelines are recreated below. Descriptor retirement
     // snapshots contain non-owning timeline handles, so consume all pending
     // releases and clear the snapshot while those timelines are still alive.
-    DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+    org::DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
 	PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
 
     // TODO: Find a better way to handle resources like this
@@ -5277,31 +7100,65 @@ void Renderer::CreateRenderGraph() {
 
         if (!currentRenderGraph)
         {
-		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
+		currentRenderGraph = std::make_unique<org::RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}
         if (auto* uploadService = currentRenderGraph->GetUploadService()) {
             uploadService->Initialize();
-            org::runtime::SetActiveUploadService(uploadService);
         }
         if (m_uploadPolicyService) {
+            m_uploadPolicyService->SetUploadService(currentRenderGraph->RetainUploadService());
             org::runtime::SetActiveUploadPolicyService(m_uploadPolicyService.get());
         }
         if (auto* descriptorService = currentRenderGraph->GetDescriptorService()) {
             descriptorService->Initialize();
-            org::runtime::SetActiveDescriptorService(descriptorService);
         }
         }
+        if (m_clodRayTracingSystem && currentRenderGraph)
+            m_clodRayTracingSystem->SetUploadService(currentRenderGraph->RetainUploadService());
+        if (m_pSkeletonManager && currentRenderGraph)
+            m_pSkeletonManager->SetUploadService(currentRenderGraph->RetainUploadService());
+        if (currentRenderGraph)
+            ::ResourceManager::GetInstance().SetUploadService(currentRenderGraph->RetainUploadService());
 
         if (!m_renderGraphRuntimeInitialized) {
         currentRenderGraph->GetMemorySnapshotProvider().SetProvider(
             org::memory::CreateECSMemorySnapshotProvider(RendererECSManager::GetInstance().GetWorld()));
         Menu::GetInstance().SetRenderGraph(currentRenderGraph.get());
 
-        if (auto* textureFactory = m_managerInterface.GetTextureFactory()) {
-            textureFactory->SetReadbackService(currentRenderGraph->GetReadbackService());
+        if (auto* textureFactory = m_pTextureFactory.get()) {
+            textureFactory->SetUploadService(currentRenderGraph->RetainUploadService());
+            textureFactory->SetReadbackService(currentRenderGraph->GetReadbackServiceOwner());
         }
+        if (m_pEnvironmentManager)
+            m_pEnvironmentManager->SetUploadService(currentRenderGraph->RetainUploadService());
+        if (m_pMaterialManager) {
+			m_pMaterialManager->SetRendererStateServices(
+				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService());
+			m_pMaterialManager->SetDescriptorService(currentRenderGraph->RetainDescriptorService());
+		}
+		if (m_pObjectManager)
+			m_pObjectManager->SetRendererStateServices(
+				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService(),
+				m_numFramesInFlight);
+		if (m_pMeshManager)
+			m_pMeshManager->SetRendererStateServices(
+				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService(),
+				m_numFramesInFlight);
+		if (m_pIndirectCommandBufferManager)
+			m_pIndirectCommandBufferManager->SetRendererStateServices(
+				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService());
+		if (m_sceneIngestionServices.execution.generation) {
+			m_sceneIngestionServices.execution.generation->uploads.store(
+				currentRenderGraph->RetainUploadService(), std::memory_order_release);
+			m_sceneIngestionServices.execution.generation->descriptors.store(
+				currentRenderGraph->RetainDescriptorService(), std::memory_order_release);
+		}
+		if (m_pTerrainManager)
+			m_pTerrainManager->SetRendererStateServices(
+				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService(),
+				currentRenderGraph->RetainDescriptorService());
 
 
         RendererECSManager::GetInstance().CreateRenderPhaseEntity(Engine::Primary::CLodTransparentPass);
@@ -5315,6 +7172,8 @@ void Renderer::CreateRenderGraph() {
     }
 
     auto& newGraph = currentRenderGraph;
+	org::runtime::ScopedActiveGraphServices activeGraphServices(
+		newGraph->GetUploadService(), newGraph->GetDescriptorService());
     const auto probeGraphBuildPhase = [&](const char* phase) {
         ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), phase);
     };
@@ -5329,14 +7188,14 @@ void Renderer::CreateRenderGraph() {
     // DeletionManager. If it is left until normal frame maintenance, those
     // native objects survive for numFramesInFlight + 1 frames and can retain
     // stale graph backing through the rebuilt graph's first frames.
-    DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+    org::DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
 	PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
 
     // Everything released above is GPU-idle, so it is safe (and important) to
     // release its native objects before materializing the candidate graph.
     // Otherwise two complete alias-pool generations overlap for the normal
     // frames-in-flight retirement delay and can exhaust VRAM.
-    DeletionManager::GetInstance().DrainAll();
+    org::DeletionManager::GetInstance().DrainAll();
     }
     probeGraphBuildPhase("CreateRenderGraph after ResetForRebuild");
 
@@ -5355,15 +7214,63 @@ void Renderer::CreateRenderGraph() {
     }
     probeGraphBuildPhase("CreateRenderGraph after PrepareExtensionsForBuild");
 
+    // The primary camera is high-frequency frame data, not renderer-state
+    // publication. Insert its graphics-queue upload before all pipeline passes;
+    // their camera SRV declarations establish the required RAW dependencies.
+    newGraph->BuildPass<br::render::PrimaryCameraUploadPass>(
+        "PrimaryCameraUploadPass", m_pViewManager->GetCameraBuffer(),
+        m_pViewManager->GetCullingCameraBuffer(), m_numFramesInFlight);
+
     auto& depth = primaryCameraEntity.get<Components::DepthMap>();
-    std::shared_ptr<PixelBuffer> depthTexture = depth.depthMap;
+    std::shared_ptr<org::PixelBuffer> depthTexture = depth.depthMap;
 
     const bool terrainRvtEnabled = m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>();
-    m_producerServices.pipelines = &PSOManager::GetInstance();
-    m_producerServices.commandSignatures = &CommandSignatureManager::GetInstance();
-    m_producerServices.settings = &SettingsManager::GetInstance();
-    m_producerServices.ecs = &RendererECSManager::GetInstance();
-    m_producerServices.renderContext = &m_context;
+    m_materialEvaluationInputs = {};
+    m_materialEvaluationInputs.pipelines = &PSOManager::GetInstance();
+    m_materialEvaluationInputs.commandSignatures = &CommandSignatureManager::GetInstance();
+    m_materialEvaluationInputs.clodSlabResources = m_pMeshManager
+        ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr;
+    {
+        auto& world = RendererECSManager::GetInstance().GetWorld();
+        const auto visibilityTag = world.component<CLodExtensionVisibilityBufferTag>();
+        const auto capture = [&](auto componentTag, auto&& accept) {
+            world.query_builder<>()
+                .with<CLodExtensionTypeTag>(visibilityTag)
+                .with(componentTag)
+                .build()
+                .each([&](flecs::entity entity) {
+                    if (const auto resource = entity.try_get<Components::Resource>(); resource) {
+                        if (auto retained = std::static_pointer_cast<org::GloballyIndexedResource>(
+                                resource->resource.lock())) {
+                            accept(entity, std::move(retained));
+                        }
+                    }
+                });
+        };
+        capture(world.component<VisibleClustersBufferTag>(), [&](flecs::entity entity, auto resource) {
+            m_materialEvaluationInputs.visibleClusters = std::move(resource);
+            if (const auto capacity = entity.try_get<CLodVisibleClusterCapacity>(); capacity)
+                m_materialEvaluationInputs.visibleClusterCapacity = capacity->maxVisibleClusters;
+        });
+        capture(world.component<VisibleClustersCounterTag>(), [&](flecs::entity, auto resource) {
+            m_materialEvaluationInputs.visibleClusterCounter = std::move(resource);
+        });
+        capture(world.component<VisibleClusterTransformIndicesBufferTag>(), [&](flecs::entity, auto resource) {
+            m_materialEvaluationInputs.visibleClusterTransformIndices = std::move(resource);
+        });
+        capture(world.component<CLodReyesDiceQueueTag>(), [&](flecs::entity, auto resource) {
+            m_materialEvaluationInputs.reyesDiceQueue = std::move(resource);
+        });
+        capture(world.component<CLodReyesTessTableConfigsTag>(), [&](flecs::entity, auto resource) {
+            m_materialEvaluationInputs.reyesTessTableConfigs = std::move(resource);
+        });
+        capture(world.component<CLodReyesTessTableVerticesTag>(), [&](flecs::entity, auto resource) {
+            m_materialEvaluationInputs.reyesTessTableVertices = std::move(resource);
+        });
+        capture(world.component<CLodReyesTessTableTrianglesTag>(), [&](flecs::entity, auto resource) {
+            m_materialEvaluationInputs.reyesTessTableTriangles = std::move(resource);
+        });
+    }
     br::pipeline::PipelineBuildContext buildContext(
         *newGraph,
         m_pipelineRecipe.Bindings(),
@@ -5377,6 +7284,7 @@ void Renderer::CreateRenderGraph() {
                     Builtin::PrimaryCamera::ProjectedDepthTexture,
                     m_visibilityRendering ? depth.projectedDepthMap : depthTexture);
                 newGraph->RegisterResource(Builtin::Backbuffer, m_dynamicBackbuffer);
+                newGraph->RegisterResource(Builtin::PresentationColor, m_dynamicPresentationColor);
                 newGraph->RegisterResource(Builtin::PerFrameBuffer, ::ResourceManager::GetInstance().GetPerFrameBuffer());
                 break;
             case BrdfIntegration:
@@ -5403,14 +7311,14 @@ void Renderer::CreateRenderGraph() {
                     spdlog::warn("Renderer: no valid environment is active. Using fallback blank cubemaps.");
                     m_warnedUsingFallbackEnvironment = true;
                 }
-                const auto registerEnvironment = [&](ResourceIdentifier resourceId, std::shared_ptr<Resource> fallback) {
+                const auto registerEnvironment = [&](org::ResourceIdentifier resourceId, std::shared_ptr<org::Resource> fallback) {
                     if (const auto* binding = m_pipelineRecipe.Bindings().Find(resourceId)) {
                         const auto& contract = binding->contract;
                         if (contract.initialAccess != rhi::ResourceAccessType::None ||
                             contract.initialLayout != rhi::ResourceLayout::Undefined ||
                             contract.initialSync != rhi::ResourceSyncState::None) {
                             if (auto* tracker = binding->resource->GetStateTracker()) {
-                                tracker->Reset(RangeSpec{}, ResourceState{ contract.initialAccess, contract.initialLayout, contract.initialSync });
+                                tracker->Reset(org::RangeSpec{}, org::ResourceState{ contract.initialAccess, contract.initialLayout, contract.initialSync });
                             }
                         }
                         newGraph->RegisterResource(resourceId, binding->resource);
@@ -5439,13 +7347,13 @@ void Renderer::CreateRenderGraph() {
                 break; // These techniques own ordered graph extensions.
             case CanonicalSurfaceResources: {
                 const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-                TextureDescription desc;
+                org::TextureDescription desc;
                 desc.channels = 2;
                 desc.format = rhi::Format::R32G32_UInt;
                 desc.hasRTV = desc.hasSRV = desc.hasUAV = desc.hasNonShaderVisibleUAV = true;
                 desc.allowAlias = true;
                 desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
-                auto visibilityBuffer = PixelBuffer::CreateSharedUnmaterialized(desc);
+                auto visibilityBuffer = org::PixelBuffer::CreateSharedUnmaterialized(desc);
                 visibilityBuffer->SetName("Visibility Buffer");
                 org::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
                 newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
@@ -5453,14 +7361,14 @@ void Renderer::CreateRenderGraph() {
                 CreateCanonicalSurfaceResources(newGraph.get());
                 CreateDebugVisualizationResources(newGraph.get());
                 if (m_visibilityRendering) {
-                    newGraph->BuildRenderPass<ClearVisibilityBufferPass>("ClearVisibilityBufferPass");
+                    newGraph->BuildPass<ClearVisibilityBufferPass>("ClearVisibilityBufferPass");
                     newGraph->SetPassTechnique("ClearVisibilityBufferPass", "Primary Visibility::Canonical Surface Construction");
                 }
                 break;
             }
             case VisibilityMaterialBinning:
                 RegisterVisUtilResources(newGraph.get(), false);
-                BuildVisibilityMaterialBinningPipeline(newGraph.get());
+                BuildVisibilityMaterialBinningPipeline(newGraph.get(), m_materialEvaluationInputs);
                 break;
             case TerrainRvt:
                 RegisterVisUtilResources(
@@ -5469,10 +7377,10 @@ void Renderer::CreateRenderGraph() {
                 BuildTerrainRvtPipeline(newGraph.get());
                 break;
             case TerrainRegionMaterialEvaluation:
-                BuildTerrainRegionMaterialEvaluationPipeline(newGraph.get());
+                BuildTerrainRegionMaterialEvaluationPipeline(newGraph.get(), m_materialEvaluationInputs);
                 break;
             case MaterialEvaluation:
-                BuildMaterialEvaluationPipeline(newGraph.get(), m_producerServices, terrainRvtEnabled);
+                BuildMaterialEvaluationPipeline(newGraph.get(), m_materialEvaluationInputs, terrainRvtEnabled);
                 break;
             case Gtao:
                 RegisterGTAOResources(newGraph.get());
@@ -5500,61 +7408,64 @@ void Renderer::CreateRenderGraph() {
                 histogram->SetName("Luminance Histogram Buffer");
                 org::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
                 newGraph->RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogram);
-				auto& histogramBuilder = newGraph->BuildComputePass<LuminanceHistogramPass>("luminanceHistogramPass");
+				auto& histogramBuilder = newGraph->BuildPass<LuminanceHistogramPass>("luminanceHistogramPass");
 #if BASICRENDERER_HAS_INTEROP_VALIDATION
 				br::validation::SARPInteropValidation::ApplyPassPolicy(
 					"luminanceHistogramPass", histogramBuilder, DeviceManager::GetInstance().GetPeerBackend());
 #endif
                 newGraph->SetPassTechnique("luminanceHistogramPass", "Post Process::Exposure");
-                newGraph->BuildComputePass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
+                newGraph->BuildPass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
                 newGraph->SetPassTechnique("LuminanceAveragePass", "Post Process::Exposure");
                 break;
             }
             case Upscaling:
                 if (UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSS &&
                     SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()) {
-                    newGraph->BuildComputePass<DilateMotionVectorsPass>("DilateMotionVectorsPass");
+                    newGraph->BuildPass<DilateMotionVectorsPass>("DilateMotionVectorsPass");
                     newGraph->SetPassTechnique("DilateMotionVectorsPass", "Post Process::Upscaling");
                 }
-                newGraph->BuildRenderPass<UpscalingPass>("UpscalingPass");
+                newGraph->BuildPass<UpscalingPass>("UpscalingPass",
+                    br::render::UpscalingGenerationService::CaptureCurrent());
                 newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
                 break;
             case Bloom:
 				BuildBloomPipeline(newGraph.get());
                 break;
             case Tonemapping:
-                newGraph->BuildRenderPass<TonemappingPass>(
+                newGraph->BuildPass<TonemappingPass>(
                     "TonemappingPass",
                     m_pipelineRecipe.Contains<br::pipeline::BloomTechnique>());
                 newGraph->SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
                 break;
             case DebugOutput: {
+                auto debugSnapshots = br::render::DebugSceneSnapshotService::Create(
+                    RendererECSManager::GetInstance().GetWorld());
                 const bool skeletons = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")() ==
                     static_cast<unsigned int>(OutputType::SKELETONS) && DeviceManager::GetInstance().GetMeshShadersSupported();
                 if (skeletons) {
-                    newGraph->BuildRenderPass<DebugSkeletonPass>("DebugSkeletonPass");
+                    newGraph->BuildPass<DebugSkeletonPass>("DebugSkeletonPass", debugSnapshots);
                     newGraph->SetPassTechnique("DebugSkeletonPass", "Debug::Visualization");
                 }
                 else {
-                    newGraph->BuildRenderPass<DebugResolvePass>("DebugResolvePass");
+                    newGraph->BuildPass<DebugResolvePass>("DebugResolvePass");
                     newGraph->SetPassTechnique("DebugResolvePass", "Debug::Visualization");
                 }
                 if (getDrawBoundingSpheres()) {
-                    newGraph->BuildRenderPass<DebugSpherePass>("DebugSpherePass");
+                    newGraph->BuildPass<DebugSpherePass>("DebugSpherePass", debugSnapshots);
                     newGraph->SetPassTechnique("DebugSpherePass", "Debug::Visualization");
                 }
                 break;
             }
             case DebugUi:
-                newGraph->BuildRenderPass<MenuRenderPass>("MenuRenderPass");
+                newGraph->BuildPass<MenuRenderPass>("MenuRenderPass");
                 newGraph->SetPassTechnique("MenuRenderPass", "Debug::UI");
                 break;
             case DepthHistory:
-                BuildLinearDepthHistoryCopyPass(newGraph.get(), m_pViewManager.get());
+                BuildLinearDepthHistoryCopyPass(newGraph.get(), &m_depthHistory);
                 break;
             case Present:
-                newGraph->BuildRenderPass<PresentPass>("PresentPass");
-                newGraph->SetPassTechnique("PresentPass", "Frame::Present");
+                newGraph->BuildPass<PresentationReadyPass>("PresentationReadyPass");
+                newGraph->SetPassTechnique("PresentationReadyPass", "Frame::Present");
                 break;
             }
         });
@@ -5598,6 +7509,16 @@ void Renderer::CreateRenderGraph() {
 	spdlog::info("Renderer::CreateRenderGraph entering CompileStructural");
     newGraph->CompileStructural();
 	spdlog::info("Renderer::CreateRenderGraph leaving CompileStructural");
+    }
+    if (const auto* persistent = std::getenv("SARP_PERSISTENT_GRAPH"); persistent && persistent[0] == '1') {
+        // Segment placement is explicit: passes whose touched-resource set is
+        // only known per frame cannot live in the persistent main executable.
+        newGraph->SetPersistentSegment("Builtin::Uploads", org::RenderGraph::PersistentSegmentKind::Pre);
+        newGraph->SetPersistentSegment("CLod::AsyncUpload", org::RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentSegment("Builtin::Readbacks", org::RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentSegment("CLod::StreamingReadbackCopy", org::RenderGraph::PersistentSegmentKind::Tail);
+        newGraph->SetPersistentExecutionEnabled(true);
+        spdlog::info("Persistent render graph execution enabled (SARP_PERSISTENT_GRAPH=1)");
     }
     probeGraphBuildPhase("CreateRenderGraph after CompileStructural");
     {

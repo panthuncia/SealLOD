@@ -1,67 +1,63 @@
 #pragma once
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
 
-class SkyboxRenderPass : public ComputePass {
+struct SkyboxBindings {
+    org::ResourceBindingToken depth, camera, environment, hdr, motion;
+};
+
+class SkyboxRenderPass : public org::TypedRenderGraphPass<SkyboxRenderPass,
+    br::render::PreparedComputeDispatch, SkyboxBindings> {
 public:
     SkyboxRenderPass() {
         CreatePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override {
-        builder->WithShaderResource(Builtin::Environment::CurrentCubemap, Builtin::Environment::InfoBuffer)
-            .WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }), Builtin::CameraBuffer)
-			.WithUnorderedAccess(Builtin::Color::HDRColorTarget, Builtin::Surface::Motion);
+    SkyboxBindings Declare(org::PassBuilder& declaration) {
+        declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        auto* builder = &declaration;
+		builder->WithShaderResource(Builtin::Environment::CurrentCubemap);
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+        return {
+            builder->BindShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
+            builder->BindShaderResource(Builtin::CameraBuffer),
+            builder->BindShaderResource(Builtin::Environment::InfoBuffer),
+            builder->BindUnorderedAccess(Builtin::Color::HDRColorTarget),
+            builder->BindUnorderedAccess(Builtin::Surface::Motion) };
     }
 
-    void Setup() override {
-        m_pHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Color::HDRColorTarget);
+    br::render::PreparedComputeDispatch Prepare(const SkyboxBindings& bindings,
+        const org::PassPrepareContext& preparation) const {
+
+        const auto& context = *preparation.preparationData->Get<UpdateContext>();
+        br::render::PreparedComputeDispatch data{};
+        data.resourceHeap = context.textureDescriptorHeap.GetHandle();
+        data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
+        auto program = preparation.CaptureProgramBinding(m_pso);
+        data.program = program.program;
+        data.descriptorIndices = std::move(program.descriptorIndices);
+        data.constants[0] = preparation.ResolveView(bindings.depth, {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[1] = preparation.ResolveView(bindings.camera, {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[2] = preparation.ResolveView(bindings.environment, {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[3] = preparation.ResolveView(bindings.hdr, {org::BindlessViewKind::UnorderedAccess}).index;
+		data.constants[4] = preparation.ResolveView(bindings.motion, {org::BindlessViewKind::UnorderedAccess}).index;
+        const auto& target = preparation.Describe(bindings.hdr);
+        data.groupsX = (target.texture.width + 7u) / 8u;
+        data.groupsY = (target.texture.height + 7u) / 8u;
+        return data;
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
-
-        auto& commandList = executionContext.commandList;
-
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-
-		commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-		commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-
-        BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-
-        uint32_t rootConstants[NumMiscUintRootConstants] = {};
-        rootConstants[0] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::LinearDepthMap)->GetSRVInfo(0).slot.index;
-        rootConstants[1] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index;
-        rootConstants[2] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Environment::InfoBuffer)->GetSRVInfo(0).slot.index;
-        rootConstants[3] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Color::HDRColorTarget)->GetUAVShaderVisibleInfo(0).slot.index;
-		rootConstants[4] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Motion)->GetUAVShaderVisibleInfo(0).slot.index;
-        commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rootConstants);
-
-        const uint32_t w = m_pHDRTarget->GetWidth();
-        const uint32_t h = m_pHDRTarget->GetHeight();
-        constexpr uint32_t groupSizeX = 8;
-        constexpr uint32_t groupSizeY = 8;
-        const uint32_t groupsX = (w + groupSizeX - 1) / groupSizeX;
-        const uint32_t groupsY = (h + groupSizeY - 1) / groupSizeY;
-
-        commandList.Dispatch(groupsX, groupsY, 1);
-
-        return {};
-    }
-
-    void Cleanup() override {
-        // Cleanup if necessary
+    static void Record(const SkyboxBindings&, const br::render::PreparedComputeDispatch& data,
+        org::PassRecordContext& recording) {
+        br::render::RecordPreparedComputeDispatch(data, recording);
     }
 
 private:
-    PipelineState m_pso;
+    org::PipelineState m_pso;
 
-    PixelBuffer* m_pHDRTarget = nullptr;
     void CreatePSO() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),

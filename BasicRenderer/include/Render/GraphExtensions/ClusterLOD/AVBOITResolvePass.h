@@ -2,31 +2,35 @@
 
 #include <memory>
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
-class AVBOITResolvePass final : public ComputePass {
+struct AVBOITResolveBindings {
+    org::ResourceBindingToken config, accumulation, normalization, extinction;
+};
+
+class AVBOITResolvePass final : public org::TypedRenderGraphPass<AVBOITResolvePass,
+    br::render::PreparedComputeDispatch, AVBOITResolveBindings> {
 public:
     AVBOITResolvePass(
-        std::shared_ptr<Buffer> configBuffer,
-        std::shared_ptr<PixelBuffer> accumulationTexture,
-        std::shared_ptr<PixelBuffer> normalizationTexture,
-        std::shared_ptr<PixelBuffer> shadingExtinctionTexture);
+        std::shared_ptr<org::Buffer> configBuffer,
+        std::shared_ptr<org::PixelBuffer> accumulationTexture,
+        std::shared_ptr<org::PixelBuffer> normalizationTexture,
+        std::shared_ptr<org::PixelBuffer> shadingExtinctionTexture);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    void Update(const UpdateExecutionContext& executionContext) override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    AVBOITResolveBindings Declare(org::PassBuilder& builder);
+    br::render::PreparedComputeDispatch Prepare(const AVBOITResolveBindings&,
+        const org::PassPrepareContext& preparation) const;
+    static void Record(const AVBOITResolveBindings&,
+        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
 
 private:
-    std::shared_ptr<Buffer> m_configBuffer;
-    std::shared_ptr<PixelBuffer> m_accumulationTexture;
-    std::shared_ptr<PixelBuffer> m_normalizationTexture;
-    std::shared_ptr<PixelBuffer> m_shadingExtinctionTexture;
-    PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_configBuffer;
+    std::shared_ptr<org::PixelBuffer> m_accumulationTexture;
+    std::shared_ptr<org::PixelBuffer> m_normalizationTexture;
+    std::shared_ptr<org::PixelBuffer> m_shadingExtinctionTexture;
+    org::PipelineState m_pso;
 };

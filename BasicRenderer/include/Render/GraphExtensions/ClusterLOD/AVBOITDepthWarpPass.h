@@ -2,27 +2,26 @@
 
 #include <memory>
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 
-class AVBOITDepthWarpPass final : public ComputePass {
+struct AVBOITDepthWarpBindings { org::ResourceBindingToken config, histogram, lut; };
+class AVBOITDepthWarpPass final : public org::TypedRenderGraphPass<AVBOITDepthWarpPass, br::render::PreparedComputeDispatch, AVBOITDepthWarpBindings> {
 public:
     AVBOITDepthWarpPass(
-        std::shared_ptr<Buffer> configBuffer,
-        std::shared_ptr<Buffer> occupancyHistogramBuffer,
-        std::shared_ptr<Buffer> depthWarpLUTBuffer);
+        std::shared_ptr<org::Buffer> configBuffer,
+        std::shared_ptr<org::Buffer> occupancyHistogramBuffer,
+        std::shared_ptr<org::Buffer> depthWarpLUTBuffer);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    void Update(const UpdateExecutionContext& executionContext) override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    AVBOITDepthWarpBindings Declare(org::PassBuilder& builder);
+    br::render::PreparedComputeDispatch Prepare(const AVBOITDepthWarpBindings&, const org::PassPrepareContext&) const;
+    static void Record(const AVBOITDepthWarpBindings&, const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
 
 private:
-    std::shared_ptr<Buffer> m_configBuffer;
-    std::shared_ptr<Buffer> m_occupancyHistogramBuffer;
-    std::shared_ptr<Buffer> m_depthWarpLUTBuffer;
-    PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_configBuffer;
+    std::shared_ptr<org::Buffer> m_occupancyHistogramBuffer;
+    std::shared_ptr<org::Buffer> m_depthWarpLUTBuffer;
+    org::PipelineState m_pso;
 };

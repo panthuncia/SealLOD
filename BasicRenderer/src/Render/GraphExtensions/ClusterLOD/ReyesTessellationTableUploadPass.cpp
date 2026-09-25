@@ -1,61 +1,46 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesTessellationTableUploadPass.h"
 
 #include "Render/GraphExtensions/ClusterLOD/ReyesTessellationTable.h"
-#include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/Runtime/UploadTypes.h"
 #include "Resources/Buffers/Buffer.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 
 ReyesTessellationTableUploadPass::ReyesTessellationTableUploadPass(
-    std::shared_ptr<Buffer> tessTableConfigsBuffer,
-    std::shared_ptr<Buffer> tessTableVerticesBuffer,
-    std::shared_ptr<Buffer> tessTableTrianglesBuffer)
+    std::shared_ptr<org::Buffer> tessTableConfigsBuffer,
+    std::shared_ptr<org::Buffer> tessTableVerticesBuffer,
+    std::shared_ptr<org::Buffer> tessTableTrianglesBuffer)
     : m_tessTableConfigsBuffer(std::move(tessTableConfigsBuffer))
     , m_tessTableVerticesBuffer(std::move(tessTableVerticesBuffer))
     , m_tessTableTrianglesBuffer(std::move(tessTableTrianglesBuffer)) {
 }
 
-void ReyesTessellationTableUploadPass::DeclareResourceUsages(ComputePassBuilder* builder)
+void ReyesTessellationTableUploadPass::Declare(org::PassBuilder& builder)
 {
-    builder->WithShaderResource(
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    builder.WithShaderResource(
         m_tessTableConfigsBuffer,
         m_tessTableVerticesBuffer,
         m_tessTableTrianglesBuffer);
 }
 
-void ReyesTessellationTableUploadPass::Setup() {}
-
-void ReyesTessellationTableUploadPass::Update(const UpdateExecutionContext& executionContext)
+void ReyesTessellationTableUploadPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
-
-    if (m_uploaded) {
-        return;
-    }
 
     const auto& tableData = GetReyesTessellationTableData();
-    BUFFER_UPLOAD(
-        tableData.configs.data(),
-        static_cast<uint32_t>(tableData.configs.size() * sizeof(CLodReyesTessTableConfigEntry)),
-        org::runtime::UploadTarget::FromShared(m_tessTableConfigsBuffer),
-        0);
-    BUFFER_UPLOAD(
-        tableData.vertices.data(),
-        static_cast<uint32_t>(tableData.vertices.size() * sizeof(uint32_t)),
-        org::runtime::UploadTarget::FromShared(m_tessTableVerticesBuffer),
-        0);
-    BUFFER_UPLOAD(
-        tableData.triangles.data(),
-        static_cast<uint32_t>(tableData.triangles.size() * sizeof(uint32_t)),
-        org::runtime::UploadTarget::FromShared(m_tessTableTrianglesBuffer),
-        0);
-
-    m_uploaded = true;
+    const auto uploadOnce = [this](size_t index, const auto& bytes,
+        const std::shared_ptr<org::Buffer>& target) {
+        if (!target) return;
+        const auto generation = target->GetBackingGeneration();
+        if (m_uploadedGenerations[index] == generation) return;
+        UploadBufferData(
+            bytes.data(),
+            static_cast<uint32_t>(bytes.size() * sizeof(bytes.front())),
+            org::runtime::UploadTarget::FromShared(target),
+            0);
+        m_uploadedGenerations[index] = generation;
+    };
+    uploadOnce(0, tableData.configs, m_tessTableConfigsBuffer);
+    uploadOnce(1, tableData.vertices, m_tessTableVerticesBuffer);
+    uploadOnce(2, tableData.triangles, m_tessTableTrianglesBuffer);
 }
-
-PassReturn ReyesTessellationTableUploadPass::Execute(PassExecutionContext& executionContext)
-{
-    (void)executionContext;
-    return {};
-}
-
-void ReyesTessellationTableUploadPass::Cleanup() {}

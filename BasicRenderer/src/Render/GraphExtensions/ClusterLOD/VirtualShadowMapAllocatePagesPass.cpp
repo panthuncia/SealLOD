@@ -10,19 +10,20 @@
 #include "Resources/PixelBuffer.h"
 #include "ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodVirtualShadowAllocateRootConstants.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapAllocatePagesPass::VirtualShadowMapAllocatePagesPass(
-    std::shared_ptr<Buffer> allocationRequestsBuffer,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer,
-    std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<Buffer> freePhysicalPagesBuffer,
-    std::shared_ptr<Buffer> reusablePhysicalPagesBuffer,
-    std::shared_ptr<Buffer> pageListHeaderBuffer,
-    std::shared_ptr<Buffer> statsBuffer)
+    std::shared_ptr<org::Buffer> allocationRequestsBuffer,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> indirectArgsBuffer,
+    std::shared_ptr<org::Buffer> clipmapInfoBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> pageMetadataBuffer,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::shared_ptr<org::Buffer> freePhysicalPagesBuffer,
+    std::shared_ptr<org::Buffer> reusablePhysicalPagesBuffer,
+    std::shared_ptr<org::Buffer> pageListHeaderBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer)
     : m_allocationRequestsBuffer(std::move(allocationRequestsBuffer))
     , m_allocationCountBuffer(std::move(allocationCountBuffer))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
@@ -47,69 +48,58 @@ VirtualShadowMapAllocatePagesPass::VirtualShadowMapAllocatePagesPass(
     };
 
     auto device = DeviceManager::GetInstance().GetDevice();
+    rhi::CommandSignaturePtr commandSignature;
     device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        m_commandSignature);
+        commandSignature);
+    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
-void VirtualShadowMapAllocatePagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
+VirtualShadowMapAllocatePagesBindings VirtualShadowMapAllocatePagesPass::Declare(org::PassBuilder& builder)
 {
-    builder->WithShaderResource(
-            m_allocationRequestsBuffer,
-            m_allocationCountBuffer,
-            m_clipmapInfoBuffer,
-            m_freePhysicalPagesBuffer,
-            m_reusablePhysicalPagesBuffer,
-            m_pageListHeaderBuffer)
-        .WithIndirectArguments(m_indirectArgsBuffer)
-        .WithUnorderedAccess(m_pageTableTexture, m_pageMetadataBuffer, m_dirtyPageFlagsBuffer, m_statsBuffer);
-
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    return {builder.BindShaderResource(m_allocationRequestsBuffer), builder.BindShaderResource(m_allocationCountBuffer),
+        builder.BindIndirectArguments(m_indirectArgsBuffer), builder.BindShaderResource(m_clipmapInfoBuffer),
+        builder.BindUnorderedAccess(m_pageTableTexture), builder.BindUnorderedAccess(m_pageMetadataBuffer),
+        builder.BindUnorderedAccess(m_dirtyPageFlagsBuffer), builder.BindShaderResource(m_freePhysicalPagesBuffer),
+        builder.BindShaderResource(m_reusablePhysicalPagesBuffer), builder.BindShaderResource(m_pageListHeaderBuffer),
+        builder.BindUnorderedAccess(m_statsBuffer),
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)()};
 }
 
-void VirtualShadowMapAllocatePagesPass::Setup() {}
-
-PassReturn VirtualShadowMapAllocatePagesPass::Execute(PassExecutionContext& executionContext)
-{
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-    const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
-
-    uint32_t rootConstants[NumMiscUintRootConstants] = {};
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_REQUESTS_DESCRIPTOR_INDEX] = m_allocationRequestsBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_REQUEST_COUNT_DESCRIPTOR_INDEX] = m_allocationCountBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_TABLE_DESCRIPTOR_INDEX] = m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_METADATA_DESCRIPTOR_INDEX] = m_pageMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] = m_dirtyPageFlagsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_FREE_PAGES_DESCRIPTOR_INDEX] = m_freePhysicalPagesBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_REUSABLE_PAGES_DESCRIPTOR_INDEX] = m_reusablePhysicalPagesBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_LIST_HEADER_DESCRIPTOR_INDEX] = m_pageListHeaderBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_clipmapInfoBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT] = virtualShadowConfig.maxPhysicalPages;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_RENDER_BUDGET] =
-        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        rootConstants);
-
-    commandList.ExecuteIndirect(m_commandSignature->GetHandle(), m_indirectArgsBuffer->GetAPIResource().GetHandle(), 0, {}, 0, 1);
-
-    return {};
+br::render::PreparedComputeIndirect VirtualShadowMapAllocatePagesPass::Prepare(
+    const VirtualShadowMapAllocatePagesBindings& bindings, const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
+    br::render::PreparedComputeIndirect data{};
+    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    data.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
+    data.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
+    auto program = preparation.CaptureProgramBinding(m_pso);
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
+    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
+    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index; };
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_REQUESTS_DESCRIPTOR_INDEX] = srv(bindings.requests);
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_REQUEST_COUNT_DESCRIPTOR_INDEX] = srv(bindings.requestCount);
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_FREE_PAGES_DESCRIPTOR_INDEX] = srv(bindings.freePages);
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_REUSABLE_PAGES_DESCRIPTOR_INDEX] = srv(bindings.reusablePages);
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_LIST_HEADER_DESCRIPTOR_INDEX] = srv(bindings.header);
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT] = config.maxPhysicalPages;
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_RENDER_BUDGET] = bindings.pageRenderBudget;
+    data.constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
+    return data;
 }
 
-void VirtualShadowMapAllocatePagesPass::Cleanup() {}
+void VirtualShadowMapAllocatePagesPass::Record(const VirtualShadowMapAllocatePagesBindings&,
+    const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeIndirect(data, recording);
+}

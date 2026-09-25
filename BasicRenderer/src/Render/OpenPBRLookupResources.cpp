@@ -77,9 +77,9 @@ const std::array<OpenPBRLTCEntry, kLTCEntryCount> kFuzzLTC = {
 };
 #undef vec3
 
-ImageDimensions MakeImageDimensions(uint32_t width, uint32_t height, uint64_t bytesPerPixel)
+org::ImageDimensions MakeImageDimensions(uint32_t width, uint32_t height, uint64_t bytesPerPixel)
 {
-    ImageDimensions dims{};
+    org::ImageDimensions dims{};
     dims.width = width;
     dims.height = height;
     dims.rowPitch = static_cast<uint64_t>(width) * bytesPerPixel;
@@ -99,14 +99,14 @@ std::shared_ptr<std::vector<uint8_t>> MakeScalarBytes(
 }
 
 template <size_t Count>
-std::shared_ptr<PixelBuffer> CreateScalarTableTexture2D(
+std::shared_ptr<org::PixelBuffer> CreateScalarTableTexture2D(
     const TextureFactory& textureFactory,
     const std::array<OpenPBREnergyElement, Count>& data,
     uint32_t width,
     uint32_t height,
     std::string_view debugName)
 {
-    TextureDescription desc{};
+    org::TextureDescription desc{};
     desc.channels = 1;
     desc.format = rhi::Format::R16_UNorm;
     desc.hasSRV = true;
@@ -122,7 +122,7 @@ std::shared_ptr<PixelBuffer> CreateScalarTableTexture2D(
 }
 
 template <size_t Count>
-std::shared_ptr<PixelBuffer> CreateScalarTableTexture2DArray(
+std::shared_ptr<org::PixelBuffer> CreateScalarTableTexture2DArray(
     const TextureFactory& textureFactory,
     const std::array<OpenPBREnergyElement, Count>& data,
     uint32_t width,
@@ -132,7 +132,7 @@ std::shared_ptr<PixelBuffer> CreateScalarTableTexture2DArray(
 {
     const size_t sliceValueCount = static_cast<size_t>(width) * height;
 
-    TextureDescription desc{};
+    org::TextureDescription desc{};
     desc.channels = 1;
     desc.format = rhi::Format::R16_UNorm;
     desc.hasSRV = true;
@@ -155,7 +155,7 @@ std::shared_ptr<PixelBuffer> CreateScalarTableTexture2DArray(
     return texture;
 }
 
-std::shared_ptr<PixelBuffer> CreateFuzzLTCTableTexture(
+std::shared_ptr<org::PixelBuffer> CreateFuzzLTCTableTexture(
     const TextureFactory& textureFactory,
     std::string_view debugName)
 {
@@ -171,7 +171,7 @@ std::shared_ptr<PixelBuffer> CreateFuzzLTCTableTexture(
     auto bytes = std::make_shared<std::vector<uint8_t>>(halfData.size() * sizeof(uint16_t));
     std::memcpy(bytes->data(), halfData.data(), bytes->size());
 
-    TextureDescription desc{};
+    org::TextureDescription desc{};
     desc.channels = 4;
     desc.format = rhi::Format::R16G16B16A16_Float;
     desc.hasSRV = true;

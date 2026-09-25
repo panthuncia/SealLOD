@@ -38,6 +38,6 @@ std::string MakeVariantPassName(const CLodVariantTraits& traits, std::string_vie
 std::string MakeVariantResourceName(const CLodVariantTraits& traits, std::string_view suffix);
 std::string GetVariantTechniquePath(const CLodVariantTraits& traits, std::string_view passName);
 
-TextureDescription CreateVirtualShadowPageTableDescription();
-TextureDescription CreateVirtualShadowPhysicalPagesDescription(uint32_t backingResolution, uint32_t maxPhysicalPages);
-TextureDescription CreateVirtualShadowDirtyHierarchyDescription();
+org::TextureDescription CreateVirtualShadowPageTableDescription();
+org::TextureDescription CreateVirtualShadowPhysicalPagesDescription(uint32_t backingResolution, uint32_t maxPhysicalPages);
+org::TextureDescription CreateVirtualShadowDirtyHierarchyDescription();

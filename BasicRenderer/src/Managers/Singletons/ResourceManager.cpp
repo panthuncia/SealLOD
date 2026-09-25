@@ -5,7 +5,9 @@
 #include <cstdlib>
 #include <memory>
 #include <rhi_helpers.h>
+#include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <OpenRenderGraph/OpenRenderGraph.h>
 #include <spdlog/spdlog.h>
 
@@ -13,7 +15,7 @@
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
-#include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/Runtime/IUploadService.h"
 #include "Render/TerrainRvtTelemetry.h"
 
 namespace
@@ -70,7 +72,8 @@ namespace
     }
 }
 
-void ::ResourceManager::Initialize() {
+void ::ResourceManager::Initialize(std::shared_ptr<org::runtime::IUploadService> uploadService) {
+	m_uploadService = std::move(uploadService);
 
 	auto device = DeviceManager::GetInstance().GetDevice();
 
@@ -86,6 +89,10 @@ void ::ResourceManager::Initialize() {
     m_uavCounterReset->Map(&pMappedCounterReset, 0, sizeof(UINT));
 	ZeroMemory(pMappedCounterReset, sizeof(UINT));
 	m_uavCounterReset->Unmap(0, 0);
+}
+
+void ::ResourceManager::SetUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService) {
+	m_uploadService = std::move(uploadService);
 }
 
 void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex) {
@@ -180,10 +187,18 @@ void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, D
 		}
 	}
 
-	BUFFER_UPLOAD(&perFrameCBData, sizeof(PerFrameCB), org::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0);
+	if (!m_uploadService) throw std::runtime_error("ResourceManager upload service generation is unavailable");
+#if BUILD_TYPE == BUILD_TYPE_DEBUG
+	m_uploadService->UploadData(&perFrameCBData, sizeof(PerFrameCB),
+		org::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0, __FILE__, __LINE__);
+#else
+	m_uploadService->UploadData(&perFrameCBData, sizeof(PerFrameCB),
+		org::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0);
+#endif
 }
 void ::ResourceManager::Cleanup()
 {
 	m_perFrameBuffer.reset();
 	m_uavCounterReset.Reset();
+	m_uploadService.reset();
 }

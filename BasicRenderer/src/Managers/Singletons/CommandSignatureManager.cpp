@@ -19,6 +19,10 @@ void LogCommandSignatureResult(const char* name, rhi::Result result) {
 
 void CommandSignatureManager::Initialize() {
 
+    m_dispatchMeshCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
+    m_dispatchCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
+    m_materialEvaluationCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
+    m_terrainRegionMaterialEvaluationCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
     auto device = DeviceManager::GetInstance().GetDevice();
 
     if (DeviceManager::GetInstance().GetMeshShadersSupported()) {
@@ -29,7 +33,7 @@ void CommandSignatureManager::Initialize() {
         auto& graphicsLayout = PSOManager::GetInstance().GetRootSignature();
         const auto result = device.CreateCommandSignature(
             rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, std::size(args)), sizeof(DispatchMeshIndirectCommand) },
-            graphicsLayout.GetHandle(), m_dispatchMeshCommandSignature);
+            graphicsLayout.GetHandle(), *m_dispatchMeshCommandSignature);
         LogCommandSignatureResult("dispatch mesh", result);
     }
     else {
@@ -43,15 +47,16 @@ void CommandSignatureManager::Initialize() {
     auto& computeLayout = PSOManager::GetInstance().GetComputeRootSignature();
     auto result = device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args2, std::size(args2)), sizeof(DispatchIndirectCommand) },
-        computeLayout.GetHandle(), m_dispatchCommandSignature);
+        computeLayout.GetHandle(), *m_dispatchCommandSignature);
     LogCommandSignatureResult("dispatch", result);
 
+    m_rawDispatchCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
     rhi::IndirectArg rawDispatchArgs[] = {
         {.kind = rhi::IndirectArgKind::Dispatch }
     };
     result = device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(rawDispatchArgs, std::size(rawDispatchArgs)), sizeof(D3D12_DISPATCH_ARGUMENTS) },
-        computeLayout.GetHandle(), m_rawDispatchCommandSignature);
+        computeLayout.GetHandle(), *m_rawDispatchCommandSignature);
     LogCommandSignatureResult("raw dispatch", result);
 
     // Used by the visibility buffer material evaluation pass
@@ -61,7 +66,7 @@ void CommandSignatureManager::Initialize() {
     };
     result = device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(materialEvaluationArgs, 2), sizeof(MaterialEvaluationIndirectCommand) },
-        computeLayout.GetHandle(), m_materialEvaluationCommandSignature);
+        computeLayout.GetHandle(), *m_materialEvaluationCommandSignature);
     LogCommandSignatureResult("material evaluation", result);
 
     rhi::IndirectArg terrainRegionMaterialEvaluationArgs[] = {
@@ -70,15 +75,15 @@ void CommandSignatureManager::Initialize() {
     };
     result = device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(terrainRegionMaterialEvaluationArgs, 2), sizeof(TerrainRegionMaterialEvaluationIndirectCommand) },
-        computeLayout.GetHandle(), m_terrainRegionMaterialEvaluationCommandSignature);
+        computeLayout.GetHandle(), *m_terrainRegionMaterialEvaluationCommandSignature);
     LogCommandSignatureResult("terrain region material evaluation", result);
 
 }
 
 void CommandSignatureManager::Cleanup() {
-    m_dispatchMeshCommandSignature.Reset();
-    m_dispatchCommandSignature.Reset();
-    m_rawDispatchCommandSignature.Reset();
-    m_materialEvaluationCommandSignature.Reset();
-    m_terrainRegionMaterialEvaluationCommandSignature.Reset();
+    m_dispatchMeshCommandSignature.reset();
+    m_dispatchCommandSignature.reset();
+    m_rawDispatchCommandSignature.reset();
+    m_materialEvaluationCommandSignature.reset();
+    m_terrainRegionMaterialEvaluationCommandSignature.reset();
 }

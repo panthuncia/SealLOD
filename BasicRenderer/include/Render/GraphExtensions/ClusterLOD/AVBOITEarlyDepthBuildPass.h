@@ -2,31 +2,30 @@
 
 #include <memory>
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
-class AVBOITEarlyDepthBuildPass final : public ComputePass {
+struct AVBOITEarlyDepthBuildBindings { org::ResourceBindingToken config, zeroSlice, commands, count; };
+class AVBOITEarlyDepthBuildPass final : public org::TypedRenderGraphPass<AVBOITEarlyDepthBuildPass, br::render::PreparedComputeDispatch, AVBOITEarlyDepthBuildBindings> {
 public:
     AVBOITEarlyDepthBuildPass(
-        std::shared_ptr<Buffer> configBuffer,
-        std::shared_ptr<PixelBuffer> zeroTransmittanceSliceTexture,
-        std::shared_ptr<Buffer> tileCommandsBuffer,
-        std::shared_ptr<Buffer> tileCountBuffer);
+        std::shared_ptr<org::Buffer> configBuffer,
+        std::shared_ptr<org::PixelBuffer> zeroTransmittanceSliceTexture,
+        std::shared_ptr<org::Buffer> tileCommandsBuffer,
+        std::shared_ptr<org::Buffer> tileCountBuffer);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    void Update(const UpdateExecutionContext& executionContext) override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    AVBOITEarlyDepthBuildBindings Declare(org::PassBuilder& builder);
+    void Update(const org::UpdateExecutionContext& executionContext) override;
+    br::render::PreparedComputeDispatch Prepare(const AVBOITEarlyDepthBuildBindings&, const org::PassPrepareContext&) const;
+    static void Record(const AVBOITEarlyDepthBuildBindings&, const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
 
 private:
-    std::shared_ptr<Buffer> m_configBuffer;
-    std::shared_ptr<PixelBuffer> m_zeroTransmittanceSliceTexture;
-    std::shared_ptr<Buffer> m_tileCommandsBuffer;
-    std::shared_ptr<Buffer> m_tileCountBuffer;
-    PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_configBuffer;
+    std::shared_ptr<org::PixelBuffer> m_zeroTransmittanceSliceTexture;
+    std::shared_ptr<org::Buffer> m_tileCommandsBuffer;
+    std::shared_ptr<org::Buffer> m_tileCountBuffer;
+    org::PipelineState m_pso;
 };

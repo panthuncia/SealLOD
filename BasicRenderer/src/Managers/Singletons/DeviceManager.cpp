@@ -163,6 +163,9 @@ void DeviceManager::Initialize() {
     catch (const std::exception&) {
         enableRuntimeInstrumentation = false;
     }
+    if (IsTruthyEnvironmentValue("BASICRENDERER_RESHAPE_ENABLE")) {
+        enableRuntimeInstrumentation = true;
+    }
 
 #if !BASICRHI_ENABLE_RESHAPE
     enableRuntimeInstrumentation = false;
@@ -173,6 +176,9 @@ void DeviceManager::Initialize() {
     }
     catch (const std::exception&) {
         enableSynchronousRecording = false;
+    }
+    if (IsTruthyEnvironmentValue("BASICRENDERER_RESHAPE_SYNCHRONOUS_RECORDING")) {
+        enableSynchronousRecording = true;
     }
 
     try {
@@ -291,6 +297,23 @@ void DeviceManager::Initialize() {
                 feature.featureBit,
                 feature.name,
                 feature.description);
+        }
+
+        if (const std::string featureMaskText = GetEnvironmentString("BASICRENDERER_RESHAPE_GLOBAL_FEATURE_MASK");
+            !featureMaskText.empty()) {
+            char* end = nullptr;
+            const auto featureMask = std::strtoull(featureMaskText.c_str(), &end, 0);
+            if (end != featureMaskText.c_str() && *end == '\0') {
+                const auto maskResult = rhi::debug::SetGlobalInstrumentationMask(m_device.Get(), featureMask);
+                spdlog::info(
+                    "DeviceManager::Initialize ReShape environment feature mask=0x{:X} result={}",
+                    featureMask,
+                    static_cast<std::uint32_t>(maskResult));
+            } else {
+                spdlog::warn(
+                    "DeviceManager::Initialize ignored invalid BASICRENDERER_RESHAPE_GLOBAL_FEATURE_MASK='{}'",
+                    featureMaskText);
+            }
         }
 
         if (enableRuntimeInstrumentation && instrumentationState.active && instrumentationFeatures.empty()) {

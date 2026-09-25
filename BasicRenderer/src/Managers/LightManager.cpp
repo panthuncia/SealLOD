@@ -7,6 +7,7 @@
 #include "Managers/Singletons/DeletionManager.h"
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Managers/ViewManager.h"
+#include "Render/ShadowViewService.h"
 #include "Resources/Buffers/SortedUnsignedIntBuffer.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -14,13 +15,15 @@
 #include "Render/MemoryIntrospectionAPI.h"
 #include "ShaderBuffers.h"
 #include "Resources/PixelBuffer.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
+#include "Render/LightStateArtifacts.h"
 #include "../../generated/BuiltinResources.h"
 
 LightManager::LightManager() {
     auto& resourceManager = ::ResourceManager::GetInstance();
 
 	m_activeLightIndices = SortedUnsignedIntBuffer::CreateShared(1, "activeLightIndices");
-    m_lightBuffer = LazyDynamicStructuredBuffer<LightInfo>::CreateShared(10, "lightBuffer<LightInfo>");
+    m_lightBuffer = org::LazyDynamicStructuredBuffer<LightInfo>::CreateShared(10, "lightBuffer<LightInfo>");
     m_spotViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "spotViewInfo<uint>");
     m_pointViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "pointViewInfo<uint>");
     m_directionalViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "direcitonalViewInfo<uint>");
@@ -38,11 +41,11 @@ LightManager::LightManager() {
 	getDirectionalVirtualShadowSourceAngleDegrees = SettingsManager::GetInstance().getSettingGetter<float>(
 		CLodDirectionalVirtualShadowSourceAngleDegreesSettingName);
 
-	m_pLightViewInfoResourceGroup = std::make_shared<ResourceGroup>("LightViewInfo");
+	m_pLightViewInfoResourceGroup = std::make_shared<org::ResourceGroup>("LightViewInfo");
 	m_pLightViewInfoResourceGroup->AddResource(m_spotViewInfo);
 	m_pLightViewInfoResourceGroup->AddResource(m_pointViewInfo);
 
-	m_pLightBufferResourceGroup = std::make_shared<ResourceGroup>("LightBufferResourceGroup");
+	m_pLightBufferResourceGroup = std::make_shared<org::ResourceGroup>("LightBufferResourceGroup");
 	m_pLightBufferResourceGroup->AddResource(m_lightBuffer);
 	m_pLightBufferResourceGroup->AddResource(m_activeLightIndices);
 
@@ -56,7 +59,7 @@ LightManager::LightManager() {
 
 	static const size_t avgPagesPerCluster = 10;
 	m_lightPagePoolSize = numClusters * avgPagesPerCluster;
-	m_pLightPagesBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+	m_pLightPagesBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
 		static_cast<uint32_t>(m_lightPagePoolSize),
 		sizeof(LightPage),
 		true,
@@ -75,6 +78,24 @@ LightManager::LightManager() {
 	m_resources[Builtin::Light::DirectionalLightCascadeBuffer] = m_directionalViewInfo;
 	m_resources[Builtin::Light::ActiveLightIndices] = m_activeLightIndices;
 
+    const auto publishedSource = br::render::PublishedStateSource::ProcessSource();
+    const auto addPublished = [&](org::ResourceIdentifier key, std::shared_ptr<org::Resource> fallback,
+        std::uint64_t variant) {
+        m_resolvers[key] = std::make_shared<PublishedStateResourceResolver>(publishedSource,
+            br::render::PublishedResourceKey{ br::render::PublishedFragmentKind::Lights,
+                br::render::PublishedResourceUsage::ShaderResource, 0, 0, variant },
+            std::move(fallback));
+    };
+    addPublished(Builtin::Light::InfoBuffer, m_lightBuffer, br::render::LightInfoTableVariant);
+    addPublished(Builtin::Light::SpotLightMatrixBuffer, m_spotViewInfo,
+        br::render::LightSpotViewTableVariant);
+    addPublished(Builtin::Light::PointLightCubemapBuffer, m_pointViewInfo,
+        br::render::LightPointViewTableVariant);
+    addPublished(Builtin::Light::DirectionalLightCascadeBuffer, m_directionalViewInfo,
+        br::render::LightDirectionalViewTableVariant);
+    addPublished(Builtin::Light::ActiveLightIndices, m_activeLightIndices,
+        br::render::LightActiveIndexTableVariant);
+
 	m_resolvers[Builtin::Light::ViewResourceGroup] = 
 		std::make_shared<ResourceGroupResolver>(m_pLightViewInfoResourceGroup);
 	m_resolvers[Builtin::Light::BufferGroup] = 
@@ -82,7 +103,7 @@ LightManager::LightManager() {
 }
 
 LightManager::~LightManager() {
-	auto& deletionManager = DeletionManager::GetInstance();
+	auto& deletionManager = org::DeletionManager::GetInstance();
 }
 
 namespace {
@@ -142,7 +163,8 @@ AddLightReturn LightManager::AddLight(LightInfo* lightInfo, uint64_t entityId) {
     viewInfo.lightBufferIndex = lightIndex;
     viewInfo.lightBufferView = lightBufferView;
     
-	return { viewInfo, planes };
+    m_publicationRevision.fetch_add(1, std::memory_order_release);
+    return { viewInfo, planes };
 }
 
 
@@ -163,6 +185,7 @@ void LightManager::RemoveLight(flecs::entity light) {
 
 	RemoveLightViewInfo(light);
 	light.remove<Components::LightViewInfo>();
+	m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
 unsigned int LightManager::GetNumLights() {
@@ -196,8 +219,8 @@ LightManager::CreatePointLightViewInfo(const LightInfo& info, uint64_t entityId)
 		ViewCreationParams viewParams{};
 		viewParams.parentEntityID = entityId;
 		viewParams.lightType = Components::LightType::Point;
-		auto renderView = m_pViewManager->CreateView(camera, ViewFlags::ShadowFace(), viewParams);
-		m_pointViewInfo->Add(m_pViewManager->Get(renderView)->gpu.cameraBufferIndex);
+		auto renderView = m_shadowViews->CreateShadowView(camera, ViewFlags::ShadowFace(), viewParams);
+		m_pointViewInfo->Add(m_shadowViews->ShadowViewCameraBufferIndex(renderView));
 		viewInfo.viewIDs.push_back(renderView);
 	}	
 	
@@ -228,8 +251,8 @@ LightManager::CreateSpotLightViewInfo(const LightInfo& info, uint64_t entityId) 
 	ViewCreationParams viewParams{};
 	viewParams.parentEntityID = entityId;
 	viewParams.lightType = Components::LightType::Spot;
-	auto renderView = m_pViewManager->CreateView(camera, ViewFlags::ShadowFace(), viewParams);
-	m_spotViewInfo->Add(m_pViewManager->Get(renderView)->gpu.cameraBufferIndex);
+	auto renderView = m_shadowViews->CreateShadowView(camera, ViewFlags::ShadowFace(), viewParams);
+	m_spotViewInfo->Add(m_shadowViews->ShadowViewCameraBufferIndex(renderView));
 	viewInfo.viewIDs.push_back(renderView);
 
 	viewInfo.projectionMatrix = Components::Matrix(camera.unjitteredProjection);
@@ -321,8 +344,8 @@ LightManager::CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t ent
 		viewParams.parentEntityID = entityId;
 		viewParams.lightType = Components::LightType::Directional;
 		viewParams.cascadeIndex = i;
-		auto renderView = m_pViewManager->CreateView(cameraInfo, ViewFlags::ShadowCascade(), viewParams);
-		m_directionalViewInfo->Add(m_pViewManager->Get(renderView)->gpu.cameraBufferIndex);
+		auto renderView = m_shadowViews->CreateShadowView(cameraInfo, ViewFlags::ShadowCascade(), viewParams);
+		m_directionalViewInfo->Add(m_shadowViews->ShadowViewCameraBufferIndex(renderView));
 		viewInfo.viewIDs.push_back(renderView);
 	}
 	return { viewInfo, cascadePlanes };
@@ -346,12 +369,7 @@ void LightManager::RebuildDirectionalLightViewInfoBuffer(std::optional<uint64_t>
 
 		viewInfo.viewInfoBufferIndex = m_directionalViewInfo->Size();
 		for (uint64_t viewId : viewInfo.viewIDs) {
-			const View* view = m_pViewManager->Get(viewId);
-			if (!view) {
-				continue;
-			}
-
-			m_directionalViewInfo->Add(view->gpu.cameraBufferIndex);
+			m_directionalViewInfo->Add(m_shadowViews->ShadowViewCameraBufferIndex(viewId));
 		}
 
 		light.lightInfo.shadowViewInfoIndex = static_cast<int>(viewInfo.viewInfoBufferIndex);
@@ -361,6 +379,7 @@ void LightManager::RebuildDirectionalLightViewInfoBuffer(std::optional<uint64_t>
 
 
 void LightManager::UpdateLightViewInfo(flecs::entity light) {
+	m_publicationRevision.fetch_add(1, std::memory_order_release);
 	//auto projectionMatrix = light.get<Components::ProjectionMatrix>();
 	auto viewInfo = light.get<Components::LightViewInfo>();
 	auto& renderViewIds = viewInfo.viewIDs;
@@ -400,7 +419,7 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 				static_cast<float>(viewInfo.depthResY) / static_cast<float>(GetNextPowerOfTwo(viewInfo.depthResY))
 			};
 			info.numDepthMips = CalculateMipLevels(static_cast<uint16_t>(info.depthResX), static_cast<uint16_t>(info.depthResY));
-			m_pViewManager->UpdateCamera(renderViewIds[i], info);
+			m_shadowViews->UpdateShadowView(renderViewIds[i], info);
 		}
 		break;
 	}
@@ -430,7 +449,7 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 		};
 		camera.numDepthMips = CalculateMipLevels(static_cast<uint16_t>(camera.depthResX), static_cast<uint16_t>(camera.depthResY));
 
-		m_pViewManager->UpdateCamera(renderViewIds[0], camera);
+		m_shadowViews->UpdateShadowView(renderViewIds[0], camera);
 		break;
 	}
 	case Components::LightType::Directional: {
@@ -499,7 +518,7 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 			};
 			info.numDepthMips = CalculateMipLevels(static_cast<uint16_t>(info.depthResX), static_cast<uint16_t>(info.depthResY));
 			info.isOrtho = true; // Directional lights use orthographic projection for shadows.
-			m_pViewManager->UpdateCamera(renderViewIds[i], info);
+			m_shadowViews->UpdateShadowView(renderViewIds[i], info);
 		}
 		lightViewInfoChanged = true;
 		UpdateLightBufferView(viewInfo.lightBufferView.get(), lightInfo.lightInfo);
@@ -527,20 +546,20 @@ void LightManager::RemoveLightViewInfo(flecs::entity light) {
 	case Components::LightType::Point: {
 		const auto& views = viewInfo->viewIDs;
 		for (size_t i = 0; i < views.size(); i++) {
-			m_pViewManager->DestroyView(views[i]);
+			m_shadowViews->DestroyShadowView(views[i]);
 		}
 		break;
 	}
 	case Components::LightType::Spot: {
 		for (const auto viewID : viewInfo->viewIDs) {
-			m_pViewManager->DestroyView(viewID);
+			m_shadowViews->DestroyShadowView(viewID);
 		}
 		break;
 	}
 	case Components::LightType::Directional: {
 		const auto& views = viewInfo->viewIDs;
 		for (size_t i = 0; i < views.size(); i++) {
-			m_pViewManager->DestroyView(views[i]);
+			m_shadowViews->DestroyShadowView(views[i]);
 		}
 		RebuildDirectionalLightViewInfoBuffer(light.id());
 		break;
@@ -555,21 +574,37 @@ void LightManager::SetCurrentCamera(flecs::entity camera) {
 }
 
 
-void LightManager::SetViewManager(ViewManager* viewManager) {
-	m_pViewManager = viewManager;
+void LightManager::SetShadowViewService(br::render::IShadowViewService* service) {
+	m_shadowViews = service;
 }
 
-void LightManager::UpdateLightBufferView(BufferView* view, const LightInfo& data) {
+std::vector<std::shared_ptr<const std::vector<std::byte>>> LightManager::CaptureTableImages() const {
+    std::vector<std::shared_ptr<const std::vector<std::byte>>> result;
+    result.reserve(5);
+    const auto capture = [&](const auto& buffer) {
+        result.push_back(std::make_shared<const std::vector<std::byte>>(
+            buffer->CaptureCpuShadowBytes()));
+    };
+    capture(m_lightBuffer);
+    capture(m_spotViewInfo);
+    capture(m_pointViewInfo);
+    capture(m_directionalViewInfo);
+    capture(m_activeLightIndices);
+    return result;
+}
+
+void LightManager::UpdateLightBufferView(org::BufferView* view, const LightInfo& data) {
 	std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
 	m_lightBuffer->UpdateView(view, &data);
+	m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
-std::shared_ptr<Resource> LightManager::ProvideResource(ResourceIdentifier const& key) {
+std::shared_ptr<org::Resource> LightManager::ProvideResource(org::ResourceIdentifier const& key) {
 	return m_resources[key];
 }
 
-std::vector<ResourceIdentifier> LightManager::GetSupportedKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> LightManager::GetSupportedKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resources.size());
 	for (auto const& [key, _] : m_resources)
 		keys.push_back(key);
@@ -577,14 +612,14 @@ std::vector<ResourceIdentifier> LightManager::GetSupportedKeys() {
 	return keys;
 }
 
-std::vector<ResourceIdentifier> LightManager::GetSupportedResolverKeys() {
-	std::vector<ResourceIdentifier> keys;
+std::vector<org::ResourceIdentifier> LightManager::GetSupportedResolverKeys() {
+	std::vector<org::ResourceIdentifier> keys;
 	keys.reserve(m_resolvers.size());
 	for (auto const& [k, _] : m_resolvers)
 		keys.push_back(k);
 	return keys;
 }
-std::shared_ptr<IResourceResolver> LightManager::ProvideResolver(ResourceIdentifier const& key) {
+std::shared_ptr<org::IResourceResolver> LightManager::ProvideResolver(org::ResourceIdentifier const& key) {
 	auto it = m_resolvers.find(key);
 	if (it == m_resolvers.end()) return nullptr;
 	return it->second;

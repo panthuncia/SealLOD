@@ -52,7 +52,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "37";
+constexpr std::string_view kObjectReyesConfigVersion = "40";
 constexpr std::string_view kNifTreeWindCacheVersion = "4";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)

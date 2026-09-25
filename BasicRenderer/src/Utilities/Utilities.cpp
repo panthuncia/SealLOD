@@ -171,7 +171,7 @@ ImageData LoadSTBImage(const char* filename) {
 }
 
 struct DecodedTexture {
-    TextureDescription desc;
+    org::TextureDescription desc;
     TextureAsset::BytesList subresources;
     bool alphaAllOpaque = true;
     std::string filepathUtf8;
@@ -179,13 +179,13 @@ struct DecodedTexture {
 };
 
 static std::shared_ptr<TextureAsset>
-CreateTextureFromDecoded(DecodedTexture img, std::shared_ptr<Sampler> sampler, bool allowRTV, bool allowUAV)
+CreateTextureFromDecoded(DecodedTexture img, std::shared_ptr<org::Sampler> sampler, bool allowRTV, bool allowUAV)
 {
     img.desc.hasRTV = allowRTV;
     img.desc.hasUAV = allowUAV;
     img.desc.generateMipMaps = false;
 
-    if (!sampler) sampler = Sampler::GetDefaultSampler();
+    if (!sampler) sampler = org::Sampler::GetDefaultSampler();
 
 	TextureFileMeta meta{};
 	meta.fileType = img.fileType.value_or(ImageFiletype::UNKNOWN);
@@ -298,7 +298,7 @@ static DecodedTexture DecodedFromDXT(
         }
 #endif
 
-        ImageDimensions dims{};
+        org::ImageDimensions dims{};
         dims.width = static_cast<uint32_t>(src.width);
         dims.height = static_cast<uint32_t>(src.height);
         dims.rowPitch = src.rowPitch;
@@ -581,7 +581,7 @@ namespace detail {
         return true;
     }
 
-    std::optional<TextureDescription> TryBuildDeferredConditionedCacheDescription(
+    std::optional<org::TextureDescription> TryBuildDeferredConditionedCacheDescription(
         const std::wstring& filePath,
         bool allowRTV,
         bool allowUAV,
@@ -608,7 +608,7 @@ namespace detail {
             return std::nullopt;
         }
 
-        TextureDescription desc{};
+        org::TextureDescription desc{};
         desc.format = static_cast<rhi::Format>(header.format);
         desc.channels = static_cast<unsigned short>(header.channels);
         desc.isCubemap = br::processed_texture_cache::HasFlag(header, br::processed_texture_cache::FlagIsCubemap);
@@ -636,7 +636,7 @@ namespace detail {
                     return std::nullopt;
                 }
 
-                ImageDimensions dims{};
+                org::ImageDimensions dims{};
                 dims.width = static_cast<uint32_t>(mipWidth);
                 dims.height = static_cast<uint32_t>(mipHeight);
                 dims.rowPitch = rowPitch;
@@ -650,7 +650,7 @@ namespace detail {
 
     std::shared_ptr<TextureAsset> TryLoadProcessedTextureCacheToVRAM(
         const std::wstring& filePath,
-        std::shared_ptr<Sampler> sampler,
+        std::shared_ptr<org::Sampler> sampler,
         bool allowRTV,
         bool allowUAV,
         std::string* outFailureReason = nullptr)
@@ -681,7 +681,7 @@ namespace detail {
             return {};
         }
 
-        TextureDescription desc{};
+        org::TextureDescription desc{};
         desc.format = static_cast<rhi::Format>(header.format);
         desc.channels = static_cast<unsigned short>(header.channels);
         desc.isCubemap = br::processed_texture_cache::HasFlag(header, br::processed_texture_cache::FlagIsCubemap);
@@ -716,7 +716,7 @@ namespace detail {
                     return {};
                 }
 
-                ImageDimensions dims{};
+                org::ImageDimensions dims{};
                 dims.width = static_cast<uint32_t>(mipWidth);
                 dims.height = static_cast<uint32_t>(mipHeight);
                 dims.rowPitch = rowPitch;
@@ -732,7 +732,7 @@ namespace detail {
             return {};
         }
 
-        auto pixelBuffer = PixelBuffer::CreateShared(desc);
+        auto pixelBuffer = org::PixelBuffer::CreateShared(desc);
         if (!pixelBuffer) {
             if (outFailureReason) {
                 *outFailureReason = "failed to create resident texture resource for conditioned cache upload";
@@ -759,7 +759,7 @@ namespace detail {
         }
 
         if (!sampler) {
-            sampler = Sampler::GetDefaultSampler();
+            sampler = org::Sampler::GetDefaultSampler();
         }
 
         TextureFileMeta meta{};
@@ -778,7 +778,7 @@ namespace detail {
 
     std::shared_ptr<TextureAsset> TryLoadDDSDirectToVRAM(
         const std::wstring& filePath,
-        std::shared_ptr<Sampler> sampler,
+        std::shared_ptr<org::Sampler> sampler,
         bool preferSRGB,
         const LoadFlags& flags,
         bool requireCubemap,
@@ -827,7 +827,7 @@ namespace detail {
 
         const DXGI_FORMAT chosenFormat = preferSRGB ? DirectX::MakeSRGB(metadata.format) : ToLinearIfSRGB(metadata.format);
 
-        TextureDescription desc{};
+        org::TextureDescription desc{};
         desc.format = rhi::helpers::ToRHI(chosenFormat);
         desc.channels = static_cast<unsigned short>(rhi::helpers::FormatChannelCount(desc.format));
         if (rhi::helpers::IsBlockCompressed(desc.format)) {
@@ -868,7 +868,7 @@ namespace detail {
                 return {};
             }
 
-            ImageDimensions dims{};
+            org::ImageDimensions dims{};
             dims.width = static_cast<uint32_t>(srcImage.width);
             dims.height = static_cast<uint32_t>(srcImage.height);
             dims.rowPitch = srcImage.rowPitch;
@@ -888,7 +888,7 @@ namespace detail {
             currentOffset += srcImage.slicePitch;
         }
 
-        auto pixelBuffer = PixelBuffer::CreateShared(desc);
+        auto pixelBuffer = org::PixelBuffer::CreateShared(desc);
         std::string directStorageMessage;
         if (!DirectStorageManager::GetInstance().UploadTextureRegionsFromFile(filePath, pixelBuffer->GetAPIResource(), regions, &directStorageMessage)) {
             if (!directStorageMessage.empty()) {
@@ -898,7 +898,7 @@ namespace detail {
         }
 
         if (!sampler) {
-            sampler = Sampler::GetDefaultSampler();
+            sampler = org::Sampler::GetDefaultSampler();
         }
 
         TextureFileMeta meta{};
@@ -1004,7 +1004,7 @@ namespace detail {
 std::shared_ptr<TextureAsset>
 LoadTextureFromMemory(const void* bytes,
     size_t byteCount,
-    std::shared_ptr<Sampler> sampler,
+    std::shared_ptr<org::Sampler> sampler,
     const LoadFlags& flags,
     bool preferSRGB, 
     bool allowRTV, 
@@ -1095,7 +1095,7 @@ LoadTextureFromMemory(const void* bytes,
 
 std::shared_ptr<TextureAsset>
 LoadTextureFromFile(const std::wstring& filePath,
-    std::shared_ptr<Sampler> sampler,
+    std::shared_ptr<org::Sampler> sampler,
     bool preferSRGB,
     const LoadFlags& flagsIn,
     bool allowRTV, bool allowUAV)
@@ -1179,7 +1179,7 @@ LoadTextureFromFile(const std::wstring& filePath,
 std::shared_ptr<TextureAsset>
 LoadTextureFromFileDeferred(
     const std::wstring& filePath,
-    std::shared_ptr<Sampler> sampler,
+    std::shared_ptr<org::Sampler> sampler,
     bool preferSRGB,
     const TextureFileMeta* metaOverride,
     bool allowRTV,
@@ -1195,7 +1195,7 @@ LoadTextureFromFileDeferred(
     }
     meta.preferSRGB = preferSRGB;
 
-    TextureDescription desc{};
+    org::TextureDescription desc{};
     std::string deferredShapeDetail = "texture load deferred; source path retained for async upload";
     if (meta.isProcessingCacheArtifact || ::detail::IsProcessedTextureCachePath(filePath)) {
         std::string cacheShapeError;
@@ -1222,7 +1222,7 @@ LoadTextureFromFileDeferred(
         desc.hasUAV = allowUAV;
         desc.generateMipMaps = false;
 
-        ImageDimensions dims{};
+        org::ImageDimensions dims{};
         dims.width = 1;
         dims.height = 1;
         dims.rowPitch = 4;
@@ -1246,13 +1246,13 @@ std::shared_ptr<TextureAsset> LoadCubemapFromFile(const char* topPath, const cha
 	ImageData back = LoadSTBImage(backPath);
 
 
-	ImageDimensions dim;
+	org::ImageDimensions dim;
 	dim.width = top.width;
 	dim.height = top.height;
 	dim.rowPitch = top.width * top.channels;
 	dim.slicePitch = dim.rowPitch * top.height;
 
-	TextureDescription desc;
+	org::TextureDescription desc;
 	desc.imageDimensions.push_back(dim);
 	desc.channels = static_cast<unsigned short>(top.channels);
 	desc.format = rhi::Format::R8G8B8A8_UNorm;
@@ -1268,12 +1268,12 @@ std::shared_ptr<TextureAsset> LoadCubemapFromFile(const char* topPath, const cha
     dataPtrs.push_back(std::make_shared<std::vector<uint8_t>>(front.data, front.data + front.width*front.height*front.channels));
     dataPtrs.push_back(std::make_shared<std::vector<uint8_t>>(back.data, back.data + back.width*back.height*back.channels));
 
-	auto sampler = Sampler::GetDefaultSampler();
+	auto sampler = org::Sampler::GetDefaultSampler();
     return TextureAsset::CreateShared(desc, dataPtrs, sampler, TextureFileMeta());
 }
 
 std::shared_ptr<TextureAsset> LoadCubemapFromFile(std::wstring ddsFilePath, bool allowRTV, bool allowUAV) {
-    if (auto directStorageTexture = ::detail::TryLoadDDSDirectToVRAM(ddsFilePath, Sampler::GetDefaultSampler(), false, {}, true, allowRTV, allowUAV)) {
+    if (auto directStorageTexture = ::detail::TryLoadDDSDirectToVRAM(ddsFilePath, org::Sampler::GetDefaultSampler(), false, {}, true, allowRTV, allowUAV)) {
         return directStorageTexture;
     }
 
@@ -1290,7 +1290,7 @@ std::shared_ptr<TextureAsset> LoadCubemapFromFile(std::wstring ddsFilePath, bool
     }
 
     // Extract cubemap faces and create a PixelBuffer from them
-    TextureDescription desc;
+    org::TextureDescription desc;
 
     std::vector<std::shared_ptr<std::vector<uint8_t>>> dataPtrs;
     dataPtrs.reserve(6ull * metadata.mipLevels);
@@ -1313,7 +1313,7 @@ std::shared_ptr<TextureAsset> LoadCubemapFromFile(std::wstring ddsFilePath, bool
 #endif
 
             // Store dimensions (as you already do)
-            ImageDimensions dim{};
+            org::ImageDimensions dim{};
             dim.width = static_cast<uint32_t>(img->width);
             dim.height = static_cast<uint32_t>(img->height);
             dim.rowPitch = img->rowPitch;
@@ -1336,9 +1336,9 @@ std::shared_ptr<TextureAsset> LoadCubemapFromFile(std::wstring ddsFilePath, bool
 	desc.hasUAV = allowUAV;
     desc.generateMipMaps = false;
 
-	auto buffer = PixelBuffer::CreateShared(desc);
+	auto buffer = org::PixelBuffer::CreateShared(desc);
 
-    auto sampler = Sampler::GetDefaultSampler();
+    auto sampler = org::Sampler::GetDefaultSampler();
 
 	TextureFileMeta meta{};
 	meta.fileType = ImageFiletype::DDS;
@@ -1735,11 +1735,11 @@ DXGI_FORMAT DetermineTextureFormat(int channels, bool sRGB, bool isDSV) {
     }
 }
 
-ShaderVisibleIndexInfo CreateShaderResourceView(
+org::ShaderVisibleIndexInfo CreateShaderResourceView(
     rhi::Device& device,
     rhi::Resource& resource,
     rhi::Format format,
-    DescriptorHeap* srvHeap,
+    org::DescriptorHeap* srvHeap,
     int mipLevels,
     bool isCubemap,
     bool isArray,
@@ -1772,18 +1772,18 @@ ShaderVisibleIndexInfo CreateShaderResourceView(
 
     device.CreateShaderResourceView({ srvHeap->GetHeap().GetHandle(), descriptorIndex}, resource.GetHandle(), desc);
 
-    ShaderVisibleIndexInfo srvInfo;
+    org::ShaderVisibleIndexInfo srvInfo;
     srvInfo.slot.index = descriptorIndex;
 	srvInfo.slot.heap = srvHeap->GetHeap().GetHandle();
 
     return srvInfo;
 }
 
-std::vector<std::vector<ShaderVisibleIndexInfo>> CreateShaderResourceViewsPerMip(
+std::vector<std::vector<org::ShaderVisibleIndexInfo>> CreateShaderResourceViewsPerMip(
     rhi::Device&     device,
     rhi::Resource&   resource,
     rhi::Format       format,
-    DescriptorHeap*   srvHeap,
+    org::DescriptorHeap*   srvHeap,
     int               mipLevels,
     bool              isCubemap,
     bool              isArray,
@@ -1793,7 +1793,7 @@ std::vector<std::vector<ShaderVisibleIndexInfo>> CreateShaderResourceViewsPerMip
     int sliceCount = isArray ? arraySize : 1;
 
     // Outer vector size == number of slices
-    std::vector<std::vector<ShaderVisibleIndexInfo>> result(sliceCount);
+    std::vector<std::vector<org::ShaderVisibleIndexInfo>> result(sliceCount);
 
     for (int slice = 0; slice < sliceCount; ++slice) {
         // Reserve inner vector for mipLevels entries
@@ -1840,7 +1840,7 @@ std::vector<std::vector<ShaderVisibleIndexInfo>> CreateShaderResourceViewsPerMip
 
 			device.CreateShaderResourceView({ srvHeap->GetHeap().GetHandle(), descriptorIndex}, resource.GetHandle(), srvDesc);
 
-            ShaderVisibleIndexInfo srvInfo;
+            org::ShaderVisibleIndexInfo srvInfo;
             srvInfo.slot.index = descriptorIndex;
 			srvInfo.slot.heap = srvHeap->GetHeap().GetHandle();
 
@@ -1850,11 +1850,11 @@ std::vector<std::vector<ShaderVisibleIndexInfo>> CreateShaderResourceViewsPerMip
 
     return result;
 }
-ShaderVisibleIndexInfo CreateUnorderedAccessView(
+org::ShaderVisibleIndexInfo CreateUnorderedAccessView(
     rhi::Device& device,
     rhi::Resource& resource,
     rhi::Format format,
-    DescriptorHeap* uavHeap,
+    org::DescriptorHeap* uavHeap,
     bool isArray,
     int arraySize,
     int mipSlice,
@@ -1882,18 +1882,18 @@ ShaderVisibleIndexInfo CreateUnorderedAccessView(
 	// No counter for texture UAVs
     device.CreateUnorderedAccessView({uavHeap->GetHeap().GetHandle(), descriptorIndex}, resource.GetHandle(), uavDesc);
 
-    ShaderVisibleIndexInfo uavInfo;
+    org::ShaderVisibleIndexInfo uavInfo;
     uavInfo.slot.index = descriptorIndex;
 	uavInfo.slot.heap = uavHeap->GetHeap().GetHandle();
 
     return uavInfo;
 }
 
-NonShaderVisibleIndexInfo CreateNonShaderVisibleUnorderedAccessView( // Clear operations need a non-shader visible UAV
+org::NonShaderVisibleIndexInfo CreateNonShaderVisibleUnorderedAccessView( // Clear operations need a non-shader visible UAV
     rhi::Device& device,
     rhi::Resource& resource,
     rhi::Format format,
-    DescriptorHeap* uavHeap,
+    org::DescriptorHeap* uavHeap,
     bool isArray,
     int arraySize,
     int mipSlice,
@@ -1919,18 +1919,18 @@ NonShaderVisibleIndexInfo CreateNonShaderVisibleUnorderedAccessView( // Clear op
     // No counter for texture UAVs
 	device.CreateUnorderedAccessView({ uavHeap->GetHeap().GetHandle(), descriptorIndex}, resource.GetHandle(), uavDesc);
 
-    NonShaderVisibleIndexInfo uavInfo;
+    org::NonShaderVisibleIndexInfo uavInfo;
     uavInfo.slot.index = descriptorIndex;
 	uavInfo.slot.heap = uavHeap->GetHeap().GetHandle();
 
     return uavInfo;
 }
 
-std::vector<std::vector<ShaderVisibleIndexInfo>> CreateUnorderedAccessViewsPerMip(
+std::vector<std::vector<org::ShaderVisibleIndexInfo>> CreateUnorderedAccessViewsPerMip(
     rhi::Device& device,
     rhi::Resource& resource,
     rhi::Format      format,
-    DescriptorHeap* uavHeap,
+    org::DescriptorHeap* uavHeap,
     int              mipLevels,
     bool             isArray,
     int              arraySize,
@@ -1939,7 +1939,7 @@ std::vector<std::vector<ShaderVisibleIndexInfo>> CreateUnorderedAccessViewsPerMi
 {
     // If not an array, treat as a single slice
     const int sliceCount = isArray ? arraySize : 1;
-    std::vector<std::vector<ShaderVisibleIndexInfo>> result(sliceCount);
+    std::vector<std::vector<org::ShaderVisibleIndexInfo>> result(sliceCount);
 
     for (int slice = 0; slice < sliceCount; ++slice) {
         auto& sliceUAVs = result[slice];
@@ -1978,7 +1978,7 @@ std::vector<std::vector<ShaderVisibleIndexInfo>> CreateUnorderedAccessViewsPerMi
             const UINT descriptorIndex = uavHeap->AllocateDescriptor();
             device.CreateUnorderedAccessView({ uavHeap->GetHeap().GetHandle(), descriptorIndex }, resource.GetHandle(), uavDesc);
 
-            ShaderVisibleIndexInfo uavInfo{ { uavHeap->GetHeap().GetHandle(), descriptorIndex } };
+            org::ShaderVisibleIndexInfo uavInfo{ { uavHeap->GetHeap().GetHandle(), descriptorIndex } };
             sliceUAVs.push_back(uavInfo);
         }
     }
@@ -1986,11 +1986,11 @@ std::vector<std::vector<ShaderVisibleIndexInfo>> CreateUnorderedAccessViewsPerMi
     return result;
 }
 
-std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateNonShaderVisibleUnorderedAccessViewsPerMip(
+std::vector<std::vector<org::NonShaderVisibleIndexInfo>> CreateNonShaderVisibleUnorderedAccessViewsPerMip(
     rhi::Device&      device,
     rhi::Resource&   resource,
     rhi::Format        format,
-    DescriptorHeap*    uavHeap,
+    org::DescriptorHeap*    uavHeap,
     int                mipLevels,
     bool               isArray,
     int                arraySize,
@@ -1998,7 +1998,7 @@ std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateNonShaderVisibleUnorde
 {
     // Determine how many "slices" we'll emit (1 if not an array)
     int sliceCount = isArray ? arraySize : 1;
-    std::vector<std::vector<NonShaderVisibleIndexInfo>> result(sliceCount);
+    std::vector<std::vector<org::NonShaderVisibleIndexInfo>> result(sliceCount);
 
     for (int slice = 0; slice < sliceCount; ++slice) {
         auto& sliceUAVs = result[slice];
@@ -2024,7 +2024,7 @@ std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateNonShaderVisibleUnorde
             // Create the UAV (no counter for texture UAVs)
 			device.CreateUnorderedAccessView({ uavHeap->GetHeap().GetHandle(), idx}, resource.GetHandle(), uavDesc);
 
-            NonShaderVisibleIndexInfo info;
+            org::NonShaderVisibleIndexInfo info;
             info.slot.index = idx;
 			info.slot.heap = uavHeap->GetHeap().GetHandle();
             sliceUAVs.push_back(info);
@@ -2034,11 +2034,11 @@ std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateNonShaderVisibleUnorde
     return result;
 }
 
-std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateRenderTargetViews(
+std::vector<std::vector<org::NonShaderVisibleIndexInfo>> CreateRenderTargetViews(
     rhi::Device&      device,
     rhi::Resource&    resource,
     rhi::Format        format,
-    DescriptorHeap*    rtvHeap,
+    org::DescriptorHeap*    rtvHeap,
     bool               isCubemap,
     bool               isArray,
     int                arraySize,
@@ -2050,7 +2050,7 @@ std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateRenderTargetViews(
     int sliceCount = isCubemap ? (6 * arraySize) : arraySize;
 
     // Prepare the outer vector: one entry per slice
-    std::vector<std::vector<NonShaderVisibleIndexInfo>> result(sliceCount);
+    std::vector<std::vector<org::NonShaderVisibleIndexInfo>> result(sliceCount);
 
     // Common bits of the RTV description
     rhi::RtvDesc rtvDesc = {};
@@ -2071,7 +2071,7 @@ std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateRenderTargetViews(
             // Create the RTV
 			device.CreateRenderTargetView({ rtvHeap->GetHeap().GetHandle(), idx}, resource.GetHandle(), rtvDesc);
 
-            NonShaderVisibleIndexInfo info;
+            org::NonShaderVisibleIndexInfo info;
             info.slot.index = idx;
 			info.slot.heap = rtvHeap->GetHeap().GetHandle();
             sliceRTVs.push_back(info);
@@ -2081,10 +2081,10 @@ std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateRenderTargetViews(
     return result;
 }
 
-std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateDepthStencilViews(
+std::vector<std::vector<org::NonShaderVisibleIndexInfo>> CreateDepthStencilViews(
     rhi::Device&      device,
     rhi::Resource&    resource,
-    DescriptorHeap*    dsvHeap,
+    org::DescriptorHeap*    dsvHeap,
     rhi::Format        format,
     bool               isCubemap,
     bool               isArray,
@@ -2093,7 +2093,7 @@ std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateDepthStencilViews(
 {
     // 6 faces per cube, or just arraySize for non-cubemaps.
     int sliceCount = isCubemap ? (6 * arraySize) : arraySize;
-    std::vector<std::vector<NonShaderVisibleIndexInfo>> result(sliceCount);
+    std::vector<std::vector<org::NonShaderVisibleIndexInfo>> result(sliceCount);
 
     // Base DSV descriptor
     rhi::DsvDesc dsvDesc = {};
@@ -2115,7 +2115,7 @@ std::vector<std::vector<NonShaderVisibleIndexInfo>> CreateDepthStencilViews(
             // create the DSV
 			device.CreateDepthStencilView({ dsvHeap->GetHeap().GetHandle(), idx}, resource.GetHandle(), dsvDesc);
 
-            NonShaderVisibleIndexInfo info;
+            org::NonShaderVisibleIndexInfo info;
             info.slot.index = idx;
 			info.slot.heap = dsvHeap->GetHeap().GetHandle();
             sliceDSVs.push_back(info);
@@ -2392,8 +2392,8 @@ XMFLOAT3 GetGlobalPositionFromMatrix(const DirectX::XMMATRIX& mat) {
 }
 
 Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRes, unsigned int arraySize, bool isCubemap) {
-	TextureDescription desc;
-	ImageDimensions dims;
+	org::TextureDescription desc;
+	org::ImageDimensions dims;
 	dims.width = xRes;
 	dims.height = yRes;
 	desc.imageDimensions.push_back(dims);
@@ -2408,11 +2408,11 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 	desc.dsvFormat = rhi::Format::D32_Float;
     desc.generateMipMaps = false;
 
-	std::shared_ptr<PixelBuffer> depthBuffer = PixelBuffer::CreateShared(desc);
+	std::shared_ptr<org::PixelBuffer> depthBuffer = org::PixelBuffer::CreateShared(desc);
 	depthBuffer->SetName("Depth Buffer");
 	org::memory::SetResourceUsageHint(*depthBuffer, "Depth resources");
 
-    TextureDescription downsampledDesc;
+    org::TextureDescription downsampledDesc;
     // Pad yres and xres to power of two
 	dims.height = yRes;
 	dims.width = xRes;
@@ -2434,13 +2434,13 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
     downsampledDesc.clearColor[0] = std::numeric_limits<float>().max();
 	downsampledDesc.padInternalResolution = true;
 
-    std::shared_ptr<PixelBuffer> linearDepthBuffer = PixelBuffer::CreateShared(downsampledDesc);
+    std::shared_ptr<org::PixelBuffer> linearDepthBuffer = org::PixelBuffer::CreateShared(downsampledDesc);
     linearDepthBuffer->SetName("linear Depth Buffer");
 	org::memory::SetResourceUsageHint(*linearDepthBuffer, "Depth resources");
 
 	// Projected (non-linear) depth for upscalers — R32_Float with UAV+SRV, same resolution as depth buffer
-	TextureDescription projectedDesc;
-	ImageDimensions projDims;
+	org::TextureDescription projectedDesc;
+	org::ImageDimensions projDims;
 	projDims.width = xRes;
 	projDims.height = yRes;
 	projectedDesc.imageDimensions.push_back(projDims);
@@ -2456,7 +2456,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 	projectedDesc.uavFormat = rhi::Format::R32_Float;
 	projectedDesc.generateMipMaps = false;
 
-	std::shared_ptr<PixelBuffer> projectedDepthBuffer = PixelBuffer::CreateShared(projectedDesc);
+	std::shared_ptr<org::PixelBuffer> projectedDepthBuffer = org::PixelBuffer::CreateShared(projectedDesc);
 	projectedDepthBuffer->SetName("Projected Depth Buffer");
 	org::memory::SetResourceUsageHint(*projectedDepthBuffer, "Depth resources");
 
@@ -2481,8 +2481,8 @@ std::string GetDirectoryFromPath(const std::string& path) {
 	return path.substr(0, lastSlash);
 }
 
-std::shared_ptr<Buffer> CreateIndexedStructuredBuffer(size_t numElements, unsigned int elementSize, bool UAV, bool UAVCounter) {
-    auto dataBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+std::shared_ptr<org::Buffer> CreateIndexedStructuredBuffer(size_t numElements, unsigned int elementSize, bool UAV, bool UAVCounter) {
+    auto dataBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
         static_cast<uint32_t>(numElements),
         static_cast<uint32_t>(elementSize),
         UAV,
@@ -2494,7 +2494,7 @@ std::shared_ptr<Buffer> CreateIndexedStructuredBuffer(size_t numElements, unsign
     return dataBuffer;
 }
 
-std::shared_ptr<Buffer> CreateIndexedTypedBuffer(
+std::shared_ptr<org::Buffer> CreateIndexedTypedBuffer(
     uint32_t        numElements,
     rhi::Format   elementFormat,
     bool          UAV)
@@ -2508,9 +2508,9 @@ std::shared_ptr<Buffer> CreateIndexedTypedBuffer(
 
     const size_t bufferSize = numElements * elementSize;
 
-    auto dataBuffer = Buffer::CreateShared(rhi::HeapType::DeviceLocal, bufferSize, UAV);
+    auto dataBuffer = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, bufferSize, UAV);
 
-    BufferBase::DescriptorRequirements descReq{};
+    org::BufferBase::DescriptorRequirements descReq{};
 
     descReq.createCBV = false;
     descReq.createSRV = true;
@@ -2549,16 +2549,16 @@ std::shared_ptr<Buffer> CreateIndexedTypedBuffer(
     return dataBuffer;
 }
 
-std::shared_ptr<Buffer> CreateIndexedConstantBuffer(size_t bufferSize, std::string name) {
+std::shared_ptr<org::Buffer> CreateIndexedConstantBuffer(size_t bufferSize, std::string name) {
     auto device = DeviceManager::GetInstance().GetDevice();
 
     // Calculate the size of the buffer to be 256-byte aligned
     UINT paddedSize = (bufferSize + 255) & ~255;
 
-    auto dataBuffer = Buffer::CreateShared(rhi::HeapType::DeviceLocal, paddedSize, false);
+    auto dataBuffer = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, paddedSize, false);
     dataBuffer->SetName(name);
 
-    BufferBase::DescriptorRequirements descReq{};
+    org::BufferBase::DescriptorRequirements descReq{};
 
     descReq.createCBV = true;
 

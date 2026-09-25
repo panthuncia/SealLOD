@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <flecs.h>
 #include <rhi.h>
+#include <BasicTelemetry/Tracy.h>
 
 #include "FidelityFX/FfxBackendAdapters.h"
 #include "slHooks.h"
@@ -94,7 +95,7 @@ namespace {
 
     bool MakeStreamlineVulkanTextureResource(
         rhi::Device device,
-        PixelBuffer* texture,
+        org::PixelBuffer* texture,
         rhi::DescriptorSlot viewSlot,
         VkImageLayout layout,
         sl::Resource& resource)
@@ -422,7 +423,7 @@ void UpscalingManager::Setup() {
     }
 }
 
-void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
     if (backend != rhi::Backend::D3D12 && backend != rhi::Backend::Vulkan) {
         spdlog::warn("UpscalingManager::EvaluateDLSS called on unsupported backend {}; skipping.", static_cast<uint32_t>(backend));
@@ -546,7 +547,11 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         }
 
         const sl::BaseStructure* inputs[] = { &myViewport };
-        if (SL_FAILED(result, slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList)))
+        const auto evaluateResult = [&] {
+            BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
+            return slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList);
+        }();
+        if (SL_FAILED(result, evaluateResult))
         {
             if (result == sl::Result::eWarnOutOfVRAM) {
                 if (!m_reportedDlssOutOfMemory) {
@@ -598,7 +603,11 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         sl::ResourceTag mvecTag = sl::ResourceTag{ &mvec, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
 
         const sl::BaseStructure* inputs[] = { &myViewport, &depthTag, &mvecTag, &colorInTag, &colorOutTag };
-        if (SL_FAILED(result, slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList)))
+        const auto evaluateResult = [&] {
+            BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
+            return slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList);
+        }();
+        if (SL_FAILED(result, evaluateResult))
         {
             if (result == sl::Result::eWarnOutOfVRAM) {
                 if (!m_reportedDlssOutOfMemory) {
@@ -635,7 +644,7 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     if (!EnsureFSRContext()) {
         spdlog::warn("UpscalingManager::EvaluateFSR3 skipped dispatch because the FSR context is not initialized");
         return;
@@ -694,7 +703,7 @@ void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     UINT mipSlice = 0;
     UINT arraySlice = 0;
     UINT dstSubresource = CalcSubresource(
@@ -723,8 +732,9 @@ void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Compone
         .depth = 1,
     };
 
-    const bool graphOwnsCopyBarriers = DeviceManager::GetInstance().GetBackend() == rhi::Backend::Vulkan
-        && m_upscalingMode == UpscalingMode::None;
+    // This function is reached only for a generation whose captured mode is
+    // None. The mutable manager selection may already describe a successor.
+    const bool graphOwnsCopyBarriers = DeviceManager::GetInstance().GetBackend() == rhi::Backend::Vulkan;
 
     rhi::TextureSubresourceRange copyRange{};
     copyRange.baseMip = mipSlice;
@@ -783,9 +793,19 @@ void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
     SyncSettingsFromSettingsManager();
     const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(m_upscalingMode, m_dlssSupported);
+    EvaluateCaptured(effectiveMode, commandList, camera, frameNumber, elapsedSeconds,
+        pHDRTarget, pUpscaledHDRTarget, pDepthTexture, pMotionVectors);
+}
+
+void UpscalingManager::EvaluateCaptured(UpscalingMode mode, rhi::CommandList& commandList,
+    const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds,
+    org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget,
+    org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
+    std::scoped_lock evaluateLock(m_evaluateMutex);
+    const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(mode, m_dlssSupported);
     switch (effectiveMode)
     {
 	    case UpscalingMode::None:

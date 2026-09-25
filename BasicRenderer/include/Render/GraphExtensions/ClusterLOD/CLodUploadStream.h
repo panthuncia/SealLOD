@@ -5,14 +5,13 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "Render/Runtime/UploadTypes.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class Resource; }
-using org::Resource;
 
 enum class CLodUploadTicketState : uint8_t {
     Published,
@@ -30,14 +29,14 @@ struct CLodUploadTicket {
 };
 
 struct CLodUploadPage {
-    std::shared_ptr<Buffer> buffer;
+    std::shared_ptr<org::Buffer> buffer;
     size_t capacity = 0;
     size_t tail = 0;
 };
 
 struct CLodUploadCopy {
-    std::shared_ptr<Resource> destination;
-    std::shared_ptr<Buffer> staging;
+    std::shared_ptr<org::Resource> destination;
+    std::shared_ptr<org::Buffer> staging;
     size_t destinationOffset = 0;
     size_t stagingOffset = 0;
     size_t size = 0;
@@ -47,7 +46,7 @@ struct CLodUploadBatch {
     std::shared_ptr<CLodUploadTicket> ticket;
     std::vector<CLodUploadCopy> copies;
     std::vector<std::shared_ptr<CLodUploadPage>> pages;
-    std::vector<std::shared_ptr<Resource>> destinations;
+    std::vector<std::shared_ptr<org::Resource>> destinations;
     std::vector<uint32_t> affectedGroups;
     std::vector<uint32_t> retiringPages;
     uint64_t nonResidentEpoch = 0;
@@ -91,8 +90,12 @@ public:
 
 private:
     struct DeferredUpload {
-        const void* data = nullptr;
-        size_t size = 0;
+        // Bulk publication may be separated from the manager mutation that
+        // supplied the bytes by hundreds of residency operations.  Callers
+        // frequently supply stack-local chunks/zero entries, so retaining a
+        // borrowed pointer here corrupts the eventual page-map publication.
+        // Capture an immutable image at journal time instead.
+        std::vector<std::byte> data;
         org::runtime::UploadTarget target;
         size_t destinationOffset = 0;
     };

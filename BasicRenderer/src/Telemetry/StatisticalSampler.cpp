@@ -210,7 +210,7 @@ Configuration LoadConfiguration(const std::filesystem::path& path)
     }
 
     if (config.metrics.empty() || config.passes.empty()) throw std::runtime_error("sampling requires metrics and passes");
-    if (config.minimumSamples < 2 || config.maximumSamples < config.minimumSamples) {
+    if (config.minimumSamples < 1 || config.maximumSamples < config.minimumSamples) {
         throw std::runtime_error("invalid sampling minimum/maximum sample counts");
     }
     if (!(config.confidenceLevel > 0.0 && config.confidenceLevel < 1.0)) {

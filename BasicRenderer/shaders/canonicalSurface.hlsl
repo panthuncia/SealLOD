@@ -242,9 +242,6 @@ void EvaluateCanonicalSurfaceOptimized(uint2 pixel, uint64_t vis)
             payload = PackDebugFloat3(sample.materialInputs.normalWS * 0.5 + 0.5);
             break;
         case OUTPUT_ALBEDO:
-        case OUTPUT_TERRAIN_GRASS_OVERLAY:
-            payload = PackDebugFloat3(sample.materialInputs.albedo);
-            break;
         case OUTPUT_METALLIC:
             payload = PackDebugFloat3(sample.materialInputs.metallic.xxx);
             break;

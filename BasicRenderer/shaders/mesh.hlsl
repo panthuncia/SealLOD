@@ -48,7 +48,7 @@ static const uint CLOD_RASTER_INIT_FAILURE_MESHLET_OOB = 2u;
 static const uint CLOD_RASTER_INIT_FAILURE_INVALID_OUTPUT_COUNTS = 3u;
 
 #ifndef CLOD_RASTER_MESH_TELEMETRY
-#define CLOD_RASTER_MESH_TELEMETRY 0
+#define CLOD_RASTER_MESH_TELEMETRY 1
 #endif
 
 void CLodRasterTelemetryAdd(uint counterIndex, uint value)
@@ -89,12 +89,19 @@ struct CLodSourceGroupMismatchDetail
     uint viewId;
     uint bucketMeshletIndex;
     uint bucketCount;
-    uint pad0;
+    uint actualOwnerMeshMetadataIndex;
+    uint expectedTemplateMeshMetadataIndex;
+    uint expectedMeshIdentityLo;
+    uint expectedMeshIdentityHi;
+    uint actualMeshIdentityLo;
+    uint actualMeshIdentityHi;
 };
 
 void CLodRecordSourceGroupMismatch(
     uint expectedGroupLocalIndex,
     uint foundGroupLocalIndex,
+    uint actualOwnerMeshMetadataIndex,
+    uint expectedTemplateMeshMetadataIndex,
     uint pageLocalMeshletIndex,
     uint pageSlabDescriptorIndex,
     uint pageSlabByteOffset,
@@ -183,7 +190,13 @@ void CLodRecordSourceGroupMismatch(
     detail.viewId = viewId;
     detail.bucketMeshletIndex = bucketMeshletIndex;
     detail.bucketCount = bucketCount;
-    detail.pad0 = 0u;
+    detail.actualOwnerMeshMetadataIndex = actualOwnerMeshMetadataIndex;
+    detail.expectedTemplateMeshMetadataIndex = expectedTemplateMeshMetadataIndex;
+    const InstanceDrawRecordBuffer validationDrawRecord = LoadInstanceDrawRecord(instanceId);
+    detail.expectedMeshIdentityLo = validationDrawRecord.expectedMeshIdentityLo;
+    detail.expectedMeshIdentityHi = validationDrawRecord.expectedMeshIdentityHi;
+    detail.actualMeshIdentityLo = metadata.meshIdentityLo;
+    detail.actualMeshIdentityHi = metadata.meshIdentityHi;
 
     RWStructuredBuffer<CLodSourceGroupMismatchDetail> details =
         ResourceDescriptorHeap[CLOD_RASTER_SOURCE_GROUP_MISMATCH_DETAILS_DESCRIPTOR_INDEX];
@@ -890,6 +903,7 @@ void EmitMeshletVisBufferForViewCLod(
         // Vertex i is meshlet-local (0..vertexCount-1)
         outputVertices[i] = GetVisBufferVertexAttributesForViewCLod(
             i, setup, setup.meshletIndex, viewID, shadowClipmapIndex, clusterIndex, rasterInfo);
+        outputVertices[i].drawRecordIndex = setup.drawRecordIndex;
     }
 
     WriteTriangles(uGroupThreadID, setup, outputTriangles);
@@ -937,6 +951,7 @@ void EmitCachedMeshletVisBufferVerticesForViewCLod(
         vertex.materialDataIndex = setup.meshBuffer.materialDataIndex;
 #endif
         vertex.visibleClusterIndex = clusterIndex;
+        vertex.drawRecordIndex = setup.drawRecordIndex;
 #if !defined(CLOD_RASTER_SINGLE_VIEW)
         vertex.viewID = viewID;
 #endif
@@ -1149,6 +1164,7 @@ VisBufferPSInput ReyesShadowVisVertexToPSInput(ReyesShadowVisVertex vertex)
     output.materialDataIndex = gs_reyesShadowSetup.meshBuffer.materialDataIndex;
 #endif
     output.visibleClusterIndex = gs_reyesShadowDiceEntry.visibleClusterIndex;
+    output.drawRecordIndex = gs_reyesShadowSetup.drawRecordIndex;
 #if !defined(CLOD_RASTER_SINGLE_VIEW)
     output.viewID = gs_reyesShadowSetup.viewID;
 #endif
@@ -1281,14 +1297,17 @@ void VisibilityBufferMSMain(
     EmitPrimitiveIDs(uGroupThreadID, setup, primitiveInfo);
 }
 
-bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTransformIndex, out MeshletSetup setup, out uint failureReason, out bool sourceGroupMismatch, out uint foundSourceGroupLocalIndex, in uint bucketMeshletIndex, in uint bucketCount)
+bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTransformIndex, out MeshletSetup setup, out uint failureReason, out bool sourceGroupMismatch, out uint foundSourceGroupLocalIndex, out uint foundOwnerMeshMetadataIndex, out uint expectedTemplateMeshMetadataIndex, in uint bucketMeshletIndex, in uint bucketCount)
 {
     failureReason = CLOD_RASTER_INIT_FAILURE_NONE;
     sourceGroupMismatch = false;
     foundSourceGroupLocalIndex = 0xFFFFFFFFu;
+    foundOwnerMeshMetadataIndex = 0xFFFFFFFFu;
+    expectedTemplateMeshMetadataIndex = 0xFFFFFFFFu;
 
     setup.meshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
     const uint drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
+    setup.drawRecordIndex = drawRecordIndex;
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
 #if !CLOD_RASTER_MINIMAL_OBJECT_SETUP
     setup.meshInstanceBuffer = LoadMeshTemplateForDraw(drawRecordIndex);
@@ -1367,9 +1386,55 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
     const uint descSourceGroupLocalIndex = descriptor.sourceGroupLocalIndex;
     const uint expectedGroupLocalIndex = CLodVisibleClusterGroupID(packedCluster);
     foundSourceGroupLocalIndex = descSourceGroupLocalIndex;
+    const MeshInstanceClodOffsets validationOffsets = LoadCLodOffsetsForDraw(drawRecordIndex);
+    const PerMeshInstanceBuffer validationTemplate = LoadMeshTemplateForDrawRecord(drawRecord);
+    expectedTemplateMeshMetadataIndex = validationTemplate.expectedClodMeshMetadataIndex;
+    StructuredBuffer<CLodMeshMetadata> validationMetadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata validationMetadata =
+        validationMetadataBuffer[validationOffsets.clodMeshMetadataIndex];
+    StructuredBuffer<ClusterLODGroup> validationGroups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    StructuredBuffer<ClusterLODGroupSegment> validationSegments =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
+    const ClusterLODGroup validationGroup =
+        validationGroups[validationMetadata.groupsBase + expectedGroupLocalIndex];
+    for (uint segmentIndex = validationGroup.firstSegment;
+        segmentIndex < validationGroup.firstSegment + validationGroup.segmentCount;
+        ++segmentIndex)
+    {
+        const ClusterLODGroupSegment segment =
+            validationSegments[validationMetadata.segmentsBase + segmentIndex];
+        if (setup.meshletIndex < segment.firstMeshletInPage ||
+            setup.meshletIndex >= segment.firstMeshletInPage + segment.meshletCount) continue;
+        const GroupPageMapEntry entry =
+            LoadGroupPageMapEntry(validationMetadata.pageMapBase, segment.pageIndex);
+        if (entry.slabDescriptorIndex == pageSlabDesc &&
+            entry.slabByteOffset == pageSlabOff)
+        {
+            foundOwnerMeshMetadataIndex = entry.ownerMeshMetadataIndex;
+            break;
+        }
+    }
     sourceGroupMismatch =
         descSourceGroupLocalIndex != 0xFFFFFFFFu &&
         descSourceGroupLocalIndex != expectedGroupLocalIndex;
+    sourceGroupMismatch = sourceGroupMismatch ||
+        foundOwnerMeshMetadataIndex != validationOffsets.clodMeshMetadataIndex;
+    sourceGroupMismatch = sourceGroupMismatch ||
+        (expectedTemplateMeshMetadataIndex != 0xFFFFFFFFu &&
+         expectedTemplateMeshMetadataIndex != validationOffsets.clodMeshMetadataIndex);
+    const bool templateIdentityTagged =
+        (validationTemplate.expectedClodMeshIdentityLo |
+         validationTemplate.expectedClodMeshIdentityHi) != 0u;
+    sourceGroupMismatch = sourceGroupMismatch || (templateIdentityTagged &&
+        (validationTemplate.expectedClodMeshIdentityLo != validationMetadata.meshIdentityLo ||
+         validationTemplate.expectedClodMeshIdentityHi != validationMetadata.meshIdentityHi));
+    const bool drawRecordIdentityTagged =
+        (drawRecord.expectedMeshIdentityLo | drawRecord.expectedMeshIdentityHi) != 0u;
+    sourceGroupMismatch = sourceGroupMismatch || (drawRecordIdentityTagged &&
+        (drawRecord.expectedMeshIdentityLo != validationMetadata.meshIdentityLo ||
+         drawRecord.expectedMeshIdentityHi != validationMetadata.meshIdentityHi));
 #else
 #endif
 
@@ -1444,6 +1509,12 @@ void ClusterLODBucketMSMain(
     out indices uint3 outputTriangles[MS_MESHLET_SIZE],
     out primitives VisibilityPerPrimitive primitiveInfo[MS_MESHLET_SIZE])
 {
+    if (uGroupThreadID == 0u)
+    {
+        // Keep the dispatch-entry probe ahead of every frame-data read. This
+        // separates missing ExecuteIndirect work from invalid frozen bindings.
+        CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_GROUPS, 1u);
+    }
     // From command signature
     uint baseOffset = IndirectCommandSignatureRootConstant0;
     uint dispatchX = IndirectCommandSignatureRootConstant1;
@@ -1467,6 +1538,8 @@ void ClusterLODBucketMSMain(
     uint initFailureReason = CLOD_RASTER_INIT_FAILURE_NONE;
     bool sourceGroupMismatch = false;
     uint foundSourceGroupLocalIndex = 0xFFFFFFFFu;
+    uint foundOwnerMeshMetadataIndex = 0xFFFFFFFFu;
+    uint expectedTemplateMeshMetadataIndex = 0xFFFFFFFFu;
 
     if (draw) {
         ByteAddressBuffer compactedClusters = ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
@@ -1481,6 +1554,8 @@ void ClusterLODBucketMSMain(
             initFailureReason,
             sourceGroupMismatch,
             foundSourceGroupLocalIndex,
+            foundOwnerMeshMetadataIndex,
+            expectedTemplateMeshMetadataIndex,
             linearizedID,
             count);
         if (!draw)
@@ -1491,7 +1566,6 @@ void ClusterLODBucketMSMain(
 
     if (uGroupThreadID == 0u)
     {
-        CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_GROUPS, 1u);
 #if defined(PSO_SKINNED)
         CLodRasterTelemetryAdd(
             WG_COUNTER_RASTER_MESH_SHADER_SKINNED_GROUPS,
@@ -1523,6 +1597,8 @@ void ClusterLODBucketMSMain(
                 CLodRecordSourceGroupMismatch(
                     CLodVisibleClusterGroupID(packedCluster),
                     foundSourceGroupLocalIndex,
+                    foundOwnerMeshMetadataIndex,
+                    expectedTemplateMeshMetadataIndex,
                     CLodVisibleClusterLocalMeshletIndex(packedCluster),
                     CLodVisibleClusterPageSlabDescriptorIndex(packedCluster),
                     CLodVisibleClusterPageSlabByteOffset(packedCluster),
@@ -1769,6 +1845,8 @@ void ClusterLODReyesVirtualShadowMSMain(
                 uint initFailureReason = CLOD_RASTER_INIT_FAILURE_NONE;
                 bool sourceGroupMismatch = false;
                 uint foundSourceGroupLocalIndex = 0xFFFFFFFFu;
+                uint foundOwnerMeshMetadataIndex = 0xFFFFFFFFu;
+                uint expectedTemplateMeshMetadataIndex = 0xFFFFFFFFu;
                 if (InitializeMeshletFromCompactedCluster(
                         packedCluster,
                         visibleClusterTransformIndices[gs_reyesShadowDiceEntry.visibleClusterIndex],
@@ -1776,6 +1854,8 @@ void ClusterLODReyesVirtualShadowMSMain(
                         initFailureReason,
                         sourceGroupMismatch,
                         foundSourceGroupLocalIndex,
+                        foundOwnerMeshMetadataIndex,
+                        expectedTemplateMeshMetadataIndex,
                         compactedWorkIndex,
                         gs_reyesShadowPackedWorkGroup.rasterWorkEntryCount))
                 {

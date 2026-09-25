@@ -26,6 +26,7 @@ struct ShaderVariantRequest {
 	MaterialRasterFlags materialRasterFlags{ MaterialRasterFlagsNone };
 	CLodRasterOutputKind rasterOutputKind{ CLodRasterOutputKind::VisibilityBuffer };
 	bool wireframe{ false };
+	bool singleView{ false };
 
 	bool operator==(const ShaderVariantRequest&) const = default;
 };
@@ -52,7 +53,6 @@ inline MaterialCompileFlags GetMaterialEvaluationShaderKey(MaterialCompileFlags 
 		MaterialCompileFlags::MaterialCompileOpenPBRFuzzWeightTexture |
 		MaterialCompileFlags::MaterialCompileOpenPBRFuzzRoughnessTexture |
 		MaterialCompileFlags::MaterialCompileVoxel |
-		MaterialCompileFlags::MaterialCompileTextureStreaming |
 		MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha |
 		MaterialCompileFlags::MaterialCompileTerrain |
 		MaterialCompileFlags::MaterialCompileClodReyesPatch |
@@ -70,9 +70,13 @@ inline ShaderVariantRequest NormalizeShaderVariantRequest(ShaderVariantRequest r
 		request.materialRasterFlags = MaterialRasterFlagsNone;
 		request.rasterOutputKind = CLodRasterOutputKind::VisibilityBuffer;
 		request.wireframe = false;
+		request.singleView = false;
 	} else if (request.kind != ShaderVariantKind::ClusterLODSoftwareRaster) {
 		request.materialCompileFlags = MaterialCompileNone;
 		request.rasterOutputKind = CLodRasterOutputKind::VisibilityBuffer;
+	}
+	if (request.kind != ShaderVariantKind::ClusterLODRaster) {
+		request.singleView = false;
 	}
 	return request;
 }

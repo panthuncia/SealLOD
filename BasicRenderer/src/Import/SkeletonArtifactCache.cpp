@@ -425,13 +425,25 @@ std::vector<std::uint32_t> MakeGeometricTargets(
 {
 	std::vector<std::uint32_t> targets{ high };
 	if (high <= low) return targets;
-	const auto steps = (std::max)(1u, static_cast<std::uint32_t>(std::ceil(
-		std::log(static_cast<float>(high) / static_cast<float>((std::max)(1u, low))) / std::log(maximumRatio))));
-	for (std::uint32_t step = 1; step < steps; ++step) {
-		const float t = static_cast<float>(step) / static_cast<float>(steps);
-		targets.push_back(static_cast<std::uint32_t>(std::lround(
-			std::exp(std::lerp(std::log(static_cast<float>(high)), std::log(static_cast<float>(low)), t)))));
+	const float logHigh = std::log(static_cast<float>(high));
+	const float logLow = std::log(static_cast<float>((std::max)(1u, low)));
+	auto steps = (std::max)(1u, static_cast<std::uint32_t>(std::ceil((logHigh - logLow) / std::log(maximumRatio))));
+	// Rounding the geometric targets can push an adjacent pair past the ratio
+	// (9 -> 5 -> 3 at 1.75), so add steps until every rounded pair honours it.
+	std::vector<std::uint32_t> spaced;
+	for (;; ++steps) {
+		spaced.assign(1u, high);
+		for (std::uint32_t step = 1; step < steps; ++step) {
+			const float t = static_cast<float>(step) / static_cast<float>(steps);
+			spaced.push_back(static_cast<std::uint32_t>(std::lround(std::exp(std::lerp(logHigh, logLow, t)))));
+		}
+		spaced.push_back(low);
+		bool withinRatio = true;
+		for (std::size_t i = 1; i < spaced.size() && withinRatio; ++i)
+			withinRatio = static_cast<float>(spaced[i - 1]) <= maximumRatio * static_cast<float>((std::max)(1u, spaced[i]));
+		if (withinRatio || steps >= high - low) break;
 	}
+	targets.assign(spaced.begin(), spaced.end() - 1);
 	for (const auto target : explicitTargets) if (target < high && target > low) targets.push_back(target);
 	targets.push_back(low);
 	std::ranges::sort(targets, std::greater{});

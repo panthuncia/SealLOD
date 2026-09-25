@@ -324,6 +324,13 @@ if(EXISTS "${BASICRENDERER_REPO_ROOT}/geometry-central/CMakeLists.txt" AND NOT T
 endif()
 
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
+target_sources(${PROJECT_NAME} PRIVATE
+    "include/Render/PersistentRendererPublication.h"
+    "src/Render/PersistentRendererPublication.cpp"
+    "include/Render/GraphExtensions/ClusterLOD/CapturedHierarchicalDispatchCullingInputs.h"
+    "include/Render/GraphExtensions/ClusterLOD/CapturedCullingCommandSink.h"
+    "include/Render/GraphExtensions/ClusterLOD/PersistentHierarchicalDispatchCullingPass.h"
+    "include/RenderPasses/VisUtil/PersistentMaterialEvaluationPass.h")
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
 if(BASICRENDERER_BUILD_INTEROP_VALIDATION)
     add_library(SARPInteropValidation STATIC
@@ -349,8 +356,16 @@ add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
 add_executable(SkeletonArtifactCacheTests "tests/SkeletonArtifactCacheTests.cpp")
 add_executable(PipelineRecipeTests "tests/PipelineRecipeTests.cpp")
 add_executable(MaterialEvalVariantTests "tests/MaterialEvalVariantTests.cpp")
+add_executable(MaterialOwnershipGuardTests "tests/MaterialOwnershipGuardTests.cpp")
 add_executable(VirtualShadowBudgetTests "tests/VirtualShadowBudgetTests.cpp")
 add_executable(BoundedSpscQueueTests "tests/BoundedSpscQueueTests.cpp")
+add_executable(TaskSchedulerManagerTests "tests/TaskSchedulerManagerTests.cpp")
+target_link_libraries(TaskSchedulerManagerTests PRIVATE ${PROJECT_NAME})
+target_compile_features(TaskSchedulerManagerTests PRIVATE cxx_std_23)
+
+add_executable(AsyncStateGraphTests "tests/AsyncStateGraphTests.cpp")
+target_link_libraries(AsyncStateGraphTests PRIVATE ${PROJECT_NAME})
+target_compile_features(AsyncStateGraphTests PRIVATE cxx_std_23)
 target_include_directories(BoundedSpscQueueTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/include")
 target_compile_features(BoundedSpscQueueTests PRIVATE cxx_std_23)
 add_executable(CLodCoordinatorTests "tests/CLodCoordinatorTests.cpp")
@@ -556,33 +571,21 @@ function(add_symlink_or_copy_per_config source destination IS_DIRECTORY target_n
         get_filename_component(target_name "${destination}" NAME)
     endif()
 
-    set(_sync_stamp "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>/${target_name}.stamp")
-    set(_sync_stamp_dir "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>")
-
     if (IS_DIRECTORY)
-        add_custom_command(
-            OUTPUT "${_sync_stamp}"
+        add_custom_target("${target_name}_sync"
             COMMENT "Syncing directory ${destination} <- ${source}"
             VERBATIM
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${_sync_stamp_dir}"
             COMMAND ${CMAKE_COMMAND} -E remove_directory "${destination}"
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Release>,copy_directory,create_symlink> "${source}" "${destination}"
-            COMMAND ${CMAKE_COMMAND} -E touch "${_sync_stamp}"
         )
     else()
-        add_custom_command(
-            OUTPUT "${_sync_stamp}"
+        add_custom_target("${target_name}_sync"
             COMMENT "Syncing file ${destination} <- ${source}"
             VERBATIM
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${_sync_stamp_dir}"
             COMMAND ${CMAKE_COMMAND} -E remove "${destination}"
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Release>,copy,create_symlink> "${source}" "${destination}"
-            COMMAND ${CMAKE_COMMAND} -E touch "${_sync_stamp}"
-            DEPENDS "${source}"
         )
     endif()
-
-    add_custom_target("${target_name}_sync" DEPENDS "${_sync_stamp}")
     add_dependencies(${PROJECT_NAME} "${target_name}_sync")
     add_dependencies(${BASICRENDERER_DEMO_TARGET} "${target_name}_sync")
 endfunction()
@@ -1399,6 +1402,8 @@ PRIVATE
 target_link_libraries(SkeletonArtifactCacheTests PRIVATE ${PROJECT_NAME})
 target_link_libraries(PipelineRecipeTests PRIVATE ${PROJECT_NAME})
 target_link_libraries(MaterialEvalVariantTests PRIVATE ${PROJECT_NAME})
+target_link_libraries(MaterialOwnershipGuardTests PRIVATE ${PROJECT_NAME})
+target_compile_features(MaterialOwnershipGuardTests PRIVATE cxx_std_23)
 target_link_libraries(VirtualShadowBudgetTests PRIVATE ${PROJECT_NAME})
 if(MSVC)
     target_compile_options(SkeletonArtifactCacheTests PRIVATE /std:c++latest)
@@ -1412,7 +1417,52 @@ add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
 add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)
 add_test(NAME PipelineRecipeTests COMMAND PipelineRecipeTests)
 add_test(NAME MaterialEvalVariantTests COMMAND MaterialEvalVariantTests)
+add_test(NAME MaterialOwnershipGuardTests COMMAND MaterialOwnershipGuardTests)
 add_test(NAME VirtualShadowBudgetTests COMMAND VirtualShadowBudgetTests)
 add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
+add_test(NAME TaskSchedulerManagerTests COMMAND TaskSchedulerManagerTests)
+add_test(NAME AsyncStateGraphTests COMMAND AsyncStateGraphTests)
 add_test(NAME CLodCoordinatorTests COMMAND CLodCoordinatorTests)
 add_test(NAME StatisticalSamplerTests COMMAND StatisticalSamplerTests)
+
+if(WIN32)
+    # SARP tests use the deployed runtime, including optional SDK DLLs and
+    # relative runtime assets. Standalone BasicRenderer uses its output root.
+    set(_basicrenderer_runtime_tests
+        ShaderPreprocessTests
+        SkeletonArtifactCacheTests
+        PipelineRecipeTests
+        MaterialEvalVariantTests
+        VirtualShadowBudgetTests
+        BoundedSpscQueueTests
+        TaskSchedulerManagerTests
+        AsyncStateGraphTests
+        CLodCoordinatorTests
+        StatisticalSamplerTests)
+    if(BASICRENDERER_TEST_RUNTIME_DIR)
+        set_tests_properties(${_basicrenderer_runtime_tests} PROPERTIES
+            WORKING_DIRECTORY "${BASICRENDERER_TEST_RUNTIME_DIR}"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_TEST_RUNTIME_DIR}")
+    else()
+        set_tests_properties(${_basicrenderer_runtime_tests} PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_OUTPUT_ROOT}")
+    endif()
+    # Metadata-only publication preparation tests need no deployed assets.
+    foreach(_pipeline_runtime_dll WinPixEventRuntime.dll dxcompiler.dll dxil.dll hlsl.dll)
+        if(EXISTS "${BASICRENDERER_SOURCE_ROOT}/${_pipeline_runtime_dll}")
+            add_custom_command(TARGET PipelineRecipeTests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${BASICRENDERER_SOURCE_ROOT}/${_pipeline_runtime_dll}"
+                    "$<TARGET_FILE_DIR:PipelineRecipeTests>")
+        endif()
+    endforeach()
+    set_tests_properties(PipelineRecipeTests PROPERTIES
+        WORKING_DIRECTORY "$<TARGET_FILE_DIR:PipelineRecipeTests>"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${BASICRENDERER_OUTPUT_ROOT}")
+    if(BASICRENDERER_ENABLE_NVPERF AND NVPERF_GRFX_HOST_DLL)
+        add_custom_command(TARGET PipelineRecipeTests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NVPERF_GRFX_HOST_DLL}"
+                "$<TARGET_FILE_DIR:PipelineRecipeTests>"
+            VERBATIM)
+    endif()
+endif()

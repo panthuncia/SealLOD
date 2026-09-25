@@ -20,6 +20,7 @@
 #include "Resources/Buffers/MemoryBlock.h"
 #include "Interfaces/IHasMemoryMetadata.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
+#include "Render/VersionedGpuBufferArtifacts.h"
 
 namespace org {
 
@@ -95,7 +96,6 @@ public:
     std::vector<PagedAllocation> AddDataPaged(const void* data, size_t count, size_t elementSize, size_t pageElementCount);
 	std::vector<std::shared_ptr<BufferView>> AddDataBatch(const void* data, size_t count, size_t elementSize);
 	void UpdateView(BufferView* view, const void* data) override;
-
     org::runtime::BulkWriteHandle BeginBulkWrite() {
         auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
@@ -116,6 +116,9 @@ public:
         }
 
         EnsureCpuShadowSize(dirtyOffset + dirtySize);
+		RetainCpuShadowWrite(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(dirtyOffset),
+			dirtySize, dirtyOffset);
+		if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return;
         StageOrUploadLocked(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(dirtyOffset), dirtySize, dirtyOffset);
         if (org::runtime::GetActiveUploadPolicyService() != nullptr && m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();
@@ -129,9 +132,11 @@ public:
     }
 
     void OnUploadPolicyFlush() override {
+		if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return;
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
+            *RetainBufferUploadService(),
             org::runtime::UploadTarget::FromShared(shared_from_this()),
             [this](size_t offset, size_t size) -> const void* {
                 if (offset + size > m_cpuShadowData.size()) {
@@ -142,6 +147,7 @@ public:
     }
 
     bool HasPendingUploadPolicyWork() const override {
+		if (m_versionedGraphExclusive.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.HasPendingWork();
     }
@@ -150,6 +156,20 @@ public:
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         RetainCpuShadowWrite(data, size, offset);
     }
+
+    void EnableVersionedGraphJournal();
+	bool RequestVersionedGraphCapacityBytes(size_t absoluteCapacity);
+	void SetVersionedGraphMutationCallback(std::function<void()> callback) {
+		m_versionedGraphMutationCallback = std::move(callback);
+	}
+	void SetVersionedGraphExclusive(bool exclusive);
+    br::render::VersionedGpuBufferJournal::Capture CaptureVersionedGraphState() const;
+    // Current journal write sequence; matches Capture::writeSequence of a capture taken now.
+    std::uint64_t VersionedGraphWriteSequence() const;
+    std::vector<std::byte> CaptureCpuShadowBytes() const;
+    void AcknowledgeVersionedGraphState(
+        const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version);
+    bool HasUnpublishedVersionedGraphState() const;
 
     uint64_t GetUploadPolicyLastFlushWrites() const override {
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
@@ -213,6 +233,10 @@ private:
 
     std::map<size_t, MemoryBlock> m_blocksByOffset;
     std::set<std::pair<size_t, size_t>> m_freeBlocks; // (size, offset)
+    // Last published probe (the K largest free blocks). Readers that find the
+    // allocator busy use it instead of waiting behind a worker allocation.
+    mutable std::mutex m_probeCacheMutex;
+    mutable AllocationProbe m_cachedProbe;
 
     std::weak_ptr<ViewedDynamicBufferBase> m_cachedWeakPtr;
     bool m_weakPtrCached = false;
@@ -266,8 +290,10 @@ private:
     size_t m_pendingResizeCapacity = 0;
     size_t m_requestedResizeCapacity = 0;
     bool m_pendingResizeValid = false;
+    std::unique_ptr<br::render::VersionedGpuBufferJournal> m_versionedGraphJournal;
+	std::function<void()> m_versionedGraphMutationCallback;
+	std::atomic_bool m_versionedGraphExclusive{ false };
 };
 
 } // namespace org
 
-using org::DynamicBuffer;

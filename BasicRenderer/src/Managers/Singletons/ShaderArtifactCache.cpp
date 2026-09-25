@@ -97,16 +97,16 @@ bool ReadString(const std::vector<std::byte>& in, size_t& offset, std::string& o
     return true;
 }
 
-void WriteResourceIdentifiers(std::vector<std::byte>& out, const std::vector<ResourceIdentifier>& ids)
+void WriteResourceIdentifiers(std::vector<std::byte>& out, const std::vector<org::ResourceIdentifier>& ids)
 {
     const uint64_t count = static_cast<uint64_t>(ids.size());
     WritePod(out, count);
-    for (const ResourceIdentifier& id : ids) {
+    for (const org::ResourceIdentifier& id : ids) {
         WriteString(out, id.ToString());
     }
 }
 
-bool ReadResourceIdentifiers(const std::vector<std::byte>& in, size_t& offset, std::vector<ResourceIdentifier>& out)
+bool ReadResourceIdentifiers(const std::vector<std::byte>& in, size_t& offset, std::vector<org::ResourceIdentifier>& out)
 {
     uint64_t count = 0;
     if (!ReadPod(in, offset, count)) {

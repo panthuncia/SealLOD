@@ -8,7 +8,9 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Managers/ViewManager.h"
 #include "Render/RenderContext.h"
-#include "Render/Runtime/UploadServiceAccess.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
+#include "RenderPasses/PreparedComputeBarrier.h"
+#include "Render/Runtime/UploadTypes.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Resources/components.h"
@@ -18,27 +20,75 @@
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
+void ClusterSoftwareRasterizationPass::Record(
+    const ClusterSoftwareRasterFrameData& frame, const uint32_t& generation,
+    org::PassRecordContext& recording) {
+    if (!frame.enabled || frame.bucketCount == 0u) return;
+
+    struct Sink {
+        org::PassRecordContext& recording;
+        rhi::CommandList& commands;
+        const ClusterSoftwareRasterFrameData& frame;
+        bool heapsBound = false;
+        void Bind(const org::PreparedProgramBinding& binding) {
+            if (!heapsBound) {
+                br::render::BindPreparedDescriptorHeaps(commands,frame.raster.resourceHeap,frame.raster.samplerHeap);
+                heapsBound = true;
+            }
+            commands.BindLayout(recording.ResolveLayout(binding.program));
+            commands.BindPipeline(recording.Resolve(binding.program));
+            if (!binding.descriptorIndices.empty()) {
+                commands.PushConstants(rhi::ShaderStage::Compute, 0,
+                    org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
+                    static_cast<uint32_t>(binding.descriptorIndices.size()),binding.descriptorIndices.data());
+            }
+        }
+        void Constants(const std::array<uint32_t,NumMiscUintRootConstants>& values) {
+            commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
+                NumMiscUintRootConstants,values.data());
+        }
+        void Dispatch(uint32_t x,uint32_t y,uint32_t z) { commands.Dispatch(x,y,z); }
+        void Indirect(rhi::CommandSignatureHandle signature,org::PreparedResourceReference arguments,uint64_t offset) {
+            commands.ExecuteIndirect(signature,recording.Resolve(arguments).GetHandle(),offset,{},0,1);
+        }
+        void UavBarrier(org::PreparedResourceReference resource) { br::render::RecordPreparedComputeUavBarrier(resource,recording); }
+        void IndirectBarrier(org::PreparedResourceReference resource) {
+            rhi::BufferBarrier indirectBarrier{};
+            indirectBarrier.buffer = recording.Resolve(resource).GetHandle();
+            indirectBarrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
+            indirectBarrier.afterAccess = rhi::ResourceAccessType::IndirectArgument;
+            indirectBarrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
+            indirectBarrier.afterSync = rhi::ResourceSyncState::ExecuteIndirect;
+            rhi::BarrierBatch indirectBatch{};
+            indirectBatch.buffers = {&indirectBarrier};
+            commands.Barriers(indirectBatch);
+        }
+    } sink{recording,recording.Commands(),frame};
+    EmitSkinCacheCommands(frame,generation,sink);
+
+    br::render::RecordPreparedComputeIndirectSequence(frame.raster, recording,
+        std::pair<uint32_t, uint32_t>{CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION, generation});
+}
+
 ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
-    std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
-    std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
-    std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
-    std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
-    std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
-    std::shared_ptr<Buffer> viewRasterInfoBuffer,
+    std::shared_ptr<org::Buffer> compactedVisibleClustersBuffer,
+    std::shared_ptr<org::Buffer> compactedVisibleClusterTransformIndicesBuffer,
+    std::shared_ptr<org::Buffer> rasterBucketsHistogramBuffer,
+    std::shared_ptr<org::Buffer> rasterBucketsIndirectArgsBuffer,
+    std::shared_ptr<org::Buffer> sortedToUnsortedMappingBuffer,
     CLodRasterOutputKind outputKind,
-    std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
-    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
-    std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
-    std::shared_ptr<Buffer> telemetryBuffer,
-    std::shared_ptr<ResourceGroup> slabResourceGroup,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPageTableTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowPhysicalPagesTexture,
+    std::shared_ptr<org::PixelBuffer> virtualShadowDynamicPagesTexture,
+    std::shared_ptr<org::Buffer> virtualShadowClipmapInfoBuffer,
+    std::shared_ptr<org::Buffer> telemetryBuffer,
+    std::shared_ptr<org::ResourceGroup> slabResourceGroup,
     bool runWhenComputeSWRasterEnabledOnly)
     : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
     , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
     , m_rasterBucketsIndirectArgsBuffer(std::move(rasterBucketsIndirectArgsBuffer))
     , m_sortedToUnsortedMappingBuffer(std::move(sortedToUnsortedMappingBuffer))
-    , m_viewRasterInfoBuffer(std::move(viewRasterInfoBuffer))
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
     , m_virtualShadowDynamicPagesTexture(std::move(virtualShadowDynamicPagesTexture))
@@ -53,18 +103,20 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
     };
 
     auto device = DeviceManager::GetInstance().GetDevice();
+    m_rasterizationCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
     device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 2), sizeof(RasterizeClustersCommand) },
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        m_rasterizationCommandSignature);
+        *m_rasterizationCommandSignature);
 
     rhi::IndirectArg dispatchArg[] = {
         {.kind = rhi::IndirectArgKind::Dispatch }
     };
+    m_dynamicWindSkinCacheDispatchCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
     device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArg, 1), 12u },
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        m_dynamicWindSkinCacheDispatchCommandSignature);
+        *m_dynamicWindSkinCacheDispatchCommandSignature);
 
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow &&
         SettingsManager::GetInstance().getSettingGetter<bool>(
@@ -173,7 +225,9 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
 
 ClusterSoftwareRasterizationPass::~ClusterSoftwareRasterizationPass() = default;
 
-void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder* builder) {
+ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::PassBuilder& declaration) {
+    auto* builder = &declaration;
+    builder->PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder->WithShaderResource(
             Builtin::PerMeshBuffer,
             Builtin::PerMaterialDataBuffer,
@@ -196,11 +250,15 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
             m_compactedVisibleClustersBuffer,
             m_compactedVisibleClusterTransformIndicesBuffer,
             m_rasterBucketsHistogramBuffer,
-            m_sortedToUnsortedMappingBuffer,
-            m_viewRasterInfoBuffer)
+            m_sortedToUnsortedMappingBuffer)
         .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
-        .WithIndirectArguments(m_rasterBucketsIndirectArgsBuffer)
         .WithUnorderedAccess(Builtin::DebugVisualization);
+    ClusterSoftwareRasterBindings bindings{
+        builder->BindShaderResource(m_rasterBucketsHistogramBuffer),
+        builder->BindShaderResource(m_compactedVisibleClustersBuffer),
+        builder->BindShaderResource(m_compactedVisibleClusterTransformIndicesBuffer),
+        builder->BindShaderResource(m_sortedToUnsortedMappingBuffer),
+        builder->BindIndirectArguments(m_rasterBucketsIndirectArgsBuffer)};
 
     if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer) {
         for (auto& vb : m_visibilityBuffers) {
@@ -208,6 +266,7 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
         }
     }
     else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
+        bindings.virtualShadow = true;
         builder->WithShaderResource(
                 m_virtualShadowClipmapInfoBuffer,
                 Builtin::Shadows::CLodDirectionalPageViewInfo)
@@ -217,6 +276,8 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
                 m_virtualShadowDynamicPagesTexture);
         if (m_telemetryBuffer) {
             builder->WithUnorderedAccess(m_telemetryBuffer);
+            bindings.telemetry = builder->BindUnorderedAccess(m_telemetryBuffer);
+            bindings.hasTelemetry = true;
         }
         if (m_dynamicWindSkinCacheHashBuffer) {
             builder->WithUnorderedAccess(
@@ -228,7 +289,19 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
                 m_dynamicWindSkinCacheIndirectArgsBuffer)
                 .WithIndirectArguments(m_dynamicWindSkinCacheIndirectArgsBuffer)
                 .WithShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
+            bindings.skinMapping = builder->BindUnorderedAccess(m_dynamicWindSkinCacheMappingBuffer);
+            bindings.skinHash = builder->BindUnorderedAccess(m_dynamicWindSkinCacheHashBuffer);
+            bindings.skinPositions = builder->BindUnorderedAccess(m_dynamicWindSkinCachePositionsBuffer);
+            bindings.skinAllocator = builder->BindUnorderedAccess(m_dynamicWindSkinCacheAllocatorBuffer);
+            bindings.skinWork = builder->BindUnorderedAccess(m_dynamicWindSkinCacheWorkRecordsBuffer);
+            bindings.skinArgs = builder->BindUnorderedAccess(m_dynamicWindSkinCacheIndirectArgsBuffer);
+            bindings.skinMembership = builder->BindShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
+            bindings.hasSkinCache = true;
         }
+        bindings.pageTable = builder->BindUnorderedAccess(m_virtualShadowPageTableTexture);
+        bindings.clipmapInfo = builder->BindShaderResource(m_virtualShadowClipmapInfoBuffer);
+        bindings.physicalPages = builder->BindUnorderedAccess(m_virtualShadowPhysicalPagesTexture);
+        bindings.dynamicPages = builder->BindUnorderedAccess(m_virtualShadowDynamicPagesTexture);
     }
 
     if (m_slabResourceGroup) {
@@ -236,61 +309,19 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
     }
 
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    return bindings;
 }
 
-void ClusterSoftwareRasterizationPass::Setup() {
-}
-
-void ClusterSoftwareRasterizationPass::Update(const UpdateExecutionContext& executionContext) {
+void ClusterSoftwareRasterizationPass::Update(const org::UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
-    const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
-
-    std::vector<std::shared_ptr<PixelBuffer>> nextVisibilityBuffers;
-    auto numViews = context.viewManager->GetCameraBufferSize();
-    std::vector<CLodViewRasterInfo> viewRasterInfo(numViews);
-
-    context.viewManager->ForEachView([&](uint64_t v) {
-        auto viewInfo = context.viewManager->Get(v);
-        if (!viewInfo) {
-            return;
-        }
-
-        auto cameraIndex = viewInfo->gpu.cameraBufferIndex;
-        CLodViewRasterInfo info{};
-        info.scissorMinX = 0;
-        info.scissorMinY = 0;
-
-        if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-            if (viewInfo->flags.shadow && viewInfo->lightType == Components::LightType::Directional) {
-                info.scissorMaxX = virtualShadowConfig.virtualResolution;
-                info.scissorMaxY = virtualShadowConfig.virtualResolution;
-                info.viewportScaleX = 1.0f;
-                info.viewportScaleY = 1.0f;
-            }
-            viewRasterInfo[cameraIndex] = info;
-            return;
-        }
-
-        if (viewInfo->gpu.visibilityBuffer == nullptr) {
-            return;
-        }
-
-        info.visibilityUAVDescriptorIndex = viewInfo->gpu.visibilityBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        info.scissorMaxX = viewInfo->gpu.visibilityBuffer->GetWidth();
-        info.scissorMaxY = viewInfo->gpu.visibilityBuffer->GetHeight();
-        info.viewportScaleX = 1.0f;
-        info.viewportScaleY = 1.0f;
-        viewRasterInfo[cameraIndex] = info;
-        nextVisibilityBuffers.push_back(viewInfo->gpu.visibilityBuffer);
-    });
-
-    m_viewRasterInfoBuffer->ResizeStructured(static_cast<uint32_t>(viewRasterInfo.size()));
-    BUFFER_UPLOAD(
-        viewRasterInfo.data(),
-        static_cast<uint32_t>(viewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
-        org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
-        0);
+    // Only the declarations are maintained here: the view table the shader
+    // reads is published during preparation (ViewRasterInfoTable).
+    std::vector<std::shared_ptr<org::PixelBuffer>> nextVisibilityBuffers;
+    if (m_outputKind != CLodRasterOutputKind::VirtualShadow)
+        for (const auto& viewInfo : context.Views())
+            if (viewInfo.visibilityBuffer && viewInfo.cameraBufferIndex < context.ViewCameraBufferSize())
+                nextVisibilityBuffers.push_back(viewInfo.visibilityBuffer);
 
     m_declaredResourcesChanged = (nextVisibilityBuffers != m_visibilityBuffers);
     m_visibilityBuffers = std::move(nextVisibilityBuffers);
@@ -300,192 +331,104 @@ bool ClusterSoftwareRasterizationPass::DeclaredResourcesChanged() const {
     return m_declaredResourcesChanged;
 }
 
-PassReturn ClusterSoftwareRasterizationPass::Execute(PassExecutionContext& executionContext) {
-    if (m_runWhenComputeSWRasterEnabledOnly && !CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)())) {
-        return {};
-    }
+ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::BuildRecipe(
+    const ClusterSoftwareRasterBindings& bindings, const org::PassPrepareContext& preparation) const {
+    ClusterSoftwareRasterFrameData frame{};
+    if (m_runWhenComputeSWRasterEnabledOnly && !CLodSoftwareRasterUsesCompute(
+        SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)()))
+        return frame;
     if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer &&
-        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)()) {
-        return {};
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)())
+        return frame;
+    const auto* context = preparation.preparationData
+        ? preparation.preparationData->Get<UpdateContext>() : nullptr;
+    if (!context) throw std::logic_error("CLod software-raster preparation requires the owned render snapshot");
+    frame.enabled = true;
+    auto& data = frame.raster;
+    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    data.commandSignature = preparation.CaptureCommandSignature(m_rasterizationCommandSignature);
+    data.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
+    const auto srv = [&](org::ResourceBindingToken token) {
+        return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index;
+    };
+    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) {
+        return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index;
+    };
+    // Keep the original default-SRV, mip-zero contract, resolved from the selected
+    // immutable binding version rather than mutable buffer descriptor storage.
+    auto constants = BuildPrimaryConstants<uint32_t>(bindings,[&](org::ResourceBindingToken token) {
+        return preparation.ResolveView(token,{org::BindlessViewKind::ShaderResource}).index;
+    });
+    constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] =
+        ViewRasterInfoTable(preparation).Publish(preparation, m_viewRasterInfoPublisher);
+    if (bindings.virtualShadow) {
+        const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
+        ApplyVirtualShadowConstants(constants,bindings,
+            {config.pageTableResolution,config.virtualResolution,m_dynamicWindSkinCacheHashEntryCount,
+                m_dynamicWindSkinCachePositionCapacity,static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)},srv,uav);
     }
-
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
-
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-
-    uint32_t misc[NumMiscUintRootConstants] = {};
-    misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITIONS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_ALLOCATOR_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_WORK_RECORDS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_INDIRECT_ARGS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    misc[CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
-    misc[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = m_rasterBucketsHistogramBuffer->GetSRVInfo(0).slot.index;
-    misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_compactedVisibleClustersBuffer->GetSRVInfo(0).slot.index;
-    misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
-    misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index;
-    misc[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index;
-    if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-        const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = m_virtualShadowPageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_virtualShadowClipmapInfoBuffer->GetSRVInfo(0).slot.index;
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = m_virtualShadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
-            m_virtualShadowDynamicPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = virtualShadowConfig.virtualResolution;
-        if (m_telemetryBuffer) {
-            misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] =
-                m_telemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        }
-        if (m_dynamicWindSkinCacheHashBuffer) {
-            ++m_dynamicWindSkinCacheGeneration;
-            if (m_dynamicWindSkinCacheGeneration == 0u ||
-                m_dynamicWindSkinCacheGeneration >= 0x7FFFFFFFu) {
-                m_dynamicWindSkinCacheGeneration = 1u;
-            }
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX] =
-                m_dynamicWindSkinCacheMappingBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_DESCRIPTOR_INDEX] =
-                m_dynamicWindSkinCacheHashBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_ENTRY_COUNT] =
-                m_dynamicWindSkinCacheHashEntryCount;
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] =
-                m_dynamicWindSkinCacheGeneration;
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITIONS_DESCRIPTOR_INDEX] =
-                m_dynamicWindSkinCachePositionsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITION_CAPACITY] =
-                m_dynamicWindSkinCachePositionCapacity;
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_ALLOCATOR_DESCRIPTOR_INDEX] =
-                m_dynamicWindSkinCacheAllocatorBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_WORK_RECORDS_DESCRIPTOR_INDEX] =
-                m_dynamicWindSkinCacheWorkRecordsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-            misc[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_INDIRECT_ARGS_DESCRIPTOR_INDEX] =
-                m_dynamicWindSkinCacheIndirectArgsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-            misc[CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] =
-                m_resourceRegistryView
-                    ->RequestPtr<GloballyIndexedResource>("Builtin::DynamicWind::VisibleSkeletonMembership")
-                    ->GetSRVInfo(0).slot.index;
-        }
+    const auto numBuckets = context->preparedRasterBucketCount;
+    frame.bucketCount = numBuckets;
+    BT_PLOT("CLod.RasterArgs.PreparedSoftwareBucketCount", static_cast<int64_t>(numBuckets));
+    BT_PLOT("CLod.RasterArgs.PreparedSoftwareBackingBytes", static_cast<int64_t>(m_rasterBucketsIndirectArgsBuffer->GetSize()));
+    data.steps.reserve(numBuckets);
+    VisitBuckets(numBuckets,context->preparedRasterBucketFlags,m_rasterBucketsIndirectArgsBuffer->GetSize(),
+        [&](MaterialRasterFlags flags,uint32_t,uint64_t argumentsOffset) {
+        const auto* pso = PSOManager::GetInstance().TryGetClusterLODSoftwareRasterPSO(flags, m_outputKind);
+        if (!pso) return;
+        br::render::PreparedComputeIndirectSequence::Step step{};
+        const auto binding = preparation.CaptureProgramBinding(*pso);
+        step.program = binding.program;
+        step.descriptorIndices = binding.descriptorIndices;
+        step.constants = constants;
+        step.argumentsOffset = argumentsOffset;
+        data.steps.push_back(std::move(step));
+    });
+    if (bindings.hasSkinCache && numBuckets != 0u) {
+        frame.hasSkinCache = true;
+        frame.cacheConstants = constants;
+        frame.clearConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = uav(bindings.skinAllocator);
+        frame.clearConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = 2u;
+        frame.clearProgram = preparation.CaptureProgramBinding(m_dynamicWindSkinCacheClearPipeline);
+        frame.buildProgram = preparation.CaptureProgramBinding(m_dynamicWindSkinCacheBuildPipeline);
+        frame.finalizeProgram = preparation.CaptureProgramBinding(m_dynamicWindSkinCacheFinalizePipeline);
+        frame.skinProgram = preparation.CaptureProgramBinding(m_dynamicWindSkinCacheSkinPipeline);
+        frame.resolveProgram = preparation.CaptureProgramBinding(m_dynamicWindSkinCacheResolvePipeline);
+        frame.cacheDispatchSignature = preparation.CaptureCommandSignature(m_dynamicWindSkinCacheDispatchCommandSignature);
+        frame.cacheIndirectArgs = preparation.CaptureResource(bindings.skinArgs);
+        frame.cacheAllocator = preparation.CaptureResource(bindings.skinAllocator);
+        frame.cacheHash = preparation.CaptureResource(bindings.skinHash);
+        frame.cacheWorkRecords = preparation.CaptureResource(bindings.skinWork);
+        frame.cachePositions = preparation.CaptureResource(bindings.skinPositions);
+        frame.cacheMapping = preparation.CaptureResource(bindings.skinMapping);
     }
-    commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, misc);
-
-    auto numBuckets = context.materialManager->GetRasterBucketCount();
-    if (numBuckets == 0) {
-        return {};
-    }
-
-    auto apiResource = m_rasterBucketsIndirectArgsBuffer->GetAPIResource();
-    auto stride = sizeof(RasterizeClustersCommand);
-
-    if (m_dynamicWindSkinCacheHashBuffer) {
-        BindResourceDescriptorIndices(commandList, m_dynamicWindSkinCacheClearPipeline.GetResourceDescriptorSlots());
-        commandList.BindPipeline(m_dynamicWindSkinCacheClearPipeline.GetAPIPipelineState().GetHandle());
-        uint32_t clearConstants[NumMiscUintRootConstants] = {};
-        clearConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] =
-            m_dynamicWindSkinCacheAllocatorBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        clearConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
-        clearConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = 2u;
-        commandList.PushConstants(
-            rhi::ShaderStage::Compute,
-            0,
-            MiscUintRootSignatureIndex,
-            0,
-            NumMiscUintRootConstants,
-            clearConstants);
-        commandList.Dispatch(1u, 1u, 1u);
-        commandList.PushConstants(
-            rhi::ShaderStage::Compute,
-            0,
-            MiscUintRootSignatureIndex,
-            0,
-            NumMiscUintRootConstants,
-            misc);
-
-        auto dispatchCacheStage = [&](const PipelineState& pipeline) {
-            BindResourceDescriptorIndices(commandList, pipeline.GetResourceDescriptorSlots());
-            commandList.BindPipeline(pipeline.GetAPIPipelineState().GetHandle());
-            for (uint32_t bucket = 0; bucket < numBuckets; ++bucket) {
-                const uint64_t argOffset = static_cast<uint64_t>(bucket) * stride;
-                commandList.ExecuteIndirect(
-                    m_rasterizationCommandSignature->GetHandle(),
-                    apiResource.GetHandle(),
-                    argOffset,
-                    {},
-                    0,
-                    1);
-            }
-        };
-        auto uavBarrier = [&](const std::shared_ptr<Buffer>& buffer) {
-            rhi::BufferBarrier barrier{};
-            barrier.buffer = buffer->GetAPIResource().GetHandle();
-            barrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
-            barrier.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
-            barrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
-            barrier.afterSync = rhi::ResourceSyncState::ComputeShading;
-            rhi::BarrierBatch batch{};
-            batch.buffers = { &barrier };
-            commandList.Barriers(batch);
-        };
-
-        uavBarrier(m_dynamicWindSkinCacheAllocatorBuffer);
-        dispatchCacheStage(m_dynamicWindSkinCacheBuildPipeline);
-        uavBarrier(m_dynamicWindSkinCacheHashBuffer);
-        uavBarrier(m_dynamicWindSkinCacheAllocatorBuffer);
-        uavBarrier(m_dynamicWindSkinCacheWorkRecordsBuffer);
-        BindResourceDescriptorIndices(commandList, m_dynamicWindSkinCacheFinalizePipeline.GetResourceDescriptorSlots());
-        commandList.BindPipeline(m_dynamicWindSkinCacheFinalizePipeline.GetAPIPipelineState().GetHandle());
-        commandList.Dispatch(1u, 1u, 1u);
-        rhi::BufferBarrier indirectArgsBarrier{};
-        indirectArgsBarrier.buffer = m_dynamicWindSkinCacheIndirectArgsBuffer->GetAPIResource().GetHandle();
-        indirectArgsBarrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
-        indirectArgsBarrier.afterAccess = rhi::ResourceAccessType::IndirectArgument;
-        indirectArgsBarrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
-        indirectArgsBarrier.afterSync = rhi::ResourceSyncState::ExecuteIndirect;
-        rhi::BarrierBatch indirectArgsBarrierBatch{};
-        indirectArgsBarrierBatch.buffers = { &indirectArgsBarrier };
-        commandList.Barriers(indirectArgsBarrierBatch);
-        BindResourceDescriptorIndices(commandList, m_dynamicWindSkinCacheSkinPipeline.GetResourceDescriptorSlots());
-        commandList.BindPipeline(m_dynamicWindSkinCacheSkinPipeline.GetAPIPipelineState().GetHandle());
-        commandList.ExecuteIndirect(
-            m_dynamicWindSkinCacheDispatchCommandSignature->GetHandle(),
-            m_dynamicWindSkinCacheIndirectArgsBuffer->GetAPIResource().GetHandle(),
-            0u,
-            {},
-            0u,
-            1u);
-        uavBarrier(m_dynamicWindSkinCachePositionsBuffer);
-        dispatchCacheStage(m_dynamicWindSkinCacheResolvePipeline);
-        uavBarrier(m_dynamicWindSkinCacheMappingBuffer);
-    }
-
-    for (uint32_t i = 0; i < numBuckets; ++i) {
-        auto flags = context.materialManager->GetRasterFlagsForBucket(i);
-        const PipelineState* pso = PSOManager::GetInstance().TryGetClusterLODSoftwareRasterPSO(flags, m_outputKind);
-        if (!pso) {
-            continue;
-        }
-
-        BindResourceDescriptorIndices(commandList, pso->GetResourceDescriptorSlots());
-        commandList.BindPipeline(pso->GetAPIPipelineState().GetHandle());
-
-        const uint64_t argOffset = static_cast<uint64_t>(i) * stride;
-        commandList.ExecuteIndirect(
-            m_rasterizationCommandSignature->GetHandle(),
-            apiResource.GetHandle(),
-            argOffset,
-            {},
-            0,
-            1);
-    }
-
-    return {};
+    return frame;
 }
 
-void ClusterSoftwareRasterizationPass::Cleanup() {}
+uint32_t ClusterSoftwareRasterizationPass::PrepareInvocation(const ClusterSoftwareRasterFrameData& recipe,
+    const ClusterSoftwareRasterBindings&, const org::PassPrepareContext&) const {
+    return PrepareInvocationGeneration(recipe.enabled,recipe.hasSkinCache,recipe.bucketCount,m_dynamicWindSkinCacheGeneration);
+}
+std::vector<uint64_t> ClusterSoftwareRasterizationPass::RecipeRevision(const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    std::vector<uint64_t> revision{SettingsManager::GetInstance().Revision(), context->preparedRasterBucketCount,
+        reinterpret_cast<uintptr_t>(m_rasterizationCommandSignature.get()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheClearPipeline.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheBuildPipeline.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheFinalizePipeline.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheSkinPipeline.PeekPayload()),
+        reinterpret_cast<uintptr_t>(m_dynamicWindSkinCacheResolvePipeline.PeekPayload())};
+    for (uint32_t i = 0; i < context->preparedRasterBucketCount; ++i) {
+        const auto flags = context->preparedRasterBucketFlags.at(i);
+        const auto* pso = PSOManager::GetInstance().TryGetClusterLODSoftwareRasterPSO(flags, m_outputKind);
+        revision.push_back(static_cast<uint64_t>(flags));
+        revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->PeekPayload() : nullptr));
+    }
+    ViewRasterInfoTable(preparation).AppendRevision(preparation, revision);
+    return revision;
+}
+
+CLodViewRasterInfoTable ClusterSoftwareRasterizationPass::ViewRasterInfoTable(const org::PassPrepareContext& preparation) const {
+    const auto& context = CLodPreparationSnapshot(preparation);
+    return BuildCLodVisibilityViewRasterInfo(context.Views(), context.ViewCameraBufferSize(), m_outputKind);
+}

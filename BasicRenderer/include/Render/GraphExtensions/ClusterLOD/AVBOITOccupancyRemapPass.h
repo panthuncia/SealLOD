@@ -2,31 +2,29 @@
 
 #include <memory>
 
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
-class AVBOITOccupancyRemapPass final : public ComputePass {
+struct AVBOITOccupancyRemapBindings { org::ResourceBindingToken config, lut, occupancy; };
+class AVBOITOccupancyRemapPass final : public org::TypedRenderGraphPass<AVBOITOccupancyRemapPass, br::render::PreparedComputeDispatch, AVBOITOccupancyRemapBindings> {
 public:
     AVBOITOccupancyRemapPass(
-        std::shared_ptr<Buffer> configBuffer,
-        std::shared_ptr<PixelBuffer> occupancyTexture,
-        std::shared_ptr<PixelBuffer> occupancySliceMaskTexture,
-        std::shared_ptr<Buffer> depthWarpLUTBuffer);
+        std::shared_ptr<org::Buffer> configBuffer,
+        std::shared_ptr<org::PixelBuffer> occupancyTexture,
+        std::shared_ptr<org::PixelBuffer> occupancySliceMaskTexture,
+        std::shared_ptr<org::Buffer> depthWarpLUTBuffer);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    void Update(const UpdateExecutionContext& executionContext) override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    AVBOITOccupancyRemapBindings Declare(org::PassBuilder& builder);
+    br::render::PreparedComputeDispatch Prepare(const AVBOITOccupancyRemapBindings&, const org::PassPrepareContext&) const;
+    static void Record(const AVBOITOccupancyRemapBindings&, const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
 
 private:
-    std::shared_ptr<Buffer> m_configBuffer;
-    std::shared_ptr<PixelBuffer> m_occupancyTexture;
-    std::shared_ptr<PixelBuffer> m_occupancySliceMaskTexture;
-    std::shared_ptr<Buffer> m_depthWarpLUTBuffer;
-    PipelineState m_pso;
+    std::shared_ptr<org::Buffer> m_configBuffer;
+    std::shared_ptr<org::PixelBuffer> m_occupancyTexture;
+    std::shared_ptr<org::PixelBuffer> m_occupancySliceMaskTexture;
+    std::shared_ptr<org::Buffer> m_depthWarpLUTBuffer;
+    org::PipelineState m_pso;
 };

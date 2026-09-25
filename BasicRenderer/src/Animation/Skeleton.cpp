@@ -661,7 +661,8 @@ void Skeleton::UpdateTransforms(float elapsedSeconds, bool force)
     }
 
     if (m_externalPose && !force) {
-        m_poseDirty = true;
+        // SetExternalPose already marks the pose dirty only when the matrices
+        // changed; marking it here re-skinned every static actor every frame.
         return;
     }
 

@@ -1,9 +1,22 @@
 #include "Mesh/MeshInstance.h"
 #include "Managers/MeshManager.h"
-#include "Managers/SkeletonManager.h"
+#include "Render/PoseInstanceRegistrationService.h"
 #include "Materials/Material.h"
 
 #include <algorithm>
+
+std::shared_ptr<MeshInstance> MeshInstance::CreateFrozenCopy(const MeshInstance& source) {
+    auto frozen = std::shared_ptr<MeshInstance>(new MeshInstance(source.m_mesh));
+    frozen->m_materialOverride = source.m_materialOverride;
+    frozen->m_perMeshInstanceBufferData = source.m_perMeshInstanceBufferData;
+    frozen->m_animationSpeed = source.m_animationSpeed;
+    if (source.m_skeleton) {
+        frozen->m_skeleton = std::make_shared<Skeleton>(*source.m_skeleton);
+    } else {
+        frozen->m_skeleton.reset();
+    }
+    return frozen;
+}
 
 MeshInstance::~MeshInstance() {
     ReleaseSkinningInstance_();
@@ -17,14 +30,14 @@ void MeshInstance::InitializeBoundsFromMesh_()
 }
 
 void MeshInstance::ReleaseSkinningInstance_() {
-    if (m_pCurrentSkeletonManager == nullptr || m_skeleton == nullptr) {
+    if (m_poseRegistration == nullptr || m_skeleton == nullptr) {
         return;
     }
 
-    auto lifetime = m_skeletonManagerLifetime.lock();
+    auto lifetime = m_poseRegistrationLifetime.lock();
     if (!lifetime || !lifetime->load(std::memory_order_acquire)) {
-        m_pCurrentSkeletonManager = nullptr;
-        m_skeletonManagerLifetime.reset();
+        m_poseRegistration = nullptr;
+        m_poseRegistrationLifetime.reset();
         return;
     }
 
@@ -32,16 +45,16 @@ void MeshInstance::ReleaseSkinningInstance_() {
         return;
     }
 
-    m_pCurrentSkeletonManager->ReleaseSkinningInstance(m_skeleton.get());
+    m_poseRegistration->Release(m_skeleton.get());
 }
 
-void MeshInstance::SetCurrentSkeletonManager(SkeletonManager* manager) {
-    m_pCurrentSkeletonManager = manager;
-    if (manager != nullptr) {
-        m_skeletonManagerLifetime = manager->GetLifetimeToken();
+void MeshInstance::SetPoseRegistrationService(br::render::PoseInstanceRegistrationService* service) {
+    m_poseRegistration = service;
+    if (service != nullptr) {
+        m_poseRegistrationLifetime = service->GetLifetimeToken();
     }
     else {
-        m_skeletonManagerLifetime.reset();
+        m_poseRegistrationLifetime.reset();
     }
 }
 
@@ -76,7 +89,7 @@ void MeshInstance::SyncSkinningStateFromSkeleton() {
     }
 }
 
-void MeshInstance::SetBufferViews(std::unique_ptr<BufferView> perMeshInstanceBufferView) {
+void MeshInstance::SetBufferViews(std::unique_ptr<org::BufferView> perMeshInstanceBufferView) {
 	m_perMeshInstanceBufferView = std::move(perMeshInstanceBufferView);
 	if (!m_perMeshInstanceBufferView) {
         return; // nothing to update
@@ -88,7 +101,7 @@ void MeshInstance::SetBufferViews(std::unique_ptr<BufferView> perMeshInstanceBuf
 	}
 }
 
-void MeshInstance::SetBufferViewUsingBaseMesh(std::unique_ptr<BufferView> perMeshInstanceBufferView) {
+void MeshInstance::SetBufferViewUsingBaseMesh(std::unique_ptr<org::BufferView> perMeshInstanceBufferView) {
 	m_perMeshInstanceBufferView = std::move(perMeshInstanceBufferView);
     InitializeBoundsFromMesh_();
 
@@ -111,8 +124,8 @@ void MeshInstance::SetSkeleton(std::shared_ptr<Skeleton> skeleton) {
 	m_skeleton = skeleton;
     if (m_skeleton != nullptr) {
         m_skeleton->SetAnimationSpeed(m_animationSpeed);
-        if (m_pCurrentSkeletonManager != nullptr) {
-            m_pCurrentSkeletonManager->AcquireSkinningInstance(m_skeleton);
+        if (m_poseRegistration != nullptr) {
+            m_poseRegistration->Acquire(m_skeleton);
             m_perMeshInstanceBufferData.skinningInstanceSlot = m_skeleton->GetSkinningInstanceSlot();
         }
     }
@@ -127,6 +140,19 @@ void MeshInstance::SetPerObjectBufferIndex(uint32_t index) {
 }
 void MeshInstance::SetPerMeshBufferIndex(uint32_t index) {
 	m_perMeshInstanceBufferData.perMeshBufferIndex = index;
+	if (m_pCurrentMeshManager && m_perMeshInstanceBufferView) {
+		m_pCurrentMeshManager->UpdatePerMeshInstanceBuffer(m_perMeshInstanceBufferView, m_perMeshInstanceBufferData);
+	}
+}
+void MeshInstance::SetExpectedClodMeshMetadataIndex(uint32_t index) {
+	m_perMeshInstanceBufferData.expectedClodMeshMetadataIndex = index;
+	if (m_pCurrentMeshManager && m_perMeshInstanceBufferView) {
+		m_pCurrentMeshManager->UpdatePerMeshInstanceBuffer(m_perMeshInstanceBufferView, m_perMeshInstanceBufferData);
+	}
+}
+void MeshInstance::SetExpectedClodMeshIdentity(uint64_t identity) {
+	m_perMeshInstanceBufferData.expectedClodMeshIdentityLo = static_cast<uint32_t>(identity);
+	m_perMeshInstanceBufferData.expectedClodMeshIdentityHi = static_cast<uint32_t>(identity >> 32u);
 	if (m_pCurrentMeshManager && m_perMeshInstanceBufferView) {
 		m_pCurrentMeshManager->UpdatePerMeshInstanceBuffer(m_perMeshInstanceBufferView, m_perMeshInstanceBufferData);
 	}

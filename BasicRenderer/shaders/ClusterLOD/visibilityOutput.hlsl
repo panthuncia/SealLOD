@@ -11,7 +11,7 @@ static const uint WG_COUNTER_RASTER_PIXEL_TARGET_BOUNDS_REJECTED = 127u;
 static const uint WG_COUNTER_RASTER_PIXEL_VISIBILITY_WRITES = 128u;
 
 #ifndef CLOD_RASTER_PIXEL_TELEMETRY
-#define CLOD_RASTER_PIXEL_TELEMETRY 0
+#define CLOD_RASTER_PIXEL_TELEMETRY 1
 #endif
 
 void CLodRasterPixelTelemetryAdd(uint counterIndex, uint value)

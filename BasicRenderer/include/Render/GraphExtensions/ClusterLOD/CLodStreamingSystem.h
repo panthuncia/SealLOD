@@ -10,25 +10,26 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "Managers/MeshManager.h"
+#include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodPageLRU.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodUploadStream.h"
 #include "Resources/Buffers/Buffer.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 #include "Utilities/BoundedSpscQueue.h"
+#include "Render/GraphExtensions/ClusterLOD/VirtualShadowUpgradeService.h"
 
 namespace org { class UploadInstance; }
-using org::UploadInstance;
+struct UpdateContext;
 
 struct CLodActiveGroupsSnapshot {
-    std::vector<uint32_t> bits;
     uint32_t activeGroupScanCount = 0;
     uint64_t generation = 0;
 };
@@ -58,25 +59,29 @@ public:
     CLodStreamingSystem();
     ~CLodStreamingSystem();
 
+    // Renderer-scoped geometry storage. This dependency is installed before
+    // Initialize and remains valid until Shutdown completes; streaming workers
+    // no longer discover it through the process-global settings registry.
+    void SetGeometryStorage(ICLodGeometryStorage* storage) noexcept { m_geometryStorage = storage; }
+
     void SetPriorityMode(CLodPriorityMode mode) { m_priorityMode = mode; }
     CLodPriorityMode GetPriorityMode() const { return m_priorityMode; }
 
-    void Initialize(RenderGraph& rg);
+    void Initialize(org::RenderGraph& rg);
     void Shutdown();
     void ShutdownGraphResources();
     void QuiesceGraphResourceAccess();
-    void OnRegistryReset(ResourceRegistry* reg);
-    void GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
-    void GatherStructuralTailPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
-    void GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
-    std::shared_ptr<Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
-    std::shared_ptr<Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
-    void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<Buffer>> buffers);
-    bool TryAcquireVirtualShadowUpgradeUpload(uint32_t& slotIndex, uint32_t& inputCount);
-    void ReleaseVirtualShadowUpgradeUpload(uint32_t slotIndex);
+    void OnRegistryReset(org::ResourceRegistry* reg);
+    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+    void GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+    std::shared_ptr<org::Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
+    std::shared_ptr<org::Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
+    void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<org::Buffer>> buffers);
+    VirtualShadowUpgradeQueue GetVirtualShadowUpgradeQueue() const { return m_virtualShadowUpgradeQueue; }
     void SetVirtualShadowFallbackFeedbackResources(
-        std::shared_ptr<Buffer> dependencies,
-        std::shared_ptr<Buffer> dependencyCount);
+        std::shared_ptr<org::Buffer> dependencies,
+        std::shared_ptr<org::Buffer> dependencyCount);
 
 private:
     struct VirtualShadowDependency;
@@ -134,9 +139,9 @@ private:
         uint64_t readbackDecodedNs);
     void EnsureStreamingStorageCapacity(uint32_t requiredGroupCount);
     void ProcessStreamingDomainEvents();
-    void RebuildStreamingDomainFromSnapshot(MeshManager* meshManager);
+    void RebuildStreamingDomainFromSnapshot(ICLodGeometryStorage* meshManager);
     void InitializeActiveRange(
-        MeshManager* meshManager,
+        ICLodGeometryStorage* meshManager,
         uint32_t begin,
         uint32_t count,
         uint32_t& initializedGroups,
@@ -159,7 +164,7 @@ private:
         uint32_t heapIndex,
         PendingStreamingRequest& outRequest);
     void SetGroupUsesPinnedStorage(uint32_t groupIndex, bool usesPinnedStorage);
-    void ApplyDiskStreamingCompletions(MeshManager* meshManager);
+    void ApplyDiskStreamingCompletions(ICLodGeometryStorage* meshManager);
     void ParkReadyCompletionForSharedPage(
         uint32_t groupIndex,
         uint32_t page,
@@ -182,7 +187,7 @@ private:
         uint32_t parentGroupIndex,
         std::vector<MeshManager::CLodDiskStreamingCompletion>*
             immediateCompletions = nullptr);
-    void CommitPendingResidencyPromotions(MeshManager* meshManager);
+    void CommitPendingResidencyPromotions(ICLodGeometryStorage* meshManager);
     void RecordVirtualShadowUpgradeDependencies(
         std::span<const CLodVirtualShadowPredictedPage> dependencies);
     void QueueVirtualShadowReadyDependency(const VirtualShadowDependency& dependency);
@@ -200,7 +205,7 @@ private:
     void PublishVirtualShadowUpgradeUpload();
     void InvalidateVirtualShadowUpgradeUploadMappings();
     void ClearVirtualShadowUpgradeState();
-    void ReconcileStaleDiskIoRequests(MeshManager* meshManager);
+    void ReconcileStaleDiskIoRequests(ICLodGeometryStorage* meshManager);
     bool PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex);
     void EnsureStreamingDiagnosticsCapacity(uint32_t requiredGroupCount);
     void RecordStreamingRequestObserved(
@@ -220,53 +225,55 @@ private:
     void WriteStreamingRequestTraceReport();
     void AccumulateStreamingDiagnostics(CLodStreamingOperationStats& stats);
     void QueuePendingNonResidentBitsUpload();
-    void RequestStreamingStorageGpuResize(uint32_t newCapacity);
-    bool PublishPendingStreamingStorageGpuResizeLocked();
+    void CreateResidencyStorage(uint32_t capacity);
+    void PublishFilledResidencyStorages(uint64_t completedBatchId);
+    uint32_t BoundResidencyCapacity(const UpdateContext& context) const;
     bool IsPhysicalPageResidentForKey(uint32_t page, uint64_t key) const;
     bool IsPhysicalPagePendingForKey(uint32_t page, uint64_t key) const;
     uint32_t GetPendingMeshPageRefCount(uint32_t page, uint64_t key) const;
     void AddPendingMeshPageReference(uint32_t page, uint64_t key);
     void ReleasePendingMeshPageReference(uint32_t page, uint64_t key);
     bool SetGroupResidentBit(uint32_t groupIndex, bool resident);
-    void ForceGroupNonResident(uint32_t groupIndex, MeshManager* meshManager, bool clearPageMapEntries);
+    void ForceGroupNonResident(uint32_t groupIndex, ICLodGeometryStorage* meshManager, bool clearPageMapEntries);
     void ForceGroupAndDescendantsNonResident(
         uint32_t groupIndex,
-        MeshManager* meshManager,
+        ICLodGeometryStorage* meshManager,
         bool clearPageMapEntries);
-    bool IsGroupSelectedParentResident(uint32_t groupIndex, MeshManager* meshManager) const;
+    bool IsGroupSelectedParentResident(uint32_t groupIndex, ICLodGeometryStorage* meshManager) const;
     bool IsGroupSelectedParentResidentOrCommitReady(
         uint32_t groupIndex,
-        MeshManager* meshManager) const;
+        ICLodGeometryStorage* meshManager) const;
     uint32_t SelectedAncestorDepth(
         uint32_t groupIndex,
-        MeshManager* meshManager) const;
+        ICLodGeometryStorage* meshManager) const;
     void TouchGroupPages(uint32_t groupIndex);
-    void PrefetchChildGroupLayouts(uint32_t parentGroupIndex, MeshManager* meshManager);
+    void PrefetchChildGroupLayouts(uint32_t parentGroupIndex, ICLodGeometryStorage* meshManager);
     void InstallPrefetchedChildGroupLayouts(
         uint32_t parentGroupIndex,
         std::vector<MeshManager::CLodPrefetchedChildLayout>&& prefetchedLayouts);
     void EvictPrefetchedChildLayoutsForOwner(uint32_t ownerGroupIndex);
     void ClearPrefetchedChildLayouts();
     void PollCompletedReadbackSlots();
-    void StreamingWorkerMain();
+    void StreamingDrainTask(const br::TaskContext& context);
+    void ScheduleStreamingDrain();
     void ProcessStreamingRequestsBudgeted();
     void RequestStreamingFrameWork();
     void PublishStreamingFrameWorkForFrame();
     void RunStreamingServiceWork();
     bool EnsureParallelSortResources();
     void DestroyParallelSortResources();
-    void ClearStreamingUploadFunction(MeshManager* meshManager);
-    void InstallStreamingUploadFunction(MeshManager* meshManager);
+    void ClearStreamingUploadFunction(ICLodGeometryStorage* meshManager);
+    void InstallStreamingUploadFunction(ICLodGeometryStorage* meshManager);
     bool PublishRetainedUploadBatch();
     void SealStreamingUploadBatch();
     void ObserveUploadBatchTickets();
     void PublishActiveGroupSnapshot();
-    void StartStreamingWorker();
-    void StopStreamingWorker();
+    void StartStreamingService();
+    void StopStreamingService();
 
     // Page-level LRU helpers
-    void InitializePageLru(MeshManager* meshManager);
-    void EnsurePageTrackingCapacity(MeshManager* meshManager);
+    void InitializePageLru(ICLodGeometryStorage* meshManager);
+    void EnsurePageTrackingCapacity(ICLodGeometryStorage* meshManager);
     struct PagePopFailureStats {
         uint32_t scanned = 0;
         uint32_t scanLimit = 0;
@@ -284,15 +291,15 @@ private:
     };
     std::vector<uint32_t> PopFreePages(
         std::span<const uint32_t> pageSizeBytes,
-        MeshManager* meshManager,
+        ICLodGeometryStorage* meshManager,
         PagePopFailureStats* outStats = nullptr);
     CLodPageLRU& PageLruForPage(uint32_t page);
     const CLodPageLRU& PageLruForPage(uint32_t page) const;
     uint32_t TotalPageLruSize() const;
-    void ReleaseOwnedPagesForGroup(uint32_t groupIndex, MeshManager* meshManager);
-    void ReleaseGroupResidency(uint32_t groupIndex, MeshManager* meshManager, bool clearPageMapEntries);
-    void RetirePhysicalPage(uint32_t page, MeshManager* meshManager, bool pinned);
-    void DrainRetiredPhysicalPages(MeshManager* meshManager);
+    void ReleaseOwnedPagesForGroup(uint32_t groupIndex, ICLodGeometryStorage* meshManager);
+    void ReleaseGroupResidency(uint32_t groupIndex, ICLodGeometryStorage* meshManager, bool clearPageMapEntries);
+    void RetirePhysicalPage(uint32_t page, ICLodGeometryStorage* meshManager, bool pinned);
+    void DrainRetiredPhysicalPages(ICLodGeometryStorage* meshManager);
     bool IsPhysicalPageRetired(uint32_t page);
     bool IsPhysicalPagePinnedStorage(uint32_t page) const;
     uint64_t StreamingUploadVisibilityDelayTicks() const;
@@ -315,7 +322,7 @@ private:
     bool TryGetCachedParentGroup(uint32_t groupIndex, uint32_t& outParentGroupIndex);
     bool IsPhysicalPageCleanForFreshAllocation(uint32_t page) const;
     bool IsPhysicalPageEvictable(uint32_t page) const;
-    bool EvictPhysicalPage(uint32_t page, MeshManager* meshManager);
+    bool EvictPhysicalPage(uint32_t page, ICLodGeometryStorage* meshManager);
     void MarkStreamingNonResidentBitsDirtyWord(uint32_t wordAddress);
     void MarkStreamingNonResidentBitsDirtyAll();
     bool TryConsumeStreamingNonResidentBitsUpload(std::vector<uint32_t>& outBits, uint32_t& outFirstWord, uint32_t maxWords);
@@ -336,32 +343,50 @@ private:
         uint64_t commitTick = 0u;
     };
 
-    PreAllocatedPages PreAllocatePagesForGroup(uint32_t groupIndex, const MeshManager::CLodGroupStreamingInfo& info, MeshManager* meshManager);
+    PreAllocatedPages PreAllocatePagesForGroup(uint32_t groupIndex, const MeshManager::CLodGroupStreamingInfo& info, ICLodGeometryStorage* meshManager);
     PreAllocatedPages PreAllocatePagesForGroup(
         uint32_t groupIndex,
         uint32_t groupsBase,
         std::span<const uint32_t> meshPageIndices,
         std::span<const uint32_t> meshPageBlobSizes,
-        MeshManager* meshManager,
+        ICLodGeometryStorage* meshManager,
         bool buildMeshPageKeys = true);
-    bool AssignPagesToGroup(uint32_t groupIndex, const PreAllocatedPages& pages, MeshManager* meshManager);
-    void ReleasePreAllocatedPages(const PreAllocatedPages& pages, MeshManager* meshManager);
+    bool AssignPagesToGroup(uint32_t groupIndex, const PreAllocatedPages& pages, ICLodGeometryStorage* meshManager);
+    void ReleasePreAllocatedPages(const PreAllocatedPages& pages, ICLodGeometryStorage* meshManager);
     bool ValidateRenderableCompletion(
         uint32_t groupIndex,
         const PreAllocatedPages& pages,
         const MeshManager::CLodDiskStreamingCompletion& completion,
-        uint32_t expectedPageCount) const;
+        uint32_t expectedPageCount,
+        ICLodGeometryStorage* meshManager) const;
 
-    std::shared_ptr<Buffer> m_streamingNonResidentBits;
-    std::shared_ptr<Buffer> m_streamingActiveGroupsBits;
-    std::shared_ptr<Buffer> m_streamingLoadRequestKeys;
-    std::shared_ptr<Buffer> m_streamingLoadRequests;
-    std::shared_ptr<Buffer> m_streamingLoadCounter;
-    std::shared_ptr<Buffer> m_streamingRuntimeState;
-    std::shared_ptr<Buffer> m_usedGroupsCounter;
-    std::shared_ptr<Buffer> m_usedGroupsBuffer;
-    std::shared_ptr<Buffer> m_sourceGroupMismatchCounter;
-    std::shared_ptr<Buffer> m_sourceGroupMismatchDetails;
+    // Non-resident bitset allocations, newest last. A capacity increase is a new
+    // allocation that the worker fills through its upload batches and publishes
+    // as a CLodResidencyStorage revision once that fill completes; it never
+    // resizes a bitset a frame may be reading. Every allocation a published
+    // state can still bind keeps receiving residency changes in the same batches
+    // as the newest, so page reuse remains ordered after every reader.
+    struct ResidencyStorage {
+        uint32_t capacity = 0;
+        std::shared_ptr<org::Buffer> retained; // until published
+        std::weak_ptr<org::Buffer> buffer;
+        bool fillQueued = false;
+        uint64_t fillBatchId = 0;
+        bool published = false;
+    };
+    std::vector<ResidencyStorage> m_residencyStorages; // streaming worker
+    // Frames bind the bitset of their published geometry cut; before the first
+    // cut this falls back to the initial allocation.
+    std::shared_ptr<PublishedStateResourceResolver> m_nonResidentBitsResolver;
+    std::shared_ptr<org::Buffer> m_initialResidencyStorage; // resolver fallback
+    std::shared_ptr<org::Buffer> m_streamingLoadRequestKeys;
+    std::shared_ptr<org::Buffer> m_streamingLoadRequests;
+    std::shared_ptr<org::Buffer> m_streamingLoadCounter;
+    std::shared_ptr<org::Buffer> m_streamingRuntimeState;
+    std::shared_ptr<org::Buffer> m_usedGroupsCounter;
+    std::shared_ptr<org::Buffer> m_usedGroupsBuffer;
+    std::shared_ptr<org::Buffer> m_sourceGroupMismatchCounter;
+    std::shared_ptr<org::Buffer> m_sourceGroupMismatchDetails;
 
     std::vector<uint32_t> m_streamingNonResidentBitsCpu;
     std::vector<uint32_t> m_streamingActiveGroupsBitsCpu;
@@ -508,9 +533,6 @@ private:
     uint32_t m_streamingActiveGroupScanCount = 0u;
     uint32_t m_streamingStorageGroupCapacity = CLodStreamingInitialGroupCapacity;
     std::atomic<uint32_t> m_streamingGpuStorageGroupCapacity{CLodStreamingInitialGroupCapacity};
-    std::atomic<uint32_t> m_pendingStreamingGpuStorageGroupCapacity{0u};
-    std::atomic<uint64_t> m_streamingGpuResizeAckGeneration{0u};
-    uint64_t m_observedStreamingGpuResizeAckGeneration = 0u;
     bool m_streamingNonResidentBitsUploadPending = false;
     bool m_streamingActiveGroupsBitsUploadPending = true;
     uint32_t m_streamingNonResidentBitsDirtyBegin = 0u;
@@ -527,7 +549,7 @@ private:
     uint64_t m_streamingNonResidentBitsQueuedTick = 0u;
     uint64_t m_streamingNonResidentBitsUploadFenceEpoch = 0u;
     uint64_t m_streamingNonResidentBitsUploadFenceValue = 0u;
-    std::function<MeshManager*()> m_getMeshManager = []() { return nullptr; };
+    ICLodGeometryStorage* m_geometryStorage = nullptr;
     std::function<uint32_t()> m_getStreamingCpuUploadBudgetRequests;
 
     std::vector<PendingStreamingRequest> m_pendingStreamingRequests;
@@ -562,11 +584,10 @@ private:
     enum class VirtualShadowUpgradeUploadState : uint8_t {
         Free,
         Filling,
-        Ready,
-        InFlight,
+        Published,
     };
     struct VirtualShadowUpgradeUploadSlot {
-        std::shared_ptr<Buffer> buffer;
+        std::shared_ptr<org::Buffer> buffer;
         void* mapped = nullptr;
         uint64_t mappedBackingGeneration = 0u;
         std::atomic<VirtualShadowUpgradeUploadState> state{
@@ -588,15 +609,14 @@ private:
     std::vector<uint32_t> m_virtualShadowBatchSourceChainOffsetByGroup;
     std::vector<uint32_t> m_virtualShadowBatchSourceChainCountByGroup;
     uint32_t m_virtualShadowBatchSourceGeneration = 0u;
-    std::array<VirtualShadowUpgradeUploadSlot, VirtualShadowUpgradeUploadSlotCapacity>
+    std::array<std::shared_ptr<VirtualShadowUpgradeUploadSlot>, VirtualShadowUpgradeUploadSlotCapacity>
         m_virtualShadowUpgradeUploadSlots;
     uint32_t m_virtualShadowUpgradeUploadSlotCount = 0u;
-    BoundedSpscQueue<uint32_t, VirtualShadowUpgradeUploadSlotCapacity>
-        m_virtualShadowReadyUploadSlots;
+    VirtualShadowUpgradeQueue m_virtualShadowUpgradeQueue;
     std::vector<uint32_t> m_virtualShadowResidencyGenerationByGroup;
     CLodVirtualShadowUpgradeQueueStats m_virtualShadowUpgradeStats;
-    std::shared_ptr<Buffer> m_virtualShadowFallbackDependenciesBuffer;
-    std::shared_ptr<Buffer> m_virtualShadowFallbackDependencyCountBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowFallbackDependenciesBuffer;
+    std::shared_ptr<org::Buffer> m_virtualShadowFallbackDependencyCountBuffer;
 
     std::vector<MeshManager::CLodStreamingDomainEvent> m_streamingDomainEventScratch;
     std::vector<uint32_t> m_childGroupsScratch;
@@ -615,9 +635,7 @@ private:
     std::atomic<uint64_t> m_streamingServiceEpoch{1};
     std::atomic<bool> m_streamingServiceRunning{false};
     uint64_t m_streamingServicePublishedGeneration = 0;
-    std::vector<uint32_t> m_publishedActiveGroupsBits;
     uint32_t m_publishedActiveGroupScanCount = 0;
-    bool m_publishedActiveGroupsBitsUploadPending = true;
     BoundedSpscQueue<CLodActiveGroupsSnapshot, 4> m_activeGroupsSnapshotQueue;
     std::optional<CLodActiveGroupsSnapshot> m_retainedActiveGroupsSnapshot;
 
@@ -638,7 +656,7 @@ private:
     rhi::TimelinePtr m_streamingUploadCompletionFencePtr;
     rhi::Timeline m_streamingUploadCompletionFenceHandle;
     std::atomic<uint64_t> m_streamingUploadCompletionFenceCounter{0};
-    rhi::TimelinePtr m_directStorageLaunchFencePtr;
+    std::shared_ptr<rhi::TimelinePtr> m_directStorageLaunchFencePtr;
     rhi::Timeline m_directStorageLaunchFenceHandle;
     std::atomic<uint64_t> m_directStorageLaunchFenceCounter{0};
     // Worker publishes launch demand; the graph thread supplies the queue
@@ -648,14 +666,14 @@ private:
 
     struct ReadbackStagingSlot {
         enum class State : uint8_t { Free, Recording, Submitted, Decoding };
-        std::shared_ptr<Buffer> counterStaging;
-        std::shared_ptr<Buffer> requestsStaging;
-        std::shared_ptr<Buffer> usedGroupsCounterStaging;
-        std::shared_ptr<Buffer> usedGroupsBufferStaging;
-        std::shared_ptr<Buffer> sourceGroupMismatchCounterStaging;
-        std::shared_ptr<Buffer> sourceGroupMismatchDetailsStaging;
-        std::shared_ptr<Buffer> virtualShadowDependencyCountStaging;
-        std::shared_ptr<Buffer> virtualShadowDependenciesStaging;
+        std::shared_ptr<org::Buffer> counterStaging;
+        std::shared_ptr<org::Buffer> requestsStaging;
+        std::shared_ptr<org::Buffer> usedGroupsCounterStaging;
+        std::shared_ptr<org::Buffer> usedGroupsBufferStaging;
+        std::shared_ptr<org::Buffer> sourceGroupMismatchCounterStaging;
+        std::shared_ptr<org::Buffer> sourceGroupMismatchDetailsStaging;
+        std::shared_ptr<org::Buffer> virtualShadowDependencyCountStaging;
+        std::shared_ptr<org::Buffer> virtualShadowDependenciesStaging;
         uint64_t fenceValue = 0;
         std::atomic<State> state{State::Free};
 
@@ -693,9 +711,14 @@ private:
     bool m_virtualShadowFeedbackLossPending = false;
     uint64_t m_virtualShadowFeedbackRecoveryRequests = 0u;
 
-    // Background streaming worker thread
-    std::thread m_streamingWorkerThread;
-    std::atomic<bool> m_streamingWorkerQuit{false};
+    // Serial scheduler-owned streaming coordinator. GPU completion is polled
+    // by frame/service kicks; this task never waits on a fence.
+    br::TaskScope m_streamingTaskScope;
+    std::atomic<bool> m_streamingDrainScheduled{false};
+    std::atomic<bool> m_streamingServiceStop{false};
+    uint64_t m_streamingLastProcessedFence = 0;
+    uint64_t m_streamingObservedServiceEpoch = 0;
+    uint64_t m_streamingLastLongSliceDiagnosticMs = 0;
     struct DecodedStreamingRequest {
         uint32_t groupIndex = UINT32_MAX;
         uint32_t priority = 0u;
@@ -728,5 +751,5 @@ private:
 
     // Dedicated upload instance + copy queue for async CLod streaming uploads.
     std::unique_ptr<CLodUploadStream> m_uploadStream;
-    QueueSlotIndex m_uploadQueueSlot{};
+    org::QueueSlotIndex m_uploadQueueSlot{};
 };

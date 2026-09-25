@@ -7,6 +7,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <atomic>
+#include <cstddef>
 
 #include "ShaderBuffers.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
@@ -17,7 +19,7 @@
 class ShadowMaps;
 class LinearShadowMaps;
 class IndirectCommandBufferManager;
-class ViewManager;
+namespace br::render { class IShadowViewService; }
 class SortedUnsignedIntBuffer;
 
 struct AddLightReturn {
@@ -25,8 +27,9 @@ struct AddLightReturn {
 	std::optional<Components::FrustumPlanes> frustumPlanes;
 };
 
-class LightManager: public IResourceProvider {
+class LightManager: public org::IResourceProvider {
 public:
+    std::vector<std::shared_ptr<const std::vector<std::byte>>> CaptureTableImages() const;
 	static std::unique_ptr<LightManager> CreateUnique() {
 		return std::unique_ptr<LightManager>(new LightManager());
 	}
@@ -34,33 +37,34 @@ public:
     AddLightReturn AddLight(LightInfo* lightInfo, uint64_t entityId);
     void RemoveLight(LightInfo* light);
 	void RemoveLight(flecs::entity light);
-    unsigned int GetNumLights();
+	unsigned int GetNumLights();
+	uint64_t GetPublicationRevision() const noexcept { return m_publicationRevision.load(std::memory_order_acquire); }
     void SetCurrentCamera(flecs::entity camera);
-	void SetViewManager(ViewManager* viewManager);
-	void UpdateLightBufferView(BufferView* view, const LightInfo& data);
+	void SetShadowViewService(br::render::IShadowViewService* service);
+	void UpdateLightBufferView(org::BufferView* view, const LightInfo& data);
     void UpdateLightViewInfo(flecs::entity light);
 	unsigned int GetLightPagePoolSize() { return m_lightPagePoolSize; }
-	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-	std::vector<ResourceIdentifier> GetSupportedKeys() override;
-	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
+	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+	std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+	std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
 
 private:
     LightManager();
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
-	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::IResourceResolver>, org::ResourceIdentifier::Hasher> m_resolvers;
 	flecs::entity m_currentCamera;
-    std::shared_ptr<LazyDynamicStructuredBuffer<LightInfo>> m_lightBuffer;
+    std::shared_ptr<org::LazyDynamicStructuredBuffer<LightInfo>> m_lightBuffer;
 	std::shared_ptr<SortedUnsignedIntBuffer> m_activeLightIndices; // Sorted list of active light indices
     std::shared_ptr<DynamicStructuredBuffer<unsigned int>> m_spotViewInfo; // Indices into camera buffer
     std::shared_ptr<DynamicStructuredBuffer<unsigned int>> m_pointViewInfo;
     std::shared_ptr<DynamicStructuredBuffer<unsigned int>> m_directionalViewInfo;
 
-	std::shared_ptr<ResourceGroup> m_pLightViewInfoResourceGroup;
-	std::shared_ptr<ResourceGroup> m_pLightBufferResourceGroup;
+	std::shared_ptr<org::ResourceGroup> m_pLightViewInfoResourceGroup;
+	std::shared_ptr<org::ResourceGroup> m_pLightBufferResourceGroup;
 
-	std::shared_ptr<Buffer> m_pClusterBuffer;
-	std::shared_ptr<Buffer> m_pLightPagesBuffer;
+	std::shared_ptr<org::Buffer> m_pClusterBuffer;
+	std::shared_ptr<org::Buffer> m_pLightPagesBuffer;
 
     // TODO: The buffer size and increment size are low for testing.
     unsigned int m_commandBufferSize = 1;
@@ -74,10 +78,11 @@ private:
 	std::function<float()> getDirectionalShadowSceneExtent;
 	std::function<float()> getDirectionalVirtualShadowSourceAngleDegrees;
     std::function<void(std::shared_ptr<void>)> markForDelete;
-	ViewManager* m_pViewManager = nullptr;
+	br::render::IShadowViewService* m_shadowViews = nullptr;
 	unsigned int m_lightPagePoolSize = 0;
 
 	std::mutex m_lightUpdateMutex;
+	std::atomic_uint64_t m_publicationRevision{1};
 
     std::pair<Components::LightViewInfo, std::optional<Components::FrustumPlanes>>
         CreatePointLightViewInfo(const LightInfo& info, uint64_t entityId);

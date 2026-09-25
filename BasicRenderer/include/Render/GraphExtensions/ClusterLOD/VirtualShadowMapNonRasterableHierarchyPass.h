@@ -3,28 +3,35 @@
 #include <memory>
 
 #include "Render/PipelineState.h"
-#include "RenderPasses/Base/ComputePass.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
-class VirtualShadowMapNonRasterableHierarchyPass final : public ComputePass {
+struct VirtualShadowMapNonRasterableHierarchyBindings {
+    org::ResourceBindingToken pageTable;
+    org::ResourceBindingToken hierarchy;
+    org::ResourceBindingToken clipmapInfo;
+};
+
+class VirtualShadowMapNonRasterableHierarchyPass final : public org::TypedRenderGraphPass<VirtualShadowMapNonRasterableHierarchyPass,
+    br::render::PreparedComputeDispatchSequence, VirtualShadowMapNonRasterableHierarchyBindings> {
 public:
     VirtualShadowMapNonRasterableHierarchyPass(
-        std::shared_ptr<PixelBuffer> pageTableTexture,
-        std::shared_ptr<PixelBuffer> nonRasterableHierarchyTexture,
-        std::shared_ptr<Buffer> clipmapInfoBuffer);
+        std::shared_ptr<org::PixelBuffer> pageTableTexture,
+        std::shared_ptr<org::PixelBuffer> nonRasterableHierarchyTexture,
+        std::shared_ptr<org::Buffer> clipmapInfoBuffer);
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) override;
-    void Setup() override;
-    PassReturn Execute(PassExecutionContext& executionContext) override;
-    void Cleanup() override;
+    VirtualShadowMapNonRasterableHierarchyBindings Declare(org::PassBuilder& builder);
+    br::render::PreparedComputeDispatchSequence Prepare(const VirtualShadowMapNonRasterableHierarchyBindings&,
+        const org::PassPrepareContext& preparation) const;
+    static void Record(const VirtualShadowMapNonRasterableHierarchyBindings&,
+        const br::render::PreparedComputeDispatchSequence&, org::PassRecordContext&);
 
 private:
-    PipelineState m_pso;
-    std::shared_ptr<PixelBuffer> m_pageTableTexture;
-    std::shared_ptr<PixelBuffer> m_nonRasterableHierarchyTexture;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
+    org::PipelineState m_pso;
+    std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<org::PixelBuffer> m_nonRasterableHierarchyTexture;
+    std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;
 };

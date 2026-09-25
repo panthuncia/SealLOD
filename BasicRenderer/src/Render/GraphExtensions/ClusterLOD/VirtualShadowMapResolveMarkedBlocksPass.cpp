@@ -7,18 +7,19 @@
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 #include "../shaders/PerPassRootConstants/clodVirtualShadowResolveMarkedBlocksRootConstants.h"
+#include "RenderPasses/PreparedComputeDispatch.h"
 
 VirtualShadowMapResolveMarkedBlocksPass::VirtualShadowMapResolveMarkedBlocksPass(
-    std::shared_ptr<Buffer> markedBlocksMaskBuffer,
-    std::shared_ptr<Buffer> markedBlocksListBuffer,
-    std::shared_ptr<Buffer> markedBlocksCountBuffer,
-    std::shared_ptr<Buffer> allocationRequestsBuffer,
-    std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> markClipmapDataBuffer,
-    std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
-    std::shared_ptr<Buffer> statsBuffer)
+    std::shared_ptr<org::Buffer> markedBlocksMaskBuffer,
+    std::shared_ptr<org::Buffer> markedBlocksListBuffer,
+    std::shared_ptr<org::Buffer> markedBlocksCountBuffer,
+    std::shared_ptr<org::Buffer> allocationRequestsBuffer,
+    std::shared_ptr<org::Buffer> allocationCountBuffer,
+    std::shared_ptr<org::Buffer> markClipmapDataBuffer,
+    std::shared_ptr<org::PixelBuffer> pageTableTexture,
+    std::shared_ptr<org::Buffer> dirtyPageFlagsBuffer,
+    std::shared_ptr<org::Buffer> directionalPageViewInfoBuffer,
+    std::shared_ptr<org::Buffer> statsBuffer)
     : m_markedBlocksMaskBuffer(std::move(markedBlocksMaskBuffer))
     , m_markedBlocksListBuffer(std::move(markedBlocksListBuffer))
     , m_markedBlocksCountBuffer(std::move(markedBlocksCountBuffer))
@@ -38,25 +39,20 @@ VirtualShadowMapResolveMarkedBlocksPass::VirtualShadowMapResolveMarkedBlocksPass
         "CLod.VirtualShadow.ResolveMarkedBlocks.PSO");
 }
 
-void VirtualShadowMapResolveMarkedBlocksPass::DeclareResourceUsages(ComputePassBuilder* builder)
+VirtualShadowMapResolveMarkedBlocksBindings VirtualShadowMapResolveMarkedBlocksPass::Declare(org::PassBuilder& builder)
 {
-    builder->WithShaderResource(
-            m_markedBlocksMaskBuffer,
-            m_markedBlocksListBuffer,
-            m_markedBlocksCountBuffer,
-            m_markClipmapDataBuffer)
-        .WithUnorderedAccess(
-            m_allocationRequestsBuffer,
-            m_allocationCountBuffer,
-            m_pageTableTexture,
-            m_dirtyPageFlagsBuffer,
-            m_directionalPageViewInfoBuffer,
-            m_statsBuffer);
+    builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    return {builder.BindShaderResource(m_markedBlocksMaskBuffer), builder.BindShaderResource(m_markedBlocksListBuffer),
+        builder.BindShaderResource(m_markedBlocksCountBuffer), builder.BindUnorderedAccess(m_allocationRequestsBuffer),
+        builder.BindUnorderedAccess(m_allocationCountBuffer), builder.BindShaderResource(m_markClipmapDataBuffer),
+        builder.BindUnorderedAccess(m_pageTableTexture), builder.BindUnorderedAccess(m_dirtyPageFlagsBuffer),
+        builder.BindUnorderedAccess(m_directionalPageViewInfoBuffer), builder.BindUnorderedAccess(m_statsBuffer),
+        m_activeClipmapCount};
 }
 
-void VirtualShadowMapResolveMarkedBlocksPass::Setup() {}
+void VirtualShadowMapResolveMarkedBlocksPass::Initialize() {}
 
-void VirtualShadowMapResolveMarkedBlocksPass::Update(const UpdateExecutionContext& executionContext)
+void VirtualShadowMapResolveMarkedBlocksPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
     m_activeClipmapCount = (std::min)(
@@ -64,45 +60,38 @@ void VirtualShadowMapResolveMarkedBlocksPass::Update(const UpdateExecutionContex
         CLodVirtualShadowMaxSupportedClipmapCount);
 }
 
-PassReturn VirtualShadowMapResolveMarkedBlocksPass::Execute(PassExecutionContext& executionContext)
-{
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& context = *renderContext;
-    auto& commandList = executionContext.commandList;
 
-    commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-    const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
 
-    uint32_t rootConstants[NumMiscUintRootConstants] = {};
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MASK_DESCRIPTOR_INDEX] = m_markedBlocksMaskBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_LIST_DESCRIPTOR_INDEX] = m_markedBlocksListBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_COUNT_DESCRIPTOR_INDEX] = m_markedBlocksCountBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUESTS_DESCRIPTOR_INDEX] = m_allocationRequestsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUEST_COUNT_DESCRIPTOR_INDEX] = m_allocationCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] =
-        m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = m_dirtyPageFlagsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] =
-        m_directionalPageViewInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_ACTIVE_CLIPMAP_COUNT] = m_activeClipmapCount;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_CLIPMAP_DATA_DESCRIPTOR_INDEX] = m_markClipmapDataBuffer->GetSRVInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MAX_REQUEST_COUNT] = virtualShadowConfig.maxAllocationRequests;
-
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        rootConstants);
-
-    commandList.Dispatch((CLodVirtualShadowMaxMarkedBlockCount + 63u) / 64u, 1u, 1u);
-
-    return {};
+br::render::PreparedComputeDispatch VirtualShadowMapResolveMarkedBlocksPass::Prepare(
+    const VirtualShadowMapResolveMarkedBlocksBindings& bindings, const org::PassPrepareContext& preparation) const {
+    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
+    auto payload = m_pso.GetPayload(); br::render::PreparedComputeDispatch data{};
+    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(std::move(payload));
+    data.program = program.program;
+    data.descriptorIndices = std::move(program.descriptorIndices);
+    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
+    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index; };
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MASK_DESCRIPTOR_INDEX] = srv(bindings.mask);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_LIST_DESCRIPTOR_INDEX] = srv(bindings.list);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_COUNT_DESCRIPTOR_INDEX] = srv(bindings.count);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUESTS_DESCRIPTOR_INDEX] = uav(bindings.requests);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUEST_COUNT_DESCRIPTOR_INDEX] = uav(bindings.requestCount);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = uav(bindings.pageViewInfo);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_ACTIVE_CLIPMAP_COUNT] = bindings.activeClipmapCount;
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_CLIPMAP_DATA_DESCRIPTOR_INDEX] = srv(bindings.clipmapData);
+    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MAX_REQUEST_COUNT] = config.maxAllocationRequests;
+    data.groupsX = (CLodVirtualShadowMaxMarkedBlockCount + 63u) / 64u;
+    return data;
 }
 
-void VirtualShadowMapResolveMarkedBlocksPass::Cleanup() {}
+void VirtualShadowMapResolveMarkedBlocksPass::ShutdownPass() {}
+
+void VirtualShadowMapResolveMarkedBlocksPass::Record(const VirtualShadowMapResolveMarkedBlocksBindings&,
+    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
+    br::render::RecordPreparedComputeDispatch(data, recording);
+}

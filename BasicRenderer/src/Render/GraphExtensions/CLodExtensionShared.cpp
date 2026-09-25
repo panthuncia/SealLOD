@@ -130,10 +130,10 @@ std::string GetVariantTechniquePath(const CLodVariantTraits& traits, std::string
     }
 }
 
-TextureDescription CreateVirtualShadowPageTableDescription()
+org::TextureDescription CreateVirtualShadowPageTableDescription()
 {
-    TextureDescription desc;
-    ImageDimensions dims;
+    org::TextureDescription desc;
+    org::ImageDimensions dims;
     dims.width = CLodVirtualShadowMaxPageTableResolution;
     dims.height = CLodVirtualShadowMaxPageTableResolution;
     dims.rowPitch = static_cast<uint64_t>(dims.width) * sizeof(uint32_t);
@@ -150,10 +150,10 @@ TextureDescription CreateVirtualShadowPageTableDescription()
     return desc;
 }
 
-TextureDescription CreateVirtualShadowPhysicalPagesDescription(uint32_t backingResolution, uint32_t maxPhysicalPages)
+org::TextureDescription CreateVirtualShadowPhysicalPagesDescription(uint32_t backingResolution, uint32_t maxPhysicalPages)
 {
-    TextureDescription desc;
-    ImageDimensions dims;
+    org::TextureDescription desc;
+    org::ImageDimensions dims;
     const uint32_t sanitizedBackingResolution = CLodVirtualShadowSanitizeBackingResolution(backingResolution);
     const uint32_t atlasPagesWide = (std::max)(
         1u,
@@ -175,10 +175,10 @@ TextureDescription CreateVirtualShadowPhysicalPagesDescription(uint32_t backingR
     return desc;
 }
 
-TextureDescription CreateVirtualShadowDirtyHierarchyDescription()
+org::TextureDescription CreateVirtualShadowDirtyHierarchyDescription()
 {
-    TextureDescription desc;
-    ImageDimensions dims;
+    org::TextureDescription desc;
+    org::ImageDimensions dims;
     dims.width = CLodVirtualShadowMaxPageTableResolution;
     dims.height = CLodVirtualShadowMaxPageTableResolution;
     dims.rowPitch = static_cast<uint64_t>(dims.width) * sizeof(uint32_t);

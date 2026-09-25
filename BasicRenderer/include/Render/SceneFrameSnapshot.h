@@ -1,12 +1,15 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 #include "Scene/Components.h"
+
+class Mesh;
 
 namespace br::render {
 
@@ -49,6 +52,9 @@ struct SceneFrameSnapshot {
     uint64_t sourceFrameNumber = 0;
     Components::DrawStats drawStats;
     Components::GlobalMeshLibrary meshLibrary;
+    // The library's lookup entries are weak. This keeps the exact artifacts
+    // selected by the source revision alive through delayed ingestion.
+    std::vector<std::shared_ptr<Mesh>> retainedMeshArtifacts;
     bool drawStatsChanged = true;
     bool meshLibraryChanged = true;
 

@@ -10,6 +10,7 @@
 #include <rhi.h>
 
 #include "OpenRenderGraph/OpenRenderGraph.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 
 namespace br {
 
@@ -19,24 +20,33 @@ public:
 
     void Initialize(rhi::Timeline readbackFence);
 
-    void RequestReadback(std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap);
+    void RequestReadback(std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap);
 
-    std::shared_ptr<RenderPass> GetReadbackPass() const { return m_readbackPass; }
+    std::shared_ptr<org::RenderPass> GetReadbackPass() const { return m_readbackPass; }
 
     void ProcessReadbackRequests();
 
     void Cleanup();
 
 private:
+    struct ReadbackFrameData {
+        struct Copy {
+            org::PreparedResourceReference source{};
+            rhi::ResourceHandle destination{};
+            rhi::CopyableFootprint footprint{};
+            uint32_t mip = 0, slice = 0;
+        };
+        std::vector<Copy> copies;
+    };
     struct ReadbackInfo {
         bool cubemap = false;
-        std::shared_ptr<PixelBuffer> texture;
+        std::shared_ptr<org::PixelBuffer> texture;
         std::wstring outputFile;
         std::function<void()> callback;
     };
 
     struct ReadbackRequest {
-        std::shared_ptr<Resource> readbackBuffer;
+        std::shared_ptr<org::Resource> readbackBuffer;
         std::vector<rhi::CopyableFootprint> layouts;
         uint64_t totalSize = 0;
         std::wstring outputFile;
@@ -44,59 +54,55 @@ private:
         uint64_t fenceValue = 0;
     };
 
-    class ReadbackPass : public RenderPass, public IHasImmediateModeCommands {
+    struct State {
+        std::mutex mutex;
+        std::vector<ReadbackInfo> queuedReadbacks;
+        std::vector<ReadbackRequest> readbackRequests;
+        std::atomic<uint64_t> nextFenceValue{ 0 };
+        bool accepting = true;
+    };
+
+    class ReadbackPass
+        : public org::TypedRenderGraphPass<ReadbackPass, ReadbackFrameData>,
+          public org::IDynamicDeclaredResources {
     public:
-        explicit ReadbackPass(ReadbackManager& owner)
-            : m_owner(owner) {
+        explicit ReadbackPass(std::shared_ptr<State> state)
+            : m_state(std::move(state)) {
         }
 
-        void Setup() override {
-        }
-
-        void RecordImmediateCommands(ImmediateExecutionContext& context) override;
-
-        PassReturn Execute(PassExecutionContext& context) override;
-
-        void Cleanup() override {
-        }
+        void Declare(org::PassBuilder& builder);
+        ReadbackFrameData Prepare(const org::PassPrepareContext& preparation);
+        static void Record(const ReadbackFrameData& data, org::PassRecordContext& recording);
+        bool DeclaredResourcesChanged() const override;
 
         void SetReadbackFence(rhi::Timeline fence) {
             m_readbackFence = fence;
         }
 
     private:
-        ReadbackManager& m_owner;
+        std::shared_ptr<State> m_state;
         rhi::Timeline m_readbackFence;
-        uint64_t m_pendingFenceValue = 0;
-        bool m_hasWork = false;
     };
-
-    uint64_t AcquireNextFenceValue() noexcept {
-        return m_nextFenceValue.fetch_add(1, std::memory_order_relaxed) + 1;
-    }
 
     void ClearReadbacks();
 
     void SaveCubemapToDDS(
         rhi::Device& device,
         org::imm::ImmediateCommandList& commandList,
-        std::shared_ptr<PixelBuffer> cubemap,
+        std::shared_ptr<org::PixelBuffer> cubemap,
         const std::wstring& outputFile,
         uint64_t fenceValue);
 
     void SaveTextureToDDS(
         rhi::Device& device,
         org::imm::ImmediateCommandList& commandList,
-        PixelBuffer* texture,
+        org::PixelBuffer* texture,
         const std::wstring& outputFile,
         uint64_t fenceValue);
 
     std::shared_ptr<ReadbackPass> m_readbackPass;
+    std::shared_ptr<State> m_state;
     rhi::Timeline m_readbackFence;
-    std::atomic<uint64_t> m_nextFenceValue{ 0 };
-    std::mutex m_mutex;
-    std::vector<ReadbackInfo> m_queuedReadbacks;
-    std::vector<ReadbackRequest> m_readbackRequests;
 };
 
 } // namespace br

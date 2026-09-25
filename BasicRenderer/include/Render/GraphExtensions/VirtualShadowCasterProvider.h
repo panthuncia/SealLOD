@@ -13,9 +13,7 @@
 #include "Render/RenderGraph/RenderGraph.h"
 
 namespace org { class Buffer; }
-using org::Buffer;
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 
 enum class VirtualShadowCasterMobility : uint8_t {
     Rigid,
@@ -62,15 +60,15 @@ private:
 };
 
 struct VirtualShadowCasterBuildContext {
-    std::shared_ptr<PixelBuffer> pageTable;
-    std::shared_ptr<PixelBuffer> staticPhysicalPages;
-    std::shared_ptr<PixelBuffer> dynamicPhysicalPages;
-    std::shared_ptr<Buffer> clipmapInfo;
-    std::shared_ptr<Buffer> compactShadowCameras;
-    std::shared_ptr<Buffer> staticActiveBlockMetadata;
-    std::shared_ptr<Buffer> dynamicActiveBlockMetadata;
-    std::shared_ptr<Buffer> directionalPageViews;
-    std::shared_ptr<Buffer> statistics;
+    std::shared_ptr<org::PixelBuffer> pageTable;
+    std::shared_ptr<org::PixelBuffer> staticPhysicalPages;
+    std::shared_ptr<org::PixelBuffer> dynamicPhysicalPages;
+    std::shared_ptr<org::Buffer> clipmapInfo;
+    std::shared_ptr<org::Buffer> compactShadowCameras;
+    std::shared_ptr<org::Buffer> staticActiveBlockMetadata;
+    std::shared_ptr<org::Buffer> dynamicActiveBlockMetadata;
+    std::shared_ptr<org::Buffer> directionalPageViews;
+    std::shared_ptr<org::Buffer> statistics;
     std::shared_ptr<VirtualShadowInvalidationQueue> invalidationQueue;
 };
 
@@ -84,15 +82,15 @@ struct VirtualShadowCasterTelemetryTag {
 class VirtualShadowPassBuilder {
 public:
     VirtualShadowPassBuilder(
-        std::vector<RenderGraph::ExternalPassDesc>& passes,
+        std::vector<org::RenderGraph::ExternalPassDesc>& passes,
         std::string afterPass,
         std::string beforePass = {});
 
-    void Add(RenderGraph::ExternalPassDesc pass);
+    void Add(org::RenderGraph::ExternalPassDesc pass);
     const std::string& LastPassName() const;
 
 private:
-    std::vector<RenderGraph::ExternalPassDesc>& m_passes;
+    std::vector<org::RenderGraph::ExternalPassDesc>& m_passes;
     std::string m_lastPass;
     std::string m_beforePass;
 };

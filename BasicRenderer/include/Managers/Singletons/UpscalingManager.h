@@ -7,6 +7,7 @@
 #include <vector>
 #include <DirectXMath.h>
 #include <functional>
+#include <mutex>
 
 #include <sl.h>
 #include <sl_consts.h>
@@ -91,7 +92,6 @@ inline sl::DLSSMode ToSLQualityMode(UpscaleQualityMode mode) {
 }
 
 namespace org { class PixelBuffer; }
-using org::PixelBuffer;
 struct RenderContext;
 
 class UpscalingManager {
@@ -100,7 +100,13 @@ public:
     void InitializeAdapter();
 	void ProxyDevice();
     void Setup();
-	void Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors);
+	void Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
+	// Records using the mode captured by a retained graph generation. This does
+	// not consult the mutable settings/current-mode selection.
+	void EvaluateCaptured(UpscalingMode mode, rhi::CommandList& commandList,
+		const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds,
+		org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget,
+		org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
     void RequestHistoryReset() { m_resetUpscalerHistory = true; }
 	void Shutdown();
 
@@ -117,9 +123,9 @@ private:
     UpscalingManager() = default;
     void SyncSettingsFromSettingsManager();
     bool EnsureFSRContext();
-	void EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors);
-    void EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors);
-	void EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors);
+	void EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
+    void EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
+	void EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
 	UpscalingMode m_upscalingMode = UpscalingMode::DLSS;
     UpscaleQualityMode m_upscaleQualityMode = UpscaleQualityMode::Balanced;
     std::function<DirectX::XMUINT2()> m_getRenderRes;
@@ -133,7 +139,10 @@ private:
     bool m_resetUpscalerHistory = true;
     // Streamline reports memory pressure as a warning result. Avoid turning a
     // recoverable, persistent condition into one error log entry per frame.
-    bool m_reportedDlssOutOfMemory = false;
+	bool m_reportedDlssOutOfMemory = false;
+    // Vendor upscalers own mutable history/context state. Recording may run on
+    // workers for different frames, so serialize evaluation in frame order.
+    std::mutex m_evaluateMutex;
 };
 
 inline UpscalingManager& UpscalingManager::GetInstance() {
