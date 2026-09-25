@@ -83,7 +83,8 @@ std::string_view KindName(ArtifactKind kind) {
         "StaticTemplateBatch", "StaticVisibility", "StaticAsset", "StaticMaterialVariant",
         "StaticShaderVariant", "StaticVariant", "TextureImageTable", "GrassCell",
         "GrassShard", "GrassScratch", "GrassScene", "GeometryResidency", "ViewFamily",
-        "PoseState", "LightTable", "GeometryCoverageGate" };
+        "PoseState", "LightTable", "GeometryCoverageGate", "TextureDisplayGate",
+        "CLodResidencyStorage", "CLodResidencyCapacityGate" };
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(names) ? names[index] : "Unknown";
 }
@@ -2604,8 +2605,14 @@ struct AsyncStateGraph::Impl : std::enable_shared_from_this<Impl> {
 
     static bool PinsExactRecipe(const ArtifactKey& consumer, bool coalescible,
         const ArtifactRequirement& requirement) {
+        // A ready gate only authorizes a build; it never becomes part of the
+        // consumer's content. Its requester's handle keeps the gate version alive
+        // until the consumer builds, and a completed consumer must not pin it: a
+        // long-lived consumer would otherwise retain every gate version it was ever
+        // admitted against (and, through them, their GPU backings) indefinitely.
         if (requirement.minimumRevision == 0 ||
-            requirement.invalidation == DependencyInvalidationPolicy::Latest) return false;
+            requirement.invalidation == DependencyInvalidationPolicy::Latest ||
+            requirement.invalidation == DependencyInvalidationPolicy::ReadyGate) return false;
         // Most latest-wins consumers may replace their entire recipe. Active
         // lists and references to them are content-bearing: their compacted
         // indices must remain paired with the exact source generation.

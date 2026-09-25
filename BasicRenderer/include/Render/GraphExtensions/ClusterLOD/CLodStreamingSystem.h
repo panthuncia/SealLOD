@@ -22,13 +22,14 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodPageLRU.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodUploadStream.h"
 #include "Resources/Buffers/Buffer.h"
+#include "Resources/Resolvers/PublishedStateResourceResolver.h"
 #include "Utilities/BoundedSpscQueue.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowUpgradeService.h"
 
 namespace org { class UploadInstance; }
+struct UpdateContext;
 
 struct CLodActiveGroupsSnapshot {
-    std::vector<uint32_t> bits;
     uint32_t activeGroupScanCount = 0;
     uint64_t generation = 0;
 };
@@ -224,8 +225,9 @@ private:
     void WriteStreamingRequestTraceReport();
     void AccumulateStreamingDiagnostics(CLodStreamingOperationStats& stats);
     void QueuePendingNonResidentBitsUpload();
-    void RequestStreamingStorageGpuResize(uint32_t newCapacity);
-    bool PublishPendingStreamingStorageGpuResizeLocked();
+    void CreateResidencyStorage(uint32_t capacity);
+    void PublishFilledResidencyStorages(uint64_t completedBatchId);
+    uint32_t BoundResidencyCapacity(const UpdateContext& context) const;
     bool IsPhysicalPageResidentForKey(uint32_t page, uint64_t key) const;
     bool IsPhysicalPagePendingForKey(uint32_t page, uint64_t key) const;
     uint32_t GetPendingMeshPageRefCount(uint32_t page, uint64_t key) const;
@@ -358,8 +360,25 @@ private:
         uint32_t expectedPageCount,
         ICLodGeometryStorage* meshManager) const;
 
-    std::shared_ptr<org::Buffer> m_streamingNonResidentBits;
-    std::shared_ptr<org::Buffer> m_streamingActiveGroupsBits;
+    // Non-resident bitset allocations, newest last. A capacity increase is a new
+    // allocation that the worker fills through its upload batches and publishes
+    // as a CLodResidencyStorage revision once that fill completes; it never
+    // resizes a bitset a frame may be reading. Every allocation a published
+    // state can still bind keeps receiving residency changes in the same batches
+    // as the newest, so page reuse remains ordered after every reader.
+    struct ResidencyStorage {
+        uint32_t capacity = 0;
+        std::shared_ptr<org::Buffer> retained; // until published
+        std::weak_ptr<org::Buffer> buffer;
+        bool fillQueued = false;
+        uint64_t fillBatchId = 0;
+        bool published = false;
+    };
+    std::vector<ResidencyStorage> m_residencyStorages; // streaming worker
+    // Frames bind the bitset of their published geometry cut; before the first
+    // cut this falls back to the initial allocation.
+    std::shared_ptr<PublishedStateResourceResolver> m_nonResidentBitsResolver;
+    std::shared_ptr<org::Buffer> m_initialResidencyStorage; // resolver fallback
     std::shared_ptr<org::Buffer> m_streamingLoadRequestKeys;
     std::shared_ptr<org::Buffer> m_streamingLoadRequests;
     std::shared_ptr<org::Buffer> m_streamingLoadCounter;
@@ -514,9 +533,6 @@ private:
     uint32_t m_streamingActiveGroupScanCount = 0u;
     uint32_t m_streamingStorageGroupCapacity = CLodStreamingInitialGroupCapacity;
     std::atomic<uint32_t> m_streamingGpuStorageGroupCapacity{CLodStreamingInitialGroupCapacity};
-    std::atomic<uint32_t> m_pendingStreamingGpuStorageGroupCapacity{0u};
-    std::atomic<uint64_t> m_streamingGpuResizeAckGeneration{0u};
-    uint64_t m_observedStreamingGpuResizeAckGeneration = 0u;
     bool m_streamingNonResidentBitsUploadPending = false;
     bool m_streamingActiveGroupsBitsUploadPending = true;
     uint32_t m_streamingNonResidentBitsDirtyBegin = 0u;
@@ -619,9 +635,7 @@ private:
     std::atomic<uint64_t> m_streamingServiceEpoch{1};
     std::atomic<bool> m_streamingServiceRunning{false};
     uint64_t m_streamingServicePublishedGeneration = 0;
-    std::vector<uint32_t> m_publishedActiveGroupsBits;
     uint32_t m_publishedActiveGroupScanCount = 0;
-    bool m_publishedActiveGroupsBitsUploadPending = true;
     BoundedSpscQueue<CLodActiveGroupsSnapshot, 4> m_activeGroupsSnapshotQueue;
     std::optional<CLodActiveGroupsSnapshot> m_retainedActiveGroupsSnapshot;
 

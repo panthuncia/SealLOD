@@ -1115,6 +1115,30 @@ std::array<std::shared_ptr<org::PixelBuffer>, kPlaceholderVariantCount>& Process
 	return placeholders;
 }
 
+// Every placeholder image, so the publication boundary can tell a placeholder
+// binding from a real one regardless of which texture carries it. Weak entries:
+// an expired placeholder's address may be reused by an unrelated image.
+struct ProcessingPlaceholderRegistry {
+	std::mutex mutex;
+	std::unordered_map<const org::PixelBuffer*, std::weak_ptr<org::PixelBuffer>> images;
+};
+
+ProcessingPlaceholderRegistry& ProcessingPlaceholderImages()
+{
+	static ProcessingPlaceholderRegistry registry;
+	return registry;
+}
+
+std::shared_ptr<org::PixelBuffer> RegisterProcessingPlaceholderImage(std::shared_ptr<org::PixelBuffer> image)
+{
+	if (!image) return image;
+	auto& registry = ProcessingPlaceholderImages();
+	std::lock_guard lock(registry.mutex);
+	std::erase_if(registry.images, [](const auto& entry) { return entry.second.expired(); });
+	registry.images.insert_or_assign(image.get(), image);
+	return image;
+}
+
 std::shared_ptr<org::PixelBuffer> GetSharedProcessingPlaceholderTexture(
 	const TextureFactory& factory,
 	const TextureProcessingSettings& settings)
@@ -1126,7 +1150,7 @@ std::shared_ptr<org::PixelBuffer> GetSharedProcessingPlaceholderTexture(
 	if (cacheIndex >= kPlaceholderVariantCount) {
 		ZoneScopedN("TextureAsset::GetSharedProcessingPlaceholderTexture::UncachedSemantic");
 		TracyPlot("SARP.Texture.ProcessingPlaceholder.UncachedSemantic", static_cast<int64_t>(semanticIndex));
-		return CreatePlaceholderTexture(factory, settings);
+		return RegisterProcessingPlaceholderImage(CreatePlaceholderTexture(factory, settings));
 	}
 
 	std::lock_guard<std::mutex> lock(ProcessingPlaceholderCacheMutex());
@@ -1140,7 +1164,7 @@ std::shared_ptr<org::PixelBuffer> GetSharedProcessingPlaceholderTexture(
 	{
 		ZoneScopedN("TextureAsset::GetSharedProcessingPlaceholderTexture::CreatePlaceholderTexture");
 		TracyPlot("SARP.Texture.ProcessingPlaceholder.CacheMiss", static_cast<int64_t>(1));
-		placeholder = CreatePlaceholderTexture(factory, settings);
+		placeholder = RegisterProcessingPlaceholderImage(CreatePlaceholderTexture(factory, settings));
 		if (placeholder) {
 			std::ostringstream name;
 			name << "Shared Processing Placeholder "
@@ -1960,6 +1984,20 @@ std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromFilePath(
 	const std::string& reason)
 {
 	return BuildSourceDataFromTextureFilePath(path, preferSRGB, reason);
+}
+
+bool TextureAsset::IsProcessingPlaceholderImage(const org::PixelBuffer* image) {
+	if (!image) return false;
+	auto& registry = ProcessingPlaceholderImages();
+	std::lock_guard lock(registry.mutex);
+	const auto found = registry.images.find(image);
+	return found != registry.images.end() && found->second.lock().get() == image;
+}
+
+void TextureAsset::MarkTerminalLoadFailure(std::string_view reason) {
+	if (m_terminalLoadFailure.exchange(true, std::memory_order_acq_rel)) return;
+	spdlog::warn("TextureAsset: '{}' failed to load ({}); renderables waiting on it proceed with the placeholder",
+		TextureTelemetryLabel(*this), reason);
 }
 
 uint32_t TextureAsset::NextStreamingTextureID() {
@@ -3110,6 +3148,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 			}
 			m_reloadHandle.reset();
 			reloadFailedThisFrame = true;
+			MarkTerminalLoadFailure(reloadError.empty() ? "source data build failed" : reloadError);
 		}
 	}
 
@@ -3540,6 +3579,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 							"TextureAsset: failed to upload processing failure fallback for '{}': {}",
 							TextureTelemetryLabel(*this),
 							ex.what());
+						MarkTerminalLoadFailure(ex.what());
 						ensureProcessingPlaceholder(
 							processingError.empty()
 								? "async processing failed; keeping placeholder texture"
@@ -3603,6 +3643,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				"placeholder replaced with asynchronously rebuilt source data")) {
 			return makeResult();
 		}
+		MarkTerminalLoadFailure("rebuilt source data could not be uploaded");
 		ensureProcessingPlaceholder("rebuilt source data could not be uploaded; keeping placeholder resident");
 		return makeResult();
 	}

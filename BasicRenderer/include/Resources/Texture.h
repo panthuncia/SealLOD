@@ -5,6 +5,7 @@
 #include <mutex>
 
 #include <string>
+#include <string_view>
 #include <variant>
 
 #include "Import/Filetypes.h"
@@ -347,6 +348,12 @@ public:
     uint32_t GetStreamingTextureID() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.streamingTextureID; }
     bool IsMipStreamingEligible() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.eligible; }
     bool IsMipStreamingEnabled() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.enabled; }
+    // True for the shared processing placeholders (and uncached placeholder
+    // variants) that stand in for a texture before its own image exists.
+    static bool IsProcessingPlaceholderImage(const org::PixelBuffer* image);
+    // Set once the texture's source could not be turned into an image; its
+    // placeholder is then final and must not hold back the renderables using it.
+    bool HasTerminalLoadFailure() const { return m_terminalLoadFailure.load(std::memory_order_acquire); }
     bool IsUsingFallbackImage() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_hasUploadedPlaceholder && !m_hasUploadedFinalImage; }
     bool HasUsableImage() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_image && m_image->HasValidBackingResource(); }
     bool IsResidentFinalImage() const {
@@ -481,6 +488,7 @@ private:
 	bool m_hasUploadedPlaceholder = false;
 	bool m_hasUploadedFinalImage = false;
 	bool m_processingFallbackRequested = false;
+	std::atomic<bool> m_terminalLoadFailure{ false };
     TextureLoadPathTelemetry m_lastReportedLoadPath = TextureLoadPathTelemetry::Unknown;
     TextureUploadPathTelemetry m_lastReportedUploadPath = TextureUploadPathTelemetry::Unknown;
 
@@ -506,5 +514,6 @@ private:
     void NoteTextureSeen(uint64_t frameIndex);
     void BumpStreamingStateRevision();
     void BumpBindingRevision();
+    void MarkTerminalLoadFailure(std::string_view reason);
     void PrimeConditionedCacheResidentUploadMetadata() const;
 };

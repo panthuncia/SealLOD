@@ -59,9 +59,12 @@ enum class ArtifactKind : std::uint16_t {
     PoseState,
     LightTable,
     GeometryCoverageGate,
+    TextureDisplayGate,
+    CLodResidencyStorage,
+    CLodResidencyCapacityGate,
 };
 inline constexpr std::size_t kArtifactKindCount =
-    static_cast<std::size_t>(ArtifactKind::GeometryCoverageGate) + 1u;
+    static_cast<std::size_t>(ArtifactKind::CLodResidencyCapacityGate) + 1u;
 
 struct ArtifactAddress {
     ArtifactKind kind = ArtifactKind::Generic;
@@ -200,6 +203,9 @@ struct ArtifactRequirement {
         DependencyInvalidationPolicy::Latest };
 }
 
+// Exact-version readiness gate: authorizes the consumer's build once that version
+// reaches the milestone, without pinning it. The requester must hold the
+// version's handle until the consumer has built; afterwards it may be reclaimed.
 [[nodiscard]] inline ArtifactRequirement ReadyGate(ArtifactVersionID version,
     ArtifactReadiness readiness = ArtifactReadiness::CpuReady) {
     return { version.address, version.revision, readiness, DependencyPolicy::AllOf, 0,

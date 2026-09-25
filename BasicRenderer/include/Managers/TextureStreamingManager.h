@@ -215,6 +215,10 @@ private:
 	void RecordTextureDirtyReason(const char* reason);
 	void QueueTextureImageTableMetadata(const std::shared_ptr<TextureAsset>& texture);
 	void FlushPendingTextureImageTableMetadata();
+	void AppendTextureDisplayGates(const TextureAsset& texture,
+		const TextureAsset::PublishedBindingSnapshot& published,
+		std::vector<br::render::ArtifactIntent>& intents);
+	void ReleaseTextureDisplayGates(std::vector<br::render::ArtifactIntent> gates);
 	void PublishTextureImageTable();
 	MaterialTextureStreamingStats BuildTextureStreamingStats() const;
 
@@ -228,6 +232,19 @@ private:
 	std::vector<std::weak_ptr<TextureAsset>> m_pendingTextureImageTableMetadata;
 	std::unordered_set<std::uint32_t> m_pendingTextureImageTableMetadataIDs;
 	std::uint64_t m_textureImageTableEpoch = 0;
+	// Display gates already requested per streaming texture, one bit per
+	// br::render::TextureDisplayQuality. Worker drain only.
+	static constexpr std::uint8_t kAllTextureDisplayGates = 0b11u;
+	std::unordered_map<std::uint32_t, std::uint8_t> m_textureDisplayGatesRequested;
+	std::uint64_t m_textureDisplayGateRevision = 0;
+	// Gates satisfied by image-table rows up to tableEpoch, waiting for a ready
+	// root that contains those rows.
+	struct PendingTextureDisplayGate {
+		std::uint64_t tableEpoch = 0;
+		br::render::ArtifactIntent intent;
+	};
+	std::mutex m_pendingTextureDisplayGatesMutex;
+	std::vector<PendingTextureDisplayGate> m_pendingTextureDisplayGates;
 	std::uint64_t m_textureImageTableLogicalExtent = 1;
 	bool m_textureImageTableDirty = false;
 	br::render::ArtifactVersionHandle m_textureImageTableHandle;

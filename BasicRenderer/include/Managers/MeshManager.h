@@ -33,7 +33,7 @@ namespace org { class BufferView; }
 class ViewManager;
 class ICLodGeometryStorage;
 class MeshManagerCLodGeometryStorage;
-namespace br::render { class RendererStateRequestService; }
+namespace br::render { class RendererStateRequestService; class CLodResidencyStorageDirectory; }
 namespace br::render { struct PublishedRendererState; class VersionedGpuBufferBackingPool; }
 namespace org::runtime { class IUploadService; }
 class PublishedStateResourceResolver;
@@ -286,6 +286,13 @@ public:
 	}
 	void SetCLodStreamingUploadFunction(PagePool::UploadFn fn);
 	void SetCLodStreamingWakeFunction(std::function<void()> fn);
+	// Published CLod residency bitsets: built by CLod streaming, required by every
+	// geometry cut for the groups its table references. Null until the renderer
+	// state services are installed.
+	std::shared_ptr<br::render::CLodResidencyStorageDirectory> GetCLodResidencyStorages() const {
+		std::lock_guard lock(m_geometryBufferGraphMutex);
+		return m_clodResidencyStorages;
+	}
 	uint64_t GetActiveMeshletCount() const { return m_activeMeshletCount; }
 
 	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
@@ -425,6 +432,9 @@ private:
 	std::uint64_t m_geometryBufferStateRevision = 0;
 	std::uint64_t m_geometryBufferFingerprint = 0;
 	br::render::ArtifactVersionHandle m_geometryBufferStateVersion{};
+	std::shared_ptr<br::render::CLodResidencyStorageDirectory> m_clodResidencyStorages;
+	// Capacity gate per required group capacity (powers of two), geometry graph mutex.
+	std::unordered_map<std::uint32_t, br::render::ArtifactVersionHandle> m_clodResidencyGates;
 	std::uint32_t m_geometryFramesInFlight = 1;
 	SkeletonManager* m_skeletonManager = nullptr;
 	std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> m_windTypeSkeletons;
@@ -634,6 +644,7 @@ public:
 	virtual PagePool* GetCLodPagePool() const = 0;
 	virtual void SetCLodStreamingUploadFunction(PagePool::UploadFn) = 0;
 	virtual void SetCLodStreamingWakeFunction(std::function<void()>) = 0;
+	virtual std::shared_ptr<br::render::CLodResidencyStorageDirectory> GetCLodResidencyStorages() const = 0;
 };
 
 class MeshManagerCLodGeometryStorage final : public ICLodGeometryStorage {
@@ -670,6 +681,7 @@ public:
 	PagePool* GetCLodPagePool() const override { return m_owner.GetCLodPagePool(); }
 	void SetCLodStreamingUploadFunction(PagePool::UploadFn fn) override { m_owner.SetCLodStreamingUploadFunction(std::move(fn)); }
 	void SetCLodStreamingWakeFunction(std::function<void()> fn) override { m_owner.SetCLodStreamingWakeFunction(std::move(fn)); }
+	std::shared_ptr<br::render::CLodResidencyStorageDirectory> GetCLodResidencyStorages() const override { return m_owner.GetCLodResidencyStorages(); }
 
 private:
 	MeshManager& m_owner;

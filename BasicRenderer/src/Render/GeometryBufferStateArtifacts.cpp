@@ -11,7 +11,13 @@ namespace {
 
 ArtifactBuildResult BuildGeometryBufferState(const ArtifactBuildContext& context) {
     const auto input = context.input.Get<GeometryBufferStateBuildInput>();
-    if (!input || input->buffers.empty() || context.dependencies.size() != input->buffers.size()) {
+    // The CLod residency capacity gate is the only dependency besides the buffers.
+    const auto residencyGate = std::ranges::find_if(context.dependencies, [](const ArtifactSnapshot& value) {
+        return value.key.kind == ArtifactKind::CLodResidencyCapacityGate;
+    });
+    const std::size_t gateDependencies = residencyGate != context.dependencies.end() ? 1u : 0u;
+    if (!input || input->buffers.empty() ||
+        context.dependencies.size() != input->buffers.size() + gateDependencies) {
         return ArtifactBuildResult::Failure("geometry buffer dependency closure incomplete");
     }
     auto state = std::make_shared<PublishedGeometryBufferState>();
@@ -51,6 +57,15 @@ ArtifactBuildResult BuildGeometryBufferState(const ArtifactBuildContext& context
             PublishedFragmentKind::Geometry, PublishedResourceUsage::ShaderResource,
             0, 0, expected.catalogVariant }, std::move(resources));
         root->fragment.resourceHolds.push_back(version);
+    }
+    if (residencyGate != context.dependencies.end()) {
+        // The non-resident bitset covering every group in this cut's group table.
+        const auto residency = residencyGate->payload.Get<RendererStateFragmentArtifact>();
+        if (!residency) return ArtifactBuildResult::Failure("CLod residency gate has no storage fragment");
+        root->catalogEntries.insert(root->catalogEntries.end(),
+            residency->catalogEntries.begin(), residency->catalogEntries.end());
+        root->fragment.resourceHolds.insert(root->fragment.resourceHolds.end(),
+            residency->fragment.resourceHolds.begin(), residency->fragment.resourceHolds.end());
     }
     root->fragment.payload = ArtifactPayload::Make<PublishedGeometryBufferState>(std::move(state));
     return ArtifactBuildResult::Ready(

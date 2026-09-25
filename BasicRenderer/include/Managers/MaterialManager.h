@@ -59,6 +59,12 @@ public:
 	std::shared_ptr<const br::render::MaterialUsageReservation> ReserveMaterialUsage(
 		const std::vector<MaterialUsageCapture>& captures);
 	void RegisterMaterialSource(const std::shared_ptr<Material>& material);
+	// Appends the texture display gates (see TextureDisplayGateAddress) a renderable
+	// drawn with this material must wait for: every streamed texture it samples must
+	// be bound to a real image, coverage-preserving if the material is alpha-tested,
+	// or have explicitly failed. Duplicates already in the list are skipped.
+	static void AppendTextureDisplayRequirements(
+		const Material& material, std::vector<br::render::ArtifactRequirement>& requirements);
 	bool ApplyMaterialRowArtifact(const br::render::MaterialRowArtifact& row);
 	void DecrementMaterialUsageCount(const Material& material);
 	void InitializeTextureStreaming(TextureFactory& textureFactory, uint32_t framesInFlight);

@@ -807,6 +807,21 @@ void MaterialManager::SetDescriptorService(std::shared_ptr<org::runtime::IDescri
 	PostMaterialMutation(redirtyAll);
 }
 
+void MaterialManager::AppendTextureDisplayRequirements(
+	const Material& material, std::vector<br::render::ArtifactRequirement>& requirements) {
+	const auto quality = (material.Technique().compileFlags & MaterialCompileFlags::MaterialCompileAlphaTest) != 0u
+		? br::render::TextureDisplayQuality::AlphaCoverage
+		: br::render::TextureDisplayQuality::AnyImage;
+	for (const auto& texture : CollectMaterialTextureAssets(material)) {
+		const auto streamingTextureID = texture ? texture->GetStreamingTextureID() : 0u;
+		// Unstreamed textures never pass through the binding publication boundary.
+		if (streamingTextureID == 0u) continue;
+		const auto address = br::render::TextureDisplayGateAddress(streamingTextureID, quality);
+		if (std::ranges::any_of(requirements, [&](const auto& existing) { return existing.key == address; })) continue;
+		requirements.push_back(br::render::LatestAtLeast(address, 1u, br::render::ArtifactReadiness::CpuReady));
+	}
+}
+
 MaterialManager::MaterialUsageCapture MaterialManager::CaptureMaterialUsage(
 	Material& material, unsigned int count, bool refreshTextureBindings) {
 	if (!m_descriptorService) {

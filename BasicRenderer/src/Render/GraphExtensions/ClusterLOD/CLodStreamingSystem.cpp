@@ -24,6 +24,8 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodStreamingFeedbackSortPass.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodStreamingReadbackSources.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodDirectStorageLaunchPass.h"
+#include "Render/CLodResidencyStorageArtifacts.h"
+#include "Render/RenderContext.h"
 #include "Render/Runtime/ExternalSignalReservation.h"
 #include "Render/Runtime/UploadTypes.h"
 #include "Managers/UploadInstance.h"
@@ -34,6 +36,7 @@
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "Resources/Buffers/DynamicBuffer.h"
 #include "Resources/BackedResource.h"
+#include "Utilities/Utilities.h"
 #include "Telemetry/NvPerfIntegration.h"
 #include <BasicTelemetry/Telemetry.h>
 #include "Mesh/ClusterLODShaderTypes.h"
@@ -1015,25 +1018,7 @@ CLodStreamingSystem::CLodStreamingSystem() {
         m_streamingCpuUploadBudgetRequests = 10000u;
     }
 
-    m_streamingNonResidentBits = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodBitsetWordCount(m_streamingStorageGroupCapacity),
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_streamingNonResidentBits->SetName("CLod Streaming NonResident Bits");
-    tagBufferUsage(m_streamingNonResidentBits, "Cluster LOD streaming");
-
-    m_streamingActiveGroupsBits = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodBitsetWordCount(m_streamingStorageGroupCapacity),
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_streamingActiveGroupsBits->SetName("CLod Streaming Active Groups Bits");
-    tagBufferUsage(m_streamingActiveGroupsBits, "Cluster LOD streaming");
+    CreateResidencyStorage(m_streamingStorageGroupCapacity);
 
     m_streamingLoadRequests = CreateAliasedUnmaterializedStructuredBuffer(
         CLodStreamingRequestCapacity,
@@ -1222,8 +1207,6 @@ void CLodStreamingSystem::OnRegistryReset(org::ResourceRegistry* reg) {
         }
     };
 
-    releaseBufferBacking(m_streamingNonResidentBits);
-    releaseBufferBacking(m_streamingActiveGroupsBits);
     releaseBufferBacking(m_streamingLoadRequestKeys);
     releaseBufferBacking(m_streamingLoadRequests);
     releaseBufferBacking(m_streamingLoadCounter);
@@ -1245,13 +1228,18 @@ void CLodStreamingSystem::OnRegistryReset(org::ResourceRegistry* reg) {
     if (ICLodGeometryStorage* meshManager = m_geometryStorage) {
         ClearStreamingUploadFunction(meshManager);
     }
-    // The rematerialized bitsets have undefined contents. Re-upload the
-    // authoritative CPU mirrors without declaring every live group nonresident.
+    // Residency storages are published state rather than graph-local backings
+    // and keep their contents. Re-upload the authoritative CPU mirror anyway,
+    // and refill any storage whose fill batch may not survive the rebuild.
+    for (auto& storage : m_residencyStorages) {
+        if (!storage.published) {
+            storage.fillQueued = false;
+            storage.fillBatchId = 0;
+        }
+    }
     MarkStreamingNonResidentBitsDirtyAll();
     MarkStreamingActiveGroupsBitsDirty();
-    m_publishedActiveGroupsBits.clear();
     m_publishedActiveGroupScanCount = 0u;
-    m_publishedActiveGroupsBitsUploadPending = true;
     m_activeGroupsSnapshotQueue.Reset();
     m_retainedActiveGroupsSnapshot.reset();
     m_streamingServicePublishedGeneration = 0;
@@ -1281,8 +1269,6 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
         }
     };
 
-    releaseBufferBacking(m_streamingNonResidentBits);
-    releaseBufferBacking(m_streamingActiveGroupsBits);
     releaseBufferBacking(m_streamingLoadRequestKeys);
     releaseBufferBacking(m_streamingLoadRequests);
     releaseBufferBacking(m_streamingLoadCounter);
@@ -1481,11 +1467,15 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     m_streamingNonResidentBitsUploadFenceEpoch = 0;
     m_streamingNonResidentBitsUploadFenceValue = 0;
     m_streamingActiveGroupScanCount = 0u;
+    for (auto& storage : m_residencyStorages) {
+        if (!storage.published) {
+            storage.fillQueued = false;
+            storage.fillBatchId = 0;
+        }
+    }
     MarkStreamingNonResidentBitsDirtyAll();
     MarkStreamingActiveGroupsBitsDirty();
-    m_publishedActiveGroupsBits.clear();
     m_publishedActiveGroupScanCount = 0u;
-    m_publishedActiveGroupsBitsUploadPending = true;
     m_activeGroupsSnapshotQueue.Reset();
     m_retainedActiveGroupsSnapshot.reset();
     m_streamingServicePublishedGeneration = 0;
@@ -1646,8 +1636,6 @@ void CLodStreamingSystem::PublishStreamingFrameWorkForFrame() {
     BT_PLOT("CLodStreaming.VSMUpgrade.SubmittedJobs", static_cast<int64_t>(upgradeJobs.submitted));
     BT_PLOT("CLodStreaming.VSMUpgrade.ReturnedJobs", static_cast<int64_t>(upgradeJobs.returned));
     BT_PLOT("CLodStreaming.VSMUpgrade.DiscardedJobs", static_cast<int64_t>(upgradeJobs.discarded));
-    (void)PublishPendingStreamingStorageGpuResizeLocked();
-
     CLodActiveGroupsSnapshot newest;
     bool received = false;
     m_activeGroupsSnapshotQueue.Drain([&](CLodActiveGroupsSnapshot&& snapshot) {
@@ -1655,9 +1643,7 @@ void CLodStreamingSystem::PublishStreamingFrameWorkForFrame() {
         received = true;
     });
     if (received) {
-        m_publishedActiveGroupsBits = std::move(newest.bits);
         m_publishedActiveGroupScanCount = newest.activeGroupScanCount;
-        m_publishedActiveGroupsBitsUploadPending = true;
         m_streamingServicePublishedGeneration = newest.generation;
     }
 }
@@ -1668,11 +1654,6 @@ void CLodStreamingSystem::PublishActiveGroupSnapshot() {
             if (m_streamingActiveGroupsBitsUploadPending) {
                 const uint32_t capacity =
                     m_streamingGpuStorageGroupCapacity.load(std::memory_order_acquire);
-                const uint32_t wordCount = CLodBitsetWordCount(capacity);
-                m_retainedActiveGroupsSnapshot->bits.assign(
-                    m_streamingActiveGroupsBitsCpu.begin(),
-                    m_streamingActiveGroupsBitsCpu.begin() + std::min<uint32_t>(
-                        wordCount, static_cast<uint32_t>(m_streamingActiveGroupsBitsCpu.size())));
                 m_retainedActiveGroupsSnapshot->activeGroupScanCount =
                     std::min(m_streamingActiveGroupScanCount, capacity);
                 m_retainedActiveGroupsSnapshot->generation = ++m_streamingServicePublishedGeneration;
@@ -1685,11 +1666,6 @@ void CLodStreamingSystem::PublishActiveGroupSnapshot() {
     if (!m_streamingActiveGroupsBitsUploadPending) return;
 
     CLodActiveGroupsSnapshot snapshot;
-    const uint32_t wordCount = CLodBitsetWordCount(m_streamingGpuStorageGroupCapacity);
-    snapshot.bits.assign(
-        m_streamingActiveGroupsBitsCpu.begin(),
-        m_streamingActiveGroupsBitsCpu.begin() + std::min<uint32_t>(
-            wordCount, static_cast<uint32_t>(m_streamingActiveGroupsBitsCpu.size())));
     snapshot.activeGroupScanCount = std::min(
         m_streamingActiveGroupScanCount,
         m_streamingGpuStorageGroupCapacity.load(std::memory_order_acquire));
@@ -1723,13 +1699,6 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
     }
     ObserveUploadBatchTickets();
     if (m_retainedUploadBatch) return;
-    const uint64_t resizeAckGeneration =
-        m_streamingGpuResizeAckGeneration.load(std::memory_order_acquire);
-    if (resizeAckGeneration != m_observedStreamingGpuResizeAckGeneration) {
-        m_observedStreamingGpuResizeAckGeneration = resizeAckGeneration;
-        MarkStreamingNonResidentBitsDirtyAll();
-        MarkStreamingActiveGroupsBitsDirty();
-    }
     ICLodGeometryStorage* meshManager = nullptr;
     {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::GetMeshManager");
@@ -1737,6 +1706,13 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
     }
     if (m_uploadStream == nullptr) {
         return;
+    }
+    // Geometry cuts wait for a published bitset covering their group tables;
+    // grow to whatever capacity they have asked for.
+    if (meshManager != nullptr) {
+        if (const auto storages = meshManager->GetCLodResidencyStorages()) {
+            EnsureStreamingStorageCapacity(storages->RequestedCapacity());
+        }
     }
 
     {
@@ -1786,8 +1762,19 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
 }
 
 void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses) {
-    rg.RegisterResource(Builtin::CLod::StreamingNonResidentBits, m_streamingNonResidentBits);
-    rg.RegisterResource(Builtin::CLod::StreamingActiveGroupsBits, m_streamingActiveGroupsBits);
+    if (!m_nonResidentBitsResolver) {
+        m_nonResidentBitsResolver = std::make_shared<PublishedStateResourceResolver>(
+            br::render::PublishedStateSource::ProcessSource(),
+            br::render::PublishedResourceKey{
+                br::render::PublishedFragmentKind::Geometry,
+                br::render::PublishedResourceUsage::ShaderResource, 0, 0,
+                br::render::kCLodNonResidentBitsCatalogVariant },
+            m_initialResidencyStorage);
+    }
+    rg.RegisterResolver(Builtin::CLod::StreamingNonResidentBits, m_nonResidentBitsResolver);
+    if (m_geometryStorage) {
+        if (const auto storages = m_geometryStorage->GetCLodResidencyStorages()) storages->AttachProducer();
+    }
     rg.RegisterResource(Builtin::CLod::StreamingLoadRequestKeys, m_streamingLoadRequestKeys);
     rg.RegisterResource(Builtin::CLod::StreamingLoadRequests, m_streamingLoadRequests);
     rg.RegisterResource(Builtin::CLod::StreamingLoadCounter, m_streamingLoadCounter);
@@ -1859,8 +1846,6 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
         m_streamingLoadRequestKeys,
 		m_usedGroupsCounter,
         m_sourceGroupMismatchCounter,
-		m_streamingNonResidentBits,
-		m_streamingActiveGroupsBits,
 		m_streamingRuntimeState,
 		[](std::vector<uint32_t>& outBits, uint32_t& outFirstWord, org::UploadInstance*) {
             // Non-resident data is sealed by the single streaming writer into
@@ -1869,16 +1854,10 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
             outFirstWord = 0u;
             return false;
         },
-		[this](std::vector<uint32_t>& outBits, uint32_t& outActiveScanCount) {
-            outActiveScanCount = m_publishedActiveGroupScanCount;
-            if (!m_publishedActiveGroupsBitsUploadPending) {
-                outBits.clear();
-                return false;
-            }
-
-            outBits = m_publishedActiveGroupsBits;
-            m_publishedActiveGroupsBitsUploadPending = false;
-            return true;
+		[this](const UpdateContext& context) {
+            // Groups past the capacity of the bitset this frame binds read as
+            // nonresident; its published geometry never references them.
+            return std::min(m_publishedActiveGroupScanCount, BoundResidencyCapacity(context));
 		},
         [this]() {
             PublishStreamingFrameWorkForFrame();
@@ -2278,13 +2257,11 @@ bool CLodStreamingSystem::TryConsumeStreamingNonResidentBitsUpload(
     const uint32_t cpuWordCount = static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size());
     const uint32_t validWordCount = std::min(gpuWordCount, cpuWordCount);
     if (validWordCount == 0u) {
-        if (m_pendingStreamingGpuStorageGroupCapacity == 0u) {
-            m_streamingNonResidentBitsUploadPending = false;
-            m_streamingNonResidentBitsDirtyBegin = 0u;
-            m_streamingNonResidentBitsDirtyEnd = 0u;
-            m_streamingNonResidentBitsDirtyWords.clear();
-            m_streamingNonResidentBitsDirtyWordCursor = 0u;
-        }
+        m_streamingNonResidentBitsUploadPending = false;
+        m_streamingNonResidentBitsDirtyBegin = 0u;
+        m_streamingNonResidentBitsDirtyEnd = 0u;
+        m_streamingNonResidentBitsDirtyWords.clear();
+        m_streamingNonResidentBitsDirtyWordCursor = 0u;
         return false;
     }
 
@@ -2322,18 +2299,16 @@ bool CLodStreamingSystem::TryConsumeStreamingNonResidentBitsUpload(
 
     if (beginIndex >= m_streamingNonResidentBitsDirtyWords.size() ||
         m_streamingNonResidentBitsDirtyWords[beginIndex] >= validWordCount) {
-        if (m_pendingStreamingGpuStorageGroupCapacity == 0u) {
-            m_streamingNonResidentBitsUploadPending = false;
-            m_streamingNonResidentBitsDirtyBegin = 0u;
-            m_streamingNonResidentBitsDirtyEnd = 0u;
-            for (uint32_t word : m_streamingNonResidentBitsDirtyWords) {
-                if (word < m_streamingNonResidentBitsDirtyWordFlags.size()) {
-                    m_streamingNonResidentBitsDirtyWordFlags[word] = 0u;
-                }
+        m_streamingNonResidentBitsUploadPending = false;
+        m_streamingNonResidentBitsDirtyBegin = 0u;
+        m_streamingNonResidentBitsDirtyEnd = 0u;
+        for (uint32_t word : m_streamingNonResidentBitsDirtyWords) {
+            if (word < m_streamingNonResidentBitsDirtyWordFlags.size()) {
+                m_streamingNonResidentBitsDirtyWordFlags[word] = 0u;
             }
-            m_streamingNonResidentBitsDirtyWords.clear();
-            m_streamingNonResidentBitsDirtyWordCursor = 0u;
         }
+        m_streamingNonResidentBitsDirtyWords.clear();
+        m_streamingNonResidentBitsDirtyWordCursor = 0u;
         return false;
     }
 
@@ -3283,7 +3258,39 @@ void CLodStreamingSystem::RecordNonResidentBitsUploadQueued() {
 
 void CLodStreamingSystem::QueuePendingNonResidentBitsUpload() {
     ZoneScopedN("CLodStreamingWorker::QueueNonResidentBitsUpload");
-    if (m_uploadStream == nullptr || !m_streamingNonResidentBitsUploadPending) {
+    if (m_uploadStream == nullptr) {
+        return;
+    }
+
+    // Storages still bindable by some published state or in-flight frame. A
+    // storage nothing else references can never be read again.
+    std::vector<std::pair<std::shared_ptr<org::Buffer>, uint32_t>> liveStorages;
+    liveStorages.reserve(m_residencyStorages.size());
+    for (auto it = m_residencyStorages.begin(); it != m_residencyStorages.end();) {
+        auto buffer = it->buffer.lock();
+        if (!buffer) {
+            it = m_residencyStorages.erase(it);
+            continue;
+        }
+        if (!it->fillQueued) {
+            // The complete mirror, in the same batch stream as every later change,
+            // so the storage is exact once this batch completes.
+            const uint32_t words = std::min<uint32_t>(
+                CLodBitsetWordCount(it->capacity), static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size()));
+            if (words != 0u) {
+                m_uploadStream->UploadData(
+                    m_streamingNonResidentBitsCpu.data(),
+                    static_cast<size_t>(words) * sizeof(uint32_t),
+                    org::runtime::UploadTarget::FromShared(buffer),
+                    0u);
+            }
+            it->fillQueued = true;
+            it->fillBatchId = 0u;
+        }
+        liveStorages.emplace_back(std::move(buffer), CLodBitsetWordCount(it->capacity));
+        ++it;
+    }
+    if (!m_streamingNonResidentBitsUploadPending) {
         return;
     }
 
@@ -3295,11 +3302,16 @@ void CLodStreamingSystem::QueuePendingNonResidentBitsUpload() {
     uint64_t uploadedWords = 0u;
     while (uploadedRuns < kWorkerMaxNonResidentUploadRuns &&
         TryConsumeStreamingNonResidentBitsUpload(uploadBits, firstWord, kWorkerMaxNonResidentUploadWordsPerRun)) {
-        m_uploadStream->UploadData(
-            uploadBits.data(),
-            uploadBits.size() * sizeof(uint32_t),
-            org::runtime::UploadTarget::FromShared(m_streamingNonResidentBits),
-            firstWord * sizeof(uint32_t));
+        for (const auto& [storage, storageWords] : liveStorages) {
+            if (firstWord >= storageWords) continue;
+            const uint32_t words = std::min<uint32_t>(
+                static_cast<uint32_t>(uploadBits.size()), storageWords - firstWord);
+            m_uploadStream->UploadData(
+                uploadBits.data(),
+                static_cast<size_t>(words) * sizeof(uint32_t),
+                org::runtime::UploadTarget::FromShared(storage),
+                firstWord * sizeof(uint32_t));
+        }
         uploadedWords += static_cast<uint64_t>(uploadBits.size());
         ++uploadedRuns;
     }
@@ -6182,8 +6194,6 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     const uint32_t newCapacity = CLodRoundUpCapacity(requiredGroupCount);
     const uint32_t newWordCount = CLodBitsetWordCount(newCapacity);
 
-    RequestStreamingStorageGpuResize(newCapacity);
-
     m_streamingNonResidentBitsCpu.resize(newWordCount, ~0u);
     m_streamingNonResidentBitsDirtyWordFlags.resize(newWordCount, 0u);
     m_streamingActiveGroupsBitsCpu.resize(newWordCount, 0u);
@@ -6216,50 +6226,55 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
         newCapacity, 0u);
     EnsureStreamingDiagnosticsCapacity(newCapacity);
     m_streamingStorageGroupCapacity = newCapacity;
-
-    MarkStreamingNonResidentBitsDirtyAll();
+    // Existing storages keep their (still exact) contents; the new one is filled
+    // from the grown mirror by the next worker upload.
+    CreateResidencyStorage(newCapacity);
     MarkStreamingActiveGroupsBitsDirty();
 }
 
-void CLodStreamingSystem::RequestStreamingStorageGpuResize(uint32_t newCapacity) {
-    uint32_t pending = m_pendingStreamingGpuStorageGroupCapacity.load(std::memory_order_relaxed);
-    while (pending < newCapacity &&
-        !m_pendingStreamingGpuStorageGroupCapacity.compare_exchange_weak(
-            pending, newCapacity, std::memory_order_release, std::memory_order_relaxed)) {
+void CLodStreamingSystem::CreateResidencyStorage(uint32_t capacity) {
+    // Allocated on the streaming worker, outside any graph: the buffer is not
+    // bindable until its filled revision is published through the state graph.
+    org::Resource::ScopedECSRegistrationSuppression suppressECS;
+    auto buffer = CreateIndexedStructuredBuffer(CLodBitsetWordCount(capacity), sizeof(uint32_t), true);
+    buffer->SetName("CLod Streaming NonResident Bits");
+    org::memory::SetResourceUsageHint(*buffer, "Cluster LOD streaming");
+    if (!m_initialResidencyStorage) {
+        m_initialResidencyStorage = buffer;
     }
-    TracyPlot("CLodStreaming.Storage.PendingGpuCapacity", static_cast<int64_t>(
-        m_pendingStreamingGpuStorageGroupCapacity.load(std::memory_order_relaxed)));
+    m_residencyStorages.push_back(ResidencyStorage{
+        .capacity = capacity,
+        .retained = buffer,
+        .buffer = buffer,
+    });
+    m_streamingGpuStorageGroupCapacity.store(capacity, std::memory_order_release);
+    TracyPlot("CLodStreaming.Storage.Capacity", static_cast<int64_t>(capacity));
 }
 
-bool CLodStreamingSystem::PublishPendingStreamingStorageGpuResizeLocked() {
-    const uint32_t oldCapacity = m_streamingGpuStorageGroupCapacity.load(std::memory_order_acquire);
-    const uint32_t newCapacity = m_pendingStreamingGpuStorageGroupCapacity.load(std::memory_order_acquire);
-    if (newCapacity == 0u || newCapacity <= oldCapacity) {
-        return false;
+void CLodStreamingSystem::PublishFilledResidencyStorages(uint64_t completedBatchId) {
+    const auto storages = m_geometryStorage ? m_geometryStorage->GetCLodResidencyStorages() : nullptr;
+    for (auto& storage : m_residencyStorages) {
+        if (storage.published || !storage.fillQueued || storage.fillBatchId != completedBatchId) continue;
+        if (!storages || !storage.retained) {
+            // Nothing to publish into yet: refill once the directory exists.
+            storage.fillQueued = false;
+            storage.fillBatchId = 0u;
+            continue;
+        }
+        storage.published = true;
+        spdlog::info("CLod streaming: publishing filled residency bitset capacity={}", storage.capacity);
+        storages->PublishStorage(storage.capacity, storage.retained);
+        // From here the published state holds it for as long as any frame can
+        // bind it; the weak reference keeps it written until then.
+        storage.retained.reset();
     }
+}
 
-    if (!org::BufferBase::IsBackingMutationAllowedOnThisThread()) {
-        TracyPlot("CLodStreaming.Storage.SkippedGpuResizeOutsideMutationScope", static_cast<int64_t>(1));
-        return false;
-    }
-
-    const uint32_t newWordCount = CLodBitsetWordCount(newCapacity);
-    spdlog::info(
-        "CLod streaming: publishing deferred bitset GPU resize oldCapacity={} newCapacity={} words={}",
-        oldCapacity,
-        newCapacity,
-        newWordCount);
-
-    m_streamingNonResidentBits->ResizeStructured(newWordCount);
-    m_streamingActiveGroupsBits->ResizeStructured(newWordCount);
-    m_streamingGpuStorageGroupCapacity.store(newCapacity, std::memory_order_release);
-    uint32_t expected = newCapacity;
-    m_pendingStreamingGpuStorageGroupCapacity.compare_exchange_strong(
-        expected, 0u, std::memory_order_acq_rel, std::memory_order_acquire);
-    m_streamingGpuResizeAckGeneration.fetch_add(1u, std::memory_order_release);
-    m_streamingGpuResizeAckGeneration.notify_one();
-    RequestStreamingFrameWork();
-    return true;
+uint32_t CLodStreamingSystem::BoundResidencyCapacity(const UpdateContext& context) const {
+    if (!m_nonResidentBitsResolver) return 0u;
+    const auto resources = m_nonResidentBitsResolver->ResolveFrom(context.publishedRendererState);
+    const auto buffer = resources.empty() ? nullptr : std::dynamic_pointer_cast<org::Buffer>(resources.front());
+    return buffer ? static_cast<uint32_t>(buffer->GetSize() / sizeof(uint32_t)) * 32u : 0u;
 }
 
 void CLodStreamingSystem::InitializeActiveRange(
@@ -6365,6 +6380,9 @@ void CLodStreamingSystem::SealStreamingUploadBatch() {
         m_streamingNonResidentBitsQueuedEpoch);
     if (!batch) return;
 
+    for (auto& storage : m_residencyStorages) {
+        if (storage.fillQueued && storage.fillBatchId == 0u) storage.fillBatchId = batch->ticket->batchId;
+    }
     m_outstandingUploadBatches.push_back(batch);
     if (!m_uploadBatchQueue.TryPush(batch)) {
         m_retainedUploadBatch = std::move(batch);
@@ -6441,6 +6459,7 @@ void CLodStreamingSystem::ObserveUploadBatchTickets() {
             }
         }
         if (state == CLodUploadTicketState::Completed) {
+            PublishFilledResidencyStorages(batch->ticket->batchId);
             if (m_uploadStream) m_uploadStream->Recycle(batch);
             m_outstandingUploadBatches[i] = std::move(m_outstandingUploadBatches.back());
             m_outstandingUploadBatches.pop_back();

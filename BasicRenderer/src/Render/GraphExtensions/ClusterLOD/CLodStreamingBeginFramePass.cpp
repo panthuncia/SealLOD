@@ -20,22 +20,18 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     std::shared_ptr<org::Buffer> loadRequestKeys,
     std::shared_ptr<org::Buffer> usedGroupsCounter,
     std::shared_ptr<org::Buffer> sourceGroupMismatchCounter,
-    std::shared_ptr<org::Buffer> nonResidentBits,
-    std::shared_ptr<org::Buffer> activeGroupsBits,
     std::shared_ptr<org::Buffer> runtimeState,
     std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> queueNonResidentBitsUpload,
-    std::function<bool(std::vector<uint32_t>&, uint32_t&)> getActiveGroupsBitsUpload,
+    std::function<uint32_t(const UpdateContext&)> getActiveGroupScanCount,
     std::function<void()> scheduleStreamingReadbacks,
     std::function<void()> processStreamingRequests)
     : m_loadCounter(std::move(loadCounter))
     , m_loadRequestKeys(std::move(loadRequestKeys))
     , m_usedGroupsCounter(std::move(usedGroupsCounter))
     , m_sourceGroupMismatchCounter(std::move(sourceGroupMismatchCounter))
-    , m_nonResidentBits(std::move(nonResidentBits))
-    , m_activeGroupsBits(std::move(activeGroupsBits))
     , m_runtimeState(std::move(runtimeState))
     , m_queueNonResidentBitsUpload(std::move(queueNonResidentBitsUpload))
-    , m_getActiveGroupsBitsUpload(std::move(getActiveGroupsBitsUpload))
+    , m_getActiveGroupScanCount(std::move(getActiveGroupScanCount))
     , m_scheduleStreamingReadbacks(std::move(scheduleStreamingReadbacks))
     , m_processStreamingRequests(std::move(processStreamingRequests))
     , m_getUploadInstance(std::move(getUploadInstance))
@@ -52,7 +48,7 @@ CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBu
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     CLodStreamingBeginFrameBindings bindings{builder.BindUnorderedAccess(m_loadCounter),
         builder.BindUnorderedAccess(m_loadRequestKeys), builder.BindUnorderedAccess(m_usedGroupsCounter)};
-    builder.WithUnorderedAccess(m_nonResidentBits, m_activeGroupsBits, m_runtimeState);
+    builder.WithUnorderedAccess(m_runtimeState);
     if (m_sourceGroupMismatchCounter) {
         bindings.sourceMismatchCounter = builder.BindUnorderedAccess(m_sourceGroupMismatchCounter);
         bindings.hasSourceMismatchCounter = true;
@@ -110,19 +106,9 @@ void CLodStreamingBeginFramePass::Update(const org::UpdateExecutionContext& exec
         m_processStreamingRequests();
     }
 
-    uint32_t activeGroupScanCount = 0u;
-    {
-        ZoneScopedN("CLodStreamingBeginFramePass::UploadActiveGroupsBits");
-        const bool activeGroupsBitsUploadPending = m_getActiveGroupsBitsUpload
-            && m_getActiveGroupsBitsUpload(m_activeGroupsBitsUploadScratch, activeGroupScanCount);
-        if (activeGroupsBitsUploadPending && !m_activeGroupsBitsUploadScratch.empty()) {
-            UploadBufferData(
-                m_activeGroupsBitsUploadScratch.data(),
-                static_cast<uint32_t>(m_activeGroupsBitsUploadScratch.size() * sizeof(uint32_t)),
-                org::runtime::UploadTarget::FromShared(m_activeGroupsBits),
-                0);
-        }
-    }
+    // Bounded by the capacity of the residency bitset this frame's published
+    // state binds, so the scan never reaches past it.
+    const uint32_t activeGroupScanCount = m_getActiveGroupScanCount ? m_getActiveGroupScanCount(*updateContext) : 0u;
 
     {
         ZoneScopedN("CLodStreamingBeginFramePass::UploadRuntimeState");

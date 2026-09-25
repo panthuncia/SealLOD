@@ -112,6 +112,7 @@
 #include "Render/IndirectStateArtifacts.h"
 #include "Render/MaterialStateArtifacts.h"
 #include "Render/TextureBindingArtifacts.h"
+#include "Render/CLodResidencyStorageArtifacts.h"
 #include "Render/TerrainStateArtifacts.h"
 #include "Render/VersionedGpuBufferArtifacts.h"
 #include "Render/StaticStateArtifacts.h"
@@ -825,11 +826,13 @@ void Renderer::Initialize(
     br::render::RegisterIndirectStateProducer(*m_asyncStateGraph);
     br::render::RegisterMaterialStateProducer(*m_asyncStateGraph);
 	br::render::RegisterTextureBindingProducer(*m_asyncStateGraph);
+	br::render::RegisterTextureDisplayGateProducer(*m_asyncStateGraph);
 	br::render::RegisterTerrainStateProducer(*m_asyncStateGraph);
     br::render::RegisterVersionedGpuBufferProducer(*m_asyncStateGraph);
 	br::render::RegisterTextureImageTableProducer(*m_asyncStateGraph);
     br::render::RegisterObjectBufferStateProducer(*m_asyncStateGraph);
     br::render::RegisterGeometryCoverageGateProducer(*m_asyncStateGraph);
+    br::render::RegisterCLodResidencyStorageProducers(*m_asyncStateGraph);
     br::render::RegisterGeometryBufferStateProducer(*m_asyncStateGraph);
     br::render::RegisterStaticStateProducers(*m_asyncStateGraph);
     br::render::RegisterGeometryResidencyStateProducer(*m_asyncStateGraph);
@@ -2156,6 +2159,11 @@ void Renderer::SetSettings() {
 		ReadUintEnvironmentValue(
 			"SARP_ALPHA_TESTED_TEXTURE_MAX_RESIDENT_TOP_MIP",
 			AlphaTestedMaterialTextureMaxResidentTopMipDefault));
+	settingsManager.registerSetting<uint32_t>(
+		AlphaTestedMaterialTextureMinResidentDimensionSettingName,
+		ReadUintEnvironmentValue(
+			"SARP_ALPHA_TESTED_TEXTURE_MIN_RESIDENT_DIMENSION",
+			AlphaTestedMaterialTextureMinResidentDimensionDefault));
 	int32_t forcedSkeletonLod = -1;
 	char* forcedSkeletonLodValue = nullptr;
 	size_t forcedSkeletonLodValueSize = 0;

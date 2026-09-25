@@ -16,6 +16,7 @@
 #include "Import/CLodCache.h"
 #include "Materials/Material.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/CLodResidencyStorageArtifacts.h"
 #include <BasicTelemetry/Telemetry.h>
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
@@ -1991,6 +1992,12 @@ void MeshManager::SetRendererStateRequestService(br::render::RendererStateReques
 	m_rendererStateRequests = service;
 	m_geometryResidencyVersion = {};
 	m_geometryResidencyRevision = 0;
+	{
+		std::lock_guard graphLock(m_geometryBufferGraphMutex);
+		m_clodResidencyStorages = service
+			? std::make_shared<br::render::CLodResidencyStorageDirectory>(*service) : nullptr;
+		m_clodResidencyGates.clear();
+	}
 	if (service == nullptr) return;
 
 	auto input = std::make_shared<br::render::GeometryResidencyDeltaInput>();
@@ -2120,12 +2127,40 @@ std::uint64_t MeshManager::PublishDesiredBufferState() {
 	auto rootInput = std::make_shared<br::render::GeometryBufferStateBuildInput>();
 	rootInput->coveredMutationSequence = coverage;
 	std::vector<br::render::ArtifactRequirement> requirements;
+	std::uint32_t clodGroupCount = 0;
 	for (std::size_t i = 0; i < m_graphBufferBindings.size(); ++i) {
 		const auto& binding = m_graphBufferBindings[i];
 		const auto revision = (std::max<std::uint64_t>)(captures[i].writeSequence, 1u);
 		rootInput->buffers.push_back({ binding.key, revision, binding.elementStride, binding.catalogVariant });
 		requirements.push_back(br::render::Exact(binding.submittedVersion,
 			br::render::ArtifactReadiness::GpuReady));
+		if (binding.identifier == org::ResourceIdentifier{ Builtin::CLod::Groups }) {
+			clodGroupCount = static_cast<std::uint32_t>(captures[i].elementCount);
+		}
+	}
+	// Every group this cut's table references needs a published non-resident
+	// bitset that covers it: the cut, and so every draw of those groups, waits for
+	// a filled storage of sufficient capacity instead of reading past or into an
+	// unfilled bitset. One gate per power-of-two capacity; each is immutable.
+	if (clodGroupCount != 0u && m_clodResidencyStorages && m_clodResidencyStorages->HasProducer()) {
+		const auto capacity = CLodRoundUpCapacity(clodGroupCount);
+		auto& gate = m_clodResidencyGates[capacity];
+		if (!gate) {
+			auto gateInput = std::make_shared<br::render::CLodResidencyCapacityGateInput>();
+			gateInput->capacity = capacity;
+			gateInput->directory = m_clodResidencyStorages;
+			const auto gateResult = m_rendererStateRequests->Request(
+				br::render::CLodResidencyCapacityGateAddress(capacity), 1u, {},
+				br::render::ArtifactPayload::Make<br::render::CLodResidencyCapacityGateInput>(std::move(gateInput)),
+				capacity);
+			if (!gateResult) {
+				m_clodResidencyGates.erase(capacity);
+				m_geometryBufferGraphDirty.store(true, std::memory_order_release);
+				return m_geometryBufferStateRevision;
+			}
+			gate = gateResult.Handle();
+		}
+		requirements.push_back(br::render::Exact(gate, br::render::ArtifactReadiness::CpuReady));
 	}
 	const auto result = m_rendererStateRequests->SubmitLatest({
 		{ br::render::ArtifactKind::GeometryBufferState, 0, 0 }, ++m_geometryBufferStateRevision,

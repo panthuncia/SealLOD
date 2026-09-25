@@ -9,6 +9,7 @@
 
 namespace org { class Buffer; }
 namespace org { class UploadInstance; }
+struct UpdateContext;
 
 struct CLodStreamingBeginFrameBindings {
     org::ResourceBindingToken loadCounter, loadRequestKeys, usedGroupsCounter, sourceMismatchCounter;
@@ -24,11 +25,9 @@ public:
         std::shared_ptr<org::Buffer> loadRequestKeys,
         std::shared_ptr<org::Buffer> usedGroupsCounter,
         std::shared_ptr<org::Buffer> sourceGroupMismatchCounter,
-        std::shared_ptr<org::Buffer> nonResidentBits,
-        std::shared_ptr<org::Buffer> activeGroupsBits,
         std::shared_ptr<org::Buffer> runtimeState,
         std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> queueNonResidentBitsUpload,
-        std::function<bool(std::vector<uint32_t>&, uint32_t&)> getActiveGroupsBitsUpload,
+        std::function<uint32_t(const UpdateContext&)> getActiveGroupScanCount,
         std::function<void()> scheduleStreamingReadbacks,
         std::function<void()> processStreamingRequests);
 
@@ -44,15 +43,12 @@ private:
     std::shared_ptr<org::Buffer> m_loadRequestKeys;
     std::shared_ptr<org::Buffer> m_usedGroupsCounter;
     std::shared_ptr<org::Buffer> m_sourceGroupMismatchCounter;
-    std::shared_ptr<org::Buffer> m_nonResidentBits;
-    std::shared_ptr<org::Buffer> m_activeGroupsBits;
     std::shared_ptr<org::Buffer> m_runtimeState;
     std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> m_queueNonResidentBitsUpload;
-    std::function<bool(std::vector<uint32_t>&, uint32_t&)> m_getActiveGroupsBitsUpload;
+    std::function<uint32_t(const UpdateContext&)> m_getActiveGroupScanCount;
     std::function<void()> m_scheduleStreamingReadbacks;
     std::function<void()> m_processStreamingRequests;
     std::function<org::UploadInstance*()> m_getUploadInstance;
-    std::vector<uint32_t> m_activeGroupsBitsUploadScratch;
     std::vector<uint32_t> m_nonResidentBitsUploadScratch;
     org::PipelineState m_clearUintPipeline;
 };

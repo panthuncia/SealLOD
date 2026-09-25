@@ -32,7 +32,21 @@ ArtifactBuildResult BuildTextureBinding(const ArtifactBuildContext& context) {
 		input->transfer ? input->transfer->gpuSubmissions : input->gpuSubmissions);
 }
 
+ArtifactBuildResult BuildTextureDisplayGate(const ArtifactBuildContext& context) {
+    const auto input = context.input.Get<TextureDisplayGateInput>();
+    if (!input || context.key != TextureDisplayGateAddress(input->streamingTextureID, input->quality)) {
+        return ArtifactBuildResult::Failure("texture display gate identity mismatch");
+    }
+    return ArtifactBuildResult::Ready(ArtifactPayload::Make<PublishedTextureDisplayGate>(input));
+}
+
 } // namespace
+
+void RegisterTextureDisplayGateProducer(AsyncStateGraph& graph) {
+    graph.RegisterProducer(ArtifactKind::TextureDisplayGate, {
+        TaskLane::Streaming, TaskDomain::TextureProcessing,
+        "TextureDisplayGate::Build", BuildTextureDisplayGate });
+}
 
 void RegisterTextureBindingProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::TextureBinding, {

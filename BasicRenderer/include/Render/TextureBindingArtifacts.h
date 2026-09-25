@@ -34,6 +34,32 @@ struct PublishedTextureBinding {
     TextureStreamingGPUInfo streamingMetadata{};
 };
 
+// Display readiness of one streaming texture, latched once per quality level.
+// Renderables require the gates of every texture they sample, so they become
+// visible only once the published image table binds a usable image for each of
+// them (not the shared processing placeholder, and for alpha-tested use not a
+// mip too coarse to preserve coverage), or once the texture has explicitly
+// failed to load and the placeholder is final.
+enum class TextureDisplayQuality : std::uint64_t {
+    AnyImage = 0,
+    AlphaCoverage = 1,
+};
+
+[[nodiscard]] inline ArtifactAddress TextureDisplayGateAddress(
+    std::uint32_t streamingTextureID, TextureDisplayQuality quality) {
+    return { ArtifactKind::TextureDisplayGate, streamingTextureID,
+        static_cast<std::uint64_t>(quality) };
+}
+
+struct TextureDisplayGateInput {
+    std::uint32_t streamingTextureID = 0;
+    TextureDisplayQuality quality = TextureDisplayQuality::AnyImage;
+    std::uint64_t bindingRevision = 0;
+    bool loadFailed = false;
+};
+using PublishedTextureDisplayGate = TextureDisplayGateInput;
+
 void RegisterTextureBindingProducer(AsyncStateGraph& graph);
+void RegisterTextureDisplayGateProducer(AsyncStateGraph& graph);
 
 } // namespace br::render

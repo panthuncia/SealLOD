@@ -342,7 +342,6 @@ HierarchicalCullingBindings HierarchicalCullingPass::Declare(org::PassBuilder& b
             Builtin::CLod::AssemblyTransforms,
             Builtin::CLod::AssemblyBoneRemaps,
             Builtin::CLod::AssemblyBoneRemapIndices,
-            Builtin::CLod::StreamingActiveGroupsBits,
             Builtin::CLod::StreamingNonResidentBits,
             Builtin::CLod::MeshMetadata,
             CLodLevelInfosBufferId,
