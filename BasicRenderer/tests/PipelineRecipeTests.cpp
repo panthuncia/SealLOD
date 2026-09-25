@@ -87,8 +87,10 @@ void TestInvocationConstantRecording()
     HierarchicalDispatchCullingInvocation invocation;
     invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] = 77;
     invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] = 123;
-    invocation.workloads.push_back({3,4,5,6,2,7,1,1});
-    invocation.workloads.push_back({13,14,15,16,1,17,1,1});
+    invocation.workloads.push_back({.viewDataIndex = 3, .activeDrawSetIndicesSRVIndex = 4, .activeDrawCount = 5,
+        .drawRecordVisibilityGenerationSRVIndex = 6, .drawRecordVisibilityGenerationCount = 8, .shadowCasterClass = 2, .dispatchGridX = 7});
+    invocation.workloads.push_back({.viewDataIndex = 13, .activeDrawSetIndicesSRVIndex = 14, .activeDrawCount = 15,
+        .drawRecordVisibilityGenerationSRVIndex = 16, .drawRecordVisibilityGenerationCount = 18, .shadowCasterClass = 1, .dispatchGridX = 17});
     HierarchicalDispatchCullingPass::Record(culling, invocation, context);
     if (recorded.history.size() != 4 || recorded.history.front() != std::vector<uint32_t>{11}
         || recorded.history.back() != std::vector<uint32_t>{99})
@@ -100,6 +102,7 @@ void TestInvocationConstantRecording()
             || constants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] != workload.viewDataIndex
             || constants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] != workload.activeDrawSetIndicesSRVIndex
             || constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] != workload.drawRecordVisibilityGenerationSRVIndex
+            || constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_COUNT] != workload.drawRecordVisibilityGenerationCount
             || constants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] != workload.shadowCasterClass
             || constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] != 77
             || constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] != 123
@@ -669,7 +672,6 @@ void TestFullCapturedCullingEmission()
         &CapturedHierarchicalDispatchCullingInputs::m_skinnedVoxelRasterWorkCounterBuffer,
         &CapturedHierarchicalDispatchCullingInputs::m_swVisibleClustersCounterBuffer,
         &CapturedHierarchicalDispatchCullingInputs::m_swWriteBaseCounterBuffer,
-        &CapturedHierarchicalDispatchCullingInputs::m_viewDepthSrvIndicesBuffer,
         &CapturedHierarchicalDispatchCullingInputs::m_viewRasterInfoBuffer,
         &CapturedHierarchicalDispatchCullingInputs::m_visibleClusterTransformIndicesBuffer,
         &CapturedHierarchicalDispatchCullingInputs::m_visibleClustersBuffer,
@@ -797,7 +799,10 @@ void TestFullCapturedCullingEmission()
     HierarchicalDispatchCullingInvocation invocation;
     invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] = 11;
     invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] = 20;
-    invocation.workloads.push_back({3,4,5,6,0,1,1,1});
+    // Designated so new workload fields cannot silently shift these values;
+    // it must match what PrepareCullingWorkloads derives from the publication below.
+    invocation.workloads.push_back({.viewDataIndex = 3, .activeDrawSetIndicesSRVIndex = 4, .activeDrawCount = 5,
+        .drawRecordVisibilityGenerationSRVIndex = 6, .dispatchGridX = 1});
     auto record = [&](const auto& publication) {
         trace = {};
         auto context = org::RecordingContext::FromPersistentBindings(list,publication);
@@ -1573,18 +1578,19 @@ void TestSoftwareRasterBucketSelection()
         bool virtualShadow = true, hasTelemetry = true, hasSkinCache = true;
     } primary;
     const auto constants = ClusterSoftwareRasterizationPass::BuildPrimaryConstants<uint32_t>(primary,[](uint32_t value) { return value+100; });
+    // View raster info is published per preparation, not bound with the program.
     Require(constants[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] == 110
-        && constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] == 113
+        && constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] == UINT32_MAX
         && constants[CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] == UINT32_MAX,
         "software raster primary constants lost selected descriptors or missing-cache defaults");
     auto symbolic = ClusterSoftwareRasterizationPass::BuildPrimaryConstants<br::render::SymbolicComputeConstant>(primary,
         [](uint32_t) { return org::persistent::ViewToken{}; });
-    Require(br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,symbolic).bindingViews.size() == 5,
+    Require(br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,symbolic).bindingViews.size() == 4,
         "software raster primary constants lost stable view provenance");
     ClusterSoftwareRasterizationPass::ApplyVirtualShadowConstants(symbolic,primary,{128,16384,10,1024,7},
         [](uint32_t) { return org::persistent::ViewToken{}; },[](uint32_t,uint32_t) { return org::persistent::ViewToken{}; });
     const auto shadowConstants = br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,symbolic);
-    Require(shadowConstants.bindingViews.size() == 17
+    Require(shadowConstants.bindingViews.size() == 16
         && shadowConstants.values[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_ENTRY_COUNT] == 10
         && shadowConstants.values[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] == 128,
         "software raster shadow constants confused scalar shape with descriptor bindings");

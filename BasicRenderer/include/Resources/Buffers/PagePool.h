@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <span>
 #include <vector>
@@ -147,9 +148,13 @@ private:
 	};
 
 	Config     m_config;
-	uint32_t   m_totalPageCapacity = 0;
 	uint32_t   m_generalSlabCount = 0;
 
+	// The streaming worker grows the slab table while other threads (graph
+	// declaration, ray-tracing refresh) read it. Guards m_slabs and
+	// m_totalPageCapacity; everything else is owned by the streaming worker.
+	mutable std::shared_mutex m_slabMutex;
+	uint32_t   m_totalPageCapacity = 0;
 	std::vector<Slab> m_slabs;
 	std::array<std::vector<uint32_t>, 5> m_freePinnedPageIDs;
 	// CPU-side mirror of the page table: indexed by global page ID.
@@ -164,6 +169,8 @@ private:
 
 	// Generation-bound upload function. Cleared when the streaming owner shuts down.
 	UploadFn m_uploadFn;
+
+	uint32_t PageToSlabIndexLocked(uint32_t globalPageID) const;
 
 	// Allocate a new slab. Streaming slabs are capped by numStreamingSlabs.
 	bool AllocateNewSlab(SlabRole role, uint32_t pageSizeBytes, std::vector<uint32_t>* outPageIDs = nullptr);
