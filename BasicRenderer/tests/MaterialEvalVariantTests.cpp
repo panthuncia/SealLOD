@@ -1,9 +1,9 @@
 #include <iostream>
 #include <stdexcept>
 
-#include "Mesh/VertexFlags.h"
-#include "Render/DrawWorkload.h"
-#include "Render/MaterialCompileFlagsSlotRegistry.h"
+#include <BasicRenderer/Scene/VertexFlags.h>
+#include "BasicRenderer/Pipeline/MeshDrawWorkload.h"
+#include "Materials/Evaluation/MaterialCompileFlagsSlotRegistry.h"
 
 namespace {
 void Require(bool condition, const char* message)

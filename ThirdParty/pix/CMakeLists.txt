@@ -33,3 +33,11 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
 install(EXPORT PixHeadersTargets
         NAMESPACE Pix::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PixHeaders)
+
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    cmake/PixHeadersConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/PixHeadersConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PixHeaders)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/PixHeadersConfig.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PixHeaders)

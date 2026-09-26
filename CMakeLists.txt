@@ -1,4 +1,4 @@
-﻿# CMakeList.txt : Top-level CMake project file, do global configuration
+# CMakeList.txt : Top-level CMake project file, do global configuration
 # and include sub-projects here.
 #
 cmake_minimum_required (VERSION 3.10)
@@ -358,16 +358,10 @@ if(BASICRHI_ENABLE_RESHAPE)
 endif()
 
 add_subdirectory("ThirdParty")
-add_subdirectory("BasicRHI")
 set(ORG_MODULE_SERVICES_ENABLE_DXC ON CACHE BOOL "" FORCE)
-set(ORG_MODULE_SERVICES_ENABLE_VULKAN ${BASICRHI_ENABLE_VULKAN} CACHE BOOL "" FORCE)
 set(ORG_MODULE_SERVICES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-add_subdirectory("ORGModuleServices")
-if(NOT TARGET BasicTelemetry::Core)
-  add_subdirectory("BasicTelemetry")
-endif()
-add_subdirectory("OpenRenderGraph")
-add_subdirectory("BasicScene")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/RendererDependencies.cmake")
+basicrenderer_resolve_dependencies("${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
 add_subdirectory ("BasicRenderer")
 add_subdirectory("Plugins/ProceduralWind")
 

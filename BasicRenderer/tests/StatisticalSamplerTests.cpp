@@ -1,4 +1,4 @@
-#include "Telemetry/StatisticalSampler.h"
+#include <BasicRenderer/Diagnostics/StatisticalSampler.h>
 
 #include <cmath>
 #include <filesystem>

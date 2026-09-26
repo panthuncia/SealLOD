@@ -1,0 +1,1193 @@
+#pragma once
+#include <unordered_map>
+#include "BasicRenderer/Scene/Components.h"
+#include "Render/RenderGraph/RenderGraph.h"
+#include "../../../generated/BuiltinResources.h"
+#include "PostProcessing/Bloom/RenderPasses/BloomSamplePass.h"
+#include "PostProcessing/Bloom/RenderPasses/BloomBlendPass.h"
+#include "Scene/Views/RenderPasses/PrimaryDepthCopyPass.h"
+#include "Materials/Evaluation/RenderPasses/BuildPixelListPass.h"
+#include "Materials/Evaluation/RenderPasses/EvaluateMaterialGroupsPass.h"
+#include "Materials/Evaluation/RenderPasses/MaterialHistogramPass.h"
+#include "Materials/Evaluation/RenderPasses/MaterialPixelCounterResetPass.h"
+#include "Materials/Evaluation/RenderPasses/MaterialBlockScanPass.h"
+#include "Materials/Evaluation/RenderPasses/MaterialBlockOffsetsPass.h"
+#include "Materials/Evaluation/RenderPasses/BuildMaterialIndirectCommandBufferPass.h"
+#include "Materials/Evaluation/RenderPasses/TerrainRegionMaterialEvaluationPasses.h"
+#include "Terrain/RenderPasses/TerrainRvtPasses.h"
+#include <BasicRenderer/Extensions/IndirectCommand.h>
+#include "Lighting/Environment/RenderPasses/brdfIntegrationPass.h"
+#include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAODenoisePass.h"
+#include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOFilterPass.h"
+#include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOMainPass.h"
+#include "Lighting/Clustered/RenderPasses/LightCullingPass.h"
+#include "Lighting/Clustered/RenderPasses/ClusterGenerationPass.h"
+#include "Lighting/Environment/RenderPasses/EnvironmentConversionPass.h"
+#include "Lighting/Environment/RenderPasses/EnvironmentSHPass.h"
+#include "Lighting/Shading/RenderPasses/DeferredShadingPass.h"
+#include "Lighting/Environment/RenderPasses/SkyboxRenderPass.h"
+#include "PostProcessing/Reflections/RenderPasses/ScreenSpaceReflectionsPass.h"
+#include "Lighting/Environment/RenderPasses/SpecularIBLPass.h"
+#include "PostProcessing/Reflections/RenderPasses/RayTracedReflectionsPass.h"
+#include "PostProcessing/Downsampling/RenderPasses/Downsample.h"
+#include "Scene/Views/RenderPasses/LinearDepthHistoryCopyPass.h"
+#include "Resources/Buffers/Buffer.h"
+#include "Render/MemoryIntrospectionAPI.h"
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+#include "Validation/SARPInteropValidation.h"
+#include "Runtime/Device/DeviceManager.h"
+#endif
+
+inline void TagPassTechnique(org::RenderGraph* graph, std::string_view passName, std::string_view techniquePath) {
+    graph->SetPassTechnique(std::string(passName), std::string(techniquePath));
+}
+
+inline void CreateDebugVisualizationResources(org::RenderGraph* graph) {
+    auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+
+    org::TextureDescription debugVisDesc;
+    debugVisDesc.channels = 2;
+    debugVisDesc.format = rhi::Format::R32G32_UInt;
+    debugVisDesc.hasUAV = true;
+    debugVisDesc.uavFormat = rhi::Format::R32G32_UInt;
+    debugVisDesc.hasSRV = true;
+    debugVisDesc.srvFormat = rhi::Format::R32G32_UInt;
+    debugVisDesc.hasNonShaderVisibleUAV = true;
+    debugVisDesc.allowAlias = true;
+    org::ImageDimensions debugVisDims = { resolution.x, resolution.y, 0, 0 };
+    debugVisDesc.imageDimensions.push_back(debugVisDims);
+    auto debugVisTex = org::PixelBuffer::CreateSharedUnmaterialized(debugVisDesc);
+    debugVisTex->SetName("Debug Visualization");
+    org::memory::SetResourceUsageHint(*debugVisTex, "Debug");
+    graph->RegisterResource(Builtin::DebugVisualization, debugVisTex);
+}
+
+inline void BuildBRDFIntegrationPass(org::RenderGraph* graph) {
+	org::TextureDescription brdfDesc;
+    brdfDesc.arraySize = 1;
+    brdfDesc.channels = 2;
+    brdfDesc.isCubemap = false;
+    brdfDesc.hasRTV = true;
+    brdfDesc.format = rhi::Format::R16G16_Float;
+    brdfDesc.generateMipMaps = false;
+    brdfDesc.hasSRV = true;
+    brdfDesc.srvFormat = rhi::Format::R16G16_Float;
+	brdfDesc.hasUAV = true;
+	brdfDesc.uavFormat = rhi::Format::R16G16_Float;
+    org::ImageDimensions dims = { 512, 512, 0, 0 };
+    brdfDesc.imageDimensions.push_back(dims);
+    auto brdfIntegrationTexture = org::PixelBuffer::CreateSharedUnmaterialized(brdfDesc);
+    brdfIntegrationTexture->SetName("BRDF Integration Texture");
+    org::memory::SetResourceUsageHint(*brdfIntegrationTexture, "Environment lighting");
+    brdfIntegrationTexture->EnableIdleDematerialization(120);
+	graph->RegisterResource(Builtin::BRDFLUT, brdfIntegrationTexture);
+	graph->BuildPass<BRDFIntegrationPass>("BRDF Integration Pass");
+    TagPassTechnique(graph, "BRDF Integration Pass", "Environment Lighting::BRDF Integration");
+}
+
+inline void RegisterVisUtilResources(
+    org::RenderGraph* graph,
+    bool terrainRvt,
+    bool registerCommonResources = true,
+    std::unordered_map<std::string, std::shared_ptr<org::Resource>>* persistentTerrainRvtResources = nullptr)
+{
+    auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    const uint32_t maxPixels = resolution.x * resolution.y;
+
+    auto& rm = ::ResourceManager::GetInstance();
+    (void)rm;
+
+    if (registerCommonResources) {
+
+    // Total pixel count buffer (uint[1])
+    auto totalPixelCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    totalPixelCountBuffer->SetAllowAlias(true);
+    totalPixelCountBuffer->SetName("VisUtil::TotalPixelCountBuffer");
+    org::memory::SetResourceUsageHint(*totalPixelCountBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TotalPixelCountBuffer", totalPixelCountBuffer);
+
+	// PixelRef: packed pixel coordinates followed by the cached 64-bit visibility key.
+    struct PixelRefPOD { uint32_t pixelXY; uint32_t visibilityKey[2]; };
+    auto pixelListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        maxPixels,
+        sizeof(PixelRefPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+	pixelListBuffer->SetAllowAlias(true);
+    pixelListBuffer->SetName("VisUtil::PixelListBuffer");
+    org::memory::SetResourceUsageHint(*pixelListBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::PixelListBuffer", pixelListBuffer);
+
+    constexpr uint32_t maxTerrainRegions = 65536u;
+    auto terrainRegionPixelCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionPixelCountBuffer->SetAllowAlias(true);
+    terrainRegionPixelCountBuffer->SetName("VisUtil::TerrainRegionPixelCountBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionPixelCountBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionPixelCountBuffer", terrainRegionPixelCountBuffer);
+
+    auto terrainRegionOffsetBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionOffsetBuffer->SetAllowAlias(true);
+    terrainRegionOffsetBuffer->SetName("VisUtil::TerrainRegionOffsetBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionOffsetBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionOffsetBuffer", terrainRegionOffsetBuffer);
+
+    auto terrainRegionWriteCursorBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionWriteCursorBuffer->SetAllowAlias(true);
+    terrainRegionWriteCursorBuffer->SetName("VisUtil::TerrainRegionWriteCursorBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionWriteCursorBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionWriteCursorBuffer", terrainRegionWriteCursorBuffer);
+
+    auto terrainRegionBlockSumsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        (maxTerrainRegions + 1023u) / 1024u,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionBlockSumsBuffer->SetAllowAlias(true);
+    terrainRegionBlockSumsBuffer->SetName("VisUtil::TerrainRegionBlockSumsBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionBlockSumsBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionBlockSumsBuffer", terrainRegionBlockSumsBuffer);
+
+    auto terrainRegionScannedBlockSumsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        (maxTerrainRegions + 1023u) / 1024u,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionScannedBlockSumsBuffer->SetAllowAlias(true);
+    terrainRegionScannedBlockSumsBuffer->SetName("VisUtil::TerrainRegionScannedBlockSumsBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionScannedBlockSumsBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionScannedBlockSumsBuffer", terrainRegionScannedBlockSumsBuffer);
+
+    auto terrainRegionTotalPixelCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionTotalPixelCountBuffer->SetAllowAlias(true);
+    terrainRegionTotalPixelCountBuffer->SetName("VisUtil::TerrainRegionTotalPixelCountBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionTotalPixelCountBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionTotalPixelCountBuffer", terrainRegionTotalPixelCountBuffer);
+
+    auto terrainRegionActiveListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionActiveListBuffer->SetAllowAlias(true);
+    terrainRegionActiveListBuffer->SetName("VisUtil::TerrainRegionActiveListBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionActiveListBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionActiveListBuffer", terrainRegionActiveListBuffer);
+
+    auto terrainRegionActiveCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionActiveCountBuffer->SetAllowAlias(true);
+    terrainRegionActiveCountBuffer->SetName("VisUtil::TerrainRegionActiveCountBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionActiveCountBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionActiveCountBuffer", terrainRegionActiveCountBuffer);
+
+    auto terrainRegionPixelListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        maxPixels,
+        sizeof(PixelRefPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionPixelListBuffer->SetAllowAlias(true);
+    terrainRegionPixelListBuffer->SetName("VisUtil::TerrainRegionPixelListBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionPixelListBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionPixelListBuffer", terrainRegionPixelListBuffer);
+
+    auto terrainRegionMaterialEvalCommandBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(TerrainRegionMaterialEvaluationIndirectCommand),
+        true,
+        true,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionMaterialEvalCommandBuffer->SetAllowAlias(true);
+    terrainRegionMaterialEvalCommandBuffer->SetName("IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionMaterialEvalCommandBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer", terrainRegionMaterialEvalCommandBuffer);
+
+    auto terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(D3D12_DISPATCH_ARGUMENTS),
+        true,
+        true,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer->SetAllowAlias(true);
+    terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer->SetName("IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
+    org::memory::SetResourceUsageHint(*terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer", terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer);
+
+    }
+
+    if (terrainRvt) {
+    if (persistentTerrainRvtResources && !persistentTerrainRvtResources->empty()) {
+        for (const auto& [name, resource] : *persistentTerrainRvtResources) {
+            graph->RegisterResource(name, resource);
+        }
+        return;
+    }
+    struct TerrainRvtInfoPOD {
+        uint32_t pageSize;
+        uint32_t borderTexels;
+        uint32_t physicalTileTexelSide;
+        uint32_t physicalAtlasPagesWide;
+        uint32_t physicalAtlasPagesHigh;
+        uint32_t maxPhysicalPages;
+        uint32_t maxVirtualPageTableEntries;
+        uint32_t maxRequests;
+        uint32_t maxGenerationEntries;
+        uint32_t mipCount;
+        uint32_t pageTableResolution;
+        uint32_t flags;
+        float basePageWorldSize;
+        uint32_t physicalAtlasPoolCount;
+        uint32_t maxTerrainSets;
+        uint32_t maxClipLevels;
+        uint32_t maxGeneratedPagesPerFrame;
+        float mipOffset;
+    };
+    struct TerrainRvtClipInfoPOD {
+        uint32_t terrainSetIndex;
+        uint32_t clipLevel;
+        uint32_t tableBaseSlot;
+        uint32_t tableResolution;
+        uint32_t originPage[2];
+        uint32_t terrainPageCount[2];
+        float pageWorldSize;
+        float invPageWorldSize;
+        uint32_t valid;
+        uint32_t terrainClipCount;
+        int32_t clearDelta[2];
+    };
+    struct TerrainRvtPageTagPOD {
+        uint32_t terrainSetIndex;
+        uint32_t clipLevel;
+        uint32_t pageX;
+        uint32_t pageY;
+    };
+    struct TerrainRvtPageRequestPOD {
+        uint32_t pageTableIndex;
+        uint32_t terrainSetIndex;
+        uint32_t clipLevel;
+        uint32_t contentMask;
+        uint32_t pageX;
+        uint32_t pageY;
+        uint32_t pad0;
+        uint32_t pad1;
+    };
+    struct TerrainRvtGenerationRequestPOD {
+        uint32_t pageTableIndex;
+        uint32_t physicalPageIndex;
+        uint32_t contentMask;
+        uint32_t terrainSetIndex;
+        uint32_t clipLevel;
+        uint32_t pageX;
+        uint32_t pageY;
+        uint32_t pad0;
+    };
+    struct TerrainRvtPhysicalPageAtlasInfoPOD {
+        float atlasBaseUv[2];
+        float pageUvScale[2];
+        float poolIndex;
+        float pad0[3];
+    };
+    struct TerrainRvtHeightResidentCacheEntryPOD {
+        uint32_t status;
+        uint32_t requestedTerrainSetIndex;
+        uint32_t requestedClipLevel;
+        uint32_t requestedPageX;
+        uint32_t requestedPageY;
+        uint32_t residentClipLevel;
+        uint32_t residentPageTableIndex;
+        uint32_t physicalPageIndex;
+        uint32_t residentPageX;
+        uint32_t residentPageY;
+        uint32_t pad0;
+        uint32_t pad1;
+    };
+    struct TerrainRvtStatsPOD {
+        uint32_t heightRequests;
+        uint32_t materialRequests;
+        uint32_t requestOverflows;
+        uint32_t generatedPages;
+        uint32_t allocationFailures;
+        uint32_t heightFallbacks;
+        uint32_t materialFallbacks;
+        uint32_t residentHits;
+        uint32_t heightSampleAttempts;
+        uint32_t materialSampleAttempts;
+        uint32_t heightSampleHits;
+        uint32_t materialSampleHits;
+        uint32_t heightPageTableMisses;
+        uint32_t materialPageTableMisses;
+        uint32_t heightComputePageFailures;
+        uint32_t materialComputePageFailures;
+        uint32_t heightDisabledFallbacks;
+        uint32_t materialDisabledFallbacks;
+        uint32_t heightForcedFallbacks;
+        uint32_t materialForcedFallbacks;
+        uint32_t markComputePageFailures;
+        uint32_t markWorldRectCalls;
+        uint32_t markWorldRectPages;
+        uint32_t resolveResidentPages;
+        uint32_t generationHeightPages;
+        uint32_t generationMaterialPages;
+        uint32_t generationCombinedPages;
+        uint32_t generationTexels;
+        uint32_t materialSampleRequestedPageXor;
+        uint32_t materialSampleResidentPageXor;
+        uint32_t materialSamplePhysicalPageXor;
+        uint32_t materialSampleRequestedPageMin;
+        uint32_t materialSampleRequestedPageMax;
+        uint32_t materialSampleResidentPageMin;
+        uint32_t materialSampleResidentPageMax;
+        uint32_t materialSamplePhysicalPageMin;
+        uint32_t materialSamplePhysicalPageMax;
+        uint32_t materialSampleCoarserResidentHits;
+        uint32_t materialSampleAtlasPoolMask;
+        uint32_t heightOwnerMismatches;
+        uint32_t materialOwnerMismatches;
+        uint32_t requestPageTableXor;
+        uint32_t requestPageTableMin;
+        uint32_t requestPageTableMax;
+        uint32_t generationPageTableMin;
+        uint32_t generationPageTableMax;
+        uint32_t materialSampleAttemptedPageXor;
+        uint32_t materialSampleAttemptedPageMin;
+        uint32_t materialSampleAttemptedPageMax;
+        uint32_t materialSamplePageMissRequestedPageXor;
+        uint32_t materialSamplePageMissRequestedPageMin;
+        uint32_t materialSamplePageMissRequestedPageMax;
+        uint32_t heightSampleAttemptedPageXor;
+        uint32_t heightSampleAttemptedPageMin;
+        uint32_t heightSampleAttemptedPageMax;
+        uint32_t heightSamplePageMissRequestedPageXor;
+        uint32_t heightSamplePageMissRequestedPageMin;
+        uint32_t heightSamplePageMissRequestedPageMax;
+        uint32_t heightFastSampleAttempts;
+        uint32_t heightFastSampleHits;
+        uint32_t heightFastPageMissRequests;
+        uint32_t heightFullSampleAttempts;
+        uint32_t heightFullSampleHits;
+        uint32_t generationPageTableXor;
+        uint32_t generationPhysicalPageXor;
+        uint32_t physicalPageOwnerCollisions;
+        uint32_t heightRequestMipHistogram[16];
+        uint32_t materialRequestMipHistogram[16];
+        uint32_t heightSampleMipHistogram[16];
+        uint32_t materialSampleMipHistogram[16];
+        uint32_t generationMipHistogram[16];
+    };
+
+    const uint32_t terrainRvtPageTableEntries = TerrainRvt::MaxPageTableEntries();
+    auto terrainRvtInfoBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(TerrainRvtInfoPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtInfoBuffer->SetAllowAlias(false);
+    terrainRvtInfoBuffer->SetName("TerrainRvt::Info");
+    org::memory::SetResourceUsageHint(*terrainRvtInfoBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtInfo, terrainRvtInfoBuffer);
+
+    auto terrainRvtClipInfosBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::MaxClipInfoCount(),
+        sizeof(TerrainRvtClipInfoPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtClipInfosBuffer->SetAllowAlias(false);
+    terrainRvtClipInfosBuffer->SetName("TerrainRvt::ClipInfos");
+    org::memory::SetResourceUsageHint(*terrainRvtClipInfosBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtClipInfos, terrainRvtClipInfosBuffer);
+
+    auto terrainRvtPageTableBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtPageTableBuffer->SetAllowAlias(false);
+    terrainRvtPageTableBuffer->SetName("TerrainRvt::PageTable");
+    org::memory::SetResourceUsageHint(*terrainRvtPageTableBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtPageTable, terrainRvtPageTableBuffer);
+
+    auto terrainRvtPageKeysBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(TerrainRvtPageTagPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtPageKeysBuffer->SetAllowAlias(false);
+    terrainRvtPageKeysBuffer->SetName("TerrainRvt::PageKeys");
+    org::memory::SetResourceUsageHint(*terrainRvtPageKeysBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtPageKeys, terrainRvtPageKeysBuffer);
+
+    auto terrainRvtPhysicalPageOwnerBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::MaxPhysicalPages(),
+        sizeof(uint32_t) * 4u,
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtPhysicalPageOwnerBuffer->SetAllowAlias(false);
+    terrainRvtPhysicalPageOwnerBuffer->SetName("TerrainRvt::PhysicalPageOwner");
+    org::memory::SetResourceUsageHint(*terrainRvtPhysicalPageOwnerBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtPhysicalPageOwner, terrainRvtPhysicalPageOwnerBuffer);
+
+    auto terrainRvtPhysicalPageAtlasBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::MaxPhysicalPages(),
+        sizeof(TerrainRvtPhysicalPageAtlasInfoPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtPhysicalPageAtlasBuffer->SetAllowAlias(false);
+    terrainRvtPhysicalPageAtlasBuffer->SetName("TerrainRvt::PhysicalPageAtlas");
+    org::memory::SetResourceUsageHint(*terrainRvtPhysicalPageAtlasBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtPhysicalPageAtlas, terrainRvtPhysicalPageAtlasBuffer);
+
+    auto terrainRvtHeightResidentCacheBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(TerrainRvtHeightResidentCacheEntryPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtHeightResidentCacheBuffer->SetAllowAlias(false);
+    terrainRvtHeightResidentCacheBuffer->SetName("TerrainRvt::HeightResidentCache");
+    org::memory::SetResourceUsageHint(*terrainRvtHeightResidentCacheBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtHeightResidentCache, terrainRvtHeightResidentCacheBuffer);
+
+    auto terrainRvtRequestMasksBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtRequestMasksBuffer->SetAllowAlias(false);
+    terrainRvtRequestMasksBuffer->SetName("TerrainRvt::RequestMasks");
+    org::memory::SetResourceUsageHint(*terrainRvtRequestMasksBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtRequestMasks, terrainRvtRequestMasksBuffer);
+
+    auto terrainRvtRequestListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(TerrainRvtPageRequestPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtRequestListBuffer->SetAllowAlias(false);
+    terrainRvtRequestListBuffer->SetName("TerrainRvt::RequestList");
+    org::memory::SetResourceUsageHint(*terrainRvtRequestListBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtRequestList, terrainRvtRequestListBuffer);
+
+    auto terrainRvtCountersBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::CounterCount,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtCountersBuffer->SetAllowAlias(false);
+    terrainRvtCountersBuffer->SetName("TerrainRvt::Counters");
+    org::memory::SetResourceUsageHint(*terrainRvtCountersBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtCounters, terrainRvtCountersBuffer);
+
+    auto terrainRvtGenerationListBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::MaxPhysicalPages(),
+        sizeof(TerrainRvtGenerationRequestPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtGenerationListBuffer->SetAllowAlias(false);
+    terrainRvtGenerationListBuffer->SetName("TerrainRvt::GenerationList");
+    org::memory::SetResourceUsageHint(*terrainRvtGenerationListBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtGenerationList, terrainRvtGenerationListBuffer);
+
+    auto terrainRvtStatsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(TerrainRvtStatsPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtStatsBuffer->SetAllowAlias(false);
+    terrainRvtStatsBuffer->SetName("TerrainRvt::Stats");
+    org::memory::SetResourceUsageHint(*terrainRvtStatsBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtStats, terrainRvtStatsBuffer);
+
+    auto terrainRvtGenerateDispatchArgsBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(D3D12_DISPATCH_ARGUMENTS),
+        true,
+        true,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtGenerateDispatchArgsBuffer->SetAllowAlias(false);
+    terrainRvtGenerateDispatchArgsBuffer->SetName("TerrainRvt::GenerateDispatchArgs");
+    org::memory::SetResourceUsageHint(*terrainRvtGenerateDispatchArgsBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtGenerateDispatchArgs, terrainRvtGenerateDispatchArgsBuffer);
+
+    const uint32_t terrainRvtPhysicalTileSide = TerrainRvt::PageSize() + TerrainRvt::BorderTexels() * 2u;
+    const uint32_t terrainRvtAtlasSide = TerrainRvt::AtlasPagesWide() * terrainRvtPhysicalTileSide;
+    const uint32_t terrainRvtAtlasHeight = TerrainRvt::AtlasPagesHigh() * terrainRvtPhysicalTileSide;
+    const uint64_t terrainRvtAtlasTexels =
+        static_cast<uint64_t>(terrainRvtAtlasSide) *
+        static_cast<uint64_t>(terrainRvtAtlasHeight) *
+        static_cast<uint64_t>(TerrainRvt::AtlasPoolCount());
+    const uint64_t terrainRvtAtlasBytes = terrainRvtAtlasTexels * (2u + 4u + 8u + 4u);
+    spdlog::info(
+        "Terrain RVT atlas allocation: pageSize={} border={} tileSide={} pages={}x{} pools={} texture={}x{} totalAtlasBytes={} ({:.2f} MiB)",
+        TerrainRvt::PageSize(),
+        TerrainRvt::BorderTexels(),
+        terrainRvtPhysicalTileSide,
+        TerrainRvt::AtlasPagesWide(),
+        TerrainRvt::AtlasPagesHigh(),
+        TerrainRvt::AtlasPoolCount(),
+        terrainRvtAtlasSide,
+        terrainRvtAtlasHeight,
+        terrainRvtAtlasBytes,
+        static_cast<double>(terrainRvtAtlasBytes) / (1024.0 * 1024.0));
+    auto createTerrainRvtAtlas = [&](std::string_view name, const char* debugName, rhi::Format format, uint32_t channels) {
+        org::TextureDescription desc;
+        desc.arraySize = TerrainRvt::AtlasPoolCount();
+        desc.channels = channels;
+        desc.isCubemap = false;
+        desc.isArray = true;
+        desc.hasSRV = true;
+        desc.hasUAV = true;
+        desc.hasNonShaderVisibleUAV = true;
+        desc.format = format;
+        desc.srvFormat = format;
+        desc.uavFormat = format;
+        desc.allowAlias = false;
+        desc.imageDimensions.push_back({ terrainRvtAtlasSide, terrainRvtAtlasHeight, 0, 0 });
+        auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
+        texture->SetName(debugName);
+        org::memory::SetResourceUsageHint(*texture, "Terrain RVT");
+        graph->RegisterResource(name, texture);
+    };
+
+    createTerrainRvtAtlas(Builtin::Terrain::RvtHeightAtlas, "TerrainRvt::HeightAtlas", rhi::Format::R16_Float, 1);
+    createTerrainRvtAtlas(Builtin::Terrain::RvtAlbedoAtlas, "TerrainRvt::AlbedoAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
+    createTerrainRvtAtlas(Builtin::Terrain::RvtNormalAtlas, "TerrainRvt::NormalAtlas", rhi::Format::R16G16B16A16_Float, 4);
+    createTerrainRvtAtlas(Builtin::Terrain::RvtMaterialAtlas, "TerrainRvt::MaterialAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
+    if (persistentTerrainRvtResources) {
+        const std::string_view persistentNames[] = {
+            Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtClipInfos,
+            Builtin::Terrain::RvtPageTable, Builtin::Terrain::RvtPageKeys,
+            Builtin::Terrain::RvtPhysicalPageOwner, Builtin::Terrain::RvtPhysicalPageAtlas,
+            Builtin::Terrain::RvtHeightResidentCache, Builtin::Terrain::RvtRequestMasks,
+            Builtin::Terrain::RvtRequestList, Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtGenerationList, Builtin::Terrain::RvtStats,
+            Builtin::Terrain::RvtGenerateDispatchArgs, Builtin::Terrain::RvtHeightAtlas,
+            Builtin::Terrain::RvtAlbedoAtlas, Builtin::Terrain::RvtNormalAtlas,
+            Builtin::Terrain::RvtMaterialAtlas
+        };
+        for (const auto name : persistentNames) {
+            persistentTerrainRvtResources->insert_or_assign(
+                std::string(name), graph->RequestResourcePtr(name));
+        }
+    }
+    }
+}
+
+inline void BuildVisibilityMaterialBinningPipeline(org::RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs)
+{
+    graph->BuildPass<MaterialUAVResetPass>("MaterialPixelCounterResetPass");
+    TagPassTechnique(graph, "MaterialPixelCounterResetPass", "Primary Visibility::GBuffer Construction::Material Groups");
+    graph->BuildPass<MaterialHistogramPass>("MaterialHistogramPass", inputs);
+    TagPassTechnique(graph, "MaterialHistogramPass", "Primary Visibility::GBuffer Construction::Material Groups");
+    graph->BuildPass<MaterialBlockScanPass>("MaterialBlockScanPass");
+    TagPassTechnique(graph, "MaterialBlockScanPass", "Primary Visibility::GBuffer Construction::Material Groups");
+    graph->BuildPass<MaterialBlockOffsetsPass>("MaterialBlockOffsetsPass");
+    TagPassTechnique(graph, "MaterialBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+    graph->BuildPass<BuildPixelListPass>("BuildPixelListPass", inputs);
+    TagPassTechnique(graph, "BuildPixelListPass", "Primary Visibility::GBuffer Construction::VisUtil");
+    graph->BuildPass<BuildMaterialIndirectCommandBufferPass>("BuildMaterialIndirectCommandBufferPass");
+    TagPassTechnique(graph, "BuildMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Material Groups");
+}
+
+inline void BuildTerrainRvtPipeline(org::RenderGraph* graph)
+{
+    graph->BuildPass<TerrainRvtFrameResetPass>("TerrainRvtFrameResetPass");
+    TagPassTechnique(graph, "TerrainRvtFrameResetPass", "Primary Visibility::Terrain RVT");
+    graph->BuildPass<TerrainRvtResolveRequestsPass>("TerrainRvtResolveMaterialRequestsPass");
+    TagPassTechnique(graph, "TerrainRvtResolveMaterialRequestsPass", "Primary Visibility::Terrain RVT");
+    graph->BuildPass<TerrainRvtBuildGenerateDispatchArgsPass>("TerrainRvtBuildMaterialGenerateDispatchArgsPass");
+    TagPassTechnique(graph, "TerrainRvtBuildMaterialGenerateDispatchArgsPass", "Primary Visibility::Terrain RVT");
+    graph->BuildPass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
+    TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
+    graph->BuildPass<TerrainRvtFinalizeGeneratedPagesPass>("TerrainRvtFinalizeGeneratedMaterialPagesPass");
+    TagPassTechnique(graph, "TerrainRvtFinalizeGeneratedMaterialPagesPass", "Primary Visibility::Terrain RVT");
+    graph->BuildPass<TerrainRvtBuildHeightResidentCachePass>("TerrainRvtBuildHeightResidentCachePass");
+    TagPassTechnique(graph, "TerrainRvtBuildHeightResidentCachePass", "Primary Visibility::Terrain RVT");
+    graph->BuildPass<TerrainRvtClearFeedbackRequestsPass>("TerrainRvtClearFeedbackRequestsPass");
+    TagPassTechnique(graph, "TerrainRvtClearFeedbackRequestsPass", "Primary Visibility::Terrain RVT");
+}
+
+inline void BuildTerrainRegionMaterialEvaluationPipeline(org::RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs)
+{
+    graph->BuildPass<TerrainRegionCounterResetPass>("TerrainRegionCounterResetPass");
+    TagPassTechnique(graph, "TerrainRegionCounterResetPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildPass<TerrainRegionHistogramPass>("TerrainRegionHistogramPass");
+    TagPassTechnique(graph, "TerrainRegionHistogramPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildPass<TerrainRegionBlockScanPass>("TerrainRegionBlockScanPass");
+    TagPassTechnique(graph, "TerrainRegionBlockScanPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildPass<TerrainRegionBlockOffsetsPass>("TerrainRegionBlockOffsetsPass");
+    TagPassTechnique(graph, "TerrainRegionBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildPass<TerrainRegionPixelListPass>("TerrainRegionPixelListPass");
+    TagPassTechnique(graph, "TerrainRegionPixelListPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildPass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass>("BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass");
+    TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildPass<BuildTerrainRegionMaterialIndirectCommandBufferPass>("BuildTerrainRegionMaterialIndirectCommandBufferPass");
+    TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildPass<EvaluateTerrainRegionMaterialGroupsPass>("EvaluateTerrainRegionMaterialGroupsPass", inputs);
+    TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+}
+
+inline void BuildMaterialEvaluationPipeline(org::RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs, bool terrainRvt)
+{
+    graph->BuildPass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", inputs, terrainRvt);
+    TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+}
+
+inline void BuildCanonicalSurfacePipeline(
+    org::RenderGraph* graph,
+    const MaterialEvaluationBuildInputs& inputs,
+    bool visibilityMaterialBinning,
+    bool terrainRvt,
+    bool terrainRegionMaterialEvaluation,
+    bool materialEvaluation) {
+    RegisterVisUtilResources(graph, terrainRvt);
+    bool occlusionCulling = SettingsManager::GetInstance().getSettingGetter<bool>("enableOcclusionCulling")();
+	bool enableWireframe = SettingsManager::GetInstance().getSettingGetter<bool>("enableWireframe")();
+	bool useMeshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
+	bool indirect = SettingsManager::GetInstance().getSettingGetter<bool>("enableIndirectDraws")();
+    bool visibilityRendering = SettingsManager::GetInstance().getSettingGetter<bool>("enableVisibilityRendering")();
+
+    if (!useMeshShaders) {
+        indirect = false; // Mesh shader pipelines are required for indirect draws
+	}
+
+    // Z prepass goes before light clustering for when active cluster determination is implemented
+    bool clearRTVs = false;
+    const bool needsVisibilityMaterialEvaluation = visibilityRendering && visibilityMaterialBinning;
+    if (!needsVisibilityMaterialEvaluation && (!occlusionCulling || !indirect)) {
+        clearRTVs = true; // We will not run an earlier pass
+    }
+    if (needsVisibilityMaterialEvaluation) {
+        // Reset material counters
+        graph->BuildPass<MaterialUAVResetPass>("MaterialPixelCounterResetPass");
+        TagPassTechnique(graph, "MaterialPixelCounterResetPass", "Primary Visibility::GBuffer Construction::Material Groups");
+
+        // Build material histogram
+        graph->BuildPass<MaterialHistogramPass>("MaterialHistogramPass", inputs);
+        TagPassTechnique(graph, "MaterialHistogramPass", "Primary Visibility::GBuffer Construction::Material Groups");
+
+        // Prefix sum material histogram
+        graph->BuildPass<MaterialBlockScanPass>("MaterialBlockScanPass");
+        TagPassTechnique(graph, "MaterialBlockScanPass", "Primary Visibility::GBuffer Construction::Material Groups");
+
+        graph->BuildPass<MaterialBlockOffsetsPass>("MaterialBlockOffsetsPass");
+        TagPassTechnique(graph, "MaterialBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+
+        // Build pixel list
+        graph->BuildPass<BuildPixelListPass>("BuildPixelListPass", inputs);
+        TagPassTechnique(graph, "BuildPixelListPass", "Primary Visibility::GBuffer Construction::VisUtil");
+
+        // Build indirect command buffer for material passes
+        graph->BuildPass<BuildMaterialIndirectCommandBufferPass>("BuildMaterialIndirectCommandBufferPass");
+        TagPassTechnique(graph, "BuildMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Material Groups");
+
+        if (terrainRvt) {
+            graph->BuildPass<TerrainRvtFrameResetPass>("TerrainRvtFrameResetPass");
+            TagPassTechnique(graph, "TerrainRvtFrameResetPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildPass<TerrainRvtResolveRequestsPass>("TerrainRvtResolveMaterialRequestsPass");
+            TagPassTechnique(graph, "TerrainRvtResolveMaterialRequestsPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildPass<TerrainRvtBuildGenerateDispatchArgsPass>("TerrainRvtBuildMaterialGenerateDispatchArgsPass");
+            TagPassTechnique(graph, "TerrainRvtBuildMaterialGenerateDispatchArgsPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildPass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
+            TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildPass<TerrainRvtFinalizeGeneratedPagesPass>("TerrainRvtFinalizeGeneratedMaterialPagesPass");
+            TagPassTechnique(graph, "TerrainRvtFinalizeGeneratedMaterialPagesPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildPass<TerrainRvtBuildHeightResidentCachePass>("TerrainRvtBuildHeightResidentCachePass");
+            TagPassTechnique(graph, "TerrainRvtBuildHeightResidentCachePass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildPass<TerrainRvtClearFeedbackRequestsPass>("TerrainRvtClearFeedbackRequestsPass");
+            TagPassTechnique(graph, "TerrainRvtClearFeedbackRequestsPass", "Primary Visibility::Terrain RVT");
+        }
+
+        if (terrainRegionMaterialEvaluation) {
+            graph->BuildPass<TerrainRegionCounterResetPass>("TerrainRegionCounterResetPass");
+            TagPassTechnique(graph, "TerrainRegionCounterResetPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+            graph->BuildPass<TerrainRegionHistogramPass>("TerrainRegionHistogramPass");
+            TagPassTechnique(graph, "TerrainRegionHistogramPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+            graph->BuildPass<TerrainRegionBlockScanPass>("TerrainRegionBlockScanPass");
+            TagPassTechnique(graph, "TerrainRegionBlockScanPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+            graph->BuildPass<TerrainRegionBlockOffsetsPass>("TerrainRegionBlockOffsetsPass");
+            TagPassTechnique(graph, "TerrainRegionBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+            graph->BuildPass<TerrainRegionPixelListPass>("TerrainRegionPixelListPass");
+            TagPassTechnique(graph, "TerrainRegionPixelListPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+            graph->BuildPass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass>("BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass");
+            TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+            graph->BuildPass<BuildTerrainRegionMaterialIndirectCommandBufferPass>("BuildTerrainRegionMaterialIndirectCommandBufferPass");
+            TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+            graph->BuildPass<EvaluateTerrainRegionMaterialGroupsPass>("EvaluateTerrainRegionMaterialGroupsPass", inputs);
+            TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+        }
+
+        // Evaluate material groups
+        if (materialEvaluation) {
+            graph->BuildPass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", inputs, terrainRvt);
+            TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+        }
+
+        // PrimaryDepthCopyPass is disabled for CLod two-phase path.
+    }
+}
+
+inline void RegisterGTAOResources(org::RenderGraph* graph) {
+    auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    constexpr uint64_t gtaoAliasPoolID = 1;
+
+    org::TextureDescription workingDepthsDesc;
+    workingDepthsDesc.arraySize = 1;
+    workingDepthsDesc.channels = 1;
+    workingDepthsDesc.isCubemap = false;
+    workingDepthsDesc.hasUAV = true;
+	workingDepthsDesc.hasSRV = true;
+    workingDepthsDesc.format = rhi::Format::R32_Float;
+    workingDepthsDesc.generateMipMaps = true;
+    workingDepthsDesc.allowAlias = true;
+    org::ImageDimensions dims1 = { resolution.x, resolution.y, 0, 0 };
+    workingDepthsDesc.imageDimensions.push_back(dims1);
+    auto workingDepths = org::PixelBuffer::CreateSharedUnmaterialized(workingDepthsDesc);
+    //workingDepths->SetAliasingPool(gtaoAliasPoolID);
+    org::memory::SetResourceUsageHint(*workingDepths, "GTAO resources");
+    workingDepths->SetName("GTAO Working Depths");
+
+    org::TextureDescription workingEdgesDesc;
+    workingEdgesDesc.arraySize = 1;
+    workingEdgesDesc.channels = 1;
+    workingEdgesDesc.isCubemap = false;
+    workingEdgesDesc.hasUAV = true;
+	workingEdgesDesc.hasSRV = true;
+    workingEdgesDesc.format = rhi::Format::R8_UNorm;
+    workingEdgesDesc.generateMipMaps = false;
+    workingEdgesDesc.imageDimensions.push_back(dims1);
+	workingEdgesDesc.allowAlias = true;
+    auto workingEdges = org::PixelBuffer::CreateSharedUnmaterialized(workingEdgesDesc);
+    org::memory::SetResourceUsageHint(*workingEdges, "GTAO resources");
+    workingEdges->SetName("GTAO Working Edges");
+
+    org::TextureDescription workingAOTermDesc;
+    workingAOTermDesc.arraySize = 1;
+    workingAOTermDesc.channels = 1;
+    workingAOTermDesc.isCubemap = false;
+    workingAOTermDesc.hasUAV = true;
+	workingAOTermDesc.hasSRV = true;
+    workingAOTermDesc.format = rhi::Format::R8_UInt;
+    workingAOTermDesc.generateMipMaps = false;
+    workingAOTermDesc.imageDimensions.push_back(dims1);
+    workingAOTermDesc.allowAlias = true;
+    auto workingAOTerm1 = org::PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
+    workingAOTerm1->SetName("GTAO Working AO Term 1");
+    org::memory::SetResourceUsageHint(*workingAOTerm1, "GTAO resources");
+    auto workingAOTerm2 = org::PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
+    workingAOTerm2->SetName("GTAO Working AO Term 2");
+    org::memory::SetResourceUsageHint(*workingAOTerm2, "GTAO resources");
+    std::shared_ptr<org::PixelBuffer> outputAO = org::PixelBuffer::CreateSharedUnmaterialized(workingAOTermDesc);
+    //outputAO->SetAliasingPool(gtaoAliasPoolID);
+    outputAO->SetName("GTAO Output AO Term");
+    org::memory::SetResourceUsageHint(*outputAO, "GTAO resources");
+
+    graph->RegisterResource(Builtin::GTAO::WorkingAOTerm1, workingAOTerm1);
+    graph->RegisterResource(Builtin::GTAO::WorkingAOTerm2, workingAOTerm2);
+    graph->RegisterResource(Builtin::GTAO::OutputAOTerm, outputAO);
+    graph->RegisterResource(Builtin::GTAO::WorkingDepths, workingDepths);
+    graph->RegisterResource(Builtin::GTAO::WorkingEdges, workingEdges);
+}
+
+inline void BuildGTAOPipeline(org::RenderGraph* graph, const Components::Camera* currentCamera) {
+    auto GTAOConstantBuffer = CreateIndexedConstantBuffer(sizeof(GTAOInfo),"GTAO constants");
+
+    graph->RegisterResource("Builtin::GTAO::ConstantsBuffer", GTAOConstantBuffer);
+
+    graph->BuildPass<GTAOFilterPass>("GTAOFilterPass"); // Depth filter pass
+    TagPassTechnique(graph, "GTAOFilterPass", "Post Process::GTAO");
+
+    graph->BuildPass<GTAOMainPass>("GTAOMainPass"); // Main pass
+    TagPassTechnique(graph, "GTAOMainPass", "Post Process::GTAO");
+
+    graph->BuildPass<GTAODenoisePass>("GTAODenoisePass"); // Denoise pass
+    TagPassTechnique(graph, "GTAODenoisePass", "Post Process::GTAO");
+}
+
+inline void BuildLightClusteringPipeline(org::RenderGraph* graph) {
+    // light pages counter
+    auto lightPagesCounter = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(unsigned int),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    lightPagesCounter->SetName("Light Pages Counter");
+    graph->RegisterResource(Builtin::Light::PagesCounter, lightPagesCounter);
+
+    graph->BuildPass<ClusterGenerationPass>("ClusterGenerationPass");
+    TagPassTechnique(graph, "ClusterGenerationPass", "Lighting::Clustered Lighting");
+
+    graph->BuildPass<LightCullingPass>("LightCullingPass");
+    TagPassTechnique(graph, "LightCullingPass", "Lighting::Clustered Lighting");
+}
+
+inline void BuildEnvironmentPipeline(org::RenderGraph* graph) {
+    graph->BuildPass<EnvironmentConversionPass>("Environment Conversion Pass");
+    TagPassTechnique(graph, "Environment Conversion Pass", "Environment Lighting::Capture & Filtering");
+
+    graph->BuildPass<EnvironmentSHPass>("Environment Spherical Harmonics Pass");
+    TagPassTechnique(graph, "Environment Spherical Harmonics Pass", "Environment Lighting::Capture & Filtering");
+
+    graph->BuildPass<EnvironmentFilterPass>("Environment Prefilter Pass");
+    TagPassTechnique(graph, "Environment Prefilter Pass", "Environment Lighting::Capture & Filtering");
+}
+
+inline void BuildLinearDepthDownsamplePass(org::RenderGraph* graph) {
+    graph->BuildPass<DownsamplePass>("LinearDepthDownsamplePass");
+    TagPassTechnique(graph, "LinearDepthDownsamplePass", "Depth::Linear Depth");
+}
+
+inline void BuildLinearDepthHistoryCopyPass(org::RenderGraph* graph, br::render::IDepthHistoryService* historyService) {
+    graph->BuildPass<LinearDepthHistoryCopyPass>("LinearDepthHistoryCopyPass", historyService);
+    TagPassTechnique(graph, "LinearDepthHistoryCopyPass", "Post Process::Depth History");
+}
+
+inline void BuildPrimaryPass(org::RenderGraph* graph, Environment* currentEnvironment, bool hasBoundEnvironment = false) {
+
+	bool gtaoEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")();
+	bool meshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
+	bool indirect = SettingsManager::GetInstance().getSettingGetter<bool>("enableIndirectDraws")();
+	bool wireframe = SettingsManager::GetInstance().getSettingGetter<bool>("enableWireframe")();
+
+	// Uses existing GBuffer resources
+    const bool renderSkybox = currentEnvironment != nullptr || hasBoundEnvironment;
+    graph->BuildPass<DeferredShadingPass>("DeferredShadingPass", renderSkybox);
+    TagPassTechnique(graph, "DeferredShadingPass", "Lighting::Primary Shading");
+
+    // DeferredShading's background branch renders the skybox using the same
+    // final opaque-depth classification, avoiding a second full-screen pass.
+
+	// Forward pass for materials incompatible with deferred rendering
+    graph->BuildPass<ForwardRenderPass>("Forward render pass", ForwardRenderPassInputs{
+        wireframe,
+        meshShaders,
+        indirect});
+    TagPassTechnique(graph, "Forward render pass", "Lighting::Primary Shading");
+}
+
+inline void BuildPPLLPipeline(org::RenderGraph* graph) {
+	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+	bool useMeshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
+	bool indirect = SettingsManager::GetInstance().getSettingGetter<bool>("enableIndirectDraws")();
+	bool wireframe = SettingsManager::GetInstance().getSettingGetter<bool>("enableWireframe")();
+    if (!useMeshShaders) {
+        indirect = false; // Mesh shader pipelines are required for indirect draws
+	}
+
+    static const size_t aveFragsPerPixel = 5;
+    auto numPPLLNodes = resolution.x * resolution.y * aveFragsPerPixel;
+    static const size_t PPLLNodeSize = 24; // two uints, four floats
+    org::TextureDescription desc;
+    org::ImageDimensions dimensions;
+    dimensions.width = resolution.x;
+    dimensions.height = resolution.y;
+    dimensions.rowPitch = resolution.x * sizeof(unsigned int);
+    dimensions.slicePitch = dimensions.rowPitch * resolution.y;
+    desc.imageDimensions.push_back(dimensions);
+    desc.channels = 1;
+    desc.format = rhi::Format::R32_UInt;
+    desc.hasRTV = false;
+    desc.hasUAV = true;
+    desc.hasNonShaderVisibleUAV = true;
+    desc.allowAlias = true;
+    //auto PPLLHeadPointerTexture = PixelBuffer::CreateSharedUnmaterialized(desc);
+    //PPLLHeadPointerTexture->SetName("PPLLHeadPointerTexture");
+    //org::memory::SetResourceUsageHint(*PPLLHeadPointerTexture, "OIT resources");
+    //auto PPLLBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+    //    static_cast<uint32_t>(numPPLLNodes),
+    //    static_cast<uint32_t>(PPLLNodeSize),
+    //    true,
+    //    false,
+    //    false,
+    //    rhi::HeapType::DeviceLocal);
+    //PPLLBuffer->SetAllowAlias(true);
+    //PPLLBuffer->SetName("PPLLBuffer");
+    //org::memory::SetResourceUsageHint(*PPLLBuffer, "OIT resources");
+    //auto PPLLCounter = Buffer::CreateSharedUnmaterialized(rhi::HeapType::DeviceLocal, sizeof(uint32_t), true);
+    //{
+    //    BufferBase::DescriptorRequirements descReq{};
+    //    descReq.createCBV = false;
+    //    descReq.createSRV = true;
+    //    descReq.createUAV = true;
+    //    descReq.createNonShaderVisibleUAV = true;
+    //    descReq.uavCounterOffset = 0;
+
+    //    descReq.srvDesc = rhi::SrvDesc{
+    //        .dimension = rhi::SrvDim::Buffer,
+    //        .formatOverride = rhi::Format::R32_UInt,
+    //        .buffer = {
+    //            .kind = rhi::BufferViewKind::Typed,
+    //            .firstElement = 0,
+    //            .numElements = 1,
+    //            .structureByteStride = 0,
+    //        },
+    //    };
+
+    //    descReq.uavDesc = rhi::UavDesc{
+    //        .dimension = rhi::UavDim::Buffer,
+    //        .formatOverride = rhi::Format::R32_UInt,
+    //        .buffer = {
+    //            .kind = rhi::BufferViewKind::Typed,
+    //            .firstElement = 0,
+    //            .numElements = 1,
+    //            .structureByteStride = 0,
+    //            .counterOffsetInBytes = 0,
+    //        },
+    //    };
+
+    //    PPLLCounter->SetDescriptorRequirements(descReq);
+    //}
+    //PPLLCounter->SetName("PPLLCounter");
+    //org::memory::SetResourceUsageHint(*PPLLCounter, "OIT resources");
+
+    //graph->RegisterResource(Builtin::PPLL::HeadPointerTexture, PPLLHeadPointerTexture);
+    //graph->RegisterResource(Builtin::PPLL::DataBuffer, PPLLBuffer);
+    //graph->RegisterResource(Builtin::PPLL::Counter, PPLLCounter);
+
+    //graph->BuildRenderPass<PPLLFillPass>("PPFillPass", PPLLFillPassInputs{
+    //    wireframe,
+    //    numPPLLNodes,
+    //    useMeshShaders,
+    //    indirect });
+
+    //graph->BuildRenderPass<PPLLResolvePass>("PPLLResolvePass");
+}
+
+inline void BuildBloomPipeline(org::RenderGraph* graph) {
+	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+
+    org::TextureDescription bloomDesc;
+    bloomDesc.arraySize = 1;
+    bloomDesc.channels = 4;
+    bloomDesc.isCubemap = false;
+    bloomDesc.hasRTV = true;
+    bloomDesc.hasSRV = true;
+    bloomDesc.format = rhi::Format::R16G16B16A16_Float;
+    bloomDesc.generateMipMaps = true;
+    bloomDesc.imageDimensions.push_back({ resolution.x, resolution.y, 0, 0 });
+    // This remains separate from the single-mip Streamline output, but can
+    // participate in the render graph's enhanced-barrier aliasing model.
+    bloomDesc.allowAlias = true;
+    auto bloomTexture = org::PixelBuffer::CreateSharedUnmaterialized(bloomDesc);
+    bloomTexture->SetName("Bloom Texture");
+    org::memory::SetResourceUsageHint(*bloomTexture, "Post-Processing resources");
+    graph->RegisterResource(Builtin::PostProcessing::BloomTexture, bloomTexture);
+
+    // Calculate max mips
+	unsigned int maxBloomMips = static_cast<unsigned int>(std::log2(std::max(resolution.x, resolution.y))) + 1;
+    unsigned int numBloomMips = 5;
+	if (maxBloomMips < numBloomMips) {
+		numBloomMips = maxBloomMips; // Limit to max mips
+	}
+
+	// Downsample numBloomMips mips of the HDR color target
+    for (unsigned int i = 0; i < numBloomMips; i++) {
+        const std::string passName = "BloomDownsamplePass" + std::to_string(i);
+		auto& builder = graph->BuildPass<BloomSamplePass>(passName, BloomSamplePassInputs{ i, false });
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+		br::validation::SARPInteropValidation::ApplyPassPolicy(
+			passName, builder, DeviceManager::GetInstance().GetPeerBackend());
+#endif
+        graph->SetPassTechnique(passName, "Post Process::Bloom");
+    }
+
+	// Upsample numBloomMips - 1 mips of the HDR color target, starting from the last mip
+    // The final mip-2 to mip-1 accumulation is folded into the full-resolution
+    // blend pass, avoiding a separate half-resolution render pass.
+    for (unsigned int i = numBloomMips-1; i > 1; i--) {
+        const std::string passName = "BloomUpsamplePass" + std::to_string(i);
+        graph->BuildPass<BloomSamplePass>(passName, BloomSamplePassInputs{ i, true });
+        graph->SetPassTechnique(passName, "Post Process::Bloom");
+    }
+    
+    // Tonemapping composites mip 1 plus the accumulated mip 2 directly while
+    // it already reads the full-resolution HDR source. This avoids another
+    // full-resolution HDR read/modify/write pass.
+}
+
+inline void CreateCanonicalSurfaceResources(org::RenderGraph* graph)
+{
+    const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    const org::ImageDimensions dimensions{ resolution.x, resolution.y, 0, 0 };
+    const auto createTexture = [&](std::string_view id, const char* name, rhi::Format format) {
+        org::TextureDescription desc;
+        desc.channels = 4;
+        desc.format = format;
+        desc.hasRTV = true;
+        desc.rtvFormat = format;
+        desc.hasSRV = true;
+        desc.srvFormat = format;
+        desc.hasUAV = true;
+        desc.uavFormat = format;
+        desc.hasNonShaderVisibleUAV = true;
+        desc.allowAlias = true;
+        desc.imageDimensions.push_back(dimensions);
+        auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
+        texture->SetName(name);
+        org::memory::SetResourceUsageHint(*texture, "SARP canonical surface contract v1");
+        graph->RegisterResource(id, std::move(texture));
+    };
+
+    createTexture(Builtin::Surface::BaseColorOpacity, "SARP Surface Base Color + Opacity", rhi::Format::R8G8B8A8_UNorm);
+    createTexture(Builtin::Surface::NormalRoughness, "SARP Surface Normal + Roughness", rhi::Format::R16G16B16A16_Float);
+    createTexture(Builtin::Surface::SpecularAo, "SARP Surface Specular F0 + AO", rhi::Format::R8G8B8A8_UNorm);
+    createTexture(Builtin::Surface::Emissive, "SARP Surface Emissive", rhi::Format::R16G16B16A16_Float);
+    createTexture(Builtin::Surface::Motion, "SARP Surface Motion", rhi::Format::R16G16_Float);
+    createTexture(Builtin::Surface::DeviceDepth, "SARP Surface Device Depth", rhi::Format::R32_Float);
+    createTexture(Builtin::Surface::Identity, "SARP Surface Identity", rhi::Format::R32G32_UInt);
+    createTexture(Builtin::Surface::Payload0, "SARP Surface Payload 0", rhi::Format::R16G16B16A16_Float);
+    createTexture(Builtin::Surface::Payload1, "SARP Surface Payload 1", rhi::Format::R16G16B16A16_Float);
+
+    // SARPSurfaceRecordV1 is deliberately duplicated as a fixed 32-byte stride here;
+    // the renderer library does not depend on SARP's public module headers.
+    auto records = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        resolution.x * resolution.y, 32u, true, false, false, rhi::HeapType::DeviceLocal);
+    records->SetAllowAlias(true);
+    records->SetName("SARP Surface Records");
+    org::memory::SetResourceUsageHint(*records, "SARP canonical surface contract v1");
+    graph->RegisterResource(Builtin::Surface::Records, std::move(records));
+}
+
+inline void BuildSSRPasses(org::RenderGraph* graph) {
+	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+
+    org::TextureDescription ssrDesc;
+    ssrDesc.arraySize = 1;
+    ssrDesc.channels = 4;
+    ssrDesc.isCubemap = false;
+    ssrDesc.hasRTV = true;
+    ssrDesc.format = rhi::Format::R16G16B16A16_Float;
+    ssrDesc.generateMipMaps = false;
+    ssrDesc.hasSRV = true;
+    ssrDesc.srvFormat = rhi::Format::R16G16B16A16_Float;
+	ssrDesc.hasUAV = true;
+	ssrDesc.uavFormat = rhi::Format::R16G16B16A16_Float;
+	ssrDesc.hasNonShaderVisibleUAV = true; // For ClearUnorderedAccessView
+    org::ImageDimensions dims = { resolution.x, resolution.y, 0, 0 };
+    ssrDesc.imageDimensions.push_back(dims);
+    ssrDesc.allowAlias = true;
+    auto ssrTexture = org::PixelBuffer::CreateSharedUnmaterialized(ssrDesc);
+    ssrTexture->SetName("SSR Texture");
+    org::memory::SetResourceUsageHint(*ssrTexture, "Post-Processing resources");
+	graph->RegisterResource(Builtin::PostProcessing::ScreenSpaceReflections, ssrTexture);
+
+    graph->BuildPass<ScreenSpaceReflectionsPass>("Screen-Space Reflections Pass");
+    TagPassTechnique(graph, "Screen-Space Reflections Pass", "Post Process::Screen-Space Reflections");
+
+    graph->BuildPass<SpecularIBLPass>("Specular IBL & SSR Composite Pass");
+    TagPassTechnique(graph, "Specular IBL & SSR Composite Pass", "Post Process::Screen-Space Reflections");
+}
+
+inline void BuildRayTracedReflectionPasses(org::RenderGraph* graph) {
+    auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+
+    org::TextureDescription rtReflectionDesc;
+    rtReflectionDesc.arraySize = 1;
+    rtReflectionDesc.channels = 4;
+    rtReflectionDesc.isCubemap = false;
+    rtReflectionDesc.hasRTV = true;
+    rtReflectionDesc.format = rhi::Format::R16G16B16A16_Float;
+    rtReflectionDesc.generateMipMaps = false;
+    rtReflectionDesc.hasSRV = true;
+    rtReflectionDesc.srvFormat = rhi::Format::R16G16B16A16_Float;
+    rtReflectionDesc.hasUAV = true;
+    rtReflectionDesc.uavFormat = rhi::Format::R16G16B16A16_Float;
+    rtReflectionDesc.hasNonShaderVisibleUAV = true;
+    rtReflectionDesc.imageDimensions.push_back({ resolution.x, resolution.y, 0, 0 });
+    rtReflectionDesc.allowAlias = true;
+
+    auto rtReflectionTexture = org::PixelBuffer::CreateSharedUnmaterialized(rtReflectionDesc);
+    rtReflectionTexture->SetName("Ray Traced Reflections Texture");
+    org::memory::SetResourceUsageHint(*rtReflectionTexture, "Post-Processing resources");
+    graph->RegisterResource(Builtin::PostProcessing::ScreenSpaceReflections, rtReflectionTexture);
+
+    graph->BuildPass<RayTracedReflectionsPass>("Ray Traced Reflections Pass");
+    TagPassTechnique(graph, "Ray Traced Reflections Pass", "Ray Tracing::Reflections");
+
+    graph->BuildPass<SpecularIBLPass>("Specular IBL & RT Reflections Composite Pass");
+    TagPassTechnique(graph, "Specular IBL & RT Reflections Composite Pass", "Ray Tracing::Reflections");
+}

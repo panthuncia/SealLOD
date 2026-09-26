@@ -1,4 +1,4 @@
-﻿# CMakeList.txt : CMake project for BasicRenderer, include source and define
+# CMakeList.txt : CMake project for BasicRenderer, include source and define
 # project specific logic here.
 #
 
@@ -21,81 +21,13 @@ set(CMAKE_INCLUDE_DIRECTORIES_BEFORE ON)
 # Add source to this project's executable.
 add_definitions(-D_UNICODE -DUNICODE)
 
-option(BASICRENDERER_USE_PACKAGE_DEPS "Prefer preinstalled BasicRHI/OpenRenderGraph packages" ON)
-option(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK "Allow fallback to in-tree BasicRHI/OpenRenderGraph" ON)
-
-if(BASICRENDERER_USE_PACKAGE_DEPS)
-    find_package(BasicTelemetry CONFIG QUIET)
-    find_package(BasicScene CONFIG QUIET)
-    find_package(BasicRHI CONFIG QUIET)
-    find_package(OpenRenderGraph CONFIG QUIET)
-    find_package(ORGModuleServices CONFIG QUIET)
+include("${BASICRENDERER_REPO_ROOT}/cmake/RendererDependencies.cmake")
+# Retain the inner entry point's fallback defaults without overriding host targets.
+if(NOT TARGET BasicTelemetry::Core)
+    set(BASICTELEMETRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BASICTELEMETRY_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 endif()
-
-if(TARGET BasicScene AND NOT TARGET BasicScene::BasicScene)
-    add_library(BasicScene::BasicScene ALIAS BasicScene)
-endif()
-
-if(TARGET BasicRHI AND NOT TARGET BasicRHI::BasicRHI)
-    add_library(BasicRHI::BasicRHI ALIAS BasicRHI)
-endif()
-
-if(TARGET OpenRenderGraph AND NOT TARGET OpenRenderGraph::OpenRenderGraph)
-    add_library(OpenRenderGraph::OpenRenderGraph ALIAS OpenRenderGraph)
-endif()
-
-if(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK)
-    if(NOT TARGET BasicTelemetry::Core AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../BasicTelemetry/CMakeLists.txt")
-        set(BASICTELEMETRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(BASICTELEMETRY_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../BasicTelemetry" "${CMAKE_CURRENT_BINARY_DIR}/_deps/BasicTelemetry")
-    endif()
-
-    if(NOT TARGET BasicScene::BasicScene AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../BasicScene/CMakeLists.txt")
-        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../BasicScene" "${CMAKE_CURRENT_BINARY_DIR}/_deps/BasicScene")
-    endif()
-
-    if(TARGET BasicScene AND NOT TARGET BasicScene::BasicScene)
-        add_library(BasicScene::BasicScene ALIAS BasicScene)
-    endif()
-
-    if(NOT TARGET BasicRHI::BasicRHI AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../BasicRHI/CMakeLists.txt")
-        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../BasicRHI" "${CMAKE_CURRENT_BINARY_DIR}/_deps/BasicRHI")
-    endif()
-
-    if(TARGET BasicRHI AND NOT TARGET BasicRHI::BasicRHI)
-        add_library(BasicRHI::BasicRHI ALIAS BasicRHI)
-    endif()
-
-    if(NOT TARGET OpenRenderGraph::OpenRenderGraph AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../OpenRenderGraph/CMakeLists.txt")
-        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../OpenRenderGraph" "${CMAKE_CURRENT_BINARY_DIR}/_deps/OpenRenderGraph")
-    endif()
-
-    if(TARGET OpenRenderGraph AND NOT TARGET OpenRenderGraph::OpenRenderGraph)
-        add_library(OpenRenderGraph::OpenRenderGraph ALIAS OpenRenderGraph)
-    endif()
-
-    if(NOT TARGET ORGModuleServices::ORGModuleServices AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../ORGModuleServices/CMakeLists.txt")
-        set(ORG_MODULE_SERVICES_ENABLE_VULKAN ${BASICRHI_ENABLE_VULKAN} CACHE BOOL "" FORCE)
-        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../ORGModuleServices" "${CMAKE_CURRENT_BINARY_DIR}/_deps/ORGModuleServices")
-    endif()
-endif()
-
-if(NOT TARGET BasicScene::BasicScene)
-    message(FATAL_ERROR "BasicRenderer requires BasicScene::BasicScene. Install BasicScene package or provide BasicScene as submodule.")
-endif()
-
-if(NOT TARGET BasicRHI::BasicRHI)
-    message(FATAL_ERROR "BasicRenderer requires BasicRHI::BasicRHI. Install BasicRHI package or provide BasicRHI as submodule.")
-endif()
-
-if(NOT TARGET OpenRenderGraph::OpenRenderGraph)
-    message(FATAL_ERROR "BasicRenderer requires OpenRenderGraph::OpenRenderGraph. Install OpenRenderGraph package or provide OpenRenderGraph as submodule.")
-endif()
-
-if(NOT TARGET ORGModuleServices::ORGModuleServices)
-    message(FATAL_ERROR "BasicRenderer requires ORGModuleServices::ORGModuleServices. Install it or provide it as a submodule.")
-endif()
+basicrenderer_resolve_dependencies("${BASICRENDERER_REPO_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/_deps")
 
 if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     get_filename_component(_basicrenderer_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
@@ -306,10 +238,307 @@ target_link_libraries(resource_codegen
 
 set(BASICRENDERER_DEMO_TARGET BasicRendererDemo)
 
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+set(SOURCES
+    # src
+    "src/Scene/Views/DefaultDirection.cpp"
+    "src/Runtime/Renderer/RendererGraphConstruction.cpp"
+    "src/Runtime/Renderer/RendererLifecycle.cpp"
+    "src/Runtime/Renderer/RendererFrameRendering.cpp"
+    "src/Runtime/Renderer/RendererFrameUpdate.cpp"
+    "src/Runtime/Renderer/RendererPipeline.cpp"
+    "src/Runtime/Renderer/RendererResources.cpp"
+    "src/Runtime/Renderer/RendererSceneSync.cpp"
+    "src/Runtime/Renderer/RendererSceneIngestion.cpp"
+    "src/Runtime/Renderer/RendererSceneApi.cpp"
+    # src/Animation
+    "src/Animation/Playback/AnimationClip.cpp"
+    "src/Animation/Playback/AnimationController.cpp"
+    "src/Animation/Skeletons/Skeleton.cpp"
+    "src/Animation/Skeletons/SkeletonManager.cpp"
+    # src/Assets
+    "src/Pipeline/ShaderCompilation/ShaderArtifactCompilation.cpp"
+    "src/Assets/Textures/Processing/TextureProcessingManager.cpp"
+    "src/Assets/Textures/Processing/TextureProcessingRequests.cpp"
+    # src/Diagnostics
+    "src/Pipeline/Diagnostics/PipelineControl.cpp"
+    "src/Diagnostics/Renderer/RendererDiagnostics.cpp"
+    "src/Terrain/Diagnostics/TerrainRvtTelemetry.cpp"
+    "src/Diagnostics/Renderer/RendererTelemetryRequests.cpp"
+    "src/Diagnostics/Renderer/RendererCLodTelemetryRequests.cpp"
+    # src/Factories
+    "src/Assets/Textures/TextureFactory.cpp"
+    "src/Assets/Textures/RenderPasses/MipmappingPass.cpp"
+    "src/Assets/Textures/RenderPasses/BC7CompressionPasses.cpp"
+    # src/FidelityFX
+    "src/PostProcessing/FidelityFX/Backend/FfxBackendAdapters.cpp"
+    "src/PostProcessing/FidelityFX/Backend/FfxBackendDX12.cpp"
+    "src/PostProcessing/FidelityFX/Backend/FfxBackendVulkan.cpp"
+    # src/Import
+    "src/Assets/Import/Assimp/AssimpGeometryExtractor.cpp"
+    "src/Assets/Import/Assimp/AssimpLoader.cpp"
+    "src/Assets/Import/NIF/BRNiflyClient.cpp"
+    "src/Assets/Cache/ClusterLOD/CLodCache.cpp"
+    "src/Assets/Cache/ClusterLOD/CLodCacheLoader.cpp"
+    "src/Assets/GeometryProcessing/ClusterLOD/DefaultCLodSettings.cpp"
+    "src/Assets/Import/GlTF/GlTFGeometryExtractor.cpp"
+    "src/Assets/Import/GlTF/GlTFLoader.cpp"
+    "src/Assets/Import/ModelLoader.cpp"
+    "src/Assets/Import/NIF/NifLoader.cpp"
+    "src/Assets/GeometryProcessing/Reyes/ObjectReyesAtlasBaker.cpp"
+    "src/Assets/Import/RenderableAsset.cpp"
+    "src/Assets/Cache/Skeleton/SkeletonArtifactCache.cpp"
+    "src/Assets/Cache/Skeleton/SkeletonArtifactValidation.cpp"
+    "src/Assets/Import/USD/USDGeometryExtractor.cpp"
+    "src/Assets/Import/USD/USDLoader.cpp"
+    "src/Assets/Import/USD/USDStageEntryPoints.cpp"
+    "src/Assets/Import/USD/USDMaterialConversion.cpp"
+    "src/Assets/Import/USD/USDSkeletonConversion.cpp"
+    "src/Assets/Import/USD/USDGeometryConversion.cpp"
+    "src/Assets/Import/USD/USDAssetAssembly.cpp"
+    "src/Assets/Import/USD/USDMaterialCache.cpp"
+    # src/Lighting
+    "src/Lighting/Environment/EnvironmentManager.cpp"
+    "src/Lighting/Lights/LightManager.cpp"
+    "src/Lighting/Environment/RenderPasses/brdfIntegrationPass.h"
+    "src/Lighting/Environment/RenderPasses/EnvironmentConversionPass.h"
+    "src/Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"
+    "src/Lighting/Environment/RenderPasses/EnvironmentSHPass.h"
+    "src/Lighting/Environment/RenderPasses/SkyboxRenderPass.h"
+    # src/Materials
+    "src/Materials/Material.cpp"
+    "src/Materials/MaterialManager.cpp"
+    "src/Materials/TextureStreaming/MaterialTextureStreaming.cpp"
+    "src/Materials/TextureStreaming/MaterialTextureTransferService.cpp"
+    "src/Materials/TextureStreaming/TextureStreamingManager.cpp"
+    # src/Menu
+    "src/Diagnostics/Menu/Panels/VirtualGeometryPanel.cpp"
+    "src/Diagnostics/Menu/Panels/FrameTaskGraphPanel.cpp"
+    "src/Diagnostics/Menu/Panels/PassTimingPanel.cpp"
+    "src/Diagnostics/Menu/Panels/AutoAliasPanel.cpp"
+    "src/Diagnostics/Menu/Panels/SceneExplorerPanel.cpp"
+    "src/Diagnostics/Menu/RenderPasses/MenuDrawData.cpp"
+    "src/Diagnostics/Menu/Panels/EnvironmentPanel.cpp"
+    "src/Diagnostics/Menu/Panels/OutputPanel.cpp"
+    "src/Diagnostics/Menu/Panels/PostProcessingPanel.cpp"
+    "src/Diagnostics/Menu/MenuRuntime.cpp"
+    # src/Runtime
+    "src/Scene/Objects/IndirectCommandBufferManager.cpp"
+    "src/Runtime/IO/DirectStorageManager.cpp"
+    "src/Runtime/IO/ReadbackManager.cpp"
+    "src/Runtime/Device/RenderDeviceAccess.cpp"
+    "src/Pipeline/PipelineState/CommandSignatureManager.cpp"
+    "src/Pipeline/PipelineState/PipelineAccess.cpp"
+    "src/Runtime/Settings/SettingAccess.cpp"
+    "src/Runtime/Settings/RendererSettings.cpp"
+    # src/PostProcessing
+    "src/PostProcessing/FidelityFX/FFXManager.cpp"
+    "src/PostProcessing/Reflections/ScreenSpaceReflectionsGenerationService.cpp"
+    "src/PostProcessing/Upscaling/UpscalingGenerationService.cpp"
+    "src/PostProcessing/Upscaling/UpscalingManager.cpp"
+    # src/Terrain
+    "src/Terrain/Residency/TerrainManager.cpp"
+    # src/Runtime / src/Assets
+    "src/Runtime/Device/DeviceManager.cpp"
+    "src/Pipeline/PipelineState/PSOManager.cpp"
+    "src/Runtime/Resources/ResourceManager.cpp"
+    "src/Pipeline/ShaderCompilation/ShaderArtifactCache.cpp"
+    "src/Runtime/Scheduling/TaskSchedulerManager.cpp"
+    # src/Mesh
+    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLOD.cpp"
+    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODUtilities.cpp"
+    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODValidation.cpp"
+    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.cpp"
+    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePacking.cpp"
+    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.cpp"
+    "src/Assets/Geometry/Mesh.cpp"
+    "src/Assets/Geometry/MeshIngestBuilder.cpp"
+    "src/Assets/Geometry/MeshInstance.cpp"
+    "src/Assets/Geometry/MeshInstanceFactory.cpp"
+    "src/VirtualGeometry/GeometryStorage/MeshManager.cpp"
+    "src/Assets/GeometryProcessing/Voxels/VoxelGroupBuilder.cpp"
+    # src/Render
+    "src/Runtime/StateGraph/AsyncStateGraph.cpp"
+    "src/VirtualGeometry/Streaming/Publication/CLodResidencyStorageArtifacts.cpp"
+    "src/Runtime/StateGraph/CapacityProvider.cpp"
+    "src/Diagnostics/Scene/DebugSceneSnapshotService.cpp"
+    "src/VirtualGeometry/GeometryStorage/GeometryBufferStateArtifacts.cpp"
+    "src/VirtualGeometry/Streaming/Publication/GeometryResidencyStateArtifacts.cpp"
+    "src/Scene/Objects/IndirectStateArtifacts.cpp"
+    "src/Lighting/Lights/LightStateArtifacts.cpp"
+    "src/Materials/Publication/MaterialStateArtifacts.cpp"
+    "src/Scene/Objects/ObjectBufferStateArtifacts.cpp"
+    "src/Materials/Evaluation/OpenPBRLookupResources.cpp"
+    "src/Runtime/Publication/PersistentRendererPublication.cpp"
+    "src/Animation/Pose/PoseInstanceRegistrationService.cpp"
+    "src/Animation/Pose/PoseStateArtifacts.cpp"
+    "src/Runtime/Publication/PublishedRendererState.cpp"
+    "src/Runtime/GraphIntegration/RenderGraphIOService.cpp"
+    "src/Runtime/Publication/RendererStateRequestService.cpp"
+    "src/Scene/Ingestion/SceneAssetRequestService.cpp"
+    "src/Scene/Ingestion/SceneEntityMaterializationService.cpp"
+    "src/Scene/Ingestion/SceneRenderBridge.cpp"
+    "src/Scene/Ingestion/SceneRenderableResidencyService.cpp"
+    "src/Scene/Ingestion/SceneSourceStateStore.cpp"
+    "src/Pipeline/ShaderCompilation/ShaderVariantRequestService.cpp"
+    "src/VirtualGeometry/GeometryStorage/StaticGeometryRequestService.cpp"
+    "src/Materials/Publication/StaticMaterialRequestService.cpp"
+    "src/Scene/Objects/StaticObjectRequestService.cpp"
+    "src/Runtime/Publication/StaticStateArtifacts.cpp"
+    "src/Scene/Objects/StaticWorkloadRequestService.cpp"
+    "src/Runtime/Scheduling/TbbTaskService.cpp"
+    "src/Terrain/Residency/TerrainStateArtifacts.cpp"
+    "src/Materials/TextureStreaming/TextureBindingArtifacts.cpp"
+    "src/Materials/TextureStreaming/TextureImageTableArtifacts.cpp"
+    "src/Runtime/Resources/VersionedBuffers/VersionedGpuBufferArtifacts.cpp"
+    "src/Scene/Views/ViewStateArtifacts.cpp"
+    # src/Render/GraphExtensions
+    "src/Transparency/GraphIntegration/CLodAlphaVariant.cpp"
+    "src/VirtualGeometry/GraphIntegration/CLodExtension.cpp"
+    "src/VirtualGeometry/GraphIntegration/CLodExtensionShared.cpp"
+    "src/VirtualShadows/GraphIntegration/CLodShadowVariant.cpp"
+    "src/VirtualGeometry/GraphIntegration/CLodVisibilityVariant.cpp"
+    "src/VirtualShadows/Casters/VirtualShadowCasterProvider.cpp"
+    # src/Render/Pipeline
+    "src/Pipeline/Recipes/PipelineRecipe.cpp"
+    # src/RenderPasses
+    "src/Scene/Views/RenderPasses/PrimaryCameraUploadPass.cpp"
+    "src/Lighting/Clustered/RenderPasses/ClusterGenerationPass.h"
+    "src/Lighting/Clustered/RenderPasses/LightCullingPass.h"
+    "src/VirtualGeometry/Rasterization/RenderPasses/ClearVisibilityBufferPass.h"
+    "src/Diagnostics/RenderPasses/DebugGridPass.h"
+    "src/Lighting/Shading/RenderPasses/DeferredShadingPass.h"
+    "src/Diagnostics/RenderPasses/DebugSpheresPass.h"
+    "src/Diagnostics/RenderPasses/DebugSkeletonPass.h"
+    "src/Runtime/Frame/RenderPasses/PresentPass.h"
+    "src/Scene/Views/RenderPasses/PrimaryDepthCopyPass.h"
+    "src/Scene/Views/RenderPasses/PrimaryCameraUploadPass.h"
+    "src/PostProcessing/Downsampling/RenderPasses/Downsample.h"
+    "src/Scene/Views/RenderPasses/LinearDepthHistoryCopyPass.h"
+    "src/PostProcessing/AmbientOcclusion/RenderPasses/XeGTAODenoisePass.h"
+    "src/PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOFilterPass.h"
+    "src/PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOMainPass.h"
+    "src/PostProcessing/Bloom/RenderPasses/BloomBlendPass.h"
+    "src/PostProcessing/Bloom/RenderPasses/BloomSamplePass.h"
+    "src/Diagnostics/RenderPasses/DebugResolvePass.h"
+    "src/PostProcessing/Upscaling/RenderPasses/DilateMotionVectorsPass.h"
+    "src/PostProcessing/Exposure/RenderPasses/luminanceHistogram.h"
+    "src/PostProcessing/Exposure/RenderPasses/luminanceHistogramAverage.h"
+    "src/Lighting/Environment/RenderPasses/SpecularIBLPass.h"
+    "src/PostProcessing/ToneMapping/RenderPasses/Tonemapping.h"
+    # src/Resources
+    "src/Runtime/Resources/Sampler.cpp"
+    "src/Assets/Textures/Texture.cpp"
+    # src/Resources/Buffers
+    "src/Runtime/Resources/Buffers/BufferView.cpp"
+    "src/Runtime/Resources/Buffers/DynamicBuffer.cpp"
+    "src/Runtime/Resources/Buffers/DynamicStructuredBuffer.cpp"
+    "src/Runtime/Resources/Buffers/PagePool.cpp"
+    "src/Runtime/Resources/Buffers/SortedUnsignedIntBuffer.cpp"
+    # src/Scene
+    "src/Scene/ECS/ECSManager.cpp"
+    "src/Scene/ECS/RendererECSManager.cpp"
+    "src/Scene/Environment.cpp"
+    "src/Scene/Objects/ObjectManager.cpp"
+    "src/Scene/Scene.cpp"
+    "src/Scene/Views/ViewManager.cpp"
+    # src/Telemetry
+    "src/Diagnostics/Telemetry/FrameTaskGraphTelemetry.cpp"
+    "src/Diagnostics/Telemetry/NvPerfIntegration.cpp"
+    "src/Diagnostics/Telemetry/SamplingControlServer.cpp"
+    "src/Diagnostics/Telemetry/StatisticalSampler.cpp"
+    # src/Transparency
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITAdaptiveFitPass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITAdaptiveFitUpdatePass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITDepthWarpPass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITEarlyDepthBuildPass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITEarlyDepthPass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITIntegratePass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITOccupancyHistogramPass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITOccupancyRemapPass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITResolvePass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITSetupPass.cpp"
+    "src/Transparency/AVBOIT/RenderPasses/AVBOITSparseClearPass.cpp"
+    # src/Utilities
+    "src/Assets/Cache/CachePathUtilities.cpp"
+    "src/Utilities/MathUtils.cpp"
+    "src/Assets/Textures/Import/StbImage.cpp"
+    "src/Utilities/Utilities.cpp"
+    # src/VirtualGeometry/Culling
+    "src/VirtualGeometry/Culling/RenderPasses/HierarchicalCullingPass.cpp"
+    "src/VirtualGeometry/Culling/RenderPasses/HierarchicalDispatchCullingPass.cpp"
+    # src/VirtualGeometry/GraphIntegration
+    "src/VirtualGeometry/GraphIntegration/CLodViewTables.cpp"
+    # src/VirtualGeometry/Rasterization
+    "src/VirtualGeometry/Rasterization/RenderPasses/ClearDeepVisibilityPass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/ClusterRasterizationPass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/ClusterSoftwareRasterizationPass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/DeepVisibilityResolvePass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/PerViewLinearDepthCopyPass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/RasterBucketBlockOffsetsPass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/RasterBucketBlockScanPass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/RasterBucketCompactAndArgsPass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/RasterBucketCreateCommandPass.cpp"
+    "src/VirtualGeometry/Rasterization/RenderPasses/RasterBucketHistogramPass.cpp"
+    # src/VirtualGeometry/RayTracing
+    "src/VirtualGeometry/RayTracing/CLodRayTracingSystem.cpp"
+    # src/VirtualGeometry/Reyes
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesBuildRasterWorkPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesClassifyPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesCreateDispatchArgsPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesDeepVisibilityRasterizationPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesDicePass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesPatchRasterizationPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesQueueResetPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesRasterWorkCompactAndArgsPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesRasterWorkHistogramPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesReplayMergePass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesSeedPatchesPass.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesSplitPass.cpp"
+    "src/VirtualGeometry/Reyes/Tessellation/ReyesTessellationGeneratedReferenceSource.cpp"
+    "src/VirtualGeometry/Reyes/Tessellation/ReyesTessellationTable.cpp"
+    "src/VirtualGeometry/Reyes/RenderPasses/ReyesTessellationTableUploadPass.cpp"
+    # src/VirtualGeometry/Streaming
+    "src/VirtualGeometry/Streaming/CLodPageLRU.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingPageWaiters.cpp"
+    "src/VirtualGeometry/Streaming/RenderPasses/CLodStreamingBeginFramePass.cpp"
+    "src/VirtualGeometry/Streaming/RenderPasses/CLodStreamingFeedbackSortPass.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingAdmission.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingCompletions.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingDomain.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingFeedback.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingResidencyCommit.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingShadowNotifications.cpp"
+    "src/VirtualGeometry/Streaming/CLodStreamingTrace.cpp"
+    "src/VirtualGeometry/Streaming/CLodUploadStream.cpp"
+    # src/VirtualGeometry/Voxels
+    "src/VirtualGeometry/Voxels/RenderPasses/VoxelSoftwareRasterizationPass.cpp"
+    # src/VirtualShadows
+    "src/VirtualShadows/Rasterization/RenderPasses/ReyesVirtualShadowHardwareRasterPass.cpp"
+    "src/VirtualShadows/Rasterization/RenderPasses/ReyesVirtualShadowRasterizationPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapAdmitPagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapAllocatePagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapBuildActiveBlocksPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapBuildMarkTilesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapBuildPageListsPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapClearDirtyBitsPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapClearPagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapComposePagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapDeduplicatePredictedPagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapDirtyHierarchyPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapExpandPredictedPagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapFreeWrappedPagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapGatherStatsPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapInvalidatePagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapMarkPagesPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapNonRasterableHierarchyPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapResolveMarkedBlocksPass.cpp"
+    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapSetupPass.cpp"
+)
 set(BASICRENDERER_DEMO_SOURCE "${BASICRENDERER_SOURCE_ROOT}/src/BasicRenderer.cpp")
-set(BASICRENDERER_SAMPLING_CONTROL_SOURCE "${BASICRENDERER_SOURCE_ROOT}/src/Telemetry/StatisticalSamplingControl.cpp")
-list(REMOVE_ITEM SOURCES "${BASICRENDERER_DEMO_SOURCE}" "${BASICRENDERER_SAMPLING_CONTROL_SOURCE}")
+set(BASICRENDERER_SAMPLING_CONTROL_SOURCE "${BASICRENDERER_SOURCE_ROOT}/src/Diagnostics/Telemetry/StatisticalSamplingControl.cpp")
+
 
 if(EXISTS "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
     add_library(xatlas STATIC "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
@@ -324,19 +553,186 @@ if(EXISTS "${BASICRENDERER_REPO_ROOT}/geometry-central/CMakeLists.txt" AND NOT T
 endif()
 
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
+add_library(BasicRendererHeaders INTERFACE)
+add_library(BasicRenderer::Headers ALIAS BasicRendererHeaders)
+target_include_directories(BasicRendererHeaders INTERFACE
+    "${BASICRENDERER_SOURCE_ROOT}/include")
+target_link_libraries(${PROJECT_NAME} PUBLIC BasicRendererHeaders)
 target_sources(${PROJECT_NAME} PRIVATE
-    "include/Render/PersistentRendererPublication.h"
-    "src/Render/PersistentRendererPublication.cpp"
-    "include/Render/GraphExtensions/ClusterLOD/CapturedHierarchicalDispatchCullingInputs.h"
-    "include/Render/GraphExtensions/ClusterLOD/CapturedCullingCommandSink.h"
-    "include/Render/GraphExtensions/ClusterLOD/PersistentHierarchicalDispatchCullingPass.h"
-    "include/RenderPasses/VisUtil/PersistentMaterialEvaluationPass.h")
+    "src/Runtime/Publication/PersistentRendererPublication.h"
+    "src/Runtime/Publication/PersistentRendererPublication.cpp"
+    "src/VirtualGeometry/Culling/RenderPasses/CapturedHierarchicalDispatchCullingInputs.h"
+    "src/VirtualGeometry/Culling/RenderPasses/CapturedCullingCommandSink.h"
+    "src/VirtualGeometry/Culling/RenderPasses/PersistentHierarchicalDispatchCullingPass.h"
+    "src/Materials/Evaluation/RenderPasses/PersistentMaterialEvaluationPass.h")
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
+foreach(_basicrenderer_api_category IN ITEMS
+    Runtime Scene Assets Streaming Pipeline Extensions Diagnostics)
+    add_executable(BasicRendererApi${_basicrenderer_api_category}Smoke
+        "tests/BuildTreeApiConsumer/${_basicrenderer_api_category}.cpp")
+    target_compile_features(BasicRendererApi${_basicrenderer_api_category}Smoke PRIVATE cxx_std_23)
+    target_link_libraries(BasicRendererApi${_basicrenderer_api_category}Smoke
+        PRIVATE BasicRenderer::BasicRenderer)
+endforeach()
+add_library(BasicRendererPublicHeaderSmoke OBJECT
+    "tests/PublicHeaders/Assets_ClusterLODShaderTypes.cpp"
+    "tests/PublicHeaders/Assets_Import_Filetypes.cpp"
+    "tests/PublicHeaders/Assets_MaterialBlendState.cpp"
+    "tests/PublicHeaders/Assets_MaterialTextureStreaming.cpp"
+    "tests/PublicHeaders/Assets_TechniqueDescriptor.cpp"
+    "tests/PublicHeaders/Assets_TextureResidency.cpp"
+    "tests/PublicHeaders/Extensions_Input_InputAction.cpp"
+    "tests/PublicHeaders/Extensions_Input_InputContext.cpp"
+    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedComputeBarrier.cpp"
+    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedComputeCommands.cpp"
+    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedComputeDispatch.cpp"
+    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedEnvironmentDispatch.cpp"
+    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedFullscreenDraw.cpp"
+    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedLegacyAdmission.cpp"
+    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedRenderIndirect.cpp"
+    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedResourceClears.cpp"
+    "tests/PublicHeaders/Scene_RendererComponents.cpp"
+    "tests/PublicHeaders/Pipeline_PipelineKind.cpp"
+    "tests/PublicHeaders/Assets_CachePaths.cpp"
+    "tests/PublicHeaders/Assets_CLodCacheIdentity.cpp"
+    "tests/PublicHeaders/Assets_CLodCacheStore.cpp"
+    "tests/PublicHeaders/Scene_SceneFrameSnapshot.cpp"
+    "tests/PublicHeaders/Scene_FrustumUtilities.cpp"
+    "tests/PublicHeaders/Pipeline_ShaderVariantRequestService.cpp"
+    "tests/PublicHeaders/Scene_SceneIngestionServices.cpp"
+    "tests/PublicHeaders/Scene_SceneRenderBridge.cpp"
+    "tests/PublicHeaders/Extensions_RenderContext.cpp"
+    "tests/PublicHeaders/Extensions_DynamicStructuredBuffer.cpp"
+    "tests/PublicHeaders/Extensions_Buffers_BufferView.cpp"
+    "tests/PublicHeaders/Extensions_Buffers_DynamicBuffer.cpp"
+    "tests/PublicHeaders/Extensions_Buffers_LazyDynamicStructuredBuffer.cpp"
+    "tests/PublicHeaders/Extensions_Buffers_MemoryBlock.cpp"
+    "tests/PublicHeaders/Extensions_Buffers_PagePool.cpp"
+    "tests/PublicHeaders/Extensions_Buffers_SortedUnsignedIntBuffer.cpp"
+    "tests/PublicHeaders/Extensions_PublishedStateResourceResolver.cpp"
+    "tests/PublicHeaders/Extensions_ResourceComponent.cpp"
+    "tests/PublicHeaders/Assets_ClusterLODTypes.cpp"
+    "tests/PublicHeaders/Assets_MaterialFlags.cpp"
+    "tests/PublicHeaders/Assets_ClusterLODUtilities.cpp"
+    "tests/PublicHeaders/Assets_SGGX.cpp"
+    "tests/PublicHeaders/Assets_DefaultCLodSettings.cpp"
+    "tests/PublicHeaders/Assets_MeshData.cpp"
+    "tests/PublicHeaders/Assets_MaterialDescription.cpp"
+    "tests/PublicHeaders/Assets_DefaultedOptional.cpp"
+    "tests/PublicHeaders/Assets_GeometryMesh.cpp"
+    "tests/PublicHeaders/Assets_GeometryMeshInstance.cpp"
+    "tests/PublicHeaders/Assets_GeometryMeshInstanceFactory.cpp"
+    "tests/PublicHeaders/Assets_GeometryVertexLayout.cpp"
+    "tests/PublicHeaders/Assets_ImportedAsset.cpp"
+    "tests/PublicHeaders/Assets_ImportSettings.cpp"
+    "tests/PublicHeaders/Assets_ImportModelLoader.cpp"
+    "tests/PublicHeaders/Assets_Import_AssimpGeometryExtractor.cpp"
+    "tests/PublicHeaders/Assets_Import_BRNiflyClient.cpp"
+    "tests/PublicHeaders/Assets_Import_CLodCache.cpp"
+    "tests/PublicHeaders/Assets_Import_GlTFGeometryExtractor.cpp"
+    "tests/PublicHeaders/Assets_Import_USDGeometryExtractor.cpp"
+    "tests/PublicHeaders/Assets_Import_USDMaterialCache.cpp"
+    "tests/PublicHeaders/Assets_Import_MeshPreprocessData.cpp"
+    "tests/PublicHeaders/Assets_Import_RenderablePrototypeGeometry.cpp"
+    "tests/PublicHeaders/Assets_Import_ObjectReyesAtlasCache.cpp"
+    "tests/PublicHeaders/Assets_Import_CLodCacheLoader.cpp"
+    "tests/PublicHeaders/Assets_Import_VoxelGroupBuilder.cpp"
+    "tests/PublicHeaders/Assets_ImportNifLoader.cpp"
+    "tests/PublicHeaders/Assets_USDLoader.cpp"
+    "tests/PublicHeaders/Assets_RenderableAsset.cpp"
+    "tests/PublicHeaders/Assets_TextureTypes.cpp"
+    "tests/PublicHeaders/Assets_Texture.cpp"
+    "tests/PublicHeaders/Assets_TextureLoading.cpp"
+    "tests/PublicHeaders/Assets_CpuTextureSampler.cpp"
+    "tests/PublicHeaders/Assets_Material.cpp"
+    "tests/PublicHeaders/Assets_TextureProcessingRequests.cpp"
+    "tests/PublicHeaders/Assets_ShaderArtifactCompilation.cpp"
+    "tests/PublicHeaders/Diagnostics_SamplingReadinessSnapshot.cpp"
+    "tests/PublicHeaders/Diagnostics_MaterialTextureStreamingStats.cpp"
+    "tests/PublicHeaders/Diagnostics_OutputTypes.cpp"
+    "tests/PublicHeaders/Diagnostics_TerrainRvtTelemetry.cpp"
+    "tests/PublicHeaders/Diagnostics_CLodTelemetry.cpp"
+    "tests/PublicHeaders/Diagnostics_PipelineControl.cpp"
+    "tests/PublicHeaders/Diagnostics_NvPerfIntegration.cpp"
+    "tests/PublicHeaders/Diagnostics_StatisticalSampler.cpp"
+    "tests/PublicHeaders/Diagnostics_SamplingControlServer.cpp"
+    "tests/PublicHeaders/Extensions_RenderGraphExtensionRegistration.cpp"
+    "tests/PublicHeaders/Extensions_RenderDeviceAccess.cpp"
+    "tests/PublicHeaders/Extensions_PipelineAccess.cpp"
+    "tests/PublicHeaders/Extensions_ShaderCompilationTypes.cpp"
+    "tests/PublicHeaders/Extensions_SettingAccess.cpp"
+    "tests/PublicHeaders/Extensions_InputManager.cpp"
+    "tests/PublicHeaders/Extensions_BuiltinResources.cpp"
+    "tests/PublicHeaders/Extensions_ShaderBuffers.cpp"
+    "tests/PublicHeaders/Extensions_IndirectCommand.cpp"
+    "tests/PublicHeaders/Extensions_VirtualShadowCasterProvider.cpp"
+    "tests/PublicHeaders/Extensions_VirtualGeometryCLodCommon.cpp"
+    "tests/PublicHeaders/Extensions_ProducerPersistentState.cpp"
+    "tests/PublicHeaders/Pipeline_PipelineRecipe.cpp"
+    "tests/PublicHeaders/Pipeline_PSOFlags.cpp"
+    "tests/PublicHeaders/Pipeline_RenderPhase.cpp"
+    "tests/PublicHeaders/Pipeline_DrawWorkload.cpp"
+    "tests/PublicHeaders/Pipeline_MaterialEvalVariants.cpp"
+    "tests/PublicHeaders/Pipeline_MeshDrawWorkload.cpp"
+    "tests/PublicHeaders/Pipeline_RendererSettings.cpp"
+    "tests/PublicHeaders/Pipeline_CLodOptions.cpp"
+    "tests/PublicHeaders/Pipeline_UpscalingTypes.cpp"
+    "tests/PublicHeaders/Renderer.cpp"
+    "tests/PublicHeaders/Scene_Components.cpp"
+    "tests/PublicHeaders/Scene_AnimationAnimation.cpp"
+    "tests/PublicHeaders/Scene_AnimationAnimationClip.cpp"
+    "tests/PublicHeaders/Scene_AnimationAnimationController.cpp"
+    "tests/PublicHeaders/Scene_AnimationDynamicWindMetadata.cpp"
+    "tests/PublicHeaders/Scene_AnimationKeyframe.cpp"
+    "tests/PublicHeaders/Scene_AnimationSkeleton.cpp"
+    "tests/PublicHeaders/Scene_AnimationSkeletonArtifact.cpp"
+    "tests/PublicHeaders/Scene_VertexFlags.cpp"
+    "tests/PublicHeaders/Scene_Environment.cpp"
+    "tests/PublicHeaders/Scene_Scene.cpp"
+    "tests/PublicHeaders/Scene_TerrainTypes.cpp"
+    "tests/PublicHeaders/Streaming_ArtifactTypes.cpp"
+    "tests/PublicHeaders/Streaming_CLodGeometryTypes.cpp"
+    "tests/PublicHeaders/Streaming_DirectStorageRequest.cpp"
+    "tests/PublicHeaders/Streaming_GeometryRequests.cpp"
+    "tests/PublicHeaders/Streaming_MaterialRequests.cpp"
+    "tests/PublicHeaders/Streaming_ObjectRequests.cpp"
+    "tests/PublicHeaders/Streaming_PublishedTypes.cpp"
+    "tests/PublicHeaders/Streaming_PoseState.cpp"
+    "tests/PublicHeaders/Streaming_PublishedRendererState.cpp"
+    "tests/PublicHeaders/Streaming_StaticObjectRequestService.cpp"
+    "tests/PublicHeaders/Streaming_StaticSceneArtifacts.cpp"
+    "tests/PublicHeaders/Streaming_RendererStateArtifacts.cpp"
+    "tests/PublicHeaders/Streaming_SceneAssetRequestService.cpp"
+    "tests/PublicHeaders/Streaming_StaticGeometryRequestService.cpp"
+    "tests/PublicHeaders/Streaming_StaticMaterialRequestService.cpp"
+    "tests/PublicHeaders/Streaming_StaticWorkloadRequestService.cpp"
+    "tests/PublicHeaders/Streaming_WorkloadRequests.cpp"
+    "tests/PublicHeaders/Streaming_VersionedGpuBuffer.cpp"
+    "tests/PublicHeaders/Streaming_RendererStateRequestService.cpp"
+    "tests/PublicHeaders/Streaming_TaskScheduler.cpp"
+    "tests/PublicHeaders/Streaming_SerializedTaskPump.cpp"
+    "tests/PublicHeaders/Extensions_EnvironmentWorkService.cpp"
+    "tests/PublicHeaders/Extensions_WindPaletteService.cpp"
+    "tests/PublicHeaders/Pipeline_RasterBucketFlags.cpp"
+    "tests/PublicHeaders/Streaming_LightStateArtifacts.cpp"
+    "tests/PublicHeaders/Streaming_ViewStateArtifacts.cpp"
+    "tests/PublicHeaders/Runtime_Detail_DepthHistoryService.cpp"
+    "tests/PublicHeaders/Runtime_Detail_PoseInstanceRegistrationService.cpp"
+    "tests/PublicHeaders/Runtime_Detail_SceneEntityMaterializationService.cpp"
+    "tests/PublicHeaders/Runtime_Detail_SceneRenderableResidencyService.cpp"
+    "tests/PublicHeaders/Runtime_Detail_SceneSourceStateStore.cpp"
+    "tests/PublicHeaders/Runtime_Detail_FrameTimer.cpp"
+    "tests/PublicHeaders/Runtime_Detail_OpenPBRLookupResources.cpp"
+    "tests/PublicHeaders/Runtime_Detail_MaterialEvaluationBuildInputs.cpp"
+)
+target_link_libraries(BasicRendererPublicHeaderSmoke PRIVATE ${PROJECT_NAME})
+add_dependencies(BasicRendererPublicHeaderSmoke Generate_BuiltinResources)
+target_compile_features(BasicRendererPublicHeaderSmoke PRIVATE cxx_std_23)
 if(BASICRENDERER_BUILD_INTEROP_VALIDATION)
     add_library(SARPInteropValidation STATIC
         "${BASICRENDERER_SOURCE_ROOT}/validation/SARPInteropValidation.cpp")
     target_compile_features(SARPInteropValidation PRIVATE cxx_std_23)
-    target_include_directories(SARPInteropValidation PUBLIC "${BASICRENDERER_SOURCE_ROOT}/include")
+    target_include_directories(SARPInteropValidation PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
     target_link_libraries(SARPInteropValidation PRIVATE OpenRenderGraph::OpenRenderGraph spdlog::spdlog_header_only)
     target_link_libraries(${PROJECT_NAME} PRIVATE SARPInteropValidation)
     target_compile_definitions(${PROJECT_NAME} PUBLIC BASICRENDERER_HAS_INTEROP_VALIDATION=1)
@@ -344,6 +740,7 @@ else()
     target_compile_definitions(${PROJECT_NAME} PUBLIC BASICRENDERER_HAS_INTEROP_VALIDATION=0)
 endif()
 add_executable(${BASICRENDERER_DEMO_TARGET} WIN32 "${BASICRENDERER_DEMO_SOURCE}")
+target_include_directories(${BASICRENDERER_DEMO_TARGET} PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 add_executable(StatisticalSamplingControl "${BASICRENDERER_SAMPLING_CONTROL_SOURCE}")
 target_compile_features(StatisticalSamplingControl PRIVATE cxx_std_23)
 target_link_libraries(StatisticalSamplingControl PRIVATE nlohmann_json::nlohmann_json)
@@ -366,7 +763,8 @@ target_compile_features(TaskSchedulerManagerTests PRIVATE cxx_std_23)
 add_executable(AsyncStateGraphTests "tests/AsyncStateGraphTests.cpp")
 target_link_libraries(AsyncStateGraphTests PRIVATE ${PROJECT_NAME})
 target_compile_features(AsyncStateGraphTests PRIVATE cxx_std_23)
-target_include_directories(BoundedSpscQueueTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/include")
+target_include_directories(AsyncStateGraphTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
+target_include_directories(BoundedSpscQueueTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 target_compile_features(BoundedSpscQueueTests PRIVATE cxx_std_23)
 add_executable(CLodCoordinatorTests "tests/CLodCoordinatorTests.cpp")
 add_executable(StatisticalSamplerTests "tests/StatisticalSamplerTests.cpp")
@@ -376,6 +774,7 @@ target_compile_definitions(StatisticalSamplerTests PRIVATE
 target_link_libraries(StatisticalSamplerTests PRIVATE ${PROJECT_NAME})
 target_include_directories(CLodCoordinatorTests PRIVATE
     "${BASICRENDERER_SOURCE_ROOT}/include"
+    "${BASICRENDERER_SOURCE_ROOT}/src"
     "${BASICRENDERER_REPO_ROOT}/OpenRenderGraph/include")
 target_compile_features(CLodCoordinatorTests PRIVATE cxx_std_23)
 target_link_libraries(CLodCoordinatorTests PRIVATE ${PROJECT_NAME})
@@ -1066,7 +1465,8 @@ if (MSVC)
   >)
 endif()
 
-target_include_directories(${PROJECT_NAME} BEFORE PUBLIC ${DIRECTX_HEADERS_INCLUDE_DIR} include/ generated/)
+target_include_directories(${PROJECT_NAME} BEFORE PUBLIC ${DIRECTX_HEADERS_INCLUDE_DIR} generated/)
+target_include_directories(${PROJECT_NAME} PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 if(BASICRENDERER_DETECTED_VULKAN_INCLUDE_DIR)
     target_include_directories(${PROJECT_NAME} BEFORE PRIVATE "${BASICRENDERER_DETECTED_VULKAN_INCLUDE_DIR}")
 endif()
@@ -1170,6 +1570,7 @@ PRIVATE
     spdlog::spdlog_header_only 
     Microsoft::DirectXTex 
     imgui::imgui 
+    Microsoft.GSL::GSL
     meshoptimizer
     Eigen3::Eigen
     embree
@@ -1197,7 +1598,6 @@ PRIVATE
     Boost::interprocess
     TBB::tbb
     Tracy::TracyClient
-    BasicTelemetry::Core
     unofficial::sqlite3::sqlite3
     slang::slang
     "${BASICRENDERER_SOURCE_ROOT}/WinPixEventRuntime.lib" 
@@ -1209,15 +1609,14 @@ PRIVATE
 target_link_libraries(${PROJECT_NAME}
 PUBLIC
     spdlog::spdlog_header_only
-    Microsoft.GSL::GSL
     Microsoft::DirectX-Headers
     meshoptimizer
     flecs::flecs
-    Streamline::headers
     OpenRenderGraph::OpenRenderGraph
     BasicScene::BasicScene
     BasicRHI::BasicRHI
-    geometry-central
+    BasicTelemetry::Core
+    nlohmann_json::nlohmann_json
 )
 
 if(TARGET BasicRenderer_DirectStorage)
@@ -1400,11 +1799,16 @@ PRIVATE
 )
 
 target_link_libraries(SkeletonArtifactCacheTests PRIVATE ${PROJECT_NAME})
+target_include_directories(SkeletonArtifactCacheTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 target_link_libraries(PipelineRecipeTests PRIVATE ${PROJECT_NAME})
+target_include_directories(PipelineRecipeTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 target_link_libraries(MaterialEvalVariantTests PRIVATE ${PROJECT_NAME})
+target_include_directories(MaterialEvalVariantTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 target_link_libraries(MaterialOwnershipGuardTests PRIVATE ${PROJECT_NAME})
+target_include_directories(MaterialOwnershipGuardTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 target_compile_features(MaterialOwnershipGuardTests PRIVATE cxx_std_23)
 target_link_libraries(VirtualShadowBudgetTests PRIVATE ${PROJECT_NAME})
+target_include_directories(VirtualShadowBudgetTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 if(MSVC)
     target_compile_options(SkeletonArtifactCacheTests PRIVATE /std:c++latest)
     target_compile_options(PipelineRecipeTests PRIVATE /std:c++latest)
@@ -1413,6 +1817,13 @@ if(MSVC)
 endif()
 
 enable_testing()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME RendererBoundaryAudit
+    COMMAND "${Python3_EXECUTABLE}" "${BASICRENDERER_REPO_ROOT}/scripts/Audit-RendererBoundaries.py")
+add_test(NAME RendererBoundaryAuditTests
+    COMMAND "${Python3_EXECUTABLE}" "${BASICRENDERER_REPO_ROOT}/scripts/TestRendererBoundaries.py")
+add_test(NAME RendererBuildInputAudit
+    COMMAND "${Python3_EXECUTABLE}" "${BASICRENDERER_REPO_ROOT}/scripts/Audit-RendererBuildInputs.py")
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
 add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)
 add_test(NAME PipelineRecipeTests COMMAND PipelineRecipeTests)

@@ -2,5 +2,9 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(flecs CONFIG)
+if(NOT TARGET flecs::flecs AND TARGET flecs::flecs_static)
+    add_library(flecs::flecs INTERFACE IMPORTED)
+    set_property(TARGET flecs::flecs PROPERTY INTERFACE_LINK_LIBRARIES flecs::flecs_static)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/BasicSceneTargets.cmake")

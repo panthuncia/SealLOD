@@ -1,0 +1,32 @@
+# Shared discovery for the repository and inner renderer entry points. Existing
+# host targets always win; imported packages are tried before in-tree fallback.
+option(BASICRENDERER_USE_PACKAGE_DEPS "Prefer preinstalled first-party packages" ON)
+option(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK "Allow fallback to in-tree first-party libraries" ON)
+
+function(basicrenderer_resolve_dependency package target repo_root binary_root)
+    if(TARGET ${package} AND NOT TARGET ${target})
+        add_library(${target} ALIAS ${package})
+    endif()
+    if(NOT TARGET ${target} AND BASICRENDERER_USE_PACKAGE_DEPS)
+        find_package(${package} CONFIG QUIET)
+    endif()
+    if(NOT TARGET ${target} AND BASICRENDERER_ENABLE_SUBMODULE_FALLBACK
+        AND EXISTS "${repo_root}/${package}/CMakeLists.txt")
+        add_subdirectory("${repo_root}/${package}" "${binary_root}/${package}")
+    endif()
+    if(TARGET ${package} AND NOT TARGET ${target})
+        add_library(${target} ALIAS ${package})
+    endif()
+    if(NOT TARGET ${target})
+        message(FATAL_ERROR "BasicRenderer requires ${target}. Install ${package} or enable its in-tree fallback.")
+    endif()
+endfunction()
+
+function(basicrenderer_resolve_dependencies repo_root binary_root)
+    basicrenderer_resolve_dependency(BasicTelemetry BasicTelemetry::Core "${repo_root}" "${binary_root}")
+    basicrenderer_resolve_dependency(BasicScene BasicScene::BasicScene "${repo_root}" "${binary_root}")
+    basicrenderer_resolve_dependency(BasicRHI BasicRHI::BasicRHI "${repo_root}" "${binary_root}")
+    basicrenderer_resolve_dependency(OpenRenderGraph OpenRenderGraph::OpenRenderGraph "${repo_root}" "${binary_root}")
+    set(ORG_MODULE_SERVICES_ENABLE_VULKAN ${BASICRHI_ENABLE_VULKAN} CACHE BOOL "" FORCE)
+    basicrenderer_resolve_dependency(ORGModuleServices ORGModuleServices::ORGModuleServices "${repo_root}" "${binary_root}")
+endfunction()

@@ -1,9 +1,9 @@
-#include <BasicScene/Environment.h>
+#include <BasicRenderer/Scene/Environment.h>
 
 #include <DirectXMath.h>
 
-#include "Managers/EnvironmentManager.h"
-#include "Resources/Texture.h"
+#include "Lighting/Environment/EnvironmentManager.h"
+#include "BasicRenderer/Assets/Texture.h"
 #include "Resources/PixelBuffer.h"
 
 void Environment::SetHDRI(std::shared_ptr<TextureAsset> hdriTexture) {

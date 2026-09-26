@@ -24,32 +24,36 @@ set(BR_SHADERS  "${BR_ROOT}/shaders")   # for Common/defines.h
 # Shared sources (compiled independently from BasicRenderer)
 set(CLOD_SHARED_SOURCES
     # Geometry extractors
-    "${BR_SRC}/Import/GlTFGeometryExtractor.cpp"
-    "${BR_SRC}/Import/AssimpGeometryExtractor.cpp"
-    "${BR_SRC}/Import/USDGeometryExtractor.cpp"
-    "${BR_SRC}/Import/USDMaterialCache.cpp"
-    "${BR_SRC}/Import/BRNiflyClient.cpp"
+    "${BR_SRC}/Assets/Import/GlTF/GlTFGeometryExtractor.cpp"
+    "${BR_SRC}/Assets/Import/Assimp/AssimpGeometryExtractor.cpp"
+    "${BR_SRC}/Assets/Import/USD/USDGeometryExtractor.cpp"
+    "${BR_SRC}/Assets/Import/USD/USDMaterialCache.cpp"
+    "${BR_SRC}/Assets/Import/NIF/BRNiflyClient.cpp"
 
     # CLod build & cache infrastructure
-    "${BR_SRC}/Import/CLodCache.cpp"
-    "${BR_SRC}/Import/CLodCacheLoader.cpp"
-    "${BR_SRC}/Import/SkeletonArtifactValidation.cpp"
-    "${BR_SRC}/Import/DefaultCLodSettings.cpp"
-    "${BR_SRC}/Mesh/MeshIngestBuilder.cpp"
-    "${BR_SRC}/Mesh/ClusterLOD.cpp"
-    "${BR_SRC}/Mesh/ClusterLODUtilities.cpp"
-    "${BR_SRC}/Mesh/VoxelGroupBuilder.cpp"
-    "${BR_SRC}/Render/GraphExtensions/ClusterLOD/ReyesTessellationTable.cpp"
-    "${BR_SRC}/Render/GraphExtensions/ClusterLOD/ReyesTessellationGeneratedReferenceSource.cpp"
+    "${BR_SRC}/Assets/Cache/ClusterLOD/CLodCache.cpp"
+    "${BR_SRC}/Assets/Cache/ClusterLOD/CLodCacheLoader.cpp"
+    "${BR_SRC}/Assets/Cache/Skeleton/SkeletonArtifactValidation.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/DefaultCLodSettings.cpp"
+    "${BR_SRC}/Assets/Geometry/MeshIngestBuilder.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLOD.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODUtilities.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODValidation.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePacking.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/Voxels/VoxelGroupBuilder.cpp"
+    "${BR_SRC}/VirtualGeometry/Reyes/Tessellation/ReyesTessellationTable.cpp"
+    "${BR_SRC}/VirtualGeometry/Reyes/Tessellation/ReyesTessellationGeneratedReferenceSource.cpp"
 
     # Utilities
-    "${BR_SRC}/Utilities/CachePathUtilities.cpp"
+    "${BR_SRC}/Assets/Cache/CachePathUtilities.cpp"
 
     # Singletons needed by the pipeline
-    "${BR_SRC}/Managers/Singletons/TaskSchedulerManager.cpp"
+    "${BR_SRC}/Runtime/Scheduling/TaskSchedulerManager.cpp"
 
     # Telemetry used by TaskSchedulerManager
-    "${BR_SRC}/Telemetry/FrameTaskGraphTelemetry.cpp"
+    "${BR_SRC}/Diagnostics/Telemetry/FrameTaskGraphTelemetry.cpp"
 )
 
 add_executable(CLodCacheTool
@@ -68,6 +72,7 @@ set_target_properties(CLodCacheTool PROPERTIES
 # Include directories
 target_include_directories(CLodCacheTool PRIVATE
     "${BR_INCLUDE}"
+    "${BR_SRC}"
     "${BR_SHADERS}"          # ClusterLODUtilities.cpp includes "../shaders/Common/defines.h"
     "${BR_ROOT}/generated"
 )

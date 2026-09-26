@@ -18,7 +18,7 @@
 #include <mutex>
 #include <thread>
 
-#include "Managers/MaterialOwnershipGuards.h"
+#include "Materials/MaterialOwnershipGuards.h"
 
 namespace {
 

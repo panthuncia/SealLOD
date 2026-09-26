@@ -1,23 +1,25 @@
-#include "Render/AsyncStateGraph.h"
-#include "Render/CapacityProvider.h"
-#include "Render/PublishedRendererState.h"
-#include "Render/RendererStateRequestService.h"
-#include "Managers/Singletons/RendererECSManager.h"
+#include "Runtime/StateGraph/AsyncStateGraph.h"
+#include "Runtime/StateGraph/CapacityProvider.h"
+#include <BasicRenderer/Streaming/PublishedRendererState.h>
+#include <BasicRenderer/Streaming/RendererStateRequestService.h>
+#include "Scene/ECS/RendererECSManager.h"
 #include "Render/Runtime/StreamingUploadTypes.h"
-#include "Render/VersionedGpuBufferArtifacts.h"
-#include "Render/TextureImageTableArtifacts.h"
-#include "Render/StaticStateArtifacts.h"
-#include "Render/ObjectBufferStateArtifacts.h"
-#include "Render/GeometryResidencyStateArtifacts.h"
-#include "Render/MaterialStateArtifacts.h"
-#include "Render/ViewStateArtifacts.h"
-#include "Render/PoseStateArtifacts.h"
-#include "Render/LightStateArtifacts.h"
-#include "Render/SceneSourceStateStore.h"
-#include "Resources/Resolvers/PublishedStateResourceResolver.h"
+#include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
+#include "Materials/TextureStreaming/TextureImageTableArtifacts.h"
+#include "Runtime/Publication/StaticStateArtifacts.h"
+#include <BasicRenderer/Streaming/StaticSceneArtifacts.h>
+#include "Scene/Objects/ObjectBufferStateArtifacts.h"
+#include "VirtualGeometry/Streaming/Publication/GeometryResidencyStateArtifacts.h"
+#include "Materials/Publication/MaterialStateArtifacts.h"
+#include "BasicRenderer/Streaming/ViewStateArtifacts.h"
+#include <BasicRenderer/Streaming/PoseState.h>
+#include "BasicRenderer/Streaming/LightStateArtifacts.h"
+#include "Runtime/GraphIntegration/StateProducerRegistrations.h"
+#include "BasicRenderer/Runtime/Detail/SceneSourceStateStore.h"
+#include <BasicRenderer/Extensions/Resources/PublishedStateResourceResolver.h>
 #include "Resources/Buffers/Buffer.h"
 #include "Utilities/TripleGenerationMailbox.h"
-#include "RenderPasses/PreparedRenderIndirect.h"
+#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedRenderIndirect.h"
 
 #include <atomic>
 #include <cstring>
@@ -290,8 +292,8 @@ int main() {
     }
 
     {
-        const auto first = AsyncStateGraph::AllocateSuspensionIdentity();
-        const auto second = AsyncStateGraph::AllocateSuspensionIdentity();
+        const auto first = br::render::AllocateArtifactSuspensionIdentity();
+        const auto second = br::render::AllocateArtifactSuspensionIdentity();
         Check(first != 0 && second != 0 && first != second);
 
         auto pool = std::make_shared<VersionedGpuBufferBackingPool>();
@@ -1344,7 +1346,7 @@ int main() {
             if (!commit) return true;
             templateBatchCommits.fetch_add(1, std::memory_order_relaxed);
             for (const auto key : published.templateKeys) {
-                ObjectManager::StaticMeshTemplateRef ref;
+                StaticMeshTemplateRef ref;
                 ref.meshTemplateIndex = static_cast<std::uint32_t>(key);
                 published.templateRefs.push_back(std::move(ref));
             }

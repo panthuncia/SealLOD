@@ -4,8 +4,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
-#include "Render/GraphExtensions/VirtualShadowCasterProvider.h"
+#include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
+#include <BasicRenderer/Extensions/VirtualShadowCasterProvider.h>
 #include "Utilities/Utilities.h"
 
 namespace {

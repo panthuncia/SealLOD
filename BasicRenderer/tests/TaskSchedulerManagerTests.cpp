@@ -1,5 +1,5 @@
-#include "Managers/Singletons/TaskSchedulerManager.h"
-#include "Managers/SerializedTaskPump.h"
+#include <BasicRenderer/Streaming/TaskScheduler.h>
+#include <BasicRenderer/Streaming/SerializedTaskPump.h>
 
 #include <atomic>
 #include <chrono>
