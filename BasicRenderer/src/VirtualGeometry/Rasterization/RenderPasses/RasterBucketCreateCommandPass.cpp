@@ -33,13 +33,13 @@ RasterBucketCreateCommandPass::RasterBucketCreateCommandPass(
 }
 
 RasterBucketCreateCommandBindings RasterBucketCreateCommandPass::Declare(org::PassBuilder& builder) {
-    RasterBucketCreateCommandBindings bindings{builder.BindShaderResource(m_visibleClustersCounterBuffer),
-        builder.BindUnorderedAccess(m_histogramIndirectCommand)};
+    RasterBucketCreateCommandBindings bindings{builder.ShaderResource(m_visibleClustersCounterBuffer),
+        builder.UnorderedAccess(m_histogramIndirectCommand)};
     if (m_patchReplayNodeInputs) {
-        bindings.replayState = builder.BindShaderResource(m_occlusionReplayStateBuffer);
-        bindings.nodeInputs = builder.BindUnorderedAccess(m_occlusionNodeGpuInputsBuffer);
+        bindings.replayState = builder.ShaderResource(m_occlusionReplayStateBuffer);
+        bindings.nodeInputs = builder.UnorderedAccess(m_occlusionNodeGpuInputsBuffer);
     }
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.numBuckets = m_numBuckets;
     bindings.visibleCapacity = m_visibleClustersCapacity;
     bindings.enabled = m_enabled;
@@ -60,10 +60,10 @@ br::render::PreparedComputeDispatch RasterBucketCreateCommandPass::Prepare(
     data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
     data.program = preparation.CaptureProgram(m_pso);
     data.descriptorIndices = CaptureResourceDescriptorIndices(m_pso.GetResourceDescriptorSlots());
-    data.constants[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.visibleCount, {org::BindlessViewKind::ShaderResource}).index;
-    data.constants[CLOD_CREATE_RASTER_BUCKET_HISTOGRAM_COMMAND_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.indirectCommand, {org::BindlessViewKind::UnorderedAccess}).index;
-    data.constants[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = bindings.patchReplay ? preparation.ResolveView(bindings.replayState, {org::BindlessViewKind::ShaderResource}).index : 0xFFFFFFFFu;
-    data.constants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = bindings.patchReplay ? preparation.ResolveView(bindings.nodeInputs, {org::BindlessViewKind::UnorderedAccess}).index : 0xFFFFFFFFu;
+    data.constants[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.visibleCount).index;
+    data.constants[CLOD_CREATE_RASTER_BUCKET_HISTOGRAM_COMMAND_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.indirectCommand).index;
+    data.constants[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = bindings.patchReplay ? preparation.Resolve(bindings.replayState).index : 0xFFFFFFFFu;
+    data.constants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = bindings.patchReplay ? preparation.Resolve(bindings.nodeInputs).index : 0xFFFFFFFFu;
     data.constants[CLOD_CREATE_NUM_RASTER_BUCKETS] = numBuckets;
     data.constants[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = bindings.visibleCapacity;
     data.groupsX = enabled ? 1u : 0u;

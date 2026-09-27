@@ -12,8 +12,10 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapAllocatePagesBindings {
-    org::ResourceBindingToken requests, requestCount, indirectArgs, clipmapInfo, pageTable;
-    org::ResourceBindingToken pageMetadata, dirtyFlags, freePages, reusablePages, header, stats;
+    org::DeclaredViewToken requests, requestCount;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken clipmapInfo, pageTable;
+    org::DeclaredViewToken pageMetadata, dirtyFlags, freePages, reusablePages, header, stats;
     uint32_t pageRenderBudget = 0;
 };
 

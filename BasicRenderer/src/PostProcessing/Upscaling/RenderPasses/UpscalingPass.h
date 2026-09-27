@@ -41,18 +41,18 @@ public:
             : Builtin::Surface::Motion;
 
         if (upscalingMode == UpscalingMode::FSR3) {
-            builder->WithShaderResource(
+            builder->ShaderResource(
                 Builtin::Color::HDRColorTarget,
                 motionVectors,
-                Builtin::PrimaryCamera::ProjectedDepthTexture)
-                .WithUnorderedAccess(upscaledHDR);
+                Builtin::PrimaryCamera::ProjectedDepthTexture);
+            builder->UnorderedAccess(upscaledHDR);
             return;
         }
 
         if (upscalingMode == UpscalingMode::None && backend == rhi::Backend::Vulkan) {
-            builder->WithCopySource(Builtin::Color::HDRColorTarget)
-                .WithCopyDest(upscaledHDR)
-                .WithShaderResource(
+            builder->CopySource(Builtin::Color::HDRColorTarget);
+            builder->CopyDestination(upscaledHDR);
+            builder->ShaderResource(
                     Builtin::Surface::Motion,
                     Builtin::PrimaryCamera::ProjectedDepthTexture);
             return;
@@ -69,12 +69,12 @@ public:
 
         // TODO: Remove these backend-specific workarounds when ORG can model combined non-conflicting usages on one resource.
         if (backend == rhi::Backend::Vulkan) {
-            builder->WithShaderResource(
+            builder->ShaderResource(
                 Builtin::Color::HDRColorTarget,
                 motionVectors,
-                Builtin::PrimaryCamera::ProjectedDepthTexture)
-                .WithUnorderedAccessClear(upscaledHDR)
-                .WithInternalTransition(upscaledHDR, vulkanStreamlineExitState);
+                Builtin::PrimaryCamera::ProjectedDepthTexture);
+            builder->UnorderedAccessClear(upscaledHDR);
+            builder->WithInternalTransition(upscaledHDR, vulkanStreamlineExitState);
         }
         else {
             builder->WithLegacyInterop(

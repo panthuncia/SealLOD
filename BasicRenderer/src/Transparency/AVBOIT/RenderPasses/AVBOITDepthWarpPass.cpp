@@ -26,7 +26,7 @@ AVBOITDepthWarpPass::AVBOITDepthWarpPass(
 AVBOITDepthWarpBindings AVBOITDepthWarpPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.BindShaderResource(m_configBuffer), builder.BindShaderResource(m_occupancyHistogramBuffer), builder.BindUnorderedAccess(m_depthWarpLUTBuffer)};
+    return {builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_depthWarpLUTBuffer)};
 }
 
 br::render::PreparedComputeDispatch AVBOITDepthWarpPass::Prepare(const AVBOITDepthWarpBindings& bindings, const org::PassPrepareContext& preparation) const {
@@ -45,9 +45,9 @@ br::render::PreparedComputeDispatch AVBOITDepthWarpPass::Prepare(const AVBOITDep
     data.descriptorIndices = std::move(program.descriptorIndices);
 
     auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_CONFIG_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::ShaderResource}).index;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_LUT_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.lut, {org::BindlessViewKind::UnorderedAccess}).index;
+    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_CONFIG_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.config).index;
+    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.histogram).index;
+    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_LUT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.lut).index;
 
     const uint32_t groupCountX =
         (CLodAVBOITDepthWarpLUTResolution + 63u) / 64u;

@@ -123,6 +123,7 @@ void TextureFactory::BC7CompressionPass::Declare(org::PassBuilder& builder)
 {
     std::scoped_lock lock(m_pendingMutex);
     m_declaredResourcesChanged.store(false, std::memory_order_release);
+    m_declaredJobs.clear();
     if (m_pending.empty()) {
         return;
     }
@@ -137,10 +138,15 @@ void TextureFactory::BC7CompressionPass::Declare(org::PassBuilder& builder)
             continue;
         }
 
+        auto& declared = m_declaredJobs.emplace_back();
+        declared.job = job;
+        declared.sources.reserve(job->subresources.size());
         for (const auto& subresource : job->subresources) {
-            builder.WithShaderResource(Subresources(job->workingTexture, org::Mip{subresource.mip, 1}, org::Slice{subresource.slice, 1}));
+            declared.sources.push_back(builder.ShaderResource(
+                Subresources(job->workingTexture, org::Mip{subresource.mip, 1}, org::Slice{subresource.slice, 1}),
+                org::SrvView{.mip = subresource.mip, .slice = subresource.slice}).View());
         }
-        builder.WithUnorderedAccess(job->blockBuffer);
+        declared.blocks = builder.UnorderedAccess(job->blockBuffer).View();
     }
 }
 
@@ -178,15 +184,20 @@ br::render::PreparedComputePipelineSequence TextureFactory::BC7CompressionPass::
             waiting.push_back(job);
             continue;
         }
+        const auto declared = std::find_if(m_declaredJobs.begin(), m_declaredJobs.end(),
+            [&](const DeclaredJob& entry) { return entry.job == job; });
+        if (declared == m_declaredJobs.end()) {
+            waiting.push_back(job);
+            continue;
+        }
         const auto binding = preparation.CaptureProgramBinding(GetOrCreatePipeline());
-        for (const auto& subresource : job->subresources) {
+        for (size_t index = 0; index < job->subresources.size(); ++index) {
+            const auto& subresource = job->subresources[index];
             br::render::PreparedComputePipelineSequence::Step step{};
             step.program = binding.program;
             step.descriptorIndices = binding.descriptorIndices;
-            step.constants[UintRootConstant0] =
-                job->workingTexture->GetSRVInfo(subresource.mip, subresource.slice).slot.index;
-            step.constants[UintRootConstant1] =
-                job->blockBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            step.constants[UintRootConstant0] = preparation.Resolve(declared->sources.at(index)).index;
+            step.constants[UintRootConstant1] = preparation.Resolve(declared->blocks).index;
             step.constants[UintRootConstant2] = static_cast<uint32_t>(subresource.footprint.offset);
             step.constants[UintRootConstant3] = subresource.footprint.rowPitch;
             step.constants[UintRootConstant4] = subresource.footprint.width;
@@ -230,6 +241,7 @@ void TextureFactory::BC7CompressionCopyPass::Declare(org::PassBuilder& builder)
 {
     std::scoped_lock lock(m_pendingMutex);
     m_declaredResourcesChanged.store(false, std::memory_order_release);
+    m_declaredJobs.clear();
     if (m_pending.empty()) {
         return;
     }
@@ -242,8 +254,8 @@ void TextureFactory::BC7CompressionCopyPass::Declare(org::PassBuilder& builder)
             continue;
         }
 
-        builder.WithCopySource(job->blockBuffer);
-        builder.WithCopyDest(job->compressedTexture);
+        m_declaredJobs.push_back({job, builder.CopySource(job->blockBuffer),
+            builder.CopyDestination(job->compressedTexture)});
     }
 }
 
@@ -262,8 +274,14 @@ TextureFactory::BC7CompressionCopyFrameData TextureFactory::BC7CompressionCopyPa
             waiting.push_back(job);
             continue;
         }
-        const auto source = preparation.CaptureResource(job->blockBuffer->GetGlobalResourceID());
-        const auto destination = preparation.CaptureResource(job->compressedTexture->GetGlobalResourceID());
+        const auto declared = std::find_if(m_declaredJobs.begin(), m_declaredJobs.end(),
+            [&](const DeclaredJob& entry) { return entry.job == job; });
+        if (declared == m_declaredJobs.end()) {
+            waiting.push_back(job);
+            continue;
+        }
+        const auto source = preparation.CaptureResource(declared->source);
+        const auto destination = preparation.CaptureResource(declared->destination);
         for (const auto& subresource : job->subresources) {
             frame.copies.push_back({source, destination, subresource.footprint,
                 subresource.mip, subresource.slice});
@@ -321,6 +339,7 @@ void TextureFactory::BC7CompressionReadbackPass::Declare(org::PassBuilder& build
 {
     std::scoped_lock lock(m_pendingMutex);
     m_declaredResourcesChanged.store(false, std::memory_order_release);
+    m_declaredJobs.clear();
     if (m_pending.empty()) {
         return;
     }
@@ -334,7 +353,7 @@ void TextureFactory::BC7CompressionReadbackPass::Declare(org::PassBuilder& build
             continue;
         }
 
-        builder.WithCopySource(job->compressedTexture);
+        m_declaredJobs.push_back({job, builder.CopySource(job->compressedTexture)});
     }
 }
 
@@ -411,6 +430,12 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
             waiting.push_back(job);
             continue;
         }
+        const auto declared = std::find_if(m_declaredJobs.begin(), m_declaredJobs.end(),
+            [&](const DeclaredJob& entry) { return entry.job == job; });
+        if (declared == m_declaredJobs.end()) {
+            waiting.push_back(job);
+            continue;
+        }
         std::vector<rhi::CopyableFootprint> footprints(job->subresources.size());
         rhi::FootprintRangeDesc range{};
         range.texture = job->compressedTexture->GetAPIResource().GetHandle();
@@ -421,7 +446,7 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
         auto readback = org::Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
         if (!job->debugName.empty()) readback->SetName(job->debugName + "[BC7Readback]");
         preparation.Retain(readback);
-        const auto source = preparation.CaptureResource(job->compressedTexture->GetGlobalResourceID());
+        const auto source = preparation.CaptureResource(declared->source);
         for (size_t index = 0; index < job->subresources.size(); ++index) {
             const auto& subresource = job->subresources[index];
             frame.copies.push_back({source, readback->GetAPIResource().GetHandle(),

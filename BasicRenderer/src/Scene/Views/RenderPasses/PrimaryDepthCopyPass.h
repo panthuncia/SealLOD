@@ -16,10 +16,9 @@ public:
 	void Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* builder = &declaration;
-		builder->WithShaderResource(
-			Builtin::PrimaryCamera::VisibilityTexture)
-			.WithUnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap);
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+		builder->ShaderResource(Builtin::PrimaryCamera::VisibilityTexture);
+		builder->UnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap);
+		builder->ConstantBuffer(Builtin::PerFrameBuffer);
 	}
 
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {

@@ -20,9 +20,10 @@ struct StreamingFeedbackSortFrameData {
 };
 
 struct StreamingFeedbackSortBindings {
-    org::ResourceBindingToken requestCounter;
-    std::array<org::ResourceBindingToken, 7> uavs;
-    org::ResourceBindingToken countScatterUav, reduceScanUav, countScatterIndirect, reduceScanIndirect;
+    org::DeclaredViewToken requestCounter;
+    std::array<org::DeclaredViewToken, 7> uavs;
+    org::DeclaredViewToken countScatterUav, reduceScanUav;
+    org::ResourceBindingToken countScatterIndirect, reduceScanIndirect;
 };
 
 class CLodStreamingFeedbackSortPass final : public org::TypedRenderGraphPass<CLodStreamingFeedbackSortPass,

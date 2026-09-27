@@ -6,7 +6,9 @@
 #include <rhi.h>
 
 #include "Interfaces/IDynamicDeclaredResources.h"
-#include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
+#include "Render/DeclaredTableLayout.h"
+#include "BasicRenderer/Extensions/ShaderBuffers.h"
+#include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
@@ -17,8 +19,11 @@ namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesPatchRasterBindings {
-    org::ResourceBindingToken visible, transforms, diceQueue, diceCounter, work, workCounter;
-    org::ResourceBindingToken tessConfigs, tessVertices, tessTriangles, indirectArgs, telemetry;
+    org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
+    org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken telemetry;
+    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoTable;
     uint32_t phase = 0, patchIndexBase = 0;
     bool enabled = false;
 };
@@ -61,9 +66,6 @@ private:
     std::shared_ptr<org::Buffer> m_tessTableConfigsBuffer;
     std::shared_ptr<org::Buffer> m_tessTableVerticesBuffer;
     std::shared_ptr<org::Buffer> m_tessTableTrianglesBuffer;
-    // The per-view table the shader reads; it embeds the visibility UAVs, so
-    // it is published during preparation from the frame's bindings.
-    CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
     org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Reyes Patch Raster View Raster Info"};
     std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
     std::shared_ptr<org::Buffer> m_telemetryBuffer;
@@ -71,7 +73,13 @@ private:
     uint32_t m_maxDiceQueueEntries = 0u;
     uint32_t m_phaseIndex = 0u;
     uint32_t m_patchVisibilityIndexBase = 0u;
-    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
+    struct ViewInput {
+        uint32_t cameraIndex = 0;
+        std::shared_ptr<org::PixelBuffer> visibility;
+        bool operator==(const ViewInput&) const = default;
+    };
+    std::vector<ViewInput> m_viewInputs;
+    std::vector<CLodViewRasterInfo> m_viewRasterInfos;
     bool m_declaredResourcesChanged = true;
     org::PipelineState m_pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;

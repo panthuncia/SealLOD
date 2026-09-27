@@ -7,7 +7,7 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
-#include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
+#include "Render/DeclaredTableLayout.h"
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
@@ -18,10 +18,12 @@ namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesDeepVisibilityRasterBindings {
-    org::ResourceBindingToken visible, transforms, diceQueue, diceCounter, work, workCounter;
-    org::ResourceBindingToken tessConfigs, tessVertices, tessTriangles, indirectArgs, telemetry;
-    org::ResourceBindingToken nodes, nodeCounter, overflowCounter;
-    std::vector<org::ResourceBindingToken> visibilityBuffers, headPointerBuffers;
+    org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
+    org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken telemetry;
+    org::DeclaredViewToken nodes, nodeCounter, overflowCounter;
+    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoTable;
     uint32_t patchVisibilityIndexBase = 0u;
     uint32_t nodeCapacity = 1u;
 };
@@ -73,17 +75,19 @@ private:
     std::shared_ptr<org::Buffer> m_deepVisibilityCounterBuffer;
     std::shared_ptr<org::Buffer> m_deepVisibilityOverflowCounterBuffer;
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
-    // Built by Update from the view snapshot; its descriptors are resolved and
-    // the table published during preparation.
+    // Rows are selected in Update; Declare binds their frozen descriptor views.
     org::PreparedTablePublisher m_viewRasterInfoPublisher;
-    CLodViewRasterInfoTable m_viewRasterInfoTable;
 
     uint32_t m_patchVisibilityIndexBase = 0u;
     uint32_t m_deepVisibilityNodeCapacity = 1u;
 
-    std::vector<CLodViewRasterInfo> m_viewRasterInfos; // Rows without descriptors (change detection).
-    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
-    std::vector<std::shared_ptr<org::PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
+    struct ViewInput {
+        uint32_t cameraIndex = 0;
+        std::shared_ptr<org::PixelBuffer> visibility, headPointers;
+        bool operator==(const ViewInput&) const = default;
+    };
+    std::vector<CLodViewRasterInfo> m_viewRasterInfos;
+    std::vector<ViewInput> m_viewInputs;
     bool m_declaredResourcesChanged = true;
     org::PipelineState m_pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;

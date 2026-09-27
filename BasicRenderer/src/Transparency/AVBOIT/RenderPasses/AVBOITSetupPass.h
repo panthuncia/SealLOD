@@ -15,8 +15,13 @@ namespace org { class PixelBuffer; }
 using AVBOITSetupFrameData = br::render::PreparedResourceClears;
 
 struct AVBOITSetupBindings {
-    std::vector<org::ResourceBindingToken> clears;
-    std::vector<org::ResourceBindingToken> targets;
+    struct Clear {
+        std::vector<org::DeclaredViewToken> shaderViews, cpuViews;
+    };
+    std::vector<Clear> clears;
+    std::vector<org::DeclaredViewToken> targets;
+    org::DeclaredViewToken depthWarp, scalarExtinction, chromaticExtinction;
+    org::DeclaredViewToken integratedTransmittance, shadingTransmittance;
 };
 
 class AVBOITSetupPass final : public org::TypedRenderGraphPass<AVBOITSetupPass,

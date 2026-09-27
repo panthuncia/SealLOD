@@ -28,12 +28,12 @@ AVBOITResolvePass::AVBOITResolvePass(
 AVBOITResolveBindings AVBOITResolvePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithUnorderedAccess(Builtin::Color::HDRColorTarget);
+    builder.UnorderedAccess(Builtin::Color::HDRColorTarget);
     return {
-        builder.BindShaderResource(m_configBuffer),
-        builder.BindShaderResource(m_accumulationTexture),
-        builder.BindShaderResource(m_normalizationTexture),
-        builder.BindShaderResource(m_shadingExtinctionTexture) };
+        builder.ShaderResource(m_configBuffer),
+        builder.ShaderResource(m_accumulationTexture),
+        builder.ShaderResource(m_normalizationTexture),
+        builder.ShaderResource(m_shadingExtinctionTexture) };
 }
 
 br::render::PreparedComputeDispatch AVBOITResolvePass::Prepare(
@@ -54,13 +54,13 @@ br::render::PreparedComputeDispatch AVBOITResolvePass::Prepare(
 
     auto& misc = data.constants;
     misc[CLOD_AVBOIT_VBOIT_RESOLVE_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.config).index;
     misc[CLOD_AVBOIT_VBOIT_RESOLVE_ACCUMULATION_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.accumulation, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.accumulation).index;
     misc[CLOD_AVBOIT_VBOIT_RESOLVE_NORMALIZATION_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.normalization, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.normalization).index;
     misc[CLOD_AVBOIT_VBOIT_RESOLVE_SHADING_EXTINCTION_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.extinction, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.extinction).index;
 
     const auto& accumulation = preparation.Describe(bindings.accumulation);
     const uint32_t groupCountX = (accumulation.texture.width + 7u) / 8u;

@@ -7,7 +7,7 @@
 
 namespace org { class Buffer; }
 
-struct AVBOITDepthWarpBindings { org::ResourceBindingToken config, histogram, lut; };
+struct AVBOITDepthWarpBindings { org::DeclaredViewToken config, histogram, lut; };
 class AVBOITDepthWarpPass final : public org::TypedRenderGraphPass<AVBOITDepthWarpPass, br::render::PreparedComputeDispatch, AVBOITDepthWarpBindings> {
 public:
     AVBOITDepthWarpPass(

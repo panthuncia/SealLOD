@@ -4,6 +4,7 @@
 
 #include <rhi.h>
 
+#include "Interfaces/IDynamicDeclaredResources.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
@@ -14,15 +15,17 @@ namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesBuildRasterWorkBindings {
-    org::ResourceBindingToken diceQueue, diceCounter, readOffset, tessConfigs, output, outputCounter, indirectArgs, telemetry;
-    org::ResourceBindingToken visibleClusters, visibleTransforms, replayQueue, replayCounter, replayOverflow;
+    org::DeclaredViewToken diceQueue, diceCounter, readOffset, tessConfigs, output, outputCounter, telemetry;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken visibleClusters, visibleTransforms, replayQueue, replayCounter, replayOverflow;
+    org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;
     uint32_t capacity = 0, phase = 0, replayCapacity = 0;
     bool hasReadOffset = false, hasVisibleClusters = false, hasVisibleTransforms = false, hasViewDepthIndices = false;
     bool hasReplayQueue = false, hasReplayCounter = false, hasReplayOverflow = false, useAabbOcclusion = false;
 };
 
 class ReyesBuildRasterWorkPass final : public org::TypedRenderGraphPass<ReyesBuildRasterWorkPass,
-    br::render::PreparedComputeIndirect, ReyesBuildRasterWorkBindings> {
+    br::render::PreparedComputeIndirect, ReyesBuildRasterWorkBindings>, public org::IDynamicDeclaredResources {
 public:
     ReyesBuildRasterWorkPass(
         std::shared_ptr<org::Buffer> diceQueueBuffer,
@@ -46,6 +49,7 @@ public:
 
     ReyesBuildRasterWorkBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
+    bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
     void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     br::render::PreparedComputeIndirect Prepare(const ReyesBuildRasterWorkBindings&,
         const org::PassPrepareContext& preparation) const;
@@ -67,6 +71,8 @@ private:
     // it is published during preparation from the frame's bindings. Phase 1
     // tests against history depth, as the phase-1 culling pass does.
     org::PreparedTablePublisher m_viewDepthPublisher{"CLod Reyes Build Raster Work View Depth SRV Indices"};
+    CLodDeclaredViewDepthTable m_viewDepthTable;
+    bool m_declaredResourcesChanged = true;
     std::shared_ptr<org::Buffer> m_replayDiceQueueBuffer;
     std::shared_ptr<org::Buffer> m_replayDiceQueueCounterBuffer;
     std::shared_ptr<org::Buffer> m_replayDiceQueueOverflowBuffer;

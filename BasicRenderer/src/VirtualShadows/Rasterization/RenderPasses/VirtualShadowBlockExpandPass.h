@@ -36,9 +36,10 @@ struct VirtualShadowBlockFrameData {
 };
 
 struct VirtualShadowBlockBindings {
-    org::ResourceBindingToken sourceVisible, sourceTransforms, sourceHistogram, sourceArgs;
-    org::ResourceBindingToken expandedHistogram, expandedOffsets, expandedCursor, expandedVisible, expandedTransforms;
-    org::ResourceBindingToken clipmapInfo, rigidMetadata, skinnedMetadata, coverage, stats;
+    org::DeclaredViewToken sourceVisible, sourceTransforms, sourceHistogram;
+    org::ResourceBindingToken sourceArgs;
+    org::DeclaredViewToken expandedHistogram, expandedOffsets, expandedCursor, expandedVisible, expandedTransforms;
+    org::DeclaredViewToken clipmapInfo, rigidMetadata, skinnedMetadata, coverage, stats;
 };
 
 class VirtualShadowBlockExpandPass : public org::TypedRenderGraphPass<VirtualShadowBlockExpandPass,
@@ -129,7 +130,7 @@ public:
     {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* builder = &declaration;
-        builder->WithShaderResource(
+        builder->ShaderResource(
                 Builtin::PerMeshInstanceBuffer,
                 Builtin::InstanceDrawRecordBuffer,
                 Builtin::PerInstanceTransformBuffer,
@@ -142,50 +143,31 @@ public:
                 Builtin::CullingCameraBuffer,
                 Builtin::SkeletonResources::InverseBindMatrices,
                 Builtin::SkeletonResources::BoneTransforms,
-                Builtin::SkeletonResources::SkinningInstanceInfo,
-                m_sourceVisibleClustersBuffer,
-                m_sourceVisibleClusterTransformIndicesBuffer,
-                m_sourceHistogramBuffer,
-                m_virtualShadowClipmapInfoBuffer,
-                m_virtualShadowActiveBlockMetadataBuffer,
-                m_virtualShadowDynamicActiveBlockMetadataBuffer)
-            .WithUnorderedAccess(m_expandedHistogramBuffer)
-            .WithUnorderedAccess(m_virtualShadowStatsBuffer)
-            .WithIndirectArguments(m_sourceIndirectArgsBuffer)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
-
-        if (m_mode == VirtualShadowBlockExpandMode::Emit) {
-            builder->WithShaderResource(m_expandedOffsetsBuffer, m_virtualShadowBlockClusterCoverageBuffer)
-                .WithUnorderedAccess(
-                    m_expandedWriteCursorBuffer,
-                    m_expandedVisibleClustersBuffer,
-                    m_expandedVisibleClusterTransformIndicesBuffer);
-        } else {
-            builder->WithUnorderedAccess(m_virtualShadowBlockClusterCoverageBuffer);
-        }
+                Builtin::SkeletonResources::SkinningInstanceInfo);
+        builder->ConstantBuffer(Builtin::PerFrameBuffer);
 
         if (m_slabResourceGroup) {
-            builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+            builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
         }
         VirtualShadowBlockBindings bindings{
-            builder->BindShaderResource(m_sourceVisibleClustersBuffer),
-            builder->BindShaderResource(m_sourceVisibleClusterTransformIndicesBuffer),
-            builder->BindShaderResource(m_sourceHistogramBuffer),
-            builder->BindIndirectArguments(m_sourceIndirectArgsBuffer),
-            builder->BindUnorderedAccess(m_expandedHistogramBuffer),
+            builder->ShaderResource(m_sourceVisibleClustersBuffer),
+            builder->ShaderResource(m_sourceVisibleClusterTransformIndicesBuffer),
+            builder->ShaderResource(m_sourceHistogramBuffer),
+            builder->IndirectArguments(m_sourceIndirectArgsBuffer),
+            builder->UnorderedAccess(m_expandedHistogramBuffer),
             {}, {}, {}, {},
-            builder->BindShaderResource(m_virtualShadowClipmapInfoBuffer),
-            builder->BindShaderResource(m_virtualShadowActiveBlockMetadataBuffer),
-            builder->BindShaderResource(m_virtualShadowDynamicActiveBlockMetadataBuffer),
+            builder->ShaderResource(m_virtualShadowClipmapInfoBuffer),
+            builder->ShaderResource(m_virtualShadowActiveBlockMetadataBuffer),
+            builder->ShaderResource(m_virtualShadowDynamicActiveBlockMetadataBuffer),
             m_mode == VirtualShadowBlockExpandMode::Histogram
-                ? builder->BindUnorderedAccess(m_virtualShadowBlockClusterCoverageBuffer)
-                : builder->BindShaderResource(m_virtualShadowBlockClusterCoverageBuffer),
-            builder->BindUnorderedAccess(m_virtualShadowStatsBuffer)};
+                ? builder->UnorderedAccess(m_virtualShadowBlockClusterCoverageBuffer).View()
+                : builder->ShaderResource(m_virtualShadowBlockClusterCoverageBuffer).View(),
+            builder->UnorderedAccess(m_virtualShadowStatsBuffer)};
         if (m_mode == VirtualShadowBlockExpandMode::Emit) {
-            bindings.expandedOffsets = builder->BindShaderResource(m_expandedOffsetsBuffer);
-            bindings.expandedCursor = builder->BindUnorderedAccess(m_expandedWriteCursorBuffer);
-            bindings.expandedVisible = builder->BindUnorderedAccess(m_expandedVisibleClustersBuffer);
-            bindings.expandedTransforms = builder->BindUnorderedAccess(m_expandedVisibleClusterTransformIndicesBuffer);
+            bindings.expandedOffsets = builder->ShaderResource(m_expandedOffsetsBuffer);
+            bindings.expandedCursor = builder->UnorderedAccess(m_expandedWriteCursorBuffer);
+            bindings.expandedVisible = builder->UnorderedAccess(m_expandedVisibleClustersBuffer);
+            bindings.expandedTransforms = builder->UnorderedAccess(m_expandedVisibleClusterTransformIndicesBuffer);
         }
         return bindings;
     }
@@ -224,11 +206,11 @@ public:
         if (numBuckets == 0u) return data;
         const auto clearToken = m_mode == VirtualShadowBlockExpandMode::Histogram
             ? bindings.expandedHistogram : bindings.expandedCursor;
-        const auto srv = [&](org::ResourceBindingToken token) {
-            return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index;
+        const auto srv = [&](org::DeclaredViewToken token) {
+            return preparation.Resolve(token).index;
         };
-        const auto uav = [&](org::ResourceBindingToken token) {
-            return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index;
+        const auto uav = [&](org::DeclaredViewToken token) {
+            return preparation.Resolve(token).index;
         };
         data.clear.resourceHeap = context.textureDescriptorHeap.GetHandle();
         data.clear.samplerHeap = context.samplerDescriptorHeap.GetHandle();
@@ -239,7 +221,7 @@ public:
         data.clear.constants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
         data.clear.constants[CLOD_CLEAR_UINT_BUFFER_COUNT] = numBuckets;
         data.clear.groupsX = (numBuckets + 63u) / 64u;
-        data.clearBarrier = preparation.CaptureResource(clearToken);
+        data.clearBarrier = preparation.DeclaredReference(clearToken);
         const auto arguments = preparation.CaptureResource(bindings.sourceArgs);
         const auto signature = preparation.CaptureCommandSignature(m_commandSignature);
         const auto rigid = preparation.CaptureProgramBinding(m_rigidPso);

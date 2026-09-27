@@ -10,9 +10,9 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapBuildActiveBlocksBindings {
-    org::ResourceBindingToken pageTable;
-    org::ResourceBindingToken clipmapInfo;
-    org::ResourceBindingToken output;
+    org::DeclaredViewToken pageTable;
+    org::DeclaredViewToken clipmapInfo;
+    org::DeclaredViewToken output;
     bool dynamicPages = false;
 };
 

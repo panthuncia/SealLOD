@@ -166,8 +166,8 @@ namespace {
         void Declare(org::PassBuilder& builder) {
             for (const auto& upload : m_inputs.uploads) {
                 if (!upload.dstResource || !upload.srcUploadBuffer || upload.size == 0) continue;
-                builder.WithCopySource(upload.srcUploadBuffer);
-                builder.WithCopyDest(upload.dstResource);
+                builder.CopySource(upload.srcUploadBuffer);
+                builder.CopyDestination(upload.dstResource);
             }
             builder.PreferQueue(org::QueueKind::Copy);
         }
@@ -317,8 +317,8 @@ namespace {
                 if (!batch) continue;
                 for (const auto& copy : batch->copies) {
                     if (!copy.destination || !copy.staging || copy.size == 0u) continue;
-                    builder.WithCopySource(copy.staging);
-                    builder.WithCopyDest(copy.destination);
+                    builder.CopySource(copy.staging);
+                    builder.CopyDestination(copy.destination);
                 }
             }
             builder.PreferQueue(org::QueueKind::Graphics);
@@ -526,8 +526,8 @@ namespace {
             const std::shared_ptr<org::Buffer>& staging,
             const std::shared_ptr<org::Buffer>& source) {
             if (!source || !staging) return;
-            builder.WithCopySource(source);
-            builder.WithCopyDest(staging);
+            builder.CopySource(source);
+            builder.CopyDestination(staging);
         }
 
         static void CaptureCopy(CLodStructuralReadbackFrameData& frame,

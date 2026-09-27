@@ -8,7 +8,7 @@
 namespace org { class Buffer; }
 
 struct RasterBucketBlockOffsetsBindings {
-    org::ResourceBindingToken offsets, blockSums, scannedBlockSums, totalCount;
+    org::DeclaredViewToken offsets, blockSums, scannedBlockSums, totalCount;
     uint32_t numBuckets = 0;
     bool enabled = false;
 };

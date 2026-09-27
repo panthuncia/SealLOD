@@ -8,7 +8,7 @@
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
-struct AVBOITOccupancyRemapBindings { org::ResourceBindingToken config, lut, occupancy; };
+struct AVBOITOccupancyRemapBindings { org::DeclaredViewToken config, lut, occupancy; };
 class AVBOITOccupancyRemapPass final : public org::TypedRenderGraphPass<AVBOITOccupancyRemapPass, br::render::PreparedComputeDispatch, AVBOITOccupancyRemapBindings> {
 public:
     AVBOITOccupancyRemapPass(

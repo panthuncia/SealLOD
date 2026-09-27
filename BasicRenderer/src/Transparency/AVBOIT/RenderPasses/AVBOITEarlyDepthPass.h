@@ -25,7 +25,9 @@ struct AVBOITEarlyDepthFrameData {
 };
 
 struct AVBOITEarlyDepthBindings {
-    org::ResourceBindingToken config, arguments, count, depth;
+    org::DeclaredViewToken config;
+    org::ResourceBindingToken arguments, count;
+    org::DeclaredViewToken depth;
 };
 
 class AVBOITEarlyDepthPass final : public org::TypedRenderGraphPass<AVBOITEarlyDepthPass,

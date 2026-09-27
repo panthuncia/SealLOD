@@ -9,7 +9,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct AVBOITOccupancyHistogramBindings {
-    org::ResourceBindingToken config, occupancy, sliceMask, histogram;
+    org::DeclaredViewToken config, occupancy, sliceMask, histogram;
 };
 
 class AVBOITOccupancyHistogramPass final : public org::TypedRenderGraphPass<AVBOITOccupancyHistogramPass,

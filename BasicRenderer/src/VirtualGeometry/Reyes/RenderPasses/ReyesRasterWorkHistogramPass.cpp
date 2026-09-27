@@ -42,9 +42,9 @@ ReyesRasterWorkHistogramPass::ReyesRasterWorkHistogramPass(
 
 ReyesRasterWorkHistogramBindings ReyesRasterWorkHistogramPass::Declare(org::PassBuilder& declaration) {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    declaration.WithConstantBuffer(Builtin::PerFrameBuffer);
-    return {declaration.BindShaderResource(m_rasterWorkBuffer), declaration.BindShaderResource(m_rasterWorkCounterBuffer),
-        declaration.BindIndirectArguments(m_histogramIndirectCommand), declaration.BindUnorderedAccess(m_histogramBuffer), m_numBuckets};
+    declaration.ConstantBuffer(Builtin::PerFrameBuffer);
+    return {declaration.ShaderResource(m_rasterWorkBuffer), declaration.ShaderResource(m_rasterWorkCounterBuffer),
+        declaration.IndirectArguments(m_histogramIndirectCommand), declaration.UnorderedAccess(m_histogramBuffer), m_numBuckets};
 }
 
 ReyesHistogramFrameData ReyesRasterWorkHistogramPass::Prepare(
@@ -61,17 +61,17 @@ ReyesHistogramFrameData ReyesRasterWorkHistogramPass::Prepare(
         dispatch.descriptorIndices = std::move(binding.descriptorIndices);
     };
     capture(data.clear, m_clearPipeline);
-    data.clear.constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::UnorderedAccess}).index;
+    data.clear.constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.histogram).index;
     data.clear.constants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
     data.clear.constants[CLOD_CLEAR_UINT_BUFFER_COUNT] = numRasterBuckets;
     data.clear.groupsX = (numRasterBuckets + 63u) / 64u;
     capture(data.histogram, m_histogramPipeline);
     data.histogram.commandSignature = preparation.CaptureCommandSignature(m_histogramCommandSignature);
     data.histogram.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
-    data.histogramBarrier = preparation.CaptureResource(bindings.histogram);
-    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_WORK_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.work, {org::BindlessViewKind::ShaderResource}).index;
-    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_WORK_COUNTER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.counter, {org::BindlessViewKind::ShaderResource}).index;
-    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::UnorderedAccess}).index;
+    data.histogramBarrier = preparation.DeclaredReference(bindings.histogram);
+    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_WORK_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.work).index;
+    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_WORK_COUNTER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.counter).index;
+    data.histogram.constants[CLOD_REYES_RASTER_BUCKET_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.histogram).index;
     return data;
 }
 

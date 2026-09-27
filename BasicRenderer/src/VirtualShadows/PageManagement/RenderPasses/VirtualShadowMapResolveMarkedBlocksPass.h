@@ -10,8 +10,8 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapResolveMarkedBlocksBindings {
-    org::ResourceBindingToken mask, list, count, requests, requestCount, clipmapData;
-    org::ResourceBindingToken pageTable, dirtyFlags, pageViewInfo, stats;
+    org::DeclaredViewToken mask, list, count, requests, requestCount, clipmapData;
+    org::DeclaredViewToken pageTable, dirtyFlags, pageViewInfo, stats;
     uint32_t activeClipmapCount = 0;
 };
 

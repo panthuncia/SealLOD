@@ -50,8 +50,9 @@ PrimaryCameraUploadPass::PrimaryCameraUploadPass(
 }
 
 void PrimaryCameraUploadPass::Declare(org::PassBuilder& builder) {
-    builder.WithCopyDest(m_cameraDestination).WithCopyDest(m_cullingDestination);
-    for (const auto& staging : m_staging) builder.WithCopySource(staging);
+    builder.CopyDestination(m_cameraDestination);
+    builder.CopyDestination(m_cullingDestination);
+    for (const auto& staging : m_staging) builder.CopySource(staging);
     builder.PreferQueue(org::QueueKind::Graphics);
 }
 

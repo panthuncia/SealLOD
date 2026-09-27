@@ -20,7 +20,7 @@ struct PerViewLinearDepthCopyPreparedData {
 };
 
 struct PerViewLinearDepthCopyBindingView {
-    org::ResourceBindingToken visibility, linearDepth;
+    org::DeclaredViewToken visibility, linearDepth;
     uint32_t width = 0, height = 0;
     bool primary = false;
     std::array<uint32_t, 2> projection{};
@@ -28,7 +28,7 @@ struct PerViewLinearDepthCopyBindingView {
 
 struct PerViewLinearDepthCopyBindings {
     std::vector<PerViewLinearDepthCopyBindingView> views;
-    org::ResourceBindingToken projectedDepth, canonicalDeviceDepth;
+    org::DeclaredViewToken projectedDepth, canonicalDeviceDepth;
     bool hasProjectedDepth = false, hasCanonicalDeviceDepth = false;
 };
 

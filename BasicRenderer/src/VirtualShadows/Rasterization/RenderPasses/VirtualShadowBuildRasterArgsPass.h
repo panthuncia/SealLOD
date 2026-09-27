@@ -15,7 +15,7 @@
 namespace org { class Buffer; }
 
 struct VirtualShadowBuildRasterArgsBindings {
-    org::ResourceBindingToken histogram, offsets, arguments;
+    org::DeclaredViewToken histogram, offsets, arguments;
 };
 
 class VirtualShadowBuildRasterArgsPass : public org::TypedRenderGraphPass<VirtualShadowBuildRasterArgsPass,
@@ -41,10 +41,10 @@ public:
 
     VirtualShadowBuildRasterArgsBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        declaration.WithConstantBuffer(Builtin::PerFrameBuffer);
-        return {declaration.BindShaderResource(m_histogramBuffer),
-            declaration.BindShaderResource(m_offsetsBuffer),
-            declaration.BindUnorderedAccess(m_indirectArgsBuffer)};
+        declaration.ConstantBuffer(Builtin::PerFrameBuffer);
+        return {declaration.ShaderResource(m_histogramBuffer),
+            declaration.ShaderResource(m_offsetsBuffer),
+            declaration.UnorderedAccess(m_indirectArgsBuffer)};
     }
 
     void Update(const org::UpdateExecutionContext& executionContext) override
@@ -79,12 +79,9 @@ public:
         auto program = preparation.CaptureProgramBinding(m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
-        data.constants[CLOD_VSM_BUILD_ARGS_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.ResolveView(
-            bindings.histogram, {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[CLOD_VSM_BUILD_ARGS_OFFSETS_DESCRIPTOR_INDEX] = preparation.ResolveView(
-            bindings.offsets, {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[CLOD_VSM_BUILD_ARGS_INDIRECT_ARGS_DESCRIPTOR_INDEX] = preparation.ResolveView(
-            bindings.arguments, {org::BindlessViewKind::UnorderedAccess}).index;
+        data.constants[CLOD_VSM_BUILD_ARGS_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.histogram).index;
+        data.constants[CLOD_VSM_BUILD_ARGS_OFFSETS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.offsets).index;
+        data.constants[CLOD_VSM_BUILD_ARGS_INDIRECT_ARGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.arguments).index;
         data.constants[CLOD_VSM_BUILD_ARGS_NUM_BUCKETS] = numBuckets;
         data.groupsX = (numBuckets + 63u) / 64u;
         return data;

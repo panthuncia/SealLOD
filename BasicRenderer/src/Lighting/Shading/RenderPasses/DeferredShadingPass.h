@@ -26,7 +26,7 @@ public:
 	}
 
 	void Declare(org::PassBuilder& builder) {
-		builder.WithShaderResource(Builtin::CameraBuffer,
+		builder.ShaderResource(Builtin::CameraBuffer,
 			Builtin::Environment::PrefilteredCubemapsGroup,
 			Builtin::Light::ActiveLightIndices,
 			Builtin::Light::InfoBuffer,
@@ -49,33 +49,33 @@ public:
 			Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
-			Builtin::Noise::BlueNoise2D)
-			.WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }))
-			.WithUnorderedAccess(Builtin::Color::HDRColorTarget,
+			Builtin::Noise::BlueNoise2D);
+		builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }));
+		builder.UnorderedAccess(Builtin::Color::HDRColorTarget,
 				Builtin::DebugVisualization,
 				Builtin::Surface::Motion);
 
 			if (m_shadowsEnabled) {
-				builder.WithShaderResource(Builtin::Shadows::CLodClipmapInfo,
+				builder.ShaderResource(Builtin::Shadows::CLodClipmapInfo,
 					Builtin::Shadows::CLodCompactMainCamera,
 					Builtin::Shadows::CLodCompactShadowCameras,
 					Builtin::Shadows::CLodDirectionalPageViewInfo,
 					Builtin::Shadows::CLodPageMetadata,
 					Builtin::Shadows::CLodPageTable,
-					Builtin::Shadows::CLodPhysicalPages)
-					.WithUnorderedAccess(Builtin::Shadows::CLodStats);
+					Builtin::Shadows::CLodPhysicalPages);
+				builder.UnorderedAccess(Builtin::Shadows::CLodStats);
 			}
 
 		if (m_clusteredLightingEnabled) {
-			builder.WithShaderResource(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer);
+			builder.ShaderResource(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer);
 		}
 
 		if (m_gtaoEnabled) {
-			builder.WithShaderResource(Builtin::GTAO::OutputAOTerm);
+			builder.ShaderResource(Builtin::GTAO::OutputAOTerm);
 		}
 
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer)
-			.PreferQueue(org::QueueKind::Compute);
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
+		builder.PreferQueue(org::QueueKind::Compute);
 	}
 
 	void Initialize() {

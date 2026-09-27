@@ -39,11 +39,11 @@ AVBOITIntegrateBindings AVBOITIntegratePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     AVBOITIntegrateBindings bindings{
-        builder.BindShaderResource(m_configBuffer),
-        builder.BindShaderResource(m_fitStateBuffer),
-        builder.BindUnorderedAccess(m_occupancyTexture) };
+        builder.ShaderResource(m_configBuffer),
+        builder.ShaderResource(m_fitStateBuffer),
+        builder.UnorderedAccess(m_occupancyTexture) };
 
-    builder.WithUnorderedAccess(
+    builder.UnorderedAccess(
         Builtin::DebugVisualization,
         m_coverageTexture,
         m_occupancySliceMaskTexture,
@@ -52,7 +52,7 @@ AVBOITIntegrateBindings AVBOITIntegratePass::Declare(org::PassBuilder& builder)
         m_integratedTransmittanceTexture,
         m_zeroTransmittanceSliceTexture);
 
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return bindings;
 }
 
@@ -87,9 +87,9 @@ br::render::PreparedComputeDispatch AVBOITIntegratePass::Prepare(
 
     auto& misc = data.constants;
     misc[CLOD_AVBOIT_VBOIT_INTEGRATE_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.config).index;
     misc[CLOD_AVBOIT_VBOIT_INTEGRATE_FIT_STATE_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.state, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.state).index;
 
     const auto& occupancy = preparation.Describe(bindings.occupancy);
     const uint32_t groupCountX = (occupancy.texture.width + 7u) / 8u;

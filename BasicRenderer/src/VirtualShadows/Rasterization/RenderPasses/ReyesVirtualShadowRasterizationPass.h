@@ -16,9 +16,11 @@ namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesVirtualShadowRasterBindings {
-    org::ResourceBindingToken visible, transforms, diceQueue, diceCounter, work, workCounter;
-    org::ResourceBindingToken tessConfigs, tessVertices, tessTriangles, indirectArgs, telemetry, viewInfo;
-    org::ResourceBindingToken pageTable, physicalPages, dynamicPages, clipmapInfo;
+    org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
+    org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken telemetry, viewInfo;
+    org::DeclaredViewToken pageTable, physicalPages, dynamicPages, clipmapInfo;
     uint32_t phase = 0, pageTableResolution = 0, virtualResolution = 0;
 };
 

@@ -26,7 +26,7 @@ A_STATIC void LpmSetupOut(AU1 i, inAU4 v)
 #include "../shaders/PerPassRootConstants/tonemapRootConstants.h"
 
 struct TonemappingBindings {
-    org::ResourceBindingToken lpm, bloom, target;
+    org::DeclaredViewToken lpm, bloomMip1, bloomMip2, target;
 };
 
 class TonemappingPass : public org::TypedRenderGraphPass<
@@ -49,15 +49,18 @@ public:
     }
 
     TonemappingBindings Declare(org::PassBuilder& builder) {
-        builder.WithShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer);
+        builder.ShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer);
         TonemappingBindings bindings{};
-        bindings.target = builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor});
-        bindings.lpm = builder.BindShaderResource(m_pLPMConstants);
+        bindings.target = builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor}).View();
+        bindings.lpm = builder.ShaderResource(m_pLPMConstants).View();
         if (m_bloomEnabled) {
-            bindings.bloom = builder.BindShaderResource(
-                Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ 1, 2 }));
+            const std::array views{org::SrvView{UINT32_MAX, 1}, org::SrvView{UINT32_MAX, 2}};
+            auto bloom = builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ 1, 2 }),
+                std::span<const org::SrvView>(views));
+            bindings.bloomMip1 = bloom.View(0);
+            bindings.bloomMip2 = bloom.View(1);
         }
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return bindings;
     }
 
@@ -82,22 +85,18 @@ public:
 		const auto* context = preparation.preparationData->Get<UpdateContext>();
 		br::render::PreparedFullscreenDraw data{};
 		data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-		data.targetResource = preparation.CaptureResource(bindings.target);
-		data.renderTargetReference = preparation.CaptureView(
-			bindings.target, {org::BindlessViewKind::RenderTarget});
+		data.targetResource = preparation.CaptureResource(bindings.target.Resource());
+		data.renderTargetReference = preparation.Capture(bindings.target);
 		data.loadOp = rhi::LoadOp::Clear;
 		data.clear.rgba[3] = 1.0f; data.width = context->outputResolution.x; data.height = context->outputResolution.y;
 
         br::render::BindPreparedProgram(
             data, preparation, m_pso);
-		data.constants[LPM_CONSTANTS_BUFFER_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(
-            bindings.lpm, {org::BindlessViewKind::ShaderResource}).index;
+		data.constants[LPM_CONSTANTS_BUFFER_SRV_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.lpm).index;
 		data.constants[TONEMAP_TYPE] = context->tonemapType; data.constants[TONEMAP_BLOOM_ENABLED] = m_bloomEnabled ? 1u : 0u;
 		if (m_bloomEnabled) {
-			data.constants[TONEMAP_BLOOM_MIP1_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(
-                bindings.bloom, {org::BindlessViewKind::ShaderResource, UINT32_MAX, 1}).index;
-			data.constants[TONEMAP_BLOOM_MIP2_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(
-                bindings.bloom, {org::BindlessViewKind::ShaderResource, UINT32_MAX, 2}).index;
+			data.constants[TONEMAP_BLOOM_MIP1_SRV_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.bloomMip1).index;
+			data.constants[TONEMAP_BLOOM_MIP2_SRV_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.bloomMip2).index;
 			data.constants[TONEMAP_BLOOM_FILTER_RADIUS] = as_uint(0.001f);
 			data.constants[TONEMAP_BLOOM_ASPECT_RATIO] = as_uint(context->outputResolution.x / static_cast<float>(context->outputResolution.y));
 		}

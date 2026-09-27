@@ -8,7 +8,7 @@
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 struct GTAODenoiseBindings {
-    org::ResourceBindingToken workingAO, workingEdges, outputAO;
+    org::DeclaredViewToken workingAO, workingEdges, outputAO;
 };
 
 class GTAODenoisePass : public org::TypedRenderGraphPass<GTAODenoisePass,
@@ -21,12 +21,12 @@ public:
 
     GTAODenoiseBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        builder.WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+        builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            builder.BindShaderResource(Builtin::GTAO::WorkingAOTerm1),
-            builder.BindShaderResource(Builtin::GTAO::WorkingEdges),
-            builder.BindUnorderedAccess(Builtin::GTAO::OutputAOTerm) };
+            builder.ShaderResource(Builtin::GTAO::WorkingAOTerm1),
+            builder.ShaderResource(Builtin::GTAO::WorkingEdges),
+            builder.UnorderedAccess(Builtin::GTAO::OutputAOTerm) };
     }
 
     void Initialize() {
@@ -48,13 +48,10 @@ public:
         data.descriptorIndices = std::move(program.descriptorIndices);
 
 
-        data.constants[UintRootConstant0] = preparation.ResolveView(bindings.workingAO,
-            {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[UintRootConstant1] = preparation.ResolveView(bindings.workingEdges,
-            {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[UintRootConstant0] = preparation.Resolve(bindings.workingAO).index;
+        data.constants[UintRootConstant1] = preparation.Resolve(bindings.workingEdges).index;
         data.constants[UintRootConstant2] = m_samplerIndex;
-        data.constants[UintRootConstant3] = preparation.ResolveView(bindings.outputAO,
-            {org::BindlessViewKind::UnorderedAccess}).index;
+        data.constants[UintRootConstant3] = preparation.Resolve(bindings.outputAO).index;
         data.groupsX = (context->renderResolution.x + XE_GTAO_NUMTHREADS_X * 2u - 1u) / (XE_GTAO_NUMTHREADS_X * 2u);
         data.groupsY = (context->renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1u) / XE_GTAO_NUMTHREADS_Y;
         return data;

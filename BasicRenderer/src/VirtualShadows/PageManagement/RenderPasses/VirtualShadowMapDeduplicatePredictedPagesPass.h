@@ -11,8 +11,8 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapDeduplicatePredictedPagesBindings {
-    org::ResourceBindingToken rawPages, rawCount, scratch, pages, pageCount;
-    org::ResourceBindingToken stats, pageTable, pageMetadata, dirtyFlags;
+    org::DeclaredViewToken rawPages, rawCount, scratch, pages, pageCount;
+    org::DeclaredViewToken stats, pageTable, pageMetadata, dirtyFlags;
     uint32_t physicalPageCount = 0;
 };
 

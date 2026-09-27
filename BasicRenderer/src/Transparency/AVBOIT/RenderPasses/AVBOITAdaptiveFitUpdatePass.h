@@ -7,7 +7,7 @@
 
 namespace org { class Buffer; }
 
-struct AVBOITAdaptiveFitUpdateBindings { org::ResourceBindingToken config, histogram, state; };
+struct AVBOITAdaptiveFitUpdateBindings { org::DeclaredViewToken config, histogram, state; };
 class AVBOITAdaptiveFitUpdatePass final : public org::TypedRenderGraphPass<AVBOITAdaptiveFitUpdatePass, br::render::PreparedComputeDispatch, AVBOITAdaptiveFitUpdateBindings> {
 public:
     AVBOITAdaptiveFitUpdatePass(

@@ -9,8 +9,8 @@
 namespace org { class Buffer; }
 
 struct VirtualShadowMapBuildMarkTilesBindings {
-    org::ResourceBindingToken tileWork;
-    org::ResourceBindingToken tileCount;
+    org::DeclaredViewToken tileWork;
+    org::DeclaredViewToken tileCount;
 };
 
 class VirtualShadowMapBuildMarkTilesPass final : public org::TypedRenderGraphPass<VirtualShadowMapBuildMarkTilesPass,

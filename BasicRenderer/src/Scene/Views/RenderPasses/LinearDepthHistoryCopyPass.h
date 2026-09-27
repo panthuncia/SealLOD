@@ -16,7 +16,7 @@ public:
         // The current depth pyramid remains intact until the next frame's
         // phase-1 cull consumes it. Declaring the read keeps this marker after
         // the final phase-2 depth writes without copying the texture.
-        builder.WithShaderResource(Builtin::LinearDepthMaps);
+        builder.ShaderResource(Builtin::LinearDepthMaps);
     }
 
     org::EmptyPassFrameData Prepare(const org::PassPrepareContext& preparation) {

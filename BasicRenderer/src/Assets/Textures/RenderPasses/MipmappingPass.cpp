@@ -250,11 +250,6 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::Pixel
         c.mipUavDescriptorIndices[i] = 0;
     }
 
-    // Fill mip1..mipN UAV indices
-    for (uint32_t i = 0; i < c.mips; ++i) {
-        c.mipUavDescriptorIndices[i] = tex->GetUAVShaderVisibleInfo(i + 1).slot.index;
-    }
-
     j.dispatchThreadGroupCountXY[0] = tg[0];
     j.dispatchThreadGroupCountXY[1] = tg[1];
 
@@ -295,30 +290,44 @@ void TextureFactory::MipmappingPass::Declare(org::PassBuilder& declaration)
     auto* builder = &declaration;
     m_declaredResourcesChanged = false;
     m_declaredJobs = m_jobs.Pending();
+    m_declaredJobViews.clear();
+    m_declaredJobViews.reserve(m_declaredJobs.size());
     for (const auto& entry : m_declaredJobs) {
         const auto& j = entry->work;
-        builder->WithShaderResource(j.constantsBuffer);
+        auto& views = m_declaredJobViews.emplace_back();
+        views.constants = builder->ShaderResource(j.constantsBuffer).View();
         auto tex = j.texture;
         if (!tex) continue;
 
         // SPD reads only mip0. Alpha coverage mode reads each previous mip in sequence.
         if (j.preserveAlphaCoverage) {
-            builder->WithShaderResource(Subresources(tex, org::Mip{ 0, j.mipsToGenerate }));
+            std::vector<org::SrvView> requests;
+            requests.reserve(j.mipsToGenerate);
+            for (uint32_t mip = 0; mip < j.mipsToGenerate; ++mip) requests.push_back({.mip = mip});
+            auto use = builder->ShaderResource(Subresources(tex, org::Mip{ 0, j.mipsToGenerate }),
+                std::span<const org::SrvView>(requests));
+            views.alphaSources = std::move(use.views);
         }
         else {
-            builder->WithShaderResource(Subresources(tex, org::Mip{ 0, 1 }));
+            views.source = builder->ShaderResource(Subresources(tex, org::Mip{ 0, 1 }),
+                org::SrvView{j.isArray ? static_cast<uint32_t>(org::SRVViewType::Texture2DArray) : UINT32_MAX}).View();
         }
         if (j.mipsToGenerate > 0) {
-            builder->WithUnorderedAccess(Subresources(tex, org::FromMip{ 1 }));
+            std::vector<org::UavView> requests;
+            requests.reserve(j.mipsToGenerate);
+            for (uint32_t mip = 1; mip <= j.mipsToGenerate; ++mip) requests.push_back({.mip = mip});
+            auto use = builder->UnorderedAccess(Subresources(tex, org::FromMip{ 1 }),
+                std::span<const org::UavView>(requests));
+            views.outputs = std::move(use.views);
         }
 
         // Counter is UAV for the dispatch
         if (j.preserveAlphaCoverage) {
-            builder->WithUnorderedAccess(j.alphaStats);
-            builder->WithUnorderedAccess(j.alphaScales);
+            views.alphaStats = builder->UnorderedAccess(j.alphaStats).View();
+            views.alphaScales = builder->UnorderedAccess(j.alphaScales).View();
         }
         else {
-            builder->WithUnorderedAccess(j.counter);
+            views.counter = builder->UnorderedAccess(j.counter).View();
         }
     }
 }
@@ -343,10 +352,16 @@ br::render::PreparedComputePipelineSequence TextureFactory::MipmappingPass::Prep
         data.steps.push_back(std::move(step));
     };
     // Process all jobs queued for this frame
-    for (const auto& entry : jobs) {
+    for (size_t jobIndex = 0; jobIndex < jobs.size(); ++jobIndex) {
+        const auto& entry = jobs[jobIndex];
         const auto& j = entry->work;
-        const uint32_t constantsSrvIndex = j.constantsBuffer->GetSRVInfo(0).slot.index;
+        const auto& views = m_declaredJobViews.at(jobIndex);
+        const uint32_t constantsSrvIndex = preparation.Resolve(views.constants).index;
         if (!j.texture) continue;
+        auto constants = j.cpuConstants;
+        for (uint32_t mip = 0; mip < constants.mips; ++mip)
+            constants.mipUavDescriptorIndices[mip] = preparation.Resolve(views.outputs.at(mip)).index;
+        j.constantsBuffer->UpdateView(j.constantsView.get(), &constants);
 
         if (j.preserveAlphaCoverage) {
             org::PipelineState& resetPso = GetOrCreateAlphaPipeline(L"AlphaMipResetStatsCS", m_psoAlphaReset, m_hasPsoAlphaReset, "AlphaMip[ResetStats]");
@@ -359,8 +374,8 @@ br::render::PreparedComputePipelineSequence TextureFactory::MipmappingPass::Prep
             const auto resolve = preparation.CaptureProgramBinding(resolvePso);
             const auto apply = preparation.CaptureProgramBinding(applyPso);
             constexpr uint32_t kStatsWordsPerMip = 260u;
-            const uint32_t statsUav = j.alphaStats->GetUAVShaderVisibleInfo(0).slot.index;
-            const uint32_t scalesUav = j.alphaScales->GetUAVShaderVisibleInfo(0).slot.index;
+            const uint32_t statsUav = preparation.Resolve(views.alphaStats).index;
+            const uint32_t scalesUav = preparation.Resolve(views.alphaScales).index;
             const uint32_t flags = j.isSrgb ? 1u : 0u;
 
             for (uint32_t mip = 1; mip <= j.mipsToGenerate; ++mip) {
@@ -384,8 +399,8 @@ br::render::PreparedComputePipelineSequence TextureFactory::MipmappingPass::Prep
 
                 append(reset, root, (kStatsWordsPerMip + 255u) / 256u, 1, 1, true);
 
-                root[UintRootConstant0] = j.texture->GetSRVInfo(srcMip).slot.index;
-                root[UintRootConstant1] = j.texture->GetUAVShaderVisibleInfo(mip).slot.index;
+                root[UintRootConstant0] = preparation.Resolve(views.alphaSources.at(srcMip)).index;
+                root[UintRootConstant1] = preparation.Resolve(views.outputs.at(srcMip)).index;
                 append(downsample, root, (dstW + 7u) / 8u, (dstH + 7u) / 8u, 1, true);
 
                 append(resolve, root, 1, 1, 1, true);
@@ -395,17 +410,14 @@ br::render::PreparedComputePipelineSequence TextureFactory::MipmappingPass::Prep
         }
         else {
             // Pick SRV (2D vs array)
-            const uint32_t srcSrvIndex =
-                j.isArray
-                ? j.texture->GetSRVInfo(org::SRVViewType::Texture2DArray, 0).slot.index
-                : j.texture->GetSRVInfo(0).slot.index;
+            const uint32_t srcSrvIndex = preparation.Resolve(views.source).index;
 
             org::PipelineState& pso = GetOrCreatePipeline(j.valueType, j.isArray);
 
             const auto binding = preparation.CaptureProgramBinding(pso);
 
             unsigned int root[NumMiscUintRootConstants]{};
-            root[UintRootConstant0] = j.counter->GetUAVShaderVisibleInfo(0).slot.index;
+            root[UintRootConstant0] = preparation.Resolve(views.counter).index;
             root[UintRootConstant1] = srcSrvIndex;
             root[UintRootConstant2] = constantsSrvIndex;
             root[UintRootConstant3] = j.constantsIndex;

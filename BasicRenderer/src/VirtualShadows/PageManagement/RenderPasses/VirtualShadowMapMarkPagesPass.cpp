@@ -65,14 +65,14 @@ VirtualShadowMapMarkPagesBindings VirtualShadowMapMarkPagesPass::Declare(org::Pa
 {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
-    builder->WithShaderResource(Builtin::Shadows::CLodCompactMainCamera);
+    builder->ShaderResource(Builtin::Shadows::CLodCompactMainCamera);
     VirtualShadowMapMarkPagesBindings bindings{
-        builder->BindShaderResource(m_tileWorkBuffer), builder->BindShaderResource(m_tileCountBuffer),
-        builder->BindIndirectArguments(m_indirectArgsBuffer), builder->BindShaderResource(m_markClipmapDataBuffer),
-        builder->BindUnorderedAccess(m_markedBlocksMaskBuffer), builder->BindUnorderedAccess(m_markedBlocksListBuffer),
-        builder->BindUnorderedAccess(m_markedBlocksCountBuffer), {}, m_activeClipmapCount, m_receiverSubpageMode};
+        builder->ShaderResource(m_tileWorkBuffer), builder->ShaderResource(m_tileCountBuffer),
+        builder->IndirectArguments(m_indirectArgsBuffer), builder->ShaderResource(m_markClipmapDataBuffer),
+        builder->UnorderedAccess(m_markedBlocksMaskBuffer), builder->UnorderedAccess(m_markedBlocksListBuffer),
+        builder->UnorderedAccess(m_markedBlocksCountBuffer), {}, m_activeClipmapCount, m_receiverSubpageMode};
     if (m_receiverSubpageMaskBuffer) {
-        bindings.receiverMask = builder->BindUnorderedAccess(m_receiverSubpageMaskBuffer);
+        bindings.receiverMask = builder->UnorderedAccess(m_receiverSubpageMaskBuffer);
     }
     return bindings;
 }
@@ -108,39 +108,37 @@ VirtualShadowMarkFrameData VirtualShadowMapMarkPagesPass::Prepare(
     data.markProgram = mark.program;
     data.markIndices = std::move(mark.descriptorIndices);
     data.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
     data.indirectArguments = preparation.CaptureResource(bindings.indirectArgs);
-    data.clearMask[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = uav(bindings.mask);
+    data.clearMask[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.mask).index;
     data.clearMask[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodVirtualShadowMaxMarkedBlockCount;
     data.clearReceiver = data.clearMask;
     if (bindings.receiverSubpageMode != CLodVirtualShadowReceiverSubpageModeOff) {
         if (!bindings.receiverMask) throw std::logic_error("receiver subpage mode requires a declared mask");
-        data.clearReceiver[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = uav(*bindings.receiverMask);
+        data.clearReceiver[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(*bindings.receiverMask).index;
         data.clearReceiver[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodVirtualShadowMaxReceiverPageCount;
         data.receiverGroups = (CLodVirtualShadowMaxReceiverPageCount + 63u) / 64u;
         data.receiverUint2 = bindings.receiverSubpageMode == CLodVirtualShadowReceiverSubpageMode8x8;
     }
     data.clearCount = data.clearMask;
-    data.clearCount[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = uav(bindings.count);
+    data.clearCount[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.count).index;
     data.clearCount[CLOD_CLEAR_UINT_BUFFER_COUNT] = 1u;
-    data.barrierResources[0] = preparation.CaptureResource(bindings.mask);
-    data.barrierResources[1] = preparation.CaptureResource(bindings.count);
+    data.barrierResources[0] = preparation.DeclaredReference(bindings.mask);
+    data.barrierResources[1] = preparation.DeclaredReference(bindings.count);
     if (data.receiverGroups) {
-        data.barrierResources[2] = preparation.CaptureResource(*bindings.receiverMask);
+        data.barrierResources[2] = preparation.DeclaredReference(*bindings.receiverMask);
         data.barrierCount = 3;
     }
     auto& c = data.mark;
-    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_TILE_WORK_DESCRIPTOR_INDEX] = srv(bindings.tileWork);
-    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_TILE_COUNT_DESCRIPTOR_INDEX] = srv(bindings.tileCount);
+    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_TILE_WORK_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.tileWork).index;
+    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_TILE_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.tileCount).index;
     c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_SCREEN_WIDTH] = context->renderResolution.x;
     c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_SCREEN_HEIGHT] = context->renderResolution.y;
     c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_ACTIVE_CLIPMAP_COUNT] = bindings.activeClipmapCount;
-    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_CLIPMAP_DATA_DESCRIPTOR_INDEX] = srv(bindings.clipmapData);
-    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_MASK_DESCRIPTOR_INDEX] = uav(bindings.mask);
-    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LIST_DESCRIPTOR_INDEX] = uav(bindings.list);
-    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_COUNT_DESCRIPTOR_INDEX] = uav(bindings.count);
-    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX] = bindings.receiverMask ? uav(*bindings.receiverMask) : 0u;
+    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_CLIPMAP_DATA_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.clipmapData).index;
+    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_MASK_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.mask).index;
+    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LIST_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.list).index;
+    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.count).index;
+    c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX] = bindings.receiverMask ? preparation.Resolve(*bindings.receiverMask).index : 0u;
     c[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_ENABLED] = bindings.receiverSubpageMode;
     return data;
 }

@@ -54,7 +54,7 @@ public:
     void Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
-        b->WithUnorderedAccess(
+        b->UnorderedAccess(
             "Builtin::VisUtil::TerrainRegionPixelCountBuffer",
             "Builtin::VisUtil::TerrainRegionWriteCursorBuffer",
             "Builtin::VisUtil::TerrainRegionActiveCountBuffer");
@@ -154,18 +154,17 @@ public:
     void Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
-        b->WithShaderResource(
+        b->ShaderResource(
             "Builtin::VisUtil::PixelListBuffer",
             Builtin::PrimaryCamera::VisibilityTexture,
             Builtin::CameraBuffer,
-            Builtin::Terrain::Sets)
-            .WithUnorderedAccess(
+            Builtin::Terrain::Sets);
+        b->UnorderedAccess(
                 "Builtin::VisUtil::TerrainRegionPixelCountBuffer",
                 "Builtin::VisUtil::TerrainRegionActiveListBuffer",
-                "Builtin::VisUtil::TerrainRegionActiveCountBuffer")
-
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
-        builder.WithIndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+                "Builtin::VisUtil::TerrainRegionActiveCountBuffer");
+        b->ConstantBuffer(Builtin::PerFrameBuffer);
+        builder.IndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
     }
 
 };
@@ -184,8 +183,8 @@ public:
     void Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
-        b->WithShaderResource("Builtin::VisUtil::TerrainRegionPixelCountBuffer")
-            .WithUnorderedAccess(
+        b->ShaderResource("Builtin::VisUtil::TerrainRegionPixelCountBuffer");
+        b->UnorderedAccess(
                 "Builtin::VisUtil::TerrainRegionOffsetBuffer",
                 "Builtin::VisUtil::TerrainRegionBlockSumsBuffer");
     }
@@ -227,10 +226,10 @@ public:
     void Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
-        b->WithShaderResource(
+        b->ShaderResource(
             "Builtin::VisUtil::TerrainRegionPixelCountBuffer",
-            "Builtin::VisUtil::TerrainRegionBlockSumsBuffer")
-            .WithUnorderedAccess(
+            "Builtin::VisUtil::TerrainRegionBlockSumsBuffer");
+        b->UnorderedAccess(
                 "Builtin::VisUtil::TerrainRegionOffsetBuffer",
                 "Builtin::VisUtil::TerrainRegionScannedBlockSumsBuffer",
                 "Builtin::VisUtil::TerrainRegionTotalPixelCountBuffer");
@@ -268,18 +267,17 @@ public:
     void Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
-        b->WithShaderResource(
+        b->ShaderResource(
             "Builtin::VisUtil::PixelListBuffer",
             Builtin::PrimaryCamera::VisibilityTexture,
             Builtin::CameraBuffer,
             Builtin::Terrain::Sets,
-            "Builtin::VisUtil::TerrainRegionOffsetBuffer")
-            .WithUnorderedAccess(
+            "Builtin::VisUtil::TerrainRegionOffsetBuffer");
+        b->UnorderedAccess(
                 "Builtin::VisUtil::TerrainRegionWriteCursorBuffer",
-                "Builtin::VisUtil::TerrainRegionPixelListBuffer")
-
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
-        builder.WithIndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+                "Builtin::VisUtil::TerrainRegionPixelListBuffer");
+        b->ConstantBuffer(Builtin::PerFrameBuffer);
+        builder.IndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
     }
 
 };
@@ -298,8 +296,8 @@ public:
     void Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
-        b->WithShaderResource("Builtin::VisUtil::TerrainRegionActiveCountBuffer")
-            .WithUnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
+        b->ShaderResource("Builtin::VisUtil::TerrainRegionActiveCountBuffer");
+        b->UnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
     }
 
     br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
@@ -339,13 +337,13 @@ public:
     void Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
-        b->WithShaderResource(
+        b->ShaderResource(
             "Builtin::VisUtil::TerrainRegionActiveCountBuffer",
             "Builtin::VisUtil::TerrainRegionActiveListBuffer",
             "Builtin::VisUtil::TerrainRegionPixelCountBuffer",
-            "Builtin::VisUtil::TerrainRegionOffsetBuffer")
-            .WithUnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
-        builder.WithIndirectArguments("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
+            "Builtin::VisUtil::TerrainRegionOffsetBuffer");
+        b->UnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
+        builder.IndirectArguments("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
     }
 
     void Initialize() {
@@ -381,8 +379,8 @@ private:
 };
 
 struct EvaluateTerrainRegionMaterialGroupsBindings {
-    org::ResourceBindingToken visibleClusters, reyesDiceQueue;
-    org::ResourceBindingToken reyesTessTableConfigs, reyesTessTableVertices, reyesTessTableTriangles;
+    org::DeclaredViewToken visibleClusters, reyesDiceQueue;
+    org::DeclaredViewToken reyesTessTableConfigs, reyesTessTableVertices, reyesTessTableTriangles;
     bool hasReyesDiceQueue = false, hasReyesTessTables = false;
     uint32_t patchVisibilityIndexBase = 0;
 };
@@ -413,15 +411,15 @@ public:
     }
     EvaluateTerrainRegionMaterialGroupsBindings Declare(org::PassBuilder& builder) {
         EvaluateTerrainRegionMaterialGroupsBindings bindings{};
-        bindings.visibleClusters = builder.BindShaderResource(m_visibleClusterResource);
+        bindings.visibleClusters = builder.ShaderResource(m_visibleClusterResource).View();
         if (m_reyesDiceQueueResource) {
-            bindings.reyesDiceQueue = builder.BindShaderResource(m_reyesDiceQueueResource);
+            bindings.reyesDiceQueue = builder.ShaderResource(m_reyesDiceQueueResource).View();
             bindings.hasReyesDiceQueue = true;
         }
         if (m_reyesTessTableConfigsResource && m_reyesTessTableVerticesResource && m_reyesTessTableTrianglesResource) {
-            bindings.reyesTessTableConfigs = builder.BindShaderResource(m_reyesTessTableConfigsResource);
-            bindings.reyesTessTableVertices = builder.BindShaderResource(m_reyesTessTableVerticesResource);
-            bindings.reyesTessTableTriangles = builder.BindShaderResource(m_reyesTessTableTrianglesResource);
+            bindings.reyesTessTableConfigs = builder.ShaderResource(m_reyesTessTableConfigsResource).View();
+            bindings.reyesTessTableVertices = builder.ShaderResource(m_reyesTessTableVerticesResource).View();
+            bindings.reyesTessTableTriangles = builder.ShaderResource(m_reyesTessTableTrianglesResource).View();
             bindings.hasReyesTessTables = true;
         }
         bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
@@ -429,10 +427,10 @@ public:
         auto* b = &builder;
 
         if (m_slabResourceGroup) {
-            b->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+            b->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
         }
 
-        b->WithShaderResource(
+        b->ShaderResource(
             "Builtin::VisUtil::TerrainRegionPixelListBuffer",
             Builtin::PrimaryCamera::VisibilityTexture,
             Builtin::PrimaryCamera::LinearDepthMap,
@@ -476,8 +474,8 @@ public:
             Builtin::CLod::AssemblyBoneRemaps,
             Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::SkeletonResources::InverseSkinMatrices,
-            Builtin::PerMaterialOpenPBRDataBuffer)
-            .WithUnorderedAccess(
+            Builtin::PerMaterialOpenPBRDataBuffer);
+        b->UnorderedAccess(
                 Builtin::Surface::BaseColorOpacity,
                 Builtin::Surface::NormalRoughness,
                 Builtin::Surface::SpecularAo,
@@ -492,11 +490,10 @@ public:
                 Builtin::Terrain::RvtRequestList,
                 Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtStats,
-				Builtin::Material::TextureStreamingFeedbackBuffer)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
-        b->WithIndirectArguments(
-            "Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer",
-            "Builtin::VisUtil::TerrainRegionActiveCountBuffer");
+				Builtin::Material::TextureStreamingFeedbackBuffer);
+        b->ConstantBuffer(Builtin::PerFrameBuffer);
+        b->IndirectArguments("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
+        b->IndirectArguments("Builtin::VisUtil::TerrainRegionActiveCountBuffer");
         return bindings;
     }
 
@@ -515,18 +512,17 @@ public:
         auto program = preparation.CaptureProgramBinding(m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
-        data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(
-            bindings.visibleClusters, {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.visibleClusters).index;
         data.constants[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
         data.constants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = bindings.hasReyesDiceQueue
-            ? preparation.ResolveView(bindings.reyesDiceQueue, {org::BindlessViewKind::ShaderResource}).index : 0xFFFFFFFFu;
+            ? preparation.Resolve(bindings.reyesDiceQueue).index : 0xFFFFFFFFu;
         data.constants[VISBUF_REYES_PATCH_INDEX_BASE] = bindings.patchVisibilityIndexBase;
         data.constants[VISBUF_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = bindings.hasReyesTessTables
-            ? preparation.ResolveView(bindings.reyesTessTableConfigs, {org::BindlessViewKind::ShaderResource}).index : 0xFFFFFFFFu;
+            ? preparation.Resolve(bindings.reyesTessTableConfigs).index : 0xFFFFFFFFu;
         data.constants[VISBUF_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = bindings.hasReyesTessTables
-            ? preparation.ResolveView(bindings.reyesTessTableVertices, {org::BindlessViewKind::ShaderResource}).index : 0xFFFFFFFFu;
+            ? preparation.Resolve(bindings.reyesTessTableVertices).index : 0xFFFFFFFFu;
         data.constants[VISBUF_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = bindings.hasReyesTessTables
-            ? preparation.ResolveView(bindings.reyesTessTableTriangles, {org::BindlessViewKind::ShaderResource}).index : 0xFFFFFFFFu;
+            ? preparation.Resolve(bindings.reyesTessTableTriangles).index : 0xFFFFFFFFu;
         data.constants[VISBUF_REYES_USE_NORMAL_MAPS] = CLodReyesUseNormalMaps() ? 1u : 0u;
         data.constants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(CLodReyesTerrainNormalBlend());
         data.constants[VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS] = CLodReyesTerrainNormalMipBias();

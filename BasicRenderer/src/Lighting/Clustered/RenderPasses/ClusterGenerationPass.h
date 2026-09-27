@@ -15,10 +15,10 @@ public:
 	}
 
 	void Declare(org::PassBuilder& builder) {
-		builder.WithShaderResource(Builtin::CameraBuffer)
-			.WithUnorderedAccess(Builtin::Light::ClusterBuffer);
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer)
-			.PreferQueue(org::QueueKind::Compute);
+		builder.ShaderResource(Builtin::CameraBuffer);
+		builder.UnorderedAccess(Builtin::Light::ClusterBuffer);
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
+		builder.PreferQueue(org::QueueKind::Compute);
 	}
 
 	br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {

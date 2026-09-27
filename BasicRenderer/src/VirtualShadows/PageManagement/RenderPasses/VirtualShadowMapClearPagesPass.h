@@ -10,8 +10,8 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapClearPagesBindings {
-    org::ResourceBindingToken staticPages, dynamicPages, dirtyFlags, pageTable;
-    org::ResourceBindingToken pageMetadata, clipmapInfo, pageViewInfo, stats;
+    org::DeclaredViewToken staticPages, dynamicPages, dirtyFlags, pageTable;
+    org::DeclaredViewToken pageMetadata, clipmapInfo, pageViewInfo, stats;
     bool dynamicContentFilter = false;
 };
 

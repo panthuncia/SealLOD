@@ -53,12 +53,11 @@ public:
     void Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* builder = &declaration;
-        builder
-            ->WithShaderResource(Builtin::CameraBuffer,
-                Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }))
-            // Needs UAV, since compute will read-modify-write (manual blend)
-            .WithUnorderedAccess(Builtin::Color::HDRColorTarget);
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+        builder->ShaderResource(Builtin::CameraBuffer);
+        builder->ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }));
+        // Needs UAV, since compute will read-modify-write (manual blend)
+        builder->UnorderedAccess(Builtin::Color::HDRColorTarget);
+		builder->ConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {

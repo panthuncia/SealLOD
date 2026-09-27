@@ -71,12 +71,12 @@ ReyesRasterWorkCompactAndArgsPass::ReyesRasterWorkCompactAndArgsPass(
 
 ReyesRasterWorkCompactBindings ReyesRasterWorkCompactAndArgsPass::Declare(org::PassBuilder& declaration) {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    declaration.WithConstantBuffer(Builtin::PerFrameBuffer);
-    return {declaration.BindShaderResource(m_rasterWorkBuffer), declaration.BindShaderResource(m_rasterWorkCounterBuffer),
-        declaration.BindIndirectArguments(m_indirectCommand), declaration.BindUnorderedAccess(m_histogramBuffer),
-        declaration.BindShaderResource(m_offsetsBuffer), declaration.BindUnorderedAccess(m_writeCursorBuffer),
-        declaration.BindUnorderedAccess(m_compactedRasterWorkIndicesBuffer), declaration.BindUnorderedAccess(m_packedRasterWorkGroupsBuffer),
-        declaration.BindUnorderedAccess(m_indirectArgsBuffer), m_numBuckets};
+    declaration.ConstantBuffer(Builtin::PerFrameBuffer);
+    return {declaration.ShaderResource(m_rasterWorkBuffer), declaration.ShaderResource(m_rasterWorkCounterBuffer),
+        declaration.IndirectArguments(m_indirectCommand), declaration.UnorderedAccess(m_histogramBuffer),
+        declaration.ShaderResource(m_offsetsBuffer), declaration.UnorderedAccess(m_writeCursorBuffer),
+        declaration.UnorderedAccess(m_compactedRasterWorkIndicesBuffer), declaration.UnorderedAccess(m_packedRasterWorkGroupsBuffer),
+        declaration.UnorderedAccess(m_indirectArgsBuffer), m_numBuckets};
 }
 
 ReyesCompactFrameData ReyesRasterWorkCompactAndArgsPass::Prepare(
@@ -93,8 +93,8 @@ ReyesCompactFrameData ReyesRasterWorkCompactAndArgsPass::Prepare(
         dispatch.descriptorIndices = std::move(binding.descriptorIndices);
     };
     capture(data.clear, m_clearPipeline);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     data.clear.constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = uav(bindings.cursor);
     data.clear.constants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
     data.clear.constants[CLOD_CLEAR_UINT_BUFFER_COUNT] = numBuckets;
@@ -116,9 +116,9 @@ ReyesCompactFrameData ReyesRasterWorkCompactAndArgsPass::Prepare(
     capture(data.finalize, m_finalizePackPipeline);
     data.finalize.constants = data.compact.constants;
     data.finalize.groupsX = (numBuckets + 63u) / 64u;
-    data.cursorBarrier = preparation.CaptureResource(bindings.cursor);
-    data.compactedBarrier = preparation.CaptureResource(bindings.compacted);
-    data.packedBarrier = preparation.CaptureResource(bindings.packed);
+    data.cursorBarrier = preparation.DeclaredReference(bindings.cursor);
+    data.compactedBarrier = preparation.DeclaredReference(bindings.compacted);
+    data.packedBarrier = preparation.DeclaredReference(bindings.packed);
     return data;
 }
 

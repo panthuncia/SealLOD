@@ -26,7 +26,7 @@ struct DebugSphereFrameData {
 };
 
 struct DebugSphereBindings {
-	org::ResourceBindingToken cameraBuffer, objectBuffer;
+	org::DeclaredViewToken cameraBuffer, objectBuffer;
 };
 
 class DebugSpherePass
@@ -42,12 +42,12 @@ public:
 
 	DebugSphereBindings Declare(org::PassBuilder& declaration) {
 		auto* builder = &declaration;
-		builder->WithShaderResource(Builtin::PerMeshBuffer)
-			.WithDepthReadWrite(Builtin::PrimaryCamera::DepthTexture)
-			.IsGeometryPass();
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
-		return {builder->BindShaderResource(Builtin::CameraBuffer),
-			builder->BindShaderResource(Builtin::PerObjectBuffer)};
+		builder->ShaderResource(Builtin::PerMeshBuffer);
+		builder->DepthReadWrite(Builtin::PrimaryCamera::DepthTexture);
+		builder->IsGeometryPass();
+		builder->ConstantBuffer(Builtin::PerFrameBuffer);
+		return {builder->ShaderResource(Builtin::CameraBuffer),
+			builder->ShaderResource(Builtin::PerObjectBuffer)};
 	}
 
 	void Update(const org::UpdateExecutionContext&) override {
@@ -65,8 +65,8 @@ public:
 		data.layout = (*m_debugLayout)->GetHandle();
 		data.program = preparation.CaptureProgram(m_pso);
 		preparation.Retain(m_debugLayout);
-		data.cameraBufferIndex = preparation.ResolveView(bindings.cameraBuffer, {org::BindlessViewKind::ShaderResource}).index;
-		data.objectBufferIndex = preparation.ResolveView(bindings.objectBuffer, {org::BindlessViewKind::ShaderResource}).index;
+		data.cameraBufferIndex = preparation.Resolve(bindings.cameraBuffer).index;
+		data.objectBufferIndex = preparation.Resolve(bindings.objectBuffer).index;
 		{
 			std::scoped_lock lock(m_spheresMutex);
 			data.spheres = m_spheres;

@@ -13,10 +13,13 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 
 #include <vector>
+#include <span>
+#include <utility>
 
 struct EnvironmentFilterBindings {
     struct Job {
-        org::ResourceBindingToken source, destination;
+        org::DeclaredViewToken source;
+        std::vector<org::DeclaredViewToken> destinationFaces;
         uint32_t baseResolution = 0, mipCount = 0;
     };
     std::vector<Job> jobs;
@@ -33,9 +36,17 @@ public:
         EnvironmentFilterBindings bindings;
         for (const auto& j : m_pending) {
             if (!j->work.srcCubemap || !j->work.dstPrefilteredCubemap) continue;
-            bindings.jobs.push_back({builder.BindShaderResource(j->work.srcCubemap),
-                builder.BindUnorderedAccess(j->work.dstPrefilteredCubemap), j->work.baseResolution,
-                j->work.dstPrefilteredCubemap->GetNumUAVMipLevels()});
+            EnvironmentFilterBindings::Job job{};
+            job.source = builder.ShaderResource(j->work.srcCubemap).View();
+            job.baseResolution = j->work.baseResolution;
+            job.mipCount = j->work.dstPrefilteredCubemap->GetNumUAVMipLevels();
+            std::vector<org::UavView> views;
+            views.reserve(job.mipCount * 6);
+            for (uint32_t mip = 0; mip < job.mipCount; ++mip)
+                for (uint32_t face = 0; face < 6; ++face) views.push_back({UINT32_MAX, mip, face});
+            auto destination = builder.UnorderedAccess(j->work.dstPrefilteredCubemap, std::span<const org::UavView>(views));
+            for (uint32_t view = 0; view < views.size(); ++view) job.destinationFaces.push_back(destination.View(view));
+            bindings.jobs.push_back(std::move(job));
         }
 
         m_declaredResourcesChanged = false;
@@ -61,15 +72,13 @@ public:
         data.program = preparation.CaptureProgram(m_pso);
         data.constantCount = 5;
         for (const auto& job : bindings.jobs) {
-            const auto src = preparation.ResolveView(job.source,
-                {org::BindlessViewKind::ShaderResource}).index;
+            const auto src = preparation.Resolve(job.source).index;
             const auto mipCount = job.mipCount;
             for (uint32_t mip = 0; mip < mipCount; ++mip) {
                 const auto size = std::max(1u, job.baseResolution >> mip);
                 const auto roughness = as_uint(mipCount > 1 ? float(mip) / float(mipCount - 1) : 0.0f);
                 for (uint32_t face = 0; face < 6; ++face)
-                    data.faces.push_back({{src, preparation.ResolveView(job.destination,
-                        {org::BindlessViewKind::UnorderedAccess, UINT32_MAX, mip, face}).index,
+                    data.faces.push_back({{src, preparation.Resolve(job.destinationFaces[mip * 6 + face]).index,
                         face, size, roughness}, (size + 7) / 8});
             }
         }

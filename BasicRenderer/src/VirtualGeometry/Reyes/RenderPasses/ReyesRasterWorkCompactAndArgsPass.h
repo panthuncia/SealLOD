@@ -17,7 +17,15 @@ struct ReyesCompactFrameData {
 };
 
 struct ReyesRasterWorkCompactBindings {
-    org::ResourceBindingToken work, counter, indirectCommand, histogram, offsets, cursor, compacted, packed, indirectArgs;
+    org::DeclaredViewToken work;
+    org::DeclaredViewToken counter;
+    org::ResourceBindingToken indirectCommand;
+    org::DeclaredViewToken histogram;
+    org::DeclaredViewToken offsets;
+    org::DeclaredViewToken cursor;
+    org::DeclaredViewToken compacted;
+    org::DeclaredViewToken packed;
+    org::DeclaredViewToken indirectArgs;
     uint32_t numBuckets = 0;
 };
 

@@ -185,7 +185,7 @@ void ReadbackManager::ReadbackPass::Declare(org::PassBuilder& builder)
 {
     std::scoped_lock lock(m_state->mutex);
     for (const auto& readback : m_state->queuedReadbacks)
-        if (readback.texture) builder.WithCopySource(readback.texture);
+        if (readback.texture) builder.CopySource(readback.texture);
     builder.PreferQueue(org::QueueKind::Graphics);
 }
 

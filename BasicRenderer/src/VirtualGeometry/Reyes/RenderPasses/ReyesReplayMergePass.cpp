@@ -54,11 +54,11 @@ ReyesReplayMergePass::ReyesReplayMergePass(
 ReyesReplayMergeBindings ReyesReplayMergePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.BindShaderResource(m_sourceQueueBuffer), builder.BindShaderResource(m_sourceQueueCounterBuffer),
-        builder.BindUnorderedAccess(m_destQueueBuffer), builder.BindUnorderedAccess(m_destQueueCounterBuffer),
-        builder.BindUnorderedAccess(m_destQueueOverflowBuffer), builder.BindIndirectArguments(m_indirectArgsBuffer),
-        builder.BindUnorderedAccess(m_telemetryBuffer), m_destQueueCapacity};
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
+    return {builder.ShaderResource(m_sourceQueueBuffer), builder.ShaderResource(m_sourceQueueCounterBuffer),
+        builder.UnorderedAccess(m_destQueueBuffer), builder.UnorderedAccess(m_destQueueCounterBuffer),
+        builder.UnorderedAccess(m_destQueueOverflowBuffer), builder.IndirectArguments(m_indirectArgsBuffer),
+        builder.UnorderedAccess(m_telemetryBuffer), m_destQueueCapacity};
 }
 
 void ReyesReplayMergePass::Update(const org::UpdateExecutionContext& executionContext)
@@ -76,8 +76,8 @@ br::render::PreparedComputeIndirect ReyesReplayMergePass::Prepare(
     auto program = preparation.CaptureProgramBinding(m_pso);
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     data.constants[CLOD_REYES_REPLAY_MERGE_SOURCE_DESCRIPTOR_INDEX] = srv(bindings.source);
     data.constants[CLOD_REYES_REPLAY_MERGE_SOURCE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.sourceCounter);
     data.constants[CLOD_REYES_REPLAY_MERGE_DEST_DESCRIPTOR_INDEX] = uav(bindings.dest);

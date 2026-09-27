@@ -10,9 +10,12 @@
 #include "Render/Runtime/IDescriptorService.h"
 #include "Render/Runtime/UploadTypes.h"
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include <array>
+#include <span>
 
 struct GTAOFilterBindings {
-    org::ResourceBindingToken depth, workingDepths;
+    org::DeclaredViewToken depth;
+    std::array<org::DeclaredViewToken, 5> workingDepths;
 };
 
 class GTAOFilterPass : public org::TypedRenderGraphPass<GTAOFilterPass,
@@ -53,12 +56,16 @@ public:
 
     GTAOFilterBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        builder.WithShaderResource(Builtin::Surface::NormalRoughness)
-            .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
-        return {
-            builder.BindShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
-            builder.BindUnorderedAccess(Builtin::GTAO::WorkingDepths) };
+        builder.ShaderResource(Builtin::Surface::NormalRoughness);
+        builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
+        GTAOFilterBindings bindings{};
+        bindings.depth = builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })).View();
+        std::array<org::UavView, 5> views{};
+        for (uint32_t mip = 0; mip < views.size(); ++mip) views[mip].mip = mip;
+        auto workingDepths = builder.UnorderedAccess(Builtin::GTAO::WorkingDepths, std::span<const org::UavView>(views));
+        for (uint32_t mip = 0; mip < views.size(); ++mip) bindings.workingDepths[mip] = workingDepths.View(mip);
+        return bindings;
     }
 
 
@@ -73,11 +80,9 @@ public:
         data.descriptorIndices = std::move(program.descriptorIndices);
 
         data.constants[UintRootConstant0] = m_samplerIndex;
-        data.constants[UintRootConstant1] = preparation.ResolveView(bindings.depth,
-            {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[UintRootConstant1] = preparation.Resolve(bindings.depth).index;
         for (uint32_t mip = 0; mip < 5; ++mip)
-            data.constants[UintRootConstant2 + mip] = preparation.ResolveView(bindings.workingDepths,
-                {org::BindlessViewKind::UnorderedAccess, UINT32_MAX, mip}).index;
+            data.constants[UintRootConstant2 + mip] = preparation.Resolve(bindings.workingDepths[mip]).index;
         data.groupsX = (context->renderResolution.x + 15u) / 16u; data.groupsY = (context->renderResolution.y + 15u) / 16u;
         return data;
     }

@@ -25,8 +25,8 @@ public:
     ReyesCounterCopyBindings Declare(org::PassBuilder& builder)
     {
         builder.PreferQueue(org::QueueKind::Copy);
-        return {builder.BindCopySource(m_sourceCounterBuffer),
-            builder.BindCopyDestination(m_destCounterBuffer)};
+        return {builder.CopySource(m_sourceCounterBuffer),
+            builder.CopyDestination(m_destCounterBuffer)};
     }
 
     static void Record(const ReyesCounterCopyBindings& data,

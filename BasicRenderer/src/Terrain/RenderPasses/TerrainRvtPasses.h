@@ -222,7 +222,7 @@ public:
     void Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        b.WithUnorderedAccess(
+        b.UnorderedAccess(
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
@@ -231,9 +231,9 @@ public:
             Builtin::Terrain::RvtPhysicalPageAtlas,
             Builtin::Terrain::RvtRequestMasks,
             Builtin::Terrain::RvtCounters,
-            Builtin::Terrain::RvtStats)
-            .WithShaderResource(Builtin::CameraBuffer, Builtin::Terrain::Sets)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+            Builtin::Terrain::RvtStats);
+        b.ShaderResource(Builtin::CameraBuffer, Builtin::Terrain::Sets);
+        b.ConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     void InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
@@ -272,7 +272,7 @@ private:
 };
 
 struct TerrainRvtMarkVisibilityMaterialPagesBindings {
-    org::ResourceBindingToken visibleClusters, visibleCount;
+    org::DeclaredViewToken visibleClusters, visibleCount;
     uint32_t visibleCapacity = 0;
 };
 
@@ -297,13 +297,13 @@ public:
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         TerrainRvtMarkVisibilityMaterialPagesBindings bindings{
-            b.BindShaderResource(m_visibleClustersResource),
-            b.BindShaderResource(m_visibleClustersCounterResource),
+            b.ShaderResource(m_visibleClustersResource).View(),
+            b.ShaderResource(m_visibleClustersCounterResource).View(),
             m_visibleClusterCapacity};
         if (m_slabResourceGroup) {
-            b.WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+            b.ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
         }
-        b.WithShaderResource(
+        b.ShaderResource(
             Builtin::CameraBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
@@ -315,13 +315,13 @@ public:
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
             Builtin::Terrain::RvtPageKeys,
-            Builtin::Terrain::RvtPhysicalPageOwner)
-            .WithUnorderedAccess(
+            Builtin::Terrain::RvtPhysicalPageOwner);
+        b.UnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtRequestList,
                 Builtin::Terrain::RvtCounters,
-                Builtin::Terrain::RvtStats)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+                Builtin::Terrain::RvtStats);
+        b.ConstantBuffer(Builtin::PerFrameBuffer);
         return bindings;
     }
 
@@ -342,10 +342,8 @@ public:
         auto program = preparation.CaptureProgramBinding(m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
-        data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(
-            bindings.visibleClusters, {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[VISBUF_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = preparation.ResolveView(
-            bindings.visibleCount, {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.visibleClusters).index;
+        data.constants[VISBUF_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.visibleCount).index;
         data.groupsX = (std::max(bindings.visibleCapacity, 1u) + 63u) / 64u;
         return data;
     }
@@ -390,18 +388,18 @@ public:
     void Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        b.WithShaderResource(
+        b.ShaderResource(
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtRequestList,
             Builtin::Terrain::RvtRequestMasks,
-            Builtin::Terrain::RvtPageKeys)
-            .WithUnorderedAccess(
+            Builtin::Terrain::RvtPageKeys);
+        b.UnorderedAccess(
                 Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtPageTable,
                 Builtin::Terrain::RvtPhysicalPageOwner,
                 Builtin::Terrain::RvtGenerationList,
-                Builtin::Terrain::RvtStats)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+                Builtin::Terrain::RvtStats);
+        b.ConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     br::render::PreparedComputePipelineSequence Prepare(const org::PassPrepareContext& preparation)
@@ -453,8 +451,8 @@ public:
     void Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        b.WithShaderResource(Builtin::Terrain::RvtInfo)
-            .WithUnorderedAccess(
+        b.ShaderResource(Builtin::Terrain::RvtInfo);
+        b.UnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtCounters);
     }
@@ -490,13 +488,13 @@ public:
     void Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        b.WithShaderResource(
+        b.ShaderResource(
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
-            Builtin::Terrain::RvtPageKeys)
-            .WithUnorderedAccess(Builtin::Terrain::RvtHeightResidentCache)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+            Builtin::Terrain::RvtPageKeys);
+        b.UnorderedAccess(Builtin::Terrain::RvtHeightResidentCache);
+        b.ConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
@@ -530,8 +528,8 @@ public:
     void Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        b.WithShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtCounters)
-            .WithUnorderedAccess(Builtin::Terrain::RvtGenerateDispatchArgs);
+        b.ShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtCounters);
+        b.UnorderedAccess(Builtin::Terrain::RvtGenerateDispatchArgs);
     }
 
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
@@ -564,7 +562,7 @@ public:
     void Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        b.WithShaderResource(
+        b.ShaderResource(
             Builtin::CameraBuffer,
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
@@ -577,16 +575,16 @@ public:
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
             Builtin::Terrain::TextureGroup,
-            Builtin::Material::TextureStreamingMetadataBuffer)
-            .WithUnorderedAccess(
+            Builtin::Material::TextureStreamingMetadataBuffer);
+        b.UnorderedAccess(
                 Builtin::Terrain::RvtHeightAtlas,
                 Builtin::Terrain::RvtAlbedoAtlas,
                 Builtin::Terrain::RvtNormalAtlas,
                 Builtin::Terrain::RvtMaterialAtlas,
                 Builtin::Terrain::RvtStats,
-                Builtin::Material::TextureStreamingFeedbackBuffer)
-            .WithIndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+                Builtin::Material::TextureStreamingFeedbackBuffer);
+        b.IndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs);
+        b.ConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     void Initialize()
@@ -638,15 +636,15 @@ public:
     void Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        b.WithShaderResource(
+        b.ShaderResource(
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtCounters,
             Builtin::Terrain::RvtGenerationList,
-            Builtin::Terrain::RvtPageKeys)
-            .WithUnorderedAccess(
+            Builtin::Terrain::RvtPageKeys);
+        b.UnorderedAccess(
                 Builtin::Terrain::RvtPageTable,
-                Builtin::Terrain::RvtPhysicalPageOwner)
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+                Builtin::Terrain::RvtPhysicalPageOwner);
+        b.ConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     br::render::PreparedComputeDispatchSequence Prepare(const org::PassPrepareContext& preparation)

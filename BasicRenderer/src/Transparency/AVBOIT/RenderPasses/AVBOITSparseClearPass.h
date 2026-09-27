@@ -8,7 +8,7 @@
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
-struct AVBOITSparseClearBindings { org::ResourceBindingToken config, occupancy; };
+struct AVBOITSparseClearBindings { org::DeclaredViewToken config, occupancy; };
 class AVBOITSparseClearPass final : public org::TypedRenderGraphPass<AVBOITSparseClearPass, br::render::PreparedComputeDispatch, AVBOITSparseClearBindings> {
 public:
     AVBOITSparseClearPass(

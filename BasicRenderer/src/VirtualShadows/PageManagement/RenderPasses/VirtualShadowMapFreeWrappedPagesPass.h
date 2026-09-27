@@ -10,7 +10,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapFreeWrappedPagesBindings {
-    org::ResourceBindingToken pageTable, pageMetadata, clipmapInfo, stats;
+    org::DeclaredViewToken pageTable, pageMetadata, clipmapInfo, stats;
 };
 
 class VirtualShadowMapFreeWrappedPagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapFreeWrappedPagesPass,

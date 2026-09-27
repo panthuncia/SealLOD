@@ -18,8 +18,9 @@ enum class ReyesClassifyMode : uint32_t
 };
 
 struct ReyesClassifyBindings {
-    org::ResourceBindingToken visible, visibleCounter, readBaseCounter, fullClusters, fullCounter;
-    org::ResourceBindingToken ownedClusters, ownedCounter, ownershipBitset, indirectArgs, telemetry;
+    org::DeclaredViewToken visible, visibleCounter, readBaseCounter, fullClusters, fullCounter;
+    org::DeclaredViewToken ownedClusters, ownedCounter, ownershipBitset, telemetry;
+    org::ResourceBindingToken indirectArgs;
     uint32_t fullCapacity = 0, ownedCapacity = 0, phase = 0, mode = 0;
     bool hasReadBaseCounter = false, hasOwnershipBitset = false;
 };

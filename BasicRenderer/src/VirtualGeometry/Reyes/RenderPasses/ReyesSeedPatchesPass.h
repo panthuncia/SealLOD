@@ -12,7 +12,13 @@ namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesSeedPatchesBindings {
-    org::ResourceBindingToken visible, owned, ownedCounter, splitQueue, splitCounter, splitOverflow, indirectArgs;
+    org::DeclaredViewToken visible;
+    org::DeclaredViewToken owned;
+    org::DeclaredViewToken ownedCounter;
+    org::DeclaredViewToken splitQueue;
+    org::DeclaredViewToken splitCounter;
+    org::DeclaredViewToken splitOverflow;
+    org::ResourceBindingToken indirectArgs;
     uint32_t capacity = 0, phase = 0;
 };
 

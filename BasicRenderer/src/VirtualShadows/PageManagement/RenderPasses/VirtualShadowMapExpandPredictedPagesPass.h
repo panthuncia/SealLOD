@@ -10,8 +10,8 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapExpandPredictedPagesBindings {
-    org::ResourceBindingToken candidates, candidateCount, rawPages, rawCount, clipmapInfo;
-    org::ResourceBindingToken scratch, stats, pageTable, pageMetadata, pageViewInfo;
+    org::DeclaredViewToken candidates, candidateCount, rawPages, rawCount, clipmapInfo;
+    org::DeclaredViewToken scratch, stats, pageTable, pageMetadata, pageViewInfo;
     uint32_t physicalPageCount = 0;
 };
 

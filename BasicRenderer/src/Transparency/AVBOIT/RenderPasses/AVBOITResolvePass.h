@@ -9,7 +9,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct AVBOITResolveBindings {
-    org::ResourceBindingToken config, accumulation, normalization, extinction;
+    org::DeclaredViewToken config, accumulation, normalization, extinction;
 };
 
 class AVBOITResolvePass final : public org::TypedRenderGraphPass<AVBOITResolvePass,

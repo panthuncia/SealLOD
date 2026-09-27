@@ -22,13 +22,12 @@ public:
     }
 
     void Declare(org::PassBuilder& b) {
-        b.WithShaderResource(
+        b.ShaderResource(
             "Builtin::VisUtil::MaterialPixelCountBuffer",
-            "Builtin::VisUtil::MaterialOffsetBuffer")
-            .WithUnorderedAccess(
-                "Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
-		b.WithConstantBuffer(Builtin::PerFrameBuffer)
-            .PreferQueue(org::QueueKind::Compute);
+            "Builtin::VisUtil::MaterialOffsetBuffer");
+        b.UnorderedAccess("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+		b.ConstantBuffer(Builtin::PerFrameBuffer);
+        b.PreferQueue(org::QueueKind::Compute);
     }
 
     br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {

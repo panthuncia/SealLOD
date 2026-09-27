@@ -28,9 +28,10 @@ struct VoxelRasterFrameData {
 };
 
 struct VoxelRasterBindings {
-    org::ResourceBindingToken visible, transforms, telemetry;
-    std::array<org::ResourceBindingToken, 2> workRecords, workCounters, indirectArgs;
-    org::ResourceBindingToken pageTable, clipmapInfo, physicalPages, dynamicPages;
+    org::DeclaredViewToken visible, transforms, telemetry;
+    std::array<org::DeclaredViewToken, 2> workRecords, workCounters, indirectArgs;
+    org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages;
+    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;
     bool hasTelemetry = false, virtualShadow = false;
 };
 
@@ -60,6 +61,7 @@ public:
     VoxelRasterBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
+    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>& out) const;
     VoxelRasterFrameData Prepare(const VoxelRasterBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const VoxelRasterBindings&, const VoxelRasterFrameData&, org::PassRecordContext&);
 
@@ -79,13 +81,13 @@ private:
     // The per-view table the shader reads; it embeds the visibility UAVs, so
     // it is published during preparation from the frame's bindings.
     org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Voxel Raster View Raster Info"};
+    CLodDeclaredViewRasterTable m_viewRasterInfoTable;
     std::shared_ptr<org::PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<org::PixelBuffer> m_virtualShadowPhysicalPagesTexture;
     std::shared_ptr<org::PixelBuffer> m_virtualShadowDynamicPagesTexture;
     std::shared_ptr<org::Buffer> m_virtualShadowClipmapInfoBuffer;
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
-    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
     uint32_t m_voxelWorkCapacity = 0u;
     bool m_declaredResourcesChanged = true;
 };

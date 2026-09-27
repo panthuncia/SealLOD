@@ -8,7 +8,7 @@
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
-struct AVBOITEarlyDepthBuildBindings { org::ResourceBindingToken config, zeroSlice, commands, count; };
+struct AVBOITEarlyDepthBuildBindings { org::DeclaredViewToken config, zeroSlice, commands, count; };
 class AVBOITEarlyDepthBuildPass final : public org::TypedRenderGraphPass<AVBOITEarlyDepthBuildPass, br::render::PreparedComputeDispatch, AVBOITEarlyDepthBuildBindings> {
 public:
     AVBOITEarlyDepthBuildPass(

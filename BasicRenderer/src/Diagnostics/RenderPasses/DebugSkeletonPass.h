@@ -45,7 +45,7 @@ struct DebugSkeletonFrameData {
 };
 
 struct DebugSkeletonBindings {
-    org::ResourceBindingToken lines, perFrame, camera, target;
+    org::DeclaredViewToken lines, perFrame, camera, target;
 };
 
 class DebugSkeletonPass final
@@ -61,10 +61,10 @@ public:
     DebugSkeletonBindings Declare(org::PassBuilder& declaration)
     {
         auto* builder = &declaration;
-        return {builder->BindShaderResource(m_lineBuffer),
-            builder->BindConstantBuffer(Builtin::PerFrameBuffer),
-            builder->BindShaderResource(Builtin::CameraBuffer),
-            builder->BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
+        return {builder->ShaderResource(m_lineBuffer),
+            builder->ConstantBuffer(Builtin::PerFrameBuffer),
+            builder->ShaderResource(Builtin::CameraBuffer),
+            builder->RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
     }
 
     void Update(const org::UpdateExecutionContext&) override
@@ -83,16 +83,15 @@ public:
         const auto* context = preparation.preparationData->Get<UpdateContext>();
         data.resourceHeap = context->textureDescriptorHeap.GetHandle();
         data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.target = preparation.CaptureView(bindings.target,
-            {org::BindlessViewKind::RenderTarget});
+        data.target = preparation.Capture(bindings.target);
         data.outputResolution = context->outputResolution;
         data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle();
         data.program = preparation.CaptureProgramBinding(m_pso, m_resourceDescriptorBindings);
-        data.lineResource = preparation.CaptureResource(bindings.lines);
+        data.lineResource = preparation.DeclaredReference(bindings.lines);
         data.constants = {
-            preparation.ResolveView(bindings.lines, {org::BindlessViewKind::ShaderResource}).index,
-            preparation.ResolveView(bindings.perFrame, {org::BindlessViewKind::ConstantBuffer}).index,
-            preparation.ResolveView(bindings.camera, {org::BindlessViewKind::ShaderResource}).index };
+            preparation.Resolve(bindings.lines).index,
+            preparation.Resolve(bindings.perFrame).index,
+            preparation.Resolve(bindings.camera).index };
         data.ranges.reserve(m_drawRanges.size());
         for (const auto& range : m_drawRanges)
             data.ranges.push_back({range.lineOffset, range.lineCount});

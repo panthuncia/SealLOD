@@ -6,7 +6,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedFullscreenDraw.h"
 
-struct DebugResolveBindings { org::ResourceBindingToken target; };
+struct DebugResolveBindings { org::DeclaredViewToken target; };
 
 class DebugResolvePass
     : public org::TypedRenderGraphPass<DebugResolvePass,
@@ -17,18 +17,17 @@ public:
 	}
 
 	DebugResolveBindings Declare(org::PassBuilder& builder) {
-		builder.WithShaderResource(Builtin::DebugVisualization, Builtin::CameraBuffer);
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
-		return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
+		builder.ShaderResource(Builtin::DebugVisualization, Builtin::CameraBuffer);
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
+		return {builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
 	}
 
 	br::render::PreparedFullscreenDraw Prepare(const DebugResolveBindings& bindings,
 		const org::PassPrepareContext& preparation) const {
 		const auto* context = preparation.preparationData->Get<UpdateContext>();
 		br::render::PreparedFullscreenDraw data{};
-		data.targetResource = preparation.CaptureResource(bindings.target);
-		data.renderTargetReference = preparation.CaptureView(
-			bindings.target, {org::BindlessViewKind::RenderTarget});
+		data.targetResource = preparation.DeclaredReference(bindings.target);
+		data.renderTargetReference = preparation.Capture(bindings.target);
 		data.loadOp = rhi::LoadOp::Load;
 		data.width = context->outputResolution.x; data.height = context->outputResolution.y;
 

@@ -19,12 +19,10 @@ public:
     }
 
     void Declare(org::PassBuilder& b) {
-        b.WithShaderResource("Builtin::VisUtil::MaterialPixelCountBuffer",
-                              "Builtin::VisUtil::BlockSumsBuffer")
-         .WithUnorderedAccess("Builtin::VisUtil::MaterialOffsetBuffer",
-                              "Builtin::VisUtil::ScannedBlockSumsBuffer",
-                              "Builtin::VisUtil::TotalPixelCountBuffer")
-         .PreferQueue(org::QueueKind::Compute);
+        b.ShaderResource("Builtin::VisUtil::MaterialPixelCountBuffer", "Builtin::VisUtil::BlockSumsBuffer");
+        b.UnorderedAccess("Builtin::VisUtil::MaterialOffsetBuffer", "Builtin::VisUtil::ScannedBlockSumsBuffer",
+            "Builtin::VisUtil::TotalPixelCountBuffer");
+        b.PreferQueue(org::QueueKind::Compute);
     }
 
     br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {

@@ -12,8 +12,8 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct DeepVisibilityResolveBindings {
-    org::ResourceBindingToken headPointers, nodes, counter, overflow, visibleClusters, stats;
-    org::ResourceBindingToken diceQueue, tessConfigs, tessVertices, tessTriangles;
+    org::DeclaredViewToken headPointers, nodes, counter, overflow, visibleClusters, stats;
+    org::DeclaredViewToken diceQueue, tessConfigs, tessVertices, tessTriangles;
     uint32_t patchIndexBase = 0, width = 0, height = 0, globalPsoFlags = 0;
     bool ready = false, shadows = false, punctualLights = false, gtao = false;
     bool hasDiceQueue = false, hasTessTables = false;

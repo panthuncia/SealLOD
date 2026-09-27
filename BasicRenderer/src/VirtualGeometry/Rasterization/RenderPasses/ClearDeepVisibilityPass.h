@@ -11,7 +11,8 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct ClearDeepVisibilityBindings {
-    std::vector<org::ResourceBindingToken> headPointers;
+    struct Clear { org::DeclaredViewToken gpu, cpu; };
+    std::vector<Clear> headPointers;
 };
 
 class ClearDeepVisibilityPass final : public org::TypedRenderGraphPass<ClearDeepVisibilityPass,

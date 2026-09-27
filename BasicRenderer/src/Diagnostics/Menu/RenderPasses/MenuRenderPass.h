@@ -10,12 +10,12 @@ struct MenuFrameData {
 	DirectX::XMUINT2 outputResolution{};
 };
 
-struct MenuBindings { org::ResourceBindingToken target; };
+struct MenuBindings { org::DeclaredViewToken target; };
 
 class MenuRenderPass final : public org::TypedRenderGraphPass<MenuRenderPass, MenuFrameData, MenuBindings> {
 public:
 	MenuBindings Declare(org::PassBuilder& builder) {
-		return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
+        return {builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor}).View()};
 	}
 
 	MenuFrameData Prepare(const MenuBindings& bindings, const org::PassPrepareContext& preparation) const {
@@ -24,8 +24,7 @@ public:
 		if (!context) return {};
 		return {
 			.drawData = context->uiDrawData,
-			.target = preparation.CaptureView(bindings.target,
-				{org::BindlessViewKind::RenderTarget}),
+            .target = preparation.Capture(bindings.target),
 			.outputResolution = context->outputResolution,
 		};
 	}

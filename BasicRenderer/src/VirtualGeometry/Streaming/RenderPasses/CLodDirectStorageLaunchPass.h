@@ -17,7 +17,7 @@ public:
     explicit CLodDirectStorageLaunchPass(CLodDirectStorageLaunchInputs inputs)
         : m_inputs(std::move(inputs)) {}
     void Declare(org::PassBuilder& builder) {
-        if (m_inputs.targetSlabResolver) builder.WithCopyDest(*m_inputs.targetSlabResolver);
+        if (m_inputs.targetSlabResolver) builder.CopyDestination(*m_inputs.targetSlabResolver);
         builder.PreferQueue(org::QueueKind::Graphics);
     }
     org::EmptyPassFrameData Prepare(const org::PassPrepareContext& preparation) {

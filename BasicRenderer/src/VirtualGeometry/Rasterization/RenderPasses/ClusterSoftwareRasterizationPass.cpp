@@ -228,7 +228,7 @@ ClusterSoftwareRasterizationPass::~ClusterSoftwareRasterizationPass() = default;
 ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::PassBuilder& declaration) {
     auto* builder = &declaration;
     builder->PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder->WithShaderResource(
+    builder->ShaderResource(
             Builtin::PerMeshBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::Material::TextureStreamingMetadataBuffer,
@@ -246,85 +246,55 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
             Builtin::CameraBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
-            Builtin::SkeletonResources::SkinningInstanceInfo,
-            m_compactedVisibleClustersBuffer,
-            m_compactedVisibleClusterTransformIndicesBuffer,
-            m_rasterBucketsHistogramBuffer,
-            m_sortedToUnsortedMappingBuffer)
-        .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
-        .WithUnorderedAccess(Builtin::DebugVisualization);
+            Builtin::SkeletonResources::SkinningInstanceInfo);
+    builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+    builder->UnorderedAccess(Builtin::DebugVisualization);
     ClusterSoftwareRasterBindings bindings{
-        builder->BindShaderResource(m_rasterBucketsHistogramBuffer),
-        builder->BindShaderResource(m_compactedVisibleClustersBuffer),
-        builder->BindShaderResource(m_compactedVisibleClusterTransformIndicesBuffer),
-        builder->BindShaderResource(m_sortedToUnsortedMappingBuffer),
-        builder->BindIndirectArguments(m_rasterBucketsIndirectArgsBuffer)};
+        builder->ShaderResource(m_rasterBucketsHistogramBuffer).View(),
+        builder->ShaderResource(m_compactedVisibleClustersBuffer).View(),
+        builder->ShaderResource(m_compactedVisibleClusterTransformIndicesBuffer).View(),
+        builder->ShaderResource(m_sortedToUnsortedMappingBuffer).View(),
+        builder->IndirectArguments(m_rasterBucketsIndirectArgsBuffer)};
 
-    if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer) {
-        for (auto& vb : m_visibilityBuffers) {
-            builder->WithUnorderedAccess(vb);
-        }
-    }
-    else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
+    m_viewRasterInfoTable.Declare(*builder);
+    bindings.viewRasterInfoLayout = m_viewRasterInfoTable.Layout();
+    if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         bindings.virtualShadow = true;
-        builder->WithShaderResource(
-                m_virtualShadowClipmapInfoBuffer,
-                Builtin::Shadows::CLodDirectionalPageViewInfo)
-            .WithUnorderedAccess(
-                m_virtualShadowPageTableTexture,
-                m_virtualShadowPhysicalPagesTexture,
-                m_virtualShadowDynamicPagesTexture);
+        builder->ShaderResource(Builtin::Shadows::CLodDirectionalPageViewInfo);
         if (m_telemetryBuffer) {
-            builder->WithUnorderedAccess(m_telemetryBuffer);
-            bindings.telemetry = builder->BindUnorderedAccess(m_telemetryBuffer);
+            bindings.telemetry = builder->UnorderedAccess(m_telemetryBuffer).View();
             bindings.hasTelemetry = true;
         }
         if (m_dynamicWindSkinCacheHashBuffer) {
-            builder->WithUnorderedAccess(
-                m_dynamicWindSkinCacheMappingBuffer,
-                m_dynamicWindSkinCacheHashBuffer,
-                m_dynamicWindSkinCachePositionsBuffer,
-                m_dynamicWindSkinCacheAllocatorBuffer,
-                m_dynamicWindSkinCacheWorkRecordsBuffer,
-                m_dynamicWindSkinCacheIndirectArgsBuffer)
-                .WithIndirectArguments(m_dynamicWindSkinCacheIndirectArgsBuffer)
-                .WithShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
-            bindings.skinMapping = builder->BindUnorderedAccess(m_dynamicWindSkinCacheMappingBuffer);
-            bindings.skinHash = builder->BindUnorderedAccess(m_dynamicWindSkinCacheHashBuffer);
-            bindings.skinPositions = builder->BindUnorderedAccess(m_dynamicWindSkinCachePositionsBuffer);
-            bindings.skinAllocator = builder->BindUnorderedAccess(m_dynamicWindSkinCacheAllocatorBuffer);
-            bindings.skinWork = builder->BindUnorderedAccess(m_dynamicWindSkinCacheWorkRecordsBuffer);
-            bindings.skinArgs = builder->BindUnorderedAccess(m_dynamicWindSkinCacheIndirectArgsBuffer);
-            bindings.skinMembership = builder->BindShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
+            bindings.skinMapping = builder->UnorderedAccess(m_dynamicWindSkinCacheMappingBuffer).View();
+            bindings.skinHash = builder->UnorderedAccess(m_dynamicWindSkinCacheHashBuffer).View();
+            bindings.skinPositions = builder->UnorderedAccess(m_dynamicWindSkinCachePositionsBuffer).View();
+            bindings.skinAllocator = builder->UnorderedAccess(m_dynamicWindSkinCacheAllocatorBuffer).View();
+            bindings.skinWork = builder->UnorderedAccess(m_dynamicWindSkinCacheWorkRecordsBuffer).View();
+            bindings.skinArgs = builder->UnorderedAccess(m_dynamicWindSkinCacheIndirectArgsBuffer).View();
+            builder->IndirectArguments(m_dynamicWindSkinCacheIndirectArgsBuffer);
+            bindings.skinMembership = builder->ShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership").View();
             bindings.hasSkinCache = true;
         }
-        bindings.pageTable = builder->BindUnorderedAccess(m_virtualShadowPageTableTexture);
-        bindings.clipmapInfo = builder->BindShaderResource(m_virtualShadowClipmapInfoBuffer);
-        bindings.physicalPages = builder->BindUnorderedAccess(m_virtualShadowPhysicalPagesTexture);
-        bindings.dynamicPages = builder->BindUnorderedAccess(m_virtualShadowDynamicPagesTexture);
+        bindings.pageTable = builder->UnorderedAccess(m_virtualShadowPageTableTexture,
+            org::UavView{static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}).View();
+        bindings.clipmapInfo = builder->ShaderResource(m_virtualShadowClipmapInfoBuffer).View();
+        bindings.physicalPages = builder->UnorderedAccess(m_virtualShadowPhysicalPagesTexture).View();
+        bindings.dynamicPages = builder->UnorderedAccess(m_virtualShadowDynamicPagesTexture).View();
     }
 
     if (m_slabResourceGroup) {
-        builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+        builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
 
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder->ConstantBuffer(Builtin::PerFrameBuffer);
     return bindings;
 }
 
 void ClusterSoftwareRasterizationPass::Update(const org::UpdateExecutionContext& executionContext) {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
-    // Only the declarations are maintained here: the view table the shader
-    // reads is published during preparation (ViewRasterInfoTable).
-    std::vector<std::shared_ptr<org::PixelBuffer>> nextVisibilityBuffers;
-    if (m_outputKind != CLodRasterOutputKind::VirtualShadow)
-        for (const auto& viewInfo : context.Views())
-            if (viewInfo.visibilityBuffer && viewInfo.cameraBufferIndex < context.ViewCameraBufferSize())
-                nextVisibilityBuffers.push_back(viewInfo.visibilityBuffer);
-
-    m_declaredResourcesChanged = (nextVisibilityBuffers != m_visibilityBuffers);
-    m_visibilityBuffers = std::move(nextVisibilityBuffers);
+    m_declaredResourcesChanged = m_viewRasterInfoTable.Update(context.Views(), context.ViewCameraBufferSize(), m_outputKind);
 }
 
 bool ClusterSoftwareRasterizationPass::DeclaredResourcesChanged() const {
@@ -348,24 +318,24 @@ ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::BuildRecipe(
     data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
     data.commandSignature = preparation.CaptureCommandSignature(m_rasterizationCommandSignature);
     data.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
-    const auto srv = [&](org::ResourceBindingToken token) {
-        return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index;
+    const auto srv = [&](org::DeclaredViewToken token) {
+        return preparation.Resolve(token).index;
     };
-    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) {
-        return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index;
+    const auto uav = [&](org::DeclaredViewToken token) {
+        return preparation.Resolve(token).index;
     };
     // Keep the original default-SRV, mip-zero contract, resolved from the selected
     // immutable binding version rather than mutable buffer descriptor storage.
-    auto constants = BuildPrimaryConstants<uint32_t>(bindings,[&](org::ResourceBindingToken token) {
-        return preparation.ResolveView(token,{org::BindlessViewKind::ShaderResource}).index;
+    auto constants = BuildPrimaryConstants<uint32_t>(bindings,[&](org::DeclaredViewToken token) {
+        return preparation.Resolve(token).index;
     });
     constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] =
-        ViewRasterInfoTable(preparation).Publish(preparation, m_viewRasterInfoPublisher);
+        bindings.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoPublisher, m_viewRasterInfoTable.Rows());
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         ApplyVirtualShadowConstants(constants,bindings,
             {config.pageTableResolution,config.virtualResolution,m_dynamicWindSkinCacheHashEntryCount,
-                m_dynamicWindSkinCachePositionCapacity,static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)},srv,uav);
+                m_dynamicWindSkinCachePositionCapacity},srv,uav);
     }
     const auto numBuckets = context->preparedRasterBucketCount;
     frame.bucketCount = numBuckets;
@@ -395,12 +365,12 @@ ClusterSoftwareRasterFrameData ClusterSoftwareRasterizationPass::BuildRecipe(
         frame.skinProgram = preparation.CaptureProgramBinding(m_dynamicWindSkinCacheSkinPipeline);
         frame.resolveProgram = preparation.CaptureProgramBinding(m_dynamicWindSkinCacheResolvePipeline);
         frame.cacheDispatchSignature = preparation.CaptureCommandSignature(m_dynamicWindSkinCacheDispatchCommandSignature);
-        frame.cacheIndirectArgs = preparation.CaptureResource(bindings.skinArgs);
-        frame.cacheAllocator = preparation.CaptureResource(bindings.skinAllocator);
-        frame.cacheHash = preparation.CaptureResource(bindings.skinHash);
-        frame.cacheWorkRecords = preparation.CaptureResource(bindings.skinWork);
-        frame.cachePositions = preparation.CaptureResource(bindings.skinPositions);
-        frame.cacheMapping = preparation.CaptureResource(bindings.skinMapping);
+        frame.cacheIndirectArgs = preparation.DeclaredReference(bindings.skinArgs);
+        frame.cacheAllocator = preparation.DeclaredReference(bindings.skinAllocator);
+        frame.cacheHash = preparation.DeclaredReference(bindings.skinHash);
+        frame.cacheWorkRecords = preparation.DeclaredReference(bindings.skinWork);
+        frame.cachePositions = preparation.DeclaredReference(bindings.skinPositions);
+        frame.cacheMapping = preparation.DeclaredReference(bindings.skinMapping);
     }
     return frame;
 }
@@ -424,11 +394,6 @@ std::vector<uint64_t> ClusterSoftwareRasterizationPass::RecipeRevision(const org
         revision.push_back(static_cast<uint64_t>(flags));
         revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->PeekPayload() : nullptr));
     }
-    ViewRasterInfoTable(preparation).AppendRevision(preparation, revision);
+    m_viewRasterInfoTable.AppendRowRevision(revision);
     return revision;
-}
-
-CLodViewRasterInfoTable ClusterSoftwareRasterizationPass::ViewRasterInfoTable(const org::PassPrepareContext& preparation) const {
-    const auto& context = CLodPreparationSnapshot(preparation);
-    return BuildCLodVisibilityViewRasterInfo(context.Views(), context.ViewCameraBufferSize(), m_outputKind);
 }

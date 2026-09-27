@@ -156,7 +156,7 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
         rhi::ResourceSyncState::ExecuteIndirect
     };
 
-    builder->WithShaderResource(
+    builder->ShaderResource(
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
@@ -174,58 +174,39 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::InverseSkinMatrices,
             Builtin::SkeletonResources::BoneTransforms,
-            Builtin::SkeletonResources::SkinningInstanceInfo,
-            m_voxelWorkRecordsBuffers[0],
-            m_voxelWorkRecordsBuffers[1],
-            m_visibleClustersBuffer,
-            m_voxelWorkCounterBuffers[0],
-            m_voxelWorkCounterBuffers[1])
-        .WithShaderResource(
-            Builtin::CLod::AssemblyTransforms,
-            m_visibleClusterTransformIndicesBuffer)
-        .WithUnorderedAccess(
-            m_voxelIndirectArgsBuffers[0],
-            m_voxelIndirectArgsBuffers[1],
-            m_telemetryBuffer,
-            Builtin::DebugVisualization)
-        .WithInternalTransition(m_voxelIndirectArgsBuffers[0], indirectState)
-        .WithInternalTransition(m_voxelIndirectArgsBuffers[1], indirectState)
-        .WithConstantBuffer(Builtin::PerFrameBuffer);
+            Builtin::SkeletonResources::SkinningInstanceInfo);
+    builder->ShaderResource(Builtin::CLod::AssemblyTransforms);
+    builder->UnorderedAccess(Builtin::DebugVisualization);
+    builder->WithInternalTransition(m_voxelIndirectArgsBuffers[0], indirectState)
+        .WithInternalTransition(m_voxelIndirectArgsBuffers[1], indirectState);
+    builder->ConstantBuffer(Builtin::PerFrameBuffer);
 
-    if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer) {
-        for (auto& vb : m_visibilityBuffers) {
-            builder->WithUnorderedAccess(vb);
-        }
-    }
-    else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-        builder->WithShaderResource(
-                m_virtualShadowClipmapInfoBuffer,
-                Builtin::Shadows::CLodDirectionalPageViewInfo)
-            .WithUnorderedAccess(
-                m_virtualShadowPageTableTexture,
-                m_virtualShadowPhysicalPagesTexture,
-                m_virtualShadowDynamicPagesTexture);
+    m_viewRasterInfoTable.Declare(*builder);
+    if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
+        builder->ShaderResource(Builtin::Shadows::CLodDirectionalPageViewInfo);
     }
 
     if (m_slabResourceGroup) {
-        builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+        builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
     VoxelRasterBindings bindings{
-        builder->BindShaderResource(m_visibleClustersBuffer),
-        builder->BindShaderResource(m_visibleClusterTransformIndicesBuffer),
+        builder->ShaderResource(m_visibleClustersBuffer).View(),
+        builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         {}};
+    bindings.viewRasterInfoLayout = m_viewRasterInfoTable.Layout();
     bindings.hasTelemetry = static_cast<bool>(m_telemetryBuffer);
-    if (bindings.hasTelemetry) bindings.telemetry = builder->BindUnorderedAccess(m_telemetryBuffer);
+    if (bindings.hasTelemetry) bindings.telemetry = builder->UnorderedAccess(m_telemetryBuffer).View();
     for (uint32_t i = 0; i < 2; ++i) {
-        bindings.workRecords[i] = builder->BindShaderResource(m_voxelWorkRecordsBuffers[i]);
-        bindings.workCounters[i] = builder->BindShaderResource(m_voxelWorkCounterBuffers[i]);
-        bindings.indirectArgs[i] = builder->BindUnorderedAccess(m_voxelIndirectArgsBuffers[i]);
+        bindings.workRecords[i] = builder->ShaderResource(m_voxelWorkRecordsBuffers[i]).View();
+        bindings.workCounters[i] = builder->ShaderResource(m_voxelWorkCounterBuffers[i]).View();
+        bindings.indirectArgs[i] = builder->UnorderedAccess(m_voxelIndirectArgsBuffers[i]).View();
     }
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-        bindings.pageTable = builder->BindUnorderedAccess(m_virtualShadowPageTableTexture);
-        bindings.clipmapInfo = builder->BindShaderResource(m_virtualShadowClipmapInfoBuffer);
-        bindings.physicalPages = builder->BindUnorderedAccess(m_virtualShadowPhysicalPagesTexture);
-        bindings.dynamicPages = builder->BindUnorderedAccess(m_virtualShadowDynamicPagesTexture);
+        bindings.pageTable = builder->UnorderedAccess(m_virtualShadowPageTableTexture,
+            org::UavView{static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}).View();
+        bindings.clipmapInfo = builder->ShaderResource(m_virtualShadowClipmapInfoBuffer).View();
+        bindings.physicalPages = builder->UnorderedAccess(m_virtualShadowPhysicalPagesTexture).View();
+        bindings.dynamicPages = builder->UnorderedAccess(m_virtualShadowDynamicPagesTexture).View();
         bindings.virtualShadow = true;
     }
     return bindings;
@@ -235,21 +216,17 @@ void VoxelSoftwareRasterizationPass::Update(const org::UpdateExecutionContext& e
 {
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
-    // Only the declarations are maintained here: the view table the shader
-    // reads is published during preparation.
-    std::vector<std::shared_ptr<org::PixelBuffer>> nextVisibilityBuffers;
-    if (m_outputKind != CLodRasterOutputKind::VirtualShadow)
-        for (const auto& viewInfo : context.Views())
-            if (viewInfo.visibilityBuffer && viewInfo.cameraBufferIndex < context.ViewCameraBufferSize())
-                nextVisibilityBuffers.push_back(viewInfo.visibilityBuffer);
-
-    m_declaredResourcesChanged = (nextVisibilityBuffers != m_visibilityBuffers);
-    m_visibilityBuffers = std::move(nextVisibilityBuffers);
+    m_declaredResourcesChanged = m_viewRasterInfoTable.Update(context.Views(), context.ViewCameraBufferSize(), m_outputKind);
 }
 
 bool VoxelSoftwareRasterizationPass::DeclaredResourcesChanged() const
 {
     return m_declaredResourcesChanged;
+}
+
+void VoxelSoftwareRasterizationPass::InvocationRevision(const org::PassPrepareContext&,
+    std::vector<uint64_t>& out) const {
+    m_viewRasterInfoTable.AppendRowRevision(out);
 }
 
 VoxelRasterFrameData VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBindings& bindings,
@@ -259,11 +236,11 @@ VoxelRasterFrameData VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBi
     VoxelRasterFrameData data{};
     data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
     data.commandSignature = preparation.CaptureCommandSignature(m_dispatchCommandSignature);
-    const auto srv = [&](org::ResourceBindingToken token) {
-        return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index;
+    const auto srv = [&](org::DeclaredViewToken token) {
+        return preparation.Resolve(token).index;
     };
-    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) {
-        return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index;
+    const auto uav = [&](org::DeclaredViewToken token) {
+        return preparation.Resolve(token).index;
     };
     std::array<uint32_t, NumMiscUintRootConstants> misc{};
     misc[CLOD_RASTER_VOXEL_WORK_CAPACITY] = m_voxelWorkCapacity;
@@ -271,12 +248,12 @@ VoxelRasterFrameData VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBi
     misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = srv(bindings.transforms);
     misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = bindings.hasTelemetry && IsCLodWorkGraphTelemetryEnabled()
         ? uav(bindings.telemetry) : 0xFFFFFFFFu;
-    misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = BuildCLodVisibilityViewRasterInfo(
-        context->Views(), context->ViewCameraBufferSize(), m_outputKind).Publish(preparation, m_viewRasterInfoPublisher);
+    misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] =
+        bindings.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoPublisher, m_viewRasterInfoTable.Rows());
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-            uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
+            uav(bindings.pageTable);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = uav(bindings.physicalPages);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = uav(bindings.dynamicPages);
@@ -294,7 +271,7 @@ VoxelRasterFrameData VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBi
         const org::PipelineState& raster = telemetry ? (i == 0 ? m_rigidTelemetryRasterPso : m_skinnedTelemetryRasterPso)
             : (i == 0 ? m_rigidRasterPso : m_skinnedRasterPso);
         step.rasterProgram = preparation.CaptureProgramBinding(raster);
-        step.arguments = preparation.CaptureResource(bindings.indirectArgs[i]);
+        step.arguments = preparation.DeclaredReference(bindings.indirectArgs[i]);
     }
     return data;
 }

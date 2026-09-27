@@ -1,84 +1,56 @@
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 
 #include <algorithm>
-#include <atomic>
-#include <stdexcept>
-
-#include <spdlog/spdlog.h>
-
-#include "BasicRenderer/Extensions/RenderContext.h"
+#include "Render/PassBuilders.h"
 #include "BasicRenderer/Streaming/ViewStateArtifacts.h"
 #include "Resources/PixelBuffer.h"
 
-namespace {
-
-uint32_t LiveDescriptor(const org::PixelBuffer& resource, org::BindlessViewRequest view) {
-    if (!resource.HasAnyDescriptorSlots()) return 0xFFFFFFFFu;
-    return view.kind == org::BindlessViewKind::UnorderedAccess
-        ? resource.GetUAVShaderVisibleInfo(view.mip, view.slice).slot.index
-        : resource.GetSRVInfo(view.mip, view.slice).slot.index;
+CLodDeclaredViewDepthTable::CLodDeclaredViewDepthTable() : m_rows(CLodMaxViewDepthIndices) {
+    for (uint32_t i = 0; i < CLodMaxViewDepthIndices; ++i) m_rows[i].cameraBufferIndex = i;
 }
 
-bool Declares(const org::PassPrepareContext& preparation, const org::PixelBuffer& resource) {
-    return preparation.resourceSlots
-        && preparation.resourceSlots->Find(resource.GetGlobalResourceID()) != preparation.resourceSlots->end();
-}
-
-} // namespace
-
-uint32_t ResolveCLodViewDescriptor(const org::PassPrepareContext& preparation, const org::PixelBuffer& resource,
-    org::BindlessViewRequest view) {
-    const auto id = resource.GetGlobalResourceID();
-    if (Declares(preparation, resource)) return preparation.ResolveView(org::ResourceBindingToken{ id, id }, view).index;
-    static std::atomic<uint32_t> reported{ 0 };
-    if (reported.fetch_add(1, std::memory_order_relaxed) < 8)
-        spdlog::warn("CLod view table embeds '{}' which the preparing pass does not declare; using its current descriptor slot",
-            resource.GetName());
-    return LiveDescriptor(resource, view);
-}
-
-template<class Row>
-void CLodPreparedViewTable<Row>::AppendRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
-    // Row bytes with descriptor fields unresolved, then each binding's
-    // identity. Declared bindings are tracked by the framework once Publish()
-    // resolves them; undeclared ones contribute their current slot here.
-    uint64_t hash = 0xcbf29ce484222325ull ^ m_rows.size();
-    const auto* bytes = reinterpret_cast<const unsigned char*>(m_rows.data());
-    for (size_t i = 0; i < m_rows.size() * sizeof(Row); ++i) {
-        hash ^= bytes[i];
-        hash *= 0x100000001b3ull;
+bool CLodDeclaredViewDepthTable::Update(std::span<const br::render::PreparedViewFrameData> views, bool useHistoryDepth) {
+    std::vector<Input> inputs;
+    std::vector<CLodViewDepthSRVIndex> rows(CLodMaxViewDepthIndices);
+    for (uint32_t i = 0; i < CLodMaxViewDepthIndices; ++i) rows[i].cameraBufferIndex = i;
+    for (const auto& view : views) {
+        const auto camera = view.cameraBufferIndex;
+        if (camera >= rows.size()) continue;
+        const auto depth = !useHistoryDepth || view.depthHistory ? view.linearDepthMap : nullptr;
+        if (!depth) continue;
+        const uint32_t slices = depth->GetNumSRVSlices();
+        if (!slices) continue;
+        const uint32_t requested = view.depthBufferArrayIndex >= 0 ? static_cast<uint32_t>(view.depthBufferArrayIndex) : 0u;
+        inputs.push_back({camera, (std::min)(requested, slices - 1), depth});
     }
-    out.push_back(hash);
-    out.push_back(m_bindings.size());
-    for (const auto& binding : m_bindings) {
-        out.push_back(binding.resource->GetGlobalResourceID());
-        out.push_back((uint64_t{ static_cast<uint32_t>(binding.view.kind) } << 32) | binding.view.slice);
-        if (!Declares(preparation, *binding.resource)) out.push_back(LiveDescriptor(*binding.resource, binding.view));
-    }
+    const bool changed = inputs != m_inputs;
+    m_inputs = std::move(inputs);
+    m_rows = std::move(rows);
+    return changed;
 }
 
-template<class Row>
-uint32_t CLodPreparedViewTable<Row>::Publish(const org::PassPrepareContext& preparation,
+void CLodDeclaredViewDepthTable::Declare(org::PassBuilder& builder) {
+    m_layout = org::DeclaredTableLayout<CLodViewDepthSRVIndex>(m_rows.size());
+    for (const auto& input : m_inputs)
+        builder.ShaderResource(input.depth, org::SrvView{UINT32_MAX, 0, input.slice},
+            m_layout.Field(input.camera, &CLodViewDepthSRVIndex::linearDepthSRVIndex));
+}
+
+uint32_t CLodDeclaredViewDepthTable::Publish(const org::PassPrepareContext& preparation,
     const org::PreparedTablePublisher& publisher) const {
-    if (m_rows.empty()) return 0xFFFFFFFFu;
-    auto rows = m_rows;
-    for (const auto& binding : m_bindings)
-        rows[binding.row].*binding.field = ResolveCLodViewDescriptor(preparation, *binding.resource, binding.view);
-    return publisher.Publish(preparation, std::span<const Row>(rows));
+    return m_layout.Publish(preparation, publisher, std::span<const CLodViewDepthSRVIndex>(m_rows));
 }
 
-template class CLodPreparedViewTable<CLodViewRasterInfo>;
-template class CLodPreparedViewTable<CLodViewDepthSRVIndex>;
-
-CLodViewRasterInfoTable BuildCLodVisibilityViewRasterInfo(std::span<const br::render::PreparedViewFrameData> views,
-    uint32_t viewCount, CLodRasterOutputKind outputKind, bool bindVisibility) {
-    CLodViewRasterInfoTable table(viewCount);
+std::vector<CLodViewRasterInfo> BuildCLodVisibilityViewRasterInfoRows(
+    std::span<const br::render::PreparedViewFrameData> views,
+    uint32_t viewCount, CLodRasterOutputKind outputKind) {
+    std::vector<CLodViewRasterInfo> rows(viewCount);
     const bool virtualShadow = outputKind == CLodRasterOutputKind::VirtualShadow;
     const auto virtualResolution = virtualShadow ? CLodVirtualShadowBuildRuntimeResolutionConfig().virtualResolution : 0u;
     for (const auto& view : views) {
         const auto camera = view.cameraBufferIndex;
-        if (camera >= table.size()) continue;
-        auto& info = table[camera];
+        if (camera >= rows.size()) continue;
+        auto& info = rows[camera];
         info.scissorMinX = 0;
         info.scissorMinY = 0;
         if (virtualShadow) {
@@ -95,31 +67,42 @@ CLodViewRasterInfoTable BuildCLodVisibilityViewRasterInfo(std::span<const br::re
         info.scissorMaxY = view.visibilityBuffer->GetHeight();
         info.viewportScaleX = 1.0f;
         info.viewportScaleY = 1.0f;
-        if (bindVisibility) table.BindView(camera, &CLodViewRasterInfo::visibilityUAVDescriptorIndex, view.visibilityBuffer,
-            { org::BindlessViewKind::UnorderedAccess });
     }
-    return table;
+    return rows;
 }
 
-CLodViewDepthTable BuildCLodViewDepthTable(std::span<const br::render::PreparedViewFrameData> views, bool useHistoryDepth) {
-    CLodViewDepthTable table(CLodMaxViewDepthIndices);
-    for (uint32_t i = 0; i < CLodMaxViewDepthIndices; ++i) table[i].cameraBufferIndex = i;
-    for (const auto& view : views) {
-        const auto camera = view.cameraBufferIndex;
-        if (camera >= CLodMaxViewDepthIndices) continue;
-        const auto linearDepthMap = !useHistoryDepth || static_cast<bool>(view.depthHistory) ? view.linearDepthMap : nullptr;
-        if (!linearDepthMap) continue;
-        const uint32_t slices = linearDepthMap->GetNumSRVSlices();
-        if (slices == 0) continue;
-        const uint32_t requested = view.depthBufferArrayIndex >= 0 ? static_cast<uint32_t>(view.depthBufferArrayIndex) : 0u;
-        table.BindView(camera, &CLodViewDepthSRVIndex::linearDepthSRVIndex, linearDepthMap,
-            { org::BindlessViewKind::ShaderResource, UINT32_MAX, 0, (std::min)(requested, slices - 1) });
-    }
-    return table;
+bool CLodDeclaredViewRasterTable::Update(std::span<const br::render::PreparedViewFrameData> views, uint32_t viewCount,
+    CLodRasterOutputKind outputKind, bool bindVisibility) {
+    auto rows = BuildCLodVisibilityViewRasterInfoRows(views, viewCount, outputKind);
+    std::vector<Input> inputs;
+    if (bindVisibility && outputKind != CLodRasterOutputKind::VirtualShadow)
+        for (const auto& view : views)
+            if (view.cameraBufferIndex < rows.size() && view.visibilityBuffer)
+                inputs.push_back({view.cameraBufferIndex, view.visibilityBuffer});
+    const bool changed = inputs != m_inputs || rows.size() != m_rows.size();
+    m_inputs = std::move(inputs);
+    m_rows = std::move(rows);
+    return changed;
 }
 
-const UpdateContext& CLodPreparationSnapshot(const org::PassPrepareContext& preparation) {
-    const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr;
-    if (!context) throw std::logic_error("CLod view tables require the owned render snapshot");
-    return *context;
+void CLodDeclaredViewRasterTable::Declare(org::PassBuilder& builder) {
+    m_layout = org::DeclaredTableLayout<CLodViewRasterInfo>(m_rows.size());
+    for (const auto& input : m_inputs)
+        builder.UnorderedAccess(input.visibility, org::UavView{},
+            m_layout.Field(input.camera, &CLodViewRasterInfo::visibilityUAVDescriptorIndex));
+}
+
+uint32_t CLodDeclaredViewRasterTable::Publish(const org::PassPrepareContext& preparation,
+    const org::PreparedTablePublisher& publisher) const {
+    return m_layout.Publish(preparation, publisher, std::span<const CLodViewRasterInfo>(m_rows));
+}
+
+void CLodDeclaredViewRasterTable::AppendRowRevision(std::vector<uint64_t>& out) const {
+    uint64_t hash = 0xcbf29ce484222325ull ^ m_rows.size();
+    const auto* bytes = reinterpret_cast<const unsigned char*>(m_rows.data());
+    for (size_t i = 0; i < m_rows.size() * sizeof(CLodViewRasterInfo); ++i) {
+        hash ^= bytes[i];
+        hash *= 0x100000001b3ull;
+    }
+    out.push_back(hash);
 }

@@ -63,7 +63,7 @@ ReyesClassifyPass::ReyesClassifyPass(
 ReyesClassifyBindings ReyesClassifyPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithShaderResource(
+    builder.ShaderResource(
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
@@ -79,23 +79,23 @@ ReyesClassifyBindings ReyesClassifyPass::Declare(org::PassBuilder& builder)
             Builtin::CullingCameraBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
-            Builtin::SkeletonResources::SkinningInstanceInfo)
-        .WithConstantBuffer(Builtin::PerFrameBuffer)
-        .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
-    ReyesClassifyBindings bindings{builder.BindShaderResource(m_visibleClustersBuffer),
-        builder.BindShaderResource(m_visibleClustersCounterBuffer)};
-    bindings.fullClusters = builder.BindUnorderedAccess(m_fullClusterOutputsBuffer);
-    bindings.fullCounter = builder.BindUnorderedAccess(m_fullClusterCounterBuffer);
-    bindings.ownedClusters = builder.BindUnorderedAccess(m_ownedClustersBuffer);
-    bindings.ownedCounter = builder.BindUnorderedAccess(m_ownedClustersCounterBuffer);
-    bindings.indirectArgs = builder.BindIndirectArguments(m_indirectArgsBuffer);
-    bindings.telemetry = builder.BindUnorderedAccess(m_telemetryBuffer);
+            Builtin::SkeletonResources::SkinningInstanceInfo);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
+    builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+    ReyesClassifyBindings bindings{builder.ShaderResource(m_visibleClustersBuffer).View(),
+        builder.ShaderResource(m_visibleClustersCounterBuffer).View()};
+    bindings.fullClusters = builder.UnorderedAccess(m_fullClusterOutputsBuffer).View();
+    bindings.fullCounter = builder.UnorderedAccess(m_fullClusterCounterBuffer).View();
+    bindings.ownedClusters = builder.UnorderedAccess(m_ownedClustersBuffer).View();
+    bindings.ownedCounter = builder.UnorderedAccess(m_ownedClustersCounterBuffer).View();
+    bindings.indirectArgs = builder.IndirectArguments(m_indirectArgsBuffer);
+    bindings.telemetry = builder.UnorderedAccess(m_telemetryBuffer).View();
     if (m_ownershipBitsetBuffer) {
-        bindings.ownershipBitset = builder.BindUnorderedAccess(m_ownershipBitsetBuffer);
+        bindings.ownershipBitset = builder.UnorderedAccess(m_ownershipBitsetBuffer).View();
         bindings.hasOwnershipBitset = true;
     }
     if (m_visibleClustersReadBaseCounterBuffer) {
-        bindings.readBaseCounter = builder.BindShaderResource(m_visibleClustersReadBaseCounterBuffer);
+        bindings.readBaseCounter = builder.ShaderResource(m_visibleClustersReadBaseCounterBuffer).View();
         bindings.hasReadBaseCounter = true;
     }
     bindings.fullCapacity = m_fullClusterOutputCapacity;
@@ -115,8 +115,8 @@ br::render::PreparedComputeIndirect ReyesClassifyPass::Prepare(
     auto program = preparation.CaptureProgramBinding(m_pso);
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     data.constants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_READ_BASE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasReadBaseCounter ? srv(bindings.readBaseCounter) : 0xFFFFFFFFu;
     data.constants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.visible);
     data.constants[CLOD_REYES_CLASSIFY_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.visibleCounter);

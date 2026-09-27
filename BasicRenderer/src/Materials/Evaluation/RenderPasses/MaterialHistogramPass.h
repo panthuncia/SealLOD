@@ -15,7 +15,7 @@
 #include "BasicRenderer/Runtime/Detail/MaterialEvaluationBuildInputs.h"
 
 struct MaterialHistogramBindings {
-    org::ResourceBindingToken visibleClusters, reyesDiceQueue;
+    org::DeclaredViewToken visibleClusters, reyesDiceQueue;
     bool hasReyesDiceQueue = false;
     uint32_t patchVisibilityIndexBase = 0;
 };
@@ -37,9 +37,9 @@ public:
             throw std::invalid_argument("MaterialHistogramPass requires the published visible-cluster resource");
     }
     MaterialHistogramBindings Declare(org::PassBuilder& b) {
-        MaterialHistogramBindings bindings{b.BindShaderResource(m_visibleClusterResource)};
+        MaterialHistogramBindings bindings{b.ShaderResource(m_visibleClusterResource)};
         if (m_reyesDiceQueueResource) {
-            bindings.reyesDiceQueue = b.BindShaderResource(m_reyesDiceQueueResource);
+            bindings.reyesDiceQueue = b.ShaderResource(m_reyesDiceQueueResource);
             bindings.hasReyesDiceQueue = true;
         }
         bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
@@ -58,15 +58,15 @@ public:
                     m_reyesDiceQueueResource != nullptr);
             }
         }
-	    b.WithShaderResource(Builtin::PrimaryCamera::VisibilityTexture,
+	    b.ShaderResource(Builtin::PrimaryCamera::VisibilityTexture,
                               //Builtin::PrimaryCamera::VisibleClusterTable,
                               Builtin::PerMeshInstanceBuffer,
                               Builtin::InstanceDrawRecordBuffer,
                               Builtin::PerMeshBuffer,
-                              Builtin::PerMaterialDataBuffer)
-         .WithUnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer");
-		b.WithConstantBuffer(Builtin::PerFrameBuffer)
-         .PreferQueue(org::QueueKind::Compute);
+                              Builtin::PerMaterialDataBuffer);
+        b.UnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer");
+		b.ConstantBuffer(Builtin::PerFrameBuffer);
+        b.PreferQueue(org::QueueKind::Compute);
         return bindings;
     }
 
@@ -80,10 +80,9 @@ public:
         auto program = CaptureProgramBinding(preparation, m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
-        data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(
-            bindings.visibleClusters, {org::BindlessViewKind::ShaderResource}).index;
+        data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.visibleClusters).index;
         data.constants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = bindings.hasReyesDiceQueue
-            ? preparation.ResolveView(bindings.reyesDiceQueue, {org::BindlessViewKind::ShaderResource}).index
+            ? preparation.Resolve(bindings.reyesDiceQueue).index
             : 0xFFFFFFFFu;
         data.constants[VISBUF_REYES_PATCH_INDEX_BASE] = bindings.patchVisibilityIndexBase;
         {

@@ -10,8 +10,8 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapBuildPageListsBindings {
-    org::ResourceBindingToken pageTable, pageMetadata, allocationCount;
-    org::ResourceBindingToken freePages, reusablePages, header;
+    org::DeclaredViewToken pageTable, pageMetadata, allocationCount;
+    org::DeclaredViewToken freePages, reusablePages, header;
 };
 
 class VirtualShadowMapBuildPageListsPass final : public org::TypedRenderGraphPass<VirtualShadowMapBuildPageListsPass,

@@ -54,9 +54,17 @@ struct HierarchicalDispatchCullingPreparation {
     uint32_t windCacheGeneration = 0, windCacheEntryCount = 0;
 };
 
+struct HierarchicalDispatchDescriptorBindings {
+    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;
+    org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;
+    std::array<org::DeclaredViewToken, 4> voxelQueues{};
+    std::array<org::DeclaredViewToken, 3> pageJobQueues{};
+    bool hasVoxelQueues = false, hasPageJobQueues = false;
+};
+
 class HierarchicalDispatchCullingPass
     : public org::TypedRenderGraphPass<HierarchicalDispatchCullingPass,
-          HierarchicalDispatchCullingInvocation, org::LegacyPassBindings, HierarchicalDispatchCullingRecipe>
+          HierarchicalDispatchCullingInvocation, HierarchicalDispatchDescriptorBindings, HierarchicalDispatchCullingRecipe>
     , public org::IDynamicDeclaredResources {
 public:
     HierarchicalDispatchCullingPass(
@@ -96,10 +104,10 @@ public:
         std::shared_ptr<org::Buffer> shadowDynamicActiveBlockMetadataBuffer = nullptr);
     ~HierarchicalDispatchCullingPass() override;
 
-    void Declare(org::PassBuilder& builder);
+    HierarchicalDispatchDescriptorBindings Declare(org::PassBuilder& builder);
     void Initialize();
     std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const;
-    HierarchicalDispatchCullingRecipe BuildRecipe(const org::PassPrepareContext&) const;
+    HierarchicalDispatchCullingRecipe BuildRecipe(const HierarchicalDispatchDescriptorBindings&, const org::PassPrepareContext&) const;
     // Capture on the publication owner before scheduling worker preparation.
     // Resources must already belong to the immutable replacement bundle.
     br::render::CapturedHierarchicalDispatchCullingInputs CaptureCommandInputs(const org::PublicationBindingBundle&) const;
@@ -107,7 +115,7 @@ public:
     static HierarchicalDispatchCullingRecipe BuildCapturedRecipe(const br::render::CapturedHierarchicalDispatchCullingInputs&,
         const HierarchicalDispatchCullingCommandConfiguration&, const br::render::CapturedCullingBindings&);
     HierarchicalDispatchCullingInvocation PrepareInvocation(const HierarchicalDispatchCullingRecipe&,
-        const org::PassPrepareContext&) const;
+        const HierarchicalDispatchDescriptorBindings&, const org::PassPrepareContext&) const;
     static HierarchicalDispatchCullingInvocation PrepareInvocation(const HierarchicalDispatchCullingRecipe&,
         const HierarchicalDispatchCullingPreparation&);
     static void Record(const HierarchicalDispatchCullingRecipe&, const HierarchicalDispatchCullingInvocation&,
@@ -216,18 +224,14 @@ private:
     std::vector<CLodViewRasterInfo> m_cachedViewRasterInfo;
     // Tables this pass's shaders read. They embed descriptors, so they are
     // published during preparation from the frame's bindings.
-    CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
-    CLodViewDepthTable ViewDepthTable(const org::PassPrepareContext&) const;
+    CLodDeclaredViewRasterTable m_viewRasterInfoLayout;
+    CLodDeclaredViewDepthTable m_viewDepthLayout;
     org::PreparedTablePublisher m_viewRasterInfoTable{"CLod Dispatch Culling View Raster Info"};
     org::PreparedTablePublisher m_viewDepthTable{"CLod Dispatch Culling View Depth SRV Indices"};
     std::vector<uint32_t> m_zeroTelemetryScratch;
-    CLodVoxelRasterQueueDescriptors m_cachedVoxelQueueDescriptors{};
-    CLodWorkGraphComputePageJobDescriptors m_cachedPageJobDescriptors{};
     uint64_t m_lastDrawSetDeclarationRevision = 0u;
     uint64_t m_lastViewResourceLayoutRevision = 0u;
     uint32_t m_sizedPureComputeFrontierCapacity = 0u;
-    bool m_hasCachedVoxelQueueDescriptors = false;
-    bool m_hasCachedPageJobDescriptors = false;
     bool m_isFirstPass = true;
     bool m_declaredResourcesChanged = true;
     unsigned int m_maxVisibleClusters = 0u;

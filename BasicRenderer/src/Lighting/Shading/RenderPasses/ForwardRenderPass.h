@@ -76,7 +76,7 @@ struct ForwardRenderPassInputs {
 
 
 struct ForwardRenderBindings {
-    org::ResourceBindingToken color, depth;
+    org::DeclaredViewToken color, depth;
 };
 
 class ForwardRenderPass
@@ -103,7 +103,7 @@ public:
 		m_meshShaders = inputs.meshShaders;
 		m_indirect = inputs.indirect;
 
-        builder->WithShaderResource(
+        builder->ShaderResource(
             Builtin::CameraBuffer,
             Builtin::Environment::PrefilteredCubemapsGroup,
             Builtin::Light::ActiveLightIndices,
@@ -123,15 +123,15 @@ public:
 			Builtin::OpenPBR::IdealMetalEnergyComplement,
             Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
-            Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement)
-            .IsGeometryPass();
+            Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement);
+        builder->IsGeometryPass();
 
         ForwardRenderBindings bindings{
-            builder->BindRenderTarget(Builtin::Color::HDRColorTarget),
-            builder->BindDepthReadWrite(Builtin::PrimaryCamera::DepthTexture) };
+            builder->RenderTarget(Builtin::Color::HDRColorTarget).View(),
+            builder->DepthReadWrite(Builtin::PrimaryCamera::DepthTexture).View() };
 
         if (m_shadowsEnabled) {
-            builder->WithShaderResource(Builtin::Shadows::CLodClipmapInfo,
+            builder->ShaderResource(Builtin::Shadows::CLodClipmapInfo,
                 Builtin::Shadows::CLodCompactMainCamera,
                 Builtin::Shadows::CLodCompactShadowCameras,
                 Builtin::Shadows::CLodDirectionalPageViewInfo,
@@ -140,26 +140,26 @@ public:
                 Builtin::Shadows::CLodPhysicalPages);
         }
 
-        builder->WithUnorderedAccess(Builtin::DebugVisualization);
+        builder->UnorderedAccess(Builtin::DebugVisualization);
         if (m_clusteredLightingEnabled) {
-            builder->WithShaderResource(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer);
+            builder->ShaderResource(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer);
         }
 
         if (m_gtaoEnabled) {
-            builder->WithShaderResource(Builtin::GTAO::OutputAOTerm);
+            builder->ShaderResource(Builtin::GTAO::OutputAOTerm);
         }
         if (m_meshShaders) {
-            //builder->WithShaderResource(MESH_RESOURCE_IDFENTIFIERS, Builtin::PrimaryCamera::MeshletBitfield);
+            // Meshlet bitfield usage is declared by the selected mesh workload.
             if (m_indirect) { // Indirect draws only supported with mesh shaders, becasue I'm not writing a separate codepath for doing it the bad way
                 br::render::PublishedResourceQuery query{};
                 query.owner = br::render::PublishedFragmentKind::IndirectWorkloads;
                 query.usage = br::render::PublishedResourceUsage::IndirectArguments;
                 query.renderPhaseHash = RenderPhase{ Engine::Primary::ForwardPass }.hash;
-                builder->WithIndirectArguments(PublishedStateResourceResolver(
+                builder->IndirectArguments(PublishedStateResourceResolver(
                     br::render::PublishedStateSource::ProcessSource(), query));
             }
         }
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+		builder->ConstantBuffer(Builtin::PerFrameBuffer);
         return bindings;
     }
 
@@ -185,8 +185,8 @@ public:
         data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle();
         data.commandSignature = preparation.CaptureCommandSignature(
             CommandSignatureManager::GetInstance().CaptureDispatchMeshCommandSignature());
-        data.color = preparation.CaptureView(bindings.color, {org::BindlessViewKind::RenderTarget});
-        data.depth = preparation.CaptureView(bindings.depth, {org::BindlessViewKind::DepthStencil});
+        data.color = preparation.Capture(bindings.color);
+        data.depth = preparation.Capture(bindings.depth);
         data.resolution = context->renderResolution;
         data.settings = {context->lighting.shadowsEnabled,
             context->lighting.punctualLightingEnabled, context->lighting.gtaoEnabled};

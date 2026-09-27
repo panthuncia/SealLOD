@@ -13,7 +13,7 @@
 #include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
 struct ClusterSoftwareRasterPageJobBuildArgsBindings {
-    std::array<org::ResourceBindingToken, 2> counts, arguments;
+    std::array<org::DeclaredViewToken, 2> counts, arguments;
 };
 
 class ClusterSoftwareRasterPageJobBuildArgsPass : public org::TypedRenderGraphPass<ClusterSoftwareRasterPageJobBuildArgsPass,
@@ -39,10 +39,10 @@ public:
 
     ClusterSoftwareRasterPageJobBuildArgsBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        return {{declaration.BindShaderResource(m_pageJobCountBuffers[0]),
-                    declaration.BindShaderResource(m_pageJobCountBuffers[1])},
-            {declaration.BindUnorderedAccess(m_pageJobIndirectArgsBuffers[0]),
-                declaration.BindUnorderedAccess(m_pageJobIndirectArgsBuffers[1])}};
+        return {{declaration.ShaderResource(m_pageJobCountBuffers[0]),
+                    declaration.ShaderResource(m_pageJobCountBuffers[1])},
+            {declaration.UnorderedAccess(m_pageJobIndirectArgsBuffers[0]),
+                declaration.UnorderedAccess(m_pageJobIndirectArgsBuffers[1])}};
     }
 
     br::render::PreparedComputeDispatchSequence Prepare(
@@ -67,10 +67,8 @@ public:
         data.descriptorIndices = std::move(program.descriptorIndices);
         for (uint32_t variantIndex = 0; variantIndex < m_pageJobCountBuffers.size(); ++variantIndex) {
             br::render::PreparedComputeDispatchSequence::Step step{};
-            step.constants[CLOD_RASTER_PAGE_JOB_COUNT_DESCRIPTOR_INDEX] = preparation.ResolveView(
-                bindings.counts[variantIndex], {org::BindlessViewKind::ShaderResource}).index;
-            step.constants[CLOD_RASTER_PAGE_JOB_INDIRECT_ARGS_DESCRIPTOR_INDEX] = preparation.ResolveView(
-                bindings.arguments[variantIndex], {org::BindlessViewKind::UnorderedAccess}).index;
+            step.constants[CLOD_RASTER_PAGE_JOB_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.counts[variantIndex]).index;
+            step.constants[CLOD_RASTER_PAGE_JOB_INDIRECT_ARGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.arguments[variantIndex]).index;
             step.groupsX = 1;
             data.steps.push_back(std::move(step));
         }

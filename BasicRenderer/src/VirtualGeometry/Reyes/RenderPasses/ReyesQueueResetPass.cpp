@@ -61,35 +61,35 @@ ReyesQueueResetBindings ReyesQueueResetPass::Declare(org::PassBuilder& declarati
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     ReyesQueueResetBindings bindings{
-        builder->BindUnorderedAccess(m_fullClusterCounter),
-        builder->BindUnorderedAccess(m_ownedClusterCounter),
+        builder->UnorderedAccess(m_fullClusterCounter),
+        builder->UnorderedAccess(m_ownedClusterCounter),
         {}, {},
-        builder->BindUnorderedAccess(m_diceQueueCounter),
-        builder->BindUnorderedAccess(m_diceQueueOverflowCounter),
-        builder->BindUnorderedAccess(m_telemetryBuffer)};
+        builder->UnorderedAccess(m_diceQueueCounter),
+        builder->UnorderedAccess(m_diceQueueOverflowCounter),
+        builder->UnorderedAccess(m_telemetryBuffer)};
     if (m_replaySplitQueueCounter) {
-        bindings.replaySplitQueueCounter = builder->BindUnorderedAccess(m_replaySplitQueueCounter);
+        bindings.replaySplitQueueCounter = builder->UnorderedAccess(m_replaySplitQueueCounter);
     }
     if (m_replaySplitQueueOverflowCounter) {
-        bindings.replaySplitQueueOverflowCounter = builder->BindUnorderedAccess(m_replaySplitQueueOverflowCounter);
+        bindings.replaySplitQueueOverflowCounter = builder->UnorderedAccess(m_replaySplitQueueOverflowCounter);
     }
     if (m_replayDiceQueueCounter) {
-        bindings.replayDiceQueueCounter = builder->BindUnorderedAccess(m_replayDiceQueueCounter);
+        bindings.replayDiceQueueCounter = builder->UnorderedAccess(m_replayDiceQueueCounter);
     }
     if (m_replayDiceQueueOverflowCounter) {
-        bindings.replayDiceQueueOverflowCounter = builder->BindUnorderedAccess(m_replayDiceQueueOverflowCounter);
+        bindings.replayDiceQueueOverflowCounter = builder->UnorderedAccess(m_replayDiceQueueOverflowCounter);
     }
     if (m_ownershipBitsetBuffer) {
-        bindings.ownershipBitset = builder->BindUnorderedAccess(m_ownershipBitsetBuffer);
+        bindings.ownershipBitset = builder->UnorderedAccess(m_ownershipBitsetBuffer);
     }
     for (const auto& splitQueueCounter : m_splitQueueCounters) {
-        bindings.splitQueueCounters.push_back(builder->BindUnorderedAccess(splitQueueCounter));
+        bindings.splitQueueCounters.push_back(builder->UnorderedAccess(splitQueueCounter));
     }
     for (const auto& splitQueueOverflowCounter : m_splitQueueOverflowCounters) {
-        bindings.splitQueueOverflowCounters.push_back(builder->BindUnorderedAccess(splitQueueOverflowCounter));
+        bindings.splitQueueOverflowCounters.push_back(builder->UnorderedAccess(splitQueueOverflowCounter));
     }
 
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder->ConstantBuffer(Builtin::PerFrameBuffer);
     return bindings;
 }
 
@@ -109,8 +109,8 @@ br::render::PreparedComputePipelineSequence ReyesQueueResetPass::Prepare(
     counters.descriptorIndices = std::move(program.descriptorIndices);
     counters.groupsX = 1;
     auto& c = counters.constants;
-    const auto uavIndex = [&](org::ResourceBindingToken token) {
-        return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index;
+    const auto uavIndex = [&](org::DeclaredViewToken token) {
+        return preparation.Resolve(token).index;
     };
     c[CLOD_REYES_RESET_FULL_CLUSTER_COUNTER_DESCRIPTOR_INDEX] = uavIndex(bindings.fullClusterCounter);
     c[CLOD_REYES_RESET_OWNED_CLUSTER_COUNTER_DESCRIPTOR_INDEX] = uavIndex(bindings.ownedClusterCounter);

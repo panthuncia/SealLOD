@@ -46,7 +46,7 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     const bool shadowsEnabled = m_getShadowsEnabled ? m_getShadowsEnabled() : false;
-    builder->WithShaderResource(
+    builder->ShaderResource(
             Builtin::Light::BufferGroup,
             Builtin::PerObjectBuffer,
             Builtin::NormalMatrixBuffer,
@@ -82,21 +82,20 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo,
-            Builtin::Noise::BlueNoise2D)
-        .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
-        .WithUnorderedAccess(Builtin::Color::HDRColorTarget)
-        .WithUnorderedAccess(Builtin::DebugVisualization)
-        ;
+            Builtin::Noise::BlueNoise2D);
+    builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+    builder->UnorderedAccess(Builtin::Color::HDRColorTarget);
+    builder->UnorderedAccess(Builtin::DebugVisualization);
 
     DeepVisibilityResolveBindings bindings;
-    bindings.visibleClusters = builder->BindShaderResource(m_visibleClustersBuffer);
-    bindings.nodes = builder->BindShaderResource(m_deepVisibilityNodesBuffer);
-    bindings.counter = builder->BindShaderResource(m_deepVisibilityCounterBuffer);
-    bindings.overflow = builder->BindShaderResource(m_deepVisibilityOverflowCounterBuffer);
-    bindings.stats = builder->BindUnorderedAccess(m_deepVisibilityStatsBuffer);
+    bindings.visibleClusters = builder->ShaderResource(m_visibleClustersBuffer);
+    bindings.nodes = builder->ShaderResource(m_deepVisibilityNodesBuffer);
+    bindings.counter = builder->ShaderResource(m_deepVisibilityCounterBuffer);
+    bindings.overflow = builder->ShaderResource(m_deepVisibilityOverflowCounterBuffer);
+    bindings.stats = builder->UnorderedAccess(m_deepVisibilityStatsBuffer);
 
     if (shadowsEnabled) {
-        builder->WithShaderResource(
+        builder->ShaderResource(
             Builtin::Shadows::CLodClipmapInfo,
             Builtin::Shadows::CLodDirectionalPageViewInfo,
             Builtin::Shadows::CLodPageMetadata,
@@ -107,22 +106,22 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
     }
 
     if (m_reyesDiceQueueBuffer) {
-        bindings.diceQueue = builder->BindShaderResource(m_reyesDiceQueueBuffer);
+        bindings.diceQueue = builder->ShaderResource(m_reyesDiceQueueBuffer);
         bindings.hasDiceQueue = true;
     }
 
     if (m_reyesTessTableConfigsBuffer && m_reyesTessTableVerticesBuffer && m_reyesTessTableTrianglesBuffer) {
-        bindings.tessConfigs = builder->BindShaderResource(m_reyesTessTableConfigsBuffer);
-        bindings.tessVertices = builder->BindShaderResource(m_reyesTessTableVerticesBuffer);
-        bindings.tessTriangles = builder->BindShaderResource(m_reyesTessTableTrianglesBuffer);
+        bindings.tessConfigs = builder->ShaderResource(m_reyesTessTableConfigsBuffer);
+        bindings.tessVertices = builder->ShaderResource(m_reyesTessTableVerticesBuffer);
+        bindings.tessTriangles = builder->ShaderResource(m_reyesTessTableTrianglesBuffer);
         bindings.hasTessTables = true;
     }
 
     if (m_primaryHeadPointerTexture) {
-        bindings.headPointers = builder->BindShaderResource(m_primaryHeadPointerTexture);
+        bindings.headPointers = builder->ShaderResource(m_primaryHeadPointerTexture);
     }
 
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder->ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.patchIndexBase = m_patchVisibilityIndexBase;
     bindings.width = m_renderWidth;
     bindings.height = m_renderHeight;
@@ -182,7 +181,7 @@ br::render::PreparedComputeDispatch DeepVisibilityResolvePass::Prepare(
     auto binding = preparation.CaptureProgramBinding(pso);
     data.program = binding.program;
     data.descriptorIndices = std::move(binding.descriptorIndices);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     data.constants[MiscEnableShadows] = bindings.shadows;
     data.constants[MiscEnablePunctualLights] = bindings.punctualLights;
     data.constants[MiscEnableGTAO] = bindings.gtao;
@@ -191,7 +190,7 @@ br::render::PreparedComputeDispatch DeepVisibilityResolvePass::Prepare(
     data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.counter);
     data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_OVERFLOW_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.overflow);
     data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.visibleClusters);
-    data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_STATS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.stats, {org::BindlessViewKind::UnorderedAccess}).index;
+    data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
     data.constants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = bindings.hasDiceQueue ? srv(bindings.diceQueue) : 0xFFFFFFFFu;
     data.constants[VISBUF_REYES_PATCH_INDEX_BASE] = bindings.patchIndexBase;
     data.constants[VISBUF_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = bindings.hasTessTables ? srv(bindings.tessConfigs) : 0xFFFFFFFFu;

@@ -11,7 +11,12 @@
 namespace org { class Buffer; }
 
 struct ReyesDiceBindings {
-    org::ResourceBindingToken queue, counter, readOffset, tessConfigs, indirectArgs, telemetry;
+    org::DeclaredViewToken queue;
+    org::DeclaredViewToken counter;
+    org::DeclaredViewToken readOffset;
+    org::DeclaredViewToken tessConfigs;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken telemetry;
     uint32_t capacity = 0, phase = 0;
     bool hasReadOffset = false;
 };
