@@ -1,0 +1,16 @@
+{
+  "exceptions": [
+    {
+      "rule": "cross-package-private",
+      "source": "BasicRenderer/BasicRenderer/src/Runtime/Device/DeletionManager.h",
+      "target": "BasicRenderer/OpenRenderGraph/src/include/Managers/Singletons/DeletionManager.h",
+      "reason": "Pre-existing renderer/ORG lifecycle integration. Preserve selected device, fence retirement, and drain timing; do not replace with a new forwarding facade during path cleanup."
+    },
+    {
+      "rule": "cross-package-private",
+      "source": "BasicRenderer/BasicRenderer/src/Runtime/Device/DescriptorHeapManager.h",
+      "target": "BasicRenderer/OpenRenderGraph/src/include/Managers/Singletons/DescriptorHeapManager.h",
+      "reason": "Pre-existing renderer/ORG lifecycle integration. Preserve selected device, fence retirement, and drain timing; do not replace with a new forwarding facade during path cleanup."
+    }
+  ]
+}

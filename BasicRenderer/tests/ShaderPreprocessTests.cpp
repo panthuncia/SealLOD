@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "Managers/Singletons/brslHelpers.h"
+#include "Pipeline/ShaderCompilation/brslHelpers.h"
 
 namespace
 {

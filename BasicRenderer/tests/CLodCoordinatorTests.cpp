@@ -1,4 +1,4 @@
-#include "Render/GraphExtensions/ClusterLOD/CLodUploadStream.h"
+#include "VirtualGeometry/Streaming/CLodUploadStream.h"
 #include "Utilities/BoundedSpscQueue.h"
 
 #include <cstdio>

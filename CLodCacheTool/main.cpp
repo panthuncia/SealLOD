@@ -37,13 +37,13 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <tracy/Tracy.hpp>
 
-#include "Managers/Singletons/TaskSchedulerManager.h"
-#include "Import/GlTFGeometryExtractor.h"
-#include "Import/AssimpGeometryExtractor.h"
-#include "Import/USDGeometryExtractor.h"
-#include "Import/USDMaterialCache.h"
-#include "Import/BRNiflyClient.h"
-#include "Utilities/CachePathUtilities.h"
+#include <BasicRenderer/Streaming/TaskScheduler.h>
+#include <BasicRenderer/Assets/Import/GlTFGeometryExtractor.h>
+#include <BasicRenderer/Assets/Import/AssimpGeometryExtractor.h>
+#include <BasicRenderer/Assets/Import/USDGeometryExtractor.h>
+#include <BasicRenderer/Assets/Import/USDMaterialCache.h>
+#include <BasicRenderer/Assets/Import/BRNiflyClient.h>
+#include <BasicRenderer/Assets/CachePaths.h>
 
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/usd/primFlags.h>

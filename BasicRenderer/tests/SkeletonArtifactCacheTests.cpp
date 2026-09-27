@@ -1,8 +1,8 @@
-#include "Import/SkeletonArtifactCache.h"
-#include "Import/SkeletonArtifactValidation.h"
+#include "Assets/Cache/Skeleton/SkeletonArtifactCache.h"
+#include "Assets/Cache/Skeleton/SkeletonArtifactValidation.h"
 
-#include "Animation/Skeleton.h"
-#include "Mesh/ClusterLODTypes.h"
+#include "BasicRenderer/Scene/Animation/Skeleton.h"
+#include <BasicRenderer/Assets/ClusterLODTypes.h>
 
 #include <DirectXMath.h>
 #include <Windows.h>

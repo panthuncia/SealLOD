@@ -75,7 +75,7 @@ source changes
 
 ## Source anchors
 
-- Renderer composition and frame lifecycle: `BasicRenderer/include/Renderer.h`, `BasicRenderer/src/Renderer.cpp`
+- Renderer composition and frame lifecycle: `BasicRenderer/include/BasicRenderer/Renderer.h`, with implementation split across `RendererLifecycle.cpp`, `RendererFrameUpdate.cpp`, `RendererFrameRendering.cpp`, and `RendererGraphConstruction.cpp` under `BasicRenderer/src/`.
 - Persistent artifact graph: `BasicRenderer/include/Render/AsyncStateGraph.h`, `BasicRenderer/src/Render/AsyncStateGraph.cpp`
 - Immutable publication boundary: `BasicRenderer/include/Render/PublishedRendererState.h`, `BasicRenderer/src/Render/PublishedRendererState.cpp`
 - Frame graph runtime: `OpenRenderGraph/include/Render/RenderGraph/`, `OpenRenderGraph/src/Render/RenderGraph/`

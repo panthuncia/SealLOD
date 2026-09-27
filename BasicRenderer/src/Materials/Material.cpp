@@ -1,13 +1,15 @@
-#include "Materials/Material.h"
+#include "BasicRenderer/Assets/Material.h"
+#include "Assets/Textures/TextureFactory.h"
+#include "Runtime/Resources/ResourceManager.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <string>
 #include <spdlog/spdlog.h>
-#include "Render/PSOFlags.h"
+#include <BasicRenderer/Pipeline/PSOFlags.h>
 #include "Utilities/Utilities.h"
-#include "Materials/MaterialFlags.h"
+#include <BasicRenderer/Assets/MaterialFlags.h>
 #include "Resources/PixelBuffer.h"
 #include "Render/MemoryIntrospectionAPI.h"
 

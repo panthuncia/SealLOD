@@ -30,7 +30,7 @@
 #ifdef __cplusplus
 
 #include <cmath>
-#include "../Scene/Components.h"
+#include <BasicRenderer/Scene/Components.h>
 
 namespace XeGTAO
 {

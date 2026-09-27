@@ -5,7 +5,8 @@ $directory = "."
 $excludedDirectories = @(
     "nlohmann", "stb", "DirectX", "pix", "Intel", "FidelityFX", "ThirdParty", 
     ".*", "models", "textures", "out", "Aftermath", "NVSL", "vcpkg_installed", 
-    "tree-sitter-hlsl", "volk", "GPU-Reshape", "openpbr-bsdf", "ImGuiColorTextEdit")
+    "tree-sitter-hlsl", "volk", "GPU-Reshape", "openpbr-bsdf", "ImGuiColorTextEdit",
+    "xatlas", "PyNifly", "geometry-central", "FidelityFX-SDK")
 
 # File extensions to include in the search (e.g., .txt, .cpp, .h)
 $includeExtensions = @("*.txt", "*.cpp", "*.h")

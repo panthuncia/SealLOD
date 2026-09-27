@@ -33,3 +33,11 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
 install(EXPORT StreamlineHeadersTargets
         NAMESPACE Streamline::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/StreamlineHeaders)
+
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    cmake/StreamlineHeadersConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/StreamlineHeadersConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/StreamlineHeaders)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/StreamlineHeadersConfig.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/StreamlineHeaders)

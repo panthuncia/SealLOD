@@ -1,4 +1,4 @@
-#include <BasicScene/Scene.h>
+#include <BasicRenderer/Scene/Scene.h>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -11,26 +11,26 @@
 #include <BasicScene/SceneWorldManager.h>
 
 #include "Utilities/Utilities.h"
-#include "Managers/Singletons/SettingsManager.h"
-#include "Managers/Singletons/RendererECSManager.h"
-#include <BasicScene/Components.h>
+#include "Runtime/Settings/SettingsManager.h"
+#include "Scene/ECS/RendererECSManager.h"
+#include <BasicRenderer/Scene/Components.h>
 #include <tracy/Tracy.hpp>
-#include "Materials/Material.h"
-#include "Render/PoseInstanceRegistrationService.h"
-#include "Render/SceneEntityMaterializationService.h"
-#include "Render/StaticWorkloadRequestService.h"
-#include "Render/SceneRenderableResidencyService.h"
-#include "Mesh/MeshInstanceFactory.h"
-#include "Mesh/MeshInstance.h"
-#include "Mesh/VertexFlags.h"
-#include "Render/RendererComponents.h"
-#include "Animation/AnimationController.h"
+#include "BasicRenderer/Assets/Material.h"
+#include "BasicRenderer/Runtime/Detail/PoseInstanceRegistrationService.h"
+#include "BasicRenderer/Runtime/Detail/SceneEntityMaterializationService.h"
+#include <BasicRenderer/Streaming/StaticWorkloadRequestService.h>
+#include "BasicRenderer/Runtime/Detail/SceneRenderableResidencyService.h"
+#include "BasicRenderer/Assets/Geometry/MeshInstanceFactory.h"
+#include "BasicRenderer/Assets/Geometry/MeshInstance.h"
+#include <BasicRenderer/Scene/VertexFlags.h>
+#include "BasicRenderer/Scene/RendererComponents.h"
+#include "BasicRenderer/Scene/Animation/AnimationController.h"
 #include "Utilities/MathUtils.h"
 #include "Resources/Sampler.h"
-#include "Resources/components.h"
+#include <BasicRenderer/Extensions/ResourceComponent.h>
 #include "Resources/PixelBuffer.h"
-#include "Render/DrawWorkload.h"
-#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "BasicRenderer/Pipeline/MeshDrawWorkload.h"
+#include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 
 namespace {
 	std::atomic<uint64_t> globalStableSceneId = 0;

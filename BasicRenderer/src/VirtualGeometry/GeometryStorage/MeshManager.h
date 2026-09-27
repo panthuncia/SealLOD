@@ -1,0 +1,484 @@
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "BasicRenderer/Extensions/ShaderBuffers.h"
+#include <BasicRenderer/Streaming/CLodGeometryTypes.h>
+#include <BasicRenderer/Streaming/GeometryRequests.h>
+#include "BasicRenderer/Assets/Geometry/Mesh.h"
+#include <BasicRenderer/Assets/Import/CLodCache.h>
+#include "Runtime/IO/DirectStorageTypes.h"
+#include <BasicRenderer/Streaming/DirectStorageRequest.h>
+#include "Runtime/Settings/SettingsManager.h"
+#include "RenderPasses/Base/PassReturn.h"
+#include <BasicRenderer/Streaming/ArtifactTypes.h>
+#include "BasicRenderer/Extensions/Buffers/LazyDynamicStructuredBuffer.h"
+#include "BasicRenderer/Extensions/Buffers/PagePool.h"
+#include "Interfaces/IResourceProvider.h"
+
+class Mesh;
+class Skeleton;
+class SkeletonManager;
+class MeshInstance;
+class Material;
+namespace org { class DynamicBuffer; }
+namespace org { class ResourceGroup; }
+namespace org { class BufferView; }
+class ViewManager;
+class ICLodGeometryStorage;
+class MeshManagerCLodGeometryStorage;
+namespace br::render { class RendererStateRequestService; class CLodResidencyStorageDirectory; }
+namespace br::render { struct PublishedRendererState; class VersionedGpuBufferBackingPool; }
+namespace org::runtime { class IUploadService; }
+class PublishedStateResourceResolver;
+
+class MeshManager : public org::IResourceProvider {
+public:
+
+
+
+
+	// Represents the outcome of a single disk-streamed group IO.
+
+
+
+	static std::unique_ptr<MeshManager> CreateUnique() {
+		return std::unique_ptr<MeshManager>(new MeshManager());
+	}
+	~MeshManager();
+	bool AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices);
+	bool AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices);
+	void RemoveMesh(Mesh* mesh);
+	void RemoveMeshInstance(MeshInstance* mesh);
+
+
+
+	void AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices);
+	void SetSkeletonManager(SkeletonManager* manager) { m_skeletonManager = manager; }
+	void SetRendererStateServices(br::render::RendererStateRequestService* service,
+		std::shared_ptr<org::runtime::IUploadService> uploads, std::uint32_t framesInFlight);
+	void SetRendererStateRequestService(br::render::RendererStateRequestService* service);
+	std::uint64_t PublishDesiredBufferState();
+	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement() const;
+	// Also reports the geometry mutation sequence the returned cut covers: every
+	// journal mutation counted at or below it is contained in that cut.
+	std::optional<br::render::ArtifactRequirement> DesiredBufferStateRequirement(std::uint64_t& coverage) const;
+	// Sum of the geometry journals' write sequences. Every component only grows,
+	// so a cut whose captured sum reaches a value read after some writes contains
+	// those writes; the newest cut always reaches the current value.
+	[[nodiscard]] std::uint64_t GeometryMutationSequence() const;
+	void AcknowledgePublishedBufferState(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published);
+	ICLodGeometryStorage& GetCLodGeometryStorage() noexcept;
+	[[nodiscard]] std::optional<br::render::ArtifactVersionHandle>
+		GeometryResidencyVersion() const;
+	std::vector<br::render::StaticMeshTemplateRegistration> AddStaticMeshTemplatesBulk(const std::vector<br::render::StaticMeshTemplateRequest>& requests);
+	void PrepareStaticMeshTemplateResourcesAsync(const std::vector<br::render::StaticMeshTemplateRequest>& requests);
+	uint32_t GetCLodMaxTraversalDepth() const { return m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire); }
+
+	void GetCLodActiveUniqueAssetGroupRanges(std::vector<br::render::CLodActiveGroupRange>& outRanges, uint32_t& outMaxGroupIndex) const;
+	void GetCLodCoarsestUniqueAssetGroupRanges(std::vector<br::render::CLodActiveGroupRange>& outRanges) const;
+
+	// Slow fallback snapshot for registry/device reset recovery. Normal CLod
+	// streaming consumes incremental domain events instead.
+	void GetCLodStreamingDomainSnapshot(br::render::CLodStreamingDomainSnapshot& outSnapshot) const;
+
+
+
+	void DrainCLodStreamingDomainEvents(std::vector<br::render::CLodStreamingDomainEvent>& outEvents, uint64_t& outGeneration);
+	bool TryGetCLodParentGroup(uint32_t groupGlobalIndex, uint32_t& outParentGlobalIndex) const;
+	void GetCLodChildGroups(uint32_t parentGroupGlobalIndex, std::vector<uint32_t>& outChildGroups) const;
+
+	// Patch a single group's error field in the GPU groups buffer.
+	// Used by the streaming system to override error for residency transitions.
+	void PatchCLodGroupError(uint32_t groupGlobalIndex, float error);
+
+	br::render::CLodStreamingDebugStats GetCLodStreamingDebugStats() const;
+	void GetCLodRayTracingResidencySnapshot(br::render::CLodRayTracingResidencySnapshot& outSnapshot) const;
+	void ProcessCLodDiskStreamingIO();
+
+	// Drains groups that completed disk streaming since the last call.
+	// The extension uses this to learn which groups became resident (or failed)
+	// so it can update the GPU-visible non-resident bitset accordingly.
+	void DrainCompletedCLodDiskStreamingGroups(std::vector<br::render::CLodDiskStreamingCompletion>& outCompletions);
+
+	// Focused eviction: frees a resident group's page-pool pages, marks it
+	// non-resident, and uploads the chunk table.  Returns true on success.
+	bool FreeCLodGroupEviction(uint32_t groupGlobalIndex);
+	bool EvictCLodGroupResidency(uint32_t groupGlobalIndex, bool clearPageMapEntries);
+
+	bool CommitCLodGroupResidency(
+		uint32_t groupGlobalIndex,
+		const ClusterLODGroupChunk& chunk,
+		std::span<const uint32_t> meshPageIndices,
+		std::span<const GroupPageMapEntry> pageMapEntries,
+		std::span<const PagePool::PageAllocation> pageAllocations,
+		uint64_t streamedBytes = 0u);
+
+	// Queues disk I/O for a group without any residency side-effects.
+	// Returns true if the request was queued (or was already in the queue).
+	uint32_t QueueCLodGroupDiskIOBatch(const std::vector<br::render::CLodGroupDiskIOBatchRequest>& requests, std::vector<bool>* outQueuedByRequest = nullptr);
+	bool QueueCLodGroupDiskIO(uint32_t groupGlobalIndex, const std::vector<bool>& segmentNeedsFetch = {}, const std::vector<uint32_t>& preAllocatedPages = {}, uint32_t priority = 0u, const CLodCache::GroupPayloadLayoutMetadata* prefetchedLayout = nullptr);
+	bool TryGetCLodGroupPayloadLayout(uint32_t groupGlobalIndex, CLodCache::GroupPayloadLayoutMetadata& outLayout, std::string* outMessage = nullptr);
+	bool IsCLodStreamingDirectStorageEnabled() const { return m_clodStreamingDirectStorageEnabled.load(std::memory_order_acquire); }
+	bool HasPendingCLodDirectStorageLaunches() const;
+	bool HasPendingCLodDirectStorageUploads() const;
+	std::pair<std::size_t, std::size_t> GetPendingCLodDirectStorageCounts() const;
+	bool LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeline, uint64_t waitValue);
+
+	// Returns true if the group currently has disk I/O queued or in-flight.
+	bool IsCLodGroupDiskIOQueued(uint32_t groupGlobalIndex) const;
+
+	// Invalidates all in-flight and queued disk streaming IO.
+	// Bumps a generation counter so that stale in-flight results are rejected.
+	// Must be called when page allocations are invalidated (e.g. render graph rebuild).
+	void InvalidateCLodDiskStreamingPipeline();
+
+	// Retrieves the chunk hint and vertex byte size for a group so that
+	// the caller can compute the estimated page count before dispatching I/O.
+	br::render::CLodGroupStreamingInfo GetCLodGroupStreamingInfo(uint32_t groupGlobalIndex) const;
+
+	void UpdatePerMeshBuffer(std::unique_ptr<org::BufferView>& view, PerMeshCB& data);
+	void UpdatePerMeshInstanceBuffer(std::unique_ptr<org::BufferView>& view, PerMeshInstanceCB& data);
+	std::unique_ptr<org::BufferView> AllocatePerMeshOverrideBuffer(const PerMeshCB& data);
+	void ReleasePerMeshOverrideBuffer(std::unique_ptr<org::BufferView>& view);
+	void SetViewManager(ViewManager* viewManager) { m_pViewManager = viewManager; }
+
+	// Access the CLod page pool (may be null if no CLod meshes loaded).
+	PagePool* GetCLodPagePool() const { return m_clodPagePool.get(); }
+	std::shared_ptr<org::ResourceGroup> GetCLodSlabResourceGroup() const {
+		return m_clodPagePool ? m_clodPagePool->GetSlabResourceGroup() : nullptr;
+	}
+	void SetCLodStreamingUploadFunction(PagePool::UploadFn fn);
+	void SetCLodStreamingWakeFunction(std::function<void()> fn);
+	// Published CLod residency bitsets: built by CLod streaming, required by every
+	// geometry cut for the groups its table references. Null until the renderer
+	// state services are installed.
+	std::shared_ptr<br::render::CLodResidencyStorageDirectory> GetCLodResidencyStorages() const {
+		std::lock_guard lock(m_geometryBufferGraphMutex);
+		return m_clodResidencyStorages;
+	}
+	uint64_t GetActiveMeshletCount() const { return m_activeMeshletCount; }
+
+	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
+	std::shared_ptr<org::IResourceResolver> ProvideResolver(org::ResourceIdentifier const& key) override;
+	std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
+
+private:
+	MeshManager();
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<org::Resource>, org::ResourceIdentifier::Hasher> m_resources;
+
+	// Base meshes
+	std::shared_ptr<org::DynamicBuffer> m_perMeshBuffers;
+
+	// mesh instances
+	std::shared_ptr<org::DynamicBuffer> m_perMeshInstanceBuffers;
+
+	std::shared_ptr<org::DynamicBuffer> m_perMeshInstanceClodOffsets;
+	std::shared_ptr<org::DynamicBuffer> m_clodSharedGroupChunks;
+	std::shared_ptr<org::DynamicBuffer> m_clodMeshMetadata;
+	std::shared_ptr<org::DynamicBuffer> m_clodHierarchyLevelInfos;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODGroups;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODSegments;
+
+	//std::shared_ptr<DynamicBuffer> m_clusterLODMeshlets;
+	//std::shared_ptr<DynamicBuffer> m_clusterLODMeshletBounds;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODNodes;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODNodeSkinningInfos;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODNodeBoneIndices;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyTransforms;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyInstances;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyBoneRemaps;
+	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyBoneRemapIndices;
+	std::shared_ptr<org::DynamicBuffer> m_clodGroupPageMap;
+	uint64_t m_activeMeshletCount = 0;
+
+	struct PreparedCLodContainer {
+		std::weak_ptr<Mesh> mesh;
+		std::wstring resolvedPath;
+		std::shared_ptr<const CLodCache::MappedContainerLease> lease;
+		uint32_t pageCount = 0;
+	};
+	std::mutex m_preparedCLodContainersMutex;
+	std::unordered_map<Mesh*, PreparedCLodContainer> m_preparedCLodContainers;
+
+	struct CLodSharedStreamingState {
+		struct ResidentGroupAllocations {
+			// Per-child page allocations (one page per child)
+			std::vector<PagePool::PageAllocation> pageAllocations;
+
+			void Reset() {
+				pageAllocations.clear();
+			}
+		};
+
+		Mesh* mesh = nullptr;
+		uint32_t maxTraversalDepth = 0;
+		uint32_t vertexByteSize = 0;
+		ClusterLODCacheSource cacheSource{};
+		std::wstring resolvedContainerPath;
+		std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
+		std::shared_ptr<const CLodCache::MappedContainerLease>
+			mappedContainerLease;
+		std::unique_ptr<std::atomic<uint8_t>[]> mappedPageWarmStates;
+		uint32_t mappedPageWarmStateCount = 0u;
+		std::vector<ClusterLODRuntimeSummary::GroupChunkHint> groupChunkHints;
+		std::unique_ptr<org::BufferView> ownedMeshMetadataView;
+		uint32_t clodMeshMetadataIndex = 0;
+		uint32_t groupsBase = 0;
+		uint32_t groupCount = 0;
+		std::unique_ptr<org::BufferView> ownedGroupChunksView;
+		org::BufferView* groupChunksView = nullptr;
+		std::vector<ClusterLODGroupChunk> baselineGroupChunks;
+		std::vector<uint8_t> groupResidentFlags;
+		std::vector<ResidentGroupAllocations> residentGroupAllocations;
+		uint32_t activeInstanceCount = 0;
+
+		// Copies of hierarchy data needed at streaming-apply time.
+		// (The Mesh releases its CPU copies after setup via ReleaseCLodHierarchyCpuData.)
+		std::vector<ClusterLODGroup> groups;
+		std::vector<ClusterLODGroupSegment> segments;
+		std::vector<uint32_t> groupPageReferences;
+		std::vector<uint32_t> groupPageReferenceOffsets;
+
+		// Parent-child mapping and original error values, copied from
+		// the runtime summary at AddMesh time so that the streaming
+		// domain snapshot always has reliable data regardless of mesh
+		// object lifetime or summary state.
+		std::vector<int32_t> parentGroupByLocal;
+		std::vector<std::vector<uint32_t>> childrenByLocalParent;
+		std::vector<float> groupErrorByLocal;
+		std::vector<ClusterLODRuntimeSummary::GroupRange> coarsestRanges;
+
+		// GroupPageMap buffer view for this mesh's page map entries.
+		std::unique_ptr<org::BufferView> ownedPageMapView;
+		uint32_t pageMapGlobalBase = 0; // global offset into GroupPageMap buffer
+		uint32_t totalPageMapEntries = 0;
+		std::vector<GroupPageMapEntry> pageMapEntriesCPU; // CPU mirror for UpdateView
+	};
+
+	struct CLodSharedStreamingRange {
+		uint32_t begin = 0;
+		uint32_t end = 0;
+		std::shared_ptr<CLodSharedStreamingState> state;
+	};
+
+	struct CLodStreamingInstanceState {
+		MeshInstance* instance = nullptr;
+		uint32_t meshInstanceIndex = 0;
+		uint32_t groupsBase = 0;
+		uint32_t groupCount = 0;
+		std::shared_ptr<CLodSharedStreamingState> sharedMeshState;
+	};
+
+	std::unordered_map<uint32_t, CLodStreamingInstanceState> m_clodStreamingStateByInstanceIndex;
+	std::unordered_map<const MeshInstance*, uint32_t> m_clodStreamingInstanceIndexByPtr;
+	std::unordered_map<const Mesh*, std::shared_ptr<CLodSharedStreamingState>> m_clodSharedStreamingStateByMesh;
+	// Serializes the mutable authoring registry. Render consumers never acquire
+	// this lock; they consume immutable geometry-buffer versions from a frame snapshot.
+	mutable std::recursive_mutex m_staticTemplatePublicationMutex;
+	struct GraphBufferBinding {
+		org::ResourceIdentifier identifier;
+		std::shared_ptr<org::DynamicBuffer> buffer;
+		br::render::ArtifactKey key;
+		std::uint64_t catalogVariant = 0;
+		std::uint32_t elementStride = 0;
+		br::render::ArtifactVersionID submittedVersion{};
+		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
+	};
+	std::vector<GraphBufferBinding> m_graphBufferBindings;
+	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<PublishedStateResourceResolver>,
+		org::ResourceIdentifier::Hasher> m_graphBufferResolvers;
+	std::shared_ptr<org::runtime::IUploadService> m_geometryUploadService;
+	mutable std::mutex m_geometryBufferGraphMutex;
+	std::atomic_bool m_geometryBufferGraphDirty{ true };
+	std::uint64_t m_geometryBufferStateCoverage = 0;
+	std::uint64_t m_geometryBufferStateRevision = 0;
+	std::uint64_t m_geometryBufferFingerprint = 0;
+	br::render::ArtifactVersionHandle m_geometryBufferStateVersion{};
+	std::shared_ptr<br::render::CLodResidencyStorageDirectory> m_clodResidencyStorages;
+	// Capacity gate per required group capacity (powers of two), geometry graph mutex.
+	std::unordered_map<std::uint32_t, br::render::ArtifactVersionHandle> m_clodResidencyGates;
+	std::uint32_t m_geometryFramesInFlight = 1;
+	SkeletonManager* m_skeletonManager = nullptr;
+	std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> m_windTypeSkeletons;
+	std::vector<CLodSharedStreamingRange> m_clodSharedStreamingRanges;
+	bool m_clodSharedStreamingRangesDirty = true;
+	mutable std::mutex m_clodStreamingDomainEventsMutex;
+	std::vector<br::render::CLodStreamingDomainEvent> m_clodStreamingDomainEvents;
+	std::atomic<uint64_t> m_clodStreamingDomainEventGeneration{0};
+	mutable std::mutex m_geometryResidencyPublicationMutex;
+	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
+	br::render::ArtifactVersionHandle m_geometryResidencyVersion;
+	uint64_t m_geometryResidencyRevision = 0;
+	std::atomic<bool> m_clodStreamingDirectStorageEnabled{true};
+	SettingsManager::Subscription m_clodStreamingDirectStorageSubscription;
+
+	// Incremental debug-stats counters — updated in place by residency mutations.
+	std::atomic<uint32_t> m_debugResidentGroups{0};
+	std::atomic<uint32_t> m_debugResidentAllocations{0};
+	std::atomic<uint64_t> m_debugResidentAllocationBytes{0};
+	std::atomic<uint64_t> m_debugTotalStreamedBytes{0};
+	std::atomic<uint32_t> m_clodActiveMaxTraversalDepth{0};
+
+	struct CLodDiskStreamingRequest {
+		uint32_t groupGlobalIndex = 0;
+		ClusterLODCacheSource cacheSource{};
+		uint32_t groupsBase = 0;
+		uint32_t groupLocalIndex = 0;
+		std::optional<CLodCache::GroupPayloadLayoutMetadata> prefetchedLayout;
+		std::shared_ptr<CLodSharedStreamingState> sharedState;
+		uint32_t pageMapBase = 0;
+		uint32_t pageCount = 0;
+		std::vector<uint32_t> meshPageIndices;
+		std::vector<bool> segmentNeedsFetch; // true = fetch from disk; false = reuse existing slab data
+		std::vector<uint32_t> preAllocatedPages; // page IDs pre-allocated by the LRU
+		std::vector<uint32_t> childLayoutPrefetchGroups;
+		bool deferCpuPayloadCopy = false;
+		uint64_t generation = 0; // generation at time of request
+		uint32_t priority = 0; // streaming priority for I/O dispatch ordering
+		uint64_t ioTaskQueuedNs = 0;
+	};
+
+	struct CLodDiskStreamingResult {
+		uint32_t groupGlobalIndex = 0;
+		bool success = false;
+		ClusterLODCacheSource cacheSource{};
+		std::string uploadPathLabel = "CpuReadThenCpuUpload";
+		std::optional<ClusterLODGroupChunk> groupChunkMetadata;
+		std::vector<bool> segmentNeedsFetch;
+		std::vector<uint32_t> meshPageIndices;
+		std::vector<uint32_t> directStoragePageBlobSizes;
+		std::vector<uint64_t> directStoragePageBlobOffsets;
+		bool directStorageGpuUploadPending = false;
+		std::vector<std::vector<std::byte>> pageBlobs;
+		std::shared_ptr<const CLodCache::MappedContainerLease> mappedContainer;
+		std::vector<uint32_t> mappedPageBlobSizes;
+		std::vector<uint64_t> mappedPageBlobOffsets;
+		std::vector<uint32_t> preAllocatedPages; // forwarded from request
+		std::vector<br::render::CLodPrefetchedChildLayout> prefetchedChildLayouts;
+		uint64_t generation = 0; // generation at time of request
+		uint64_t ioTaskQueuedNs = 0;
+		uint64_t ioTaskStartedNs = 0;
+		uint64_t ioTaskCompletedNs = 0;
+	};
+
+	struct CLodPendingDirectStorageUpload {
+		uint32_t groupGlobalIndex = 0;
+		uint64_t generation = 0;
+		std::shared_ptr<CLodSharedStreamingState> sharedState;
+		uint32_t groupLocalIndex = 0;
+		ClusterLODGroupChunk chunk{};
+		std::vector<PagePool::PageAllocation> pageAllocations;
+		std::vector<GroupPageMapEntry> pageMapEntries;
+		std::vector<uint32_t> meshPageIndices;
+		std::vector<bool> segmentNeedsFetch;
+		uint32_t fetchedPageCount = 0;
+		uint64_t totalBlobBytes = 0;
+		std::string uploadPathLabel = "DirectStorageGpuDirect";
+		DirectStorageAsyncRequestHandle uploadHandle;
+		std::vector<uint32_t> pageIds;
+		std::vector<br::render::CLodPrefetchedChildLayout> prefetchedChildLayouts;
+	};
+
+	struct CLodPendingDirectStorageLaunch {
+		uint32_t groupGlobalIndex = 0;
+		uint64_t generation = 0;
+		ClusterLODCacheSource cacheSource{};
+		std::shared_ptr<CLodSharedStreamingState> sharedState;
+		uint32_t groupLocalIndex = 0;
+		ClusterLODGroupChunk chunk{};
+		std::vector<PagePool::PageAllocation> pageAllocations;
+		std::vector<GroupPageMapEntry> pageMapEntries;
+		std::vector<uint32_t> meshPageIndices;
+		std::vector<bool> segmentNeedsFetch;
+		std::vector<br::DirectStorageBufferRegionCopy> copies;
+		std::vector<uint32_t> pageIds;
+		std::vector<br::render::CLodPrefetchedChildLayout> prefetchedChildLayouts;
+		uint32_t fetchedPageCount = 0;
+		uint64_t totalBlobBytes = 0;
+		std::string uploadPathLabel = "DirectStorageGpuDirect";
+	};
+
+	// Pending requests waiting to be dispatched (guarded by m_clodDiskStreamingMutex).
+	mutable std::mutex m_clodDiskStreamingMutex;
+	std::vector<CLodDiskStreamingRequest> m_clodDiskStreamingRequests;
+	std::unordered_set<uint32_t> m_clodDiskStreamingQueuedGroups;
+
+	// Generation counter for invalidating in-flight disk IO across rebuilds.
+	std::atomic<uint64_t> m_clodDiskStreamingGeneration{0};
+
+	// Guards m_clodDiskStreamingResults and m_clodDiskStreamingCompletions.
+	mutable std::mutex m_clodDiskStreamingResultsMutex;
+
+	// Completed results waiting to be applied on the main thread.
+	std::vector<CLodDiskStreamingResult> m_clodDiskStreamingResults;
+	std::vector<br::render::CLodDiskStreamingCompletion> m_clodDiskStreamingCompletions;
+	std::vector<CLodPendingDirectStorageLaunch> m_clodPendingDirectStorageLaunches;
+	std::vector<CLodPendingDirectStorageUpload> m_clodPendingDirectStorageUploads;
+	PagePool::UploadFn m_clodStreamingUploadFn;
+	// Guarded by m_clodDiskStreamingResultsMutex. I/O workers copy the
+	// callback while publishing, then invoke it after releasing the lock.
+	std::function<void()> m_clodStreamingWakeFn;
+
+	rhi::TimelinePtr m_clodDirectStorageCompletionFencePtr;
+	rhi::Timeline m_clodDirectStorageCompletionFenceHandle;
+	std::atomic<uint64_t> m_clodDirectStorageCompletionFenceCounter{0};
+
+	// Guards CLodSharedStreamingState interiors (groupResidentFlags,
+	// baselineGroupChunks, residentGroupAllocations),
+	// m_clodPagePool, and m_clodSharedGroupChunks UpdateView calls.
+	mutable std::mutex m_clodResidencyMutex;
+
+	// Keep only a small amount of work beyond the active I/O workers. Priority
+	// remains mutable in m_clodDiskStreamingRequests until a task is admitted.
+	static constexpr uint32_t kMaxIoBatchSize = 128u;
+
+	void DispatchCLodDiskStreamingBatch();
+	bool QueueCLodDiskStreamingRequest(uint32_t groupGlobalIndex, const std::shared_ptr<CLodSharedStreamingState>& state, uint32_t groupLocalIndex, bool& outQueued, const std::vector<bool>& segmentNeedsFetch = {}, const std::vector<uint32_t>& preAllocatedPages = {}, uint32_t priority = 0u, const CLodCache::GroupPayloadLayoutMetadata* prefetchedLayout = nullptr);
+
+	enum class DiskStreamingApplyResult {
+		Prepared,
+		DeferredPendingUpload,
+		FailedPermanent,
+	};
+	DiskStreamingApplyResult PrepareCompletedCLodDiskStreamingResult(CLodDiskStreamingResult& result, const std::vector<uint32_t>& preAllocatedPages, br::render::CLodDiskStreamingCompletion& outCompletion);
+	void FinalizePendingCLodDirectStorageUploads(uint64_t currentGeneration, std::vector<br::render::CLodDiskStreamingCompletion>& outCompletions, std::vector<uint32_t>& outFinishedGroups);
+	void UploadCLodGroupChunkTable(const CLodSharedStreamingState& state);
+	void UploadCLodGroupChunk(const CLodSharedStreamingState& state, uint32_t groupLocalIndex);
+	void UploadCLodGroupPageMapRange(
+		CLodSharedStreamingState& state,
+		uint32_t pageMapOffset,
+		std::span<const GroupPageMapEntry> pageMapEntries);
+	bool IsCLodGroupResident(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const;
+	bool IsCLodMeshPageReferencedByResidentGroup(const CLodSharedStreamingState& state, uint32_t meshPageIndex) const;
+	void DeallocateCLodGroupChunkAllocations(CLodSharedStreamingState& state, uint32_t groupLocalIndex);
+	void ReleaseAllCLodGroupChunkAllocations(CLodSharedStreamingState& state);
+ 	static void ZeroCLodGroupChunkCounts(ClusterLODGroupChunk& chunk);
+	bool ApplyCLodGroupEviction(CLodSharedStreamingState& state, uint32_t groupLocalIndex, bool clearPageMapEntries);
+
+	void RebuildCLodSharedStreamingRangeIndex();
+	void PublishCLodStreamingDomainEvent(br::render::CLodStreamingDomainEvent event);
+	void PublishGeometryResidencyDelta(const br::render::CLodStreamingDomainEvent& event);
+	void PublishCLodStreamingDomainEventForSharedState(br::render::CLodStreamingDomainEventKind kind, const std::shared_ptr<CLodSharedStreamingState>& sharedState);
+	void RecomputeCLodActiveMaxTraversalDepth();
+	std::shared_ptr<CLodSharedStreamingState> FindCLodSharedStreamingStateByGlobalGroup(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex);
+	std::vector<uint32_t> GetCLodGroupMeshPageIndices(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const;
+	std::vector<uint32_t> GetCLodGroupPageMapOffsets(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const;
+
+	ViewManager* m_pViewManager;
+
+	// Page pool for CLod streaming
+	std::shared_ptr<PagePool> m_clodPagePool;
+	std::unique_ptr<MeshManagerCLodGeometryStorage> m_clodGeometryStorage;
+};

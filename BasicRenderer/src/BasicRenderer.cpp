@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <Windows.h>
 #include <windowsx.h>
 #include <memory>
@@ -24,30 +24,50 @@
 #include <nlohmann/json.hpp>
 //#include <tracy/Tracy.hpp>
 
-#include "Mesh/Mesh.h"
-#include "Renderer.h"
-#include "Utilities/Utilities.h"
-#include "Managers/Singletons/PSOManager.h"
-#include "Managers/Singletons/DeviceManager.h"
-#include "Managers/Singletons/SettingsManager.h"
-#include "Materials/Material.h"
-#include "Menu/Menu.h"
-#include "Materials/MaterialFlags.h"
-#include "Render/PSOFlags.h"
-#include "Render/OutputTypes.h"
-#include "Render/RendererSettings.h"
-#include "Render/GraphExtensions/CLodTelemetry.h"
-#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
-#include "Render/GraphExtensions/ClusterLOD/HierarchicalCullingPass.h"
-#include "Telemetry/NvPerfIntegration.h"
-#include "Telemetry/SamplingControlServer.h"
-#include "Telemetry/StatisticalSampler.h"
+#include "BasicRenderer/Assets/Geometry/Mesh.h"
+#include <BasicRenderer/Renderer.h>
+#include "BasicRenderer/Assets/Material.h"
+#include <BasicRenderer/Assets/MaterialFlags.h>
+#include <BasicRenderer/Pipeline/PSOFlags.h>
+#include <BasicRenderer/Diagnostics/OutputTypes.h>
+#include <BasicRenderer/Pipeline/RendererSettings.h>
+#include "BasicRenderer/Diagnostics/CLodTelemetry.h"
+#include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
+#include <BasicRenderer/Diagnostics/NvPerfIntegration.h>
+#include <BasicRenderer/Diagnostics/SamplingControlServer.h>
+#include <BasicRenderer/Diagnostics/StatisticalSampler.h>
 #include "Resources/Buffers/DynamicBufferBase.h"
-#include "Managers/Singletons/DeletionManager.h"
-#include "Import/ModelLoader.h"
-#include "spdlogStreambuf.h"
+#include "BasicRenderer/Assets/Import/ModelLoader.h"
 #include <rhi_interop_dx12.h>
 #include <d3d12sdklayers.h>
+#include <BasicRenderer/Extensions/RenderDeviceAccess.h>
+#include <BasicRenderer/Extensions/SettingAccess.h>
+#include <BasicRenderer/Diagnostics/PipelineControl.h>
+#include <streambuf>
+
+class spdlog_streambuf : public std::streambuf {
+public:
+    explicit spdlog_streambuf(std::shared_ptr<spdlog::logger> logger)
+        : _logger(std::move(logger)) {
+    }
+
+protected:
+    int_type overflow(int_type ch) override {
+        if (traits_type::eq_int_type(ch, traits_type::eof()))
+            return ch;
+        char c = traits_type::to_char_type(ch);
+        _buffer += c;
+        if (c == '\n') {
+            _logger->info(_buffer);
+            _buffer.clear();
+        }
+        return ch;
+    }
+
+private:
+    std::shared_ptr<spdlog::logger> _logger;
+    std::string                     _buffer;
+};
 
 // Activate dedicated GPU on NVIDIA laptops with both integrated and dedicated GPUs
 extern "C" {
@@ -63,7 +83,7 @@ extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D\\";
 
 namespace {
     void ResetD3D12SmokeValidationMessages() {
-        auto device = DeviceManager::GetInstance().GetDevice();
+        auto device = br::extensions::GetRenderDevice();
         ID3D12Device* nativeDevice = rhi::dx12::get_device(device);
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
         if (nativeDevice && SUCCEEDED(nativeDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
@@ -72,7 +92,7 @@ namespace {
     }
 
     bool D3D12SmokeValidationFailed() {
-        auto device = DeviceManager::GetInstance().GetDevice();
+        auto device = br::extensions::GetRenderDevice();
         ID3D12Device* nativeDevice = rhi::dx12::get_device(device);
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
         if (!nativeDevice || FAILED(nativeDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
@@ -1033,31 +1053,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     renderer.Initialize(hwnd, x_res, y_res, br::pipeline::MakeBasicRendererDemoPipeline());
     spdlog::info("Renderer initialized.");
-    SettingsManager::GetInstance().getSettingSetter<CLodTransparencyMode>(
+    br::extensions::MakeSettingSetter<CLodTransparencyMode>(
         CLodTransparencyModeSettingName)(CLodTransparencyMode::AVBOIT);
     spdlog::info("CLOD transparency mode: AVBOIT");
-    SettingsManager::GetInstance().getSettingSetter<bool>("rememberCameraPose")(
+    br::extensions::MakeSettingSetter<bool>("rememberCameraPose")(
         cameraState.rememberCameraPose);
     if (const char* outputTypeValue = std::getenv("SARP_DEBUG_OUTPUT_TYPE");
         outputTypeValue && outputTypeValue[0] != '\0') {
         char* end = nullptr;
         const auto parsed = std::strtoul(outputTypeValue, &end, 10);
         if (end != outputTypeValue && *end == '\0' && parsed < OutputTypeNames.size()) {
-            SettingsManager::GetInstance().getSettingSetter<unsigned int>("outputType")(
+            br::extensions::MakeSettingSetter<unsigned int>("outputType")(
                 static_cast<unsigned int>(parsed));
             spdlog::info("Debug output type selected from SARP_DEBUG_OUTPUT_TYPE: {}", parsed);
         }
     }
     if (vsmPageStateTest) {
-        SettingsManager::GetInstance().getSettingSetter<unsigned int>("outputType")(
+        br::extensions::MakeSettingSetter<unsigned int>("outputType")(
             static_cast<unsigned int>(OutputType::VSM_PAGE_STATE));
     }
     if (vsmRerenderedTest) {
-        SettingsManager::GetInstance().getSettingSetter<unsigned int>("outputType")(
+        br::extensions::MakeSettingSetter<unsigned int>("outputType")(
             static_cast<unsigned int>(OutputType::VSM_RERENDERED_THIS_FRAME));
     }
     if (clodStreamingStressTest) {
-        SettingsManager::GetInstance().getSettingSetter<uint32_t>(
+        br::extensions::MakeSettingSetter<uint32_t>(
             "clodStreamingCpuUploadBudgetRequests")(256u);
     }
     if (clodVsmCpuBenchmark) {
@@ -1066,7 +1086,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             "sweeps through frame 480 with graph rebuilds disabled.");
     }
     if (graphRebuildSmokeTest) {
-        SettingsManager::GetInstance().getSettingSetter<bool>("renderGraphCompileDumpEnabled")(true);
+        br::extensions::MakeSettingSetter<bool>("renderGraphCompileDumpEnabled")(true);
         ResetD3D12SmokeValidationMessages();
         if (clodStreamingStressTest) {
             spdlog::info("CLod streaming stress test armed: deterministic camera sweeps, teleports, and graph rebuilds through frame 1200.");
@@ -1516,37 +1536,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (graphRebuildSmokeTest && frameIndex == 120) {
                 if (pipelineReplacementSmokeTest) {
                     spdlog::info("Pipeline replacement smoke test: disabling bloom at frame {}.", frameIndex);
-                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(false);
+                    br::extensions::MakeSettingSetter<bool>("enableBloom")(false);
                 }
                 else {
                     spdlog::info("CLod graph-rebuild smoke test: disabling occlusion culling at frame {}.", frameIndex);
-                    SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(false);
+                    br::extensions::MakeSettingSetter<bool>("enableOcclusionCulling")(false);
                 }
                 if (clodStreamingStressTest) {
-                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(false);
+                    br::extensions::MakeSettingSetter<bool>("enableBloom")(false);
                 }
             }
             if (graphRebuildSmokeTest && frameIndex == 240) {
                 if (pipelineReplacementSmokeTest) {
                     spdlog::info("Pipeline replacement smoke test: enabling bloom at frame {}.", frameIndex);
-                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(true);
+                    br::extensions::MakeSettingSetter<bool>("enableBloom")(true);
                 }
                 else {
                     spdlog::info("CLod graph-rebuild smoke test: enabling occlusion culling at frame {}.", frameIndex);
-                    SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(true);
+                    br::extensions::MakeSettingSetter<bool>("enableOcclusionCulling")(true);
                 }
                 if (clodStreamingStressTest) {
-                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(true);
+                    br::extensions::MakeSettingSetter<bool>("enableBloom")(true);
                 }
             }
             if (graphRebuildSmokeTest && frameIndex == 360) {
                 if (pipelineReplacementSmokeTest) {
                     spdlog::info("Pipeline replacement smoke test: disabling bloom again at frame {}.", frameIndex);
-                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(false);
+                    br::extensions::MakeSettingSetter<bool>("enableBloom")(false);
                 }
                 else {
                     spdlog::info("CLod graph-rebuild smoke test: disabling occlusion culling again at frame {}.", frameIndex);
-                    SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(false);
+                    br::extensions::MakeSettingSetter<bool>("enableOcclusionCulling")(false);
                 }
             }
             if (graphRebuildSmokeTest && !clodStreamingStressTest && frameIndex == 480) {
@@ -1556,8 +1576,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             if (clodStreamingStressTest && (frameIndex == 600 || frameIndex == 840)) {
                 const bool enabled = frameIndex == 840;
                 spdlog::info("CLod stress: graph rebuild at frame {} bloom={} occlusion={}", frameIndex, enabled, enabled);
-                SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(enabled);
-                SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(enabled);
+                br::extensions::MakeSettingSetter<bool>("enableBloom")(enabled);
+                br::extensions::MakeSettingSetter<bool>("enableOcclusionCulling")(enabled);
             }
             if (clodStreamingStressTest && frameIndex == 1200) {
                 spdlog::info("CLod streaming stress test completed after {} frames; closing.", frameIndex);
@@ -1588,8 +1608,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (const auto& scene = renderer.GetCurrentScene(); scene) {
         SaveDemoCameraState(
             *scene,
-            SettingsManager::GetInstance()
-                .getSettingGetter<bool>("rememberCameraPose")());
+            br::extensions::MakeSettingGetter<bool>("rememberCameraPose")());
     }
     renderer.Cleanup();
 
@@ -1600,7 +1619,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 // Window callback procedure
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
 
-	const bool imguiHandled = Menu::GetInstance().HandleInput(hWnd, message, wParam, lParam);
+	const bool imguiHandled = renderer.HandleMenuInput(hWnd, message, wParam, lParam);
     const bool blockRendererInput = IsRendererInputMessage(message) && ShouldBlockRendererInputForImGui(message);
 
     if (IsRendererInputMessage(message) && !blockRendererInput) {
@@ -1695,10 +1714,10 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["pid"] = GetCurrentProcessId();
                     response["profile_active"] = !m_finished;
                     response["experiment_id"] = m_experimentId;
-                    response["pipeline_epoch"] = PSOManager::GetInstance().GetPipelineEpoch();
+                    response["pipeline_epoch"] = br::diagnostics::GetPipelineEpoch();
                 } else if (command == "pso.list") {
                     response["pipelines"] = nlohmann::json::array();
-                    for (const auto& pipeline : PSOManager::GetInstance().ListPipelines()) {
+                    for (const auto& pipeline : br::diagnostics::ListPipelines()) {
                         response["pipelines"].push_back({
                             { "id", pipeline.id },
                             { "name", pipeline.displayName },
@@ -1711,7 +1730,7 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     }
                 } else if (command == "pso.recompile") {
                     if (!m_finished) throw std::runtime_error("cannot recompile a pipeline while profiling is active");
-                    PSOManager::RecompileOptions options;
+                    br::diagnostics::RecompileOptions options;
                     options.label = request->document.value("label", "pipe-reload");
                     if (const auto defines = request->document.find("defines");
                         defines != request->document.end()) {
@@ -1729,24 +1748,24 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                                              value.get_ref<const std::string&>().end()));
                         }
                     }
-                    response["job_id"] = PSOManager::GetInstance().RequestRecompile(
+                    response["job_id"] = br::diagnostics::RequestRecompile(
                         request->document.at("pipeline_id").get<std::string>(), std::move(options));
                 } else if (command == "pso.activate") {
                     if (!m_finished) throw std::runtime_error("cannot activate a pipeline while profiling is active");
-                    response["job_id"] = PSOManager::GetInstance().RequestActivation(
+                    response["job_id"] = br::diagnostics::RequestActivation(
                         request->document.at("pipeline_id").get<std::string>(),
                         request->document.at("generation").get<std::uint64_t>());
                 } else if (command == "job.status") {
-                    const auto job = PSOManager::GetInstance().GetLiveJob(
+                    const auto job = br::diagnostics::GetLiveJob(
                         request->document.at("job_id").get<std::uint64_t>());
                     if (!job) throw std::runtime_error("unknown pipeline job");
-                    const auto stateName = [](PSOManager::LiveJobState state) {
+                    const auto stateName = [](br::diagnostics::LiveJobState state) {
                         switch (state) {
-                        case PSOManager::LiveJobState::Queued: return "queued";
-                        case PSOManager::LiveJobState::Compiling: return "compiling";
-                        case PSOManager::LiveJobState::ReadyToPublish: return "ready_to_publish";
-                        case PSOManager::LiveJobState::Published: return "published";
-                        case PSOManager::LiveJobState::Failed: return "failed";
+                        case br::diagnostics::LiveJobState::Queued: return "queued";
+                        case br::diagnostics::LiveJobState::Compiling: return "compiling";
+                        case br::diagnostics::LiveJobState::ReadyToPublish: return "ready_to_publish";
+                        case br::diagnostics::LiveJobState::Published: return "published";
+                        case br::diagnostics::LiveJobState::Failed: return "failed";
                         }
                         return "unknown";
                     };
@@ -1760,8 +1779,7 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     const char* settingName = pass == 2u
                         ? CLodPureComputeReplayExpansionFactorSettingName
                         : CLodPureComputePhase2ExpansionFactorSettingName;
-                    response["value"] = SettingsManager::GetInstance()
-                        .getSettingGetter<uint32_t>(settingName)();
+                    response["value"] = br::extensions::MakeSettingGetter<uint32_t>(settingName)();
                     response["pass"] = pass == 2u ? 2u : 1u;
                 } else if (command == "clod.phase2_expansion.set") {
                     if (!m_finished) throw std::runtime_error("cannot change traversal expansion while profiling is active");
@@ -1771,23 +1789,21 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         : CLodPureComputePhase2ExpansionFactorSettingName;
                     const uint32_t requested = request->document.at("value").get<uint32_t>();
                     const uint32_t normalized = CLodNormalizePureComputePhase2ExpansionFactor(requested);
-                    SettingsManager::GetInstance()
-                        .getSettingSetter<uint32_t>(settingName)(normalized);
+                    br::extensions::MakeSettingSetter<uint32_t>(settingName)(normalized);
                     response["value"] = normalized;
                     response["pass"] = pass == 2u ? 2u : 1u;
                 } else if (command == "clod.mode.get") {
-                    auto& settings = SettingsManager::GetInstance();
                     const auto culling =
-                        settings.getSettingGetter<CLodCullingBackend>(CLodCullingBackendSettingName)();
+                        br::extensions::MakeSettingGetter<CLodCullingBackend>(CLodCullingBackendSettingName)();
                     const auto softwareRaster =
-                        settings.getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)();
+                        br::extensions::MakeSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)();
                     response["culling"] =
                         culling == CLodCullingBackend::WorkGraph ? "work_graph" : "pure_compute";
                     response["software_raster"] =
                         softwareRaster == CLodSoftwareRasterMode::WorkGraph ? "work_graph" :
                         softwareRaster == CLodSoftwareRasterMode::Compute ? "compute" : "disabled";
                     response["rigid_only"] =
-                        settings.getSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
+                        br::extensions::MakeSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
                 } else if (command == "clod.mode.set") {
                     if (!m_finished) throw std::runtime_error("cannot change CLOD mode while profiling is active");
                     const std::string cullingName = request->document.at("culling").get<std::string>();
@@ -1803,43 +1819,41 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         softwareRasterName == "disabled" ? CLodSoftwareRasterMode::Disabled :
                         throw std::runtime_error(
                             "software_raster must be 'disabled', 'compute', or 'work_graph'");
-                    auto& settings = SettingsManager::GetInstance();
-                    settings.getSettingSetter<CLodCullingBackend>(CLodCullingBackendSettingName)(culling);
-                    settings.getSettingSetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)(
+                    br::extensions::MakeSettingSetter<CLodCullingBackend>(CLodCullingBackendSettingName)(culling);
+                    br::extensions::MakeSettingSetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)(
                         softwareRaster);
                     if (request->document.contains("rigid_only")) {
-                        settings.getSettingSetter<bool>(CLodWorkGraphRigidOnlySettingName)(
+                        br::extensions::MakeSettingSetter<bool>(CLodWorkGraphRigidOnlySettingName)(
                             request->document.at("rigid_only").get<bool>());
                     }
                     response["culling"] = cullingName;
                     response["software_raster"] = softwareRasterName;
                     response["rigid_only"] =
-                        settings.getSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
+                        br::extensions::MakeSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
                 } else if (command == "clod.vsm_perf.get" || command == "clod.vsm_perf.set") {
                     if (command == "clod.vsm_perf.set" && !m_finished) {
                         throw std::runtime_error("cannot change VSM performance settings while profiling is active");
                     }
-                    auto& settings = SettingsManager::GetInstance();
                     if (command == "clod.vsm_perf.set") {
 						const float requestedWindInner = request->document.value(
 							"dynamic_wind_inner_radius",
-							settings.getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)());
+							br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)());
 						const float requestedWindOuter = request->document.value(
 							"dynamic_wind_outer_radius",
-							settings.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)());
+							br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)());
 						if (requestedWindInner < 0.0f || requestedWindOuter < requestedWindInner) {
 							throw std::runtime_error("DynamicWind radii require 0 <= inner <= outer");
 						}
-						settings.getSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(requestedWindInner);
-						settings.getSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(requestedWindOuter);
+						br::extensions::MakeSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(requestedWindInner);
+						br::extensions::MakeSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(requestedWindOuter);
 						if (request->document.contains("skinned_shadow_radius")) {
 							const float radius = request->document.at("skinned_shadow_radius").get<float>();
 							if (radius < 0.0f) throw std::runtime_error("skinned_shadow_radius must be non-negative");
-							const float innerRadius = settings.getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
+							const float innerRadius = br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
 							if (radius < innerRadius) {
-								settings.getSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(radius);
+								br::extensions::MakeSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(radius);
 							}
-							settings.getSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(radius);
+							br::extensions::MakeSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(radius);
 						}
 						if (request->document.contains("skinned_shadow_dynamic_clipmap_count_override")) {
 							int32_t requestedOverride = request->document.at(
@@ -1852,55 +1866,55 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
 							if (requestedOverride >= 0 && activeClipmapCount != 0u) {
 								requestedOverride = std::min(requestedOverride, static_cast<int32_t>(activeClipmapCount));
 							}
-							settings.getSettingSetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)(
+							br::extensions::MakeSettingSetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)(
 								requestedOverride);
 						}
                         if (request->document.contains("page_budget")) {
-                            settings.getSettingSetter<uint32_t>(
+                            br::extensions::MakeSettingSetter<uint32_t>(
                                 CLodDirectionalVirtualShadowPageRenderBudgetSettingName)(
                                 request->document.at("page_budget").get<uint32_t>());
                         }
                         if (request->document.contains("upgrade_budget")) {
-                            settings.getSettingSetter<uint32_t>(
+                            br::extensions::MakeSettingSetter<uint32_t>(
                                 CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)(
                                 request->document.at("upgrade_budget").get<uint32_t>());
                         }
                         if (request->document.contains("cache_disabled")) {
-                            settings.getSettingSetter<bool>(
+                            br::extensions::MakeSettingSetter<bool>(
                                 CLodDisableVirtualShadowPageCachingSettingName)(
                                 request->document.at("cache_disabled").get<bool>());
                         }
                         if (request->document.contains("block_soft_cap")) {
-                            settings.getSettingSetter<uint32_t>(
+                            br::extensions::MakeSettingSetter<uint32_t>(
                                 CLodPageJobMaxPagesPerClusterSettingName)(
                                 request->document.at("block_soft_cap").get<uint32_t>());
                         }
                         if (request->document.contains("sw_raster_threshold")) {
-                            settings.getSettingSetter<uint32_t>(
+                            br::extensions::MakeSettingSetter<uint32_t>(
                                 CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)(
                                 std::min(
                                     request->document.at("sw_raster_threshold").get<uint32_t>(),
                                     0xFFFFu));
                         }
                         if (request->document.contains("page_job_force_all")) {
-                            settings.getSettingSetter<bool>(
+                            br::extensions::MakeSettingSetter<bool>(
                                 CLodPageJobForceAllSettingName)(
                                 request->document.at("page_job_force_all").get<bool>());
                         }
                         if (request->document.contains("dynamic_wind_bounds_cache_enabled")) {
-                            settings.getSettingSetter<bool>(CLodDynamicWindBoundsCacheEnabledSettingName)(
+                            br::extensions::MakeSettingSetter<bool>(CLodDynamicWindBoundsCacheEnabledSettingName)(
                                 request->document.at("dynamic_wind_bounds_cache_enabled").get<bool>());
                         }
                         if (request->document.contains("dynamic_wind_bounds_cache_mib")) {
-                            settings.getSettingSetter<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName)(
+                            br::extensions::MakeSettingSetter<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName)(
                                 std::min(request->document.at("dynamic_wind_bounds_cache_mib").get<uint32_t>(), 256u));
                         }
                         if (request->document.contains("dynamic_wind_vertex_cache_enabled")) {
-                            settings.getSettingSetter<bool>(CLodDynamicWindVertexCacheEnabledSettingName)(
+                            br::extensions::MakeSettingSetter<bool>(CLodDynamicWindVertexCacheEnabledSettingName)(
                                 request->document.at("dynamic_wind_vertex_cache_enabled").get<bool>());
                         }
                         if (request->document.contains("dynamic_wind_vertex_cache_mib")) {
-                            settings.getSettingSetter<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName)(
+                            br::extensions::MakeSettingSetter<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName)(
                                 std::min(request->document.at("dynamic_wind_vertex_cache_mib").get<uint32_t>(), 512u));
                         }
                         if (request->document.contains("raster_mode")) {
@@ -1912,27 +1926,27 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                                 mode == "reyes" ? CLodVSMRasterMode::Reyes :
                                 throw std::runtime_error(
                                     "raster_mode must be 'hardware', 'standard', 'page_job', or 'reyes'");
-                            settings.getSettingSetter<CLodVSMRasterMode>(
+                            br::extensions::MakeSettingSetter<CLodVSMRasterMode>(
                                 CLodVSMRasterModeSettingName)(rasterMode);
                         }
                     }
-                    response["page_budget"] = settings.getSettingGetter<uint32_t>(
+                    response["page_budget"] = br::extensions::MakeSettingGetter<uint32_t>(
                         CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
-                    response["upgrade_budget"] = settings.getSettingGetter<uint32_t>(
+                    response["upgrade_budget"] = br::extensions::MakeSettingGetter<uint32_t>(
                         CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)();
-                    response["cache_disabled"] = settings.getSettingGetter<bool>(
+                    response["cache_disabled"] = br::extensions::MakeSettingGetter<bool>(
                         CLodDisableVirtualShadowPageCachingSettingName)();
-                    response["block_soft_cap"] = settings.getSettingGetter<uint32_t>(
+                    response["block_soft_cap"] = br::extensions::MakeSettingGetter<uint32_t>(
                         CLodPageJobMaxPagesPerClusterSettingName)();
-                    response["sw_raster_threshold"] = settings.getSettingGetter<uint32_t>(
+                    response["sw_raster_threshold"] = br::extensions::MakeSettingGetter<uint32_t>(
                         CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)();
-                    response["page_job_force_all"] = settings.getSettingGetter<bool>(
+                    response["page_job_force_all"] = br::extensions::MakeSettingGetter<bool>(
                         CLodPageJobForceAllSettingName)();
-					response["dynamic_wind_inner_radius"] = settings.getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
-					response["dynamic_wind_outer_radius"] = settings.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
-					response["skinned_shadow_radius"] = settings.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
+					response["dynamic_wind_inner_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
+					response["dynamic_wind_outer_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
+					response["skinned_shadow_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
 					response["skinned_shadow_dynamic_clipmap_count_override"] =
-						settings.getSettingGetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)();
+						br::extensions::MakeSettingGetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)();
 					response["skinned_shadow_effective_dynamic_clipmap_count"] =
 						g_clodSkinnedShadowEffectiveDynamicClipmapCount.load(std::memory_order_relaxed);
 					response["skinned_shadow_clipmap_classification"] = nlohmann::json::array();
@@ -1948,15 +1962,15 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
 						g_clodSkinnedShadowClassificationGeneration.load(std::memory_order_relaxed);
 					response["skinned_shadow_one_shot_invalidations"] =
 						g_clodSkinnedShadowOneShotInvalidationCount.load(std::memory_order_relaxed);
-                    response["dynamic_wind_bounds_cache_enabled"] = settings.getSettingGetter<bool>(
+                    response["dynamic_wind_bounds_cache_enabled"] = br::extensions::MakeSettingGetter<bool>(
                         CLodDynamicWindBoundsCacheEnabledSettingName)();
-                    response["dynamic_wind_bounds_cache_mib"] = settings.getSettingGetter<uint32_t>(
+                    response["dynamic_wind_bounds_cache_mib"] = br::extensions::MakeSettingGetter<uint32_t>(
                         CLodDynamicWindBoundsCacheMiBSettingName)();
-                    response["dynamic_wind_vertex_cache_enabled"] = settings.getSettingGetter<bool>(
+                    response["dynamic_wind_vertex_cache_enabled"] = br::extensions::MakeSettingGetter<bool>(
                         CLodDynamicWindVertexCacheEnabledSettingName)();
-                    response["dynamic_wind_vertex_cache_mib"] = settings.getSettingGetter<uint32_t>(
+                    response["dynamic_wind_vertex_cache_mib"] = br::extensions::MakeSettingGetter<uint32_t>(
                         CLodDynamicWindVertexCacheMiBSettingName)();
-                    const CLodVSMRasterMode rasterMode = settings.getSettingGetter<CLodVSMRasterMode>(
+                    const CLodVSMRasterMode rasterMode = br::extensions::MakeSettingGetter<CLodVSMRasterMode>(
                         CLodVSMRasterModeSettingName)();
                     response["raster_mode"] =
                         rasterMode == CLodVSMRasterMode::HardwareOnly ? "hardware" :
@@ -1964,8 +1978,8 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         rasterMode == CLodVSMRasterMode::Reyes ? "reyes" : "standard";
                 } else if (command == "clod.workgraph.reload") {
                     if (!m_finished) throw std::runtime_error("cannot reload CLOD work graphs while profiling is active");
-                    response["reloaded_passes"] = HierarchicalCullingPass::ReloadAllWorkGraphs();
-                    response["pipeline_epoch"] = PSOManager::GetInstance().GetPipelineEpoch();
+                    response["reloaded_passes"] = br::diagnostics::ReloadCLodWorkGraphs();
+                    response["pipeline_epoch"] = br::diagnostics::GetPipelineEpoch();
                 } else if (command == "profile.run") {
                     if (!m_finished) throw std::runtime_error("a profiling experiment is already active");
                     StartExperiment(request->document.value("label", "experiment"), &renderer);

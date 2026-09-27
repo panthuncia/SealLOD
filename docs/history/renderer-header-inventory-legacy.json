@@ -1,0 +1,2646 @@
+{
+  "FidelityFX/host/ffx_interface.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": []
+  },
+  "BasicRenderer/Assets/Import/ModelLoader.h": {
+    "category": "Asset-processing",
+    "consumers": [
+      "apps/Preprocessor/Main.cpp",
+      "apps/RendererHost/Main.cpp",
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "src/RendererHost/RendererHostDependencies.h"
+    ],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/ModelLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/tests/PublicHeaders/Assets_ImportModelLoader.cpp"
+    ]
+  },
+  "BasicRenderer/Assets/Import/NifLoader.h": {
+    "category": "Asset-processing",
+    "consumers": [
+      "apps/Preprocessor/Main.cpp",
+      "apps/RendererHost/Main.cpp",
+      "src/RendererHost/Preprocessing/GrassMeshPreprocessor.cpp",
+      "src/RendererHost/RendererHostDependencies.h"
+    ],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/ModelLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/NifLoader.cpp",
+      "BasicRenderer/BasicRenderer/tests/PublicHeaders/Assets_ImportNifLoader.cpp"
+    ]
+  },
+  "Materials/Colorspaces.h": {
+    "category": "Asset-processing",
+    "consumers": [],
+    "internal_consumers": []
+  },
+  "BasicRenderer/Assets/MaterialDescription.h": {
+    "category": "Asset-processing",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Geometry/Mesh.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/MeshPreprocessData.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/NifLoader.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/USDGeometryExtractor.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/USDMaterialCache.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Material.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/USD/USDLoader.h",
+      "BasicRenderer/BasicRenderer/tests/PublicHeaders/Assets_MaterialDescription.cpp"
+    ]
+  },
+  "BasicRenderer/Assets/Geometry/Mesh.h": {
+    "category": "Asset-processing",
+    "consumers": [
+      "apps/Preprocessor/Main.cpp",
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "src/RendererHost/Assets/AssetBridge.h",
+      "src/RendererHost/Preprocessing/GrassMeshPreprocessor.cpp"
+    ],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Geometry/MeshInstance.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/MeshPreprocessData.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Pipeline/MeshDrawWorkload.h",
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/AssimpLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/GlTFLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/NifLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/RenderableAsset.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/USDLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/ForwardRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Mesh/Mesh.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshInstanceFactory.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.h",
+      "BasicRenderer/BasicRenderer/src/Render/DebugSceneSnapshotService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneRenderableResidencyService.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugSpheresPass.h",
+      "BasicRenderer/BasicRenderer/src/Utilities/Utilities.cpp",
+      "BasicRenderer/BasicRenderer/src/Utilities/Utilities.h",
+      "BasicRenderer/BasicRenderer/tests/PublicHeaders/Assets_GeometryMesh.cpp"
+    ]
+  },
+  "BasicRenderer/Assets/Geometry/MeshInstance.h": {
+    "category": "Asset-processing",
+    "consumers": [
+      "apps/Preprocessor/Main.cpp",
+      "apps/RendererHost/Main.cpp",
+      "src/RendererHost/RendererHostDependencies.h"
+    ],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/GlTFLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/RenderableAsset.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/USDLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/ForwardRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshInstance.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshInstanceFactory.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/DebugSceneSnapshotService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneEntityMaterializationService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneRenderableResidencyService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneRenderBridge.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugSkeletonPass.h",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/Scene.cpp",
+      "BasicRenderer/BasicRenderer/tests/PublicHeaders/Assets_GeometryMeshInstance.cpp"
+    ]
+  },
+  "d3d12.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Extensions/IndirectCommand.h",
+      "BasicRenderer/BasicRenderer/src/slHooks.h",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/FFXManager.h",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingManager.h",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp"
+    ]
+  },
+  "@private/pch.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": []
+  },
+  "@private/Animation/SkeletonManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Animation/SkeletonManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/PoseInstanceRegistrationService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Assets/brslHelpers.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/PSOManager.cpp",
+      "BasicRenderer/BasicRenderer/tests/ShaderPreprocessTests.cpp"
+    ]
+  },
+  "@private/Assets/PSOManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/PSOManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Assets/ShaderArtifactCompilation.cpp",
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/PipelineControl.cpp",
+      "BasicRenderer/BasicRenderer/src/Factories/TextureFactory.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/brdfIntegrationPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentConversionPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentFilterPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentSHPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/ForwardRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/SkyboxRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/BuildMaterialIndirectCommandBufferPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/BuildPixelListPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/EvaluateMaterialGroupsPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialBlockOffsetsPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialBlockScanPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialHistogramPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialPixelCounterResetPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/TerrainRegionMaterialEvaluationPasses.h",
+      "BasicRenderer/BasicRenderer/src/Render/ShaderVariantRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/ClearVisibilityBufferPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/ClusterGenerationPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugGridPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugSkeletonPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugSpheresPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DeferredShadingPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/LightCullingPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/PrimaryDepthCopyPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/FidelityFX/Downsample.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/GTAO/XeGTAODenoisePass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/GTAO/XeGTAOFilterPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/GTAO/XeGTAOMainPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/BloomBlendPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/BloomSamplePass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/DebugResolvePass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/DilateMotionVectorsPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/luminanceHistogram.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/luminanceHistogramAverage.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/SpecularIBLPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/Tonemapping.h",
+      "BasicRenderer/BasicRenderer/src/Runtime/CommandSignatureManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/PipelineAccess.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainRvtPasses.h",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITAdaptiveFitPass.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITAdaptiveFitUpdatePass.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITDepthWarpPass.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITEarlyDepthBuildPass.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITEarlyDepthPass.h",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITIntegratePass.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITOccupancyHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITOccupancyRemapPass.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITResolvePass.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITSparseClearPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobBuildArgsPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobRasterPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/DeepVisibilityResolvePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/PerViewLinearDepthCopyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketBlockOffsetsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketBlockScanPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCompactAndArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCreateCommandPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/RayTracing/CLodRayTracingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/RayTracing/RayTracedReflectionsPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesBuildRasterWorkPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesClassifyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesCreateDispatchArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDicePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesQueueResetPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkCompactAndArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesReplayMergePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSeedPatchesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSplitPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingBeginFramePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingFeedbackSortPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Voxels/VoxelSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowHardwareRasterPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowBlockExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowBuildRasterArgsPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapAdmitPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapAllocatePagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapBuildActiveBlocksPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapBuildMarkTilesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapBuildPageListsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapClearDirtyBitsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapClearPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapComposePagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapDeduplicatePredictedPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapDirtyHierarchyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapExpandPredictedPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapFreeWrappedPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapGatherStatsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapInvalidatePagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapMarkPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapNonRasterableHierarchyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapResolveMarkedBlocksPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapSetupPass.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Assets/ShaderArtifactCache.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/PSOManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Assets/ShaderArtifactCache.cpp"
+    ]
+  },
+  "@private/Assets/TextureProcessingManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/TextureProcessingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Assets/TextureProcessingRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/Factories/TextureFactory.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/AssimpLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/GlTFLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/NifLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/USDLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Resources/Texture.cpp"
+    ]
+  },
+  "@private/Lighting/brdfIntegrationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Lighting/EnvironmentConversionPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Lighting/EnvironmentFilterPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Lighting/EnvironmentManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/Environment.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp"
+    ]
+  },
+  "@private/Lighting/EnvironmentSHPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Lighting/ForwardRenderPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Lighting/LightManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneEntityMaterializationService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Lighting/SkyboxRenderPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Materials/MaterialManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneRenderableResidencyService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/StaticMaterialRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainManager.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketBlockOffsetsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketBlockScanPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCompactAndArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCreateCommandPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkCompactAndArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowHardwareRasterPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowBlockExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/RendererSceneApi.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Materials/MaterialOwnershipGuards.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.cpp",
+      "BasicRenderer/BasicRenderer/tests/MaterialOwnershipGuardTests.cpp"
+    ]
+  },
+  "@private/Materials/MaterialTextureTransferService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Factories/TextureFactory.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialTextureTransferService.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/TextureStreamingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/TextureBindingArtifacts.cpp"
+    ]
+  },
+  "@private/Materials/TextureStreamingManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/TextureStreamingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Menu/Menu.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/MenuRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/MenuSceneExplorer.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/MenuDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/MenuRuntime.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Menu/MenuRenderPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/Mesh/MeshManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/Mesh.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshInstance.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneRenderableResidencyService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/StaticGeometryRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/GeometryStorage/MeshManagerCLodGeometryStorage.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/RayTracing/CLodRayTracingSystem.h",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/PostProcessing/FFXManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/PostProcessing/FFXManager.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/ScreenSpaceReflectionsGenerationService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp"
+    ]
+  },
+  "@private/PostProcessing/ScreenSpaceReflectionsGenerationService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/PostProcessing/ScreenSpaceReflectionsGenerationService.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/ScreenSpaceReflectionsPass.h"
+    ]
+  },
+  "@private/PostProcessing/ScreenSpaceReflectionsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/PostProcessing/UpscalingGenerationService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingGenerationService.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingPass.h"
+    ]
+  },
+  "@private/PostProcessing/UpscalingManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingGenerationService.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp"
+    ]
+  },
+  "@private/PostProcessing/UpscalingPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/Render/CapacityProvider.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/CapacityProvider.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp"
+    ]
+  },
+  "@private/Render/CLodResidencyStorageArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/CLodResidencyStorageArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Render/DebugSceneSnapshotService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/DebugSceneSnapshotService.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugSkeletonPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugSpheresPass.h"
+    ]
+  },
+  "@private/Render/DrawWorkload.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/SceneEntityMaterializationService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/Scene.cpp",
+      "BasicRenderer/BasicRenderer/tests/MaterialEvalVariantTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/GeometryBufferStateArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GeometryBufferStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/RendererStateRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Render/GeometryResidencyStateArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GeometryResidencyStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Render/IndirectStateArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererCLodTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/ForwardRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Render/IndirectStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/StaticStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/IndirectCommandBufferManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/IndirectCommandBufferManager.h",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/PreparedCullingWorkloads.h",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/InvocationRevision.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/ClearVisibilityBufferPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DeferredShadingPass.h",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainRvtPasses.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesBuildRasterWorkPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesClassifyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesCreateDispatchArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDicePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesQueueResetPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkCompactAndArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesReplayMergePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSeedPatchesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSplitPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingFeedbackSortPass.cpp"
+    ]
+  },
+  "@private/Render/ITextureStreamingFeedbackService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.h",
+      "BasicRenderer/BasicRenderer/src/Render/RenderGraphIOService.cpp"
+    ]
+  },
+  "@private/Render/MaterialCompileFlagsSlotRegistry.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.h",
+      "BasicRenderer/BasicRenderer/tests/MaterialEvalVariantTests.cpp"
+    ]
+  },
+  "@private/Render/MaterialStateArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/BuildMaterialIndirectCommandBufferPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/BuildPixelListPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/EvaluateMaterialGroupsPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialBlockOffsetsPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialBlockScanPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialHistogramPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialPixelCounterResetPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/TerrainRegionMaterialEvaluationPasses.h",
+      "BasicRenderer/BasicRenderer/src/Render/MaterialStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/RendererStateRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/TerrainStateArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/ObjectBufferStateArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/IndirectStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/ObjectBufferStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/StaticStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/VersionedGpuBufferArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/ObjectReyesAtlasTelemetry.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/PersistentRendererPublication.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/PersistentRendererPublication.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Render/RendererFrameInputs.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PrimaryCameraUploadPass.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/ShadowViewService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ViewManager.h"
+    ]
+  },
+  "@private/Render/StaticStateArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/AsyncStateGraph.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/RendererStateRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/StaticStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Render/TbbTaskService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/TbbTaskService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/TerrainRvtTelemetry.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/ResourceManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainRvtPasses.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/TerrainStateArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/TerrainStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Render/TextureBindingArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/TextureStreamingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/MaterialStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/TerrainStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/TextureBindingArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Render/TextureImageTableArtifacts.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Materials/TextureStreamingManager.h",
+      "BasicRenderer/BasicRenderer/src/Render/TextureImageTableArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/TonemapTypes.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/CommandSignatureManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/ForwardRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/BuildMaterialIndirectCommandBufferPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/EvaluateMaterialGroupsPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/TerrainRegionMaterialEvaluationPasses.h",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/CommandSignatureManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderDeviceAccess.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainRvtPasses.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingFeedbackSortPass.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/DeletionManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/DescriptorHeapManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/TextureStreamingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/RayTracing/CLodRayTracingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/DeviceManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/PSOManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Assets/TextureProcessingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Factories/TextureFactory.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/brdfIntegrationPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentConversionPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentFilterPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentSHPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialTextureTransferService.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/TextureStreamingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/Mesh/Mesh.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/FFXManager.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingGenerationService.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/ClusterGenerationPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugSkeletonPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DebugSpheresPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/LightCullingPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/GTAO/XeGTAODenoisePass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/BloomBlendPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/BloomSamplePass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/DebugResolvePass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/SpecularIBLPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/Tonemapping.h",
+      "BasicRenderer/BasicRenderer/src/Resources/Buffers/DynamicBuffer.cpp",
+      "BasicRenderer/BasicRenderer/src/Resources/Buffers/SortedUnsignedIntBuffer.cpp",
+      "BasicRenderer/BasicRenderer/src/Resources/Texture.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/CommandSignatureManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/DeviceManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/DirectStorageManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/ReadbackManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderDeviceAccess.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h",
+      "BasicRenderer/BasicRenderer/src/Runtime/ResourceManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/ResourceManager.h",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITEarlyDepthPass.cpp",
+      "BasicRenderer/BasicRenderer/src/Utilities/Utilities.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobRasterPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCompactAndArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/RayTracing/RayTracedReflectionsPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesBuildRasterWorkPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesClassifyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDicePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkCompactAndArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesReplayMergePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSeedPatchesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSplitPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Voxels/VoxelSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowHardwareRasterPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowBlockExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapAllocatePagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapClearDirtyBitsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapMarkPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneApi.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/DirectStorageManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/CLodCache.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Resources/Texture.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/DirectStorageManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Utilities/Utilities.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/DirectStorageTypes.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.h",
+      "BasicRenderer/BasicRenderer/src/Runtime/DirectStorageManager.h"
+    ]
+  },
+  "@private/Runtime/IndirectCommandBufferManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/StaticWorkloadRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/IndirectCommandBufferManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ViewManager.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneApi.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/ReadbackManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/RenderGraphIOService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/ReadbackManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/RendererSettingsHelpers.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererPipeline.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Runtime/RenderGraphBuildHelper.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/ResourceManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/Material.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/Mesh.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/FFXManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Resources/Buffers/DynamicStructuredBuffer.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/IndirectCommandBufferManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/ResourceManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ViewManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp"
+    ]
+  },
+  "@private/Runtime/SettingsManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/ShaderArtifactCompilation.cpp",
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererCLodTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/TerrainRvtTelemetry.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/USDLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/ForwardRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialTextureStreaming.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/EvaluateMaterialGroupsPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/TerrainRegionMaterialEvaluationPasses.h",
+      "BasicRenderer/BasicRenderer/src/Materials/TextureStreamingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.h",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/FFXManager.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingGenerationService.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodVisibilityVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/ObjectReyesAtlasTelemetry.h",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/ClearVisibilityBufferPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/ClusterGenerationPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/DeferredShadingPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/Core/LightCullingPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/FidelityFX/Downsample.h",
+      "BasicRenderer/BasicRenderer/src/Runtime/DeviceManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/DirectStorageManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettingsHelpers.h",
+      "BasicRenderer/BasicRenderer/src/Runtime/ResourceManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/SettingAccess.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/Scene.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainRvtPasses.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobBuildArgsPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobRasterPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/DeepVisibilityResolvePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketBlockOffsetsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketBlockScanPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCompactAndArgsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCreateCommandPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketHistogramPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesBuildRasterWorkPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSplitPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingShadowNotifications.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowBlockExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowBuildRasterArgsPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapAdmitPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapAllocatePagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapBuildPageListsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapClearDirtyBitsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapClearPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapDirtyHierarchyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapFreeWrappedPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapGatherStatsPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapInvalidatePagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapMarkPagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapResolveMarkedBlocksPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapSetupPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererPipeline.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Runtime/spdlogStreambuf.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp"
+    ]
+  },
+  "@private/Runtime/TaskSchedulerManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp"
+    ]
+  },
+  "@private/Scene/ECSManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Scene/ECSManager.cpp"
+    ]
+  },
+  "@private/Scene/ObjectManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererCLodTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneEntityMaterializationService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/StaticObjectRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/IndirectCommandBufferManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneApi.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Scene/RendererECSManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererCLodTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/ForwardRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/IndirectCommandBufferManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/RendererECSManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/Scene.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapInvalidatePagesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapSetupPass.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Scene/ViewManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneEntityMaterializationService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ViewManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITSetupPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/PreparedCullingWorkloads.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClearDeepVisibilityPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/DeepVisibilityResolvePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/PerViewLinearDepthCopyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Voxels/VoxelSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowHardwareRasterPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapSetupPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Telemetry/FrameTaskGraphTelemetry.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Telemetry/FrameTaskGraphTelemetry.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Terrain/TerrainManager.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/SceneAssetRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Terrain/TerrainRvtPasses.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodVisibilityVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Transparency/AVBOITAdaptiveFitPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITAdaptiveFitPass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITAdaptiveFitUpdatePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITAdaptiveFitUpdatePass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITDepthWarpPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITDepthWarpPass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITEarlyDepthBuildPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITEarlyDepthBuildPass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITEarlyDepthPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITEarlyDepthPass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITIntegratePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITIntegratePass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITOccupancyHistogramPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITOccupancyHistogramPass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITOccupancyRemapPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITOccupancyRemapPass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITResolvePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITResolvePass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITSetupPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITSetupPass.cpp"
+    ]
+  },
+  "@private/Transparency/AVBOITSparseClearPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Transparency/AVBOITSparseClearPass.cpp"
+    ]
+  },
+  "@private/Utilities/Utilities.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/PSOManager.cpp",
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Factories/TextureFactory.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/AssimpLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/GlTFLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/NifLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/USDLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentFilterPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentSHPass.h",
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/Material.cpp",
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/Mesh/Mesh.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/SceneEntityMaterializationService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/VersionedGpuBufferArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/FidelityFX/Downsample.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/BloomBlendPass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/BloomSamplePass.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/luminanceHistogram.h",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PostProcessing/luminanceHistogramAverage.h",
+      "BasicRenderer/BasicRenderer/src/Runtime/CommandSignatureManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/ReadbackManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RendererSettings.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/ResourceManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/ResourceManager.h",
+      "BasicRenderer/BasicRenderer/src/Scene/Scene.cpp",
+      "BasicRenderer/BasicRenderer/src/Utilities/Utilities.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/PerViewLinearDepthCopyPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSplitPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/tests/VirtualShadowBudgetTests.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/VirtualShadows/ReyesVirtualShadowHardwareRasterPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowHardwareRasterPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/ReyesVirtualShadowRasterizationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowRasterizationPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowBlockExpandPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowBuildRasterArgsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapAdmitPagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapAdmitPagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapAllocatePagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapAllocatePagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapBuildActiveBlocksPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapBuildActiveBlocksPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapBuildMarkTilesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapBuildMarkTilesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapBuildPageListsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapBuildPageListsPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapClearDirtyBitsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapClearDirtyBitsPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapClearPagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapClearPagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapComposePagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapComposePagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapDeduplicatePredictedPagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapDeduplicatePredictedPagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapDirtyHierarchyPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapDirtyHierarchyPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapExpandPredictedPagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapExpandPredictedPagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapFreeWrappedPagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapFreeWrappedPagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapGatherStatsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapGatherStatsPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapInvalidatePagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapInvalidatePagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapMarkPagesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapMarkPagesPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapNonRasterableHierarchyPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapNonRasterableHierarchyPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapResolveMarkedBlocksPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapResolveMarkedBlocksPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowMapSetupPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapSetupPass.cpp"
+    ]
+  },
+  "@private/VirtualShadows/VirtualShadowUpgradeService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.h",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowMapAdmitPagesPass.h"
+    ]
+  },
+  "@private/VirtualGeometry/Culling/CapturedCullingCommandSink.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/PersistentHierarchicalDispatchCullingPass.h",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Culling/CapturedHierarchicalDispatchCullingInputs.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/CapturedCullingCommandSink.h",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Culling/HierarchicalCullingPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/BasicRenderer.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/CapturedHierarchicalDispatchCullingInputs.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.h"
+    ]
+  },
+  "@private/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/CapturedCullingCommandSink.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/PersistentHierarchicalDispatchCullingPass.h",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Culling/PersistentHierarchicalDispatchCullingPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Culling/PreparedCullingWorkloads.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.h",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/GeometryStorage/CLodGeometryStorage.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/GeometryStorage/MeshManagerCLodGeometryStorage.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.h"
+    ]
+  },
+  "@private/VirtualGeometry/GeometryStorage/MeshManagerCLodGeometryStorage.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Mesh/MeshManager.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/GraphIntegration/CLodViewTables.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/GraphIntegration/CLodViewTables.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterRasterizationPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesBuildRasterWorkPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSplitPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Voxels/VoxelSoftwareRasterizationPass.h"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/ClearDeepVisibilityPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClearDeepVisibilityPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/ClusterRasterizationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterRasterizationPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobBuildArgsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobExpandPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobRasterPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/DeepVisibilityResolvePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/DeepVisibilityResolvePass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/PerViewLinearDepthCopyPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/PerViewLinearDepthCopyPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/RasterBucketBlockOffsetsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketBlockOffsetsPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/RasterBucketBlockScanPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketBlockScanPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/RasterBucketCompactAndArgsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCompactAndArgsPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/RasterBucketCreateCommandPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketCreateCommandPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Rasterization/RasterBucketHistogramPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/RasterBucketHistogramPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/RayTracing/CLodRayTracingSystem.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/RayTracing/CLodRayTracingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/RayTracing/RayTracedReflectionsPass.h",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameRendering.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/RayTracing/RayTracedReflectionsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesBuildRasterWorkPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodVisibilityVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesBuildRasterWorkPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesClassifyPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesClassifyPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesCopyCounterPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesCreateDispatchArgsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodVisibilityVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesCreateDispatchArgsPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesDicePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDicePass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesGeneratedTessellationTable.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": []
+  },
+  "@private/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodVisibilityVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesQueueResetPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesQueueResetPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesRasterWorkCompactAndArgsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkCompactAndArgsPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesRasterWorkHistogramPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesRasterWorkHistogramPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesReplayMergePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesReplayMergePass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesSeedPatchesPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSeedPatchesPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesSplitPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSplitPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesTessellationArrangement.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": []
+  },
+  "@private/VirtualGeometry/Reyes/ReyesTessellationPatternUtils.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesTessellationArrangement.h"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesTessellationReferenceSource.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesTessellationGeneratedReferenceSource.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesTessellationTable.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesTessellationTable.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/USDGeometryExtractor.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesGeneratedTessellationTable.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesTessellationTable.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesTessellationTableUploadPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Reyes/ReyesTessellationTableUploadPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesTessellationTableUploadPass.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodDirectStorageLaunchPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodPageLRU.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodPageLRU.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.h"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodStreamingBeginFramePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingBeginFramePass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodStreamingFeedbackSortPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingFeedbackSortPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodStreamingInternals.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingAdmission.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingCompletions.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageWaiters.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingTrace.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingResidencyCommit.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodStreamingReadbackSources.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodStreamingSystem.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingAdmission.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingCompletions.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingDomain.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingFeedback.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingInternals.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageWaiters.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingShadowNotifications.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingTrace.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingResidencyCommit.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodStreamingTraceInternals.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingCompletions.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingFeedback.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingTrace.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingResidencyCommit.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Streaming/CLodUploadStream.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodUploadStream.cpp",
+      "BasicRenderer/BasicRenderer/tests/CLodCoordinatorTests.cpp"
+    ]
+  },
+  "@private/VirtualGeometry/Voxels/VoxelSoftwareRasterizationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Voxels/VoxelSoftwareRasterizationPass.cpp"
+    ]
+  },
+  "@private/RenderPasses/Core/ClearVisibilityBufferPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/Core/ClusterGenerationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/Core/DebugGridPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/Core/DebugSkeletonPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/Core/DebugSpheresPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/Core/DeferredShadingPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/Core/LightCullingPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/Core/PresentPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/Core/PrimaryCameraUploadPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RenderPasses/PrimaryCameraUploadPass.cpp"
+    ]
+  },
+  "@private/RenderPasses/Core/PrimaryDepthCopyPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/FidelityFX/Downsample.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/FidelityFX/LinearDepthHistoryCopyPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/GTAO/XeGTAODenoisePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/GTAO/XeGTAOFilterPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/GTAO/XeGTAOMainPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/PostProcessing/BloomBlendPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/PostProcessing/BloomSamplePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/PostProcessing/DebugResolvePass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/PostProcessing/DilateMotionVectorsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/PostProcessing/luminanceHistogram.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/PostProcessing/luminanceHistogramAverage.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/RenderPasses/PostProcessing/SpecularIBLPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/RenderPasses/PostProcessing/Tonemapping.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/BuildMaterialIndirectCommandBufferPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/BuildPixelListPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/EvaluateMaterialGroupsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/PersistentMaterialEvaluationPass.h",
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/MaterialBlockOffsetsPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/MaterialBlockScanPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/MaterialHistogramPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/MaterialPixelCounterResetPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/PersistentMaterialEvaluationPass.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp"
+    ]
+  },
+  "@private/Materials/Passes/VisUtil/TerrainRegionMaterialEvaluationPasses.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h"
+    ]
+  },
+  "@private/DefaultDirection.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/DefaultDirection.cpp",
+      "BasicRenderer/BasicRenderer/src/Utilities/Utilities.cpp"
+    ]
+  },
+  "@private/FidelityFX/FfxBackendAdapters.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/FidelityFX/FfxBackendAdapters.cpp",
+      "BasicRenderer/BasicRenderer/src/FidelityFX/FfxBackendDX12.cpp",
+      "BasicRenderer/BasicRenderer/src/FidelityFX/FfxBackendVulkan.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/FFXManager.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingManager.cpp"
+    ]
+  },
+  "@private/Resources/Resolvers/ECSResourceResolver.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/ForwardRenderPass.h",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainRvtPasses.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp"
+    ]
+  },
+  "@private/Resources/Resolvers/ResourceGroupResolver.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/EvaluateMaterialGroupsPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/TerrainRegionMaterialEvaluationPasses.h",
+      "BasicRenderer/BasicRenderer/src/Scene/ViewManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ViewManager.h",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainRvtPasses.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Culling/HierarchicalDispatchCullingPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobExpandPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Rasterization/ClusterSoftwareRasterPageJobRasterPass.h",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesBuildRasterWorkPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesDeepVisibilityRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesPatchRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Reyes/ReyesSeedPatchesPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Voxels/VoxelSoftwareRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowHardwareRasterPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/ReyesVirtualShadowRasterizationPass.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualShadows/VirtualShadowBlockExpandPass.h",
+      "BasicRenderer/BasicRenderer/tests/PipelineRecipeTests.cpp",
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp"
+    ]
+  },
+  "@private/Setting.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Runtime/SettingsManager.h"
+    ]
+  },
+  "@private/Utilities/BoundedSpscQueue.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingSystem.h",
+      "BasicRenderer/BasicRenderer/tests/BoundedSpscQueueTests.cpp",
+      "BasicRenderer/BasicRenderer/tests/CLodCoordinatorTests.cpp"
+    ]
+  },
+  "@private/Utilities/HashMix.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/PSOManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Assets/ShaderArtifactCache.cpp"
+    ]
+  },
+  "@private/Utilities/MathUtils.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Lighting/LightManager.cpp",
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Scene/Scene.cpp",
+      "BasicRenderer/BasicRenderer/src/Utilities/MathUtils.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneSync.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererSceneIngestion.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Utilities/ProcessedTextureCache.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Assets/TextureProcessingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Resources/Texture.cpp",
+      "BasicRenderer/BasicRenderer/src/Utilities/Utilities.cpp"
+    ]
+  },
+  "@private/Utilities/ProportionalBudgetAllocator.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp"
+    ]
+  },
+  "@private/Utilities/TripleGenerationMailbox.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Scene/ObjectManager.h",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp"
+    ]
+  },
+  "@private/Validation/SARPInteropValidation.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Runtime/RenderGraphBuildHelper.h",
+      "BasicRenderer/BasicRenderer/validation/SARPInteropValidation.cpp"
+    ]
+  },
+  "@private/slHooks.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/PostProcessing/UpscalingManager.cpp"
+    ]
+  },
+  "@private/Interfaces/ISetting.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Setting.h"
+    ]
+  },
+  "@private/Render/StateProducerRegistrations.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/LightStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp"
+    ]
+  },
+  "@private/Render/GraphExtensions/CLodAlphaVariant.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp"
+    ]
+  },
+  "@private/Render/GraphExtensions/CLodExtension.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodVisibilityVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/GraphExtensions/CLodExtensionComponents.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererCLodTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererTelemetryRequests.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/BuildPixelListPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/EvaluateMaterialGroupsPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/MaterialHistogramPass.h",
+      "BasicRenderer/BasicRenderer/src/Materials/Passes/VisUtil/TerrainRegionMaterialEvaluationPasses.h",
+      "BasicRenderer/BasicRenderer/src/Menu/Menu.h",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.h",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtensionShared.h",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainRvtPasses.h",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/GraphExtensions/CLodExtensionShared.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodAlphaVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtensionShared.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodVisibilityVariant.cpp"
+    ]
+  },
+  "@private/Render/GraphExtensions/CLodShadowVariant.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodShadowVariant.cpp"
+    ]
+  },
+  "@private/Render/GraphExtensions/CLodVisibilityVariant.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodExtension.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/CLodVisibilityVariant.cpp"
+    ]
+  },
+  "@private/Render/GraphExtensions/IOExtension.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Render/GraphExtensions/ReadbackCaptureExtension.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp"
+    ]
+  },
+  "@private/Import/AssimpLoader.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/AssimpLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/ModelLoader.cpp"
+    ]
+  },
+  "@private/Import/GlTFLoader.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/GlTFLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/ModelLoader.cpp"
+    ]
+  },
+  "@private/Import/ObjectReyesAtlasBaker.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/ObjectReyesAtlasBaker.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/USDLoader.cpp"
+    ]
+  },
+  "@private/Import/SkeletonArtifactCache.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/NifLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/SkeletonArtifactCache.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/USDLoader.cpp",
+      "BasicRenderer/BasicRenderer/tests/SkeletonArtifactCacheTests.cpp"
+    ]
+  },
+  "@private/Import/SkeletonArtifactValidation.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Import/CLodCacheLoader.cpp",
+      "BasicRenderer/BasicRenderer/src/Import/SkeletonArtifactValidation.cpp",
+      "BasicRenderer/BasicRenderer/tests/SkeletonArtifactCacheTests.cpp"
+    ]
+  },
+  "@private/Render/RenderGraphIOService.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Render/GraphExtensions/IOExtension.h",
+      "BasicRenderer/BasicRenderer/src/Render/RenderGraphIOService.cpp"
+    ]
+  },
+  "BasicRenderer/Diagnostics/NvPerfIntegration.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp"
+    ]
+  },
+  "BasicRenderer/Extensions/RenderContext.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/VirtualGeometry/Streaming/CLodStreamingPageResidency.cpp"
+    ]
+  },
+  "BasicRenderer/Renderer.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererSceneApi.cpp"
+    ]
+  },
+  "BasicRenderer/Scene/Scene.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/RendererSceneApi.cpp"
+    ]
+  },
+  "@private/Factories/TextureFactory.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Factories/TextureFactory.cpp",
+      "BasicRenderer/BasicRenderer/src/Lighting/EnvironmentManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/Material.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialTextureTransferService.h",
+      "BasicRenderer/BasicRenderer/src/Materials/TextureStreamingManager.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/OpenPBRLookupResources.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/RenderGraphIOService.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererGraphConstruction.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererResources.cpp",
+      "BasicRenderer/BasicRenderer/src/Resources/Texture.cpp",
+      "BasicRenderer/BasicRenderer/src/Terrain/TerrainManager.cpp"
+    ]
+  },
+  "@private/Render/AsyncStateGraph.h": {
+    "category": "Private implementation",
+    "consumers": [],
+    "internal_consumers": [
+      "BasicRenderer/BasicRenderer/src/Diagnostics/RendererDiagnostics.cpp",
+      "BasicRenderer/BasicRenderer/src/Materials/MaterialTextureTransferService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/AsyncStateGraph.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/CLodResidencyStorageArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/GeometryBufferStateArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/GeometryResidencyStateArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/IndirectStateArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/LightStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/MaterialStateArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/ObjectBufferStateArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/PoseStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/RendererStateRequestService.cpp",
+      "BasicRenderer/BasicRenderer/src/Render/StaticStateArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/TerrainStateArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/TextureBindingArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/TextureImageTableArtifacts.h",
+      "BasicRenderer/BasicRenderer/src/Render/ViewStateArtifacts.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererFrameUpdate.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/src/RendererLifecycle.cpp",
+      "BasicRenderer/BasicRenderer/tests/AsyncStateGraphTests.cpp"
+    ]
+  }
+}

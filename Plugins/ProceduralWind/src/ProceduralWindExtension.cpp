@@ -1,30 +1,27 @@
 #include "ProceduralWind/ProceduralWindExtension.h"
 #include "ProceduralWind/DynamicWindGPU.h"
 
-#include "Animation/Skeleton.h"
-#include "Managers/Singletons/PSOManager.h"
-#include "Managers/Singletons/DeviceManager.h"
-#include "Managers/Singletons/SettingsManager.h"
-#include "Managers/ObjectManager.h"
-#include "Managers/SkeletonManager.h"
-#include "Managers/ViewManager.h"
-#include "Render/BuiltinResources.h"
-#include "Render/IndirectCommand.h"
+#include "BasicRenderer/Scene/Animation/Skeleton.h"
+#include <BasicRenderer/Extensions/PipelineAccess.h>
+#include <BasicRenderer/Extensions/RenderDeviceAccess.h>
+#include <BasicRenderer/Extensions/SettingAccess.h>
+#include <BasicRenderer/Extensions/BuiltinResources.h>
+#include <BasicRenderer/Extensions/IndirectCommand.h>
 #include "Render/PassBuilders.h"
-#include "Render/RenderContext.h"
-#include "Render/OutputTypes.h"
-#include "Render/RendererSettings.h"
+#include "BasicRenderer/Extensions/RenderContext.h"
+#include <BasicRenderer/Diagnostics/OutputTypes.h>
+#include <BasicRenderer/Pipeline/RendererSettings.h>
 #include "Render/MemoryIntrospectionAPI.h"
-#include "Render/VersionedGpuBufferArtifacts.h"
-#include "Render/PoseStateArtifacts.h"
-#include "Render/GraphExtensions/CLodTelemetry.h"
+#include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
+#include <BasicRenderer/Streaming/PoseState.h>
+#include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "RenderPasses/Base/RenderPass.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "RenderPasses/PreparedComputeDispatch.h"
-#include "Resources/Buffers/DynamicStructuredBuffer.h"
+#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include <BasicRenderer/Extensions/Resources/DynamicStructuredBuffer.h>
 #include "Resources/PixelBuffer.h"
 #include "Render/Runtime/IReadbackService.h"
-#include "ShaderBuffers.h"
+#include "BasicRenderer/Extensions/ShaderBuffers.h"
 
 #include <fmt/format.h>
 #include <tracy/Tracy.hpp>
@@ -58,8 +55,8 @@ constexpr std::uint32_t kWindBoneFlagTrunk = 1u << 0u;
 std::uint32_t TransientBoneCapacity()
 {
 	return std::clamp(
-		SettingsManager::GetInstance().getSettingGetter<std::uint32_t>(
-			ProceduralWindTransientBoneCapacitySettingName)(),
+		br::extensions::ReadUnsignedSetting(
+			ProceduralWindTransientBoneCapacitySettingName),
 		1024u,
 		1048576u);
 }
@@ -846,7 +843,7 @@ void BindAndDispatch(org::PassExecutionContext& executionContext, const org::Pip
     auto* renderContext = executionContext.hostData->Get<RenderContext>();
     auto& commandList = executionContext.commandList;
     commandList.SetDescriptorHeaps(renderContext->textureDescriptorHeap.GetHandle(), renderContext->samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
+    commandList.BindLayout(br::extensions::GetComputePipelineLayout());
     commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
     commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
         sizeof(constants) / sizeof(std::uint32_t), reinterpret_cast<const std::uint32_t*>(&constants));
@@ -875,7 +872,7 @@ void PrepareTransient(org::PassExecutionContext& context, const org::PipelineSta
     auto* renderContext = context.hostData->Get<RenderContext>();
     auto& commandList = context.commandList;
     commandList.SetDescriptorHeaps(renderContext->textureDescriptorHeap.GetHandle(), renderContext->samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
+    commandList.BindLayout(br::extensions::GetComputePipelineLayout());
     commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
     commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
         sizeof(constants) / sizeof(std::uint32_t), reinterpret_cast<const std::uint32_t*>(&constants));
@@ -1006,7 +1003,7 @@ class WindResetPass final : public org::TypedRenderGraphPass<WindResetPass, br::
 public:
     explicit WindResetPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources))
     {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+        m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(),
             L"SARPShaders/ProceduralWind.hlsl", L"ResetWindTransientCS", {}, "ProceduralWind.ResetTransient");
     }
     void Declare(org::PassBuilder& builder)
@@ -1038,7 +1035,7 @@ public:
         constants.placementCount = m_resources->residentTransformCount;
         constants.allocationRecords = m_resources->processedTypeCounts->GetUAVShaderVisibleInfo(0).slot.index;
         SetVisibleSkeletonConstants(constants, *m_resources);
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+        data.layout = br::extensions::GetComputePipelineLayout();
         auto program = CaptureProgramBinding(preparation, m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
@@ -1060,7 +1057,7 @@ public:
     WindActivatePass(std::shared_ptr<WindSharedResources> resources, bool latePhase)
         : m_resources(std::move(resources)), m_latePhase(latePhase)
     {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+        m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(),
             L"SARPShaders/ProceduralWind.hlsl", L"ActivateWindInstancesCS", {}, "ProceduralWind.ActivateInstances");
     }
     void Declare(org::PassBuilder& builder)
@@ -1105,7 +1102,7 @@ public:
         constants.fieldSlice1 = m_resources->deferredEntries->GetUAVShaderVisibleInfo(0).slot.index;
         constants.fieldDimensions = m_resources->baseTypeLookup->GetSRVInfo(0).slot.index;
         constants.allocationRecords = m_resources->baseTypeLookup->Size();
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+        data.layout = br::extensions::GetComputePipelineLayout();
         auto program = CaptureProgramBinding(preparation, m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
@@ -1126,7 +1123,7 @@ class WindBuildCommandsPass final : public org::TypedRenderGraphPass<WindBuildCo
 public:
     WindBuildCommandsPass(std::shared_ptr<WindSharedResources> r, bool latePhase)
         : m_resources(std::move(r)), m_latePhase(latePhase) {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+        m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(),
             L"SARPShaders/ProceduralWind.hlsl", L"BuildWindCommandsCS", {}, "ProceduralWind.BuildCommands");
     }
     void Declare(org::PassBuilder& b) {
@@ -1152,7 +1149,7 @@ public:
         constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
         constants.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
         constants.fieldSlice0 = m_resources->processedTypeCounts->GetUAVShaderVisibleInfo(0).slot.index;
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+        data.layout = br::extensions::GetComputePipelineLayout();
         auto program = CaptureProgramBinding(preparation, m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
@@ -1170,8 +1167,8 @@ class WindFinalizeAllocationsPass final : public org::TypedRenderGraphPass<WindF
 public:
 	explicit WindFinalizeAllocationsPass(std::shared_ptr<WindSharedResources> resources)
 		: m_resources(std::move(resources)) {
-		m_pso = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+		m_pso = br::extensions::MakeComputePipeline(
+			br::extensions::GetComputePipelineLayout(),
 			L"SARPShaders/ProceduralWind.hlsl", L"FinalizeWindAllocationsCS", {},
 			"ProceduralWind.FinalizeAllocations");
 	}
@@ -1200,7 +1197,7 @@ public:
 		constants.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
 		constants.fieldSlice0 = m_resources->boneRemaps->GetSRVInfo(0).slot.index;
 		SetVisibleSkeletonConstants(constants, *m_resources);
-		data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+		data.layout = br::extensions::GetComputePipelineLayout();
 		auto program = CaptureProgramBinding(preparation, m_pso);
 		data.program = program.program;
 		data.descriptorIndices = std::move(program.descriptorIndices);
@@ -1220,10 +1217,10 @@ class WindIndirectSimulatePass final : public org::TypedRenderGraphPass<WindIndi
 public:
     WindIndirectSimulatePass(std::shared_ptr<WindSharedResources> r, bool latePhase = false)
         : m_resources(std::move(r)), m_latePhase(latePhase) {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(PSOManager::GetInstance().GetComputeRootSignature().GetHandle(), L"SARPShaders/ProceduralWind.hlsl", L"SimulateWindInstancesCS", {}, "ProceduralWind.SimulateIndirect");
+        m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(), L"SARPShaders/ProceduralWind.hlsl", L"SimulateWindInstancesCS", {}, "ProceduralWind.SimulateIndirect");
         rhi::IndirectArg args[] = {{.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},{.kind=rhi::IndirectArgKind::Dispatch}};
         m_signature = std::make_shared<rhi::CommandSignaturePtr>();
-        DeviceManager::GetInstance().GetDevice().CreateCommandSignature({rhi::Span<rhi::IndirectArg>(args,2),sizeof(WindIndirectCommand)}, PSOManager::GetInstance().GetComputeRootSignature().GetHandle(), *m_signature);
+        br::extensions::GetRenderDevice().CreateCommandSignature({rhi::Span<rhi::IndirectArg>(args,2),sizeof(WindIndirectCommand)}, br::extensions::GetComputePipelineLayout(), *m_signature);
     }
     void Declare(org::PassBuilder& b) {
         b.WithShaderResource(m_resources->windTypes,m_resources->boneEntries,m_resources->fieldSlices[0],m_resources->fieldSlices[1],Builtin::InstanceDrawRecordBuffer,Builtin::PerInstanceTransformBuffer,Builtin::SkeletonResources::InverseBindMatrices)
@@ -1288,10 +1285,10 @@ public:
         ShaderInfoBundle shaders;
         shaders.meshShader = { L"shaders/debugSkeleton.hlsl", L"MSWindMain", L"ms_6_6" };
         shaders.pixelShader = { L"shaders/debugSkeleton.hlsl", L"PSWindMain", L"ps_6_6" };
-        const auto compiled = PSOManager::GetInstance().CompileShaders(shaders);
+        const auto compiled = br::extensions::CompileShaders(shaders);
         m_bindings = compiled.resourceDescriptorSlots;
-        auto& layout = PSOManager::GetInstance().GetRootSignature();
-        rhi::SubobjLayout soLayout{ layout.GetHandle() };
+        auto layout = br::extensions::GetGraphicsPipelineLayout();
+        rhi::SubobjLayout soLayout{ layout };
         rhi::SubobjShader soMS{ rhi::ShaderStage::Mesh, rhi::DXIL(compiled.meshShader.Get()), "MSWindMain" };
         rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiled.pixelShader.Get()), "PSWindMain" };
         rhi::RasterState raster{}; raster.fill = rhi::FillMode::Solid; raster.cull = rhi::CullMode::None;
@@ -1308,14 +1305,14 @@ public:
             rhi::Make(soRaster), rhi::Make(soBlend), rhi::Make(soDepth), rhi::Make(soTargets),
             rhi::Make(soSample), rhi::Make(soTopology) };
         m_pso = std::make_shared<rhi::PipelinePtr>();
-        if (Failed(DeviceManager::GetInstance().GetDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), *m_pso)))
+        if (Failed(br::extensions::GetRenderDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), *m_pso)))
             throw std::runtime_error("Failed to create procedural-wind skeleton debug PSO");
         (*m_pso)->SetName("ProceduralWind.SkeletonDebug.PSO");
 
         ShaderInfoBundle sphereShaders;
         sphereShaders.meshShader = { L"shaders/debugSkeleton.hlsl", L"MSWindAssemblySphereMain", L"ms_6_6" };
         sphereShaders.pixelShader = { L"shaders/debugSkeleton.hlsl", L"PSWindAssemblySphereMain", L"ps_6_6" };
-        const auto compiledSphere = PSOManager::GetInstance().CompileShaders(sphereShaders);
+        const auto compiledSphere = br::extensions::CompileShaders(sphereShaders);
         m_sphereBindings = compiledSphere.resourceDescriptorSlots;
         rhi::SubobjShader sphereMS{ rhi::ShaderStage::Mesh, rhi::DXIL(compiledSphere.meshShader.Get()), "MSWindAssemblySphereMain" };
         rhi::SubobjShader spherePS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiledSphere.pixelShader.Get()), "PSWindAssemblySphereMain" };
@@ -1326,7 +1323,7 @@ public:
             rhi::Make(sphereRasterState), rhi::Make(soBlend), rhi::Make(soDepth), rhi::Make(soTargets),
             rhi::Make(soSample), rhi::Make(sphereTopology) };
         m_spherePso = std::make_shared<rhi::PipelinePtr>();
-        if (Failed(DeviceManager::GetInstance().GetDevice().CreatePipeline(
+        if (Failed(br::extensions::GetRenderDevice().CreatePipeline(
                 sphereItems, static_cast<uint32_t>(std::size(sphereItems)), *m_spherePso)))
             throw std::runtime_error("Failed to create procedural-wind assembly-sphere debug PSO");
         (*m_spherePso)->SetName("ProceduralWind.AssemblySphereDebug.PSO");
@@ -1335,8 +1332,8 @@ public:
             {.kind=rhi::IndirectArgKind::DispatchMesh}
         };
         m_signature = std::make_shared<rhi::CommandSignaturePtr>();
-        DeviceManager::GetInstance().GetDevice().CreateCommandSignature(
-            {rhi::Span<rhi::IndirectArg>(args, 2), sizeof(WindIndirectCommand)}, layout.GetHandle(), *m_signature);
+        br::extensions::GetRenderDevice().CreateCommandSignature(
+            {rhi::Span<rhi::IndirectArg>(args, 2), sizeof(WindIndirectCommand)}, layout, *m_signature);
     }
     WindSkeletonDebugBindings Declare(org::PassBuilder& declaration)
     {

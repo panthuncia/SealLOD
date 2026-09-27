@@ -29,20 +29,29 @@ shader identifier you search for.
 
 ## Layout
 
-Headers in `BasicRenderer/include/`, implementations in `BasicRenderer/src/`, mirroring each other.
+Supported headers live in `BasicRenderer/include/BasicRenderer/`; private headers live
+beside implementations in `BasicRenderer/src/`. `Runtime/Detail` declarations are
+compile-visible for existing by-value members and are not supported consumer entry points.
+See [renderer architecture](docs/renderer-architecture.md) for current migration status.
 
-| Path | Contents |
+| Path under `BasicRenderer/src/` | Contents |
 |---|---|
-| `BasicRenderer/src/Render/GraphExtensions/ClusterLOD/` | **Virtualized geometry.** 65 files; with the rest of the `CLod*` code it is ~75k lines, roughly 29% of the codebase and the largest single subsystem. |
-| `BasicRenderer/include/Render/`, `src/Render/` | Render graph integration, state graph, extensions. The largest header tree (150 files). |
-| `BasicRenderer/include/RenderPasses/`, `src/RenderPasses/` | Individual passes (50 headers). |
-| `BasicRenderer/src/Managers/` | Object, mesh, texture-streaming, PSO and other managers. `Singletons/` holds the process-wide ones. |
-| `BasicRenderer/src/Import/` | USD, glTF, NIF and CLOD-cache loading. |
-| `BasicRenderer/src/Mesh/`, `Resources/`, `Materials/`, `Animation/`, `Scene/` | Geometry processing, GPU resources, material model, skinning, ECS scene. |
-| `BasicRenderer/shaders/` | HLSL. ~58k lines; `Include/` holds the shared `.hlsli`. |
-| `BasicRenderer/tests/` | 10 unit tests. |
-| `BasicRHI/`, `OpenRenderGraph/`, `BasicTelemetry/`, `ORGModuleServices/` | Separate submodules but **first-party** — the intended repository split described in the README. Deliberately left searchable; you will read and change them alongside this code. |
-| `GPU-Reshape/`, `FidelityFX-SDK/`, `xatlas/`, `PyNifly/`, `geometry-central/`, `openpbr-bsdf/`, `tree-sitter-hlsl/`, `volk/`, `ThirdParty/` | Vendored. Not edited here. |
+| `Runtime/` | Renderer orchestration, device/resource services, scheduling, state graph, publication, frame support, and settings. |
+| `VirtualGeometry/` | Geometry storage, streaming, culling, rasterization, Reyes, voxels, and feature graph integration. |
+| `Scene/`, `Animation/`, `Terrain/` | Ingestion, object/view state, skeletons and pose, and terrain residency. |
+| `Assets/` | Format adapters, geometry representations/processing, textures, and caches. |
+| `Pipeline/`, `Materials/` | Recipes, shader compilation, pipeline state, material evaluation, and texture streaming. |
+| `Lighting/`, `VirtualShadows/`, `Transparency/`, `PostProcessing/` | Feature-owned CPU state, integration, and passes. |
+| `Diagnostics/` | Telemetry, debug rendering, and menu implementation. |
+
+Pass code lives in each owning subfeature's `RenderPasses/` directory, alongside CPU
+architecture rather than in a global pass bucket. TextureFactory retains ownership
+of its nested passes, whose definitions live in `Assets/Textures/RenderPasses`.
+Shader paths remain under `BasicRenderer/shaders/`.
+
+`BasicRHI/`, `OpenRenderGraph/`, `BasicTelemetry/`, `BasicScene/`, and
+`ORGModuleServices/` are first-party dependencies. Other vendored submodules are not
+edited as part of renderer organization work.
 
 Shader compilation goes through DXC (`BasicRenderer/dxcompiler.dll`, vendored in-tree) and Slang, with
 tree-sitter used to parse HLSL during preprocessing — `ShaderPreprocessTests` covers that path.
@@ -55,7 +64,7 @@ Two contexts, and which one you are in changes the commands.
 this in and its presets drive it.
 
 ```powershell
-cmake --build build\vs2026-renderer-host --config RelWithDebInfo
+.\build.cmd 1
 ```
 
 See SARP's own `AGENTS.md` for the sharp edges there — notably that a successful link auto-deploys
@@ -81,27 +90,30 @@ Options worth knowing: `BASICRENDERER_USE_PACKAGE_DEPS` (default `ON`),
 `BASICRENDERER_ENABLE_SUBMODULE_FALLBACK` (default `ON`), `BASICRENDERER_USD_VARIANT=dbg|rel`,
 `BASICRHI_ENABLE_RESHAPE` (default `OFF`), `BASICRENDERER_BUILD_BRNIFLY` (default `ON`).
 
-The root `CMakeLists.txt` is small (378 lines); the real target definitions are in
-`BasicRenderer/CMakeLists.txt` (1,439 lines), which is also where the tests are registered.
+The root `CMakeLists.txt` handles repository configuration. Target definitions and
+explicit renderer source lists are in `BasicRenderer/CMakeLists.txt`. Shared
+first-party dependency discovery is in `cmake/RendererDependencies.cmake`.
 
 ## Test
 
-Ten unit tests are registered at `BasicRenderer/CMakeLists.txt:1406-1415`: `ShaderPreprocessTests`,
-`SkeletonArtifactCacheTests`, `PipelineRecipeTests`, `MaterialEvalVariantTests`,
-`VirtualShadowBudgetTests`, `BoundedSpscQueueTests`, `TaskSchedulerManagerTests`,
-`AsyncStateGraphTests`, `CLodCoordinatorTests`, `StatisticalSamplerTests`. `BasicRHI`,
-`OpenRenderGraph` and `BasicTelemetry` register their own.
-
-Built through SARP, all of these appear in SARP's ctest list as tests 16–34:
+Renderer tests and boundary audits are registered in `BasicRenderer/CMakeLists.txt`.
+The current SARP RelWithDebInfo tree registers 44 tests, including first-party and
+ProceduralWind tests. Query the configured tree rather than relying on test numbers:
 
 ```powershell
-ctest -C RelWithDebInfo --test-dir build\vs2026-renderer-host -E '^SARP'
+ctest -N -C RelWithDebInfo --test-dir build\vs2026-renderer-host
+ctest -C RelWithDebInfo --test-dir build\vs2026-renderer-host --output-on-failure
 ```
 
-Ten tests against ~263k lines is thin, and none of them draw a frame. They cover scheduling, caching
-and preprocessing logic — not rendering output. Treat a green test run as evidence that you did not
-break the CPU-side plumbing, and nothing more. Rendering changes need to be looked at, and the
-benchmark harness in [TESTING.md](TESTING.md) is what measures them.
+The build compiles 149 public-header smoke units without the renderer PCH. The
+include audit is `python scripts/Audit-RendererBoundaries.py`; its fixtures are
+`python scripts/TestRendererBoundaries.py`. Explicit source-list and header-smoke
+coverage is checked by `python scripts/Audit-RendererBuildInputs.py`. Independent installed first-party
+package consumption is checked by `scripts/Test-InstalledPackages.ps1`.
+
+CPU tests do not draw frames. For changes that could affect execution or lifetimes,
+use SARP's documented exit-on-stability harness and inspect its reports. Structural
+moves require a build and boundary checks. Visual validation remains with the owner.
 
 ## Code style
 
@@ -121,8 +133,8 @@ Be aware of what does and does not exist before you go looking:
   rerender, deferred-shading and small-pass optimization rounds). These are lab notebooks tied to
   specific experiments, not architecture references.
 
-There is no architectural documentation. In particular the ClusterLOD subsystem — the largest and
-the one the README calls a novel approach — has none, and its interesting behaviour is GPU-side,
-spread across `shaders/ClusterLOD/workGraphCulling.hlsl` (~6.3k lines), `clodUtil.hlsl` (~4.4k) and
-`CLodStreamingSystem.cpp` (~8.9k). Budget reading time accordingly, and if you work it out, write it
-down.
+Architecture and migration status are now documented in
+[docs/renderer-architecture.md](docs/renderer-architecture.md). Historical baseline and
+validation records are in [docs/history/renderer-migration-history.md](docs/history/renderer-migration-history.md).
+The boundary audit distinguishes violations from ordinary private implementation
+connections; internal include counts are not a migration completion metric.

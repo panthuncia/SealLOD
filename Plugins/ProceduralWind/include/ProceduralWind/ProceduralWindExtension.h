@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ProceduralWind/ProceduralWindRuntime.h"
-#include "Render/GraphExtensions/RenderGraphExtensionRegistration.h"
+#include <BasicRenderer/Extensions/RenderGraphExtensionRegistration.h>
 
 namespace br::wind {
 

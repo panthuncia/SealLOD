@@ -21,20 +21,22 @@
 #include <rhi_conversions_dx12.h>
 #include <tracy/Tracy.hpp>
 
-#include "Utilities/ProcessedTextureCache.h"
+#include "Assets/Textures/Cache/ProcessedTextureCache.h"
+#include "Runtime/Device/DeviceManager.h"
 
-#include "DefaultDirection.h"
-#include "Managers/Singletons/DirectStorageManager.h"
+#include "Scene/Views/DefaultDirection.h"
+#include "Runtime/IO/DirectStorageManager.h"
 #include "Resources/Sampler.h"
 #include "Render/DescriptorHeap.h"
-#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/MemoryIntrospectionAPI.h"
-#include "Materials/Material.h"
-#include "Mesh/Mesh.h"
-#include "Mesh/VertexLayout.h"
-#include "Scene/Components.h"
+#include "BasicRenderer/Assets/Material.h"
+#include "BasicRenderer/Assets/Geometry/Mesh.h"
+#include "BasicRenderer/Assets/Geometry/VertexLayout.h"
+#include "BasicRenderer/Scene/Components.h"
+#include "BasicRenderer/Scene/RendererComponents.h"
 #include "Resources/PixelBuffer.h"
-#include "Resources/Texture.h"
+#include "BasicRenderer/Assets/Texture.h"
 
 using namespace DirectX;
 
