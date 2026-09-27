@@ -1841,12 +1841,75 @@
       "BasicRenderer/BasicRenderer/include/ThirdParty/meshoptimizer/clusterlod.h"
     ]
   },
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODAssembly.cpp": {
+    "category": "private",
+    "owner": "Assets/GeometryProcessing",
+    "dependencies": [
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Geometry/VertexLayout.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/ClusterLODUtilities.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/VoxelGroupBuilder.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/SGGX.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Scene/VertexFlags.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Streaming/TaskScheduler.h",
+      "BasicRenderer/BasicRenderer/shaders/Common/defines.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
+    ]
+  },
   "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h": {
     "category": "private",
     "owner": "Assets/GeometryProcessing",
     "dependencies": [
       "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/ClusterLODUtilities.h",
       "BasicRenderer/BasicRenderer/shaders/Common/defines.h"
+    ]
+  },
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODClustering.cpp": {
+    "category": "private",
+    "owner": "Assets/GeometryProcessing",
+    "dependencies": [
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Geometry/VertexLayout.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/ClusterLODUtilities.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/VoxelGroupBuilder.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/SGGX.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Scene/VertexFlags.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Streaming/TaskScheduler.h",
+      "BasicRenderer/BasicRenderer/shaders/Common/defines.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
+    ]
+  },
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.cpp": {
+    "category": "private",
+    "owner": "Assets/GeometryProcessing",
+    "dependencies": [
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Geometry/VertexLayout.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/ClusterLODUtilities.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/VoxelGroupBuilder.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/SGGX.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Scene/VertexFlags.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Streaming/TaskScheduler.h",
+      "BasicRenderer/BasicRenderer/shaders/Common/defines.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
+    ]
+  },
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.h": {
+    "category": "private",
+    "owner": "Assets/GeometryProcessing",
+    "dependencies": [
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h"
     ]
   },
   "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePacking.cpp": {
@@ -1886,7 +1949,7 @@
       "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/ClusterLODUtilities.h"
     ]
   },
-  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODUtilities.cpp": {
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.cpp": {
     "category": "private",
     "owner": "Assets/GeometryProcessing",
     "dependencies": [
@@ -1898,8 +1961,18 @@
       "BasicRenderer/BasicRenderer/include/BasicRenderer/Streaming/TaskScheduler.h",
       "BasicRenderer/BasicRenderer/shaders/Common/defines.h",
       "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.h",
       "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h",
       "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
+    ]
+  },
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.h": {
+    "category": "private",
+    "owner": "Assets/GeometryProcessing",
+    "dependencies": [
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h"
     ]
   },
   "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODValidation.cpp": {
@@ -1913,6 +1986,49 @@
       "BasicRenderer/BasicRenderer/include/BasicRenderer/Scene/VertexFlags.h",
       "BasicRenderer/BasicRenderer/include/BasicRenderer/Streaming/TaskScheduler.h",
       "BasicRenderer/BasicRenderer/shaders/Common/defines.h"
+    ]
+  },
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.cpp": {
+    "category": "private",
+    "owner": "Assets/GeometryProcessing",
+    "dependencies": [
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Geometry/VertexLayout.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/ClusterLODUtilities.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/VoxelGroupBuilder.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/SGGX.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Scene/VertexFlags.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Streaming/TaskScheduler.h",
+      "BasicRenderer/BasicRenderer/shaders/Common/defines.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
+    ]
+  },
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h": {
+    "category": "private",
+    "owner": "Assets/GeometryProcessing",
+    "dependencies": [
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h"
+    ]
+  },
+  "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelOnly.cpp": {
+    "category": "private",
+    "owner": "Assets/GeometryProcessing",
+    "dependencies": [
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Geometry/VertexLayout.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/ClusterLODUtilities.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/Import/VoxelGroupBuilder.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Assets/SGGX.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Scene/VertexFlags.h",
+      "BasicRenderer/BasicRenderer/include/BasicRenderer/Streaming/TaskScheduler.h",
+      "BasicRenderer/BasicRenderer/shaders/Common/defines.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h",
+      "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
     ]
   },
   "BasicRenderer/BasicRenderer/src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.cpp": {

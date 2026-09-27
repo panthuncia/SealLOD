@@ -37,10 +37,15 @@ set(CLOD_SHARED_SOURCES
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/DefaultCLodSettings.cpp"
     "${BR_SRC}/Assets/Geometry/MeshIngestBuilder.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLOD.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODUtilities.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODClustering.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODValidation.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePacking.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODAssembly.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelOnly.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/Voxels/VoxelGroupBuilder.cpp"
     "${BR_SRC}/VirtualGeometry/Reyes/Tessellation/ReyesTessellationTable.cpp"
@@ -73,7 +78,7 @@ set_target_properties(CLodCacheTool PROPERTIES
 target_include_directories(CLodCacheTool PRIVATE
     "${BR_INCLUDE}"
     "${BR_SRC}"
-    "${BR_SHADERS}"          # ClusterLODUtilities.cpp includes "../shaders/Common/defines.h"
+    "${BR_SHADERS}"          # ClusterLODClustering.cpp includes "../shaders/Common/defines.h"
     "${BR_ROOT}/generated"
 )
 

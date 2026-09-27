@@ -1,4 +1,4 @@
-# Renderer boundaries and remaining migration
+# Renderer boundaries and migration status
 
 This is the current status, not a chronological progress log. Earlier architecture,
 baseline, and validation records are preserved in [migration history](history/renderer-migration-history.md).
@@ -100,9 +100,10 @@ Format adapters, geometry processing, representations, and caches are under Asse
 USD import now has separate stage entry, material/texture conversion, geometry
 preprocessing, skeleton/animation conversion, and asset-assembly units; the
 remaining `USDLoader.cpp` owns traversal and model/payload entry orchestration.
-ClusterLOD validation, voxel packing, page packing and its telemetry have separate
-units. `ClusterLODBuildState` and the bit writer/size calculator shared with the
-clustering code remain private and inline where used in packing loops.
+ClusterLOD clustering, hierarchy, assembly, node skinning, page packing and its
+telemetry, voxel fallback and voxel-only construction, voxel packing, and validation
+now have separate units. `ClusterLODBuildState` and the bit writer/size calculator
+shared with clustering remain private and inline where used in packing loops.
 
 ## Completion checklist
 
@@ -118,9 +119,9 @@ clustering code remain private and inline where used in packing loops.
       from the private menu header.
 - [x] Split USD loading into material/texture conversion, geometry preprocessing,
       skeleton/animation conversion, asset assembly, stage entry, and traversal.
-- [ ] Finish ClusterLOD geometry-processing decomposition. Validation, voxel packing,
-      page packing, and telemetry are separate; clustering, hierarchy, fallback
-      candidate construction, and assembly still share `ClusterLODUtilities.cpp`.
+- [x] Split ClusterLOD geometry processing by clustering, hierarchy, assembly,
+      page packing, voxel fallback/packing, and validation, retaining the same
+      owning build state and function order.
 - [x] Compile all 149 exported/detail headers in individual units without the
       renderer PCH or SARP dependency umbrella.
 - [x] Consolidate first-party package discovery for root and inner entry points.
@@ -129,8 +130,8 @@ clustering code remain private and inline where used in packing loops.
 - [x] Build five independent installed first-party package consumers and seven
       build-tree BasicRenderer API-category consumers. The explicit source audit
       covers every renderer C++ source and public-header smoke unit.
-- [ ] Re-run final tests and exit-on-stability after the remaining implementation
-      extraction. Visual validation stays with the project owner.
+- [x] Re-run final tests and exit-on-stability after implementation extraction.
+      Visual validation stays with the project owner.
 
 ## Current validation
 
@@ -141,19 +142,26 @@ leave visual validation to the owner. The shader files, shader paths, cache form
 configuration defaults, algorithms, ownership, and execution sequencing are unchanged.
 
 The latest completed build/deployment is
-`../build/vs2026-renderer-host/migration-clod-page-packing-final.log`. All 44 SARP
-CTest tests passed (`../build/migration-clod-page-packing-ctest.log`). The corresponding
-report is `../build/migration-clod-page-packing-report.txt`: stable, 120 stable frames,
+`../build/vs2026-renderer-host/migration-clod-clustering-placement.log`. All 44 SARP
+CTest tests passed (`../build/migration-final-ctest.log`). The corresponding
+reports are `../build/migration-final-scene-report.txt` and
+`../build/migration-final-scene-second-report.txt`: both stable, 120 stable frames,
 zero readiness blockers, zero failed/pending assets, and launcher exit 0. It matches
 the baseline's 40,401 active cells, 212,305 applied placements, 99,228 live static
 objects, 2,106 successful assets, 6,870 meshes, and placement digest
-11950196757715935234. Elapsed time was 13,627 ms against a single baseline sample
-of 12,502 ms; these are insufficient to establish performance equivalence.
+11950196757715935234. Elapsed times were 16,229 and 13,239 ms against a single
+baseline sample of 12,502 ms; these are insufficient to establish a timing
+distribution or performance equivalence.
+Material-texture resident bytes were 2.11-2.14 GB in the final reports versus
+2.34 GB in the baseline report. The second stable report still listed 192 pending
+DirectStorage launches, so the harness's stability point is not full texture
+residency. Neither this memory difference nor the two timing samples establishes
+a renderer regression; a controlled repeated benchmark is needed for that claim.
 
 The boundary audit reports zero violations, two reviewed ORG integration exceptions,
-and no stale exceptions; all eleven fixtures pass. The build-input audit covers 237
+and no stale exceptions; all eleven fixtures pass. The build-input audit covers 242
 explicit renderer C++ sources and 149 individual header smoke units with no missing
-entries. These checks ran after the page-packing extraction. The earlier validation records
+entries. These checks ran after the full geometry extraction. The earlier validation records
 are in [migration history](history/renderer-migration-history.md).
 
 Both root and inner CMake entry points configured with installed first-party
@@ -161,3 +169,6 @@ packages and `BASICRENDERER_ENABLE_SUBMODULE_FALLBACK=OFF`. The inner standalone
 entry needs the same external package inputs as the root: SARP's existing vcpkg
 installation and the selected USD package directory. This checks first-party
 package discovery; BasicRenderer itself still has no installed-package export claim.
+The final `scripts/Test-InstalledPackages.ps1` run independently configured and
+built consumers of BasicRHI, BasicTelemetry, BasicScene, OpenRenderGraph, and
+ORGModuleServices; all five passed.
