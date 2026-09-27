@@ -2,11 +2,13 @@
 
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 
 def main():
-    root = Path(__file__).resolve().parents[1] / "BasicRenderer"
+    repo = Path(__file__).resolve().parents[1]
+    root = repo / "BasicRenderer"
     cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8-sig")
     cmake = re.sub(r"(?m)^\s*#.*$", "", cmake)
     sources = set(re.findall(
@@ -34,6 +36,21 @@ def main():
         ("Smoke unit references missing header", covered - headers),
     ):
         errors.extend(f"{label}: {entry}" for entry in sorted(entries))
+    if (repo / ".git").exists():
+        tracked = set(subprocess.check_output(
+            ["git", "ls-files", "--cached", "-z"], cwd=repo).decode().split("\0"))
+        build_inputs = {
+            p.relative_to(repo).as_posix()
+            for directory in (root / "src", root / "include", root / "tests" / "PublicHeaders")
+            for p in directory.rglob("*")
+            if p.is_file() and p.suffix in (".cpp", ".h", ".hpp")
+        }
+        build_inputs.update((
+            "ThirdParty/Streamline/cmake/StreamlineHeadersConfig.cmake.in",
+            "ThirdParty/pix/cmake/PixHeadersConfig.cmake.in",
+        ))
+        errors.extend(f"Untracked build input: {entry}"
+                      for entry in sorted(build_inputs - tracked))
     for error in errors:
         print(error, file=sys.stderr)
     print(f"Renderer build inputs: {len(errors)} violations; "
