@@ -47,9 +47,10 @@ public:
 			Builtin::OpenPBR::FuzzLTC,
 			Builtin::OpenPBR::IdealMetalEnergyComplement,
 			Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
-			Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
 			Builtin::Noise::BlueNoise2D);
+		builder.ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
+			org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
 		builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }));
 		builder.UnorderedAccess(Builtin::Color::HDRColorTarget,
 				Builtin::DebugVisualization,
@@ -61,8 +62,9 @@ public:
 					Builtin::Shadows::CLodCompactShadowCameras,
 					Builtin::Shadows::CLodDirectionalPageViewInfo,
 					Builtin::Shadows::CLodPageMetadata,
-					Builtin::Shadows::CLodPageTable,
 					Builtin::Shadows::CLodPhysicalPages);
+				builder.ShaderResource(Builtin::Shadows::CLodPageTable,
+					org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
 				builder.UnorderedAccess(Builtin::Shadows::CLodStats);
 			}
 
@@ -78,12 +80,7 @@ public:
 		builder.PreferQueue(org::QueueKind::Compute);
 	}
 
-	void Initialize() {
-		RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
-		if (m_shadowsEnabled) {
-			RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
-		}
-	}
+	void Initialize() {}
 
 	br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
 		const auto* update = preparation.preparationData->Get<UpdateContext>();

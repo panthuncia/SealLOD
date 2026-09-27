@@ -122,8 +122,9 @@ public:
 			Builtin::OpenPBR::FuzzLTC,
 			Builtin::OpenPBR::IdealMetalEnergyComplement,
             Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
-			Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
             Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement);
+        builder->ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
+            org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
         builder->IsGeometryPass();
 
         ForwardRenderBindings bindings{
@@ -136,8 +137,9 @@ public:
                 Builtin::Shadows::CLodCompactShadowCameras,
                 Builtin::Shadows::CLodDirectionalPageViewInfo,
                 Builtin::Shadows::CLodPageMetadata,
-                Builtin::Shadows::CLodPageTable,
                 Builtin::Shadows::CLodPhysicalPages);
+            builder->ShaderResource(Builtin::Shadows::CLodPageTable,
+                org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
         }
 
         builder->UnorderedAccess(Builtin::DebugVisualization);
@@ -164,11 +166,6 @@ public:
     }
 
     void Initialize() {
-        RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
-        if (m_shadowsEnabled) {
-            RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
-        }
-
         //if (m_meshShaders)
             //m_primaryCameraMeshletBitfield = m_resourceRegistryView->RequestPtr<DynamicGloballyIndexedResource>(Builtin::PrimaryCamera::MeshletBitfield);
     }

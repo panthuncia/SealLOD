@@ -708,12 +708,12 @@ HierarchicalDispatchDescriptorBindings HierarchicalDispatchCullingPass::Declare(
             br::render::PublishedStateSource::ProcessSource(), drawSetIndicesQuery));
     builder.ShaderResource(PublishedStateResourceResolver(
             br::render::PublishedStateSource::ProcessSource(), visibilityGenerationQuery));
-    builder.WithInternalTransition(m_visibleClustersCounterBuffer, computeReadState);
-    builder.WithInternalTransition(m_occlusionReplayStateBuffer, computeReadState);
-    builder.WithInternalTransition(m_pureComputeCurrentNodeFrontierBuffer, computeReadState);
-    builder.WithInternalTransition(m_pureComputeCurrentNodeCounterBuffer, computeReadState);
-    builder.WithInternalTransition(m_pureComputeCurrentLeafFrontierBuffer, computeReadState);
-    builder.WithInternalTransition(m_pureComputeCurrentLeafCounterBuffer, computeReadState);
+    builder.InternalTransition(m_visibleClustersCounterBuffer, computeReadState);
+    builder.InternalTransition(m_occlusionReplayStateBuffer, computeReadState);
+    builder.InternalTransition(m_pureComputeCurrentNodeFrontierBuffer, computeReadState);
+    builder.InternalTransition(m_pureComputeCurrentNodeCounterBuffer, computeReadState);
+    builder.InternalTransition(m_pureComputeCurrentLeafFrontierBuffer, computeReadState);
+    builder.InternalTransition(m_pureComputeCurrentLeafCounterBuffer, computeReadState);
 
     if (m_voxelRasterWorkCapacity != 0u) {
         bindings.voxelQueues = {
@@ -727,15 +727,15 @@ HierarchicalDispatchDescriptorBindings HierarchicalDispatchCullingPass::Declare(
 
     const uint32_t traversalLevelCount = std::min(m_activeTraversalDepth, kPureComputeMaxTraversalLevels);
     if (!m_isFirstPass || traversalLevelCount > 0u) {
-        builder.WithInternalTransition(m_pureComputeNodeDispatchArgsBuffer, indirectState)
-            .WithInternalTransition(m_pureComputeLeafDispatchArgsBuffer, indirectState)
-            .WithInternalTransition(m_pureComputeClusterDispatchArgsBuffer, indirectState);
+        builder.InternalTransition(m_pureComputeNodeDispatchArgsBuffer, indirectState)
+            .InternalTransition(m_pureComputeLeafDispatchArgsBuffer, indirectState)
+            .InternalTransition(m_pureComputeClusterDispatchArgsBuffer, indirectState);
     }
     if (traversalLevelCount > 0u) {
-        builder.WithInternalTransition(m_pureComputeNextNodeFrontierBuffer, computeReadState)
-            .WithInternalTransition(m_pureComputeNextNodeCounterBuffer, computeReadState)
-            .WithInternalTransition(m_pureComputeNextLeafFrontierBuffer, computeReadState)
-            .WithInternalTransition(m_pureComputeNextLeafCounterBuffer, computeReadState);
+        builder.InternalTransition(m_pureComputeNextNodeFrontierBuffer, computeReadState)
+            .InternalTransition(m_pureComputeNextNodeCounterBuffer, computeReadState)
+            .InternalTransition(m_pureComputeNextLeafFrontierBuffer, computeReadState)
+            .InternalTransition(m_pureComputeNextLeafCounterBuffer, computeReadState);
     }
 
     if (UsesSWClassification(m_workGraphMode) && m_swVisibleClustersCounterBuffer) {
@@ -828,10 +828,6 @@ HierarchicalDispatchDescriptorBindings HierarchicalDispatchCullingPass::Declare(
 
 void HierarchicalDispatchCullingPass::Initialize()
 {
-	// Pure-compute traversal uses the same bindless node-bounds sidecars as the
-	// work graph. Keep explicit registrations in addition to graph declarations.
-	RegisterSRV(Builtin::CLod::NodeSkinningInfos);
-	RegisterSRV(Builtin::CLod::NodeBoneIndices);
 }
 
 template<class EmissionData, class CommandSink>

@@ -177,8 +177,8 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
             Builtin::SkeletonResources::SkinningInstanceInfo);
     builder->ShaderResource(Builtin::CLod::AssemblyTransforms);
     builder->UnorderedAccess(Builtin::DebugVisualization);
-    builder->WithInternalTransition(m_voxelIndirectArgsBuffers[0], indirectState)
-        .WithInternalTransition(m_voxelIndirectArgsBuffers[1], indirectState);
+    builder->InternalTransition(m_voxelIndirectArgsBuffers[0], indirectState)
+        .InternalTransition(m_voxelIndirectArgsBuffers[1], indirectState);
     builder->ConstantBuffer(Builtin::PerFrameBuffer);
 
     m_viewRasterInfoTable.Declare(*builder);

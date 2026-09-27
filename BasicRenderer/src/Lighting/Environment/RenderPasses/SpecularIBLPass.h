@@ -35,9 +35,10 @@ public:
             Builtin::PrimaryCamera::DepthTexture,
 			Builtin::OpenPBR::FuzzLTC,
 			Builtin::OpenPBR::IdealMetalEnergyComplement,
-			Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
             Builtin::CameraBuffer);
+        builder.ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
+            org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
 
         builder.UnorderedAccess(Builtin::DebugVisualization);
@@ -48,9 +49,7 @@ public:
         return {builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget})};
     }
 
-    void Initialize() {
-		RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
-    }
+    void Initialize() {}
 
     br::render::PreparedFullscreenDraw Prepare(const SpecularIBLBindings& bindings,
         const org::PassPrepareContext& preparation) const {

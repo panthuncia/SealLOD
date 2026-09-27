@@ -70,7 +70,6 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
             Builtin::OpenPBR::FuzzLTC,
             Builtin::OpenPBR::IdealMetalEnergyComplement,
             Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
-            Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
             Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
             Builtin::CLod::Offsets,
             Builtin::CLod::GroupChunks,
@@ -83,6 +82,8 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo,
             Builtin::Noise::BlueNoise2D);
+    builder->ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
+        org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
     builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     builder->UnorderedAccess(Builtin::Color::HDRColorTarget);
     builder->UnorderedAccess(Builtin::DebugVisualization);
@@ -99,10 +100,11 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
             Builtin::Shadows::CLodClipmapInfo,
             Builtin::Shadows::CLodDirectionalPageViewInfo,
             Builtin::Shadows::CLodPageMetadata,
-            Builtin::Shadows::CLodPageTable,
             Builtin::Shadows::CLodPhysicalPages,
 		    Builtin::Shadows::CLodCompactMainCamera,
             Builtin::Shadows::CLodCompactShadowCameras);
+        builder->ShaderResource(Builtin::Shadows::CLodPageTable,
+            org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
     }
 
     if (m_reyesDiceQueueBuffer) {
@@ -139,10 +141,6 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
 
 void DeepVisibilityResolvePass::Initialize()
 {
-    RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
-    if (m_getShadowsEnabled && m_getShadowsEnabled()) {
-        RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
-    }
     m_pHDRTarget = m_resourceRegistryView->RequestPtr<org::PixelBuffer>(Builtin::Color::HDRColorTarget);
 }
 

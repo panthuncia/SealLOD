@@ -69,7 +69,7 @@ public:
             if (m_tlasInstances) bindings.tlasInstances = builder.UnorderedAccess(m_tlasInstances).View();
             bindings.hasServiceResources = true;
         }
-        builder.WithInternalTransition(
+        builder.InternalTransition(
             org::ResourceIdentifierAndRange(Builtin::PostProcessing::ScreenSpaceReflections, {}),
             org::ResourceState{.access = rhi::ResourceAccessType::Common,
                 .layout = rhi::ResourceLayout::Common,

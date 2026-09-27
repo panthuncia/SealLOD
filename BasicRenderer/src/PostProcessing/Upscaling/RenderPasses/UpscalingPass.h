@@ -74,15 +74,15 @@ public:
                 motionVectors,
                 Builtin::PrimaryCamera::ProjectedDepthTexture);
             builder->UnorderedAccessClear(upscaledHDR);
-            builder->WithInternalTransition(upscaledHDR, vulkanStreamlineExitState);
+            builder->InternalTransition(upscaledHDR, vulkanStreamlineExitState);
         }
         else {
-            builder->WithLegacyInterop(
+            builder->LegacyInterop(
                 Builtin::Color::HDRColorTarget,
                 motionVectors,
                 Builtin::PrimaryCamera::ProjectedDepthTexture,
                 upscaledHDR)
-                .WithInternalTransition(upscaledHDR, dx12StreamlineExitState);
+                .InternalTransition(upscaledHDR, dx12StreamlineExitState);
         }
     }
 

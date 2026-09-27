@@ -375,6 +375,9 @@ HierarchicalCullingBindings HierarchicalCullingPass::Declare(org::PassBuilder& b
             Builtin::Shadows::CLodDirectionalPageViewInfo,
             Builtin::Shadows::CLodCompactShadowCameras);
         builder.UnorderedAccess(Builtin::Shadows::CLodPageTable);
+        if (UsesWorkGraphSWRaster(m_workGraphMode))
+            builder.ShaderResource(Builtin::Shadows::CLodPageTable,
+                org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
     }
     if (m_workGraphReyesVisibility) {
         builder.ShaderResource(
@@ -487,18 +490,13 @@ HierarchicalCullingBindings HierarchicalCullingPass::Declare(org::PassBuilder& b
         bindings.hasPageJobQueues = true;
     }
 
-    builder.WithInternalTransition(m_visibleClustersCounterBuffer, computeReadState)
-        .WithInternalTransition(m_occlusionReplayStateBuffer, computeReadState);
+    builder.InternalTransition(m_visibleClustersCounterBuffer, computeReadState)
+        .InternalTransition(m_occlusionReplayStateBuffer, computeReadState);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return bindings;
 }
 
 void HierarchicalCullingPass::Initialize() {
-	RegisterSRV(Builtin::CLod::NodeSkinningInfos);
-	RegisterSRV(Builtin::CLod::NodeBoneIndices);
-    if (UsesWorkGraphSWRaster(m_workGraphMode) && UsesVirtualShadowOutput(m_rasterOutputKind)) {
-        RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
-    }
 }
 
 
