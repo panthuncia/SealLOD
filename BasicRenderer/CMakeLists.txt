@@ -343,6 +343,8 @@ set(SOURCES
     "src/Runtime/Resources/ResourceManager.cpp"
     "src/Pipeline/ShaderCompilation/ShaderArtifactCache.cpp"
     "src/Runtime/Scheduling/TaskSchedulerManager.cpp"
+    "src/Runtime/Scheduling/GraphSchedulerAdapter.h"
+    "src/Runtime/Scheduling/GraphSchedulerAdapter.cpp"
     # src/Mesh
     "src/Assets/GeometryProcessing/ClusterLOD/ClusterLOD.cpp"
     "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODClustering.cpp"
@@ -363,6 +365,11 @@ set(SOURCES
     "src/Assets/GeometryProcessing/Voxels/VoxelGroupBuilder.cpp"
     # src/Render
     "src/Runtime/StateGraph/AsyncStateGraph.cpp"
+    "src/Runtime/StateGraph/RendererGraphAdapters.h"
+    "src/Runtime/StateGraph/RendererGraphAdapters.cpp"
+    "src/Runtime/StateGraph/GraphDiagnostics.h"
+    "src/Runtime/StateGraph/GraphTrace.h"
+    "src/Runtime/StateGraph/RendererGraphTrace.cpp"
     "src/VirtualGeometry/Streaming/Publication/CLodResidencyStorageArtifacts.cpp"
     "src/Runtime/StateGraph/CapacityProvider.cpp"
     "src/Diagnostics/Scene/DebugSceneSnapshotService.cpp"
@@ -558,10 +565,13 @@ if(EXISTS "${BASICRENDERER_REPO_ROOT}/geometry-central/CMakeLists.txt" AND NOT T
 endif()
 
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
+include(${BASICRENDERER_REPO_ROOT}/ORGModuleServices/cmake/AsyncStateGraph.cmake)
+target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::AsyncStateGraph)
 add_library(BasicRendererHeaders INTERFACE)
 add_library(BasicRenderer::Headers ALIAS BasicRendererHeaders)
 target_include_directories(BasicRendererHeaders INTERFACE
     "${BASICRENDERER_SOURCE_ROOT}/include")
+target_link_libraries(BasicRendererHeaders INTERFACE ORGModuleServices::AsyncPrimitives)
 target_link_libraries(${PROJECT_NAME} PUBLIC BasicRendererHeaders)
 target_sources(${PROJECT_NAME} PRIVATE
     "src/Runtime/Publication/PersistentRendererPublication.h"

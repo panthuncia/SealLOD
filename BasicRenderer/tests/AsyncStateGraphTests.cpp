@@ -1,4 +1,6 @@
 #include "Runtime/StateGraph/AsyncStateGraph.h"
+#include <ORGModuleServices/Async/SuspensionIdentity.h>
+#include "Runtime/Scheduling/GraphSchedulerAdapter.h"
 #include "Runtime/StateGraph/CapacityProvider.h"
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 #include <BasicRenderer/Streaming/RendererStateRequestService.h>
@@ -293,8 +295,9 @@ int main() {
 
     {
         const auto first = br::render::AllocateArtifactSuspensionIdentity();
+        const auto shared = org::async::AllocateArtifactSuspensionIdentity();
         const auto second = br::render::AllocateArtifactSuspensionIdentity();
-        Check(first != 0 && second != 0 && first != second);
+        Check(first != 0 && shared == first + 1 && second == shared + 1);
 
         auto pool = std::make_shared<VersionedGpuBufferBackingPool>();
         std::atomic_uint retirementWakes{ 0 };
@@ -383,6 +386,195 @@ int main() {
     Check(scheduler.DomainConcurrency(TaskDomain::RendererState) == 1);
     Check(scheduler.DomainConcurrency(TaskDomain::GraphControl) == 1);
     Check(scheduler.DomainConcurrency(TaskDomain::GraphPublication) == 1);
+
+    // The shared scheduler boundary retains cancellation state after callbacks,
+    // includes timers in Wait(), and never admits another adapter's scope.
+    {
+        auto backend = br::MakeGraphSchedulerAdapter(scheduler);
+        auto foreign = br::MakeGraphSchedulerAdapter(scheduler);
+        auto scope = backend->CreateScope("GraphSchedulerAdapterTest");
+        org::async::TaskContext retainedContext;
+        std::atomic_uint calls{0};
+        const auto caller = std::this_thread::get_id();
+        Check(backend->SubmitCpu(scope, TaskLane::Streaming, TaskDomain::General,
+            "RetainCancellation", [&](const org::async::TaskContext& context) {
+                Check(std::this_thread::get_id() != caller);
+                retainedContext = context;
+                ++calls;
+            }));
+        scope->Wait();
+        Check(calls == 1 && !retainedContext.StopRequested());
+        Check(backend->ScheduleAfter(scope, std::chrono::milliseconds(1),
+            TaskLane::Streaming, TaskDomain::General, "DelayedGraphWork",
+            [&](const org::async::TaskContext&) { ++calls; }));
+        scope->Wait();
+        Check(calls == 2);
+        Check(!foreign->Submit(scope, TaskLane::Streaming, TaskDomain::General,
+            "ForeignScope", [&](const org::async::TaskContext&) { ++calls; }));
+        Check(!backend->Submit(scope, TaskLane::Count, TaskDomain::General,
+            "InvalidClass", [&](const org::async::TaskContext&) { ++calls; }));
+        scope->CancelAndWait();
+        scope.reset();
+        Check(retainedContext.StopRequested());
+        Check(calls == 2);
+
+        std::atomic_uint traced{0}, rejectedTrace{0};
+        const auto trace = +[](void* state, const org::async::TaskTraceEvent&) noexcept {
+            ++*static_cast<std::atomic_uint*>(state);
+        };
+        Check(backend->InstallTaskTraceSink(&traced, trace));
+        Check(!foreign->InstallTaskTraceSink(&rejectedTrace, trace));
+        auto tracedScope = backend->CreateScope("TraceOwnership");
+        Check(backend->Submit(tracedScope, TaskLane::Streaming, TaskDomain::General,
+            "TraceAfterRejectedSink", [](const org::async::TaskContext&) {}));
+        tracedScope->Wait();
+        backend->RemoveTaskTraceSink(&traced);
+        Check(traced > 0 && rejectedTrace == 0);
+        Check(foreign->InstallTaskTraceSink(&rejectedTrace, trace));
+        foreign->RemoveTaskTraceSink(&rejectedTrace);
+
+        // Exercise the graph constructor that has no renderer scheduler or
+        // payload interpretation hooks, including an exact-version dependency.
+        AsyncStateGraph graph(backend, "InjectedGraphScheduler");
+        graph.RegisterProducer(ArtifactKind::BufferVersion, {
+            TaskLane::Streaming, TaskDomain::General, "InjectedProducer",
+            [](const ArtifactBuildContext& context) {
+                return ArtifactBuildResult::Ready(context.input);
+            }
+        });
+        const ArtifactKey first{ArtifactKind::BufferVersion, 0xff001, 0};
+        const ArtifactKey second{ArtifactKind::BufferVersion, 0xff002, 0};
+        Check(graph.Request(first, 1));
+        graph.WaitIdle();
+        const auto predecessor = graph.Snapshot(first);
+        Check(predecessor.readiness == ArtifactReadiness::GpuReady);
+        Check(graph.Request(second, 1, {Exact(predecessor.Version(), ArtifactReadiness::GpuReady)}));
+        graph.WaitIdle();
+        Check(graph.Snapshot(second).readiness == ArtifactReadiness::GpuReady);
+        Check(graph.Request(first, 2));
+        graph.WaitIdle();
+        Check(graph.Snapshot(second).generation != 0);
+        Check(graph.Snapshot(second).readiness == ArtifactReadiness::GpuReady);
+    }
+
+    // Scheduling storage follows the host's inventory, including the fallback
+    // acceptance class for old onAccepted callbacks. Invalid classes fail
+    // before indexing mailboxes or executing an action.
+    {
+        auto backend = br::MakeGraphSchedulerAdapter(scheduler);
+        AsyncStateGraphHostHooks hooks;
+        hooks.scheduling = {1, 1, {}, {}};
+        hooks.producerDispatch.assign(1, org::async::TaskDispatch::Cpu);
+        AsyncStateGraph graph(backend, "SingleClassGraph", hooks);
+        std::atomic_uint accepted{0}, invalidExecuted{0};
+        graph.RegisterProducer(ArtifactKind::Generic, {
+            TaskLane::FrameCritical, TaskDomain::General, "SingleClassProducer",
+            [&](const ArtifactBuildContext& context) {
+                auto result = ArtifactBuildResult::Ready(context.input);
+                result.onAccepted = [&](const ArtifactSnapshot&) { ++accepted; };
+                return result;
+            }
+        });
+        graph.RegisterProducer(ArtifactKind::BufferVersion, {
+            TaskLane::FrameCritical, TaskDomain::General, "InvalidAcceptanceClass",
+            [&](const ArtifactBuildContext& context) {
+                auto result = ArtifactBuildResult::Ready(context.input);
+                result.acceptance = {TaskLane::Streaming, TaskDomain::General,
+                    [&](const ArtifactSnapshot&) { ++invalidExecuted; }};
+                return result;
+            }
+        });
+        graph.RegisterProducer(ArtifactKind::Material, {
+            TaskLane::Streaming, TaskDomain::General, "InvalidProducerClass",
+            [&](const ArtifactBuildContext& context) {
+                ++invalidExecuted;
+                return ArtifactBuildResult::Ready(context.input);
+            }
+        });
+        const ArtifactKey good{ArtifactKind::Generic, 0xff030, 0};
+        const ArtifactKey badAcceptance{ArtifactKind::BufferVersion, 0xff031, 0};
+        const ArtifactKey badProducer{ArtifactKind::Material, 0xff032, 0};
+        const auto request = graph.Request(good, 1, {}, Payload(1), 1);
+        Check(request);
+        Check(graph.Request(badAcceptance, 1, {}, Payload(1), 1));
+        Check(graph.Request(badProducer, 1, {}, Payload(1), 1));
+        graph.WaitIdle();
+        Check(graph.Snapshot(good).readiness == ArtifactReadiness::GpuReady && accepted == 1);
+        Check(graph.Snapshot(badAcceptance).readiness == ArtifactReadiness::Failed);
+        Check(graph.Snapshot(badProducer).readiness == ArtifactReadiness::Failed);
+        Check(invalidExecuted == 0);
+        const auto waiter = graph.AwaitExact(request.Handle(), ArtifactReadiness::GpuReady,
+            TaskLane::Streaming, TaskDomain::General,
+            [&](const ArtifactSnapshot&) { ++invalidExecuted; },
+            [&](const ArtifactTermination&) { ++invalidExecuted; });
+        Check(waiter.subscription == 0);
+        for (const bool emptyLayout : {true, false}) {
+            auto invalid = hooks;
+            if (emptyLayout) invalid.scheduling.laneCount = 0;
+            else invalid.producerDispatch.clear();
+            bool rejected = false;
+            try { AsyncStateGraph bad(backend, "InvalidLayout", std::move(invalid)); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            Check(rejected);
+        }
+    }
+
+    // Lifecycle/coalescing is host metadata, not knowledge of renderer kind
+    // names. All admission APIs, including fire-and-forget posting, obey it.
+    {
+        AsyncStateGraphHostHooks hooks;
+        hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::Generic)].allowCoalescing = false;
+        AsyncStateGraph graph(br::MakeGraphSchedulerAdapter(scheduler), "HostArtifactPolicy", hooks);
+        std::atomic_uint lifecycleBuilds{0};
+        const auto producer = [&](const ArtifactBuildContext& context) {
+            if (context.key.kind == ArtifactKind::Generic)
+                Check(context.revision == lifecycleBuilds.fetch_add(1) + 1);
+            return ArtifactBuildResult::Ready(context.input);
+        };
+        graph.RegisterProducer(ArtifactKind::Generic,
+            {TaskLane::Streaming, TaskDomain::General, "LifecyclePolicy", producer});
+        graph.RegisterProducer(ArtifactKind::StaticTransaction,
+            {TaskLane::Streaming, TaskDomain::General, "ReplaceablePolicy", producer});
+        const ArtifactKey lifecycle{ArtifactKind::Generic, 0xff010, 0};
+        const ArtifactKey replaceable{ArtifactKind::StaticTransaction, 0xff011, 0};
+        // Mutating the caller's copy must not change an existing graph's policy.
+        hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::Generic)].allowCoalescing = true;
+        Check(graph.SubmitLatestIntent(lifecycle, 1) == ArtifactRequestStatus::TypeMismatch);
+        Check(graph.PostRequest({lifecycle, 1}).status == ArtifactRequestStatus::TypeMismatch);
+        const auto batch = graph.SubmitLatestIntentBatch({{lifecycle, 1}, {replaceable, 1}});
+        Check(batch.size() == 2 && batch[0].status == ArtifactRequestStatus::TypeMismatch);
+        Check(batch[1]);
+        graph.PostIntents({{lifecycle, 1}, {lifecycle, 2}, {lifecycle, 3}});
+        graph.WaitIdle();
+        Check(graph.Snapshot(lifecycle).revision == 3);
+        Check(lifecycleBuilds == 3);
+        Check(graph.Snapshot(replaceable).readiness == ArtifactReadiness::GpuReady);
+        Check(graph.PostRequest({lifecycle, 4}, false));
+        graph.WaitIdle();
+        graph.PostIntents({{lifecycle, 5}});
+        graph.WaitIdle();
+        Check(graph.Snapshot(lifecycle).revision == 5);
+        Check(graph.Request(lifecycle, 6));
+        graph.WaitIdle();
+        Check(graph.Snapshot(lifecycle).revision == 6);
+        Check(lifecycleBuilds == 6);
+    }
+
+    // The BasicRenderer facade preserves its transaction policy on every path.
+    {
+        AsyncStateGraph graph(scheduler, "RendererLifecyclePolicy");
+        graph.RegisterProducer(ArtifactKind::StaticTransaction, {
+            TaskLane::Streaming, TaskDomain::General, "RendererLifecycle",
+            [](const ArtifactBuildContext& context) { return ArtifactBuildResult::Ready(context.input); }
+        });
+        const ArtifactKey key{ArtifactKind::StaticTransaction, 0xff020, 0};
+        graph.PostIntents({{key, 1}});
+        graph.WaitIdle();
+        Check(graph.Snapshot(key).revision == 1);
+        Check(graph.PostRequest({key, 2}, false));
+        graph.WaitIdle();
+        Check(graph.Snapshot(key).readiness == ArtifactReadiness::GpuReady);
+    }
 
     // A sealed object cut must survive newer buffer publications without
     // rebuilding its old ABI/revision DTO against the successor payload.

@@ -171,7 +171,7 @@ private:
 	std::shared_ptr<PublishedStateResourceResolver> m_textureImageTableResolver;
 	br::render::VersionedGpuBufferJournal m_textureImageTableJournal{ sizeof(TextureStreamingGPUInfo) };
 	std::shared_ptr<br::render::VersionedBufferFamily> m_textureImageTableFamily;
-	std::vector<std::shared_ptr<const br::render::TextureImageHoldChunk>> m_textureImageHoldChunks;
+	std::shared_ptr<const org::BindingTableVersion> m_textureImageBindings;
 	std::mutex m_pendingTextureImageTableMetadataMutex;
 	std::vector<std::weak_ptr<TextureAsset>> m_pendingTextureImageTableMetadata;
 	std::unordered_set<std::uint32_t> m_pendingTextureImageTableMetadataIDs;

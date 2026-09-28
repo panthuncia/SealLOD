@@ -9,6 +9,8 @@
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Assets/MaterialTextureStreaming.h"
 #include "Render/MemoryIntrospectionAPI.h"
+#include "Render/BindingTable.h"
+#include "Render/PublicationBindingBundle.h"
 #include <BasicRenderer/Streaming/RendererStateRequestService.h>
 #include <BasicRenderer/Pipeline/RendererSettings.h>
 #include "Materials/TextureStreaming/TextureBindingArtifacts.h"
@@ -1281,7 +1283,7 @@ void TextureStreamingManager::PublishTextureImageTable()
 	input->logicalExtent = m_textureImageTableLogicalExtent;
 	input->bufferKey = m_textureImageTableFamily->Configuration().address;
 	input->bufferFamily = m_textureImageTableFamily;
-	input->holdChunks = m_textureImageHoldChunks;
+	input->bindings = m_textureImageBindings;
 	const auto root = m_rendererStateRequests->SubmitLatest({
 		{ br::render::ArtifactKind::TextureImageTable, 0, 0 }, m_textureImageTableEpoch,
 		// The image table is consumed through a published external SRV, outside
@@ -1522,28 +1524,35 @@ void TextureStreamingManager::FlushPendingTextureImageTableMetadata()
 		const auto published = texture->GetPublishedBindingSnapshot();
 		const TextureStreamingGPUInfo metadata =
 			BuildPublishedTextureStreamingGPUInfo(*texture, published, *m_descriptorService);
+		auto& descriptors = org::DescriptorHeapManager::GetInstance();
+		const auto cleanup = descriptors.GetResourceCleanupQueue();
+		org::BindingRecordBuilder recordBuilder(cleanup, sizeof(metadata));
+		recordBuilder.WriteBytes(0, std::as_bytes(std::span{ &metadata, std::size_t{ 1 } }));
+		if (metadata.imageDescriptorIndex != UINT32_MAX) {
+			auto binding = org::OwnedDescriptorBinding::CaptureResourceView(
+				org::PublicationBindingBundle::Capture(*published.image), {}, descriptors.DeviceGeneration(), cleanup);
+			if (binding.Index() != metadata.imageDescriptorIndex)
+				throw std::logic_error("Texture table bytes and captured image binding disagree");
+			recordBuilder.WriteBinding(offsetof(TextureStreamingGPUInfo, imageDescriptorIndex), std::move(binding));
+		}
+		if (metadata.samplerDescriptorIndex != UINT32_MAX) {
+			recordBuilder.WriteBinding(offsetof(TextureStreamingGPUInfo, samplerDescriptorIndex),
+				org::OwnedDescriptorBinding::CaptureSampler(metadata.samplerDescriptorIndex,
+					descriptors.DeviceGeneration(), descriptors.GetSamplerHeap(), cleanup));
+		}
+		auto record = recordBuilder.Seal();
+		org::BindingTableBuilder bindings(cleanup, m_textureImageBindings);
+		bindings.Set(streamingTextureID, record);
+		auto nextBindings = bindings.Seal();
 		const auto desiredExtent = (std::max)(m_textureImageTableLogicalExtent,
 			static_cast<std::uint64_t>(streamingTextureID) + 1u);
 		m_textureImageTableJournal.RequestCapacity(desiredExtent);
 		m_textureImageTableEpoch = m_textureImageTableJournal.AppendWrite(
 			streamingTextureID,
-			std::as_bytes(std::span{ &metadata, std::size_t{ 1 } }),
+			record->Bytes(),
 			desiredExtent);
 		m_textureImageTableLogicalExtent = desiredExtent;
-
-		const std::size_t chunkIndex = streamingTextureID /
-			br::render::kTextureImageHoldChunkSize;
-		const std::size_t entryIndex = streamingTextureID %
-			br::render::kTextureImageHoldChunkSize;
-		if (m_textureImageHoldChunks.size() <= chunkIndex) {
-			m_textureImageHoldChunks.resize(chunkIndex + 1u);
-		}
-		auto chunk = m_textureImageHoldChunks[chunkIndex]
-			? std::make_shared<br::render::TextureImageHoldChunk>(
-				*m_textureImageHoldChunks[chunkIndex])
-			: std::make_shared<br::render::TextureImageHoldChunk>();
-		chunk->images[entryIndex] = published.image;
-		m_textureImageHoldChunks[chunkIndex] = std::move(chunk);
+		m_textureImageBindings = std::move(nextBindings);
 		m_textureImageTableDirty = true;
 		AppendTextureDisplayGates(*texture, published, displayGates);
 	}

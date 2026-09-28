@@ -3,6 +3,7 @@
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
 #include "Resources/GloballyIndexedResource.h"
+#include "Render/BindingTable.h"
 #include <BasicTelemetry/Telemetry.h>
 
 namespace br::render {
@@ -28,13 +29,13 @@ ArtifactBuildResult BuildTextureImageTable(const ArtifactBuildContext& context) 
     table->contentEpoch = input->contentEpoch;
     table->logicalExtent = input->logicalExtent;
     table->table = buffer;
-    table->holdChunks = input->holdChunks;
+    table->bindings = input->bindings;
 
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     root->kind = PublishedFragmentKind::TextureImages;
     root->fragment.revision = context.revision;
     root->fragment.dependencyClosure = context.dependencies;
-    for (const auto& chunk : table->holdChunks) root->fragment.resourceHolds.push_back(chunk);
+    if (table->bindings) root->fragment.resourceHolds.push_back(table->bindings);
     root->fragment.payload = ArtifactPayload::Make<PublishedTextureImageTable>(table);
     auto resources = std::make_shared<PublishedResourceCatalog::ResourceList>();
     resources->push_back(buffer->resource);

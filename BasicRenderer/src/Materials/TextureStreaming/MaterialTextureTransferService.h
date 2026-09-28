@@ -14,11 +14,12 @@
 #include "Assets/Textures/TextureFactory.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <BasicRenderer/Streaming/SerializedTaskPump.h>
+#include <ORGModuleServices/Async/ArtifactResources.h>
 
 namespace org { class PixelBuffer; }
 namespace org { class Resource; }
 namespace br::render {
-struct GpuSubmissionSet;
+using org::async::GpuSubmissionSet;
 struct TextureTransferArtifact {
 	std::shared_ptr<org::PixelBuffer> image;
 	std::uint64_t generation = 0;

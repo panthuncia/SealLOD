@@ -182,6 +182,9 @@ private:
     [[nodiscard]] bool TaskTraceActive() const noexcept {
         return m_taskTraceContext.load(std::memory_order_acquire) != nullptr;
     }
+    // Installation/removal are control-plane operations. Keep the callback and
+    // context paired; a rejected second sink must not overwrite the first sink.
+    std::mutex m_taskTraceControlMutex;
     std::atomic<void*> m_taskTraceContext{ nullptr };
     std::atomic<TaskTraceCallback> m_taskTraceCallback{ nullptr };
     struct TaskTraceHazardSlot {

@@ -1067,16 +1067,17 @@ TaskSchedulerManager::QueueStats TaskSchedulerManager::GetQueueStats() const {
 bool TaskSchedulerManager::InstallTaskTraceSink(void* context,
     TaskTraceCallback callback) noexcept {
     if (!context || !callback) return false;
-    void* expected = nullptr;
+    std::lock_guard lock(m_taskTraceControlMutex);
+    if (const auto installed = m_taskTraceContext.load(std::memory_order_acquire))
+        return installed == context && m_taskTraceCallback.load(std::memory_order_acquire) == callback;
     m_taskTraceCallback.store(callback, std::memory_order_release);
-    if (m_taskTraceContext.compare_exchange_strong(expected, context,
-        std::memory_order_release, std::memory_order_acquire)) return true;
-    if (expected != context) m_taskTraceCallback.store(nullptr, std::memory_order_release);
-    return expected == context;
+    m_taskTraceContext.store(context, std::memory_order_release);
+    return true;
 }
 
 void TaskSchedulerManager::RemoveTaskTraceSink(void* context) noexcept {
     if (!context) return;
+    std::lock_guard lock(m_taskTraceControlMutex);
     void* expected = context;
     if (!m_taskTraceContext.compare_exchange_strong(expected, nullptr,
         std::memory_order_seq_cst, std::memory_order_acquire)) return;
