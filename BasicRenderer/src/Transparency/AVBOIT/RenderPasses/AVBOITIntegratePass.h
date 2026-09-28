@@ -11,7 +11,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct AVBOITIntegrateBindings {
-    org::ResourceBindingToken config, state, occupancy;
+    org::DeclaredViewToken config, state, occupancy;
 };
 
 class AVBOITIntegratePass final : public org::TypedRenderGraphPass<AVBOITIntegratePass,

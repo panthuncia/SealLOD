@@ -69,7 +69,7 @@ ReyesVirtualShadowHardwareRasterPass::~ReyesVirtualShadowHardwareRasterPass() = 
 ReyesShadowHardwareBindings ReyesVirtualShadowHardwareRasterPass::Declare(org::PassBuilder& declaration) {
     declaration.PreferQueue(org::QueueKind::Graphics);
     auto* builder = &declaration;
-    builder->WithShaderResource(
+    builder->ShaderResource(
             Builtin::PerObjectBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
@@ -82,26 +82,26 @@ ReyesShadowHardwareBindings ReyesVirtualShadowHardwareRasterPass::Declare(org::P
             Builtin::Shadows::CLodDirectionalPageViewInfo,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
-            Builtin::SkeletonResources::SkinningInstanceInfo)
-		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
-        .WithUnorderedAccess(
-            Builtin::Shadows::CLodStats)
-        .IsGeometryPass();
+            Builtin::SkeletonResources::SkinningInstanceInfo);
+    builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+    builder->UnorderedAccess(
+            Builtin::Shadows::CLodStats);
+    builder->IsGeometryPass();
 
     if (m_slabResourceGroup) {
-        builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+        builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
 
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder->ConstantBuffer(Builtin::PerFrameBuffer);
     ReyesShadowHardwareBindings bindings{
-        builder->BindShaderResource(m_visibleClustersBuffer), builder->BindShaderResource(m_rasterBucketsHistogramBuffer),
-        builder->BindIndirectArguments(m_rasterBucketsIndirectArgsBuffer), builder->BindShaderResource(m_packedRasterWorkGroupsBuffer),
-        builder->BindShaderResource(m_compactedRasterWorkIndicesBuffer), builder->BindShaderResource(m_rasterWorkBuffer),
-        builder->BindShaderResource(m_diceQueueBuffer), builder->BindShaderResource(m_tessTableConfigsBuffer),
-        builder->BindShaderResource(m_tessTableVerticesBuffer), builder->BindShaderResource(m_tessTableTrianglesBuffer),
-        builder->BindUnorderedAccess(m_virtualShadowPageTableTexture), builder->BindUnorderedAccess(m_virtualShadowPhysicalPagesTexture),
-        builder->BindUnorderedAccess(m_virtualShadowDynamicPagesTexture), builder->BindShaderResource(m_virtualShadowClipmapInfoBuffer),
-        builder->BindUnorderedAccess(m_telemetryBuffer), builder->BindShaderResource(m_viewRasterInfoBuffer)};
+        builder->ShaderResource(m_visibleClustersBuffer).View(), builder->ShaderResource(m_rasterBucketsHistogramBuffer).View(),
+        builder->IndirectArguments(m_rasterBucketsIndirectArgsBuffer), builder->ShaderResource(m_packedRasterWorkGroupsBuffer).View(),
+        builder->ShaderResource(m_compactedRasterWorkIndicesBuffer).View(), builder->ShaderResource(m_rasterWorkBuffer).View(),
+        builder->ShaderResource(m_diceQueueBuffer).View(), builder->ShaderResource(m_tessTableConfigsBuffer).View(),
+        builder->ShaderResource(m_tessTableVerticesBuffer).View(), builder->ShaderResource(m_tessTableTrianglesBuffer).View(),
+        builder->UnorderedAccess(m_virtualShadowPageTableTexture, org::UavView{static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}).View(), builder->UnorderedAccess(m_virtualShadowPhysicalPagesTexture).View(),
+        builder->UnorderedAccess(m_virtualShadowDynamicPagesTexture).View(), builder->ShaderResource(m_virtualShadowClipmapInfoBuffer).View(),
+        builder->UnorderedAccess(m_telemetryBuffer).View(), builder->ShaderResource(m_viewRasterInfoBuffer).View()};
     bindings.width = m_passWidth; bindings.height = m_passHeight;
     bindings.pageTableResolution = m_shadowConfig.pageTableResolution;
     bindings.virtualResolution = m_shadowConfig.virtualResolution;
@@ -167,14 +167,14 @@ ReyesShadowHardwareFrameData ReyesVirtualShadowHardwareRasterPass::Prepare(
     data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
     data.signature = preparation.CaptureCommandSignature(m_rasterizationCommandSignature);
     data.arguments = preparation.CaptureResource(bindings.indirectArgs);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     data.constants[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = srv(bindings.histogram);
     data.constants[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = srv(bindings.visible);
     data.constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.viewInfo);
     data.constants[CLOD_RASTER_REYES_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
     data.constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-        uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
+        uav(bindings.pageTable);
     data.constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
     data.constants[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] =
         uav(bindings.physicalPages);

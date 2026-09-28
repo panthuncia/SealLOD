@@ -21,7 +21,7 @@ public:
     void Declare(org::PassBuilder& declaration) {
         auto* builder = &declaration;
         builder->PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        builder->WithLegacyInterop(Builtin::Color::HDRColorTarget,
+        builder->LegacyInterop(Builtin::Color::HDRColorTarget,
             Builtin::Surface::Motion,
             Builtin::PrimaryCamera::DepthTexture,
             Builtin::Surface::NormalRoughness,
@@ -37,7 +37,7 @@ public:
 
 		org::ResourceIdentifierAndRange outResource(Builtin::PostProcessing::ScreenSpaceReflections, {});
 
-        builder->WithInternalTransition(
+        builder->InternalTransition(
             outResource,
             outState);
     }

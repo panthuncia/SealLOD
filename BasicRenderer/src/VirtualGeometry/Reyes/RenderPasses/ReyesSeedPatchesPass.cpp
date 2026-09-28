@@ -56,12 +56,12 @@ ReyesSeedPatchesBindings ReyesSeedPatchesPass::Declare(org::PassBuilder& builder
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     if (m_slabResourceGroup) {
-        builder.WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+        builder.ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
-    return {builder.BindShaderResource(m_visibleClustersBuffer), builder.BindShaderResource(m_ownedClustersBuffer),
-        builder.BindShaderResource(m_ownedClustersCounterBuffer), builder.BindUnorderedAccess(m_splitQueueBuffer),
-        builder.BindUnorderedAccess(m_splitQueueCounterBuffer), builder.BindUnorderedAccess(m_splitQueueOverflowBuffer),
-        builder.BindIndirectArguments(m_indirectArgsBuffer), m_maxSplitQueueEntries, m_phaseIndex};
+    return {builder.ShaderResource(m_visibleClustersBuffer), builder.ShaderResource(m_ownedClustersBuffer),
+        builder.ShaderResource(m_ownedClustersCounterBuffer), builder.UnorderedAccess(m_splitQueueBuffer),
+        builder.UnorderedAccess(m_splitQueueCounterBuffer), builder.UnorderedAccess(m_splitQueueOverflowBuffer),
+        builder.IndirectArguments(m_indirectArgsBuffer), m_maxSplitQueueEntries, m_phaseIndex};
 }
 
 br::render::PreparedComputeIndirect ReyesSeedPatchesPass::Prepare(
@@ -74,8 +74,8 @@ br::render::PreparedComputeIndirect ReyesSeedPatchesPass::Prepare(
     auto program = preparation.CaptureProgramBinding(m_pso);
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     data.constants[CLOD_REYES_SEED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = srv(bindings.visible);
     data.constants[CLOD_REYES_SEED_OWNED_CLUSTERS_DESCRIPTOR_INDEX] = srv(bindings.owned);
     data.constants[CLOD_REYES_SEED_OWNED_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.ownedCounter);

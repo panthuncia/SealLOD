@@ -9,9 +9,12 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 
 #include <vector>
+#include <array>
+#include <span>
+#include <utility>
 
 struct EnvironmentConversionBindings {
-    struct Job { org::ResourceBindingToken source, destination; uint32_t size = 0; };
+    struct Job { org::DeclaredViewToken source; std::array<org::DeclaredViewToken, 6> faces; uint32_t size = 0; };
     std::vector<Job> jobs;
 };
 
@@ -28,8 +31,14 @@ public:
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         for (const auto& j : m_pending) {
             if (!j->work.srcTexture || !j->work.dstCubemap) continue;
-            bindings.jobs.push_back({builder.BindShaderResource(j->work.srcTexture),
-                builder.BindUnorderedAccess(j->work.dstCubemap), j->work.dstCubemap->GetWidth()});
+            std::array<org::UavView, 6> views{};
+            for (uint32_t face = 0; face < views.size(); ++face) views[face].slice = face;
+            auto destination = builder.UnorderedAccess(j->work.dstCubemap, std::span<const org::UavView>(views));
+            EnvironmentConversionBindings::Job job{};
+            job.source = builder.ShaderResource(j->work.srcTexture).View();
+            for (uint32_t face = 0; face < job.faces.size(); ++face) job.faces[face] = destination.View(face);
+            job.size = j->work.dstCubemap->GetWidth();
+            bindings.jobs.push_back(std::move(job));
         }
 
         m_declaredResourcesChanged = false;
@@ -56,11 +65,9 @@ public:
         data.constantCount = 4;
         for (const auto& job : bindings.jobs) {
             const auto size = job.size;
-            const auto src = preparation.ResolveView(job.source,
-                {org::BindlessViewKind::ShaderResource}).index;
+            const auto src = preparation.Resolve(job.source).index;
             for (uint32_t face = 0; face < 6; ++face)
-                data.faces.push_back({{src, preparation.ResolveView(job.destination,
-                    {org::BindlessViewKind::UnorderedAccess, UINT32_MAX, 0, face}).index,
+                data.faces.push_back({{src, preparation.Resolve(job.faces[face]).index,
                     face, size, 0}, (size + 7) / 8});
         }
         m_work.Reserve(m_pending, preparation);

@@ -16,8 +16,8 @@ namespace org { class PixelBuffer; }
 class VirtualShadowCasterRegistry;
 
 struct VirtualShadowMapSetupBindings {
-    org::ResourceBindingToken pageTable, pageMetadata, allocationCount, dirtyFlags;
-    org::ResourceBindingToken clipmapInfo, markClipmapData, stats, runtimeState, fallbackCandidateCount;
+    org::DeclaredViewToken pageTable, pageMetadata, allocationCount, dirtyFlags;
+    org::DeclaredViewToken clipmapInfo, markClipmapData, stats, runtimeState, fallbackCandidateCount;
     uint32_t packedFlags = 0;
     float autoBiasScale = 0.0f;
 };

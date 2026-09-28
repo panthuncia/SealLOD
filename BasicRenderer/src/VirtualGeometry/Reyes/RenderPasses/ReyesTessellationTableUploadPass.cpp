@@ -17,7 +17,7 @@ ReyesTessellationTableUploadPass::ReyesTessellationTableUploadPass(
 void ReyesTessellationTableUploadPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithShaderResource(
+    builder.ShaderResource(
         m_tessTableConfigsBuffer,
         m_tessTableVerticesBuffer,
         m_tessTableTrianglesBuffer);

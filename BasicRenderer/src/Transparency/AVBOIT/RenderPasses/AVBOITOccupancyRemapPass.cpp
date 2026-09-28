@@ -28,8 +28,8 @@ AVBOITOccupancyRemapPass::AVBOITOccupancyRemapPass(
 AVBOITOccupancyRemapBindings AVBOITOccupancyRemapPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithUnorderedAccess(m_occupancySliceMaskTexture);
-    return {builder.BindShaderResource(m_configBuffer), builder.BindShaderResource(m_depthWarpLUTBuffer), builder.BindUnorderedAccess(m_occupancyTexture)};
+    builder.UnorderedAccess(m_occupancySliceMaskTexture);
+    return {builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_depthWarpLUTBuffer), builder.UnorderedAccess(m_occupancyTexture)};
 }
 
 br::render::PreparedComputeDispatch AVBOITOccupancyRemapPass::Prepare(const AVBOITOccupancyRemapBindings& bindings, const org::PassPrepareContext& preparation) const {
@@ -48,8 +48,8 @@ br::render::PreparedComputeDispatch AVBOITOccupancyRemapPass::Prepare(const AVBO
     data.descriptorIndices = std::move(program.descriptorIndices);
 
     auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_CONFIG_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_LUT_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.lut, {org::BindlessViewKind::ShaderResource}).index;
+    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_CONFIG_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.config).index;
+    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_LUT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.lut).index;
 
     const auto& occupancy = preparation.Describe(bindings.occupancy);
     const uint32_t groupCountX = (occupancy.texture.width + 7u) / 8u;

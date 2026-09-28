@@ -21,14 +21,16 @@ ClearDeepVisibilityPass::ClearDeepVisibilityPass(
 ClearDeepVisibilityBindings ClearDeepVisibilityPass::Declare(org::PassBuilder& declaration)
 {
     auto* builder = &declaration;
-    builder->WithUnorderedAccess(
+    builder->UnorderedAccess(
         m_deepVisibilityCounterBuffer,
         m_deepVisibilityOverflowCounterBuffer,
         m_deepVisibilityStatsBuffer);
     ClearDeepVisibilityBindings bindings;
     bindings.headPointers.reserve(m_headPointerTextures.size());
-    for (auto& texture : m_headPointerTextures)
-        bindings.headPointers.push_back(builder->BindUnorderedAccess(texture));
+    for (auto& texture : m_headPointerTextures) {
+        auto clear = builder->UnorderedAccessClear(texture);
+        bindings.headPointers.push_back({clear.View(0), clear.View(1)});
+    }
     return bindings;
 }
 
@@ -72,10 +74,9 @@ br::render::PreparedResourceClears ClearDeepVisibilityPass::Prepare(
     data.resourceHeap = context.textureDescriptorHeap.GetHandle();
     data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
     for (const auto binding : bindings.headPointers) {
-        data.clears.push_back({preparation.CaptureResource(binding),
-            preparation.CaptureView(binding,
-                {org::BindlessViewKind::NonShaderVisibleUnorderedAccess}),
-            preparation.CaptureView(binding, {org::BindlessViewKind::UnorderedAccess}),
+        data.clears.push_back({preparation.DeclaredReference(binding.gpu),
+            preparation.Capture(binding.cpu),
+            preparation.Capture(binding.gpu),
             0.0f, 0xFFFFFFFFu, false});
     }
     return data;

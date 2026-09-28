@@ -88,38 +88,38 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
 
 RasterBucketCompactAndArgsBindings RasterBucketCompactAndArgsPass::Declare(org::PassBuilder& builder) {
     RasterBucketCompactAndArgsBindings bindings{
-        builder.BindShaderResource(m_visibleClustersBuffer),
-        builder.BindShaderResource(m_visibleClusterTransformIndicesBuffer),
-        builder.BindShaderResource(m_visibleClustersCounterBuffer),
-        builder.BindShaderResource(m_compactedBaseCounterBuffer)};
-    builder.WithShaderResource(
+        builder.ShaderResource(m_visibleClustersBuffer),
+        builder.ShaderResource(m_visibleClusterTransformIndicesBuffer),
+        builder.ShaderResource(m_visibleClustersCounterBuffer),
+        builder.ShaderResource(m_compactedBaseCounterBuffer)};
+    builder.ShaderResource(
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
             Builtin::SkeletonResources::SkinningInstanceInfo,
             Builtin::PerMeshBuffer,
             Builtin::PerMaterialDataBuffer,
-            Builtin::Material::TextureStreamingMetadataBuffer)
-        .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
-    bindings.indirectCommand = builder.BindIndirectArguments(m_indirectCommand);
-    bindings.histogram = builder.BindShaderResource(m_histogramBuffer);
-    bindings.offsets = builder.BindShaderResource(m_offsetsBuffer);
-    bindings.writeCursor = builder.BindUnorderedAccess(m_writeCursorBuffer);
-    bindings.compactedClusters = builder.BindUnorderedAccess(m_compactedClustersBuffer);
-    bindings.compactedTransforms = builder.BindUnorderedAccess(m_compactedClusterTransformIndicesBuffer);
-    bindings.indirectArgs = builder.BindUnorderedAccess(m_indirectArgsBuffer);
-    bindings.sortedMapping = builder.BindUnorderedAccess(m_sortedToUnsortedMappingBuffer);
+            Builtin::Material::TextureStreamingMetadataBuffer);
+    builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+    bindings.indirectCommand = builder.IndirectArguments(m_indirectCommand);
+    bindings.histogram = builder.ShaderResource(m_histogramBuffer);
+    bindings.offsets = builder.ShaderResource(m_offsetsBuffer);
+    bindings.writeCursor = builder.UnorderedAccess(m_writeCursorBuffer);
+    bindings.compactedClusters = builder.UnorderedAccess(m_compactedClustersBuffer);
+    bindings.compactedTransforms = builder.UnorderedAccess(m_compactedClusterTransformIndicesBuffer);
+    bindings.indirectArgs = builder.UnorderedAccess(m_indirectArgsBuffer);
+    bindings.sortedMapping = builder.UnorderedAccess(m_sortedToUnsortedMappingBuffer);
     if (m_reyesOwnershipBitsetBuffer) {
-        bindings.reyesOwnership = builder.BindShaderResource(m_reyesOwnershipBitsetBuffer);
+        bindings.reyesOwnership = builder.ShaderResource(m_reyesOwnershipBitsetBuffer);
     }
     if (m_readBaseCounterBuffer) {
-        bindings.readBaseCount = builder.BindShaderResource(m_readBaseCounterBuffer);
+        bindings.readBaseCount = builder.ShaderResource(m_readBaseCounterBuffer);
     }
     if (m_telemetryBuffer) {
-        bindings.telemetry = builder.BindUnorderedAccess(m_telemetryBuffer);
+        bindings.telemetry = builder.UnorderedAccess(m_telemetryBuffer);
     }
 
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.numBuckets = m_numBuckets;
     bindings.maxVisibleClusters = static_cast<uint32_t>(m_maxVisibleClusters);
     bindings.enabled = m_enabled && m_numBuckets != 0u;
@@ -149,14 +149,14 @@ RasterBucketCompactAndArgsPreparedData RasterBucketCompactAndArgsPass::Prepare(
     preparation.Retain(m_compactionCommandSignature);
     data.commandSignature = (*m_compactionCommandSignature)->GetHandle();
     data.indirectCommand = preparation.CaptureResource(bindings.indirectCommand);
-    data.cursorResource = preparation.CaptureResource(bindings.writeCursor);
+    data.cursorResource = preparation.DeclaredReference(bindings.writeCursor);
     data.clearDescriptorIndices = CaptureResourceDescriptorIndices(m_clearPipeline.GetResourceDescriptorSlots());
     data.compactDescriptorIndices = CaptureResourceDescriptorIndices(m_pso.GetResourceDescriptorSlots());
     data.clearConstants.resize(NumMiscUintRootConstants);
     data.compactConstants.resize(NumMiscUintRootConstants);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
-    const auto indirectArgsResource = preparation.CaptureResource(bindings.indirectArgs);
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto indirectArgsResource = preparation.DeclaredReference(bindings.indirectArgs);
     const auto indirectArgsHandle = preparation.ResolveCapturedResource(indirectArgsResource).GetHandle();
     BT_PLOT("CLod.RasterArgs.WriterResourceIndex", static_cast<int64_t>(indirectArgsHandle.index));
     BT_PLOT("CLod.RasterArgs.WriterResourceGeneration", static_cast<int64_t>(indirectArgsHandle.generation));

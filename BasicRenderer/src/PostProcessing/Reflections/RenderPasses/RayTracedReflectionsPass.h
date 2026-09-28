@@ -27,8 +27,8 @@ struct RayTracedReflectionsFrameData {
 };
 
 struct RayTracedReflectionsBindings {
-    org::ResourceBindingToken output, pageSources, buildInfos, clasData, clasAddresses;
-    org::ResourceBindingToken blasData, blasAddresses, tlasInstances;
+    org::DeclaredViewToken outputShader, outputCpu, pageSources, buildInfos;
+    org::DeclaredViewToken blasAddressesSrv, tlasInstances;
     bool hasServiceResources = false;
 };
 
@@ -48,24 +48,28 @@ public:
     }
 
     RayTracedReflectionsBindings Declare(org::PassBuilder& builder) {
-        builder.WithShaderResource(Builtin::Color::HDRColorTarget,
+        builder.ShaderResource(Builtin::Color::HDRColorTarget,
             Builtin::PrimaryCamera::DepthTexture, Builtin::Surface::NormalRoughness,
             Builtin::Surface::SpecularAo, Builtin::CameraBuffer,
             Builtin::Environment::CurrentPrefilteredCubemap);
         RayTracedReflectionsBindings bindings{};
-        bindings.output = builder.BindUnorderedAccess(
-            Builtin::PostProcessing::ScreenSpaceReflections);
+        const auto output = builder.UnorderedAccessClear(Builtin::PostProcessing::ScreenSpaceReflections);
+        bindings.outputShader = output.View(0);
+        bindings.outputCpu = output.View(1);
         if (m_pageSources && m_buildInfos) {
-            bindings.pageSources = builder.BindShaderResource(m_pageSources);
-            bindings.buildInfos = builder.BindUnorderedAccess(m_buildInfos);
-            if (m_clasData) bindings.clasData = builder.BindUnorderedAccess(m_clasData);
-            if (m_clasAddresses) bindings.clasAddresses = builder.BindUnorderedAccess(m_clasAddresses);
-            if (m_blasData) bindings.blasData = builder.BindUnorderedAccess(m_blasData);
-            if (m_blasAddresses) bindings.blasAddresses = builder.BindUnorderedAccess(m_blasAddresses);
-            if (m_tlasInstances) bindings.tlasInstances = builder.BindUnorderedAccess(m_tlasInstances);
+            bindings.pageSources = builder.ShaderResource(m_pageSources).View();
+            bindings.buildInfos = builder.UnorderedAccess(m_buildInfos).View();
+            if (m_clasData) builder.UnorderedAccess(m_clasData);
+            if (m_clasAddresses) builder.UnorderedAccess(m_clasAddresses);
+            if (m_blasData) builder.UnorderedAccess(m_blasData);
+            if (m_blasAddresses) {
+                builder.UnorderedAccess(m_blasAddresses);
+                bindings.blasAddressesSrv = builder.ShaderResource(m_blasAddresses).View();
+            }
+            if (m_tlasInstances) bindings.tlasInstances = builder.UnorderedAccess(m_tlasInstances).View();
             bindings.hasServiceResources = true;
         }
-        builder.WithInternalTransition(
+        builder.InternalTransition(
             org::ResourceIdentifierAndRange(Builtin::PostProcessing::ScreenSpaceReflections, {}),
             org::ResourceState{.access = rhi::ResourceAccessType::Common,
                 .layout = rhi::ResourceLayout::Common,
@@ -127,20 +131,13 @@ public:
         frame.samplerHeap = context->samplerDescriptorHeap.GetHandle();
         frame.pageSourceCount = service->GetGpuPageSourceCount();
         frame.buildClusterCapacity = service->GetStats().buildableClusters;
-        frame.pageSourcesSRV = preparation.ResolveView(bindings.pageSources,
-            {org::BindlessViewKind::ShaderResource}).index;
-        frame.buildInfosUAV = preparation.ResolveView(bindings.buildInfos,
-            {org::BindlessViewKind::UnorderedAccess}).index;
-        if (frame.blasAddresses) frame.blasAddressesSRV = preparation.ResolveView(
-            bindings.blasAddresses, {org::BindlessViewKind::ShaderResource}).index;
-        if (frame.tlasInstances) frame.tlasInstancesUAV = preparation.ResolveView(
-            bindings.tlasInstances, {org::BindlessViewKind::UnorderedAccess}).index;
-        frame.outputCpuUAV = preparation.CaptureView(bindings.output,
-            {org::BindlessViewKind::NonShaderVisibleUnorderedAccess});
-        frame.outputShaderUAV = preparation.CaptureView(bindings.output,
-            {org::BindlessViewKind::UnorderedAccess});
-        frame.outputUAV = preparation.ResolveView(bindings.output,
-            {org::BindlessViewKind::UnorderedAccess}).index;
+        frame.pageSourcesSRV = preparation.Resolve(bindings.pageSources).index;
+        frame.buildInfosUAV = preparation.Resolve(bindings.buildInfos).index;
+        if (frame.blasAddresses) frame.blasAddressesSRV = preparation.Resolve(bindings.blasAddressesSrv).index;
+        if (frame.tlasInstances) frame.tlasInstancesUAV = preparation.Resolve(bindings.tlasInstances).index;
+        frame.outputCpuUAV = preparation.Capture(bindings.outputCpu);
+        frame.outputShaderUAV = preparation.Capture(bindings.outputShader);
+        frame.outputUAV = preparation.Resolve(bindings.outputShader).index;
         preparation.Retain(frame.output);
         preparation.Retain(frame.pageSources); preparation.Retain(frame.buildInfos);
         preparation.Retain(frame.clasData); preparation.Retain(frame.clasAddresses);

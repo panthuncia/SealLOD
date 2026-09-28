@@ -17,7 +17,10 @@ struct ReyesHistogramFrameData {
 };
 
 struct ReyesRasterWorkHistogramBindings {
-    org::ResourceBindingToken work, counter, indirectArgs, histogram;
+    org::DeclaredViewToken work;
+    org::DeclaredViewToken counter;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken histogram;
     uint32_t numBuckets = 0;
 };
 

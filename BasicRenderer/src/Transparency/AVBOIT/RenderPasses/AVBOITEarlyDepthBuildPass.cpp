@@ -30,7 +30,7 @@ AVBOITEarlyDepthBuildPass::AVBOITEarlyDepthBuildPass(
 AVBOITEarlyDepthBuildBindings AVBOITEarlyDepthBuildPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.BindShaderResource(m_configBuffer), builder.BindShaderResource(m_zeroTransmittanceSliceTexture), builder.BindUnorderedAccess(m_tileCommandsBuffer), builder.BindUnorderedAccess(m_tileCountBuffer)};
+    return {builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_zeroTransmittanceSliceTexture), builder.UnorderedAccess(m_tileCommandsBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
 }
 
 void AVBOITEarlyDepthBuildPass::Update(const org::UpdateExecutionContext& executionContext)
@@ -70,10 +70,10 @@ br::render::PreparedComputeDispatch AVBOITEarlyDepthBuildPass::Prepare(const AVB
     data.descriptorIndices = std::move(program.descriptorIndices);
 
     auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_CONFIG_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_ZERO_SLICE_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.zeroSlice, {org::BindlessViewKind::ShaderResource}).index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMANDS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.commands, {org::BindlessViewKind::UnorderedAccess}).index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMAND_COUNT_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.count, {org::BindlessViewKind::UnorderedAccess}).index;
+    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_CONFIG_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.config).index;
+    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_ZERO_SLICE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.zeroSlice).index;
+    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMANDS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.commands).index;
+    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMAND_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.count).index;
 
     const auto& zeroSlice = preparation.Describe(bindings.zeroSlice);
     const uint32_t groupCountX = (zeroSlice.texture.width + 7u) / 8u;

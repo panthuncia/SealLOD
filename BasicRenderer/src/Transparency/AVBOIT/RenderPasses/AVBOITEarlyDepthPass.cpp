@@ -96,13 +96,13 @@ AVBOITEarlyDepthPass::AVBOITEarlyDepthPass(
 
 AVBOITEarlyDepthBindings AVBOITEarlyDepthPass::Declare(org::PassBuilder& builder)
 {
-    builder.WithShaderResource(Builtin::CameraBuffer);
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ShaderResource(Builtin::CameraBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return {
-        builder.BindShaderResource(m_configBuffer),
-        builder.BindIndirectArguments(m_tileCommandsBuffer),
-        builder.BindIndirectArguments(m_tileCountBuffer),
-        builder.BindDepthReadWrite(m_earlyDepthTexture)
+        builder.ShaderResource(m_configBuffer),
+        builder.IndirectArguments(m_tileCommandsBuffer),
+        builder.IndirectArguments(m_tileCountBuffer),
+        builder.DepthReadWrite(m_earlyDepthTexture)
     };
 }
 
@@ -119,14 +119,14 @@ AVBOITEarlyDepthFrameData AVBOITEarlyDepthPass::Prepare(
     data.signature = preparation.CaptureCommandSignature(m_commandSignature);
     data.arguments = preparation.CaptureResource(bindings.arguments);
     data.count = preparation.CaptureResource(bindings.count);
-    data.depth = preparation.CaptureView(bindings.depth, {org::BindlessViewKind::DepthStencil});
-    data.clear = preparation.ClearValue(bindings.depth);
+    data.depth = preparation.Capture(bindings.depth);
+    data.clear = preparation.ClearValue(bindings.depth.Resource());
     const auto& depthDesc = preparation.Describe(bindings.depth);
     data.width = depthDesc.texture.width; data.height = depthDesc.texture.height;
     data.maximumCount = static_cast<uint32_t>(preparation.Describe(bindings.arguments).buffer.sizeBytes
         / sizeof(CLodAVBOITEarlyDepthTileIndirectCommand));
     data.constants[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.config).index;
     return data;
 }
 

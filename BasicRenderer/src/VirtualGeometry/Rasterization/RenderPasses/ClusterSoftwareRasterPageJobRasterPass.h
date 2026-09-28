@@ -28,9 +28,10 @@ struct ClusterPageJobRasterFrameData {
 };
 
 struct ClusterPageJobRasterBindings {
-    org::ResourceBindingToken compactedVisibleClusters, compactedVisibleClusterTransformIndices;
-    org::ResourceBindingToken viewRasterInfo, pageTable, clipmapInfo, physicalPages, dynamicPages, stats;
-    std::array<org::ResourceBindingToken, 2> pageJobCounts, pageJobRecords, indirectArgs;
+    org::DeclaredViewToken compactedVisibleClusters, compactedVisibleClusterTransformIndices;
+    org::DeclaredViewToken viewRasterInfo, pageTable, clipmapInfo, physicalPages, dynamicPages, stats;
+    std::array<org::DeclaredViewToken, 2> pageJobCounts, pageJobRecords;
+    std::array<org::ResourceBindingToken, 2> indirectArgs;
 };
 
 class ClusterSoftwareRasterPageJobRasterPass : public org::TypedRenderGraphPass<ClusterSoftwareRasterPageJobRasterPass,
@@ -98,7 +99,7 @@ public:
     {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* builder = &declaration;
-        builder->WithShaderResource(
+        builder->ShaderResource(
                 Builtin::PerMeshBuffer,
                 Builtin::PerMeshInstanceBuffer,
                 Builtin::InstanceDrawRecordBuffer,
@@ -115,39 +116,25 @@ public:
                 Builtin::SkeletonResources::SkinningInstanceInfo,
                 Builtin::CLod::AssemblyTransforms,
                 Builtin::CLod::AssemblyBoneRemaps,
-                Builtin::CLod::AssemblyBoneRemapIndices,
-                m_compactedVisibleClustersBuffer,
-                m_compactedVisibleClusterTransformIndicesBuffer,
-                m_viewRasterInfoBuffer,
-                m_virtualShadowClipmapInfoBuffer,
-                m_pageJobCountBuffers[0],
-                m_pageJobRecordsBuffers[0],
-                m_pageJobCountBuffers[1],
-                m_pageJobRecordsBuffers[1])
-            .WithUnorderedAccess(
-                m_virtualShadowPageTableTexture,
-                m_virtualShadowPhysicalPagesTexture,
-                m_virtualShadowDynamicPagesTexture,
-                m_virtualShadowStatsBuffer)
-            .WithIndirectArguments(m_pageJobIndirectArgsBuffers[0], m_pageJobIndirectArgsBuffers[1])
-            .WithConstantBuffer(Builtin::PerFrameBuffer);
+                Builtin::CLod::AssemblyBoneRemapIndices);
+        builder->ConstantBuffer(Builtin::PerFrameBuffer);
 
         if (m_slabResourceGroup) {
-            builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+            builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
         }
         ClusterPageJobRasterBindings bindings{
-            builder->BindShaderResource(m_compactedVisibleClustersBuffer),
-            builder->BindShaderResource(m_compactedVisibleClusterTransformIndicesBuffer),
-            builder->BindShaderResource(m_viewRasterInfoBuffer),
-            builder->BindUnorderedAccess(m_virtualShadowPageTableTexture),
-            builder->BindShaderResource(m_virtualShadowClipmapInfoBuffer),
-            builder->BindUnorderedAccess(m_virtualShadowPhysicalPagesTexture),
-            builder->BindUnorderedAccess(m_virtualShadowDynamicPagesTexture),
-            builder->BindUnorderedAccess(m_virtualShadowStatsBuffer)};
+            builder->ShaderResource(m_compactedVisibleClustersBuffer).View(),
+            builder->ShaderResource(m_compactedVisibleClusterTransformIndicesBuffer).View(),
+            builder->ShaderResource(m_viewRasterInfoBuffer).View(),
+            builder->UnorderedAccess(m_virtualShadowPageTableTexture, org::UavView{static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}).View(),
+            builder->ShaderResource(m_virtualShadowClipmapInfoBuffer).View(),
+            builder->UnorderedAccess(m_virtualShadowPhysicalPagesTexture).View(),
+            builder->UnorderedAccess(m_virtualShadowDynamicPagesTexture).View(),
+            builder->UnorderedAccess(m_virtualShadowStatsBuffer).View()};
         for (uint32_t i = 0; i < 2; ++i) {
-            bindings.pageJobCounts[i] = builder->BindShaderResource(m_pageJobCountBuffers[i]);
-            bindings.pageJobRecords[i] = builder->BindShaderResource(m_pageJobRecordsBuffers[i]);
-            bindings.indirectArgs[i] = builder->BindIndirectArguments(m_pageJobIndirectArgsBuffers[i]);
+            bindings.pageJobCounts[i] = builder->ShaderResource(m_pageJobCountBuffers[i]).View();
+            bindings.pageJobRecords[i] = builder->ShaderResource(m_pageJobRecordsBuffers[i]).View();
+            bindings.indirectArgs[i] = builder->IndirectArguments(m_pageJobIndirectArgsBuffers[i]);
         }
         return bindings;
     }
@@ -168,11 +155,11 @@ public:
 
         const auto& context = *preparation.preparationData->Get<UpdateContext>();
         const auto signature = preparation.CaptureCommandSignature(m_commandSignature);
-        const auto srv = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) {
-            return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource, variant}).index;
+        const auto srv = [&](org::DeclaredViewToken token) {
+            return preparation.Resolve(token).index;
         };
-        const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) {
-            return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index;
+        const auto uav = [&](org::DeclaredViewToken token) {
+            return preparation.Resolve(token).index;
         };
         uint32_t misc[NumMiscUintRootConstants] = {};
         misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = srv(bindings.compactedVisibleClusters);
@@ -180,7 +167,7 @@ public:
             srv(bindings.compactedVisibleClusterTransformIndices);
         misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.viewRasterInfo);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-            uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
+            uav(bindings.pageTable);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = uav(bindings.physicalPages);
         misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =

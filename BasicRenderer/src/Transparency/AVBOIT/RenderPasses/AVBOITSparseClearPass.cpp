@@ -32,12 +32,12 @@ AVBOITSparseClearPass::AVBOITSparseClearPass(
 AVBOITSparseClearBindings AVBOITSparseClearPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithUnorderedAccess(
+    builder.UnorderedAccess(
             m_occupancySliceMaskTexture,
             m_scalarExtinctionTexture,
             m_chromaticExtinctionTexture,
             m_zeroTransmittanceSliceTexture);
-    return {builder.BindShaderResource(m_configBuffer), builder.BindUnorderedAccess(m_occupancyTexture)};
+    return {builder.ShaderResource(m_configBuffer), builder.UnorderedAccess(m_occupancyTexture)};
 }
 
 br::render::PreparedComputeDispatch AVBOITSparseClearPass::Prepare(const AVBOITSparseClearBindings& bindings, const org::PassPrepareContext& preparation) const {
@@ -57,7 +57,7 @@ br::render::PreparedComputeDispatch AVBOITSparseClearPass::Prepare(const AVBOITS
     data.descriptorIndices = std::move(program.descriptorIndices);
 
     auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_INTEGRATE_CONFIG_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
+    misc[CLOD_AVBOIT_VBOIT_INTEGRATE_CONFIG_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.config).index;
 
     const auto& occupancy = preparation.Describe(bindings.occupancy);
     const uint32_t groupCountX = (occupancy.texture.width + 7u) / 8u;

@@ -25,7 +25,7 @@ AVBOITAdaptiveFitUpdatePass::AVBOITAdaptiveFitUpdatePass(
 AVBOITAdaptiveFitUpdateBindings AVBOITAdaptiveFitUpdatePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.BindShaderResource(m_configBuffer), builder.BindShaderResource(m_occupancyHistogramBuffer), builder.BindUnorderedAccess(m_fitStateBuffer)};
+    return {builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_fitStateBuffer)};
 }
 
 br::render::PreparedComputeDispatch AVBOITAdaptiveFitUpdatePass::Prepare(const AVBOITAdaptiveFitUpdateBindings& bindings, const org::PassPrepareContext& preparation) const {
@@ -45,11 +45,11 @@ br::render::PreparedComputeDispatch AVBOITAdaptiveFitUpdatePass::Prepare(const A
 
     auto& misc = data.constants;
     misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.config).index;
     misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_STATE_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.state, {org::BindlessViewKind::UnorderedAccess}).index;
+        preparation.Resolve(bindings.state).index;
     misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_HISTOGRAM_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.histogram).index;
 
     data.groupsX = 1u; data.groupsY = 1u; data.groupsZ = 1u;
     return data;

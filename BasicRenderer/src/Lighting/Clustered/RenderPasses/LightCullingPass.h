@@ -16,10 +16,10 @@ public:
 	}
 
 	void Declare(org::PassBuilder& builder) {
-		builder.WithShaderResource(Builtin::CameraBuffer, Builtin::Light::ActiveLightIndices, Builtin::Light::InfoBuffer)
-			.WithUnorderedAccess(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer, Builtin::Light::PagesCounter);
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer)
-			.PreferQueue(org::QueueKind::Compute);
+		builder.ShaderResource(Builtin::CameraBuffer, Builtin::Light::ActiveLightIndices, Builtin::Light::InfoBuffer);
+		builder.UnorderedAccess(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer, Builtin::Light::PagesCounter);
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
+		builder.PreferQueue(org::QueueKind::Compute);
 	}
 
 	void Initialize() {

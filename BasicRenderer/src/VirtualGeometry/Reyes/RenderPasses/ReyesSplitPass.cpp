@@ -95,7 +95,7 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
 {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
-    builder->WithShaderResource(
+    builder->ShaderResource(
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
@@ -105,49 +105,50 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
             Builtin::PerMaterialOpenPBRDataBuffer,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CullingCameraBuffer,
-            Builtin::CameraBuffer)
-		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+            Builtin::CameraBuffer);
+    builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     ReyesSplitBindings bindings;
-    bindings.visible = builder->BindShaderResource(m_visibleClustersBuffer);
-    bindings.inputQueue = builder->BindShaderResource(m_inputSplitQueueBuffer);
-    bindings.inputCounter = builder->BindShaderResource(m_inputSplitQueueCounterBuffer);
-    bindings.outputQueue = builder->BindUnorderedAccess(m_outputSplitQueueBuffer);
-    bindings.outputCounter = builder->BindUnorderedAccess(m_outputSplitQueueCounterBuffer);
-    bindings.outputOverflow = builder->BindUnorderedAccess(m_outputSplitQueueOverflowBuffer);
-    bindings.diceQueue = builder->BindUnorderedAccess(m_diceQueueBuffer);
-    bindings.diceCounter = builder->BindUnorderedAccess(m_diceQueueCounterBuffer);
-    bindings.diceOverflow = builder->BindUnorderedAccess(m_diceQueueOverflowBuffer);
-    bindings.tessConfigs = builder->BindShaderResource(m_tessTableConfigsBuffer);
-    bindings.tessVertices = builder->BindShaderResource(m_tessTableVerticesBuffer);
-    bindings.tessTriangles = builder->BindShaderResource(m_tessTableTrianglesBuffer);
-    bindings.indirectArgs = builder->BindIndirectArguments(m_indirectArgsBuffer);
-    bindings.telemetry = builder->BindUnorderedAccess(m_telemetryBuffer);
+    bindings.visible = builder->ShaderResource(m_visibleClustersBuffer).View();
+    bindings.inputQueue = builder->ShaderResource(m_inputSplitQueueBuffer).View();
+    bindings.inputCounter = builder->ShaderResource(m_inputSplitQueueCounterBuffer).View();
+    bindings.outputQueue = builder->UnorderedAccess(m_outputSplitQueueBuffer).View();
+    bindings.outputCounter = builder->UnorderedAccess(m_outputSplitQueueCounterBuffer).View();
+    bindings.outputOverflow = builder->UnorderedAccess(m_outputSplitQueueOverflowBuffer).View();
+    bindings.diceQueue = builder->UnorderedAccess(m_diceQueueBuffer).View();
+    bindings.diceCounter = builder->UnorderedAccess(m_diceQueueCounterBuffer).View();
+    bindings.diceOverflow = builder->UnorderedAccess(m_diceQueueOverflowBuffer).View();
+    bindings.tessConfigs = builder->ShaderResource(m_tessTableConfigsBuffer).View();
+    bindings.tessVertices = builder->ShaderResource(m_tessTableVerticesBuffer).View();
+    bindings.tessTriangles = builder->ShaderResource(m_tessTableTrianglesBuffer).View();
+    bindings.indirectArgs = builder->IndirectArguments(m_indirectArgsBuffer);
+    bindings.telemetry = builder->UnorderedAccess(m_telemetryBuffer).View();
     if (m_enableViewDepthOcclusion) {
-        builder->WithShaderResource(Builtin::PrimaryCamera::LinearDepthMap);
+        m_viewDepthTable.Declare(*builder);
+        bindings.viewDepthLayout = m_viewDepthTable.Layout();
         bindings.hasViewDepth = true;
     }
     if (m_replaySplitQueueBuffer) {
-        bindings.replayQueue = builder->BindUnorderedAccess(m_replaySplitQueueBuffer); bindings.hasReplayQueue = true;
+        bindings.replayQueue = builder->UnorderedAccess(m_replaySplitQueueBuffer).View(); bindings.hasReplayQueue = true;
     }
     if (m_replaySplitQueueCounterBuffer) {
-        bindings.replayCounter = builder->BindUnorderedAccess(m_replaySplitQueueCounterBuffer); bindings.hasReplayCounter = true;
+        bindings.replayCounter = builder->UnorderedAccess(m_replaySplitQueueCounterBuffer).View(); bindings.hasReplayCounter = true;
     }
     if (m_replaySplitQueueOverflowBuffer) {
-        bindings.replayOverflow = builder->BindUnorderedAccess(m_replaySplitQueueOverflowBuffer); bindings.hasReplayOverflow = true;
+        bindings.replayOverflow = builder->UnorderedAccess(m_replaySplitQueueOverflowBuffer).View(); bindings.hasReplayOverflow = true;
     }
     if (m_shadowClipmapInfoBuffer) {
-        bindings.shadowClipmap = builder->BindShaderResource(m_shadowClipmapInfoBuffer);
-        builder->WithShaderResource(Builtin::Shadows::CLodCompactShadowCameras);
+        bindings.shadowClipmap = builder->ShaderResource(m_shadowClipmapInfoBuffer).View();
+        builder->ShaderResource(Builtin::Shadows::CLodCompactShadowCameras);
         bindings.hasShadowClipmap = true;
     }
     if (m_shadowDirtyHierarchyTexture) {
-        bindings.shadowDirty = builder->BindShaderResource(m_shadowDirtyHierarchyTexture); bindings.hasShadowDirty = true;
+        bindings.shadowDirty = builder->ShaderResource(m_shadowDirtyHierarchyTexture, org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}).View(); bindings.hasShadowDirty = true;
     }
     if (m_shadowNonRasterableHierarchyTexture) {
-        bindings.shadowNonRasterable = builder->BindShaderResource(m_shadowNonRasterableHierarchyTexture); bindings.hasShadowNonRasterable = true;
+        bindings.shadowNonRasterable = builder->ShaderResource(m_shadowNonRasterableHierarchyTexture, org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}).View(); bindings.hasShadowNonRasterable = true;
     }
 
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder->ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.capacity = m_maxSplitQueueEntries;
     bindings.maxPassCount = m_maxSplitPassCount;
     bindings.phase = m_phaseIndex;
@@ -157,6 +158,12 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
 }
 
 
+
+void ReyesSplitPass::Update(const org::UpdateExecutionContext& executionContext) {
+    const auto* context = executionContext.hostData->Get<UpdateContext>();
+    m_declaredResourcesChanged = m_enableViewDepthOcclusion
+        && m_viewDepthTable.Update(context->Views(), m_phaseIndex == 1u);
+}
 
 ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     const org::PassPrepareContext& preparation) const
@@ -174,10 +181,10 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     data.split.descriptorIndices = std::move(splitProgram.descriptorIndices);
     data.split.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
     data.split.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
-    data.outputCounters = {preparation.CaptureResource(bindings.outputCounter), preparation.CaptureResource(bindings.outputOverflow)};
+    data.outputCounters = {preparation.DeclaredReference(bindings.outputCounter), preparation.DeclaredReference(bindings.outputOverflow)};
     auto& c = data.split.constants;
-    const auto srv = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource, variant}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     c[CLOD_REYES_SPLIT_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.visible);
     c[CLOD_REYES_SPLIT_MAX_PASS_COUNT] = bindings.maxPassCount;
     c[CLOD_REYES_SPLIT_INPUT_QUEUE_DESCRIPTOR_INDEX] = srv(bindings.inputQueue);
@@ -194,10 +201,10 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     c[CLOD_REYES_SPLIT_QUEUE_CAPACITY] = bindings.capacity;
     c[CLOD_REYES_SPLIT_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
     c[CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = bindings.hasShadowClipmap ? srv(bindings.shadowClipmap) : 0xFFFFFFFFu;
-    c[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty ? srv(bindings.shadowDirty, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
-    c[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowNonRasterable ? srv(bindings.shadowNonRasterable, static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty ? srv(bindings.shadowDirty) : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowNonRasterable ? srv(bindings.shadowNonRasterable) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.hasViewDepth
-        ? BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).Publish(preparation, m_viewDepthPublisher)
+        ? bindings.viewDepthLayout.Publish(preparation, m_viewDepthPublisher, m_viewDepthTable.Rows())
         : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_DESCRIPTOR_INDEX] = bindings.hasReplayQueue ? uav(bindings.replayQueue) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasReplayCounter ? uav(bindings.replayCounter) : 0xFFFFFFFFu;
@@ -215,8 +222,6 @@ void ReyesSplitPass::InvocationRevision(const org::PassPrepareContext& preparati
     out.push_back(br::render::PipelineRevision(m_clearCountersPso));
     out.push_back(br::render::PipelineRevision(m_pso));
     out.push_back(br::render::OwnerRevision(m_commandSignature));
-    if (m_enableViewDepthOcclusion)
-        BuildCLodViewDepthTable(CLodPreparationSnapshot(preparation).Views(), m_phaseIndex == 1u).AppendRevision(preparation, out);
 }
 
 void ReyesSplitPass::Record(const ReyesSplitBindings&, const ReyesSplitFrameData& data, org::PassRecordContext& recording) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <span>
+
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedFullscreenDraw.h"
 #include "Runtime/Device/DeviceManager.h"
@@ -11,8 +13,7 @@
 #include "Resources/PixelBuffer.h"
 
 struct BloomBlendBindings {
-    org::ResourceBindingToken bloom;
-    org::ResourceBindingToken target;
+    org::DeclaredViewToken bloomMip1, bloomMip2, target;
 };
 
 class BloomBlendPass : public org::TypedRenderGraphPass<BloomBlendPass,
@@ -24,10 +25,9 @@ public:
     }
 
     BloomBlendBindings Declare(org::PassBuilder& builder) {
-        return {
-            builder.BindShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ 1, 2 })),
-            builder.BindRenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 }))
-        };
+        const org::SrvView bloomViews[] = {{UINT32_MAX, 1}, {UINT32_MAX, 2}};
+        auto bloom = builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{1, 2}), std::span<const org::SrvView>{bloomViews});
+        return {bloom.View(0), bloom.View(1), builder.RenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{0, 1}))};
     }
 
     br::render::PreparedFullscreenDraw Prepare(const BloomBlendBindings& bindings,
@@ -36,17 +36,14 @@ public:
         br::render::PreparedFullscreenDraw data{};
         data.resourceHeap = context->textureDescriptorHeap.GetHandle();
         data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.renderTargetReference = preparation.CaptureView(bindings.target,
-            {org::BindlessViewKind::RenderTarget});
+        data.renderTargetReference = preparation.Capture(bindings.target);
         const auto& targetDesc = preparation.Describe(bindings.target);
         data.width = targetDesc.texture.width;
         data.height = targetDesc.texture.height;
         data.constantStage = rhi::ShaderStage::AllGraphics;
         br::render::BindPreparedProgram(data, preparation, m_pso);
-        data.constants[BLOOM_LOW_SOURCE_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.bloom,
-            {org::BindlessViewKind::ShaderResource, UINT32_MAX, 2}).index;
-        data.constants[BLOOM_SOURCE_SRV_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.bloom,
-            {org::BindlessViewKind::ShaderResource, UINT32_MAX, 1}).index;
+        data.constants[BLOOM_LOW_SOURCE_SRV_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.bloomMip2).index;
+        data.constants[BLOOM_SOURCE_SRV_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.bloomMip1).index;
         data.constants[DST_WIDTH] = data.width;
         data.constants[DST_HEIGHT] = data.height;
         data.constants[BLOOM_BLEND_FILTER_RADIUS] = as_uint(0.001f);

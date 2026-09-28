@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <vector>
 #include <array>
+#include <functional>
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
@@ -31,7 +32,9 @@ ASU1 mips
 */
 
 struct DownsampleMapBindings {
-    org::ResourceBindingToken source, counter, constants;
+    org::DeclaredViewToken source, counter, constants;
+    std::vector<org::DeclaredViewToken> mipUavs;
+    std::function<void(std::span<const uint32_t>)> uploadConstants;
     bool isArrayLike = false;
     unsigned int constantsIndex = 0;
     std::array<unsigned int, 3> dispatch{};
@@ -57,21 +60,29 @@ public:
         bindings.maps.reserve(m_perMapInfo.size());
         for (auto& [resourceID, map] : m_perMapInfo) {
             (void)resourceID;
-            auto source = declaration.BindShaderResource(
-                Subresources(map.sourceMap, org::Mip{0, 1}));
-            declaration.WithUnorderedAccess(Subresources(map.sourceMap, org::FromMip{1}));
-            auto counter = declaration.BindUnorderedAccess(map.pCounterResource);
-            auto constants = declaration.BindShaderResource(map.constantsBuffer);
-            auto frozenConstants = map.constants;
-            for (uint32_t i = 0; i < frozenConstants.mips; ++i) {
-                frozenConstants.mipUavDescriptorIndices[i] = declaration.DeclaredBindlessIndex(
-                    map.sourceMap, {org::BindlessViewKind::UnorderedAccess,
-                        UINT32_MAX, i + 1u, 0u});
-            }
-            map.constantsBuffer->UpdateView(map.pConstantsBufferView.get(), &frozenConstants);
-            bindings.maps.push_back({source, counter, constants, map.isArrayLike,
-                map.constantsIndex, {map.dispatchThreadGroupCountXY[0],
-                    map.dispatchThreadGroupCountXY[1], map.dispatchThreadGroupCountZ}});
+            const uint32_t variant = map.isArrayLike
+                ? static_cast<uint32_t>(org::SRVViewType::Texture2DArray) : UINT32_MAX;
+            auto source = declaration.ShaderResource(
+                Subresources(map.sourceMap, org::Mip{0, 1}), org::SrvView{variant}).View();
+            std::vector<org::UavView> views;
+            for (uint32_t i = 0; i < map.constants.mips; ++i) views.push_back({UINT32_MAX, i + 1u});
+            auto uavs = declaration.UnorderedAccess(Subresources(map.sourceMap, org::FromMip{1}),
+                std::span<const org::UavView>(views));
+            DownsampleMapBindings binding{};
+            binding.source = source;
+            binding.counter = declaration.UnorderedAccess(map.pCounterResource).View();
+            binding.constants = declaration.ShaderResource(map.constantsBuffer).View();
+            for (uint32_t i = 0; i < views.size(); ++i) binding.mipUavs.push_back(uavs.View(i));
+            binding.uploadConstants = [buffer = map.constantsBuffer, view = map.pConstantsBufferView,
+                frozen = map.constants](std::span<const uint32_t> indices) mutable {
+                for (size_t i = 0; i < indices.size(); ++i) frozen.mipUavDescriptorIndices[i] = indices[i];
+                buffer->UpdateView(view.get(), &frozen);
+            };
+            binding.isArrayLike = map.isArrayLike;
+            binding.constantsIndex = map.constantsIndex;
+            binding.dispatch = {map.dispatchThreadGroupCountXY[0],
+                map.dispatchThreadGroupCountXY[1], map.dispatchThreadGroupCountZ};
+            bindings.maps.push_back(std::move(binding));
         }
         return bindings;
     }
@@ -116,19 +127,16 @@ public:
         const auto array = preparation.CaptureProgramBinding(downsampleArrayPSO);
         data.steps.reserve(bindings.maps.size());
         for (const auto& map : bindings.maps) {
+            std::vector<uint32_t> mipIndices;
+            for (const auto& token : map.mipUavs) mipIndices.push_back(preparation.Resolve(token).index);
+            map.uploadConstants(mipIndices);
             const auto& program = map.isArrayLike ? array : standard;
             br::render::PreparedComputePipelineSequence::Step item{};
             item.program = program.program;
             item.descriptorIndices = program.descriptorIndices;
-            item.constants[UintRootConstant0] = preparation.ResolveView(map.counter,
-                {org::BindlessViewKind::UnorderedAccess}).index;
-            item.constants[UintRootConstant1] = map.isArrayLike
-                ? preparation.ResolveView(map.source, {org::BindlessViewKind::ShaderResource,
-                    static_cast<uint32_t>(org::SRVViewType::Texture2DArray)}).index
-                : preparation.ResolveView(map.source,
-                    {org::BindlessViewKind::ShaderResource}).index;
-            item.constants[UintRootConstant2] = preparation.ResolveView(map.constants,
-                {org::BindlessViewKind::ShaderResource}).index;
+            item.constants[UintRootConstant0] = preparation.Resolve(map.counter).index;
+            item.constants[UintRootConstant1] = preparation.Resolve(map.source).index;
+            item.constants[UintRootConstant2] = preparation.Resolve(map.constants).index;
             item.constants[UintRootConstant3] = map.constantsIndex;
             item.groupsX = map.dispatch[0];
             item.groupsY = map.dispatch[1];

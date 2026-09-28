@@ -23,9 +23,10 @@ struct RasterBucketCompactAndArgsPreparedData {
 };
 
 struct RasterBucketCompactAndArgsBindings {
-    org::ResourceBindingToken visibleClusters, visibleTransforms, visibleCount, compactedBaseCount, readBaseCount;
-    org::ResourceBindingToken indirectCommand, histogram, offsets, writeCursor, compactedClusters;
-    org::ResourceBindingToken compactedTransforms, indirectArgs, sortedMapping, reyesOwnership, telemetry;
+    org::DeclaredViewToken visibleClusters, visibleTransforms, visibleCount, compactedBaseCount, readBaseCount;
+    org::ResourceBindingToken indirectCommand;
+    org::DeclaredViewToken histogram, offsets, writeCursor, compactedClusters;
+    org::DeclaredViewToken compactedTransforms, indirectArgs, sortedMapping, reyesOwnership, telemetry;
     uint32_t numBuckets = 0;
     uint32_t maxVisibleClusters = 0;
     bool enabled = false;

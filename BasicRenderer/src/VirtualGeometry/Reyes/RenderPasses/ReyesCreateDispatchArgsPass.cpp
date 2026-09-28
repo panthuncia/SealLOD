@@ -31,14 +31,14 @@ ReyesCreateDispatchArgsPass::ReyesCreateDispatchArgsPass(
 ReyesCreateDispatchArgsBindings ReyesCreateDispatchArgsPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    ReyesCreateDispatchArgsBindings bindings{builder.BindShaderResource(m_sourceCounterBuffer),
-        builder.BindUnorderedAccess(m_indirectArgsBuffer)};
+    ReyesCreateDispatchArgsBindings bindings{builder.ShaderResource(m_sourceCounterBuffer),
+        builder.UnorderedAccess(m_indirectArgsBuffer)};
     if (m_sourceBaseCounterBuffer) {
-        bindings.sourceBaseCounter = builder.BindShaderResource(m_sourceBaseCounterBuffer);
+        bindings.sourceBaseCounter = builder.ShaderResource(m_sourceBaseCounterBuffer);
         bindings.hasSourceBaseCounter = true;
     }
 
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.threadsPerGroup = m_threadsPerGroup;
     bindings.maxWorkItemCount = m_maxWorkItemCount;
     return bindings;
@@ -71,11 +71,11 @@ br::render::PreparedComputeDispatch ReyesCreateDispatchArgsPass::Prepare(
     auto program = preparation.CaptureProgramBinding(std::move(payload));
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
-    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_SOURCE_COUNTER_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.sourceCounter, {org::BindlessViewKind::ShaderResource}).index;
-    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_OUTPUT_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.indirectArgs, {org::BindlessViewKind::UnorderedAccess}).index;
+    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_SOURCE_COUNTER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.sourceCounter).index;
+    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_OUTPUT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.indirectArgs).index;
     data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_THREADS_PER_GROUP] = bindings.threadsPerGroup;
     data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_SOURCE_BASE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasSourceBaseCounter
-        ? preparation.ResolveView(bindings.sourceBaseCounter, {org::BindlessViewKind::ShaderResource}).index : 0xFFFFFFFFu;
+        ? preparation.Resolve(bindings.sourceBaseCounter).index : 0xFFFFFFFFu;
     data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_MAX_WORK_ITEM_COUNT] = bindings.maxWorkItemCount;
     data.groupsX = 1;
     return data;

@@ -53,16 +53,18 @@ struct HierarchicalCullingPassInputs {
 };
 
 struct HierarchicalCullingBindings {
-    org::ResourceBindingToken visible, transforms, visibleCounter, swCounter, histogram, telemetry;
-    org::ResourceBindingToken replay, replayState, nodeInputs;
-    org::ResourceBindingToken shadowPageTable, shadowPhysicalPages, shadowActiveMetadata;
-    org::ResourceBindingToken shadowDynamicPages, shadowDynamicMetadata, shadowDirty;
-    org::ResourceBindingToken invalidatedInstances, predictiveCandidates, predictiveCount;
-    org::ResourceBindingToken phase1Counter, swWriteBase;
-    std::array<org::ResourceBindingToken, 4> voxelQueues{};
-    std::array<org::ResourceBindingToken, 3> pageJobQueues{};
-    org::ResourceBindingToken reyesDice, reyesDiceCounter, reyesOverflow;
-    org::ResourceBindingToken reyesConfigs, reyesVertices, reyesTriangles, reyesTelemetry;
+    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;
+    org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;
+    org::DeclaredViewToken visible, transforms, visibleCounter, visibleCounterSrv, swCounter, histogram, telemetry;
+    org::DeclaredViewToken replay, replayState, replayStateSrv, nodeInputs;
+    org::DeclaredViewToken shadowPageTable, shadowPhysicalPages, shadowActiveMetadata;
+    org::DeclaredViewToken shadowDynamicPages, shadowDynamicMetadata, shadowDirty;
+    org::DeclaredViewToken invalidatedInstances, predictiveCandidates, predictiveCount;
+    org::DeclaredViewToken phase1Counter, swWriteBase;
+    std::array<org::DeclaredViewToken, 4> voxelQueues{};
+    std::array<org::DeclaredViewToken, 3> pageJobQueues{};
+    org::DeclaredViewToken reyesDice, reyesDiceCounter, reyesOverflow;
+    org::DeclaredViewToken reyesConfigs, reyesVertices, reyesTriangles, reyesTelemetry;
     bool hasSw = false, hasViewRasterInfo = false, hasViewDepth = false, hasVirtualShadow = false;
     bool hasShadowDirty = false;
     bool hasShadowRaster = false, hasReyes = false, hasInvalidated = false, hasPredictive = false;
@@ -208,23 +210,17 @@ private:
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     std::shared_ptr<org::Buffer> m_phase1VisibleClustersCounterBuffer; // Phase 2 only: Phase 1's HW counter for write offset
     std::shared_ptr<org::Buffer> m_swWriteBaseCounterBuffer; // Phase 2 only: Phase 1's SW counter for top-down write offset
-    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
     std::vector<uint64_t> m_declaredDrawSetResourceIds;
-    std::vector<uint64_t> m_declaredVisibilityBufferIds;
     std::vector<CLodViewRasterInfo> m_cachedViewRasterInfo; // Descriptor-free rows shared with page-job passes.
     // Tables this pass's shaders read. They embed descriptors, so they are
     // published during preparation from the frame's bindings.
-    CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
-    CLodViewDepthTable ViewDepthTable(const org::PassPrepareContext&) const;
+    CLodDeclaredViewRasterTable m_viewRasterInfoLayout;
+    CLodDeclaredViewDepthTable m_viewDepthLayout;
     org::PreparedTablePublisher m_viewRasterInfoTable{"CLod Culling View Raster Info"};
     org::PreparedTablePublisher m_viewDepthTable{"CLod Culling View Depth SRV Indices"};
     std::vector<uint32_t> m_zeroTelemetryScratch;
-    CLodVoxelRasterQueueDescriptors m_cachedVoxelQueueDescriptors{};
-    CLodWorkGraphComputePageJobDescriptors m_cachedPageJobDescriptors{};
     uint64_t m_lastDrawSetDeclarationRevision = 0u;
     uint64_t m_lastViewResourceLayoutRevision = 0u;
-    bool m_hasCachedVoxelQueueDescriptors = false;
-    bool m_hasCachedPageJobDescriptors = false;
     struct WorkGraphInitializationState { std::atomic_bool initialized{false}; };
     std::shared_ptr<WorkGraphInitializationState> m_workGraphInitialization =
         std::make_shared<WorkGraphInitializationState>();

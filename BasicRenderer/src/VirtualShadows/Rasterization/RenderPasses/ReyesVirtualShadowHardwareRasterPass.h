@@ -30,8 +30,10 @@ struct ReyesShadowHardwareFrameData {
 };
 
 struct ReyesShadowHardwareBindings {
-    org::ResourceBindingToken visible, histogram, indirectArgs, packedWork, compactedIndices, work, diceQueue;
-    org::ResourceBindingToken tessConfigs, tessVertices, tessTriangles, pageTable, physicalPages, dynamicPages, clipmapInfo, telemetry, viewInfo;
+    org::DeclaredViewToken visible, histogram;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken packedWork, compactedIndices, work, diceQueue;
+    org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles, pageTable, physicalPages, dynamicPages, clipmapInfo, telemetry, viewInfo;
     uint32_t width = 1, height = 1, pageTableResolution = 0, virtualResolution = 0;
     std::vector<uint32_t> bucketFlags;
 };

@@ -17,7 +17,13 @@ enum class ReyesReplayMergeKind
 };
 
 struct ReyesReplayMergeBindings {
-    org::ResourceBindingToken source, sourceCounter, dest, destCounter, destOverflow, indirectArgs, telemetry;
+    org::DeclaredViewToken source;
+    org::DeclaredViewToken sourceCounter;
+    org::DeclaredViewToken dest;
+    org::DeclaredViewToken destCounter;
+    org::DeclaredViewToken destOverflow;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken telemetry;
     uint32_t capacity = 0;
 };
 

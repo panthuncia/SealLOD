@@ -18,10 +18,10 @@ public:
     }
 
     void Declare(org::PassBuilder& builder) {
-        builder.WithUnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer",
+        builder.UnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer",
             "Builtin::VisUtil::MaterialWriteCursorBuffer");
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer)
-            .PreferQueue(org::QueueKind::Compute);
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
+        builder.PreferQueue(org::QueueKind::Compute);
     }
 
     br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {

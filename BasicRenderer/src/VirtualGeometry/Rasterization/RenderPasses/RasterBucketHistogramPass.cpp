@@ -63,27 +63,27 @@ RasterBucketHistogramPass::~RasterBucketHistogramPass() = default;
 
 RasterBucketHistogramBindings RasterBucketHistogramPass::Declare(org::PassBuilder& builder) {
     RasterBucketHistogramBindings bindings{
-        builder.BindShaderResource(m_visibleClustersBuffer), builder.BindShaderResource(m_visibleClustersCounterBuffer),
-        builder.BindIndirectArguments(m_histogramIndirectCommand), builder.BindUnorderedAccess(m_histogramBuffer)};
-    builder.WithShaderResource(
+        builder.ShaderResource(m_visibleClustersBuffer), builder.ShaderResource(m_visibleClustersCounterBuffer),
+        builder.IndirectArguments(m_histogramIndirectCommand), builder.UnorderedAccess(m_histogramBuffer)};
+    builder.ShaderResource(
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerMaterialDataBuffer,
-            Builtin::Material::TextureStreamingMetadataBuffer)
-        .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+            Builtin::Material::TextureStreamingMetadataBuffer);
+    builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     if (m_reyesOwnershipBitsetBuffer) {
-        bindings.reyesOwnership = builder.BindShaderResource(m_reyesOwnershipBitsetBuffer);
+        bindings.reyesOwnership = builder.ShaderResource(m_reyesOwnershipBitsetBuffer);
     }
     if (m_telemetryBuffer) {
-        bindings.telemetry = builder.BindUnorderedAccess(m_telemetryBuffer);
+        bindings.telemetry = builder.UnorderedAccess(m_telemetryBuffer);
     }
     if (m_readBaseCounterBuffer) {
-        bindings.readBaseCounter = builder.BindShaderResource(m_readBaseCounterBuffer);
+        bindings.readBaseCounter = builder.ShaderResource(m_readBaseCounterBuffer);
     }
 
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.numBuckets = m_numBuckets;
     bindings.visibleCapacity = m_visibleClustersCapacity;
     bindings.enabled = m_enabled && m_numBuckets != 0u;
@@ -111,13 +111,13 @@ RasterBucketHistogramPreparedData RasterBucketHistogramPass::Prepare(
     preparation.Retain(m_histogramCommandSignature);
     data.commandSignature = (*m_histogramCommandSignature)->GetHandle();
     data.indirectArguments = preparation.CaptureResource(bindings.indirectArguments);
-    data.histogramResource = preparation.CaptureResource(bindings.histogram);
+    data.histogramResource = preparation.DeclaredReference(bindings.histogram);
     data.clearDescriptorIndices = CaptureResourceDescriptorIndices(m_clearPipeline.GetResourceDescriptorSlots());
     data.histogramDescriptorIndices = CaptureResourceDescriptorIndices(m_histogramPipeline.GetResourceDescriptorSlots());
     data.clearConstants.resize(NumMiscUintRootConstants);
     data.histogramConstants.resize(NumMiscUintRootConstants);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     data.enabled = enabled;
     data.clearGroups = (numBuckets + 63u) / 64u;
     data.clearConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = uav(bindings.histogram);

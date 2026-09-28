@@ -12,7 +12,7 @@ namespace org { class UploadInstance; }
 struct UpdateContext;
 
 struct CLodStreamingBeginFrameBindings {
-    org::ResourceBindingToken loadCounter, loadRequestKeys, usedGroupsCounter, sourceMismatchCounter;
+    org::DeclaredViewToken loadCounter, loadRequestKeys, usedGroupsCounter, sourceMismatchCounter;
     bool hasSourceMismatchCounter = false;
 };
 

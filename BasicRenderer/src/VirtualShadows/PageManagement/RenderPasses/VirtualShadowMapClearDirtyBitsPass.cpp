@@ -38,11 +38,11 @@ VirtualShadowMapClearDirtyBitsPass::VirtualShadowMapClearDirtyBitsPass(
 VirtualShadowMapClearDirtyBitsBindings VirtualShadowMapClearDirtyBitsPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return {
-        builder.BindUnorderedAccess(m_pageTableTexture),
-        builder.BindUnorderedAccess(m_dirtyFlagsBuffer),
-        builder.BindUnorderedAccess(m_statsBuffer),
+        builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}),
+        builder.UnorderedAccess(m_dirtyFlagsBuffer),
+        builder.UnorderedAccess(m_statsBuffer),
         CLodVSMRasterModeUsesLargeClusterPageJob(
             SettingsManager::GetInstance().getSettingGetter<CLodVSMRasterMode>(CLodVSMRasterModeSettingName)())};
 }
@@ -62,14 +62,11 @@ br::render::PreparedComputeDispatch VirtualShadowMapClearDirtyBitsPass::Prepare(
     data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(std::move(payload));
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
-    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.pageTable,
-        {org::BindlessViewKind::UnorderedAccess, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}).index;
+    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
-    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.stats,
-        {org::BindlessViewKind::UnorderedAccess}).index;
+    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
     data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_COMPLETE_EMPTY_ADMITTED_PAGES] = bindings.completeEmptyAdmittedPages ? 1u : 0u;
-    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.dirtyFlags,
-        {org::BindlessViewKind::UnorderedAccess}).index;
+    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.dirtyFlags).index;
     data.groupsX = (config.pageTableResolution + 7u) / 8u; data.groupsY = data.groupsX; data.groupsZ = CLodVirtualShadowMaxSupportedClipmapCount;
     return data;
 }

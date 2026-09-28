@@ -18,7 +18,7 @@ struct BloomSamplePassInputs {
 };
 
 struct BloomSampleBindings {
-    org::ResourceBindingToken source, target;
+    org::DeclaredViewToken source, target;
     uint32_t sourceMip = 0, targetMip = 0;
     bool upsample = false;
 };
@@ -42,12 +42,12 @@ public:
             const auto source = inputs.mipIndex == 0
                 ? Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 })
                 : Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ inputs.mipIndex, 1 });
-            return {builder.BindShaderResource(source),
-                builder.BindRenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1})),
+            return {builder.ShaderResource(source, {UINT32_MAX, sourceMip}),
+                builder.RenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1}), {UINT32_MAX, targetMip}),
                 sourceMip, targetMip, false};
         }
-        return {builder.BindShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1})),
-            builder.BindRenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1})),
+        return {builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1}), {UINT32_MAX, sourceMip}),
+            builder.RenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1}), {UINT32_MAX, targetMip}),
             sourceMip, targetMip, true};
     }
 
@@ -60,9 +60,8 @@ public:
         data.resourceHeap = context->textureDescriptorHeap.GetHandle();
         data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
         data.targetMip = bindings.targetMip;
-        data.targetResource = preparation.CaptureResource(bindings.target);
-        data.renderTargetReference = preparation.CaptureView(bindings.target,
-            {org::BindlessViewKind::RenderTarget, UINT32_MAX, bindings.targetMip});
+        data.targetResource = preparation.DeclaredReference(bindings.target);
+        data.renderTargetReference = preparation.Capture(bindings.target);
         br::render::BindPreparedProgram(data, preparation, bindings.upsample ? m_upsamplePso : m_downsamplePso);
         data.constantStage = rhi::ShaderStage::AllGraphics;
         const auto& targetDesc = preparation.Describe(bindings.target);
@@ -70,8 +69,7 @@ public:
         data.width = targetDesc.texture.width >> bindings.targetMip;
         data.height = targetDesc.texture.height >> bindings.targetMip;
         data.loadOp = bindings.upsample ? rhi::LoadOp::Load : rhi::LoadOp::DontCare;
-        data.constants[SOURCE_TEXTURE_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.source,
-            {org::BindlessViewKind::ShaderResource, UINT32_MAX, bindings.sourceMip}).index;
+        data.constants[SOURCE_TEXTURE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.source).index;
         data.constants[MIP_WIDTH] = sourceDesc.texture.width >> bindings.sourceMip;
         data.constants[MIP_HEIGHT] = sourceDesc.texture.height >> bindings.sourceMip;
         if (bindings.upsample) {

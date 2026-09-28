@@ -23,8 +23,9 @@ struct ClearVisibilityFrameData {
 };
 
 struct ClearVisibilityBindings {
-	std::array<org::ResourceBindingToken, 10> clears;
-	org::ResourceBindingToken depth;
+	struct Clear { org::DeclaredViewToken gpu, cpu; };
+	std::array<Clear, 10> clears;
+	org::DeclaredViewToken depth;
 };
 
 class ClearVisibilityBufferPass final
@@ -46,9 +47,11 @@ public:
 			Builtin::Surface::Payload1,
 			Builtin::Surface::Identity,
 			Builtin::DebugVisualization };
-		for (size_t i = 0; i < resources.size(); ++i)
-			bindings.clears[i] = builder.BindUnorderedAccessClear(resources[i]);
-		bindings.depth = builder.BindDepthStencilClear(Builtin::PrimaryCamera::DepthTexture);
+		for (size_t i = 0; i < resources.size(); ++i) {
+			auto clear = builder.UnorderedAccessClear(resources[i]);
+			bindings.clears[i] = {clear.View(0), clear.View(1)};
+		}
+		bindings.depth = builder.DepthStencilClear(Builtin::PrimaryCamera::DepthTexture);
 		return bindings;
 	}
 
@@ -61,19 +64,18 @@ public:
 		const auto* context = preparation.preparationData->Get<UpdateContext>();
 		data.textureHeap = context->textureDescriptorHeap.GetHandle();
 		data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-		auto append = [&](org::ResourceBindingToken token, bool integer) {
+		auto append = [&](ClearVisibilityBindings::Clear token, bool integer) {
 			data.clears.push_back({
-				preparation.CaptureResource(token),
-				preparation.CaptureView(token, {org::BindlessViewKind::NonShaderVisibleUnorderedAccess}),
-				preparation.CaptureView(token, {org::BindlessViewKind::UnorderedAccess}),
+				preparation.DeclaredReference(token.gpu),
+				preparation.Capture(token.cpu),
+				preparation.Capture(token.gpu),
 				integer });
 		};
 		append(bindings.clears[0], true);
 		append(bindings.clears[8], true);
 		for (size_t i = 1; i < 8; ++i) append(bindings.clears[i], false);
 		append(bindings.clears[9], true);
-		data.depth = preparation.CaptureView(bindings.depth,
-			{org::BindlessViewKind::DepthStencil});
+		data.depth = preparation.Capture(bindings.depth);
 		return data;
 	}
 

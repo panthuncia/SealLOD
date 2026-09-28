@@ -8,7 +8,7 @@
 
 #include <string>
 
-struct BRDFIntegrationBindings { org::ResourceBindingToken target; };
+struct BRDFIntegrationBindings { org::DeclaredViewToken target; };
 
 class BRDFIntegrationPass
     : public org::TypedRenderGraphPass<BRDFIntegrationPass,
@@ -19,16 +19,15 @@ public:
     }
 
     BRDFIntegrationBindings Declare(org::PassBuilder& builder) {
-        return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::BRDFLUT})};
+        return {builder.RenderTarget(org::ResourceIdentifier{Builtin::BRDFLUT}).View()};
     }
 
     br::render::PreparedFullscreenDraw Prepare(const BRDFIntegrationBindings& bindings,
         const org::PassPrepareContext& preparation) const {
         br::render::PreparedFullscreenDraw data{};
-        data.renderTargetReference = preparation.CaptureView(bindings.target,
-            {org::BindlessViewKind::RenderTarget});
+        data.renderTargetReference = preparation.Capture(bindings.target);
         data.loadOp = rhi::LoadOp::Clear;
-        data.clear = preparation.ClearValue(bindings.target);
+        data.clear = preparation.ClearValue(bindings.target.Resource());
         const auto& desc = preparation.Describe(bindings.target);
         data.width = desc.texture.width; data.height = desc.texture.height;
         data.debugName = "BRDF Integration Pass";

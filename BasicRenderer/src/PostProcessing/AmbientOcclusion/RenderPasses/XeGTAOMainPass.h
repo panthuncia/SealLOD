@@ -9,7 +9,7 @@
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 struct GTAOMainBindings {
-    org::ResourceBindingToken workingDepths, normals, workingAO, workingEdges;
+    org::DeclaredViewToken workingDepths, normals, workingAO, workingEdges;
 };
 
 class GTAOMainPass : public org::TypedRenderGraphPass<GTAOMainPass,
@@ -22,14 +22,14 @@ public:
 
     GTAOMainBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        builder.WithShaderResource(Builtin::CameraBuffer)
-            .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+        builder.ShaderResource(Builtin::CameraBuffer);
+        builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            builder.BindShaderResource(Builtin::GTAO::WorkingDepths),
-            builder.BindShaderResource(Builtin::Surface::NormalRoughness),
-            builder.BindUnorderedAccess(Builtin::GTAO::WorkingAOTerm1),
-            builder.BindUnorderedAccess(Builtin::GTAO::WorkingEdges) };
+            builder.ShaderResource(Builtin::GTAO::WorkingDepths),
+            builder.ShaderResource(Builtin::Surface::NormalRoughness),
+            builder.UnorderedAccess(Builtin::GTAO::WorkingAOTerm1),
+            builder.UnorderedAccess(Builtin::GTAO::WorkingEdges) };
     }
 
     void Initialize() {
@@ -49,14 +49,10 @@ public:
 
         data.constants[UintRootConstant0] = static_cast<uint32_t>(context->frameNumber % 64);
         data.constants[UintRootConstant1] = m_samplerIndex;
-        data.constants[UintRootConstant2] = preparation.ResolveView(bindings.workingDepths,
-            {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[UintRootConstant3] = preparation.ResolveView(bindings.normals,
-            {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[UintRootConstant4] = preparation.ResolveView(bindings.workingAO,
-            {org::BindlessViewKind::UnorderedAccess}).index;
-        data.constants[UintRootConstant5] = preparation.ResolveView(bindings.workingEdges,
-            {org::BindlessViewKind::UnorderedAccess}).index;
+        data.constants[UintRootConstant2] = preparation.Resolve(bindings.workingDepths).index;
+        data.constants[UintRootConstant3] = preparation.Resolve(bindings.normals).index;
+        data.constants[UintRootConstant4] = preparation.Resolve(bindings.workingAO).index;
+        data.constants[UintRootConstant5] = preparation.Resolve(bindings.workingEdges).index;
         data.groupsX = (context->renderResolution.x + XE_GTAO_NUMTHREADS_X - 1u) / XE_GTAO_NUMTHREADS_X;
         data.groupsY = (context->renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1u) / XE_GTAO_NUMTHREADS_Y;
         return data;

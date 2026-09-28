@@ -5,6 +5,7 @@
 
 #include <rhi.h>
 
+#include "Interfaces/IDynamicDeclaredResources.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
@@ -22,10 +23,12 @@ struct ReyesSplitFrameData {
 };
 
 struct ReyesSplitBindings {
-    org::ResourceBindingToken visible, inputQueue, inputCounter, outputQueue, outputCounter, outputOverflow;
-    org::ResourceBindingToken diceQueue, diceCounter, diceOverflow, tessConfigs, tessVertices, tessTriangles;
-    org::ResourceBindingToken shadowClipmap, shadowDirty, shadowNonRasterable, indirectArgs, telemetry;
-    org::ResourceBindingToken replayQueue, replayCounter, replayOverflow;
+    org::DeclaredViewToken visible, inputQueue, inputCounter, outputQueue, outputCounter, outputOverflow;
+    org::DeclaredViewToken diceQueue, diceCounter, diceOverflow, tessConfigs, tessVertices, tessTriangles;
+    org::DeclaredViewToken shadowClipmap, shadowDirty, shadowNonRasterable, telemetry;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken replayQueue, replayCounter, replayOverflow;
+    org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;
     uint32_t capacity = 0, maxPassCount = 0, phase = 0, coarseTargetBits = 0;
     bool hasShadowClipmap = false, hasShadowDirty = false, hasShadowNonRasterable = false;
     bool hasViewDepth = false, hasReplayQueue = false, hasReplayCounter = false, hasReplayOverflow = false;
@@ -33,7 +36,7 @@ struct ReyesSplitBindings {
 };
 
 class ReyesSplitPass final : public org::TypedRenderGraphPass<ReyesSplitPass,
-    ReyesSplitFrameData, ReyesSplitBindings> {
+    ReyesSplitFrameData, ReyesSplitBindings>, public org::IDynamicDeclaredResources {
 public:
     ReyesSplitPass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -63,6 +66,8 @@ public:
         std::shared_ptr<org::Buffer> replaySplitQueueOverflowBuffer = nullptr);
 
     ReyesSplitBindings Declare(org::PassBuilder& builder);
+    void Update(const org::UpdateExecutionContext& executionContext) override;
+    bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
     void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     ReyesSplitFrameData Prepare(const ReyesSplitBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesSplitBindings&, const ReyesSplitFrameData&, org::PassRecordContext&);
@@ -90,6 +95,8 @@ private:
     // it is published during preparation from the frame's bindings. Phase 1
     // tests against history depth, as the phase-1 culling pass does.
     org::PreparedTablePublisher m_viewDepthPublisher{"CLod Reyes Split View Depth SRV Indices"};
+    CLodDeclaredViewDepthTable m_viewDepthTable;
+    bool m_declaredResourcesChanged = true;
     std::shared_ptr<org::Buffer> m_replaySplitQueueBuffer;
     std::shared_ptr<org::Buffer> m_replaySplitQueueCounterBuffer;
     std::shared_ptr<org::Buffer> m_replaySplitQueueOverflowBuffer;

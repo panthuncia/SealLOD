@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/Textures/TextureFactory.h"
+#include <vector>
 
 class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<MipmappingPass, br::render::PreparedComputePipelineSequence>, public org::IDynamicDeclaredResources {
     public:
@@ -66,6 +67,11 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
 
         org::runtime::FrameWorkQueue<Job> m_jobs;
         org::runtime::FrameWorkQueue<Job>::Snapshot m_declaredJobs;
+        struct JobViews {
+            org::DeclaredViewToken constants, source, counter, alphaStats, alphaScales;
+            std::vector<org::DeclaredViewToken> alphaSources, outputs;
+        };
+        std::vector<JobViews> m_declaredJobViews;
 
         org::PipelineState m_psoFloat1_2D;
         org::PipelineState m_psoFloat1_Array;
@@ -121,6 +127,12 @@ class TextureFactory::BC7CompressionPass
         org::PipelineState& GetOrCreatePipeline();
         org::PipelineState CreatePipeline() const;
 
+        struct DeclaredJob {
+            std::shared_ptr<BC7CompressionJob> job;
+            std::vector<org::DeclaredViewToken> sources;
+            org::DeclaredViewToken blocks;
+        };
+        std::vector<DeclaredJob> m_declaredJobs;
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         mutable std::mutex m_pendingMutex;
         org::PipelineState m_psoMode6;
@@ -154,6 +166,11 @@ class TextureFactory::BC7CompressionCopyPass
         }
 
     private:
+        struct DeclaredJob {
+            std::shared_ptr<BC7CompressionJob> job;
+            org::ResourceBindingToken source, destination;
+        };
+        std::vector<DeclaredJob> m_declaredJobs;
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         mutable std::mutex m_pendingMutex;
         std::atomic_bool m_declaredResourcesChanged = true;
@@ -190,6 +207,11 @@ class TextureFactory::BC7CompressionReadbackPass
         }
 
     private:
+        struct DeclaredJob {
+            std::shared_ptr<BC7CompressionJob> job;
+            org::ResourceBindingToken source;
+        };
+        std::vector<DeclaredJob> m_declaredJobs;
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         mutable std::mutex m_pendingMutex;
         std::shared_ptr<org::runtime::IReadbackService> m_readbackService;

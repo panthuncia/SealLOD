@@ -27,9 +27,9 @@ RasterBucketBlockScanPass::RasterBucketBlockScanPass(
 }
 
 RasterBucketBlockScanBindings RasterBucketBlockScanPass::Declare(org::PassBuilder& builder) {
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.BindShaderResource(m_histogramBuffer), builder.BindUnorderedAccess(m_offsetsBuffer),
-        builder.BindUnorderedAccess(m_blockSumsBuffer), m_numBuckets, m_enabled};
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
+    return {builder.ShaderResource(m_histogramBuffer), builder.UnorderedAccess(m_offsetsBuffer),
+        builder.UnorderedAccess(m_blockSumsBuffer), m_numBuckets, m_enabled};
 }
 
 
@@ -47,9 +47,9 @@ br::render::PreparedComputeDispatch RasterBucketBlockScanPass::Prepare(
     data.descriptorIndices = CaptureResourceDescriptorIndices(m_pso.GetResourceDescriptorSlots());
     data.constants[UintRootConstant0] = numBuckets;
     data.constants[CLOD_PREFIX_SCAN_NUM_BUCKETS] = numBuckets;
-    data.constants[CLOD_PREFIX_SCAN_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::ShaderResource}).index;
-    data.constants[CLOD_PREFIX_SCAN_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.offsets, {org::BindlessViewKind::UnorderedAccess}).index;
-    data.constants[CLOD_PREFIX_SCAN_RASTER_BUCKETS_BLOCK_SUMS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.blockSums, {org::BindlessViewKind::UnorderedAccess}).index;
+    data.constants[CLOD_PREFIX_SCAN_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.histogram).index;
+    data.constants[CLOD_PREFIX_SCAN_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.offsets).index;
+    data.constants[CLOD_PREFIX_SCAN_RASTER_BUCKETS_BLOCK_SUMS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.blockSums).index;
     data.groupsX = enabled ? (numBuckets + m_blockSize - 1u) / m_blockSize : 0u;
     return data;
 }

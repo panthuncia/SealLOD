@@ -11,18 +11,18 @@
 namespace org { class Buffer; }
 
 struct ReyesQueueResetBindings {
-    org::ResourceBindingToken fullClusterCounter;
-    org::ResourceBindingToken ownedClusterCounter;
-    std::vector<org::ResourceBindingToken> splitQueueCounters;
-    std::vector<org::ResourceBindingToken> splitQueueOverflowCounters;
-    org::ResourceBindingToken diceQueueCounter;
-    org::ResourceBindingToken diceQueueOverflowCounter;
-    org::ResourceBindingToken telemetry;
-    std::optional<org::ResourceBindingToken> replaySplitQueueCounter;
-    std::optional<org::ResourceBindingToken> replaySplitQueueOverflowCounter;
-    std::optional<org::ResourceBindingToken> replayDiceQueueCounter;
-    std::optional<org::ResourceBindingToken> replayDiceQueueOverflowCounter;
-    std::optional<org::ResourceBindingToken> ownershipBitset;
+    org::DeclaredViewToken fullClusterCounter;
+    org::DeclaredViewToken ownedClusterCounter;
+    std::vector<org::DeclaredViewToken> splitQueueCounters;
+    std::vector<org::DeclaredViewToken> splitQueueOverflowCounters;
+    org::DeclaredViewToken diceQueueCounter;
+    org::DeclaredViewToken diceQueueOverflowCounter;
+    org::DeclaredViewToken telemetry;
+    std::optional<org::DeclaredViewToken> replaySplitQueueCounter;
+    std::optional<org::DeclaredViewToken> replaySplitQueueOverflowCounter;
+    std::optional<org::DeclaredViewToken> replayDiceQueueCounter;
+    std::optional<org::DeclaredViewToken> replayDiceQueueOverflowCounter;
+    std::optional<org::DeclaredViewToken> ownershipBitset;
 };
 
 class ReyesQueueResetPass final : public org::TypedRenderGraphPass<ReyesQueueResetPass,

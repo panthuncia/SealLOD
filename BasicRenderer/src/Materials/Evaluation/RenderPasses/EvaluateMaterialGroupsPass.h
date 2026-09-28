@@ -31,9 +31,9 @@
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeCommands.h"
 
 struct EvaluateMaterialGroupsBindings {
-    org::ResourceBindingToken visibleClusters, visibleClusterTransformIndices;
-    org::ResourceBindingToken reyesDiceQueue, reyesTessTableConfigs;
-    org::ResourceBindingToken reyesTessTableVertices, reyesTessTableTriangles;
+    org::DeclaredViewToken visibleClusters, visibleClusterTransformIndices;
+    org::DeclaredViewToken reyesDiceQueue, reyesTessTableConfigs;
+    org::DeclaredViewToken reyesTessTableVertices, reyesTessTableTriangles;
     bool hasReyesDiceQueue = false, hasReyesTessTables = false;
     uint32_t patchVisibilityIndexBase = 0;
 };
@@ -61,16 +61,16 @@ public:
 
     EvaluateMaterialGroupsBindings Declare(org::PassBuilder& builder) {
         EvaluateMaterialGroupsBindings bindings{};
-        bindings.visibleClusters = builder.BindShaderResource(m_visibleClusterResource);
-        bindings.visibleClusterTransformIndices = builder.BindShaderResource(m_visibleClusterTransformIndicesResource);
+        bindings.visibleClusters = builder.ShaderResource(m_visibleClusterResource);
+        bindings.visibleClusterTransformIndices = builder.ShaderResource(m_visibleClusterTransformIndicesResource);
         if (m_reyesDiceQueueResource) {
-            bindings.reyesDiceQueue = builder.BindShaderResource(m_reyesDiceQueueResource);
+            bindings.reyesDiceQueue = builder.ShaderResource(m_reyesDiceQueueResource);
             bindings.hasReyesDiceQueue = true;
         }
         if (m_reyesTessTableConfigsResource && m_reyesTessTableVerticesResource && m_reyesTessTableTrianglesResource) {
-            bindings.reyesTessTableConfigs = builder.BindShaderResource(m_reyesTessTableConfigsResource);
-            bindings.reyesTessTableVertices = builder.BindShaderResource(m_reyesTessTableVerticesResource);
-            bindings.reyesTessTableTriangles = builder.BindShaderResource(m_reyesTessTableTrianglesResource);
+            bindings.reyesTessTableConfigs = builder.ShaderResource(m_reyesTessTableConfigsResource);
+            bindings.reyesTessTableVertices = builder.ShaderResource(m_reyesTessTableVerticesResource);
+            bindings.reyesTessTableTriangles = builder.ShaderResource(m_reyesTessTableTrianglesResource);
             bindings.hasReyesTessTables = true;
         }
         bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
@@ -96,10 +96,10 @@ public:
         auto* b = &builder;
 
         if (m_slabResourceGroup) {
-            b->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+            b->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
         }
 
-        b->WithShaderResource("Builtin::VisUtil::PixelListBuffer",
+        b->ShaderResource("Builtin::VisUtil::PixelListBuffer",
             Builtin::PrimaryCamera::VisibilityTexture,
             Builtin::PrimaryCamera::LinearDepthMap,
             //Builtin::PrimaryCamera::VisibleClusterTable,
@@ -132,8 +132,8 @@ public:
             Builtin::CLod::AssemblyBoneRemaps,
             Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::SkeletonResources::InverseSkinMatrices,
-            Builtin::PerMaterialOpenPBRDataBuffer)
-            .WithUnorderedAccess(Builtin::Surface::BaseColorOpacity,
+            Builtin::PerMaterialOpenPBRDataBuffer);
+        b->UnorderedAccess(Builtin::Surface::BaseColorOpacity,
                 Builtin::Surface::NormalRoughness,
                 Builtin::Surface::SpecularAo,
                 Builtin::Surface::Emissive,
@@ -143,11 +143,11 @@ public:
                 Builtin::Surface::Identity,
                 Builtin::Surface::Records,
                 Builtin::DebugVisualization,
-				Builtin::Material::TextureStreamingFeedbackBuffer)
-    	.WithConstantBuffer(Builtin::PerFrameBuffer);
+				Builtin::Material::TextureStreamingFeedbackBuffer);
+        b->ConstantBuffer(Builtin::PerFrameBuffer);
 
         if (m_terrainRvtEnabled) {
-            b->WithShaderResource(
+            b->ShaderResource(
                 Builtin::Terrain::RvtInfo,
                 Builtin::Terrain::RvtClipInfos,
                 Builtin::Terrain::RvtPageTable,
@@ -158,14 +158,14 @@ public:
                 Builtin::Terrain::RvtHeightAtlas,
                 Builtin::Terrain::RvtAlbedoAtlas,
                 Builtin::Terrain::RvtNormalAtlas,
-                Builtin::Terrain::RvtMaterialAtlas)
-                .WithUnorderedAccess(
+                Builtin::Terrain::RvtMaterialAtlas);
+            b->UnorderedAccess(
                     Builtin::Terrain::RvtRequestMasks,
                     Builtin::Terrain::RvtRequestList,
                     Builtin::Terrain::RvtCounters,
                     Builtin::Terrain::RvtStats);
         }
-        b->WithIndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+        b->IndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
         return bindings;
     }
 
@@ -367,7 +367,7 @@ public:
             const org::PipelineState* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(shaderKey);
             if (!pso) return;
             if (!constants) constants = BuildConstants<uint32_t>(bindings,{},
-                [&](org::ResourceBindingToken token) { return preparation.ResolveView(token,{org::BindlessViewKind::ShaderResource}).index; });
+                [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; });
             auto capture = preparation;
             capture.captureDescriptorIndices = [this, &preparation](const org::PipelineResources& resources) {
                 return CaptureMaterialResourceDescriptorIndices(resources, preparation);
@@ -411,7 +411,7 @@ public:
         // four scalar values are fresh even when that interface is unchanged.
         EvaluateMaterialGroupsBindings unused;
         return {BuildConstants<uint32_t>(unused,CaptureRecordingConfiguration(),
-            [](org::ResourceBindingToken) { return 0u; })};
+            [](org::DeclaredViewToken) { return 0u; })};
     }
     static void Record(const br::render::PreparedComputeIndirectSequence& recipe, const MaterialEvaluationInvocation& invocation,
         org::PassRecordContext& recording) {

@@ -79,14 +79,14 @@ CLodStreamingFeedbackSortPass::CLodStreamingFeedbackSortPass(
 StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBuilder& declaration) {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     StreamingFeedbackSortBindings bindings;
-    bindings.requestCounter = declaration.BindShaderResource(m_requestCounter);
+    bindings.requestCounter = declaration.ShaderResource(m_requestCounter);
     const std::shared_ptr<org::Buffer> uavs[] = {m_requestKeys, m_requests, m_keyScratch, m_payloadScratch,
         m_sumTable, m_reduceTable, m_constants};
-    for (size_t i = 0; i < std::size(uavs); ++i) bindings.uavs[i] = declaration.BindUnorderedAccess(uavs[i]);
-    bindings.countScatterUav = declaration.BindUnorderedAccess(m_countScatterArgs);
-    bindings.reduceScanUav = declaration.BindUnorderedAccess(m_reduceScanArgs);
-    bindings.countScatterIndirect = declaration.BindIndirectArguments(m_countScatterArgs);
-    bindings.reduceScanIndirect = declaration.BindIndirectArguments(m_reduceScanArgs);
+    for (size_t i = 0; i < std::size(uavs); ++i) bindings.uavs[i] = declaration.UnorderedAccess(uavs[i]);
+    bindings.countScatterUav = declaration.UnorderedAccess(m_countScatterArgs);
+    bindings.reduceScanUav = declaration.UnorderedAccess(m_reduceScanArgs);
+    bindings.countScatterIndirect = declaration.IndirectArguments(m_countScatterArgs);
+    bindings.reduceScanIndirect = declaration.IndirectArguments(m_reduceScanArgs);
     return bindings;
 }
 
@@ -101,13 +101,13 @@ StreamingFeedbackSortFrameData CLodStreamingFeedbackSortPass::Prepare(
         preparation.CaptureProgramBinding(m_reducePso), preparation.CaptureProgramBinding(m_scanPso),
         preparation.CaptureProgramBinding(m_scanAddPso), preparation.CaptureProgramBinding(m_scatterPso)};
     for (size_t i = 0; i < bindings.uavs.size(); ++i)
-        data.uavResources[i] = preparation.CaptureResource(bindings.uavs[i]);
+        data.uavResources[i] = preparation.DeclaredReference(bindings.uavs[i]);
     data.indirectResources = {preparation.CaptureResource(bindings.countScatterIndirect),
         preparation.CaptureResource(bindings.reduceScanIndirect)};
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index; };
-    auto constants = [&](org::ResourceBindingToken sourceKeys, org::ResourceBindingToken destKeys,
-        org::ResourceBindingToken sourcePayloads, org::ResourceBindingToken destPayloads, uint32_t iteration) {
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    auto constants = [&](org::DeclaredViewToken sourceKeys, org::DeclaredViewToken destKeys,
+        org::DeclaredViewToken sourcePayloads, org::DeclaredViewToken destPayloads, uint32_t iteration) {
         std::array<unsigned int, NumMiscUintRootConstants> c{};
         c[CLOD_STREAMING_SORT_REQUEST_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.requestCounter);
         c[CLOD_STREAMING_SORT_CONSTANTS_DESCRIPTOR_INDEX] = uav(bindings.uavs[6]);

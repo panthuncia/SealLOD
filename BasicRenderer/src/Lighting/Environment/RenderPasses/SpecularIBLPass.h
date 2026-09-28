@@ -9,7 +9,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Scene/Scene.h"
 
-struct SpecularIBLBindings { org::ResourceBindingToken target; };
+struct SpecularIBLBindings { org::DeclaredViewToken target; };
 
 class SpecularIBLPass : public org::TypedRenderGraphPass<SpecularIBLPass,
     br::render::PreparedFullscreenDraw, SpecularIBLBindings> {
@@ -21,7 +21,7 @@ public:
     }
 
     SpecularIBLBindings Declare(org::PassBuilder& builder) {
-        builder.WithShaderResource(Builtin::PostProcessing::ScreenSpaceReflections,
+        builder.ShaderResource(Builtin::PostProcessing::ScreenSpaceReflections,
             Builtin::Environment::InfoBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
             Builtin::Surface::BaseColorOpacity,
@@ -35,21 +35,21 @@ public:
             Builtin::PrimaryCamera::DepthTexture,
 			Builtin::OpenPBR::FuzzLTC,
 			Builtin::OpenPBR::IdealMetalEnergyComplement,
-			Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
 			Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
-            Builtin::CameraBuffer).WithConstantBuffer(Builtin::PerFrameBuffer);
+            Builtin::CameraBuffer);
+        builder.ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
+            org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
+        builder.ConstantBuffer(Builtin::PerFrameBuffer);
 
-        builder.WithUnorderedAccess(Builtin::DebugVisualization);
+        builder.UnorderedAccess(Builtin::DebugVisualization);
 
         if (m_gtaoEnabled) {
-            builder.WithShaderResource(Builtin::GTAO::OutputAOTerm);
+            builder.ShaderResource(Builtin::GTAO::OutputAOTerm);
         }
-        return {builder.BindRenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget})};
+        return {builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget})};
     }
 
-    void Initialize() {
-		RegisterSRV(org::SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
-    }
+    void Initialize() {}
 
     br::render::PreparedFullscreenDraw Prepare(const SpecularIBLBindings& bindings,
         const org::PassPrepareContext& preparation) const {
@@ -57,8 +57,7 @@ public:
         br::render::PreparedFullscreenDraw data{};
         data.resourceHeap = context->textureDescriptorHeap.GetHandle();
         data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.renderTargetReference = preparation.CaptureView(bindings.target,
-            {org::BindlessViewKind::RenderTarget});
+        data.renderTargetReference = preparation.Capture(bindings.target);
         const auto& desc = preparation.Describe(bindings.target);
         data.width = desc.texture.width;
         data.height = desc.texture.height;

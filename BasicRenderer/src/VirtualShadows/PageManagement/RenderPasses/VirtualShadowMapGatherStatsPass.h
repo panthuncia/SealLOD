@@ -10,7 +10,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapGatherStatsBindings {
-    org::ResourceBindingToken pageTable, allocationCount, allocationArgs, header, pageMetadata, clipmapInfo, stats;
+    org::DeclaredViewToken pageTable, allocationCount, allocationArgs, header, pageMetadata, clipmapInfo, stats;
     bool capturePreAllocateState = false;
 };
 

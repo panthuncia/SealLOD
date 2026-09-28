@@ -33,10 +33,10 @@ AVBOITOccupancyHistogramBindings AVBOITOccupancyHistogramPass::Declare(org::Pass
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     return {
-        builder.BindShaderResource(m_configBuffer),
-        builder.BindUnorderedAccess(m_occupancyTexture),
-        builder.BindUnorderedAccess(m_occupancySliceMaskTexture),
-        builder.BindUnorderedAccess(m_occupancyHistogramBuffer) };
+        builder.ShaderResource(m_configBuffer),
+        builder.UnorderedAccess(m_occupancyTexture),
+        builder.UnorderedAccess(m_occupancySliceMaskTexture),
+        builder.UnorderedAccess(m_occupancyHistogramBuffer) };
 }
 
 void AVBOITOccupancyHistogramPass::Update(const org::UpdateExecutionContext& executionContext)
@@ -74,9 +74,9 @@ br::render::PreparedComputeDispatch AVBOITOccupancyHistogramPass::Prepare(
 
     auto& misc = data.constants;
     misc[CLOD_AVBOIT_VBOIT_OCCUPANCY_HISTOGRAM_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.config, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.config).index;
     misc[CLOD_AVBOIT_VBOIT_OCCUPANCY_HISTOGRAM_BUFFER_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.histogram, {org::BindlessViewKind::UnorderedAccess}).index;
+        preparation.Resolve(bindings.histogram).index;
 
     const auto& occupancy = preparation.Describe(bindings.occupancy);
     const uint32_t groupCountX = (occupancy.texture.width + 7u) / 8u;

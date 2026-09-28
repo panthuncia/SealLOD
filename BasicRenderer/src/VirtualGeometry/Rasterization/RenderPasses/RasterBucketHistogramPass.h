@@ -22,8 +22,9 @@ struct RasterBucketHistogramPreparedData {
 };
 
 struct RasterBucketHistogramBindings {
-    org::ResourceBindingToken visibleClusters, visibleCount, indirectArguments, histogram;
-    org::ResourceBindingToken reyesOwnership, telemetry, readBaseCounter;
+    org::DeclaredViewToken visibleClusters, visibleCount;
+    org::ResourceBindingToken indirectArguments;
+    org::DeclaredViewToken histogram, reyesOwnership, telemetry, readBaseCounter;
     uint32_t numBuckets = 0;
     uint32_t visibleCapacity = 0;
     bool enabled = false;

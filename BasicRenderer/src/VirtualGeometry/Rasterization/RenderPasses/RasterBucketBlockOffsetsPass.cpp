@@ -29,9 +29,9 @@ RasterBucketBlockOffsetsPass::RasterBucketBlockOffsetsPass(
 }
 
 RasterBucketBlockOffsetsBindings RasterBucketBlockOffsetsPass::Declare(org::PassBuilder& builder) {
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.BindUnorderedAccess(m_offsetsBuffer), builder.BindShaderResource(m_blockSumsBuffer),
-        builder.BindUnorderedAccess(m_scannedBlockSumsBuffer), builder.BindUnorderedAccess(m_totalCountBuffer),
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
+    return {builder.UnorderedAccess(m_offsetsBuffer), builder.ShaderResource(m_blockSumsBuffer),
+        builder.UnorderedAccess(m_scannedBlockSumsBuffer), builder.UnorderedAccess(m_totalCountBuffer),
         m_numBuckets, m_enabled};
 }
 
@@ -50,10 +50,10 @@ br::render::PreparedComputeDispatch RasterBucketBlockOffsetsPass::Prepare(
     data.descriptorIndices = CaptureResourceDescriptorIndices(m_pso.GetResourceDescriptorSlots());
     data.constants[CLOD_PREFIX_OFFSETS_NUM_BUCKETS] = numBuckets;
     data.constants[CLOD_PREFIX_OFFSETS_NUM_BLOCKS] = (numBuckets + m_blockSize - 1u) / m_blockSize;
-    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.offsets, {org::BindlessViewKind::UnorderedAccess}).index;
-    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_BLOCK_SUMS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.blockSums, {org::BindlessViewKind::ShaderResource}).index;
-    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_SCANNED_BLOCK_SUMS_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.scannedBlockSums, {org::BindlessViewKind::UnorderedAccess}).index;
-    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_TOTAL_COUNT_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.totalCount, {org::BindlessViewKind::UnorderedAccess}).index;
+    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.offsets).index;
+    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_BLOCK_SUMS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.blockSums).index;
+    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_SCANNED_BLOCK_SUMS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.scannedBlockSums).index;
+    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_TOTAL_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.totalCount).index;
     data.groupsX = enabled ? 1u : 0u;
     return data;
 }

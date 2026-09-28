@@ -41,11 +41,11 @@ public:
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
 		for (const auto& j : m_pending) {
 			if (!j->work.srcCubemap) continue;
-			builder.WithShaderResource(j->work.srcCubemap);
+			builder.ShaderResource(j->work.srcCubemap);
 		}
 
-		builder.WithUnorderedAccess(Builtin::Environment::InfoBuffer);
-		builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+		builder.UnorderedAccess(Builtin::Environment::InfoBuffer);
+		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 
 		m_declaredResourcesChanged = false;
 	}

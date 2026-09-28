@@ -41,9 +41,11 @@ inline void RemapDescriptorIndices(ClusterSoftwareRasterFrameData& data, const o
 }
 
 struct ClusterSoftwareRasterBindings {
-    org::ResourceBindingToken histogram, visible, transforms, mapping, indirectArgs;
-    org::ResourceBindingToken pageTable, clipmapInfo, physicalPages, dynamicPages, telemetry;
-    org::ResourceBindingToken skinMapping, skinHash, skinPositions, skinAllocator, skinWork, skinArgs, skinMembership;
+    org::DeclaredViewToken histogram, visible, transforms, mapping;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages, telemetry;
+    org::DeclaredViewToken skinMapping, skinHash, skinPositions, skinAllocator, skinWork, skinArgs, skinMembership;
+    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;
     bool virtualShadow = false, hasTelemetry = false, hasSkinCache = false;
 };
 
@@ -155,30 +157,29 @@ public:
     struct ShadowConfiguration {
         uint32_t pageTableResolution = 0, virtualResolution = 0;
         uint32_t skinCacheHashEntries = 0, skinCachePositionCapacity = 0;
-        uint32_t pageTableUavVariant = UINT32_MAX;
     };
     template<class Constant, class Bindings, class Srv, class Uav>
     static void ApplyVirtualShadowConstants(std::array<Constant,NumMiscUintRootConstants>& constants,
         const Bindings& bindings, const ShadowConfiguration& configuration, Srv&& srv, Uav&& uav) {
         if (!bindings.virtualShadow) return;
-        constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable,configuration.pageTableUavVariant);
+        constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable);
         constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
-        constants[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = uav(bindings.physicalPages,UINT32_MAX);
-        constants[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = uav(bindings.dynamicPages,UINT32_MAX);
+        constants[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = uav(bindings.physicalPages);
+        constants[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = uav(bindings.dynamicPages);
         constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = Constant{configuration.pageTableResolution};
         constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = Constant{CLodVirtualShadowMaxSupportedClipmapCount};
         constants[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = Constant{configuration.virtualResolution};
-        if (bindings.hasTelemetry) constants[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry,UINT32_MAX);
+        if (bindings.hasTelemetry) constants[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
         if (!bindings.hasSkinCache) return;
-        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX] = uav(bindings.skinMapping,UINT32_MAX);
-        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_DESCRIPTOR_INDEX] = uav(bindings.skinHash,UINT32_MAX);
+        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX] = uav(bindings.skinMapping);
+        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_DESCRIPTOR_INDEX] = uav(bindings.skinHash);
         constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_ENTRY_COUNT] = Constant{configuration.skinCacheHashEntries};
         constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] = Constant{0u};
-        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITIONS_DESCRIPTOR_INDEX] = uav(bindings.skinPositions,UINT32_MAX);
+        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITIONS_DESCRIPTOR_INDEX] = uav(bindings.skinPositions);
         constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITION_CAPACITY] = Constant{configuration.skinCachePositionCapacity};
-        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_ALLOCATOR_DESCRIPTOR_INDEX] = uav(bindings.skinAllocator,UINT32_MAX);
-        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_WORK_RECORDS_DESCRIPTOR_INDEX] = uav(bindings.skinWork,UINT32_MAX);
-        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_INDIRECT_ARGS_DESCRIPTOR_INDEX] = uav(bindings.skinArgs,UINT32_MAX);
+        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_ALLOCATOR_DESCRIPTOR_INDEX] = uav(bindings.skinAllocator);
+        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_WORK_RECORDS_DESCRIPTOR_INDEX] = uav(bindings.skinWork);
+        constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_INDIRECT_ARGS_DESCRIPTOR_INDEX] = uav(bindings.skinArgs);
         constants[CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] = srv(bindings.skinMembership);
     }
 
@@ -264,7 +265,7 @@ private:
     std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBuffer;
     // The per-view table the shader reads; it embeds the visibility UAVs, so
     // it is published during preparation from the frame's bindings.
-    CLodViewRasterInfoTable ViewRasterInfoTable(const org::PassPrepareContext&) const;
+    CLodDeclaredViewRasterTable m_viewRasterInfoTable;
     org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Software Raster View Raster Info"};
     std::shared_ptr<org::PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<org::PixelBuffer> m_virtualShadowPhysicalPagesTexture;
@@ -279,7 +280,6 @@ private:
     std::shared_ptr<org::Buffer> m_dynamicWindSkinCacheIndirectArgsBuffer;
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
-    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
     bool m_declaredResourcesChanged = true;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     uint32_t m_dynamicWindSkinCacheHashEntryCount = 0u;

@@ -21,18 +21,18 @@ PerViewLinearDepthCopyBindings PerViewLinearDepthCopyPass::Declare(org::PassBuil
     PerViewLinearDepthCopyBindings bindings{};
     bindings.views.reserve(m_views.size());
     for (const auto& view : m_views) {
-        bindings.views.push_back({builder.BindShaderResource(view.visibility),
-            builder.BindUnorderedAccess(view.linearDepth), view.width, view.height,
+        bindings.views.push_back({builder.ShaderResource(view.visibility),
+            builder.UnorderedAccess(view.linearDepth), view.width, view.height,
             view.primary, view.projection});
     }
     if (m_writeProjectedDepth) {
-        bindings.projectedDepth = builder.BindUnorderedAccess(
+        bindings.projectedDepth = builder.UnorderedAccess(
             Builtin::PrimaryCamera::ProjectedDepthTexture);
         bindings.hasProjectedDepth = true;
-        bindings.canonicalDeviceDepth = builder.BindUnorderedAccess(Builtin::Surface::DeviceDepth);
+        bindings.canonicalDeviceDepth = builder.UnorderedAccess(Builtin::Surface::DeviceDepth);
         bindings.hasCanonicalDeviceDepth = true;
     }
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return bindings;
 }
 
@@ -72,18 +72,14 @@ PerViewLinearDepthCopyPreparedData PerViewLinearDepthCopyPass::Prepare(
         PreparedView item{};
         item.constants.resize(NumMiscUintRootConstants);
         auto& c = item.constants;
-        c[UintRootConstant0] = preparation.ResolveView(view.visibility,
-            {org::BindlessViewKind::ShaderResource}).index;
-        c[UintRootConstant1] = preparation.ResolveView(view.linearDepth,
-            {org::BindlessViewKind::UnorderedAccess}).index;
+        c[UintRootConstant0] = preparation.Resolve(view.visibility).index;
+        c[UintRootConstant1] = preparation.Resolve(view.linearDepth).index;
         c[UintRootConstant2] = view.width;
         c[UintRootConstant3] = view.height;
         if (m_writeProjectedDepth && view.primary && bindings.hasProjectedDepth) {
-            c[UintRootConstant4] = preparation.ResolveView(bindings.projectedDepth,
-                {org::BindlessViewKind::UnorderedAccess}).index;
+            c[UintRootConstant4] = preparation.Resolve(bindings.projectedDepth).index;
             c[UintRootConstant7] = bindings.hasCanonicalDeviceDepth
-                ? preparation.ResolveView(bindings.canonicalDeviceDepth,
-                    {org::BindlessViewKind::UnorderedAccess}).index : 0xFFFFFFFFu;
+                ? preparation.Resolve(bindings.canonicalDeviceDepth).index : 0xFFFFFFFFu;
             c[UintRootConstant5] = view.projection[0];
             c[UintRootConstant6] = view.projection[1];
         } else c[UintRootConstant4] = c[UintRootConstant7] = 0xFFFFFFFFu;

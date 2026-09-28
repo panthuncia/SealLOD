@@ -8,7 +8,7 @@
 namespace org { class Buffer; }
 
 struct RasterBucketCreateCommandBindings {
-    org::ResourceBindingToken visibleCount, indirectCommand, replayState, nodeInputs;
+    org::DeclaredViewToken visibleCount, indirectCommand, replayState, nodeInputs;
     uint32_t numBuckets = 0;
     uint32_t visibleCapacity = 0;
     bool enabled = false;

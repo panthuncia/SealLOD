@@ -15,8 +15,8 @@ public:
 
     void Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-        builder.WithShaderResource(Builtin::Color::HDRColorTarget)
-            .WithUnorderedAccess(Builtin::PostProcessing::LuminanceHistogram);
+        builder.ShaderResource(Builtin::Color::HDRColorTarget);
+        builder.UnorderedAccess(Builtin::PostProcessing::LuminanceHistogram);
     }
 
     void Initialize() {

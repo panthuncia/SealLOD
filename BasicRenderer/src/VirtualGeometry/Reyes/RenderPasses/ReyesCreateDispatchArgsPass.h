@@ -9,7 +9,7 @@
 namespace org { class Buffer; }
 
 struct ReyesCreateDispatchArgsBindings {
-    org::ResourceBindingToken sourceCounter, indirectArgs, sourceBaseCounter;
+    org::DeclaredViewToken sourceCounter, indirectArgs, sourceBaseCounter;
     uint32_t threadsPerGroup = 0;
     uint32_t maxWorkItemCount = 0;
     bool hasSourceBaseCounter = false;

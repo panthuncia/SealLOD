@@ -46,11 +46,11 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
 
 CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBuilder& builder) {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    CLodStreamingBeginFrameBindings bindings{builder.BindUnorderedAccess(m_loadCounter),
-        builder.BindUnorderedAccess(m_loadRequestKeys), builder.BindUnorderedAccess(m_usedGroupsCounter)};
-    builder.WithUnorderedAccess(m_runtimeState);
+    CLodStreamingBeginFrameBindings bindings{builder.UnorderedAccess(m_loadCounter),
+        builder.UnorderedAccess(m_loadRequestKeys), builder.UnorderedAccess(m_usedGroupsCounter)};
+    builder.UnorderedAccess(m_runtimeState);
     if (m_sourceGroupMismatchCounter) {
-        bindings.sourceMismatchCounter = builder.BindUnorderedAccess(m_sourceGroupMismatchCounter);
+        bindings.sourceMismatchCounter = builder.UnorderedAccess(m_sourceGroupMismatchCounter);
         bindings.hasSourceMismatchCounter = true;
     }
     return bindings;
@@ -66,10 +66,10 @@ br::render::PreparedComputeDispatchSequence CLodStreamingBeginFramePass::Prepare
     auto program = preparation.CaptureProgramBinding(m_clearUintPipeline);
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
-    auto appendClear = [&](org::ResourceBindingToken token, bool present, uint32_t value, uint32_t count) {
+    auto appendClear = [&](org::DeclaredViewToken token, bool present, uint32_t value, uint32_t count) {
         if (!present || count == 0u) return;
         br::render::PreparedComputeDispatchSequence::Step step{};
-        step.constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess}).index;
+        step.constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(token).index;
         step.constants[CLOD_CLEAR_UINT_BUFFER_VALUE] = value;
         step.constants[CLOD_CLEAR_UINT_BUFFER_COUNT] = count;
         step.groupsX = (count + 63u) / 64u;

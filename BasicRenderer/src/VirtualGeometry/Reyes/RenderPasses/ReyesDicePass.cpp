@@ -50,15 +50,15 @@ ReyesDicePass::ReyesDicePass(
 ReyesDiceBindings ReyesDicePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    ReyesDiceBindings bindings{builder.BindShaderResource(m_diceQueueBuffer),
-        builder.BindShaderResource(m_diceQueueCounterBuffer)};
+    ReyesDiceBindings bindings{builder.ShaderResource(m_diceQueueBuffer),
+        builder.ShaderResource(m_diceQueueCounterBuffer)};
     if (m_diceQueueReadOffsetBuffer) {
-        bindings.readOffset = builder.BindShaderResource(m_diceQueueReadOffsetBuffer);
+        bindings.readOffset = builder.ShaderResource(m_diceQueueReadOffsetBuffer);
         bindings.hasReadOffset = true;
     }
-    bindings.tessConfigs = builder.BindShaderResource(m_tessTableConfigsBuffer);
-    bindings.indirectArgs = builder.BindIndirectArguments(m_indirectArgsBuffer);
-    bindings.telemetry = builder.BindUnorderedAccess(m_telemetryBuffer);
+    bindings.tessConfigs = builder.ShaderResource(m_tessTableConfigsBuffer);
+    bindings.indirectArgs = builder.IndirectArguments(m_indirectArgsBuffer);
+    bindings.telemetry = builder.UnorderedAccess(m_telemetryBuffer);
     bindings.capacity = m_maxDiceQueueEntries;
     bindings.phase = m_phaseIndex;
     return bindings;
@@ -74,11 +74,11 @@ br::render::PreparedComputeIndirect ReyesDicePass::Prepare(
     auto program = preparation.CaptureProgramBinding(m_pso);
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
+    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     data.constants[CLOD_REYES_DICE_QUEUE_READ_OFFSET_DESCRIPTOR_INDEX] = bindings.hasReadOffset ? srv(bindings.readOffset) : 0xFFFFFFFFu;
     data.constants[CLOD_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = srv(bindings.queue);
     data.constants[CLOD_REYES_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.counter);
-    data.constants[CLOD_REYES_DICE_TELEMETRY_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.telemetry, {org::BindlessViewKind::UnorderedAccess}).index;
+    data.constants[CLOD_REYES_DICE_TELEMETRY_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.telemetry).index;
     data.constants[CLOD_REYES_DICE_PHASE_INDEX] = bindings.phase; data.constants[CLOD_REYES_DICE_QUEUE_CAPACITY] = bindings.capacity;
     data.constants[CLOD_REYES_DICE_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = srv(bindings.tessConfigs);
     return data;

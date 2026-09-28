@@ -6,7 +6,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 
 struct SkyboxBindings {
-    org::ResourceBindingToken depth, camera, environment, hdr, motion;
+    org::DeclaredViewToken depth, camera, environment, hdr, motion;
 };
 
 class SkyboxRenderPass : public org::TypedRenderGraphPass<SkyboxRenderPass,
@@ -19,14 +19,14 @@ public:
     SkyboxBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* builder = &declaration;
-		builder->WithShaderResource(Builtin::Environment::CurrentCubemap);
-		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+		builder->ShaderResource(Builtin::Environment::CurrentCubemap);
+		builder->ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            builder->BindShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
-            builder->BindShaderResource(Builtin::CameraBuffer),
-            builder->BindShaderResource(Builtin::Environment::InfoBuffer),
-            builder->BindUnorderedAccess(Builtin::Color::HDRColorTarget),
-            builder->BindUnorderedAccess(Builtin::Surface::Motion) };
+            builder->ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
+            builder->ShaderResource(Builtin::CameraBuffer),
+            builder->ShaderResource(Builtin::Environment::InfoBuffer),
+            builder->UnorderedAccess(Builtin::Color::HDRColorTarget),
+            builder->UnorderedAccess(Builtin::Surface::Motion) };
     }
 
     br::render::PreparedComputeDispatch Prepare(const SkyboxBindings& bindings,
@@ -39,11 +39,11 @@ public:
         auto program = preparation.CaptureProgramBinding(m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
-        data.constants[0] = preparation.ResolveView(bindings.depth, {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[1] = preparation.ResolveView(bindings.camera, {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[2] = preparation.ResolveView(bindings.environment, {org::BindlessViewKind::ShaderResource}).index;
-        data.constants[3] = preparation.ResolveView(bindings.hdr, {org::BindlessViewKind::UnorderedAccess}).index;
-		data.constants[4] = preparation.ResolveView(bindings.motion, {org::BindlessViewKind::UnorderedAccess}).index;
+        data.constants[0] = preparation.Resolve(bindings.depth).index;
+        data.constants[1] = preparation.Resolve(bindings.camera).index;
+        data.constants[2] = preparation.Resolve(bindings.environment).index;
+        data.constants[3] = preparation.Resolve(bindings.hdr).index;
+		data.constants[4] = preparation.Resolve(bindings.motion).index;
         const auto& target = preparation.Describe(bindings.hdr);
         data.groupsX = (target.texture.width + 7u) / 8u;
         data.groupsY = (target.texture.height + 7u) / 8u;

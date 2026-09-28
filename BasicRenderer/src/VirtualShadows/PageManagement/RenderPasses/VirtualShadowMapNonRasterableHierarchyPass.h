@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
@@ -10,9 +11,9 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapNonRasterableHierarchyBindings {
-    org::ResourceBindingToken pageTable;
-    org::ResourceBindingToken hierarchy;
-    org::ResourceBindingToken clipmapInfo;
+    org::DeclaredViewToken pageTable;
+    std::vector<org::DeclaredViewToken> hierarchy;
+    org::DeclaredViewToken clipmapInfo;
 };
 
 class VirtualShadowMapNonRasterableHierarchyPass final : public org::TypedRenderGraphPass<VirtualShadowMapNonRasterableHierarchyPass,

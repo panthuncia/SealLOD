@@ -41,59 +41,42 @@ AVBOITSetupPass::AVBOITSetupPass(
 AVBOITSetupBindings AVBOITSetupPass::Declare(org::PassBuilder& builder)
 {
     if (m_configBuffer) {
-        builder.WithShaderResource(m_configBuffer);
+        builder.ShaderResource(m_configBuffer);
     }
     if (m_fitStateBuffer) {
-        builder.WithShaderResource(m_fitStateBuffer);
+        builder.ShaderResource(m_fitStateBuffer);
     }
-    if (m_depthWarpLUTBuffer) {
-        builder.WithShaderResource(m_depthWarpLUTBuffer);
-    }
-
     AVBOITSetupBindings bindings;
+    if (m_depthWarpLUTBuffer) bindings.depthWarp = builder.ShaderResource(m_depthWarpLUTBuffer).View();
     for (const auto& resource : {m_occupancyTexture, m_coverageTexture, m_occupancySliceMaskTexture,
         m_integratedTransmittanceTexture, m_zeroTransmittanceSliceTexture})
-        if (resource) bindings.clears.push_back(builder.BindUnorderedAccessClear(resource));
+        if (resource) {
+            AVBOITSetupBindings::Clear clear{};
+            for (uint32_t slice = 0; slice < resource->GetArraySize(); ++slice) {
+                auto use = builder.UnorderedAccessClear(resource, org::UavView{UINT32_MAX, 0, slice});
+                clear.shaderViews.push_back(use.View(0));
+                clear.cpuViews.push_back(use.View(1));
+            }
+            bindings.clears.push_back(std::move(clear));
+        }
 
-    builder.WithUnorderedAccess(
-        m_scalarExtinctionTexture,
-        m_chromaticExtinctionTexture);
+    const org::UavView fullUav{static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)};
+    const org::SrvView fullSrv{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)};
+    bindings.scalarExtinction = builder.UnorderedAccess(m_scalarExtinctionTexture, fullUav).View();
+    bindings.chromaticExtinction = builder.UnorderedAccess(m_chromaticExtinctionTexture, fullUav).View();
+    bindings.integratedTransmittance = builder.UnorderedAccess(m_integratedTransmittanceTexture, fullUav).View();
+    bindings.shadingTransmittance = builder.ShaderResource(m_integratedTransmittanceTexture, fullSrv).View();
 
     if (m_accumulationTexture) {
-        bindings.targets.push_back(builder.BindRenderTargetClear(m_accumulationTexture));
+        bindings.targets.push_back(builder.RenderTargetClear(m_accumulationTexture).View());
     }
     if (m_normalizationTexture) {
-        bindings.targets.push_back(builder.BindRenderTargetClear(m_normalizationTexture));
+        bindings.targets.push_back(builder.RenderTargetClear(m_normalizationTexture).View());
     }
     if (m_shadingExtinctionTexture) {
-        bindings.targets.push_back(builder.BindRenderTargetClear(m_shadingExtinctionTexture));
+        bindings.targets.push_back(builder.RenderTargetClear(m_shadingExtinctionTexture).View());
     }
 
-    const auto index = [&](const auto& resource, org::BindlessViewRequest request) {
-        return resource ? builder.DeclaredBindlessIndex(resource, request) : 0xFFFFFFFFu;
-    };
-    m_config.occupancyUAVDescriptorIndex = index(m_occupancyTexture,
-        {org::BindlessViewKind::UnorderedAccess});
-    m_config.coverageUAVDescriptorIndex = index(m_coverageTexture,
-        {org::BindlessViewKind::UnorderedAccess});
-    m_config.occupancySliceMaskUAVDescriptorIndex = index(m_occupancySliceMaskTexture,
-        {org::BindlessViewKind::UnorderedAccess});
-    m_config.depthWarpLUTSRVDescriptorIndex = index(m_depthWarpLUTBuffer,
-        {org::BindlessViewKind::ShaderResource});
-    m_config.scalarExtinctionUAVDescriptorIndex = index(m_scalarExtinctionTexture,
-        {org::BindlessViewKind::UnorderedAccess,
-            static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)});
-    m_config.chromaticExtinctionUAVDescriptorIndex = index(m_chromaticExtinctionTexture,
-        {org::BindlessViewKind::UnorderedAccess,
-            static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)});
-    m_config.integratedTransmittanceUAVDescriptorIndex = index(m_integratedTransmittanceTexture,
-        {org::BindlessViewKind::UnorderedAccess,
-            static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)});
-    m_config.shadingTransmittanceSRVDescriptorIndex = index(m_integratedTransmittanceTexture,
-        {org::BindlessViewKind::ShaderResource,
-            static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
-    m_config.zeroTransmittanceSliceUAVDescriptorIndex = index(m_zeroTransmittanceSliceTexture,
-        {org::BindlessViewKind::UnorderedAccess});
     m_config.sliceCount = CLodAVBOITDefaultSliceCount;
     m_config.virtualSliceCount = CLodAVBOITDefaultVirtualSliceCount;
     m_config.lowResolutionWidth = m_occupancyTexture ? m_occupancyTexture->GetWidth() : 0u;
@@ -101,8 +84,6 @@ AVBOITSetupBindings AVBOITSetupPass::Declare(org::PassBuilder& builder)
     m_config.depthDistributionExponent = CLodAVBOITDefaultDepthDistributionExponent;
     m_config.lookupDepthBiasInSlices = CLodAVBOITDefaultLookupDepthBiasInSlices;
     m_config.zeroTransmittanceThreshold = CLodAVBOITDefaultZeroTransmittanceThreshold;
-    UploadBufferData(&m_config, sizeof(m_config),
-        org::runtime::UploadTarget::FromShared(m_configBuffer), 0);
     return bindings;
 }
 
@@ -115,28 +96,11 @@ void AVBOITSetupPass::Update(const org::UpdateExecutionContext& executionContext
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
 
-    m_configBuffer->EnsureVirtualDescriptorSlotsAllocated();
-    m_occupancyTexture->EnsureVirtualDescriptorSlotsAllocated();
-	m_coverageTexture->EnsureVirtualDescriptorSlotsAllocated();
-    m_occupancySliceMaskTexture->EnsureVirtualDescriptorSlotsAllocated();
-    if (m_fitStateBuffer) {
-        m_fitStateBuffer->EnsureVirtualDescriptorSlotsAllocated();
-    }
-    if (m_depthWarpLUTBuffer) {
-        m_depthWarpLUTBuffer->EnsureVirtualDescriptorSlotsAllocated();
-    }
-    m_scalarExtinctionTexture->EnsureVirtualDescriptorSlotsAllocated();
-    m_chromaticExtinctionTexture->EnsureVirtualDescriptorSlotsAllocated();
-	m_integratedTransmittanceTexture->EnsureVirtualDescriptorSlotsAllocated();
-    m_zeroTransmittanceSliceTexture->EnsureVirtualDescriptorSlotsAllocated();
-
     for (const auto& view : context.Views()) if (view.primary) {
         m_config.viewNearDepth = view.cameraInfo.zNear;
         m_config.viewFarDepth = view.cameraInfo.zFar;
         break;
     }
-
-    UploadBufferData(&m_config, sizeof(m_config), org::runtime::UploadTarget::FromShared(m_configBuffer), 0);
 
     if (m_fitStateBuffer && !m_fitStateInitialized) {
         const CLodAVBOITFitState fitState{};
@@ -151,15 +115,26 @@ AVBOITSetupFrameData AVBOITSetupPass::Prepare(
     AVBOITSetupFrameData data;
     data.resourceHeap = context->textureDescriptorHeap.GetHandle();
     data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    const auto append = [&](org::ResourceBindingToken binding, bool isFloat, float floatValue, uint32_t uintValue) {
-        const auto captured = preparation.CaptureResource(binding);
-        const auto slices = preparation.ViewSliceCount(binding, {org::BindlessViewKind::UnorderedAccess});
-        for (uint32_t slice = 0; slice < slices; ++slice) {
-            data.clears.push_back({captured,
-                preparation.CaptureView(binding,
-                    {org::BindlessViewKind::NonShaderVisibleUnorderedAccess, UINT32_MAX, 0, slice}),
-                preparation.CaptureView(binding,
-                    {org::BindlessViewKind::UnorderedAccess, UINT32_MAX, 0, slice}),
+    const auto index = [&](org::DeclaredViewToken token) {
+        return token.layout ? preparation.Resolve(token).index : 0xFFFFFFFFu;
+    };
+    auto config = m_config;
+    config.occupancyUAVDescriptorIndex = index(bindings.clears.at(0).shaderViews.at(0));
+    config.coverageUAVDescriptorIndex = index(bindings.clears.at(1).shaderViews.at(0));
+    config.occupancySliceMaskUAVDescriptorIndex = index(bindings.clears.at(2).shaderViews.at(0));
+    config.depthWarpLUTSRVDescriptorIndex = index(bindings.depthWarp);
+    config.scalarExtinctionUAVDescriptorIndex = index(bindings.scalarExtinction);
+    config.chromaticExtinctionUAVDescriptorIndex = index(bindings.chromaticExtinction);
+    config.integratedTransmittanceUAVDescriptorIndex = index(bindings.integratedTransmittance);
+    config.shadingTransmittanceSRVDescriptorIndex = index(bindings.shadingTransmittance);
+    config.zeroTransmittanceSliceUAVDescriptorIndex = index(bindings.clears.at(4).shaderViews.at(0));
+    UploadBufferData(&config, sizeof(config), org::runtime::UploadTarget::FromShared(m_configBuffer), 0);
+    const auto append = [&](const AVBOITSetupBindings::Clear& binding, bool isFloat, float floatValue, uint32_t uintValue) {
+        if (binding.shaderViews.size() != binding.cpuViews.size()) throw std::logic_error("AVBOIT clear view declaration is incomplete");
+        for (size_t slice = 0; slice < binding.shaderViews.size(); ++slice) {
+            data.clears.push_back({preparation.DeclaredReference(binding.shaderViews[slice]),
+                preparation.Capture(binding.cpuViews[slice]),
+                preparation.Capture(binding.shaderViews[slice]),
                 floatValue, uintValue, isFloat});
         }
     };
@@ -170,8 +145,7 @@ AVBOITSetupFrameData AVBOITSetupPass::Prepare(
     append(bindings.clears[3], true, 1, 0);
     append(bindings.clears[4], false, 0, CLodAVBOITDefaultSliceCount);
     for (const auto target : bindings.targets)
-        data.targets.push_back({preparation.CaptureView(target,
-            {org::BindlessViewKind::RenderTarget}), preparation.ClearValue(target)});
+        data.targets.push_back({preparation.Capture(target), preparation.ClearValue(target.Resource())});
     return data;
 }
 

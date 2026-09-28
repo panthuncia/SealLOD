@@ -49,17 +49,17 @@ VirtualShadowMapAdmitPagesBindings VirtualShadowMapAdmitPagesPass::Declare(org::
 {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     VirtualShadowMapAdmitPagesBindings bindings{
-        declaration.BindUnorderedAccess(m_pageTableTexture),
-        declaration.BindUnorderedAccess(m_dirtyPageFlagsBuffer),
-        declaration.BindUnorderedAccess(m_pageMetadataBuffer),
-        declaration.BindShaderResource(m_clipmapInfoBuffer),
-        declaration.BindShaderResource(m_compactShadowCamerasBuffer),
-        declaration.BindUnorderedAccess(m_statsBuffer)};
+        declaration.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}),
+        declaration.UnorderedAccess(m_dirtyPageFlagsBuffer),
+        declaration.UnorderedAccess(m_pageMetadataBuffer),
+        declaration.ShaderResource(m_clipmapInfoBuffer),
+        declaration.ShaderResource(m_compactShadowCamerasBuffer),
+        declaration.UnorderedAccess(m_statsBuffer)};
     bindings.normalBudget = SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
     bindings.upgradeBudget = SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)();
     bindings.upgradeInputs.reserve(m_upgradeInputBuffers.size());
     for (const auto& buffer : m_upgradeInputBuffers) {
-        bindings.upgradeInputs.push_back(declaration.BindShaderResource(buffer));
+        bindings.upgradeInputs.push_back(declaration.ShaderResource(buffer));
     }
     return bindings;
 }
@@ -73,8 +73,6 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapAdmitPagesPass::Prep
     data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
     const auto upgrades = m_upgradeQueue.Pending();
     const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-    const auto srv = [&](org::ResourceBindingToken token) { return preparation.ResolveView(token, {org::BindlessViewKind::ShaderResource}).index; };
-    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index; };
     const auto admitProgram = preparation.CaptureProgramBinding(m_pso);
     const auto append = [&](const org::PreparedProgramBinding& program, std::array<unsigned int, NumMiscUintRootConstants> constants,
         uint32_t groups, bool barrierAfter) {
@@ -95,12 +93,12 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapAdmitPagesPass::Prep
         if (found == m_upgradeInputBuffers.end()) throw std::logic_error("Undeclared shadow upgrade input buffer");
         const auto inputIndex = static_cast<size_t>(std::distance(m_upgradeInputBuffers.begin(), found));
         std::array<unsigned int, NumMiscUintRootConstants> c{};
-        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUTS_DESCRIPTOR_INDEX] = srv(bindings.upgradeInputs[inputIndex]);
+        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUTS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.upgradeInputs[inputIndex]).index;
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUT_COUNT] = work.inputCount;
-        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
-        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyPageFlags);
-        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
-        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
+        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
+        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_DIRTY_FLAGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.dirtyPageFlags).index;
+        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
+        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_METADATA_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageMetadata).index;
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
         append(*upgradeProgram, c, (work.inputCount + 63u) / 64u, true);
     }
@@ -108,9 +106,9 @@ br::render::PreparedComputePipelineSequence VirtualShadowMapAdmitPagesPass::Prep
     for (uint32_t phaseIteration = 0; phaseIteration < 2; ++phaseIteration) {
         for (uint32_t clipmapIndex = 0; clipmapIndex < CLodVirtualShadowMaxSupportedClipmapCount; ++clipmapIndex) {
             std::array<unsigned int, NumMiscUintRootConstants> c{};
-            c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
-            c[CLOD_VIRTUAL_SHADOW_ADMIT_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyPageFlags);
-            c[CLOD_VIRTUAL_SHADOW_ADMIT_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
+            c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
+            c[CLOD_VIRTUAL_SHADOW_ADMIT_DIRTY_FLAGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.dirtyPageFlags).index;
+            c[CLOD_VIRTUAL_SHADOW_ADMIT_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
             c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
             c[CLOD_VIRTUAL_SHADOW_ADMIT_CLIPMAP_INDEX] = clipmapIndex;
             c[CLOD_VIRTUAL_SHADOW_ADMIT_NORMAL_BUDGET] = bindings.normalBudget;

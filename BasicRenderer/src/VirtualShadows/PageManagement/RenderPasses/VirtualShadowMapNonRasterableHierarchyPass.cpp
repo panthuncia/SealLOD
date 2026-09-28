@@ -28,11 +28,15 @@ VirtualShadowMapNonRasterableHierarchyPass::VirtualShadowMapNonRasterableHierarc
 VirtualShadowMapNonRasterableHierarchyBindings VirtualShadowMapNonRasterableHierarchyPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
+    std::vector<org::UavView> mipViews;
+    for (uint32_t mip = 0; mip < m_nonRasterableHierarchyTexture->GetMipLevels(); ++mip)
+        mipViews.push_back({static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull), mip});
+    auto hierarchy = builder.UnorderedAccess(Subresources(m_nonRasterableHierarchyTexture, org::FromMip{0}), std::span<const org::UavView>{mipViews});
     return {
-        builder.BindShaderResource(Subresources(m_pageTableTexture, org::Mip{0, 1})),
-        builder.BindUnorderedAccess(Subresources(m_nonRasterableHierarchyTexture, org::FromMip{0})),
-        builder.BindShaderResource(m_clipmapInfoBuffer)};
+        builder.ShaderResource(Subresources(m_pageTableTexture, org::Mip{0, 1}), {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),
+        std::move(hierarchy.views),
+        builder.ShaderResource(m_clipmapInfoBuffer)};
 }
 
 br::render::PreparedComputeDispatchSequence VirtualShadowMapNonRasterableHierarchyPass::Prepare(
@@ -44,23 +48,19 @@ br::render::PreparedComputeDispatchSequence VirtualShadowMapNonRasterableHierarc
     data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(m_pso);
     data.program = program.program;
     data.descriptorIndices = std::move(program.descriptorIndices);
-    const uint32_t mipCount = preparation.Describe(bindings.hierarchy).texture.mipLevels; data.steps.reserve(mipCount);
+    const uint32_t mipCount = static_cast<uint32_t>(bindings.hierarchy.size()); data.steps.reserve(mipCount);
     for (uint32_t mip = 0; mip < mipCount; ++mip) {
         const bool pageTable = mip == 0; const uint32_t src = pageTable ? config.pageTableResolution : (std::max)(config.pageTableResolution >> (mip - 1u), 1u);
         const uint32_t dst = pageTable ? src : (src > 1u ? src >> 1u : 1u); br::render::PreparedComputeDispatchSequence::Step step{};
         step.uavBarrierBefore = !pageTable;
         step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_DESCRIPTOR_INDEX] = pageTable
-            ? preparation.ResolveView(bindings.pageTable, {org::BindlessViewKind::ShaderResource,
-                static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}).index
-            : preparation.ResolveView(bindings.hierarchy, {org::BindlessViewKind::UnorderedAccess,
-                static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull), mip - 1u}).index;
-        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_DEST_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.hierarchy,
-            {org::BindlessViewKind::UnorderedAccess, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull), mip}).index;
+            ? preparation.Resolve(bindings.pageTable).index
+            : preparation.Resolve(bindings.hierarchy[mip - 1u]).index;
+        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_DEST_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.hierarchy[mip]).index;
         step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_IS_PAGE_TABLE] = pageTable ? 1u : 0u;
         step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_RESOLUTION] = src;
         step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
-        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_INFO_DESCRIPTOR_INDEX] = preparation.ResolveView(bindings.clipmapInfo,
-            {org::BindlessViewKind::ShaderResource}).index;
+        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_INFO_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.clipmapInfo).index;
         step.groupsX = (dst + 7u) / 8u; step.groupsY = step.groupsX; step.groupsZ = CLodVirtualShadowMaxSupportedClipmapCount; data.steps.push_back(std::move(step));
     }
     return data;

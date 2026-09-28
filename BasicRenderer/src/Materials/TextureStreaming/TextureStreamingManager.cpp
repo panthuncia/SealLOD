@@ -195,8 +195,8 @@ namespace {
 		}
 
 		void Declare(org::PassBuilder& builder) {
-			builder.WithCopySource(m_source);
-			builder.WithCopyDest(m_staging);
+			builder.CopySource(m_source);
+			builder.CopyDestination(m_staging);
 			builder.PreferQueue(org::QueueKind::Copy);
 		}
 		MaterialTextureStreamingReadbackFrameData Prepare(const org::PassPrepareContext& preparation) {

@@ -13,8 +13,8 @@ namespace org { class DynamicBuffer; }
 class VirtualShadowInvalidationQueue;
 
 struct VirtualShadowMapInvalidatePagesBindings {
-    org::ResourceBindingToken inputs, inputCount, clipmapInfo, bounds;
-    org::ResourceBindingToken pageTable, dirtyFlags, pageMetadata, pageViewInfo, stats;
+    org::DeclaredViewToken inputs, inputCount, clipmapInfo, bounds;
+    org::DeclaredViewToken pageTable, dirtyFlags, pageMetadata, pageViewInfo, stats;
     uint32_t pendingInputCount = 0, pendingBoundsCount = 0;
     bool invalidateAllActiveClipmaps = false;
 };

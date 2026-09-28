@@ -151,11 +151,11 @@ VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
 VirtualShadowMapSetupBindings VirtualShadowMapSetupPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    builder.WithUnorderedAccess(
+    builder.UnorderedAccess(
         m_compactMainCameraBuffer,
         m_compactShadowCameraBuffer);
 
-    builder.WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder.ConstantBuffer(Builtin::PerFrameBuffer);
     const uint32_t packedFlags =
         ((m_resetResources ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_RESOURCES_BIT) |
         ((m_resetReasonForced ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_FORCED_BIT) |
@@ -164,11 +164,11 @@ VirtualShadowMapSetupBindings VirtualShadowMapSetupPass::Declare(org::PassBuilde
         ((m_resetReasonLightDirectionChanged ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_LIGHT_DIRECTION_CHANGED_BIT) |
         ((SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowAutoLodBiasSettingName)() ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_ENABLED_BIT) |
         ((m_feedbackRecoveryRefresh ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_FEEDBACK_RECOVERY_REFRESH_BIT);
-    return {builder.BindUnorderedAccess(m_pageTableTexture), builder.BindUnorderedAccess(m_pageMetadataBuffer),
-        builder.BindUnorderedAccess(m_allocationCountBuffer), builder.BindUnorderedAccess(m_dirtyPageFlagsBuffer),
-        builder.BindUnorderedAccess(m_clipmapInfoBuffer), builder.BindUnorderedAccess(m_markClipmapDataBuffer),
-        builder.BindUnorderedAccess(m_statsBuffer), builder.BindUnorderedAccess(m_runtimeStateBuffer),
-        builder.BindUnorderedAccess(m_fallbackCandidateCountBuffer), packedFlags,
+    return {builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
+        builder.UnorderedAccess(m_allocationCountBuffer), builder.UnorderedAccess(m_dirtyPageFlagsBuffer),
+        builder.UnorderedAccess(m_clipmapInfoBuffer), builder.UnorderedAccess(m_markClipmapDataBuffer),
+        builder.UnorderedAccess(m_statsBuffer), builder.UnorderedAccess(m_runtimeStateBuffer),
+        builder.UnorderedAccess(m_fallbackCandidateCountBuffer), packedFlags,
         SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowAutoLodBiasScaleSettingName)()};
 }
 
@@ -479,20 +479,19 @@ br::render::PreparedComputeDispatch VirtualShadowMapSetupPass::Prepare(
     const uint32_t packedConfig1 = (CLodVirtualShadowDirtyWordCount(config.maxPhysicalPages) &
         CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_SHIFT;
     auto& c = data.constants;
-    const auto uav = [&](org::ResourceBindingToken token, uint32_t variant = UINT32_MAX) { return preparation.ResolveView(token, {org::BindlessViewKind::UnorderedAccess, variant}).index; };
-    c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.pageTable, static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull));
-    c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_METADATA_DESCRIPTOR_INDEX] = uav(bindings.pageMetadata);
-    c[CLOD_VIRTUAL_SHADOW_SETUP_ALLOCATION_COUNT_DESCRIPTOR_INDEX] = uav(bindings.allocationCount);
-    c[CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_FLAGS_DESCRIPTOR_INDEX] = uav(bindings.dirtyFlags);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
+    c[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_METADATA_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageMetadata).index;
+    c[CLOD_VIRTUAL_SHADOW_SETUP_ALLOCATION_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.allocationCount).index;
+    c[CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_FLAGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.dirtyFlags).index;
     c[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_CONFIG0] = packedConfig0;
     c[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_CONFIG1] = packedConfig1;
-    c[CLOD_VIRTUAL_SHADOW_SETUP_STATS_DESCRIPTOR_INDEX] = uav(bindings.stats);
-    c[CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_INFO_DESCRIPTOR_INDEX] = uav(bindings.clipmapInfo);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
+    c[CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_INFO_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.clipmapInfo).index;
     c[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_FLAGS] = bindings.packedFlags;
-    c[CLOD_VIRTUAL_SHADOW_SETUP_MARK_CLIPMAP_DATA_DESCRIPTOR_INDEX] = uav(bindings.markClipmapData);
-    c[CLOD_VIRTUAL_SHADOW_SETUP_RUNTIME_STATE_DESCRIPTOR_INDEX] = uav(bindings.runtimeState);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_MARK_CLIPMAP_DATA_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.markClipmapData).index;
+    c[CLOD_VIRTUAL_SHADOW_SETUP_RUNTIME_STATE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.runtimeState).index;
     c[CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_SCALE_AS_UINT] = std::bit_cast<uint32_t>(bindings.autoBiasScale);
-    c[CLOD_VIRTUAL_SHADOW_SETUP_FALLBACK_CANDIDATE_COUNT_DESCRIPTOR_INDEX] = uav(bindings.fallbackCandidateCount);
+    c[CLOD_VIRTUAL_SHADOW_SETUP_FALLBACK_CANDIDATE_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.fallbackCandidateCount).index;
     data.groupsX = (config.pageTableResolution + 7u) / 8u;
     data.groupsY = data.groupsX;
     data.groupsZ = CLodVirtualShadowMaxSupportedClipmapCount;

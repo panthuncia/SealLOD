@@ -14,8 +14,8 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapAdmitPagesBindings {
-    org::ResourceBindingToken pageTable, dirtyPageFlags, pageMetadata, clipmapInfo, compactShadowCameras, stats;
-    std::vector<org::ResourceBindingToken> upgradeInputs;
+    org::DeclaredViewToken pageTable, dirtyPageFlags, pageMetadata, clipmapInfo, compactShadowCameras, stats;
+    std::vector<org::DeclaredViewToken> upgradeInputs;
     uint32_t normalBudget = 0;
     uint32_t upgradeBudget = 0;
 };

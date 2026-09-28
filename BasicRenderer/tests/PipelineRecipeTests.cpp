@@ -1587,22 +1587,19 @@ void TestSoftwareRasterBucketSelection()
         [](uint32_t) { return org::persistent::ViewToken{}; });
     Require(br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,symbolic).bindingViews.size() == 4,
         "software raster primary constants lost stable view provenance");
-    ClusterSoftwareRasterizationPass::ApplyVirtualShadowConstants(symbolic,primary,{128,16384,10,1024,7},
-        [](uint32_t) { return org::persistent::ViewToken{}; },[](uint32_t,uint32_t) { return org::persistent::ViewToken{}; });
+    ClusterSoftwareRasterizationPass::ApplyVirtualShadowConstants(symbolic,primary,{128,16384,10,1024},
+        [](uint32_t) { return org::persistent::ViewToken{}; },[](uint32_t) { return org::persistent::ViewToken{}; });
     const auto shadowConstants = br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,symbolic);
     Require(shadowConstants.bindingViews.size() == 16
         && shadowConstants.values[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_ENTRY_COUNT] == 10
         && shadowConstants.values[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] == 128,
         "software raster shadow constants confused scalar shape with descriptor bindings");
-    auto numeric = constants; uint32_t pageVariant = UINT32_MAX;
-    ClusterSoftwareRasterizationPass::ApplyVirtualShadowConstants(numeric,primary,{128,16384,10,1024,7},
-        [](uint32_t value) { return value+100; },[&](uint32_t value,uint32_t variant) {
-            if (value == primary.pageTable) pageVariant = variant;
-            return value+200;
-        });
-    Require(pageVariant == 7 && numeric[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] == 215
+    auto numeric = constants;
+    ClusterSoftwareRasterizationPass::ApplyVirtualShadowConstants(numeric,primary,{128,16384,10,1024},
+        [](uint32_t value) { return value+100; },[](uint32_t value) { return value+200; });
+    Require(numeric[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] == 215
         && numeric[CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] == 126,
-        "software raster shadow constants lost full-array UAV or membership SRV selection");
+        "software raster shadow constants lost declared UAV or membership SRV selection");
     auto nativeOwner = std::make_shared<const uint32_t>(1);
     auto pipeline = std::make_shared<org::PipelineStatePayload>(
         rhi::PipelinePtr(rhi::Device{},rhi::Pipeline(rhi::PipelineHandle{8,1}),nullptr),0,org::PipelineResources{});

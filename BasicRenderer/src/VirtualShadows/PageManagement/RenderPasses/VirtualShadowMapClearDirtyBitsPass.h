@@ -12,9 +12,9 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapClearDirtyBitsBindings {
-    org::ResourceBindingToken pageTable;
-    org::ResourceBindingToken dirtyFlags;
-    org::ResourceBindingToken stats;
+    org::DeclaredViewToken pageTable;
+    org::DeclaredViewToken dirtyFlags;
+    org::DeclaredViewToken stats;
     bool completeEmptyAdmittedPages = false;
 };
 

@@ -10,7 +10,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapComposePagesBindings {
-    org::ResourceBindingToken staticPages, dynamicPages, pageTable, pageMetadata, stats;
+    org::DeclaredViewToken staticPages, dynamicPages, pageTable, pageMetadata, stats;
 };
 
 class VirtualShadowMapComposePagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapComposePagesPass,

@@ -29,9 +29,11 @@ namespace org { class PixelBuffer; }
     };
 
 struct VirtualShadowMapMarkPagesBindings {
-    org::ResourceBindingToken tileWork, tileCount, indirectArgs, clipmapData;
-    org::ResourceBindingToken mask, list, count;
-    std::optional<org::ResourceBindingToken> receiverMask;
+    org::DeclaredViewToken tileWork, tileCount;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken clipmapData;
+    org::DeclaredViewToken mask, list, count;
+    std::optional<org::DeclaredViewToken> receiverMask;
     uint32_t activeClipmapCount = 0;
     uint32_t receiverSubpageMode = 0;
 };

@@ -23,7 +23,7 @@ AVBOITAdaptiveFitPass::AVBOITAdaptiveFitPass(
 AVBOITAdaptiveFitBindings AVBOITAdaptiveFitPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.BindUnorderedAccess(m_configBuffer), builder.BindShaderResource(m_fitStateBuffer)};
+    return {builder.UnorderedAccess(m_configBuffer), builder.ShaderResource(m_fitStateBuffer)};
 }
 
 br::render::PreparedComputeDispatch AVBOITAdaptiveFitPass::Prepare(
@@ -44,9 +44,9 @@ br::render::PreparedComputeDispatch AVBOITAdaptiveFitPass::Prepare(
 
     auto& misc = data.constants;
     misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.config, {org::BindlessViewKind::UnorderedAccess}).index;
+        preparation.Resolve(bindings.config).index;
     misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_STATE_DESCRIPTOR_INDEX] =
-        preparation.ResolveView(bindings.state, {org::BindlessViewKind::ShaderResource}).index;
+        preparation.Resolve(bindings.state).index;
 
     data.groupsX = 1u; data.groupsY = 1u; data.groupsZ = 1u;
     return data;

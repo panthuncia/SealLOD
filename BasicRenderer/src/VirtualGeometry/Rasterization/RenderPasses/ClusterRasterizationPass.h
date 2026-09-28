@@ -17,6 +17,7 @@
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"
+#include "Render/DeclaredTableLayout.h"
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
@@ -32,14 +33,16 @@ struct ClusterRasterizationPassInputs {
 };
 
 struct ClusterRasterBindings {
-    org::ResourceBindingToken histogram, visible, transforms, mapping, indirectArgs;
-    org::ResourceBindingToken telemetry, mismatchCounter, mismatchDetails;
-    org::ResourceBindingToken pageTable, clipmapInfo, physicalPages, dynamicPages;
-    org::ResourceBindingToken deepNodes, deepCounter, deepOverflow;
-    org::ResourceBindingToken avboitConfig, visibleResolve;
-    std::array<org::ResourceBindingToken, 3> colors{};
-    org::ResourceBindingToken depth;
-    std::vector<org::ResourceBindingToken> visibilityBuffers;
+    org::DeclaredViewToken histogram, visible, transforms, mapping;
+    org::ResourceBindingToken indirectArgs;
+    org::DeclaredViewToken telemetry, mismatchCounter, mismatchDetails;
+    org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages;
+    org::DeclaredViewToken deepNodes, deepCounter, deepOverflow;
+    org::DeclaredViewToken avboitConfig, visibleResolve;
+    std::array<org::DeclaredViewToken, 3> colors{};
+    org::DeclaredViewToken depth;
+    std::vector<org::DeclaredViewToken> visibilityBuffers;
+    org::DeclaredTableLayout<CLodViewRasterInfo> viewTable;
     bool hasTelemetry = false, hasMismatch = false, virtualShadow = false;
     bool deepVisibility = false, avboit = false, hasVisibleResolve = false, hasDepth = false;
 };
@@ -104,10 +107,13 @@ private:
     std::vector<CLodViewRasterInfo> m_viewRasterInfos; // Rows without descriptors (change detection).
     // Built by Update from the view snapshot; its descriptors are resolved and
     // the table published when the recipe is built.
-    CLodViewRasterInfoTable m_viewRasterInfoTable;
+    struct ViewInput {
+        uint32_t camera;
+        std::shared_ptr<org::PixelBuffer> visibility, headPointers;
+        bool operator==(const ViewInput&) const = default;
+    };
+    std::vector<ViewInput> m_viewInputs;
     org::PreparedTablePublisher m_viewRasterInfoPublisher{"CLod Raster View Raster Info"};
-    std::vector<std::shared_ptr<org::PixelBuffer>> m_visibilityBuffers;
-    std::vector<std::shared_ptr<org::PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
 
     std::shared_ptr<org::Buffer> m_compactedVisibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
@@ -145,6 +151,7 @@ private:
     uint32_t m_passHeight = 1;
     uint32_t m_deepVisibilityNodeCapacity = 1;
     bool m_declaredResourcesChanged = true;
+    bool m_declaredShadowsEnabled = false;
     std::function<bool()> m_getPunctualLightingEnabled;
     std::function<bool()> m_getShadowsEnabled;
     bool m_gtaoEnabled = false;
