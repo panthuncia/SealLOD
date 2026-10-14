@@ -12,10 +12,11 @@ AsyncStateGraphHostHooks::AsyncStateGraphHostHooks()
         {static_cast<std::uint32_t>(TaskLane::Streaming), static_cast<std::uint32_t>(TaskDomain::RendererState)}},
       producerDispatch(scheduling.domainCount, org::async::TaskDispatch::Cpu) {}
 
-AsyncStateGraph::AsyncStateGraph(TaskSchedulerManager& scheduler, std::string_view name)
-    : AsyncStateGraph(br::MakeGraphSchedulerAdapter(scheduler), name, MakeRendererGraphHooks()) {}
+AsyncStateGraph::AsyncStateGraph(TaskSchedulerManager& scheduler, std::string_view name,
+    std::shared_ptr<VersionedBufferRuntime> versionedBuffers)
+    : AsyncStateGraph(br::MakeGraphSchedulerAdapter(scheduler), name, MakeRendererGraphHooks(std::move(versionedBuffers))) {}
 
-AsyncStateGraphHostHooks MakeRendererGraphHooks() {
+AsyncStateGraphHostHooks MakeRendererGraphHooks(std::shared_ptr<VersionedBufferRuntime> versionedBuffers) {
     AsyncStateGraphHostHooks hooks;
     for (auto& policy : hooks.artifactPolicies) policy.pinExactContent = false;
     hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::ActiveDrawList)].pinExactContent = true;
@@ -25,7 +26,9 @@ AsyncStateGraphHostHooks MakeRendererGraphHooks() {
     // service drains; other graph producers use direct CPU scheduling.
     hooks.producerDispatch[static_cast<std::size_t>(TaskDomain::StaticGroupPreparation)] = org::async::TaskDispatch::Controlled;
     hooks.createTraceSession = MakeRendererGraphTrace;
-    hooks.versionsRetired = [] { NotifyVersionedGpuBufferFrameRetirement(); };
+    if (versionedBuffers) {
+        hooks.versionsRetired = [versionedBuffers = std::move(versionedBuffers)] { versionedBuffers->NotifyFrameRetirement(); };
+    }
     hooks.traceAcceptedInput = [](AsyncStateGraph& graph, ArtifactKey key,
         std::uint64_t revision, std::uint64_t generation, const ArtifactPayload& input) {
         if (key.kind == ArtifactKind::StaticTransaction) {

@@ -35,7 +35,7 @@ namespace org { class GloballyIndexedResource; }
 namespace org { class DynamicBuffer; }
 namespace org::runtime { class IUploadService; }
 class PublishedStateResourceResolver;
-namespace br::render { class RendererStateRequestService; class VersionedGpuBufferBackingPool; struct PublishedGpuBufferVersion; struct PublishedRendererState; }
+namespace br::render { class RendererStateRequestService; struct PublishedRendererState; }
 class Material;
 class Mesh;
 
@@ -207,6 +207,7 @@ private:
 		br::render::ArtifactVersionID submittedVersion{};
 		br::render::ArtifactVersionHandle submittedHandle{};
 		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
+		std::shared_ptr<const br::render::PublishedGpuBufferVersion> published;  // last acknowledged
 	};
 
 	// Immutable producer cut handed from the ordered object-journal writer to
@@ -320,6 +321,7 @@ private:
 	br::render::ArtifactVersionID m_visibilityGenerationSubmittedVersion{};
 	br::render::ArtifactVersionHandle m_visibilityGenerationSubmittedHandle{};
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_visibilityGenerationBackingPool;
+	std::shared_ptr<const br::render::PublishedGpuBufferVersion> m_visibilityGenerationPublished;
 	br::render::VersionedGpuBufferJournal m_skinnedPlacementJournal{ sizeof(SkinnedAssemblyPlacementGPU) };
 	br::render::VersionedGpuBufferJournal m_activeSkinnedPlacementJournal{
 		sizeof(br::render::PublishedActiveSkinnedPlacement) };
@@ -332,6 +334,8 @@ private:
 	br::render::ArtifactVersionHandle m_geometryCoverageGate{};
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_skinnedPlacementBackingPool;
 	std::shared_ptr<br::render::VersionedGpuBufferBackingPool> m_activeSkinnedPlacementBackingPool;
+	std::shared_ptr<const br::render::PublishedGpuBufferVersion> m_skinnedPlacementPublished;
+	std::shared_ptr<const br::render::PublishedGpuBufferVersion> m_activeSkinnedPlacementPublished;
 	std::uint32_t m_graphFramesInFlight = 1;
 	std::uint64_t m_lastBufferStatePublicationRetirementEpoch = 0;
 	mutable std::mutex m_desiredBufferStateReadyCallbackMutex;

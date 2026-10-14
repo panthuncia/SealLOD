@@ -228,15 +228,6 @@ TextureStreamingManager::TextureStreamingManager()
 	TextureStreamingGPUInfo fallback{};
 	m_textureImageTableJournal.Initialize(
 		std::as_bytes(std::span{ &fallback, std::size_t{ 1 } }), 1, 1);
-	m_textureImageTableFamily = std::make_shared<br::render::VersionedBufferFamily>(
-		br::render::VersionedBufferFamily::Config{
-			.address = { br::render::ArtifactKind::BufferVersion, 0,
-				br::render::kTextureImageTableBufferVariant },
-			.debugName = "PublishedTextureImageTable",
-			.elementStride = sizeof(TextureStreamingGPUInfo),
-			.catalogOwner = br::render::PublishedFragmentKind::TextureImages,
-			.catalogUsage = br::render::PublishedResourceUsage::ShaderResource,
-			.catalogVariant = br::render::kTextureImageTableBufferVariant });
 	m_textureStreamingMetadataBuffer = DynamicStructuredBuffer<TextureStreamingGPUInfo>::CreateShared(
 		1u,
 		"Builtin::Material::TextureStreamingMetadataBuffer",
@@ -280,6 +271,18 @@ void TextureStreamingManager::SetRendererStateRequestService(
 	}
 	m_textureImageTableBuildInFlight.store(false, std::memory_order_release);
 	m_rendererStateRequests = service;
+	if (service && !m_textureImageTableFamily) {
+		m_textureImageTableFamily = std::make_shared<br::render::VersionedBufferFamily>(service->VersionedBuffers(),
+			br::render::VersionedBufferFamily::Config{
+				.address = { br::render::ArtifactKind::BufferVersion, 0,
+					br::render::kTextureImageTableBufferVariant },
+				.debugName = "PublishedTextureImageTable",
+				.elementStride = sizeof(TextureStreamingGPUInfo),
+				.catalogOwner = br::render::PublishedFragmentKind::TextureImages,
+				.catalogUsage = br::render::PublishedResourceUsage::ShaderResource,
+				.catalogVariant = br::render::kTextureImageTableBufferVariant });
+		m_textureImageTableJournal.SetBackingPool(m_textureImageTableFamily->Configuration().pool);
+	}
 }
 
 void TextureStreamingManager::Initialize(TextureFactory& textureFactory, uint32_t framesInFlight)
@@ -1263,7 +1266,7 @@ void TextureStreamingManager::PublishTextureImageTable()
 			basic_telemetry::AddCounter("SARP.TextureStreaming.ImageTableCandidatesCoalesced");
 			return;
 		}
-		const auto retirementEpoch = br::render::VersionedGpuBufferFrameRetirementEpoch();
+		const auto retirementEpoch = m_rendererStateRequests->VersionedBuffers().RetirementEpoch();
 		if (retirementEpoch < m_lastTextureImageTableAdmissionRetirementEpoch +
 			m_framesInFlight) {
 			basic_telemetry::AddCounter("SARP.TextureStreaming.ImageTableRetirementPaced");
@@ -1307,7 +1310,7 @@ void TextureStreamingManager::PublishTextureImageTable()
 		}
 		m_textureImageTableHandle = root.Handle();
 		m_lastTextureImageTableAdmissionRetirementEpoch =
-			br::render::VersionedGpuBufferFrameRetirementEpoch();
+			m_rendererStateRequests->VersionedBuffers().RetirementEpoch();
 		m_textureImageTableDirty = false;
 		m_textureImageTableBuildInFlight.store(true, std::memory_order_release);
 		auto awaiter = m_rendererStateRequests->AwaitExact(root.Handle(),

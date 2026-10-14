@@ -10,8 +10,9 @@
 
 namespace org { class Resource; }
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 inline constexpr std::uint64_t LightInfoTableVariant = 1;
 inline constexpr std::uint64_t LightSpotViewTableVariant = 2;
 inline constexpr std::uint64_t LightPointViewTableVariant = 3;

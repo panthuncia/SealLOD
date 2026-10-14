@@ -3,6 +3,7 @@
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 #include "Materials/TextureStreaming/TextureBindingArtifacts.h"
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
+#include "Resources/Buffers/Buffer.h"
 #include "Resources/GloballyIndexedResource.h"
 #include <BasicTelemetry/Telemetry.h>
 

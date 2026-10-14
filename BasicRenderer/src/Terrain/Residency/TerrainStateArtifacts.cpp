@@ -7,6 +7,7 @@
 #include <BasicRenderer/Streaming/RendererStateRequestService.h>
 #include "Materials/TextureStreaming/TextureBindingArtifacts.h"
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
+#include "Resources/Buffers/Buffer.h"
 #include "Render/Runtime/IUploadService.h"
 #include "Resources/GloballyIndexedResource.h"
 #include "Resources/PixelBuffer.h"

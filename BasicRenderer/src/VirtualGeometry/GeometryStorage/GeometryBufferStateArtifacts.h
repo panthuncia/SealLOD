@@ -7,9 +7,10 @@
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
 
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 
 struct GeometryBufferDependencyDTO {
     ArtifactKey key{ ArtifactKind::BufferVersion, 0, 0 };

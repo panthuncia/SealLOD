@@ -37,7 +37,12 @@ class ViewManager;
 class ICLodGeometryStorage;
 class MeshManagerCLodGeometryStorage;
 namespace br::render { class RendererStateRequestService; class CLodResidencyStorageDirectory; }
-namespace br::render { struct PublishedRendererState; class VersionedGpuBufferBackingPool; }
+namespace org::services { class BackingPool; struct PublishedBufferVersion; }
+namespace br::render {
+struct PublishedRendererState;
+using VersionedGpuBufferBackingPool = org::services::BackingPool;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
+}
 namespace org::runtime { class IUploadService; }
 class PublishedStateResourceResolver;
 
@@ -295,6 +300,7 @@ private:
 		std::uint32_t elementStride = 0;
 		br::render::ArtifactVersionID submittedVersion{};
 		std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
+		std::shared_ptr<const br::render::PublishedGpuBufferVersion> published;  // last acknowledged
 	};
 	std::vector<GraphBufferBinding> m_graphBufferBindings;
 	std::unordered_map<org::ResourceIdentifier, std::shared_ptr<PublishedStateResourceResolver>,

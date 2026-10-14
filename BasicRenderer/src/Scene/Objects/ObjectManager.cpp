@@ -425,7 +425,8 @@ void ObjectManager::SetRendererStateServices(
 		binding.key = { br::render::ArtifactKind::BufferVersion, 0x4f424a4255460000ull, variant };
 		binding.catalogVariant = variant;
 		binding.elementStride = stride;
-		binding.backingPool = std::make_shared<br::render::VersionedGpuBufferBackingPool>();
+		binding.backingPool = requests->VersionedBuffers().CreatePool("Published::" + identifier.ToString());
+		buffer->SetVersionedGraphBackingPool(binding.backingPool);
 		m_graphBufferBindings.push_back(std::move(binding));
 		buffer->ReleaseECSEntity();
 		m_graphBufferResolvers.emplace(identifier,
@@ -438,9 +439,13 @@ void ObjectManager::SetRendererStateServices(
 		m_resources.erase(identifier);
 	}
 	m_visibilityGenerationBackingPool =
-		std::make_shared<br::render::VersionedGpuBufferBackingPool>();
-	m_skinnedPlacementBackingPool = std::make_shared<br::render::VersionedGpuBufferBackingPool>();
-	m_activeSkinnedPlacementBackingPool = std::make_shared<br::render::VersionedGpuBufferBackingPool>();
+		requests->VersionedBuffers().CreatePool("Published::DrawRecordVisibilityGeneration");
+	m_skinnedPlacementBackingPool = requests->VersionedBuffers().CreatePool("Published::SkinnedAssemblyPlacements");
+	m_activeSkinnedPlacementBackingPool =
+		requests->VersionedBuffers().CreatePool("Published::ActiveSkinnedAssemblyPlacements");
+	m_visibilityGenerationJournal.SetBackingPool(m_visibilityGenerationBackingPool);
+	m_skinnedPlacementJournal.SetBackingPool(m_skinnedPlacementBackingPool);
+	m_activeSkinnedPlacementJournal.SetBackingPool(m_activeSkinnedPlacementBackingPool);
 	PublishSkinnedPlacementSourceVersionLocked();
 	const auto registerPlacementResolver = [&](org::ResourceIdentifier identifier, std::uint64_t variant,
 		const std::shared_ptr<org::Resource>& bootstrap) {
@@ -570,7 +575,7 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	// Keep all newer writes in the journals until every slot has had an
 	// opportunity to retire. This bounds allocation by frame lifetime instead
 	// of by the number of import patches received during a slow frame.
-	const auto retirementEpoch = br::render::VersionedGpuBufferFrameRetirementEpoch();
+	const auto retirementEpoch = m_rendererStateRequests->VersionedBuffers().RetirementEpoch();
 	if (m_lastBufferStatePublicationRetirementEpoch != 0u &&
 		retirementEpoch < m_lastBufferStatePublicationRetirementEpoch + m_graphFramesInFlight) {
 		m_objectBufferGraphDirty.store(true, std::memory_order_release);
@@ -618,9 +623,8 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 			input->elementStride = binding.elementStride;
 			input->elementCount = capture.elementCount;
 			input->capacity = capture.capacity;
-			input->catalogOwner = br::render::PublishedFragmentKind::DrawRecords;
-			input->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
-			input->catalogVariant = binding.catalogVariant;
+			input->tag = br::render::MakeVersionedBufferTag(br::render::PublishedFragmentKind::DrawRecords,
+				br::render::PublishedResourceUsage::ShaderResource, binding.catalogVariant);
 			input->previous = capture.previous;
 			input->backingPool = binding.backingPool;
 			input->writes = capture.writes;
@@ -652,9 +656,8 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 		input->elementStride = sizeof(std::uint32_t);
 		input->elementCount = visibilityCapture.elementCount;
 		input->capacity = visibilityCapture.capacity;
-		input->catalogOwner = br::render::PublishedFragmentKind::DrawRecords;
-		input->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
-		input->catalogVariant = br::render::kObjectVisibilityGenerationVariant;
+		input->tag = br::render::MakeVersionedBufferTag(br::render::PublishedFragmentKind::DrawRecords,
+			br::render::PublishedResourceUsage::ShaderResource, br::render::kObjectVisibilityGenerationVariant);
 		input->backingPool = m_visibilityGenerationBackingPool;
 		input->previous = visibilityCapture.previous;
 		input->writes = visibilityCapture.writes;
@@ -705,9 +708,8 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 		input->elementStride = stride;
 		input->elementCount = capture.elementCount;
 		input->capacity = capture.capacity;
-		input->catalogOwner = br::render::PublishedFragmentKind::DrawRecords;
-		input->catalogUsage = br::render::PublishedResourceUsage::ShaderResource;
-		input->catalogVariant = variant;
+		input->tag = br::render::MakeVersionedBufferTag(br::render::PublishedFragmentKind::DrawRecords,
+			br::render::PublishedResourceUsage::ShaderResource, variant);
 		input->previous = capture.previous;
 		input->backingPool = backingPool;
 		input->writes = capture.writes;
@@ -832,6 +834,8 @@ std::uint64_t ObjectManager::PublishDesiredBufferState() {
 	if (fingerprint == m_objectBufferFingerprint) {
 		m_objectBufferSubmittedSnapshotGeneration =
 			m_objectBufferSnapshotMailbox.ConsumedGeneration();
+		// Submitted: the cut's captures (and the predecessor versions they hold, which pin pooled backings) are not needed again.
+		m_objectBufferSnapshotMailbox.ReleaseConsumerValue();
 		m_objectBufferSubmittedMutationGeneration = coveredMutationGeneration;
 		basic_telemetry::SetGauge("SARP.VersionedBuffer.Object.MutationCoveragePublished",
 			static_cast<std::int64_t>(coveredMutationGeneration));
@@ -872,9 +876,10 @@ void ObjectManager::AcknowledgePublishedBufferState(
 	const std::shared_ptr<const br::render::PublishedRendererState>& published) {
 	const auto state = published
 		? published->drawRecords.payload.Get<br::render::PublishedObjectBufferState>() : nullptr;
-	if (!state) return;
+	if (!state || !m_rendererStateRequests) return;
 	if (m_activeObjectBufferStateRevision.load(std::memory_order_acquire) ==
 		published->drawRecords.revision) return;
+	const auto& versionedBuffers = m_rendererStateRequests->VersionedBuffers();
 	// DrawRecords and the indirect workloads that consume them form one mutable
 	// publication epoch. Do not advance the journals' previous versions on an
 	// independently committed DrawRecords fragment: doing so retains an extra
@@ -903,47 +908,35 @@ void ObjectManager::AcknowledgePublishedBufferState(
 		const auto desired = binding.buffer->CaptureVersionedGraphState();
 		if (desired.writeSequence != version->writeSequence) {
 			binding.buffer->AcknowledgeVersionedGraphState(version);
-			if (auto pool = version->backingPool.lock(); version->backing) {
-				pool->AcknowledgePublished(
-					version->backing->backingGeneration, m_graphFramesInFlight);
-			}
+			br::render::AcknowledgePublishedVersion(binding.published, version, versionedBuffers);
 			continue;
 		}
 		if (!version->image || version->image->ByteSize() !=
 			version->elementCount * version->elementStride) return;
 		binding.buffer->AcknowledgeVersionedGraphState(version);
-		if (auto pool = version->backingPool.lock(); version->backing) {
-			pool->AcknowledgePublished(
-				version->backing->backingGeneration, m_graphFramesInFlight);
-		}
+		br::render::AcknowledgePublishedVersion(binding.published, version, versionedBuffers);
 	}
 	const auto visibilityVersion = state->FindVersion(
 		br::render::kObjectVisibilityGenerationVariant);
 	if (!visibilityVersion) return;
 	m_visibilityGenerationJournal.Acknowledge(visibilityVersion);
-	if (auto pool = visibilityVersion->backingPool.lock(); visibilityVersion->backing) {
-		pool->AcknowledgePublished(
-			visibilityVersion->backing->backingGeneration, m_graphFramesInFlight);
-	}
+	br::render::AcknowledgePublishedVersion(m_visibilityGenerationPublished, visibilityVersion, versionedBuffers);
 	const auto acknowledgePlacement = [&](std::uint64_t variant,
-		br::render::VersionedGpuBufferJournal& journal) {
+		br::render::VersionedGpuBufferJournal& journal,
+		std::shared_ptr<const br::render::PublishedGpuBufferVersion>& published) {
 		const auto version = state->FindVersion(variant);
 		if (!version) return false;
 		journal.Acknowledge(version);
-		if (auto pool = version->backingPool.lock(); version->backing) {
-			pool->AcknowledgePublished(
-				version->backing->backingGeneration, m_graphFramesInFlight);
-		}
+		br::render::AcknowledgePublishedVersion(published, version, versionedBuffers);
 		return true;
 	};
 	if (!acknowledgePlacement(br::render::kObjectSkinnedPlacementVariant,
-			m_skinnedPlacementJournal) ||
+			m_skinnedPlacementJournal, m_skinnedPlacementPublished) ||
 		!acknowledgePlacement(br::render::kObjectActiveSkinnedPlacementVariant,
-			m_activeSkinnedPlacementJournal)) return;
+			m_activeSkinnedPlacementJournal, m_activeSkinnedPlacementPublished)) return;
 
 	m_activeObjectBufferStateRevision.store(published->drawRecords.revision, std::memory_order_release);
-	m_lastBufferStatePublicationRetirementEpoch =
-		br::render::VersionedGpuBufferFrameRetirementEpoch();
+	m_lastBufferStatePublicationRetirementEpoch = versionedBuffers.RetirementEpoch();
 	br::render::DesiredBufferStateReadyCallback readyCallback;
 	{
 		std::lock_guard lock(m_desiredBufferStateReadyCallbackMutex);

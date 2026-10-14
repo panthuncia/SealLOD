@@ -1057,8 +1057,8 @@ void Renderer::Update(float elapsedSeconds) {
                                     << "content_version=" << version->contentVersion << '\n'
                                     << "content_epoch=" << version->contentEpoch << '\n'
                                     << "backing_epoch=" << version->backingEpoch << '\n'
-                                    << "backing_generation=" << (version->backing
-                                        ? version->backing->backingGeneration : 0u) << '\n';
+                                    << "backing_generation=" << (version->lease
+                                        ? version->lease->generation : 0u) << '\n';
                                 if (!result.layouts.empty()) metadata
                                     << "offset=" << result.layouts.front().offset << '\n'
                                     << "row_pitch=" << result.layouts.front().rowPitch << '\n';
@@ -1328,7 +1328,7 @@ void Renderer::Update(float elapsedSeconds) {
                                 tableMetadata << "buffer_content_version="
                                     << table->contentVersion << '\n';
                                 tableMetadata << "buffer_backing_generation="
-                                    << (table->backing ? table->backing->backingGeneration : 0u) << '\n';
+                                    << (table->lease ? table->lease->generation : 0u) << '\n';
                                 tableMetadata << "resource_id=" << resourceID << '\n';
                                 tableMetadata << "capture_resource_id="
                                     << (captureResource

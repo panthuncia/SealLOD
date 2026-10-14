@@ -69,6 +69,7 @@ class RendererStatePublisher;
 class RendererStateRequestService;
 class AsyncStateGraph;
 class VersionedBufferFamily;
+class VersionedBufferRuntime;
 }
 namespace br::telemetry { enum class CpuTaskDomain : uint8_t; }
 class CLodStreamingSystem;
@@ -255,6 +256,8 @@ private:
     std::unique_ptr<br::ReadbackManager> m_pReadbackManager = nullptr;
     std::unique_ptr<TextureFactory> m_pTextureFactory = nullptr;
     std::shared_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
+    // The renderer's versioned-buffer retirement clock and pools (advanced by frame-slot and graph retirement).
+    std::shared_ptr<br::render::VersionedBufferRuntime> m_versionedBuffers;
     std::unique_ptr<br::render::AsyncStateGraph> m_asyncStateGraph;
     std::optional<br::render::AsyncStateGraphTraceConfig> m_pendingAsyncStateGraphTrace;
     std::unique_ptr<br::render::RendererStatePublisher> m_rendererStatePublisher;

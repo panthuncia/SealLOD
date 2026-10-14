@@ -5,6 +5,7 @@
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 #include "BasicRenderer/Streaming/ViewStateArtifacts.h"
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
+#include "Resources/Buffers/Buffer.h"
 
 namespace br::render {
 namespace {

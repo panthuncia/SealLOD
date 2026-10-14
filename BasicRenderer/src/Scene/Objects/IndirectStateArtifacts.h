@@ -15,9 +15,10 @@ class DynamicGloballyIndexedResource;
 class GloballyIndexedResource;
 }
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
 
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 
 struct ActiveDrawEntryDTO {
     std::uint32_t drawRecordIndex = 0;

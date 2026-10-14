@@ -11,6 +11,9 @@ namespace br {
 // reusable payload allocations. The producer, consumer, and atomic mailbox
 // each own one slot. Neither side waits for the other: publication and
 // consumption are pointer exchanges, and intermediate generations coalesce.
+// A slot leaving use (a coalesced or already-consumed generation) is reset at
+// once, so what its payload holds (e.g. versioned-buffer leases) does not
+// outlive its generation until the slot happens to be rewritten.
 template <class T>
 class TripleGenerationMailbox {
 public:
@@ -43,6 +46,7 @@ public:
         Slot* previous = m_mailbox.exchange(
             m_producer.release(), std::memory_order_acq_rel);
         m_producer.reset(previous);
+        if (m_producer) m_producer->value = T{};
         m_publishedGeneration.store(generation, std::memory_order_release);
     }
 
@@ -53,6 +57,7 @@ public:
             m_consumedGeneration) {
             return nullptr;
         }
+        if (m_consumer) m_consumer->value = T{};
         Slot* incoming = m_mailbox.exchange(
             m_consumer.release(), std::memory_order_acq_rel);
         m_consumer.reset(incoming);
@@ -63,6 +68,11 @@ public:
         return std::addressof(m_consumer->value);
     }
 
+    // Consumer-thread only: the consumed value is no longer needed (e.g. it was
+    // submitted); ConsumerValue then returns an empty value until the next consume.
+    void ReleaseConsumerValue() noexcept {
+        if (m_consumer) m_consumer->value = T{};
+    }
     [[nodiscard]] const T* ConsumerValue() const noexcept {
         return m_consumedGeneration != 0 && m_consumer
             ? std::addressof(m_consumer->value) : nullptr;

@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
+#include "Resources/Buffers/Buffer.h"
 #include "Resources/GloballyIndexedResource.h"
 
 namespace br::render {

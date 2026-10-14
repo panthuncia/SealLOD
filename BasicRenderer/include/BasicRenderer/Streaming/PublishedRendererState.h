@@ -19,6 +19,7 @@ namespace org::experimental { struct PreparedBackingState; }
 
 namespace br::render {
 struct PersistentRendererPublication;
+class VersionedBufferRuntime;
 
 struct PublicationBundle {
     ArtifactVersionID root;
@@ -283,6 +284,8 @@ struct RendererStateCommitResult {
     // Completed worker results can own large catalog/binding graphs. Release
     // them with the renderer's existing deferred commit cleanup.
     std::vector<std::shared_ptr<const void>> retiredPreparations;
+    // Advanced once the retired states above are released (Commit runs after the slot's fence completed).
+    std::shared_ptr<VersionedBufferRuntime> versionedBuffers;
 
     [[nodiscard]] bool HasDeferredWork() const noexcept {
         return committed || retiredStateCount != 0 || !retiredPreparations.empty() || static_cast<bool>(rejectedCallback);
@@ -292,7 +295,8 @@ struct RendererStateCommitResult {
 
 class RendererStatePublisher {
 public:
-    explicit RendererStatePublisher(std::size_t framesInFlight = 0);
+    // versionedBuffers: the renderer's versioned-buffer runtime, advanced as frame slots retire (one of its own when null).
+    explicit RendererStatePublisher(std::size_t framesInFlight = 0, std::shared_ptr<VersionedBufferRuntime> versionedBuffers = {});
 
     void Bootstrap(std::shared_ptr<const PublishedRendererState> fallback, std::size_t framesInFlight);
     bool PublishCandidate(RendererStateCandidate candidate);
@@ -318,6 +322,7 @@ public:
     [[nodiscard]] std::uint64_t ActiveEpoch() const;
     [[nodiscard]] RendererStatePublisherStats Stats() const;
     [[nodiscard]] std::shared_ptr<PublishedStateSource> ResourceSource() const { return m_source; }
+    [[nodiscard]] const std::shared_ptr<VersionedBufferRuntime>& VersionedBuffers() const noexcept { return m_versionedBuffers; }
     void SetCandidateRejectedCallback(std::function<void(std::uint64_t)> callback);
 
 private:
@@ -343,6 +348,7 @@ private:
     std::size_t m_commitLatencySampleCount = 0;
     std::shared_ptr<PublishedStateSource> m_source = std::make_shared<PublishedStateSource>();
     std::function<void(std::uint64_t)> m_candidateRejected;
+    std::shared_ptr<VersionedBufferRuntime> m_versionedBuffers;
 };
 
 } // namespace br::render

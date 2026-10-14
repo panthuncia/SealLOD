@@ -10,10 +10,11 @@
 
 namespace org { class BindingTableVersion; }
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
 
 class VersionedBufferFamily;
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 
 inline constexpr std::uint64_t kTextureImageTableBufferVariant = 0x54494d47ull;
 struct TextureImageTableBuildInput {

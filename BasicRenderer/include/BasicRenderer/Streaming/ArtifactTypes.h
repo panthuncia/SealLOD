@@ -22,6 +22,7 @@
 #include <ORGModuleServices/Async/ArtifactSnapshot.h>
 #include <ORGModuleServices/Async/ArtifactBuild.h>
 #include <ORGModuleServices/Async/GraphTrace.h>
+#include <ORGModuleServices/Async/StateGraphTypes.h>
 
 namespace org { struct TrackedUploadTicket; }
 
@@ -232,5 +233,9 @@ struct AsyncStateGraphTraceReport {
     std::uint64_t droppedEvents = 0;
     std::chrono::microseconds elapsed{};
 };
+
+// The renderer graph's identity types (StateGraph<RendererGraphBinding> is AsyncStateGraph's base).
+using RendererGraphBinding = org::async::StateGraphTypes<ArtifactKind, RendererArtifactScheduling,
+    kArtifactKindCount, AsyncStateGraphTraceEventID, AsyncStateGraphTraceReport>;
 
 } // namespace br::render

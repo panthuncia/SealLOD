@@ -434,24 +434,6 @@ MaterialManager::MaterialManager() {
 	m_materialBaseJournal.Initialize({}, 0, m_materialBufferCapacity);
 	m_materialEvalJournal.Initialize({}, 0, m_materialBufferCapacity);
 	m_materialOpenPbrJournal.Initialize({}, 0, m_materialBufferCapacity);
-	m_materialBufferFamilies[0] = std::make_unique<br::render::VersionedBufferFamily>(
-		br::render::VersionedBufferFamily::Config{
-			{ br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialBaseTableVariant },
-			"Published::PerMaterialDataBuffer", sizeof(PerMaterialCB), false, false,
-			br::render::PublishedFragmentKind::Materials,
-			br::render::PublishedResourceUsage::ShaderResource, br::render::kMaterialBaseTableVariant });
-	m_materialBufferFamilies[1] = std::make_unique<br::render::VersionedBufferFamily>(
-		br::render::VersionedBufferFamily::Config{
-			{ br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialEvalTableVariant },
-			"Published::PerMaterialEvalDataBuffer", sizeof(PerMaterialEvalCB), false, false,
-			br::render::PublishedFragmentKind::Materials,
-			br::render::PublishedResourceUsage::ShaderResource, br::render::kMaterialEvalTableVariant });
-	m_materialBufferFamilies[2] = std::make_unique<br::render::VersionedBufferFamily>(
-		br::render::VersionedBufferFamily::Config{
-			{ br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialOpenPbrTableVariant },
-			"Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB), false, false,
-			br::render::PublishedFragmentKind::Materials,
-			br::render::PublishedResourceUsage::ShaderResource, br::render::kMaterialOpenPbrTableVariant });
 	auto startupBase = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(1, "StartupFallback::PerMaterialDataBuffer", true);
 	auto startupEval = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(1, "StartupFallback::PerMaterialEvalDataBuffer", true);
 	auto startupOpenPbr = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(1, "StartupFallback::PerMaterialOpenPBRDataBuffer", true);
@@ -795,6 +777,29 @@ void MaterialManager::SetRendererStateServices(br::render::RendererStateRequestS
 	std::shared_ptr<org::runtime::IUploadService> uploads) {
 	m_rendererStateRequests = requests;
 	m_uploadService = uploads;
+	if (requests && !m_materialBufferFamilies[0]) {
+		m_materialBufferFamilies[0] = std::make_unique<br::render::VersionedBufferFamily>(requests->VersionedBuffers(),
+			br::render::VersionedBufferFamily::Config{
+				{ br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialBaseTableVariant },
+				"Published::PerMaterialDataBuffer", sizeof(PerMaterialCB), false, false,
+				br::render::PublishedFragmentKind::Materials,
+				br::render::PublishedResourceUsage::ShaderResource, br::render::kMaterialBaseTableVariant });
+		m_materialBufferFamilies[1] = std::make_unique<br::render::VersionedBufferFamily>(requests->VersionedBuffers(),
+			br::render::VersionedBufferFamily::Config{
+				{ br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialEvalTableVariant },
+				"Published::PerMaterialEvalDataBuffer", sizeof(PerMaterialEvalCB), false, false,
+				br::render::PublishedFragmentKind::Materials,
+				br::render::PublishedResourceUsage::ShaderResource, br::render::kMaterialEvalTableVariant });
+		m_materialBufferFamilies[2] = std::make_unique<br::render::VersionedBufferFamily>(requests->VersionedBuffers(),
+			br::render::VersionedBufferFamily::Config{
+				{ br::render::ArtifactKind::BufferVersion, 0, br::render::kMaterialOpenPbrTableVariant },
+				"Published::PerMaterialOpenPBRDataBuffer", sizeof(PerMaterialOpenPBRCB), false, false,
+				br::render::PublishedFragmentKind::Materials,
+				br::render::PublishedResourceUsage::ShaderResource, br::render::kMaterialOpenPbrTableVariant });
+		m_materialBaseJournal.SetBackingPool(m_materialBufferFamilies[0]->Configuration().pool);
+		m_materialEvalJournal.SetBackingPool(m_materialBufferFamilies[1]->Configuration().pool);
+		m_materialOpenPbrJournal.SetBackingPool(m_materialBufferFamilies[2]->Configuration().pool);
+	}
 	if (m_textureStreamingManager) m_textureStreamingManager->SetRendererStateRequestService(requests, uploads);
 }
 
@@ -1961,7 +1966,7 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 				// Acknowledgement advances several journals and buffer-family retirement
 				// cursors. Replaying it every render update was both unnecessary and a
 				// sizeable host-thread cost while a material revision remained current.
-				if (revision > m_acknowledgedMaterialPublishedRevision) {
+				if (revision > m_acknowledgedMaterialPublishedRevision && m_materialBufferFamilies[0]) {
 					m_materialBaseJournal.Acknowledge(materialState->baseTable);
 					m_materialEvalJournal.Acknowledge(materialState->evalTable);
 					m_materialOpenPbrJournal.Acknowledge(materialState->openPbrTable);

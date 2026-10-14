@@ -8,6 +8,7 @@
 #include "Scene/Objects/ObjectBufferStateArtifacts.h"
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
+#include "Resources/Buffers/Buffer.h"
 #include "Resources/GloballyIndexedResource.h"
 
 namespace br::render {

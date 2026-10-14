@@ -11,8 +11,9 @@
 
 namespace org { class PixelBuffer; class Resource; }
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 struct PrimaryCameraFrameUpload {
     CameraInfo camera{};
     CullingCameraInfo cullingCamera{};

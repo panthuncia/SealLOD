@@ -87,6 +87,7 @@ private:
         std::vector<std::shared_ptr<const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>>> appends;
         std::shared_ptr<br::render::VersionedGpuBufferJournal> bufferJournal;
         std::shared_ptr<br::render::VersionedGpuBufferBackingPool> backingPool;
+        std::shared_ptr<const br::render::PublishedGpuBufferVersion> published;  // last acknowledged
     };
     struct DesiredSnapshot {
         std::uint64_t revision = 0;

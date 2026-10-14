@@ -555,6 +555,10 @@ void SkeletonManager::AcknowledgeInverseBindGraphState(
     if (version) m_inverseBindMatrices->AcknowledgeVersionedGraphState(version);
 }
 
+void SkeletonManager::SetInverseBindBackingPool(const std::shared_ptr<const br::render::VersionedGpuBufferBackingPool>& pool) {
+    m_inverseBindMatrices->SetVersionedGraphBackingPool(pool);
+}
+
 std::shared_ptr<org::Resource> SkeletonManager::ProvideResource(org::ResourceIdentifier const& key) {
     return m_resources[key];
 }

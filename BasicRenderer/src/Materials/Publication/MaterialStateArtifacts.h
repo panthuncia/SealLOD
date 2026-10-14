@@ -17,9 +17,10 @@
 class MaterialManager;
 namespace org { class Resource; }
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
 
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 struct MaterialRowArtifact {
     std::uint32_t materialID = 0, materialSlot = 0; std::uint64_t sourceRevision = 0;
     PerMaterialCB base{}; PerMaterialEvalCB evaluation{}; PerMaterialOpenPBRCB openPbr{};

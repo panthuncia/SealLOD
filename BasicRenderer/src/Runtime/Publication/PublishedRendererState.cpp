@@ -401,7 +401,10 @@ std::shared_ptr<const PublishedRendererState> MaterializePublishedState(
     return state;
 }
 
-RendererStatePublisher::RendererStatePublisher(std::size_t framesInFlight) {
+RendererStatePublisher::RendererStatePublisher(std::size_t framesInFlight,
+    std::shared_ptr<VersionedBufferRuntime> versionedBuffers)
+    : m_versionedBuffers(versionedBuffers ? std::move(versionedBuffers)
+        : std::make_shared<VersionedBufferRuntime>(static_cast<std::uint32_t>(framesInFlight))) {
     auto fallback = std::make_shared<PublishedRendererState>();
     Bootstrap(std::move(fallback), framesInFlight);
 }
@@ -600,12 +603,14 @@ void RendererStateCommitResult::RunDeferred() noexcept {
     // Commit is called only after this frame slot's fence completes. Notify
     // bounded mutable-resource pools after the retired manifests have released
     // their resource holds so suspended builds can retry without polling.
-    NotifyVersionedGpuBufferFrameRetirement();
+    if (versionedBuffers) versionedBuffers->NotifyFrameRetirement();
+    versionedBuffers.reset();
 }
 
 RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) {
     const auto started = std::chrono::steady_clock::now();
     RendererStateCommitResult result;
+    result.versionedBuffers = m_versionedBuffers;
     std::unique_lock lock(m_mutex);
     BT_ZONE_SCOPE("RendererStatePublisher::Commit::Locked");
     std::vector<std::pair<std::shared_ptr<PendingPatch>,std::function<void()>>> rebuilds;
@@ -884,7 +889,7 @@ void RendererStatePublisher::Shutdown() {
     patches.clear();
     active.reset();
     frameStates.clear();
-    NotifyVersionedGpuBufferFrameRetirement();
+    m_versionedBuffers->NotifyFrameRetirement();
 }
 
 std::shared_ptr<const PublishedRendererState> RendererStatePublisher::Active() const {

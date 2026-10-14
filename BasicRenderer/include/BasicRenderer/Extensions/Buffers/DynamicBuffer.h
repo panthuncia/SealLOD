@@ -163,6 +163,8 @@ public:
 		m_versionedGraphMutationCallback = std::move(callback);
 	}
 	void SetVersionedGraphExclusive(bool exclusive);
+	// The pool the journal's versions are built into: acknowledgement keeps the journal's writes back to its trim floor.
+	void SetVersionedGraphBackingPool(const std::shared_ptr<const br::render::VersionedGpuBufferBackingPool>& pool);
     br::render::VersionedGpuBufferJournal::Capture CaptureVersionedGraphState() const;
     // Current journal write sequence; matches Capture::writeSequence of a capture taken now.
     std::uint64_t VersionedGraphWriteSequence() const;

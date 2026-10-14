@@ -14,8 +14,9 @@
 
 namespace org { class DynamicGloballyIndexedResource; class GloballyIndexedResource; }
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 inline constexpr std::uint64_t kObjectPerObjectVariant = 1;
 inline constexpr std::uint64_t kObjectInstanceTransformVariant = 2;
 inline constexpr std::uint64_t kObjectDrawRecordVariant = 3;

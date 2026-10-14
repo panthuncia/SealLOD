@@ -14,9 +14,10 @@
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
 
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 
 struct ObjectBufferStateBuildInput {
     std::vector<ObjectBufferDependencyDTO> buffers;

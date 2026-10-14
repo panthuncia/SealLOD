@@ -9,10 +9,11 @@
 class Skeleton;
 namespace org { class Resource; }
 
+namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
 
 class AsyncStateGraph;
-struct PublishedGpuBufferVersion;
+using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
 inline constexpr std::uint64_t PoseInverseBindTableVariant = 1;
 inline constexpr std::uint64_t PoseBoneTransformTableVariant = 2;
 inline constexpr std::uint64_t PoseInverseSkinTableVariant = 3;

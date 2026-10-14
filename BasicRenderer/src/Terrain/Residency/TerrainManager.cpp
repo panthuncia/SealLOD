@@ -996,11 +996,11 @@ void TerrainManager::RequestGraphState()
 		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainRegionsVariant },
 		br::render::ArtifactKey{ br::render::ArtifactKind::BufferVersion, 0, br::render::kTerrainWeightBlocksVariant }
 	};
-	const auto ensureFamily = [this](std::size_t familyIndex,
+	const auto ensureFamily = [this, requests](std::size_t familyIndex,
 		const br::render::ArtifactKey& key, std::string name, const auto& values) {
 		using Value = typename std::decay_t<decltype(values)>::value_type;
 		if (!m_bufferFamilies[familyIndex]) {
-			m_bufferFamilies[familyIndex] = std::make_shared<br::render::VersionedBufferFamily>(
+			m_bufferFamilies[familyIndex] = std::make_shared<br::render::VersionedBufferFamily>(requests->VersionedBuffers(),
 				br::render::VersionedBufferFamily::Config{
 					key, std::move(name), sizeof(Value), false, false,
 					br::render::PublishedFragmentKind::Terrain,

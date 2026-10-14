@@ -18,6 +18,7 @@ struct PublicationBundle;
 struct PublishedRendererState;
 class RendererStatePublisher;
 class AsyncStateGraph;
+class VersionedBufferRuntime;
 
 class RendererStateRequestService {
 public:
@@ -54,6 +55,8 @@ public:
 		ArtifactReadiness milestone, TaskLane lane, TaskDomain domain,
 		std::function<void(const ArtifactSnapshot&)> onReached,
 		std::function<void(const ArtifactTermination&)> onTerminal);
+    // The renderer's versioned-buffer runtime (its publisher's): families and pools are made from it.
+    [[nodiscard]] VersionedBufferRuntime& VersionedBuffers() const;
     [[nodiscard]] AsyncStateGraphStats Stats() const;
     [[nodiscard]] std::uint64_t Outstanding(ArtifactKind kind) const;
     [[nodiscard]] bool TraceActive() const;

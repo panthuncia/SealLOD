@@ -30,7 +30,7 @@ class IUploadService;
 class IDescriptorService;
 }
 namespace org { class DynamicGloballyIndexedResource; }
-namespace br::render { class RendererStateRequestService; class VersionedGpuBufferBackingPool; }
+namespace br::render { class RendererStateRequestService; }
 
 class TextureFactory;
 class TextureStreamingManager;

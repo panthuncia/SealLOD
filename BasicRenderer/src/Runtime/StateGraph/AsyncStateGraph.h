@@ -6,10 +6,8 @@
 
 namespace br::render {
 
-using RendererGraphBinding = org::async::StateGraphTypes<ArtifactKind, RendererArtifactScheduling,
-    kArtifactKindCount, AsyncStateGraphTraceEventID, AsyncStateGraphTraceReport>;
-
 class AsyncStateGraph;
+class VersionedBufferRuntime;
 struct AsyncStateGraphHostHooks {
     AsyncStateGraphHostHooks();
     // Fixed for the graph lifetime; the coordinator and posted-request callers
@@ -32,7 +30,9 @@ struct AsyncStateGraphHostHooks {
 class AsyncStateGraph final : public org::async::StateGraph<RendererGraphBinding> {
     using Base = org::async::StateGraph<RendererGraphBinding>;
 public:
-    explicit AsyncStateGraph(TaskSchedulerManager& scheduler, std::string_view name = "RendererStateGraph");
+    // The renderer's graph: its hooks advance versionedBuffers' clock when versions retire.
+    explicit AsyncStateGraph(TaskSchedulerManager& scheduler, std::string_view name = "RendererStateGraph",
+        std::shared_ptr<VersionedBufferRuntime> versionedBuffers = {});
     explicit AsyncStateGraph(std::shared_ptr<org::async::GraphScheduler> scheduler,
         std::string_view name = "RendererStateGraph", AsyncStateGraphHostHooks hooks = {});
     ~AsyncStateGraph();

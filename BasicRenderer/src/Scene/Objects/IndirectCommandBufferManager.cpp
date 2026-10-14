@@ -138,6 +138,16 @@ void IndirectCommandBufferManager::SetRendererStateServices(
     }
     m_rendererStateRequests = requests;
     m_uploadService = std::move(uploads);
+    if (requests) {
+        // Journals registered before the services existed get their pools now.
+        std::lock_guard lock(m_desiredMutex);
+        for (auto& [workloadKey, journal] : m_activeJournals) {
+            if (journal.bufferJournal && !journal.backingPool) {
+                journal.backingPool = requests->VersionedBuffers().CreatePool("PublishedActiveDrawList");
+                journal.bufferJournal->SetBackingPool(journal.backingPool);
+            }
+        }
+    }
     if (requests && !m_buildScope.Valid()) {
         m_buildScope = TaskSchedulerManager::GetInstance().CreateScope(
             "IndirectCommandBufferManager::DesiredState");
@@ -205,9 +215,8 @@ void IndirectCommandBufferManager::PublishDesiredState(
 			const auto journal = m_activeJournals.find(workload->first);
 			if (journal != m_activeJournals.end() && journal->second.bufferJournal) {
 				journal->second.bufferJournal->Acknowledge(version);
-				if (auto pool = version->backingPool.lock(); version->backing) {
-					pool->AcknowledgePublished(version->backing->backingGeneration, 3u);
-				}
+				br::render::AcknowledgePublishedVersion(journal->second.published, version,
+					m_rendererStateRequests->VersionedBuffers());
 			}
 		}
 		auto observed = m_publishedRootRevision.load(std::memory_order_relaxed);
@@ -220,7 +229,7 @@ void IndirectCommandBufferManager::PublishDesiredState(
 				// frames under load; measuring from admission allowed the successor
 				// to start before old frame leases had rotated out.
 				m_lastAdmissionRetirementEpoch.store(
-					br::render::VersionedGpuBufferFrameRetirementEpoch(),
+					m_rendererStateRequests->VersionedBuffers().RetirementEpoch(),
 					std::memory_order_release);
 				break;
 			}
@@ -267,8 +276,10 @@ void IndirectCommandBufferManager::OnActiveDrawSetMutation(
 		if (!journal.bufferJournal) {
 			journal.bufferJournal = std::make_shared<br::render::VersionedGpuBufferJournal>(
 				static_cast<std::uint32_t>(sizeof(br::render::ActiveDrawEntryDTO)));
-			journal.backingPool =
-				std::make_shared<br::render::VersionedGpuBufferBackingPool>();
+			if (m_rendererStateRequests) {
+				journal.backingPool = m_rendererStateRequests->VersionedBuffers().CreatePool("PublishedActiveDrawList");
+				journal.bufferJournal->SetBackingPool(journal.backingPool);
+			}
 		}
 		const auto capacityFor = [](std::size_t rows) {
 			const auto hinted = (std::max<std::size_t>)(rows + rows / 4u, rows + 512u);
@@ -354,11 +365,11 @@ void IndirectCommandBufferManager::ScheduleDesiredBuild() {
 	// per-frame PublishDesiredState call supplies the level-triggered retry. The
 	// epoch is reset again on actual publication so a slow build cannot consume
 	// the rotation interval before its resources become visible.
-	constexpr std::uint64_t retirementEpochsPerPublication = 3u;
+	const auto& versionedBuffers = m_rendererStateRequests->VersionedBuffers();
+	const std::uint64_t retirementEpochsPerPublication = versionedBuffers.FramesInFlight();
 	const auto lastAdmissionRetirement =
 		m_lastAdmissionRetirementEpoch.load(std::memory_order_acquire);
-	const auto currentRetirement =
-		br::render::VersionedGpuBufferFrameRetirementEpoch();
+	const auto currentRetirement = versionedBuffers.RetirementEpoch();
 	if (lastAdmissionRetirement != 0u &&
 		currentRetirement < lastAdmissionRetirement + retirementEpochsPerPublication) {
 		basic_telemetry::AddCounter("SARP.Indirect.DesiredStateRetirementCoalesced");
@@ -548,11 +559,11 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
             activeInput->elementStride = sizeof(br::render::ActiveDrawEntryDTO);
 			activeInput->elementCount = activeCapture.elementCount;
 			activeInput->capacity = activeCapture.capacity;
-            activeInput->catalogOwner = br::render::PublishedFragmentKind::ActiveDrawLists;
-            activeInput->catalogUsage = br::render::PublishedResourceUsage::ActiveDrawList;
-            activeInput->catalogVariant = static_cast<std::uint64_t>(key.compileFlags) |
+            activeInput->tag = br::render::MakeVersionedBufferTag(br::render::PublishedFragmentKind::ActiveDrawLists,
+                br::render::PublishedResourceUsage::ActiveDrawList,
+                static_cast<std::uint64_t>(key.compileFlags) |
                 (static_cast<std::uint64_t>(key.skinnedShadowCaster) << 62u) |
-                (static_cast<std::uint64_t>(key.clodOnly) << 63u);
+                (static_cast<std::uint64_t>(key.clodOnly) << 63u));
 			activeInput->previous = activeCapture.previous;
 			activeInput->backingPool = journal.backingPool;
 			activeInput->writes = activeCapture.writes;
@@ -609,16 +620,17 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
                     argumentInput->elementStride = sizeof(DispatchMeshIndirectCommand);
                     argumentInput->elementCount = capacity;
                     argumentInput->capacity = capacity;
-                    argumentInput->unorderedAccess = true;
-                    argumentInput->indirectArguments = true;
-                    argumentInput->catalogOwner =
-                        br::render::PublishedFragmentKind::IndirectWorkloads;
-                    argumentInput->catalogUsage =
-                        br::render::PublishedResourceUsage::IndirectArguments;
-                    argumentInput->catalogVariant =
+                    argumentInput->flags.unorderedAccess = true;
+                    argumentInput->flags.indirectArguments = true;
+                    argumentInput->tag = br::render::MakeVersionedBufferTag(
+                        br::render::PublishedFragmentKind::IndirectWorkloads,
+                        br::render::PublishedResourceUsage::IndirectArguments,
                         static_cast<std::uint64_t>(key.compileFlags) |
                         (static_cast<std::uint64_t>(key.skinnedShadowCaster) << 62u) |
-                        (static_cast<std::uint64_t>(key.clodOnly) << 63u);
+                        (static_cast<std::uint64_t>(key.clodOnly) << 63u));
+                    // Each argument version is GPU-written whole into a backing of its own pool.
+                    argumentInput->backingPool =
+                        m_rendererStateRequests->VersionedBuffers().CreatePool("PublishedIndirectArguments");
                     const auto argumentRequest = m_rendererStateRequests->SubmitLatest({
                         argumentKey, argumentRevision, {},
                         br::render::ArtifactPayload::Make<
@@ -695,7 +707,7 @@ bool IndirectCommandBufferManager::BuildDesiredState(DesiredSnapshot snapshot) {
 			static_cast<std::int64_t>(snapshot.objectBufferRequirement
 				? snapshot.objectBufferRequirement->minimumRevision : 0u));
 		m_lastAdmissionRetirementEpoch.store(
-			br::render::VersionedGpuBufferFrameRetirementEpoch(),
+			m_rendererStateRequests->VersionedBuffers().RetirementEpoch(),
 			std::memory_order_release);
 	}
     return static_cast<bool>(rootRequest);

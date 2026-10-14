@@ -2050,7 +2050,8 @@ void MeshManager::SetRendererStateServices(br::render::RendererStateRequestServi
 		});
 		GraphBufferBinding binding{ identifier, buffer,
 			{ br::render::ArtifactKind::BufferVersion, 0x47454f4255460000ull, variant },
-			variant, stride, {}, std::make_shared<br::render::VersionedGpuBufferBackingPool>() };
+			variant, stride, {}, service->VersionedBuffers().CreatePool("Published::" + identifier.ToString()) };
+		buffer->SetVersionedGraphBackingPool(binding.backingPool);
 		m_graphBufferBindings.push_back(std::move(binding));
 		buffer->ReleaseECSEntity();
 		m_graphBufferResolvers.emplace(identifier,
@@ -2098,8 +2099,8 @@ std::uint64_t MeshManager::PublishDesiredBufferState() {
 			input->elementStride = binding.elementStride;
 			input->elementCount = capture.elementCount;
 			input->capacity = capture.capacity;
-			input->catalogOwner = br::render::PublishedFragmentKind::Geometry;
-			input->catalogVariant = binding.catalogVariant;
+			input->tag = br::render::MakeVersionedBufferTag(br::render::PublishedFragmentKind::Geometry,
+				br::render::PublishedResourceUsage::ShaderResource, binding.catalogVariant);
 			input->previous = capture.previous;
 			input->backingPool = binding.backingPool;
 			input->writes = capture.writes;
@@ -3895,8 +3896,9 @@ void MeshManager::AcknowledgePublishedBufferState(
 		const auto& version = state->versions[i];
 		if (!version) return;
 		m_graphBufferBindings[i].buffer->AcknowledgeVersionedGraphState(version);
-		if (auto pool = version->backingPool.lock(); pool && version->backing) {
-			pool->AcknowledgePublished(version->backing->backingGeneration, m_geometryFramesInFlight);
+		if (m_rendererStateRequests) {
+			br::render::AcknowledgePublishedVersion(m_graphBufferBindings[i].published, version,
+				m_rendererStateRequests->VersionedBuffers());
 		}
 	}
 }

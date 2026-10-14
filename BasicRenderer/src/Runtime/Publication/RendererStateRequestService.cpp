@@ -58,6 +58,7 @@ ArtifactAwaiter RendererStateRequestService::AwaitExact(ArtifactVersionHandle ha
 	}
 
 AsyncStateGraphStats RendererStateRequestService::Stats() const { return m_graph.Stats(); }
+VersionedBufferRuntime& RendererStateRequestService::VersionedBuffers() const { return *m_publisher.VersionedBuffers(); }
 
 std::uint64_t RendererStateRequestService::Outstanding(ArtifactKind kind) const {
         return m_graph.Outstanding(kind);
@@ -655,19 +656,21 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             std::vector<std::shared_ptr<const PublishedGpuBufferVersion>> versions;
             if (key.owner == PublishedFragmentKind::Materials) {
                 if (const auto material = artifact->fragment.payload.Get<PublishedMaterialState>();
-                    material && material->baseTable && material->baseTable->initialState)
+                    material && material->baseTable && material->baseTable->hostState)
                     versions = {material->baseTable,material->evalTable,material->openPbrTable};
             } else if (key.owner == PublishedFragmentKind::Geometry) {
                 const auto geometry = patch->fragments[index]->selectedState.Get<PublishedGeometryBufferState>();
-                if (geometry && !geometry->versions.empty() && geometry->versions.front()->initialState) versions = geometry->versions;
+                if (geometry && !geometry->versions.empty() && geometry->versions.front()->hostState) versions = geometry->versions;
             }
             if (resources && !versions.empty()) {
                 auto seeds = std::make_shared<std::vector<org::experimental::PreparedBackingState>>();
                 for (const auto& resource : *resources) {
                     if (!resource) continue;
-                    for (const auto& version : versions) if (version && version->initialState
-                        && version->initialState->graphResourceID == resource->GetGlobalResourceID()) {
-                        seeds->push_back(*version->initialState); break;
+                    for (const auto& version : versions) {
+                        const auto initial = version ? PreparedBackingStateOf(*version) : nullptr;
+                        if (initial && initial->graphResourceID == resource->GetGlobalResourceID()) {
+                            seeds->push_back(*initial); break;
+                        }
                     }
                 }
                 if (!seeds->empty()) selection.initialStates = std::move(seeds);

@@ -67,6 +67,8 @@ public:
     br::render::VersionedGpuBufferJournal::Capture CaptureInverseBindGraphState() const;
     void AcknowledgeInverseBindGraphState(
         const std::shared_ptr<const br::render::PublishedGpuBufferVersion>& version);
+    // The inverse-bind family's pool: acknowledgement keeps the journal's writes back to its trim floor.
+    void SetInverseBindBackingPool(const std::shared_ptr<const br::render::VersionedGpuBufferBackingPool>& pool);
 	TransientWindRegion ReserveTransientWindRegion(uint32_t matrixCapacity) override;
 	void EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity) override;
 

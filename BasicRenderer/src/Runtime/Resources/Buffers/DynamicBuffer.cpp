@@ -1054,6 +1054,12 @@ void org::DynamicBuffer::SetVersionedGraphExclusive(bool exclusive) {
 	}
 }
 
+void org::DynamicBuffer::SetVersionedGraphBackingPool(
+	const std::shared_ptr<const br::render::VersionedGpuBufferBackingPool>& pool) {
+	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+	if (m_versionedGraphJournal) m_versionedGraphJournal->SetBackingPool(pool);
+}
+
 br::render::VersionedGpuBufferJournal::Capture org::DynamicBuffer::CaptureVersionedGraphState() const {
 	std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
 	if (!m_versionedGraphJournal) {

@@ -531,15 +531,16 @@ void Renderer::Initialize(
         "RendererStateCommitCleanup");
     m_presentationTailScope = TaskSchedulerManager::GetInstance().CreateScope(
         "RendererPresentationTail");
+    m_versionedBuffers = std::make_shared<br::render::VersionedBufferRuntime>(m_numFramesInFlight);
     m_asyncStateGraph = std::make_unique<br::render::AsyncStateGraph>(
-        TaskSchedulerManager::GetInstance(), "RendererStateGraph");
+        TaskSchedulerManager::GetInstance(), "RendererStateGraph", m_versionedBuffers);
     // The renderer thread observes published leases only; any graph lock it
     // takes is a design regression and is counted (SARP.AsyncStateGraph.OwnerThreadLocks).
     m_asyncStateGraph->SetOwnerThread();
     if (m_pendingAsyncStateGraphTrace) {
         m_asyncStateGraph->StartTrace(*m_pendingAsyncStateGraphTrace);
     }
-    m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight);
+    m_rendererStatePublisher = std::make_unique<br::render::RendererStatePublisher>(m_numFramesInFlight, m_versionedBuffers);
     if (const auto* persistent = std::getenv("SARP_PERSISTENT_PUBLICATIONS"); persistent && persistent[0] == '1') {
         m_rendererStatePublisher->SetExecutablePreparation(br::render::PreparePersistentRendererPublication);
         spdlog::info("Persistent material/geometry publication preparation enabled; pass execution remains transitional");
@@ -690,10 +691,10 @@ void Renderer::Initialize(
 	m_pMeshManager->SetSkeletonManager(m_pSkeletonManager.get());
 	m_poseInstanceRegistrationService.Configure(m_pSkeletonManager.get());
 	m_sceneRenderableResidencyService.Configure(m_pMeshManager.get(), m_pMaterialManager.get());
-    const auto makeFrameTableFamily = [](std::uint64_t id, const char* name,
+    const auto makeFrameTableFamily = [this](std::uint64_t id, const char* name,
         std::uint32_t stride, br::render::PublishedFragmentKind owner,
         std::uint64_t variant, bool unorderedAccess = false) {
-        return std::make_unique<br::render::VersionedBufferFamily>(
+        return std::make_unique<br::render::VersionedBufferFamily>(*m_versionedBuffers,
             br::render::VersionedBufferFamily::Config{
                 { br::render::ArtifactKind::BufferVersion, id, 0 }, name, stride,
                 unorderedAccess, false, owner,
@@ -721,6 +722,7 @@ void Renderer::Initialize(
     // palette service until slot-local palette outputs are introduced.
     m_poseTableFamilies[0] = makeFrameTableFamily(120, "PoseInverseBindTable", poseStrides[0],
         br::render::PublishedFragmentKind::Poses, poseVariants[0]);
+    m_pSkeletonManager->SetInverseBindBackingPool(m_poseTableFamilies[0]->Configuration().pool);
     m_pTextureFactory = TextureFactory::CreateUnique(currentRenderGraph->RetainUploadService());
     m_clodRayTracingSystem = std::make_shared<br::render::CLodRayTracingSystem>(
         currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
