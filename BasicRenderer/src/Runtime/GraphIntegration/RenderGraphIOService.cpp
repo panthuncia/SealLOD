@@ -25,19 +25,7 @@ void RenderGraphIOService::GatherStructuralPasses(
     if (auto pass = m_uploads->GetUploadPass())
         out.push_back(org::ExternalPassDesc::Render("Builtin::Uploads", pass)
             .At(org::ExternalInsertPoint::Begin(0)));
-    if (auto pass = m_textures->GetMipmappingPass())
-        out.push_back(org::ExternalPassDesc::Compute("Builtin::Mipmapping", pass)
-            .At(org::ExternalInsertPoint::Begin(1)));
-    if (auto pass = m_textures->GetBC7CompressionPass())
-        out.push_back(org::ExternalPassDesc::Compute("Builtin::BC7Compression", pass)
-            .At(org::ExternalInsertPoint::Begin(2)));
-    if (auto pass = m_textures->GetBC7CompressionCopyPass())
-        out.push_back(org::ExternalPassDesc::Render("Builtin::BC7CompressionCopy", pass)
-            .At(org::ExternalInsertPoint::Begin(3)));
-    if (auto pass = m_textures->GetBC7CompressionReadbackPass())
-        out.push_back(org::ExternalPassDesc::Copy("Builtin::BC7CompressionReadback", pass)
-            .At(org::ExternalInsertPoint::Begin(4))
-            .PinToQueue(static_cast<org::QueueSlotIndex>(2)));
+    // Mip generation and BC7 compression run in the texture job graph (TextureJobGraph), not here.
     if (auto pass = m_readbacks->GetReadbackPass())
         out.push_back(org::ExternalPassDesc::Render("Builtin::Readbacks", pass)
             .At(org::ExternalInsertPoint::End(0))

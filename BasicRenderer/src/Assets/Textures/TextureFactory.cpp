@@ -33,7 +33,11 @@
 
 TextureFactory::TextureFactory(std::shared_ptr<org::runtime::IUploadService> uploadService)
         : m_uploadService(std::move(uploadService)) {
-		m_mipmappingPass = std::make_shared<MipmappingPass>();
+		auto handoff = std::make_shared<MipHandoffPass>();
+		auto mipmapping = std::make_shared<MipmappingPass>();
+		mipmapping->SetHandoff(handoff);
+		m_mipmappingPass = std::move(mipmapping);
+		m_mipHandoffPass = std::move(handoff);
 		m_bc7CompressionPass = std::make_shared<BC7CompressionPass>();
 		m_bc7CompressionCopyPass = std::make_shared<BC7CompressionCopyPass>();
 		m_bc7CompressionReadbackPass = std::make_shared<BC7CompressionReadbackPass>();
@@ -733,8 +737,10 @@ std::shared_ptr<org::PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffe
 		org::memory::SetResourceMemoryIdentifier(*pb, std::string(debugName));
     }
 
-    if (!m_uploadService) throw std::runtime_error("TextureFactory upload service generation is unavailable");
-    UploadTextureData(*m_uploadService, pb, desc, initialData.subresources, pb->GetMipLevels());
+    // A texture the GPU mips uploads through the job graph, whose upload pass precedes its mip pass.
+    const auto& uploads = doMipmapping && pb->GetMipLevels() > 1 && m_jobUploadService ? m_jobUploadService : m_uploadService;
+    if (!uploads) throw std::runtime_error("TextureFactory upload service generation is unavailable");
+    UploadTextureData(*uploads, pb, desc, initialData.subresources, pb->GetMipLevels());
 
     // Enqueue GPU mipgen (only if mipLevels > 1)
     if (doMipmapping && pb->GetMipLevels() > 1) {
@@ -743,6 +749,14 @@ std::shared_ptr<org::PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffe
     }
 
     return pb;
+}
+
+bool TextureFactory::HasPendingGpuJobs() const {
+    return std::static_pointer_cast<MipmappingPass>(m_mipmappingPass)->DeclaredResourcesChanged()
+        || std::static_pointer_cast<MipHandoffPass>(m_mipHandoffPass)->DeclaredResourcesChanged()
+        || std::static_pointer_cast<BC7CompressionPass>(m_bc7CompressionPass)->HasPendingJobs()
+        || std::static_pointer_cast<BC7CompressionCopyPass>(m_bc7CompressionCopyPass)->HasPendingJobs()
+        || std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass)->HasPendingJobs();
 }
 
 void TextureFactory::SetReadbackService(

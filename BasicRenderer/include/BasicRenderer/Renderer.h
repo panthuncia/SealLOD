@@ -67,6 +67,7 @@ class Runtime;
 }
 namespace br::render {
 struct RendererFrameInputs;
+class TextureJobGraph;
 class RendererStatePublisher;
 class RendererStateRequestService;
 class AsyncStateGraph;
@@ -206,6 +207,8 @@ private:
 
     // The ORG runtime every graph runs on: created before the first graph, destroyed after the last.
     std::shared_ptr<org::Runtime> m_orgRuntime;
+    // GPU mip generation and BC7 compression, in a graph of their own next to the frame graph.
+    std::unique_ptr<br::render::TextureJobGraph> m_textureJobs;
     std::unique_ptr<org::RenderGraph> currentRenderGraph;
     bool m_renderGraphRuntimeInitialized = false;
     br::pipeline::PipelineRecipe m_pipelineRecipe;

@@ -198,6 +198,7 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::Pixel
 
     Job j{};
     j.texture = tex;
+    j.handoff = m_handoff;
     j.isSrgb = isSrgb;
     j.preserveAlphaCoverage = preserveAlphaCoverage;
 
@@ -428,4 +429,30 @@ void TextureFactory::MipmappingPass::Record(const TextureMipmappingBindings& bin
                 views.dispatchThreadGroupCountXY[1], views.sliceCount);
         }
     }
+}
+
+void TextureFactory::MipHandoffPass::EnqueueJob(std::shared_ptr<org::PixelBuffer> texture) {
+    if (texture) m_jobs.Enqueue({std::move(texture)});
+}
+
+TextureMipHandoffBindings TextureFactory::MipHandoffPass::Declare(org::PassBuilder& declaration) {
+    declaration.PreferQueue(org::QueueKind::Graphics);
+    m_declaredResourcesChanged = false;
+    m_declaredJobs = m_jobs.Pending();
+    TextureMipHandoffBindings bindings;
+    for (const auto& entry : m_declaredJobs) {
+        if (!entry->work.texture) continue;
+        (void)declaration.ShaderResource(entry->work.texture);
+        ++bindings.textures;
+    }
+    return bindings;
+}
+
+org::EmptyPassFrameData TextureFactory::MipHandoffPass::Prepare(const TextureMipHandoffBindings&,
+    const org::PassPrepareContext& preparation) {
+    const auto jobs = m_declaredJobs;
+    if (jobs.empty()) return {};
+    m_jobs.Reserve(jobs, preparation);
+    m_declaredResourcesChanged = true;
+    return {};
 }

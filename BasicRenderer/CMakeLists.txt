@@ -390,6 +390,7 @@ set(SOURCES
     "src/Animation/Pose/PoseStateArtifacts.cpp"
     "src/Runtime/Publication/PublishedRendererState.cpp"
     "src/Runtime/GraphIntegration/RenderGraphIOService.cpp"
+    "src/Runtime/GraphIntegration/TextureJobGraph.cpp"
     "src/Runtime/Publication/RendererStateRequestService.cpp"
     "src/Scene/Ingestion/SceneAssetRequestService.cpp"
     "src/Scene/Ingestion/SceneEntityMaterializationService.cpp"

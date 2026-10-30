@@ -37,6 +37,9 @@ public:
 		return std::unique_ptr<TextureFactory>(new TextureFactory(std::move(uploadService)));
     }
     void SetUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService) { m_uploadService = std::move(uploadService); }
+    // The texture job graph's upload queue (br::render::TextureJobGraph): a texture whose mips the GPU generates uploads its
+    // source through it, so the job graph's own upload pass lands it ahead of the mip pass.
+    void SetJobUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService) { m_jobUploadService = std::move(uploadService); }
     // Owned initial texel bytes for a texture creation request.
 	// Subresource order is: [slice0 mip0..mipN-1, slice1 ...].
     struct TextureInitialData {
@@ -71,6 +74,9 @@ public:
 	}
 
     std::shared_ptr<org::RenderPass> GetMipmappingPass() const { return m_mipmappingPass; }
+    std::shared_ptr<org::RenderPass> GetMipHandoffPass() const { return m_mipHandoffPass; }
+    // Whether any GPU texture job (mips, their handoff, BC7) has work left: the texture job graph executes only then.
+    bool HasPendingGpuJobs() const;
     std::shared_ptr<org::RenderPass> GetBC7CompressionPass() const { return m_bc7CompressionPass; }
     std::shared_ptr<org::RenderPass> GetBC7CompressionCopyPass() const { return m_bc7CompressionCopyPass; }
     std::shared_ptr<org::RenderPass> GetBC7CompressionReadbackPass() const { return m_bc7CompressionReadbackPass; }
@@ -121,6 +127,7 @@ private:
     };
 
     class MipmappingPass;
+    class MipHandoffPass;
     class BC7CompressionPass;
     class BC7CompressionCopyPass;
     class BC7CompressionReadbackPass;
@@ -130,9 +137,11 @@ private:
     explicit TextureFactory(std::shared_ptr<org::runtime::IUploadService> uploadService);
 
 	std::shared_ptr<org::RenderPass> m_mipmappingPass;
+	std::shared_ptr<org::RenderPass> m_mipHandoffPass;
 	std::shared_ptr<org::RenderPass> m_bc7CompressionPass;
 	std::shared_ptr<org::RenderPass> m_bc7CompressionCopyPass;
 	std::shared_ptr<org::RenderPass> m_bc7CompressionReadbackPass;
     std::shared_ptr<org::runtime::IUploadService> m_uploadService;
+    std::shared_ptr<org::runtime::IUploadService> m_jobUploadService;  // SetJobUploadService
     std::shared_ptr<std::atomic_uint32_t> m_bc7InFlightJobs = std::make_shared<std::atomic_uint32_t>(0u);
 };

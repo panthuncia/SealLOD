@@ -23,8 +23,39 @@ struct TextureMipmappingBindings {
         std::vector<Job> jobs;
     };
 
+// The textures whose mip chains were submitted since the last handoff.
+struct TextureMipHandoffBindings {
+    size_t textures = 0;
+};
+
+// Takes each texture whose mips the GPU generated (submitted in an earlier execution of the job graph) to shader-resource
+// state on the graphics queue, where bindless sampling expects it: its mips leave the mip pass in unordered-access state, on the
+// compute queue. Records nothing; its declarations are the handoff.
+class TextureFactory::MipHandoffPass : public org::TypedRenderGraphPass<MipHandoffPass, org::EmptyPassFrameData, TextureMipHandoffBindings>, public org::IDynamicDeclaredResources {
+    public:
+        void EnqueueJob(std::shared_ptr<org::PixelBuffer> texture);
+
+        TextureMipHandoffBindings Declare(org::PassBuilder& builder);
+        org::EmptyPassFrameData Prepare(const TextureMipHandoffBindings& bindings, const org::PassPrepareContext& preparation);
+        static void Record(const TextureMipHandoffBindings&, org::PassRecordContext&) {}
+
+        bool DeclaredResourcesChanged() const override {
+            return m_declaredResourcesChanged || m_jobs.ReadCounters().pending != 0;
+        }
+
+    private:
+        struct Job {
+            std::shared_ptr<org::PixelBuffer> texture;
+        };
+        org::runtime::FrameWorkQueue<Job> m_jobs;
+        org::runtime::FrameWorkQueue<Job>::Snapshot m_declaredJobs;
+        std::atomic_bool m_declaredResourcesChanged = true;
+};
+
 class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<MipmappingPass, org::EmptyPassFrameData, TextureMipmappingBindings>, public org::IDynamicDeclaredResources {
     public:
+        // Each texture whose mips are submitted is handed to it (MipHandoffPass).
+        void SetHandoff(std::shared_ptr<MipHandoffPass> handoff) { m_handoff = std::move(handoff); }
         // Called by TextureFactory when you create a texture with only mip0 uploaded.
         void EnqueueJob(const std::shared_ptr<org::PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage = false);
 
@@ -81,8 +112,13 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
             bool isSrgb = false;
             bool preserveAlphaCoverage = false;
             MipmapValueType valueType = MipmapValueType::Float4;
+
+            std::shared_ptr<MipHandoffPass> handoff;
+            // Submitted (FrameWorkQueue): the texture goes on to its handoff.
+            void Commit() const { if (handoff && texture) handoff->EnqueueJob(texture); }
         };
 
+        std::shared_ptr<MipHandoffPass> m_handoff;
         org::runtime::FrameWorkQueue<Job> m_jobs;
         org::runtime::FrameWorkQueue<Job>::Snapshot m_declaredJobs;
 
@@ -151,6 +187,7 @@ class TextureFactory::BC7CompressionPass
 
         // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
         bool DeclaredResourcesChanged() const override;
+        bool HasPendingJobs() const { std::scoped_lock lock(m_pendingMutex); return !m_pending.empty(); }
 
     private:
         org::PipelineState& GetOrCreatePipeline();
@@ -191,6 +228,7 @@ class TextureFactory::BC7CompressionCopyPass
 
         // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
         bool DeclaredResourcesChanged() const override;
+        bool HasPendingJobs() const { std::scoped_lock lock(m_pendingMutex); return !m_pending.empty(); }
 
     private:
         struct DeclaredJob {
@@ -231,6 +269,7 @@ class TextureFactory::BC7CompressionReadbackPass
 
         // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
         bool DeclaredResourcesChanged() const override;
+        bool HasPendingJobs() const { std::scoped_lock lock(m_pendingMutex); return !m_pending.empty(); }
 
     private:
         struct DeclaredJob {

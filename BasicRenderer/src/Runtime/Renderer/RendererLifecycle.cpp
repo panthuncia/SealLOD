@@ -2,6 +2,7 @@
 // Created by matth on 6/25/2024.
 //
 
+#include "Runtime/GraphIntegration/TextureJobGraph.h"
 #include <BasicRenderer/Renderer.h>
 #include "Render/RenderGraph/RenderGraph.h"
 #include "OpenRenderGraph/Runtime.h"
@@ -230,6 +231,7 @@ void Renderer::Cleanup() {
 	m_pTerrainManager.reset();
 	m_pSkeletonManager.reset();
     m_pReadbackManager.reset();
+    m_textureJobs.reset();  // its passes are the factory's
     m_pTextureFactory.reset();
     m_clodRayTracingSystem.reset();
     m_context = {};
@@ -718,6 +720,8 @@ void Renderer::Initialize(
         br::render::PublishedFragmentKind::Poses, poseVariants[0]);
     m_pSkeletonManager->SetInverseBindBackingPool(m_poseTableFamilies[0]->Configuration().pool);
     m_pTextureFactory = TextureFactory::CreateUnique(currentRenderGraph->RetainUploadService());
+    m_textureJobs = std::make_unique<br::render::TextureJobGraph>(m_orgRuntime, *m_pTextureFactory, m_numFramesInFlight);
+    m_pTextureFactory->SetJobUploadService(m_textureJobs->Uploads());
     m_clodRayTracingSystem = std::make_shared<br::render::CLodRayTracingSystem>(
         currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
     if (currentRenderGraph) {

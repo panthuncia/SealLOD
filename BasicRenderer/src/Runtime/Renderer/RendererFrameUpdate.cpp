@@ -2,6 +2,7 @@
 // Created by matth on 6/25/2024.
 //
 
+#include "Runtime/GraphIntegration/TextureJobGraph.h"
 #include "OpenRenderGraph/Runtime.h"
 #include <BasicRenderer/Renderer.h>
 #include "OpenRenderGraph/GraphHost.h"
@@ -1471,6 +1472,12 @@ void Renderer::Update(float elapsedSeconds) {
 
     auto& deviceManager = DeviceManager::GetInstance();
 
+    // Texture jobs (mips, BC7) execute in their own graph, ahead of the frame graph.
+    if (m_textureJobs) {
+        runCapturedStage("TextureJobs", [&]() {
+            m_textureJobs->Execute(m_preparationFrameIndex, m_currentFrameFenceValue, deviceManager.GetDevice());
+        });
+    }
     runCapturedStage("RenderGraphUpdate", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::RenderGraphUpdate");
         if (m_dynamicPresentationColor &&
