@@ -108,11 +108,6 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.collectPassStatistics = sm.getSettingGetter<bool>("collectPassStatistics")();
     orgSettings.collectPipelineStatistics = sm.getSettingGetter<bool>("collectPipelineStatistics")();
     orgSettings.useAsyncCompute = sm.getSettingGetter<bool>("useAsyncCompute")();
-    const auto requestedCompileMode = sm.getSettingGetter<int>("experimentalAsyncCompileMode")();
-    orgSettings.experimentalAsyncCompileMode = requestedCompileMode == 2
-        ? org::runtime::AsyncCompileMode::Async : org::runtime::AsyncCompileMode::Off;
-    orgSettings.experimentalCompileConcurrency = static_cast<uint8_t>(std::clamp(
-        sm.getSettingGetter<int>("experimentalCompileConcurrency")(), 1, 4));
     orgSettings.renderGraphCompileDumpEnabled = sm.getSettingGetter<bool>("renderGraphCompileDumpEnabled")();
     orgSettings.renderGraphVramDumpEnabled = sm.getSettingGetter<bool>("renderGraphVramDumpEnabled")();
     orgSettings.renderGraphBatchTraceEnabled = sm.getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
@@ -137,6 +132,20 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.autoAliasPoolGrowthHeadroom = sm.getSettingGetter<float>("autoAliasPoolGrowthHeadroom")();
     orgSettings.transitionPlacementMode = static_cast<org::runtime::TransitionPlacementMode>(sm.getSettingGetter<uint8_t>("transitionPlacementMode")());
     orgSettings.heavyDebug = sm.getSettingGetter<bool>("heavyDebug")();
+    // ORG's diagnostic logs, under BasicRenderer's established environment switches.
+    static const uint32_t diagnosticLogs = [] {
+        using br::runtime::renderer_settings::ReadTruthyEnvironmentFlag;
+        using org::runtime::DiagnosticLog;
+        uint32_t logs = 0;
+        if (ReadTruthyEnvironmentFlag("SARP_MEMORY_INTROSPECTION_LOG"))
+            logs |= static_cast<uint32_t>(DiagnosticLog::MemoryIntrospection);
+        if (ReadTruthyEnvironmentFlag("SARP_UPLOAD_TELEMETRY_LOG") || ReadTruthyEnvironmentFlag("SARP_TEXTURE_STREAMING_TRANSITION_LOG"))
+            logs |= static_cast<uint32_t>(DiagnosticLog::UploadTelemetry);
+        if (ReadTruthyEnvironmentFlag("SARP_GPU_LIFETIME_TRACE"))
+            logs |= static_cast<uint32_t>(DiagnosticLog::KeepAliveLifetime);
+        return logs;
+    }();
+    orgSettings.diagnosticLogs = diagnosticLogs;
     org::runtime::SetOpenRenderGraphSettings(orgSettings);
 }
 
@@ -169,11 +178,6 @@ void Renderer::Render() {
     if (!m_frameInputs) {
         return;
     }
-
-    // Async mode runs graph update/declaration/preparation on its serialized
-    // owner. Transitional render-context assembly still reads a few renderer
-    // services, so join before those reads until they are publication-only.
-    currentRenderGraph->WaitForPreparation();
 
     if (!m_swapChainReady) {
         if (!m_loggedSwapChainNotReady) {

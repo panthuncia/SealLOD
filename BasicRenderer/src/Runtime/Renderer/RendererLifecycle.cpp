@@ -334,15 +334,6 @@ void Renderer::Initialize(
         "renderGraphBatchTraceEnabled",
         br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_BATCH_TRACE"));
     settingsManager.registerSetting<bool>("renderGraphLightweightCompileSummaryEnabled", false);
-    settingsManager.registerSetting<int>("experimentalAsyncCompileMode", 0);
-    settingsManager.registerSetting<int>("experimentalCompileConcurrency", 2);
-    if (const auto* mode = std::getenv("SARP_ASYNC_COMPILE_MODE")) {
-        const std::string_view value(mode);
-        const int parsed = value == "Async" || value == "async" || value == "2" ? 2 : 0;
-        settingsManager.getSettingSetter<int>("experimentalAsyncCompileMode")(parsed);
-        spdlog::info("Experimental async compile mode requested through environment: '{}' ({})",
-            value, parsed);
-    }
     LoadPipeline(hwnd, x_res, y_res);
     DirectStorageManager::GetInstance().Initialize();
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after LoadPipeline");

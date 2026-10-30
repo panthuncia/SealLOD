@@ -236,9 +236,7 @@ void Renderer::Update(float elapsedSeconds) {
         });
     }
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
-    const bool asyncFrameQueue = SettingsManager::GetInstance()
-        .getSettingGetter<int>("experimentalAsyncCompileMode")() == 2;
-    if (!asyncFrameQueue) m_preparationFrameIndex = m_frameIndex;
+    m_preparationFrameIndex = m_frameIndex;
     ApplyPendingPipelineReplacement();
 
     if (rebuildRenderGraph) {
@@ -1469,10 +1467,6 @@ void Renderer::Update(float elapsedSeconds) {
 
     runCapturedStage("RenderGraphUpdate", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::RenderGraphUpdate");
-        // Dynamic wrapper selection is part of serialized preparation state.
-        // Do not mutate it while the preceding preparation owner may still be
-        // freezing that frame's concrete resource table.
-        currentRenderGraph->WaitForPreparation();
         if (m_dynamicPresentationColor &&
             m_preparationFrameIndex < m_presentationColorResources.size()) {
             m_dynamicPresentationColor->SetResource(
@@ -1480,12 +1474,6 @@ void Renderer::Update(float elapsedSeconds) {
         }
         currentRenderGraph->Update(context, deviceManager.GetDevice());
     });
-    if (asyncFrameQueue) {
-        m_preparationFrameIndex = static_cast<uint8_t>(
-            (m_preparationFrameIndex + 1) % m_numFramesInFlight);
-        BT_PLOT("ORG.AsyncExecution.NextPreparationSlot",
-            static_cast<int64_t>(m_preparationFrameIndex));
-    }
     ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "after RenderGraphUpdate");
 
     // Clear transform-update tags only after render-graph update so passes such as
