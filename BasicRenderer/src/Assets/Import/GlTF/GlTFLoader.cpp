@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <DirectXMath.h>
@@ -1186,7 +1187,7 @@ std::shared_ptr<Material> ResolvePrimitiveMaterial(
     return LoadMaterial(gltf, sourcePath, cache, primitiveNode["material"].get<size_t>());
 }
 
-void ApplyNodeTransform(const json& gltfNode, flecs::entity entity) {
+Components::Transform ReadNodeTransform(const json& gltfNode) {
     XMVECTOR translation = XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f);
     XMVECTOR rotation = XMQuaternionIdentity();
     XMVECTOR scale = XMVectorSet(1.0f, 1.0f, 1.0f, 0.0f);
@@ -1225,9 +1226,58 @@ void ApplyNodeTransform(const json& gltfNode, flecs::entity entity) {
         }
     }
 
-    entity.set<Components::Position>({ translation });
-    entity.set<Components::Rotation>({ rotation });
-    entity.set<Components::Scale>({ scale });
+    return Components::Transform(Components::Position{ translation }, Components::Rotation{ rotation }, Components::Scale{ scale });
+}
+
+XMMATRIX ComposeNodeMatrix(const Components::Transform& transform) {
+    return XMMatrixScalingFromVector(transform.scale.scale) * XMMatrixRotationQuaternion(transform.rot.rot) *
+        XMMatrixTranslationFromVector(transform.pos.pos);
+}
+
+void ApplyNodeTransform(const json& gltfNode, flecs::entity entity) {
+    const auto transform = ReadNodeTransform(gltfNode);
+    entity.set<Components::Position>(transform.pos);
+    entity.set<Components::Rotation>(transform.rot);
+    entity.set<Components::Scale>(transform.scale);
+}
+
+// The glTF node tree without entities: each node's parent and the default scene's roots.
+struct NodeTree {
+    std::vector<int32_t> parents;
+    std::vector<size_t> roots;
+};
+
+NodeTree BuildNodeTree(const json& gltf) {
+    NodeTree tree;
+    if (!gltf.contains("nodes")) return tree;
+    const auto& nodeArray = gltf["nodes"];
+    tree.parents.assign(nodeArray.size(), -1);
+    for (size_t nodeIndex = 0; nodeIndex < nodeArray.size(); ++nodeIndex) {
+        if (!nodeArray[nodeIndex].contains("children")) continue;
+        for (const auto& childIndexValue : nodeArray[nodeIndex]["children"]) {
+            const size_t childIndex = childIndexValue.get<size_t>();
+            if (childIndex >= nodeArray.size()) throw std::runtime_error("Node child index out of range");
+            tree.parents[childIndex] = static_cast<int32_t>(nodeIndex);
+        }
+    }
+    if (gltf.contains("scenes") && gltf["scenes"].is_array() && !gltf["scenes"].empty()) {
+        const size_t sceneIndex = gltf.value<size_t>("scene", static_cast<size_t>(0));
+        if (sceneIndex >= gltf["scenes"].size()) throw std::runtime_error("Default scene index out of range");
+        const auto& selectedScene = gltf["scenes"][sceneIndex];
+        if (selectedScene.contains("nodes") && selectedScene["nodes"].is_array()) {
+            for (const auto& nodeValue : selectedScene["nodes"]) {
+                const size_t rootIndex = nodeValue.get<size_t>();
+                if (rootIndex >= nodeArray.size()) throw std::runtime_error("Scene root node index out of range");
+                tree.roots.push_back(rootIndex);
+            }
+        }
+    }
+    if (tree.roots.empty()) {
+        for (size_t nodeIndex = 0; nodeIndex < nodeArray.size(); ++nodeIndex) {
+            if (tree.parents[nodeIndex] < 0) tree.roots.push_back(nodeIndex);
+        }
+    }
+    return tree;
 }
 
 void SetEntityMeshes(flecs::entity entity, const std::vector<std::shared_ptr<Mesh>>& meshes) {
@@ -1560,125 +1610,285 @@ std::vector<std::shared_ptr<Skeleton>> BuildSkins(
     return skeletons;
 }
 
+// Base skeletons for the payload path, named by the nodes' animation keys like the entity path. A joint's parent is its
+// parent node when that is a joint; otherwise it is a root whose parent global is its non-joint ancestors' (within the file).
+std::vector<std::shared_ptr<Skeleton>> BuildPayloadSkins(
+    const json& gltf,
+    const std::vector<BufferSource>& bufferSources,
+    const NodeTree& tree,
+    const std::vector<std::string>& nodeAnimationKeys,
+    const std::vector<std::shared_ptr<Animation>>& animations)
+{
+    std::vector<std::shared_ptr<Skeleton>> skeletons;
+    if (!gltf.contains("skins") || !gltf["skins"].is_array()) {
+        return skeletons;
+    }
+
+    const auto& nodes = gltf["nodes"];
+    const auto& skins = gltf["skins"];
+    skeletons.resize(skins.size());
+    for (size_t skinIndex = 0; skinIndex < skins.size(); ++skinIndex) {
+        const auto& skinNode = skins[skinIndex];
+        if (!skinNode.contains("joints") || !skinNode["joints"].is_array() || skinNode["joints"].empty()) {
+            spdlog::warn("glTF skin {} has no joints; skipping skin", skinIndex);
+            continue;
+        }
+
+        const size_t jointCount = skinNode["joints"].size();
+        std::vector<XMMATRIX> inverseBindMatrices(jointCount, XMMatrixIdentity());
+        if (skinNode.contains("inverseBindMatrices")) {
+            auto loadedMatrices = ReadAccessorMat4AsMatrices(gltf, bufferSources, skinNode["inverseBindMatrices"].get<size_t>());
+            if (loadedMatrices.size() != jointCount) {
+                spdlog::warn("glTF skin {} inverse bind matrix count ({}) does not match joint count ({}); missing entries default to identity",
+                    skinIndex, loadedMatrices.size(), jointCount);
+            }
+            for (size_t matrixIndex = 0; matrixIndex < std::min(loadedMatrices.size(), jointCount); ++matrixIndex) {
+                inverseBindMatrices[matrixIndex] = loadedMatrices[matrixIndex];
+            }
+        }
+
+        std::unordered_map<size_t, int32_t> jointOfNode;
+        std::vector<size_t> jointNodes;
+        jointNodes.reserve(jointCount);
+        for (const auto& jointValue : skinNode["joints"]) {
+            const size_t jointNodeIndex = jointValue.get<size_t>();
+            if (jointNodeIndex >= nodes.size()) {
+                throw std::runtime_error("glTF skin joint node index out of range");
+            }
+            jointOfNode.emplace(jointNodeIndex, static_cast<int32_t>(jointNodes.size()));
+            jointNodes.push_back(jointNodeIndex);
+        }
+
+        std::vector<std::string> boneNames(jointCount);
+        std::vector<int32_t> parentIndices(jointCount, -1);
+        std::vector<Components::Transform> restLocalTransforms(jointCount);
+        std::vector<XMMATRIX> rootParentGlobals(jointCount, XMMatrixIdentity());
+        for (size_t joint = 0; joint < jointCount; ++joint) {
+            const size_t nodeIndex = jointNodes[joint];
+            boneNames[joint] = nodeAnimationKeys[nodeIndex];
+            restLocalTransforms[joint] = ReadNodeTransform(nodes[nodeIndex]);
+            const int32_t parent = tree.parents[nodeIndex];
+            if (parent < 0) continue;
+            if (const auto found = jointOfNode.find(static_cast<size_t>(parent)); found != jointOfNode.end()) {
+                parentIndices[joint] = found->second;
+                continue;
+            }
+            XMMATRIX global = XMMatrixIdentity();
+            for (int32_t ancestor = parent; ancestor >= 0 && !jointOfNode.contains(static_cast<size_t>(ancestor));
+                 ancestor = tree.parents[static_cast<size_t>(ancestor)]) {
+                global = global * ComposeNodeMatrix(ReadNodeTransform(nodes[static_cast<size_t>(ancestor)]));
+            }
+            rootParentGlobals[joint] = global;
+        }
+
+        auto skeleton = std::make_shared<Skeleton>(std::move(boneNames), std::move(parentIndices),
+            std::move(inverseBindMatrices), std::move(restLocalTransforms), std::move(rootParentGlobals));
+        for (const auto& animation : animations) {
+            const bool usesSkeleton = std::ranges::any_of(jointNodes, [&](size_t nodeIndex) {
+                return animation->nodesMap.contains(nodeAnimationKeys[nodeIndex]);
+            });
+            if (usesSkeleton) skeleton->AddAnimation(animation);
+        }
+        skeletons[skinIndex] = std::move(skeleton);
+    }
+
+    return skeletons;
+}
+
+// A file's GPU meshes, shared by the scene and payload paths, and their bindings to skins.
+struct GltfMeshes {
+    GlTFGeometryExtractor::ExtractionResult extraction;
+    GlTFMaterialCache materialCache;
+    std::vector<std::vector<PrimitiveData>> allMeshes;
+    std::vector<std::vector<std::shared_ptr<Mesh>>> sharedMeshLists;
+    std::vector<std::vector<std::optional<PreparedPrimitiveData>>> preparedPrimitives;
+    std::unordered_map<MeshBindingKey, std::vector<std::shared_ptr<Mesh>>, MeshBindingKeyHasher> skinnedMeshCache;
+
+    // A mesh's primitives, rebuilt with the skin bound when skinIndex names one.
+    const std::vector<std::shared_ptr<Mesh>>& Binding(
+        size_t meshIndex, int skinIndex, const std::vector<std::shared_ptr<Skeleton>>& skeletons)
+    {
+        if (meshIndex >= sharedMeshLists.size()) {
+            throw std::runtime_error("glTF mesh binding index out of range");
+        }
+
+        if (skinIndex < 0) {
+            return sharedMeshLists[meshIndex];
+        }
+
+        MeshBindingKey bindingKey{ meshIndex, skinIndex };
+        auto existing = skinnedMeshCache.find(bindingKey);
+        if (existing != skinnedMeshCache.end()) {
+            return existing->second;
+        }
+
+        if (static_cast<size_t>(skinIndex) >= skeletons.size() || skeletons[skinIndex] == nullptr) {
+            spdlog::warn("glTF node references missing skin {}; using static mesh binding instead", skinIndex);
+            return skinnedMeshCache.emplace(bindingKey, sharedMeshLists[meshIndex]).first->second;
+        }
+
+        std::vector<std::shared_ptr<Mesh>> boundMeshes;
+        boundMeshes.reserve(preparedPrimitives[meshIndex].size());
+        for (size_t primitiveIndex = 0; primitiveIndex < preparedPrimitives[meshIndex].size(); ++primitiveIndex) {
+            const auto& preparedPrimitive = preparedPrimitives[meshIndex][primitiveIndex];
+            if (!preparedPrimitive.has_value()) {
+                continue;
+            }
+
+            MeshPreprocessResult buildResult = preparedPrimitive->result;
+            auto mesh = buildResult.ingest.Build(
+                preparedPrimitive->material,
+                std::move(buildResult.prebuiltData),
+                MeshCpuDataPolicy::ReleaseAfterUpload);
+
+            if ((mesh->GetPerMeshCBData().vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u) {
+                mesh->SetBaseSkin(skeletons[skinIndex]);
+            }
+            else {
+                spdlog::warn(
+                    "glTF node binds skin {} to mesh {} primitive {} without JOINTS_0/WEIGHTS_0 data; leaving that primitive static",
+                    skinIndex,
+                    meshIndex,
+                    primitiveIndex);
+            }
+
+            boundMeshes.push_back(mesh);
+        }
+
+        return skinnedMeshCache.emplace(bindingKey, std::move(boundMeshes)).first->second;
+    }
+};
+
+GltfMeshes BuildGltfMeshes(const std::string& filePath) {
+    GltfMeshes result;
+    result.extraction = GlTFGeometryExtractor::ExtractAll(filePath);
+    auto& extraction = result.extraction;
+    const std::filesystem::path sourcePath(filePath);
+
+    auto defaultMaterial = Material::GetDefaultMaterial();
+    auto& materialCache = result.materialCache;
+    materialCache.sourceKey = NormalizeSourceKey(sourcePath);
+    materialCache.bufferSources = BuildBufferSources(extraction.gltf, sourcePath);
+    if (extraction.gltf.contains("materials") && extraction.gltf["materials"].is_array()) {
+        materialCache.materialCache.resize(extraction.gltf["materials"].size());
+    }
+
+    // Build mesh/primitive structure from glTF JSON
+    const size_t meshCount = extraction.gltf.contains("meshes") ? extraction.gltf["meshes"].size() : 0;
+    auto& allMeshes = result.allMeshes;
+    auto& preparedPrimitives = result.preparedPrimitives;
+    allMeshes.resize(meshCount);
+    result.sharedMeshLists.resize(meshCount);
+    preparedPrimitives.resize(meshCount);
+    for (size_t mi = 0; mi < meshCount; ++mi) {
+        const auto& meshNode = extraction.gltf["meshes"][mi];
+        if (meshNode.contains("primitives")) {
+            allMeshes[mi].resize(meshNode["primitives"].size());
+            preparedPrimitives[mi].resize(meshNode["primitives"].size());
+        }
+    }
+
+    // Build GPU meshes from extracted geometry
+    for (auto& ep : extraction.primitives) {
+        const auto& primitiveNode = extraction.gltf["meshes"][ep.meshIndex]["primitives"][ep.primitiveIndex];
+        auto material = ResolvePrimitiveMaterial(
+            extraction.gltf,
+            sourcePath,
+            materialCache,
+            primitiveNode,
+            defaultMaterial);
+        PreparedPrimitiveData preparedPrimitive{
+            std::move(ep.result),
+            material
+        };
+
+        MeshPreprocessResult buildResult = preparedPrimitive.result;
+        auto mesh = buildResult.ingest.Build(
+            material,
+            std::move(buildResult.prebuiltData),
+            MeshCpuDataPolicy::ReleaseAfterUpload);
+        allMeshes[ep.meshIndex][ep.primitiveIndex].mesh = mesh;
+        preparedPrimitives[ep.meshIndex][ep.primitiveIndex] = std::move(preparedPrimitive);
+    }
+
+    for (size_t meshIndex = 0; meshIndex < meshCount; ++meshIndex) {
+        result.sharedMeshLists[meshIndex].reserve(allMeshes[meshIndex].size());
+        for (const auto& primitive : allMeshes[meshIndex]) {
+            if (primitive.mesh != nullptr) {
+                result.sharedMeshLists[meshIndex].push_back(primitive.mesh);
+            }
+        }
+    }
+    return result;
+}
+
 } // namespace
 
 namespace GlTFLoader {
 
+std::optional<br::import::ImportedAssetPayload> LoadImportedAssetFromFile(const std::string& filePath) {
+    try {
+        auto meshes = BuildGltfMeshes(filePath);
+        const auto& gltf = meshes.extraction.gltf;
+        const auto tree = BuildNodeTree(gltf);
+        const auto nodeAnimationKeys = BuildNodeAnimationKeys(gltf);
+        const auto animations = ParseAnimations(gltf, meshes.materialCache.bufferSources, nodeAnimationKeys);
+        const auto skeletons = BuildPayloadSkins(gltf, meshes.materialCache.bufferSources, tree, nodeAnimationKeys, animations);
+
+        br::import::ImportedAssetPayload payload;
+        std::unordered_set<std::uint64_t> meshIDs;
+        std::uint32_t skinnedShapeIndex = 0;
+        if (!gltf.contains("nodes")) return payload;
+        const auto& nodes = gltf["nodes"];
+        std::vector<int> visited(nodes.size(), 0);
+        auto visit = [&](auto&& self, size_t nodeIndex, const XMMATRIX& parentGlobal) -> void {
+            if (visited[nodeIndex]++) throw std::runtime_error("glTF node graph is not a tree");
+            const auto& node = nodes[nodeIndex];
+            const XMMATRIX global = ComposeNodeMatrix(ReadNodeTransform(node)) * parentGlobal;
+            if (node.contains("mesh")) {
+                const size_t meshIndex = node["mesh"].get<size_t>();
+                if (meshIndex >= meshes.sharedMeshLists.size()) throw std::runtime_error("Node mesh index out of range");
+                const int skinIndex = node.contains("skin") ? static_cast<int>(node["skin"].get<size_t>()) : -1;
+                br::import::RenderablePartPayload part;
+                part.localMatrix = global;
+                part.name = node.value("name", "glTF_Node_" + std::to_string(nodeIndex));
+                bool skinned = false;
+                for (const auto& mesh : meshes.Binding(meshIndex, skinIndex, skeletons)) {
+                    if (!mesh) continue;
+                    part.meshes.push_back(mesh);
+                    skinned = skinned || mesh->GetBaseSkin() != nullptr;
+                    if (meshIDs.insert(mesh->GetGlobalID()).second) payload.meshes.push_back(mesh);
+                }
+                if (skinned) part.skinnedShapeIndex = skinnedShapeIndex++;
+                if (!part.meshes.empty()) payload.parts.push_back(std::move(part));
+            }
+            if (node.contains("children")) {
+                for (const auto& child : node["children"]) self(self, child.get<size_t>(), global);
+            }
+        };
+        for (const size_t root : tree.roots) visit(visit, root, XMMatrixIdentity());
+        return payload;
+    }
+    catch (const std::exception& e) {
+        spdlog::error("GlTFLoader payload import failed for {}: {}", filePath, e.what());
+        return std::nullopt;
+    }
+}
+
+
 std::shared_ptr<Scene> LoadModel(std::string filePath) {
     try {
-        auto extraction = GlTFGeometryExtractor::ExtractAll(filePath);
-        const std::filesystem::path sourcePath(filePath);
+        auto meshes = BuildGltfMeshes(filePath);
+        auto& extraction = meshes.extraction;
+        auto& materialCache = meshes.materialCache;
+        auto& allMeshes = meshes.allMeshes;
 
         auto scene = std::make_shared<Scene>();
-        auto defaultMaterial = Material::GetDefaultMaterial();
-        GlTFMaterialCache materialCache;
-        materialCache.sourceKey = NormalizeSourceKey(sourcePath);
-        materialCache.bufferSources = BuildBufferSources(extraction.gltf, sourcePath);
-        if (extraction.gltf.contains("materials") && extraction.gltf["materials"].is_array()) {
-            materialCache.materialCache.resize(extraction.gltf["materials"].size());
-        }
-
-        // Build mesh/primitive structure from glTF JSON
-        const size_t meshCount = extraction.gltf.contains("meshes") ? extraction.gltf["meshes"].size() : 0;
-        std::vector<std::vector<PrimitiveData>> allMeshes(meshCount);
-        std::vector<std::vector<std::shared_ptr<Mesh>>> sharedMeshLists(meshCount);
-        std::vector<std::vector<std::optional<PreparedPrimitiveData>>> preparedPrimitives(meshCount);
-        for (size_t mi = 0; mi < meshCount; ++mi) {
-            const auto& meshNode = extraction.gltf["meshes"][mi];
-            if (meshNode.contains("primitives")) {
-                allMeshes[mi].resize(meshNode["primitives"].size());
-                preparedPrimitives[mi].resize(meshNode["primitives"].size());
-            }
-        }
-
-        // Build GPU meshes from extracted geometry
-        for (auto& ep : extraction.primitives) {
-            const auto& primitiveNode = extraction.gltf["meshes"][ep.meshIndex]["primitives"][ep.primitiveIndex];
-            auto material = ResolvePrimitiveMaterial(
-                extraction.gltf,
-                sourcePath,
-                materialCache,
-                primitiveNode,
-                defaultMaterial);
-            PreparedPrimitiveData preparedPrimitive{
-                std::move(ep.result),
-                material
-            };
-
-            MeshPreprocessResult buildResult = preparedPrimitive.result;
-            auto mesh = buildResult.ingest.Build(
-                material,
-                std::move(buildResult.prebuiltData),
-                MeshCpuDataPolicy::ReleaseAfterUpload);
-            allMeshes[ep.meshIndex][ep.primitiveIndex].mesh = mesh;
-            preparedPrimitives[ep.meshIndex][ep.primitiveIndex] = std::move(preparedPrimitive);
-        }
-
-        for (size_t meshIndex = 0; meshIndex < meshCount; ++meshIndex) {
-            sharedMeshLists[meshIndex].reserve(allMeshes[meshIndex].size());
-            for (const auto& primitive : allMeshes[meshIndex]) {
-                if (primitive.mesh != nullptr) {
-                    sharedMeshLists[meshIndex].push_back(primitive.mesh);
-                }
-            }
-        }
 
         const auto nodeAnimationKeys = BuildNodeAnimationKeys(extraction.gltf);
         const auto hierarchy = BuildNodeHierarchy(scene, extraction.gltf, allMeshes);
         const auto animations = ParseAnimations(extraction.gltf, materialCache.bufferSources, nodeAnimationKeys);
         const auto skeletons = BuildSkins(extraction.gltf, materialCache.bufferSources, hierarchy.entities, nodeAnimationKeys, animations);
-
-        std::unordered_map<MeshBindingKey, std::vector<std::shared_ptr<Mesh>>, MeshBindingKeyHasher> skinnedMeshCache;
-        auto getMeshesForBinding = [&](size_t meshIndex, int skinIndex) -> const std::vector<std::shared_ptr<Mesh>>& {
-            if (meshIndex >= sharedMeshLists.size()) {
-                throw std::runtime_error("glTF mesh binding index out of range");
-            }
-
-            if (skinIndex < 0) {
-                return sharedMeshLists[meshIndex];
-            }
-
-            MeshBindingKey bindingKey{ meshIndex, skinIndex };
-            auto existing = skinnedMeshCache.find(bindingKey);
-            if (existing != skinnedMeshCache.end()) {
-                return existing->second;
-            }
-
-            if (static_cast<size_t>(skinIndex) >= skeletons.size() || skeletons[skinIndex] == nullptr) {
-                spdlog::warn("glTF node references missing skin {}; using static mesh binding instead", skinIndex);
-                return skinnedMeshCache.emplace(bindingKey, sharedMeshLists[meshIndex]).first->second;
-            }
-
-            std::vector<std::shared_ptr<Mesh>> boundMeshes;
-            boundMeshes.reserve(preparedPrimitives[meshIndex].size());
-            for (size_t primitiveIndex = 0; primitiveIndex < preparedPrimitives[meshIndex].size(); ++primitiveIndex) {
-                const auto& preparedPrimitive = preparedPrimitives[meshIndex][primitiveIndex];
-                if (!preparedPrimitive.has_value()) {
-                    continue;
-                }
-
-                MeshPreprocessResult buildResult = preparedPrimitive->result;
-                auto mesh = buildResult.ingest.Build(
-                    preparedPrimitive->material,
-                    std::move(buildResult.prebuiltData),
-                    MeshCpuDataPolicy::ReleaseAfterUpload);
-
-                if ((mesh->GetPerMeshCBData().vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u) {
-                    mesh->SetBaseSkin(skeletons[skinIndex]);
-                }
-                else {
-                    spdlog::warn(
-                        "glTF node binds skin {} to mesh {} primitive {} without JOINTS_0/WEIGHTS_0 data; leaving that primitive static",
-                        skinIndex,
-                        meshIndex,
-                        primitiveIndex);
-                }
-
-                boundMeshes.push_back(mesh);
-            }
-
-            return skinnedMeshCache.emplace(bindingKey, std::move(boundMeshes)).first->second;
-        };
 
         bool importedSkins = false;
         if (extraction.gltf.contains("nodes") && extraction.gltf["nodes"].is_array()) {
@@ -1703,7 +1913,7 @@ std::shared_ptr<Scene> LoadModel(std::string filePath) {
                     continue;
                 }
 
-                SetEntityMeshes(hierarchy.entities[nodeIndex], getMeshesForBinding(static_cast<size_t>(meshIndex), static_cast<int>(skinIndex)));
+                SetEntityMeshes(hierarchy.entities[nodeIndex], meshes.Binding(static_cast<size_t>(meshIndex), static_cast<int>(skinIndex), skeletons));
                 importedSkins = true;
             }
         }

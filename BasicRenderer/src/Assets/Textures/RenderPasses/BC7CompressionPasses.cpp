@@ -211,9 +211,6 @@ TextureBC7CompressionFrame TextureFactory::BC7CompressionPass::Prepare(
     TextureBC7CompressionFrame frame{};
     std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) return frame;
-    const auto* context = preparation.preparationData
-        ? preparation.preparationData->Get<UpdateContext>() : nullptr;
-    if (!context) throw std::logic_error("BC7 compression requires the owned renderer snapshot");
 
     struct Transition { std::shared_ptr<BC7CompressionJob> job; uint32_t frameIndex = 0; };
     std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
