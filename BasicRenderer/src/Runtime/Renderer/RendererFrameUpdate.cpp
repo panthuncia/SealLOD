@@ -1079,7 +1079,11 @@ void Renderer::Update(float elapsedSeconds) {
                     capture("material-offsets", "BuildMaterialIndirectCommandBufferPass", "Builtin::VisUtil::MaterialOffsetBuffer");
                     capture("material-args", "BuildMaterialIndirectCommandBufferPass", "Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
                     capture("pixel-list", "BuildPixelListPass", "Builtin::VisUtil::PixelListBuffer");
+                    // Per material, the pixels the list wrote; equal to material-counts when both passes classify alike.
+                    capture("material-cursors", "BuildPixelListPass", "Builtin::VisUtil::MaterialWriteCursorBuffer");
                     capture("surface-identity", "EvaluateMaterialGroupsPass", Builtin::Surface::Identity);
+                    capture("surface-normal-roughness", "EvaluateMaterialGroupsPass", Builtin::Surface::NormalRoughness);
+                    capture("surface-base-color", "EvaluateMaterialGroupsPass", Builtin::Surface::BaseColorOpacity);
                     // Publication audit: retain the exact object buffer backing
                     // selected for this graph generation alongside visibility.
                     // Its byte count and resource id are written by the
