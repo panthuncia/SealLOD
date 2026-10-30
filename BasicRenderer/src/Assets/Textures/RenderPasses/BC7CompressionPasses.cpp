@@ -82,6 +82,56 @@ namespace {
     }
 }
 
+namespace {
+// Whether the jobs Declare would take from pending now differ, in order, from the declared ones: stages advance at
+// submission, so a pass polls them instead of being told.
+template<class Job, class DeclaredJobs, class Takes>
+bool DeclarableJobsDiffer(const std::vector<std::shared_ptr<Job>>& pending, const DeclaredJobs& declared, Takes takes)
+{
+    size_t index = 0;
+    for (const auto& job : pending) {
+        if (!job || !takes(*job)) {
+            continue;
+        }
+        if (index >= declared.size() || declared[index].job != job) {
+            return true;
+        }
+        ++index;
+    }
+    return index != declared.size();
+}
+}
+
+bool TextureFactory::BC7CompressionPass::DeclaredResourcesChanged() const
+{
+    if (m_declaredResourcesChanged.load(std::memory_order_acquire)) return true;
+    std::scoped_lock lock(m_pendingMutex);
+    return DeclarableJobsDiffer(m_pending, m_declaredJobs, [](const BC7CompressionJob& job) {
+        const auto stage = job.stage.load(std::memory_order_acquire);
+        return job.workingTexture && job.blockBuffer &&
+            (stage == BC7CompressionJob::Stage::WaitingForSourceUpload || stage == BC7CompressionJob::Stage::ReadyForCompression);
+    });
+}
+
+bool TextureFactory::BC7CompressionCopyPass::DeclaredResourcesChanged() const
+{
+    if (m_declaredResourcesChanged.load(std::memory_order_acquire)) return true;
+    std::scoped_lock lock(m_pendingMutex);
+    return DeclarableJobsDiffer(m_pending, m_declaredJobs, [](const BC7CompressionJob& job) {
+        return job.blockBuffer && job.compressedTexture &&
+            job.stage.load(std::memory_order_acquire) == BC7CompressionJob::Stage::CompressionRecorded;
+    });
+}
+
+bool TextureFactory::BC7CompressionReadbackPass::DeclaredResourcesChanged() const
+{
+    if (m_declaredResourcesChanged.load(std::memory_order_acquire)) return true;
+    std::scoped_lock lock(m_pendingMutex);
+    return DeclarableJobsDiffer(m_pending, m_declaredJobs, [](const BC7CompressionJob& job) {
+        return job.compressedTexture && job.stage.load(std::memory_order_acquire) == BC7CompressionJob::Stage::CopyRecorded;
+    });
+}
+
 void TextureFactory::BC7CompressionPass::EnqueueJob(const std::shared_ptr<BC7CompressionJob>& job)
 {
     if (!job) {
@@ -217,7 +267,6 @@ br::render::PreparedComputePipelineSequence TextureFactory::BC7CompressionPass::
             });
     }
     m_pending = std::move(waiting);
-    m_declaredResourcesChanged = true;
     return data;
 }
 
@@ -295,7 +344,6 @@ TextureFactory::BC7CompressionCopyFrameData TextureFactory::BC7CompressionCopyPa
             });
     }
     m_pending = std::move(waiting);
-    m_declaredResourcesChanged = true;
     return frame;
 }
 
@@ -483,7 +531,6 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
     if (!admitted.empty()) preparation.Reserve(std::make_shared<Reservation>(
         m_readbackService, std::move(timeline), std::move(requests),
         std::move(admitted), preparation.frameIndex));
-    m_declaredResourcesChanged = true;
     return frame;
 }
 

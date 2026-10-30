@@ -1967,15 +1967,37 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
     const bool persistentGraph = m_renderGraph != nullptr;
     if (m_renderGraph && m_renderGraph->ScheduleTraceEnabled() != (showRG && persistentGraph))
         m_renderGraph->SetScheduleTraceEnabled(showRG && persistentGraph);
+    // A resource as a pass left it: the inspector's capture opens the memory view, which the readback fills a frame later.
+    static org::ui::MemoryViewWidget memoryView;
+    static bool showMemoryView = false;
     if (showRG && persistentGraph) {
         static org::debugui::ScheduleInspectorState scheduleInspector;
+        static bool memoryViewReady = false;
+        if (!memoryViewReady && (m_imguiBackend == rhi::Backend::D3D12 || m_imguiBackend == rhi::Backend::Vulkan) && g_pd3dSrvDescHeap) {
+            memoryView.SetImGuiDescriptorCallbacks(
+                [this]() { return AllocateImGuiDescriptor(); },
+                [this](uint32_t index) { FreeImGuiDescriptor(index); },
+                [this](uint32_t index) { return GetImGuiGpuDescriptorHandle(index); },
+                GetImGuiHeapHandle(),
+                []() { return DeviceManager::GetInstance().GetDevice(); },
+                []() { return DeviceManager::GetInstance().GetGraphicsQueue(); });
+            memoryViewReady = true;
+        }
+        const auto readback = m_renderGraph->GetReadbackServiceOwner();
+        const org::debugui::ScheduleCaptureFn capture = [readback](const std::string& pass, uint64_t resourceId, const std::string& name) {
+            memoryView.Open(pass, resourceId, name, {}, [readback, pass, resourceId](org::ReadbackCaptureCallback callback) {
+                if (readback) readback->RequestScheduledReadbackCapture(pass, resourceId, {}, std::move(callback));
+            });
+            showMemoryView = true;
+        };
         ImGui::Begin("Render Graph Inspector", nullptr);
         if (const auto snapshot = m_renderGraph->GetPersistentScheduleSnapshot())
-            org::debugui::ShowScheduleInspector(*snapshot, scheduleInspector);
+            org::debugui::ShowScheduleInspector(*snapshot, scheduleInspector, readback ? capture : org::debugui::ScheduleCaptureFn{});
         else
             ImGui::TextWrapped("No schedule yet: the graph traces its executables from the next frame it prepares.");
         ImGui::End();
     }
+    memoryView.Draw(&showMemoryView);
 
     if (showCLodTelemetry) {
         DrawCLodTelemetryWindow();

@@ -119,9 +119,8 @@ class TextureFactory::BC7CompressionPass
             br::render::RecordPreparedComputePipelineSequence(data, recording);
         }
 
-        bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged.load(std::memory_order_acquire);
-        }
+        // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
+        bool DeclaredResourcesChanged() const override;
 
     private:
         org::PipelineState& GetOrCreatePipeline();
@@ -161,9 +160,8 @@ class TextureFactory::BC7CompressionCopyPass
         BC7CompressionCopyFrameData Prepare(const org::PassPrepareContext& preparation);
         static void Record(const BC7CompressionCopyFrameData& data, org::PassRecordContext& recording);
 
-        bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged.load(std::memory_order_acquire);
-        }
+        // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
+        bool DeclaredResourcesChanged() const override;
 
     private:
         struct DeclaredJob {
@@ -202,9 +200,8 @@ class TextureFactory::BC7CompressionReadbackPass
         static void Record(const BC7CompressionReadbackFrameData& data,
             org::PassRecordContext& recording);
 
-        bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged.load(std::memory_order_acquire);
-        }
+        // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
+        bool DeclaredResourcesChanged() const override;
 
     private:
         struct DeclaredJob {

@@ -93,7 +93,6 @@
 #include "VirtualGeometry/Streaming/CLodStreamingSystem.h"
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
-#include "Runtime/GraphIntegration/ReadbackCaptureExtension.h"
 #include "Render/Runtime/IReadbackService.h"
 #include "Render/Runtime/ScopedActiveGraphServices.h"
 #include "Resources/Resource.h"

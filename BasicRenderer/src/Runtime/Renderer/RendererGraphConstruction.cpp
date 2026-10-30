@@ -111,7 +111,6 @@
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Diagnostics/RenderPasses/DebugGridPass.h"
-#include "Runtime/GraphIntegration/ReadbackCaptureExtension.h"
 #include "Render/Runtime/IReadbackService.h"
 #include "Render/Runtime/ScopedActiveGraphServices.h"
 #include "Resources/Resource.h"
@@ -748,9 +747,8 @@ void Renderer::RegisterPipelineExtensions() {
             *m_pReadbackManager,
             *m_pMaterialManager)),
         "BuiltinIO");
-    currentRenderGraph->RegisterExtension(std::make_unique<ReadbackCaptureExtension>(
-        currentRenderGraph->GetReadbackServiceOwner()),
-        "BuiltinReadbackCapture");
+    // Readback captures (IReadbackService) are placed by the graph itself: in the anchor pass's recording, or as an
+    // inserted pass when the pass cannot take them.
 
     if (!m_producerPersistentState->clodStreaming) m_producerPersistentState->clodStreaming = std::make_shared<CLodStreamingSystem>();
     if (!m_producerPersistentState->virtualShadowCasters) m_producerPersistentState->virtualShadowCasters = std::make_shared<VirtualShadowCasterRegistry>();
