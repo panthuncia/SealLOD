@@ -63,6 +63,7 @@ class DynamicResource;
 class ExternalTextureResource;
 class PixelBuffer;
 class RenderGraph;
+class Runtime;
 }
 namespace br::render {
 struct RendererFrameInputs;
@@ -203,6 +204,8 @@ private:
 
     std::shared_ptr<Scene> currentScene;
 
+    // The ORG runtime every graph runs on: created before the first graph, destroyed after the last.
+    std::shared_ptr<org::Runtime> m_orgRuntime;
     std::unique_ptr<org::RenderGraph> currentRenderGraph;
     bool m_renderGraphRuntimeInitialized = false;
     br::pipeline::PipelineRecipe m_pipelineRecipe;

@@ -179,7 +179,7 @@ void Renderer::CreateRenderGraph() {
 
         if (!currentRenderGraph)
         {
-		currentRenderGraph = std::make_unique<org::RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
+		currentRenderGraph = std::make_unique<org::RenderGraph>(m_orgRuntime);
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}

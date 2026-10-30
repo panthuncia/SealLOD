@@ -4,6 +4,7 @@
 
 #include <BasicRenderer/Renderer.h>
 #include "Render/RenderGraph/RenderGraph.h"
+#include "OpenRenderGraph/Runtime.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 #include <spdlog/spdlog.h>
 #include <rhi_debug.h>
@@ -273,7 +274,7 @@ void Renderer::Cleanup() {
 	// runtime descriptor/backing services alive through their final release.
     if (retiringDescriptors) retiringDescriptors->Cleanup();
     retiringDescriptors.reset();
-	org::RenderGraph::ShutdownRuntime();
+	m_orgRuntime.reset();
 	spdlog::info("Cleaning up swap chain");
     m_swapChain.Reset();
 	spdlog::info("Cleaning up device manager");
@@ -342,6 +343,10 @@ void Renderer::Initialize(
     SetSettings();
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
     RendererECSManager::GetInstance().Initialize();
+    // Before the renderer's tracking hooks: the runtime installs ORG's, which these replace.
+    m_orgRuntime = org::Runtime::Create({.device = DeviceManager::GetInstance().GetDevice(),
+        .backend = DeviceManager::GetInstance().GetBackend(), .slots = m_numFramesInFlight,
+        .tasks = std::make_shared<br::TbbTaskService>()});
     org::TrackedEntityToken::Hooks trackedEntityHooks{};
     trackedEntityHooks.createEntity = [](flecs::entity existing) {
             auto& ecsManager = RendererECSManager::GetInstance();
@@ -497,7 +502,7 @@ void Renderer::Initialize(
     org::Resource::SetEntityHooks(std::move(resourceEntityHooks));
 
     if (!currentRenderGraph) {
-		currentRenderGraph = std::make_unique<org::RenderGraph>(DeviceManager::GetInstance().GetDevice(), DeviceManager::GetInstance().GetBackend());
+		currentRenderGraph = std::make_unique<org::RenderGraph>(m_orgRuntime);
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}
@@ -573,11 +578,8 @@ void Renderer::Initialize(
         return TaskSchedulerManager::GetInstance().Submit(
             TaskLane::Background, TaskDomain::Cleanup, taskName, std::move(task));
     });
-    currentRenderGraph->SetTaskService(std::make_shared<br::TbbTaskService>());
     spdlog::info("Renderer initialization: initializing PSO manager");
     PSOManager::GetInstance().initialize();
-    spdlog::info("Renderer initialization: initializing deletion manager");
-    org::DeletionManager::GetInstance().Initialize();
 	spdlog::info("Renderer initialization: initializing command signatures");
 	CommandSignatureManager::GetInstance().Initialize();
     spdlog::info("Renderer initialization: command signatures initialized");

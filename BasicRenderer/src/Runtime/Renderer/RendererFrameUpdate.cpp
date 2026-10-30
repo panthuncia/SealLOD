@@ -2,6 +2,7 @@
 // Created by matth on 6/25/2024.
 //
 
+#include "OpenRenderGraph/Runtime.h"
 #include <BasicRenderer/Renderer.h>
 #include "OpenRenderGraph/GraphHost.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
@@ -282,7 +283,6 @@ void Renderer::Update(float elapsedSeconds) {
                 : 0u;
             m_pObjectManager->PublishDeferredRetireCompletedFrame(safeFrameNumber, retireDelayFrames);
         }
-        org::DescriptorHeapManager::GetInstance().ProcessDeferredReleases(m_preparationFrameIndex);
         RendererECSManager::GetInstance().FlushDeferredWorldOperations();
 
 		// Retire upload pages only after the previous use of this frame slot has
@@ -295,6 +295,8 @@ void Renderer::Update(float elapsedSeconds) {
 				uploadService->ProcessDeferredReleases(m_preparationFrameIndex);
 			}
 		}
+		// Descriptor releases and deferred deletions whose submission frontier the GPU reached.
+		if (m_orgRuntime) m_orgRuntime->Retire();
         });
 
     runCapturedStage("CommitPublishedRendererState", [&]() {
