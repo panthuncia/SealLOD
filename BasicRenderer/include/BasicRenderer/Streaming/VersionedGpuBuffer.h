@@ -12,7 +12,7 @@
 #include <ORGModuleServices/BufferJournal.h>
 #include <ORGModuleServices/VersionedBufferBuild.h>
 
-namespace org::experimental { struct PreparedBackingState; }
+namespace org::compiler { struct PreparedBackingState; }
 
 namespace br::render {
 
@@ -40,9 +40,9 @@ struct VersionedBufferCatalogTag {
 [[nodiscard]] std::shared_ptr<const void> MakeVersionedBufferTag(
     PublishedFragmentKind owner, PublishedResourceUsage usage, std::uint64_t variant);
 // The native state the producer seeded under SARP_PERSISTENT_PUBLICATIONS (PublishedBufferVersion::hostState); null otherwise.
-[[nodiscard]] inline std::shared_ptr<const org::experimental::PreparedBackingState> PreparedBackingStateOf(
+[[nodiscard]] inline std::shared_ptr<const org::compiler::PreparedBackingState> PreparedBackingStateOf(
     const PublishedGpuBufferVersion& version) noexcept {
-    return std::static_pointer_cast<const org::experimental::PreparedBackingState>(version.hostState);
+    return std::static_pointer_cast<const org::compiler::PreparedBackingState>(version.hostState);
 }
 
 // One renderer's versioned-buffer lifetime: its retirement clock (advanced once per retired frame slot), its frames in flight,

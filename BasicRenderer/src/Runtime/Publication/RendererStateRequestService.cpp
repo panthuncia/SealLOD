@@ -13,7 +13,7 @@
 #include "Materials/Publication/MaterialStateArtifacts.h"
 #include "VirtualGeometry/GeometryStorage/GeometryBufferStateArtifacts.h"
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
-#include "Render/RenderGraph/ExperimentalExecutionState.h"
+#include "Render/RenderGraph/ExecutionState.h"
 #include "Resources/Resource.h"
 
 namespace br::render {
@@ -663,7 +663,7 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
                 if (geometry && !geometry->versions.empty() && geometry->versions.front()->hostState) versions = geometry->versions;
             }
             if (resources && !versions.empty()) {
-                auto seeds = std::make_shared<std::vector<org::experimental::PreparedBackingState>>();
+                auto seeds = std::make_shared<std::vector<org::compiler::PreparedBackingState>>();
                 for (const auto& resource : *resources) {
                     if (!resource) continue;
                     for (const auto& version : versions) {

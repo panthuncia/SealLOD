@@ -4,7 +4,7 @@
 
 #include <BasicRenderer/Pipeline/PipelineRecipe.h>
 #include "BasicRenderer/Runtime/Detail/DepthHistoryService.h"
-#include "Render/RenderGraph/ExperimentalRhiExecution.h"
+#include "Render/RenderGraph/RhiExecution.h"
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeCommands.h"
 #include "Materials/Evaluation/RenderPasses/BuildPixelListPass.h"
@@ -162,13 +162,13 @@ void TestPersistentRendererPublicationBindings()
         selection.contentVersion = handle;
         selection.bindingBundle = std::make_shared<const org::PublicationBindingBundle>(
             std::vector<org::PublicationBindingBundle::Snapshot>{snapshot});
-        org::experimental::PreparedBackingState initial;
+        org::compiler::PreparedBackingState initial;
         initial.graphResourceID = snapshot->resourceID; initial.resource = snapshot->resource.GetHandle();
         initial.shape = {1,1,false};
-        initial.regions = std::make_shared<const std::vector<org::experimental::PreparedStateRegion>>(
-            std::initializer_list<org::experimental::PreparedStateRegion>{{{0,1,0,1},{}}});
-        selection.initialStates = std::make_shared<const std::vector<org::experimental::PreparedBackingState>>(
-            std::initializer_list<org::experimental::PreparedBackingState>{initial});
+        initial.regions = std::make_shared<const std::vector<org::compiler::PreparedStateRegion>>(
+            std::initializer_list<org::compiler::PreparedStateRegion>{{{0,1,0,1},{}}});
+        selection.initialStates = std::make_shared<const std::vector<org::compiler::PreparedBackingState>>(
+            std::initializer_list<org::compiler::PreparedBackingState>{initial});
         auto shard = std::make_shared<PublishedResourceCatalog::OwnerShard>();
         shard->selections.emplace(key,std::move(selection));
         auto catalog = std::make_shared<PublishedResourceCatalog>();
@@ -224,7 +224,7 @@ void TestPersistentDescriptorCommandRecording()
             | static_cast<uint64_t>(rhi::ResourceAccessType::UnorderedAccess)
             | static_cast<uint64_t>(rhi::ResourceAccessType::IndirectArgument),0,1,true});
     const auto view = edit.DeclareView(resource,{});
-    org::experimental::CompileWorkspace workspace; std::atomic_bool cancelled{false};
+    org::compiler::CompileWorkspace workspace; std::atomic_bool cancelled{false};
     auto held = edit.Build(workspace,cancelled);
     Require(program.Install(held), "persistent descriptor bootstrap");
     br::render::PreparedComputeCommandSequence commands;
@@ -568,7 +568,7 @@ void TestPixelListInvocationPreparation()
     programInputs.descriptorOrder = {8,2,6,0};
     using Executable = org::persistent::TypedPassExecutable<PersistentBuildPixelListPass>;
     const auto executable = Executable::Build(edit,{},author,programInputs);
-    org::experimental::CompileWorkspace workspace; std::atomic_bool cancelled{false};
+    org::compiler::CompileWorkspace workspace; std::atomic_bool cancelled{false};
     auto held = edit.Build(workspace,cancelled);
     Require(graph.Install(held), "persistent pixel-list bootstrap");
     host.update.publishedRendererState = publication; host.update.renderResolution = {17,9};
@@ -694,11 +694,11 @@ void TestFullCapturedCullingEmission()
         org::persistent::BindingVersion binding;
         binding.identity = (uint64_t{1} << 32) | physical; binding.backingRevision = 1;
         binding.owner = owner; binding.recording = snapshot;
-        auto initialState = std::make_shared<org::experimental::PreparedBackingState>();
+        auto initialState = std::make_shared<org::compiler::PreparedBackingState>();
         initialState->graphResourceID = index+1; initialState->resource = snapshot->resource.GetHandle();
         initialState->shape = binding.shape;
-        initialState->regions = std::make_shared<const std::vector<org::experimental::PreparedStateRegion>>(
-            std::initializer_list<org::experimental::PreparedStateRegion>{{{},
+        initialState->regions = std::make_shared<const std::vector<org::compiler::PreparedStateRegion>>(
+            std::initializer_list<org::compiler::PreparedStateRegion>{{{},
                 {static_cast<uint64_t>(rhi::ResourceAccessType::UnorderedAccess),0,
                     static_cast<uint64_t>(rhi::ResourceSyncState::ComputeShading),true}}});
         binding.admission = initialState;
@@ -763,7 +763,7 @@ void TestFullCapturedCullingEmission()
         inputs,configuration,std::move(accessSnapshots),{{mandatoryView,0}}};
     const auto executable = org::persistent::TypedPassExecutable<PersistentHierarchicalDispatchCullingPass>::Build(
         edit,{},author,capturedBuild);
-    org::experimental::CompileWorkspace workspace; std::atomic_bool cancelled{false};
+    org::compiler::CompileWorkspace workspace; std::atomic_bool cancelled{false};
     auto held = edit.Build(workspace,cancelled); Require(graph.Install(held),"full culling bootstrap");
     struct Trace {
         std::vector<std::vector<uint32_t>> constants;
@@ -835,12 +835,12 @@ void TestFullCapturedCullingEmission()
         && typedInitial.indirect == initial.indirect && typedInitial.dispatches == initial.dispatches,
         "typed captured culling construction changed production commands");
     org::persistent::SynchronousAdmission admission;
-    const std::array<org::experimental::ExecutionTimelinePoint,1> queues{{{1,0}}};
+    const std::array<org::compiler::ExecutionTimelinePoint,1> queues{{{1,0}}};
     const std::array<org::persistent::FrameProducerWait,1> producerWaits{{{executable.Id(),{99,7}}}};
     const std::array<org::persistent::FrameIncomingState,1> incomingStates{{{slots.back(),
         (inputs.*resources.back())->snapshot->resource.GetHandle(),
-        std::make_shared<const std::vector<org::experimental::PreparedStateRegion>>(
-            std::initializer_list<org::experimental::PreparedStateRegion>{{{},
+        std::make_shared<const std::vector<org::compiler::PreparedStateRegion>>(
+            std::initializer_list<org::compiler::PreparedStateRegion>{{{},
                 {static_cast<uint64_t>(rhi::ResourceAccessType::CopyDest),0,
                     static_cast<uint64_t>(rhi::ResourceSyncState::Copy),true}}}),{98,6}}}};
     struct EmptyContributor {
@@ -850,11 +850,11 @@ void TestFullCapturedCullingEmission()
     const auto& heldPasses = held->executable->graph->structure->passes;
     heldInvocations.at(heldPasses.at(pass.index).preparedPassIndex) = org::PreparedPass::FromTyped<EmptyContributor>(uint32_t{0},{});
     heldInvocations.at(heldPasses.at(executable.Id().index).preparedPassIndex) = executable.PrepareInvocation(*held,freshInputs);
-    auto pendingHeldFrame = std::make_shared<org::experimental::PendingPersistentFrame>(1,held,std::move(heldInvocations));
+    auto pendingHeldFrame = std::make_shared<org::compiler::PendingPersistentFrame>(1,held,std::move(heldInvocations));
     std::vector<org::PreparedPass> queuedInvocations(held->executable->executionLayout->placements.size());
     queuedInvocations.at(heldPasses.at(pass.index).preparedPassIndex) = org::PreparedPass::FromTyped<EmptyContributor>(uint32_t{0},{});
     queuedInvocations.at(heldPasses.at(executable.Id().index).preparedPassIndex) = executable.PrepareInvocation(*held,freshInputs);
-    auto queuedFrame = std::make_shared<org::experimental::PendingPersistentFrame>(3,held,std::move(queuedInvocations));
+    auto queuedFrame = std::make_shared<org::compiler::PendingPersistentFrame>(3,held,std::move(queuedInvocations));
     auto heldAdmission = admission.Prepare(pendingHeldFrame->Publication(),queues,producerWaits,incomingStates);
     auto sealedHeldFrame = pendingHeldFrame->Seal(heldAdmission);
     bool duplicateSealAccepted = true;
@@ -864,14 +864,14 @@ void TestFullCapturedCullingEmission()
     pendingHeldFrame.reset();
     const auto cullingBatch = held->executable->executionLayout->placements.at(executable.Id().index).batch;
     Require(sealedHeldFrame->incomingWaits.at(cullingBatch).size() == 2
-        && sealedHeldFrame->incomingWaits.at(cullingBatch)[0] == org::experimental::ExecutionTimelinePoint(99,7),
+        && sealedHeldFrame->incomingWaits.at(cullingBatch)[0] == org::compiler::ExecutionTimelinePoint(99,7),
         "sealed culling frame lost invocation-specific producer wait");
     Require(sealedHeldFrame->initialStates->at(0).authoritativeIncoming
         && sealedHeldFrame->initialStates->at(0).regions == incomingStates[0].regions,
         "sealed culling frame lost authoritative incoming state root");
-    std::vector<org::experimental::OwnedRecordingList> heldRecordings;
+    std::vector<org::compiler::OwnedRecordingList> heldRecordings;
     for (uint32_t batch = 0; batch < held->executable->graph->batches.size(); ++batch)
-        heldRecordings.push_back(org::experimental::BuildPersistentRecordingList(sealedHeldFrame,batch));
+        heldRecordings.push_back(org::compiler::BuildPersistentRecordingList(sealedHeldFrame,batch));
     Require(initial.constants[0] == std::vector<uint32_t>{200,UINT32_MAX},"captured culling reflected view layout mismatch");
     Require(initial.constants[1][CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] == 201+2*(resources.size()-1),
         "captured culling selected a different logical descriptor on shared backing");
@@ -886,7 +886,7 @@ void TestFullCapturedCullingEmission()
         auto views = std::make_shared<org::BindlessResourceViews>(*snapshot->views);
         for (auto& view : views->views) view.descriptor.index += 1000;
         snapshot->views = views; binding.recording = snapshot;
-        auto replacedState = std::make_shared<org::experimental::PreparedBackingState>(*binding.admission);
+        auto replacedState = std::make_shared<org::compiler::PreparedBackingState>(*binding.admission);
         replacedState->resource = snapshot->resource.GetHandle(); binding.admission = replacedState;
         binding.identity += 1000; ++binding.backingRevision;
         rotation.ReplaceBinding(slot,std::move(binding));
@@ -1000,7 +1000,7 @@ void TestFullCapturedCullingEmission()
     cancelledInvocations.at(heldPasses.at(executable.Id().index).preparedPassIndex) =
         newExecutable.PrepareInvocation(*selectedProgram,cancellationInputs);
     auto cpuConsumer = cancelledInvocations.at(heldPasses.at(executable.Id().index).preparedPassIndex);
-    auto cancellationSeal = std::make_shared<org::experimental::PendingPersistentFrame>(
+    auto cancellationSeal = std::make_shared<org::compiler::PendingPersistentFrame>(
         2,selectedProgram,std::move(cancelledInvocations));
     auto cpuFrame = cancellationSeal; // Preparation tasks retain the pending packet until they join.
     cancellationInputs.publication.reset(); cancellationPublication.reset();
@@ -1122,7 +1122,7 @@ void TestPublishedCullingInvocationPreparation()
     };
     build.objectConstantViews = {{CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX,0}};
     auto executable = org::persistent::TypedPassExecutable<PersistentHierarchicalDispatchCullingPass>::Build(edit,{},author,build);
-    org::experimental::CompileWorkspace workspace; std::atomic_bool cancelled{false};
+    org::compiler::CompileWorkspace workspace; std::atomic_bool cancelled{false};
     auto heldGraph = edit.Build(workspace,cancelled); Require(graph.Install(heldGraph),"persistent culling bootstrap");
     views[0].id = 13;
     PersistentHierarchicalDispatchCullingPass::InvocationInputs inputs{views,publication,3,4};
@@ -1466,7 +1466,7 @@ void TestTypedMaterialEvaluationPreparation()
     org::persistent::BindingVersion binding;
     binding.identity = (uint64_t{1} << 32) | 21; binding.backingRevision = 1; binding.owner = owner; binding.recording = snapshot;
     const auto slot = edit.AddResource(binding.shape,binding);
-    const org::experimental::CompileResourceState access{
+    const org::compiler::CompileResourceState access{
         static_cast<uint64_t>(rhi::ResourceAccessType::ShaderResource)|static_cast<uint64_t>(rhi::ResourceAccessType::IndirectArgument),0,1,false};
     auto author = std::make_unique<PersistentMaterialEvaluationPass>(PersistentMaterialEvaluationPass::Configuration{},
         std::vector<PersistentMaterialEvaluationPass::ResourceAccess>{{slot,access,{},org::BindlessViewRequest{}}});
@@ -1495,7 +1495,7 @@ void TestTypedMaterialEvaluationPreparation()
         && !programs.programs[0].descriptorAccesses[1],"material reflection mapping lost access zero or optional absence");
     auto executable = org::persistent::TypedPassExecutable<PersistentMaterialEvaluationPass>::Build(edit,{},*author,programs);
     author.reset();
-    org::experimental::CompileWorkspace workspace; std::atomic_bool cancelled{false};
+    org::compiler::CompileWorkspace workspace; std::atomic_bool cancelled{false};
     auto selected = edit.Build(workspace,cancelled); Require(graph.Install(selected),"typed material publication bootstrap failed");
     auto materials = std::make_shared<br::render::PublishedMaterialState>();
     materials->activeCompileFlags = {MaterialCompileNone}; materials->activeCompileFlagSlots = {1}; materials->compileFlagSlotsUsed = 2;

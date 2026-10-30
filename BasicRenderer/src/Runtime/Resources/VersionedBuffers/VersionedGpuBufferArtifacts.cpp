@@ -10,7 +10,7 @@
 #include <utility>
 
 #include "Render/PublicationBindingBundle.h"
-#include "Render/RenderGraph/ExperimentalExecutionState.h"
+#include "Render/RenderGraph/ExecutionState.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
@@ -113,10 +113,10 @@ void EmitPoolTelemetry(org::services::BackingPoolEvent event, std::string_view, 
     }
 }
 
-std::shared_ptr<const org::experimental::PreparedBackingState> CapturePreparedBackingState(org::Buffer& resource) {
+std::shared_ptr<const org::compiler::PreparedBackingState> CapturePreparedBackingState(org::Buffer& resource) {
     const auto snapshot = org::PublicationBindingBundle::Capture(resource);
     if (!snapshot) throw std::runtime_error("persistent buffer producer has no native snapshot");
-    auto initial = std::make_shared<org::experimental::PreparedBackingState>();
+    auto initial = std::make_shared<org::compiler::PreparedBackingState>();
     initial->graphResourceID = snapshot->resourceID;
     initial->resource = snapshot->resource.GetHandle();
     initial->shape = { (std::max)(1u, resource.GetMipLevels()), (std::max)(1u, resource.GetArraySize()), resource.HasLayout() };
@@ -126,7 +126,7 @@ std::shared_ptr<const org::experimental::PreparedBackingState> CapturePreparedBa
     initial->aliasPoolID = snapshot->aliasPoolID;
     initial->aliasOffset = snapshot->aliasOffset;
     initial->aliasSize = snapshot->aliasSize;
-    auto regions = std::make_shared<std::vector<org::experimental::PreparedStateRegion>>();
+    auto regions = std::make_shared<std::vector<org::compiler::PreparedStateRegion>>();
     if (const auto* tracker = resource.GetStateTracker()) for (const auto& segment : tracker->GetSegments()) {
         const auto range = org::ResolveRangeSpec(segment.rangeSpec, initial->shape.mips, initial->shape.slices);
         if (!range.isEmpty()) regions->push_back({ { range.firstMip, range.mipCount, range.firstSlice, range.sliceCount },

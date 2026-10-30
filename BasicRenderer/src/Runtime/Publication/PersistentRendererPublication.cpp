@@ -78,7 +78,7 @@ void PreparePersistentRendererPublication(
             return true;
         });
     }
-    org::experimental::CompileWorkspace workspace;
+    org::compiler::CompileWorkspace workspace;
     const std::atomic_bool cancelled{false};
     publication->graph = edit.Build(workspace,cancelled);
     if (!publication->graph) throw std::runtime_error("Persistent renderer publication failed to build");

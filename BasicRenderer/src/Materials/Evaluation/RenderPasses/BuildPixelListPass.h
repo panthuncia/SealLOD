@@ -149,7 +149,7 @@ public:
     Bindings Declare(org::persistent::PassDeclaration& declaration) const {
         using Access = rhi::ResourceAccessType;
         const auto state = [](Access access, bool write = false) {
-            return org::experimental::CompileResourceState{static_cast<uint64_t>(access),0,
+            return org::compiler::CompileResourceState{static_cast<uint64_t>(access),0,
                 static_cast<uint64_t>(rhi::ResourceSyncState::ComputeShading),write};
         };
         Bindings bindings;

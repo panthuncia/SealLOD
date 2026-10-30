@@ -15,7 +15,7 @@
 #include <BasicRenderer/Streaming/PublishedTypes.h>
 
 namespace org { class Resource; class PublicationBindingBundle; }
-namespace org::experimental { struct PreparedBackingState; }
+namespace org::compiler { struct PreparedBackingState; }
 
 namespace br::render {
 struct PersistentRendererPublication;
@@ -76,7 +76,7 @@ struct PublishedResourceSelection {
     std::shared_ptr<const org::PublicationBindingBundle> bindingBundle;
     // Captured on the producer only for persistent publication preparation.
     // These are new-backing seeds; dynamic external state reports remain per frame.
-    std::shared_ptr<const std::vector<org::experimental::PreparedBackingState>> initialStates;
+    std::shared_ptr<const std::vector<org::compiler::PreparedBackingState>> initialStates;
 };
 
 struct PublishedResourceCatalog {

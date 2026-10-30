@@ -13,15 +13,15 @@ class PersistentMaterialEvaluationPass {
 public:
     struct ResourceAccess {
         org::persistent::ResourceSlotId slot;
-        org::experimental::CompileResourceState state;
-        org::experimental::CompileRange range;
+        org::compiler::CompileResourceState state;
+        org::compiler::CompileRange range;
         std::optional<org::BindlessViewRequest> view;
     };
     struct GroupAccess {
         org::persistent::ResourceGroupId group;
-        org::experimental::CompileResourceState state;
+        org::compiler::CompileResourceState state;
         uint32_t phase = 0;
-        std::optional<org::experimental::CompileRange> range;
+        std::optional<org::compiler::CompileRange> range;
     };
     struct Configuration {
         uint32_t visibleClusters = 0, visibleClusterTransformIndices = 0, arguments = 0;
