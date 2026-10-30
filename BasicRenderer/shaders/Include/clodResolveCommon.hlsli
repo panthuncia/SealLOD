@@ -361,7 +361,7 @@ float2 DecodeCompressedUV(uint meshletLocalVertex, MeshletUvDecodeInfo uvInfo, M
     uint bitsPerVertex = uvBitsU + uvBitsV;
     uint bitCursor = uvInfo.uvBitstreamBase * 8u + uvInfo.uvDesc.uvBitOffset + meshletLocalVertex * bitsPerVertex;
 
-    ByteAddressBuffer slab = ResourceDescriptorHeap[d.pagePoolSlabDescriptorIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
     uint encodedU = ReadPackedBits32_BA(slab, bitCursor, uvBitsU);
     bitCursor += uvBitsU;
     uint encodedV = ReadPackedBits32_BA(slab, bitCursor, uvBitsV);
@@ -824,7 +824,7 @@ void BuildClodMaterialUvData(
 
 float3 DecodeCompressedPosition(uint meshletLocalVertex, MeshletResolveData d)
 {
-    ByteAddressBuffer slab = ResourceDescriptorHeap[d.pagePoolSlabDescriptorIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
     return CLodLoadPagePosition(slab, d.compressedPositionQuantExp, d.positionBitstreamBase, d.positionBitOffset, meshletLocalVertex);
 }
 
@@ -852,7 +852,7 @@ float3 OctDecodeNormal(float2 e)
 
 float3 DecodeCompressedNormal(uint meshletLocalVertex, MeshletResolveData d)
 {
-    ByteAddressBuffer slab = ResourceDescriptorHeap[d.pagePoolSlabDescriptorIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
     uint addr = d.normalArrayBase + (d.vertexAttributeOffset + meshletLocalVertex) * 4u;
     uint packed = slab.Load(addr);
     return OctDecodeNormal(UnpackSnorm16x2(packed));
@@ -889,7 +889,7 @@ float4 DecodeCompressedTangentFrame(uint meshletLocalVertex, float3 normalOS, Me
 
 float3 DecodeCompressedColor(uint meshletLocalVertex, MeshletResolveData d)
 {
-    ByteAddressBuffer slab = ResourceDescriptorHeap[d.pagePoolSlabDescriptorIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
     uint addr = d.colorArrayBase + (d.vertexAttributeOffset + meshletLocalVertex) * 4u;
     uint packed = slab.Load(addr);
     return float3(
@@ -911,7 +911,7 @@ SkinningInfluences DecodePackedJoints(uint meshletLocalVertex, MeshletResolveDat
         return skinning;
     }
 
-    ByteAddressBuffer slab = ResourceDescriptorHeap[d.pagePoolSlabDescriptorIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
     uint addr = d.jointArrayBase + (d.vertexAttributeOffset + meshletLocalVertex) * 32u;
     skinning.joints0 = LoadUint4(addr, slab);
     skinning.joints1 = LoadUint4(addr + 16u, slab);
@@ -925,7 +925,7 @@ SkinningInfluences DecodePackedWeights(uint meshletLocalVertex, MeshletResolveDa
         return skinning;
     }
 
-    ByteAddressBuffer slab = ResourceDescriptorHeap[d.pagePoolSlabDescriptorIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
     uint addr = d.weightArrayBase + (d.vertexAttributeOffset + meshletLocalVertex) * 32u;
     skinning.weights0 = LoadFloat4(addr, slab);
     skinning.weights1 = LoadFloat4(addr + 16u, slab);
@@ -972,100 +972,80 @@ void ApplyClodSkinning(
     ApplyClodSkinningToFrame(meshletLocalVertex, d, assemblyTransformIndex, positionOS, normalOS, unusedTangent);
 }
 
+// One cluster's decode data, loaded by the calling lane.
+MeshletResolveData LoadMeshletResolveData(uint clusterIndex)
+{
+    MeshletResolveData d = (MeshletResolveData)0;
+    ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    StructuredBuffer<PerMeshBuffer> perMeshBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+
+    const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, clusterIndex);
+    d.drawcallAndMeshlet.x = CLodVisibleClusterInstanceID(packedCluster);
+    d.drawcallAndMeshlet.y = CLodVisibleClusterLocalMeshletIndex(packedCluster);
+
+    PerMeshInstanceBuffer inst = LoadMeshTemplateForDraw(d.drawcallAndMeshlet.x);
+    inst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
+        d.drawcallAndMeshlet.x, inst.skinningInstanceSlot);
+    d.objAndMesh = uint2(d.drawcallAndMeshlet.x, inst.perMeshBufferIndex);
+    d.skinningInstanceSlot = inst.skinningInstanceSlot;
+
+    PerMeshBuffer mesh = perMeshBuffer[d.objAndMesh.y];
+
+    const uint pageSlabDesc = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+    const uint pageSlabOff = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+
+    CLodPageHeader hdr = LoadPageHeader(pageSlabDesc, pageSlabOff);
+    CLodMeshletDescriptor desc = LoadMeshletDescriptor(
+        pageSlabDesc, pageSlabOff, hdr.descriptorOffset, d.drawcallAndMeshlet.y);
+
+    d.meshInfo = uint4(mesh.vertexByteSize, mesh.vertexFlags, mesh.numVertices, 0);
+    d.materialDataIndex = mesh.materialDataIndex;
+
+    d.vertexCount = CLodDescVertexCount(desc);
+    d.triangleCount = CLodDescTriangleCount(desc);
+    d.bitsX = CLodDescBitsX(desc);
+    d.bitsY = CLodDescBitsY(desc);
+    d.bitsZ = CLodDescBitsZ(desc);
+    d.minQ = int3(desc.minQx, desc.minQy, desc.minQz);
+    d.positionBitOffset = desc.positionBitOffset;
+    d.vertexAttributeOffset = desc.vertexAttributeOffset;
+    d.triangleByteOffset = desc.triangleByteOffset;
+    d.pageAttributeMask = hdr.attributeMask;
+    d.uvSetCount = hdr.uvSetCount;
+
+    d.pageByteOffset = pageSlabOff;
+    d.uvDescriptorBase = pageSlabOff + hdr.uvDescriptorOffset;
+    d.uvBitstreamDirectoryBase = pageSlabOff + hdr.uvBitstreamDirectoryOffset;
+    d.positionBitstreamBase = pageSlabOff + hdr.positionBitstreamOffset;
+    d.normalArrayBase = pageSlabOff + hdr.normalArrayOffset;
+    d.tangentFrameArrayBase = pageSlabOff + hdr.tangentFrameArrayOffset;
+    d.colorArrayBase = pageSlabOff + hdr.colorArrayOffset;
+    d.jointArrayBase = pageSlabOff + hdr.jointArrayOffset;
+    d.weightArrayBase = pageSlabOff + hdr.weightArrayOffset;
+    d.triangleStreamBase = pageSlabOff + hdr.triangleStreamOffset;
+
+    d.compressedPositionQuantExp = hdr.compressedPositionQuantExp;
+    d.pagePoolSlabDescriptorIndex = pageSlabDesc;
+    return d;
+}
+
+// The same, loaded once per distinct cluster in the wave: each iteration takes the first active lane's cluster (a
+// wave-uniform index, so the loads are scalar) and retires the lanes that share it. WaveReadLaneAt with a per-group leader
+// is not this: its lane index must be wave-uniform, and drivers that scalarize it hand every lane the first group's data.
 MeshletResolveData LoadMeshletResolveData_Wave(uint clusterIndex)
 {
     MeshletResolveData d = (MeshletResolveData)0;
-
-    uint4 mask = WaveMatch(clusterIndex);
-    uint leader = WaveFirstLaneFromMask(mask);
-    bool isLeader = (WaveGetLaneIndex() == leader);
-
-    if (isLeader)
+    [loop]
+    for (;;)
     {
-        ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
-        StructuredBuffer<PerMeshBuffer> perMeshBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-
-        const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, clusterIndex);
-        d.drawcallAndMeshlet.x = CLodVisibleClusterInstanceID(packedCluster);
-        d.drawcallAndMeshlet.y = CLodVisibleClusterLocalMeshletIndex(packedCluster);
-
-        PerMeshInstanceBuffer inst = LoadMeshTemplateForDraw(d.drawcallAndMeshlet.x);
-        inst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
-            d.drawcallAndMeshlet.x, inst.skinningInstanceSlot);
-        d.objAndMesh = uint2(d.drawcallAndMeshlet.x, inst.perMeshBufferIndex);
-        d.skinningInstanceSlot = inst.skinningInstanceSlot;
-
-        PerMeshBuffer mesh = perMeshBuffer[d.objAndMesh.y];
-
-        const uint pageSlabDesc = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
-        const uint pageSlabOff = CLodVisibleClusterPageSlabByteOffset(packedCluster);
-
-        CLodPageHeader hdr = LoadPageHeader(pageSlabDesc, pageSlabOff);
-        CLodMeshletDescriptor desc = LoadMeshletDescriptor(
-            pageSlabDesc, pageSlabOff, hdr.descriptorOffset, d.drawcallAndMeshlet.y);
-
-        d.meshInfo = uint4(mesh.vertexByteSize, mesh.vertexFlags, mesh.numVertices, 0);
-        d.materialDataIndex = mesh.materialDataIndex;
-
-        d.vertexCount = CLodDescVertexCount(desc);
-        d.triangleCount = CLodDescTriangleCount(desc);
-        d.bitsX = CLodDescBitsX(desc);
-        d.bitsY = CLodDescBitsY(desc);
-        d.bitsZ = CLodDescBitsZ(desc);
-        d.minQ = int3(desc.minQx, desc.minQy, desc.minQz);
-        d.positionBitOffset = desc.positionBitOffset;
-        d.vertexAttributeOffset = desc.vertexAttributeOffset;
-        d.triangleByteOffset = desc.triangleByteOffset;
-        d.pageAttributeMask = hdr.attributeMask;
-        d.uvSetCount = hdr.uvSetCount;
-
-        d.pageByteOffset = pageSlabOff;
-        d.uvDescriptorBase = pageSlabOff + hdr.uvDescriptorOffset;
-        d.uvBitstreamDirectoryBase = pageSlabOff + hdr.uvBitstreamDirectoryOffset;
-        d.positionBitstreamBase = pageSlabOff + hdr.positionBitstreamOffset;
-        d.normalArrayBase = pageSlabOff + hdr.normalArrayOffset;
-        d.tangentFrameArrayBase = pageSlabOff + hdr.tangentFrameArrayOffset;
-        d.colorArrayBase = pageSlabOff + hdr.colorArrayOffset;
-        d.jointArrayBase = pageSlabOff + hdr.jointArrayOffset;
-        d.weightArrayBase = pageSlabOff + hdr.weightArrayOffset;
-        d.triangleStreamBase = pageSlabOff + hdr.triangleStreamOffset;
-
-        d.compressedPositionQuantExp = hdr.compressedPositionQuantExp;
-        d.pagePoolSlabDescriptorIndex = pageSlabDesc;
+        const uint uniformCluster = WaveReadLaneFirst(clusterIndex);
+        if (clusterIndex == uniformCluster)
+        {
+            d = LoadMeshletResolveData(uniformCluster);
+            break;
+        }
     }
-
-    d.drawcallAndMeshlet = WaveReadLaneAt(d.drawcallAndMeshlet, leader);
-    d.objAndMesh = WaveReadLaneAt(d.objAndMesh, leader);
-    d.meshInfo = WaveReadLaneAt(d.meshInfo, leader);
-    d.materialDataIndex = WaveReadLaneAt(d.materialDataIndex, leader);
-    d.vertexCount = WaveReadLaneAt(d.vertexCount, leader);
-    d.triangleCount = WaveReadLaneAt(d.triangleCount, leader);
-    d.bitsX = WaveReadLaneAt(d.bitsX, leader);
-    d.bitsY = WaveReadLaneAt(d.bitsY, leader);
-    d.bitsZ = WaveReadLaneAt(d.bitsZ, leader);
-    d.minQ.x = WaveReadLaneAt(d.minQ.x, leader);
-    d.minQ.y = WaveReadLaneAt(d.minQ.y, leader);
-    d.minQ.z = WaveReadLaneAt(d.minQ.z, leader);
-    d.positionBitOffset = WaveReadLaneAt(d.positionBitOffset, leader);
-    d.vertexAttributeOffset = WaveReadLaneAt(d.vertexAttributeOffset, leader);
-    d.triangleByteOffset = WaveReadLaneAt(d.triangleByteOffset, leader);
-    d.pageAttributeMask = WaveReadLaneAt(d.pageAttributeMask, leader);
-    d.uvSetCount = WaveReadLaneAt(d.uvSetCount, leader);
-    d.uvDescriptorBase = WaveReadLaneAt(d.uvDescriptorBase, leader);
-    d.uvBitstreamDirectoryBase = WaveReadLaneAt(d.uvBitstreamDirectoryBase, leader);
-    d.pageByteOffset = WaveReadLaneAt(d.pageByteOffset, leader);
-    d.positionBitstreamBase = WaveReadLaneAt(d.positionBitstreamBase, leader);
-    d.normalArrayBase = WaveReadLaneAt(d.normalArrayBase, leader);
-    d.tangentFrameArrayBase = WaveReadLaneAt(d.tangentFrameArrayBase, leader);
-    d.colorArrayBase = WaveReadLaneAt(d.colorArrayBase, leader);
-    d.jointArrayBase = WaveReadLaneAt(d.jointArrayBase, leader);
-    d.weightArrayBase = WaveReadLaneAt(d.weightArrayBase, leader);
-    d.triangleStreamBase = WaveReadLaneAt(d.triangleStreamBase, leader);
-    d.compressedPositionQuantExp = WaveReadLaneAt(d.compressedPositionQuantExp, leader);
-    d.pagePoolSlabDescriptorIndex = WaveReadLaneAt(d.pagePoolSlabDescriptorIndex, leader);
-    d.skinningInstanceSlot = WaveReadLaneAt(d.skinningInstanceSlot, leader);
-
     return d;
 }
 
@@ -1611,7 +1591,7 @@ uint3 DecodeTriangleCompact(uint triLocalIndex, MeshletResolveData d)
 {
     uint triOffset = d.triangleStreamBase + d.triangleByteOffset + triLocalIndex * 3u;
 
-    ByteAddressBuffer slab = ResourceDescriptorHeap[d.pagePoolSlabDescriptorIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
     uint alignedOffset = (triOffset / 4u) * 4u;
     uint firstWord = slab.Load(alignedOffset);
     uint byteOffset = triOffset % 4u;
