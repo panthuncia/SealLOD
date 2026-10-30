@@ -176,16 +176,16 @@ org::PipelineState& TextureFactory::MipmappingPass::GetOrCreatePipeline(MipmapVa
     throw std::runtime_error("MipmappingPass: unsupported pipeline variant");
 }
 
-void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage) {
-    if (!tex) return;
+bool TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage) {
+    if (!tex) return false;
 
     if (tex->IsBlockCompressed()) {
         spdlog::warn("MipmappingPass: skipping block compressed texture");
-        return;
+        return false;
     }
 
     const uint32_t mipLevels = tex->GetMipLevels();
-    if (mipLevels <= 1) return;
+    if (mipLevels <= 1) return false;
 
     const uint32_t w = tex->GetInternalWidth();
     const uint32_t h = tex->GetInternalHeight();
@@ -193,7 +193,7 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::Pixel
     // SPD limit. The alpha-coverage path generates mips sequentially and is not bound by SPD's 4K setup.
     if (!preserveAlphaCoverage && (w > 4096 || h > 4096)) {
         spdlog::warn("MipmappingPass: skipping >4K texture ({}x{}) for now", w, h);
-        return;
+        return false;
     }
 
     Job j{};
@@ -213,7 +213,7 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::Pixel
             ? desc.uavFormat
             : rhi::helpers::stripSrgb(desc.format);
         spdlog::warn("MipmappingPass: unsupported UAV format {} for GPU mip generation", static_cast<uint32_t>(format));
-        return;
+        return false;
     }
 
     if (j.preserveAlphaCoverage && (j.isArray || j.valueType != MipmapValueType::Float4)) {
@@ -256,6 +256,10 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::Pixel
 
     // Each publication owns its immutable CPU-written range through retirement.
     j.constantsBuffer = org::LazyDynamicStructuredBuffer<MipmapSpdConstants>::CreateShared(1, "Mipmap job constants");
+    if (m_uploads) {
+        j.constantsBuffer->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Immediate);
+        j.constantsBuffer->PinUploadService(m_uploads);
+    }
     j.constantsView = j.constantsBuffer->Add();
     j.constantsIndex = static_cast<uint32_t>(j.constantsView->GetOffset() / sizeof(MipmapSpdConstants));
     j.cpuConstants = c;
@@ -282,6 +286,7 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::Pixel
 
     m_declaredResourcesChanged = true;
     m_jobs.Enqueue(std::move(j));
+    return true;
 }
 
 
@@ -432,7 +437,10 @@ void TextureFactory::MipmappingPass::Record(const TextureMipmappingBindings& bin
 }
 
 void TextureFactory::MipHandoffPass::EnqueueJob(std::shared_ptr<org::PixelBuffer> texture) {
-    if (texture) m_jobs.Enqueue({std::move(texture)});
+    if (!texture) return;
+    if (!m_completedShared && m_completed)
+        m_completedShared = std::make_shared<const std::function<void(const org::PixelBuffer&)>>(m_completed);
+    m_jobs.Enqueue({std::move(texture), m_completedShared});
 }
 
 TextureMipHandoffBindings TextureFactory::MipHandoffPass::Declare(org::PassBuilder& declaration) {

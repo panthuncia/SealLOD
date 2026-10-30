@@ -722,6 +722,7 @@ void Renderer::Initialize(
     m_pTextureFactory = TextureFactory::CreateUnique(currentRenderGraph->RetainUploadService());
     m_textureJobs = std::make_unique<br::render::TextureJobGraph>(m_orgRuntime, *m_pTextureFactory, m_numFramesInFlight);
     m_pTextureFactory->SetJobUploadService(m_textureJobs->Uploads());
+    m_textureJobs->StartSelfTestIfRequested();
     m_clodRayTracingSystem = std::make_shared<br::render::CLodRayTracingSystem>(
         currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
     if (currentRenderGraph) {

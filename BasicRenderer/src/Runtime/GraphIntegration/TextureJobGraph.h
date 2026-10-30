@@ -8,7 +8,7 @@
 #include <rhi.h>
 
 class TextureFactory;
-namespace org { class Runtime; class RenderGraph; }
+namespace org { class Runtime; class RenderGraph; class PixelBuffer; }
 namespace org::runtime { class IUploadService; }
 
 namespace br::render {
@@ -31,6 +31,11 @@ public:
     // The graph's upload queue (TextureFactory::SetJobUploadService).
     const std::shared_ptr<org::runtime::IUploadService>& Uploads() const noexcept { return m_uploads; }
 
+    // BR_TEXTURE_JOB_SELF_TEST=1: mips a 64x64 checkerboard on the GPU through TextureFactory, and once its mips are ready
+    // (TextureFactory::WhenMipsReady) reads back its 1x1 mip, which must be mid-grey. Logs the result. Call once the factory
+    // uploads through this graph (TextureFactory::SetJobUploadService).
+    void StartSelfTestIfRequested();
+
     // One execution in a slot, when a texture job has work left: the slot's previous one has completed first (its upload pages
     // are reused). Otherwise only the completed executions retire (their jobs learn of completion).
     void Execute(uint32_t slot, uint64_t frameFenceValue, rhi::Device device);
@@ -44,6 +49,7 @@ private:
     // Per slot: each queue's timeline and the value its last execution in the slot submitted up to.
     std::vector<std::vector<std::pair<std::shared_ptr<rhi::TimelinePtr>, uint64_t>>> m_slotPoints;
     uint64_t m_executionsWithWork = 0, m_batches = 0;  // logged when it goes
+    std::shared_ptr<org::PixelBuffer> m_selfTestTexture;
 };
 
 } // namespace br::render

@@ -34,6 +34,8 @@ struct TextureMipHandoffBindings {
 class TextureFactory::MipHandoffPass : public org::TypedRenderGraphPass<MipHandoffPass, org::EmptyPassFrameData, TextureMipHandoffBindings>, public org::IDynamicDeclaredResources {
     public:
         void EnqueueJob(std::shared_ptr<org::PixelBuffer> texture);
+        // Called with each texture once the GPU has completed its handoff (on the thread retiring the job graph's executions).
+        void SetCompleted(std::function<void(const org::PixelBuffer&)> completed) { m_completed = std::move(completed); }
 
         TextureMipHandoffBindings Declare(org::PassBuilder& builder);
         org::EmptyPassFrameData Prepare(const TextureMipHandoffBindings& bindings, const org::PassPrepareContext& preparation);
@@ -46,7 +48,12 @@ class TextureFactory::MipHandoffPass : public org::TypedRenderGraphPass<MipHando
     private:
         struct Job {
             std::shared_ptr<org::PixelBuffer> texture;
+            std::shared_ptr<const std::function<void(const org::PixelBuffer&)>> completed;
+            // The GPU completed the execution it was submitted with (FrameWorkQueue).
+            void Complete() const { if (completed && *completed && texture) (*completed)(*texture); }
         };
+        std::shared_ptr<const std::function<void(const org::PixelBuffer&)>> m_completedShared;
+        std::function<void(const org::PixelBuffer&)> m_completed;
         org::runtime::FrameWorkQueue<Job> m_jobs;
         org::runtime::FrameWorkQueue<Job>::Snapshot m_declaredJobs;
         std::atomic_bool m_declaredResourcesChanged = true;
@@ -56,8 +63,12 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
     public:
         // Each texture whose mips are submitted is handed to it (MipHandoffPass).
         void SetHandoff(std::shared_ptr<MipHandoffPass> handoff) { m_handoff = std::move(handoff); }
-        // Called by TextureFactory when you create a texture with only mip0 uploaded.
-        void EnqueueJob(const std::shared_ptr<org::PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage = false);
+        // The job graph's upload queue: each job's constants upload through it, at once (BufferBase::PinUploadService), so its
+        // upload pass lands them ahead of the dispatch.
+        void SetUploadService(std::shared_ptr<org::runtime::IUploadService> uploads) { m_uploads = std::move(uploads); }
+        // Called by TextureFactory when you create a texture with only mip0 uploaded. False: no job (the texture cannot be mipped
+        // on the GPU), so no handoff will follow.
+        bool EnqueueJob(const std::shared_ptr<org::PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage = false);
 
         TextureMipmappingBindings Declare(org::PassBuilder& builder);
 
@@ -119,6 +130,7 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
         };
 
         std::shared_ptr<MipHandoffPass> m_handoff;
+        std::shared_ptr<org::runtime::IUploadService> m_uploads;
         org::runtime::FrameWorkQueue<Job> m_jobs;
         org::runtime::FrameWorkQueue<Job>::Snapshot m_declaredJobs;
 

@@ -34,6 +34,17 @@
 TextureFactory::TextureFactory(std::shared_ptr<org::runtime::IUploadService> uploadService)
         : m_uploadService(std::move(uploadService)) {
 		auto handoff = std::make_shared<MipHandoffPass>();
+		handoff->SetCompleted([waiters = m_mipWaiters](const org::PixelBuffer& texture) {
+			std::vector<std::function<void()>> ready;
+			{
+				std::scoped_lock lock(waiters->mutex);
+				const auto found = waiters->pending.find(&texture);
+				if (found == waiters->pending.end()) return;
+				ready = std::move(found->second);
+				waiters->pending.erase(found);
+			}
+			for (auto& callback : ready) if (callback) callback();
+		});
 		auto mipmapping = std::make_shared<MipmappingPass>();
 		mipmapping->SetHandoff(handoff);
 		m_mipmappingPass = std::move(mipmapping);
@@ -745,10 +756,31 @@ std::shared_ptr<org::PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffe
     // Enqueue GPU mipgen (only if mipLevels > 1)
     if (doMipmapping && pb->GetMipLevels() > 1) {
         const bool isSrgb = rhi::helpers::IsSRGB(desc.format) || forceSrgbMipEncoding;
-        std::static_pointer_cast<MipmappingPass>(m_mipmappingPass)->EnqueueJob(pb, isSrgb, preserveAlphaCoverage);
+        // Pending before the job can complete: WhenMipsReady sees it from here on.
+        {
+            std::scoped_lock lock(m_mipWaiters->mutex);
+            m_mipWaiters->pending.try_emplace(pb.get());
+        }
+        if (!std::static_pointer_cast<MipmappingPass>(m_mipmappingPass)->EnqueueJob(pb, isSrgb, preserveAlphaCoverage)) {
+            std::scoped_lock lock(m_mipWaiters->mutex);
+            m_mipWaiters->pending.erase(pb.get());
+        }
     }
 
     return pb;
+}
+
+void TextureFactory::SetJobUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService) {
+    m_jobUploadService = std::move(uploadService);
+    std::static_pointer_cast<MipmappingPass>(m_mipmappingPass)->SetUploadService(m_jobUploadService);
+}
+
+bool TextureFactory::WhenMipsReady(const org::PixelBuffer& texture, std::function<void()> ready) const {
+    std::scoped_lock lock(m_mipWaiters->mutex);
+    const auto found = m_mipWaiters->pending.find(&texture);
+    if (found == m_mipWaiters->pending.end()) return false;
+    found->second.push_back(std::move(ready));
+    return true;
 }
 
 bool TextureFactory::HasPendingGpuJobs() const {
