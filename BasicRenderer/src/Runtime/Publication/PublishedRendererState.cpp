@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
@@ -10,6 +12,7 @@
 
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
 #include "Render/PublicationBindingBundle.h"
+#include "Resources/Resource.h"
 
 namespace br::render {
 
@@ -26,7 +29,13 @@ SelectionBindingInputs CaptureSelectionBindingInputs(const PublishedResourceSele
     std::unordered_set<uint64_t> captured;
     if (selection.resources) for (const auto& resource : *selection.resources) {
         if (!resource) continue;
-        auto binding = org::PublicationBindingBundle::Capture(*resource);
+        org::PublicationBindingBundle::Snapshot binding;
+        try {
+            binding = org::PublicationBindingBundle::Capture(*resource);
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string(error.what()) + " (resource '" + resource->GetName() + "' id="
+                + std::to_string(resource->GetGlobalResourceID()) + ")");
+        }
         if (binding && captured.insert(binding->resourceID).second)
             inputs.bindings.push_back(std::move(binding));
     }

@@ -146,6 +146,10 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
                     return ArtifactBuildResult::Failure("indirect argument dependency type/capacity mismatch");
                 }
                 dynamicArgs = argumentVersion->resource;
+                // The version's lease keeps the argument backing out of reuse while this fragment (and every frame
+                // selecting it) names the buffer. A newer argument version supersedes this one in the artifact graph, so
+                // nothing else holds it.
+                root->fragment.resourceHolds.push_back(argumentVersion);
             }
             state->workloads.push_back(PublishedIndirectWorkload{
                 viewID, workload.key, dynamicArgs, activeBuffer,
