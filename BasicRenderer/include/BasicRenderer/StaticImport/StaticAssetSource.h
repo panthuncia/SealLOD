@@ -49,6 +49,14 @@ namespace br::staticimport
 
 		virtual ~IStaticAssetSource() = default;
 
+		// The canonical form of an asset key: keys naming the same asset map to the
+		// same string. The pipeline keys asset dependencies by it and falls back to
+		// the key as given when the result is empty.
+		[[nodiscard]] virtual std::string CanonicalAssetKey(std::string_view assetKey) const
+		{
+			return std::string{ assetKey };
+		}
+
 		// Invoked (from any thread) when asynchronous loads have results ready to
 		// publish. An empty callback clears it.
 		virtual void SetReadyRenderableAssetsCallback(ReadyAssetsCallback callback) = 0;
