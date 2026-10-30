@@ -18,7 +18,6 @@
 #include <BasicRenderer/Extensions/Resources/PublishedStateResourceResolver.h>
 #include "Render/Runtime/IReadbackService.h"
 #include "Render/Runtime/IDescriptorService.h"
-#include "RenderPasses/Base/CopyPass.h"
 #include "Resources/Buffers/Buffer.h"
 
 #include <algorithm>

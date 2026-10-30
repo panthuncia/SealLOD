@@ -55,8 +55,6 @@
 #include "Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"
 #include "Diagnostics/RenderPasses/DebugSpheresPass.h"
 #include "Diagnostics/RenderPasses/DebugSkeletonPass.h"
-#include "RenderPasses/Base/ComputePass.h"
-#include "RenderPasses/Base/CopyPass.h"
 #include "PostProcessing/Downsampling/RenderPasses/Downsample.h"
 #include "PostProcessing/ToneMapping/RenderPasses/Tonemapping.h"
 #include "PostProcessing/Upscaling/RenderPasses/UpscalingPass.h"
