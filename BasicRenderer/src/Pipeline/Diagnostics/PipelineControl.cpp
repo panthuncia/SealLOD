@@ -3,7 +3,7 @@
 #include <utility>
 
 #include "Pipeline/PipelineState/PSOManager.h"
-#include "VirtualGeometry/Culling/RenderPasses/HierarchicalCullingPass.h"
+#include "VirtualGeometry/Culling/RenderPasses/WorkGraphCullingPass.h"
 
 std::uint64_t br::diagnostics::GetPipelineEpoch()
 {
@@ -41,5 +41,5 @@ std::uint64_t br::diagnostics::RequestActivation(
 
 std::size_t br::diagnostics::ReloadCLodWorkGraphs()
 {
-	return HierarchicalCullingPass::ReloadAllWorkGraphs();
+	return WorkGraphCullingPass::ReloadAllWorkGraphs();
 }

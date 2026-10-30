@@ -120,7 +120,6 @@ public:
 
     const org::PipelineState& GetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState& GetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState& GetClusterLODVirtualShadowReyesRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState& GetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState& GetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState& GetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
@@ -133,7 +132,6 @@ public:
         bool wireframe = false,
         bool singleView = false);
     const org::PipelineState* TryGetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState* TryGetClusterLODVirtualShadowReyesRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState* TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState* TryGetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState* TryGetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
@@ -284,7 +282,6 @@ private:
 
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODRasterPSOCache;
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODVirtualShadowRasterPSOCache;
-    std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODVirtualShadowReyesRasterPSOCache;
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODDeepVisibilityRasterPSOCache;
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODAVBOITOccupancyPSOCache;
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODAVBOITRasterPSOCache;
@@ -295,7 +292,6 @@ private:
 
     std::unordered_set<RasterPSOKey> m_pendingClusterLODRasterPSOs;
     std::unordered_set<RasterPSOKey> m_pendingClusterLODVirtualShadowRasterPSOs;
-    std::unordered_set<RasterPSOKey> m_pendingClusterLODVirtualShadowReyesRasterPSOs;
     std::unordered_set<RasterPSOKey> m_pendingClusterLODDeepVisibilityRasterPSOs;
     std::unordered_set<RasterPSOKey> m_pendingClusterLODAVBOITOccupancyPSOs;
     std::unordered_set<RasterPSOKey> m_pendingClusterLODAVBOITRasterPSOs;
@@ -339,7 +335,6 @@ private:
         bool wireframe = false,
         bool singleView = false);
     org::PipelineState CreateClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    org::PipelineState CreateClusterLODVirtualShadowReyesRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     org::PipelineState CreateClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     org::PipelineState CreateClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     org::PipelineState CreateClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);

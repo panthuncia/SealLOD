@@ -13,7 +13,6 @@ enum class ShaderVariantKind : std::uint8_t {
 	MaterialEvaluation,
 	ClusterLODRaster,
 	ClusterLODVirtualShadowRaster,
-	ClusterLODVirtualShadowReyesRaster,
 	ClusterLODDeepVisibilityRaster,
 	ClusterLODAVBOITOccupancy,
 	ClusterLODAVBOITRaster,

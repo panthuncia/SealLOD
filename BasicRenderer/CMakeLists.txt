@@ -481,8 +481,10 @@ set(SOURCES
     "src/Assets/Textures/Import/StbImage.cpp"
     "src/Utilities/Utilities.cpp"
     # src/VirtualGeometry/Culling
-    "src/VirtualGeometry/Culling/RenderPasses/HierarchicalCullingPass.cpp"
-    "src/VirtualGeometry/Culling/RenderPasses/HierarchicalDispatchCullingPass.cpp"
+    "src/VirtualGeometry/Culling/RenderPasses/ComputeCullingCommands.cpp"
+    "src/VirtualGeometry/Culling/RenderPasses/ComputeCullingPass.cpp"
+    "src/VirtualGeometry/Culling/RenderPasses/CullingPassCommon.cpp"
+    "src/VirtualGeometry/Culling/RenderPasses/WorkGraphCullingPass.cpp"
     # src/VirtualGeometry/GraphIntegration
     "src/VirtualGeometry/GraphIntegration/CLodViewTables.cpp"
     # src/VirtualGeometry/Rasterization
@@ -506,8 +508,6 @@ set(SOURCES
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesDicePass.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesPatchRasterizationPass.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesQueueResetPass.cpp"
-    "src/VirtualGeometry/Reyes/RenderPasses/ReyesRasterWorkCompactAndArgsPass.cpp"
-    "src/VirtualGeometry/Reyes/RenderPasses/ReyesRasterWorkHistogramPass.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesReplayMergePass.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesSeedPatchesPass.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesSplitPass.cpp"
@@ -532,7 +532,6 @@ set(SOURCES
     # src/VirtualGeometry/Voxels
     "src/VirtualGeometry/Voxels/RenderPasses/VoxelSoftwareRasterizationPass.cpp"
     # src/VirtualShadows
-    "src/VirtualShadows/Rasterization/RenderPasses/ReyesVirtualShadowHardwareRasterPass.cpp"
     "src/VirtualShadows/Rasterization/RenderPasses/ReyesVirtualShadowRasterizationPass.cpp"
     "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapAdmitPagesPass.cpp"
     "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapAllocatePagesPass.cpp"
@@ -549,7 +548,6 @@ set(SOURCES
     "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapGatherStatsPass.cpp"
     "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapInvalidatePagesPass.cpp"
     "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapMarkPagesPass.cpp"
-    "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapNonRasterableHierarchyPass.cpp"
     "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapResolveMarkedBlocksPass.cpp"
     "src/VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapSetupPass.cpp"
 )
@@ -581,9 +579,6 @@ target_link_libraries(${PROJECT_NAME} PUBLIC BasicRendererHeaders)
 target_sources(${PROJECT_NAME} PRIVATE
     "src/Runtime/Publication/PersistentRendererPublication.h"
     "src/Runtime/Publication/PersistentRendererPublication.cpp"
-    "src/VirtualGeometry/Culling/RenderPasses/CapturedHierarchicalDispatchCullingInputs.h"
-    "src/VirtualGeometry/Culling/RenderPasses/CapturedCullingCommandSink.h"
-    "src/VirtualGeometry/Culling/RenderPasses/PersistentHierarchicalDispatchCullingPass.h"
     "src/Materials/Evaluation/RenderPasses/PersistentMaterialEvaluationPass.h")
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
 foreach(_basicrenderer_api_category IN ITEMS

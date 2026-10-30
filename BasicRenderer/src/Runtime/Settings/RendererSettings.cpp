@@ -202,7 +202,6 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::Standard);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<CLodLodHeightMode>(CLodLodHeightModeSettingName, CLodLodHeightMode::RenderHeight);
-    settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
     settingsManager.registerSetting<bool>(
         CLodDisableNonVoxelVisibilitySettingName,
         ReadTruthyEnvironmentFlag("SARP_CLOD_DISABLE_NON_VOXEL_VISIBILITY"));
@@ -215,16 +214,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(CLodReyesUseAabbOcclusionSettingName, false);
     settingsManager.registerSetting<bool>(CLodWorkGraphReyesVisibilitySettingName, false);
     settingsManager.registerSetting<bool>(CLodWorkGraphRigidOnlySettingName, false);
-    settingsManager.registerSetting<float>(
-        CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,
-        CLodReyesShadowCoarseTargetPagesPerTriangleDefault);
-    settingsManager.registerSetting<uint32_t>(CLodPageJobDiameterThresholdSettingName, 64u);
     settingsManager.registerSetting<uint32_t>(CLodSoftwareRasterDiameterThresholdSettingName, 16u);
     settingsManager.registerSetting<uint32_t>(CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName, 32u);
-    settingsManager.registerSetting<float>(CLodPageJobSparseRatioSettingName, 0.5f);
-    settingsManager.registerSetting<uint32_t>(CLodPageJobMaxPagesPerClusterSettingName, 32u);
-    settingsManager.registerSetting<uint32_t>(CLodPageJobRecordCapacitySettingName, CLodPageJobDefaultRecordCapacity);
-    settingsManager.registerSetting<bool>(CLodPageJobForceAllSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodForceTraversalDepthRootSettingName, CLodForceTraversalDepthRootDisabled);
     settingsManager.registerSetting<uint32_t>(CLodVisibleClusterCapacitySettingName, CLodDefaultVisibleClusterCapacity);
     settingsManager.registerSetting<bool>(CLodFrustumCullingSettingName, true);
@@ -490,30 +481,6 @@ void Renderer::SetSettings() {
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodTransparencyMode>(CLodTransparencyModeSettingName, [this](const CLodTransparencyMode& newValue) {
-        (void)newValue;
-        rebuildRenderGraph = true;
-        }));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodEnablePageJobVSMSettingName, [this](const bool& newValue) {
-        (void)newValue;
-        rebuildRenderGraph = true;
-        }));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodPageJobDiameterThresholdSettingName, [this](const uint32_t& newValue) {
-        (void)newValue;
-        rebuildRenderGraph = true;
-        }));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<float>(CLodPageJobSparseRatioSettingName, [this](const float& newValue) {
-        (void)newValue;
-        rebuildRenderGraph = true;
-        }));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodPageJobMaxPagesPerClusterSettingName, [this](const uint32_t& newValue) {
-        (void)newValue;
-        rebuildRenderGraph = true;
-        }));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodPageJobRecordCapacitySettingName, [this](const uint32_t& newValue) {
-        (void)newValue;
-        rebuildRenderGraph = true;
-        }));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodPageJobForceAllSettingName, [this](const bool& newValue) {
         (void)newValue;
         rebuildRenderGraph = true;
         }));

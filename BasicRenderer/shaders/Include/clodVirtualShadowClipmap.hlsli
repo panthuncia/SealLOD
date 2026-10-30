@@ -217,18 +217,6 @@ struct CLodVirtualShadowStats
     uint blockExpandedRequestedRecordCount;
     uint blockExpandedCommittedRecordCount;
     uint blockExpandedDroppedRecordCount;
-    uint pageJobRequestedRecordCount;
-    uint pageJobCommittedRecordCount;
-    uint pageJobDroppedRecordCount;
-    uint pageJobDoubleSidedRecordCount;
-    uint pageJobRasterJobCount;
-    uint pageJobRasterTriangleCount;
-    uint pageJobRasterDepthRejectedTriangleCount;
-    uint pageJobRasterBackfaceRejectedTriangleCount;
-    uint pageJobRasterCoveredPixelCount;
-    uint pageJobRasterPageWriteCount;
-    uint pageJobRasterClusterBoundsOverlapCount;
-    uint pageJobRasterBboxRejectedTriangleCount;
     uint setupWrappedClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint setupStaleDirtyClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint markResidentCleanHits[kCLodVirtualShadowClipmapCount];

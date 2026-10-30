@@ -120,9 +120,8 @@ std::string GetVariantTechniquePath(const CLodVariantTraits& traits, std::string
         if (passName.find("Reyes") != std::string_view::npos) {
             return "Shadows::Virtual Shadow Mapping::Reyes";
         }
-        if (passName.find("PageJob") != std::string_view::npos ||
-            passName.find("VirtualShadowBlock") != std::string_view::npos) {
-            return "Shadows::Virtual Shadow Mapping::Page Job";
+        if (passName.find("VirtualShadowBlock") != std::string_view::npos) {
+            return "Shadows::Virtual Shadow Mapping::Block Expansion";
         }
         return "Shadows::Virtual Shadow Mapping";
     default:

@@ -86,7 +86,6 @@ static void BuildMemorySnapshotFromRecords(
         [](auto const& a, auto const& b) { return a.bytes > b.bytes; });
 }
 
-
 void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	auto numFramesInFlight = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numFramesInFlight")();
 
@@ -258,7 +257,6 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 
     ImGui_ImplWin32_EnableDpiAwareness();
 
-
     IMGUI_CHECKVERSION();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
@@ -404,41 +402,6 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setCLodDisableVirtualShadowPageCaching = settingsManager.getSettingSetter<bool>(CLodDisableVirtualShadowPageCachingSettingName);
     m_clodDisableVirtualShadowPageCaching = getCLodDisableVirtualShadowPageCaching();
     observerSetting(m_clodDisableVirtualShadowPageCaching, CLodDisableVirtualShadowPageCachingSettingName);
-
-    getCLodEnablePageJobVSM = settingsManager.getSettingGetter<bool>(CLodEnablePageJobVSMSettingName);
-    setCLodEnablePageJobVSM = settingsManager.getSettingSetter<bool>(CLodEnablePageJobVSMSettingName);
-    m_clodEnablePageJobVSM = getCLodEnablePageJobVSM();
-    observerSetting(m_clodEnablePageJobVSM, CLodEnablePageJobVSMSettingName);
-
-    getCLodReyesShadowCoarseTargetPagesPerTriangle = settingsManager.getSettingGetter<float>(CLodReyesShadowCoarseTargetPagesPerTriangleSettingName);
-    setCLodReyesShadowCoarseTargetPagesPerTriangle = settingsManager.getSettingSetter<float>(CLodReyesShadowCoarseTargetPagesPerTriangleSettingName);
-    m_clodReyesShadowCoarseTargetPagesPerTriangle = getCLodReyesShadowCoarseTargetPagesPerTriangle();
-    observerSetting(m_clodReyesShadowCoarseTargetPagesPerTriangle, CLodReyesShadowCoarseTargetPagesPerTriangleSettingName);
-
-    getCLodPageJobDiameterThreshold = settingsManager.getSettingGetter<uint32_t>(CLodPageJobDiameterThresholdSettingName);
-    setCLodPageJobDiameterThreshold = settingsManager.getSettingSetter<uint32_t>(CLodPageJobDiameterThresholdSettingName);
-    m_clodPageJobDiameterThreshold = getCLodPageJobDiameterThreshold();
-    observerSetting(m_clodPageJobDiameterThreshold, CLodPageJobDiameterThresholdSettingName);
-
-    getCLodPageJobSparseRatio = settingsManager.getSettingGetter<float>(CLodPageJobSparseRatioSettingName);
-    setCLodPageJobSparseRatio = settingsManager.getSettingSetter<float>(CLodPageJobSparseRatioSettingName);
-    m_clodPageJobSparseRatio = getCLodPageJobSparseRatio();
-    observerSetting(m_clodPageJobSparseRatio, CLodPageJobSparseRatioSettingName);
-
-    getCLodPageJobMaxPagesPerCluster = settingsManager.getSettingGetter<uint32_t>(CLodPageJobMaxPagesPerClusterSettingName);
-    setCLodPageJobMaxPagesPerCluster = settingsManager.getSettingSetter<uint32_t>(CLodPageJobMaxPagesPerClusterSettingName);
-    m_clodPageJobMaxPagesPerCluster = getCLodPageJobMaxPagesPerCluster();
-    observerSetting(m_clodPageJobMaxPagesPerCluster, CLodPageJobMaxPagesPerClusterSettingName);
-
-    getCLodPageJobRecordCapacity = settingsManager.getSettingGetter<uint32_t>(CLodPageJobRecordCapacitySettingName);
-    setCLodPageJobRecordCapacity = settingsManager.getSettingSetter<uint32_t>(CLodPageJobRecordCapacitySettingName);
-    m_clodPageJobRecordCapacity = getCLodPageJobRecordCapacity();
-    observerSetting(m_clodPageJobRecordCapacity, CLodPageJobRecordCapacitySettingName);
-
-    getCLodPageJobForceAll = settingsManager.getSettingGetter<bool>(CLodPageJobForceAllSettingName);
-    setCLodPageJobForceAll = settingsManager.getSettingSetter<bool>(CLodPageJobForceAllSettingName);
-    m_clodPageJobForceAll = getCLodPageJobForceAll();
-    observerSetting(m_clodPageJobForceAll, CLodPageJobForceAllSettingName);
 
     getCLodForceTraversalDepthRoot = settingsManager.getSettingGetter<uint32_t>(CLodForceTraversalDepthRootSettingName);
     setCLodForceTraversalDepthRoot = settingsManager.getSettingSetter<uint32_t>(CLodForceTraversalDepthRootSettingName);
@@ -1214,41 +1177,6 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
                 setCLodForceTraversalDepthRoot(m_clodForceTraversalDepthRoot);
             }
         }
-        if (ImGui::SliderFloat(
-                "Shadow Reyes Coarse Target Pages/Triangle",
-                &m_clodReyesShadowCoarseTargetPagesPerTriangle,
-                CLodReyesShadowCoarseTargetPagesPerTriangleMin,
-                CLodReyesShadowCoarseTargetPagesPerTriangleMax,
-                "%.2f")) {
-            m_clodReyesShadowCoarseTargetPagesPerTriangle = std::clamp(
-                m_clodReyesShadowCoarseTargetPagesPerTriangle,
-                CLodReyesShadowCoarseTargetPagesPerTriangleMin,
-                CLodReyesShadowCoarseTargetPagesPerTriangleMax);
-            setCLodReyesShadowCoarseTargetPagesPerTriangle(m_clodReyesShadowCoarseTargetPagesPerTriangle);
-        }
-        if (m_clodVSMRasterMode == CLodVSMRasterMode::PageJob) {
-            int diameterThreshold = static_cast<int>(m_clodPageJobDiameterThreshold);
-            if (ImGui::SliderInt("Page-Job Diameter Threshold", &diameterThreshold, 1, 255)) {
-                m_clodPageJobDiameterThreshold = static_cast<uint32_t>(std::clamp(diameterThreshold, 1, 255));
-                setCLodPageJobDiameterThreshold(m_clodPageJobDiameterThreshold);
-            }
-            if (ImGui::SliderFloat("Page-Job Sparse Ratio", &m_clodPageJobSparseRatio, 0.0f, 1.0f, "%.2f")) {
-                setCLodPageJobSparseRatio(m_clodPageJobSparseRatio);
-            }
-            int maxPages = static_cast<int>(m_clodPageJobMaxPagesPerCluster);
-            if (ImGui::SliderInt("Page-Job Max Pages/Cluster", &maxPages, 1, 255)) {
-                m_clodPageJobMaxPagesPerCluster = static_cast<uint32_t>(std::clamp(maxPages, 1, 255));
-                setCLodPageJobMaxPagesPerCluster(m_clodPageJobMaxPagesPerCluster);
-            }
-            int pageJobRecordCapacity = static_cast<int>(m_clodPageJobRecordCapacity);
-            if (ImGui::SliderInt("Page-Job Record Capacity", &pageJobRecordCapacity, 1, 8 * 1024 * 1024)) {
-                m_clodPageJobRecordCapacity = static_cast<uint32_t>(std::clamp(pageJobRecordCapacity, 1, 8 * 1024 * 1024));
-                setCLodPageJobRecordCapacity(m_clodPageJobRecordCapacity);
-            }
-            if (ImGui::Checkbox("Force All Opaque VSM -> Page-Job", &m_clodPageJobForceAll)) {
-                setCLodPageJobForceAll(m_clodPageJobForceAll);
-            }
-        }
         }
 
         if (ImGui::CollapsingHeader("Virtual Shadows")) {
@@ -1782,7 +1710,6 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             m_renderGraph->BuildMemoryIntrospectionFrameGraphSnapshot(fgSnap, memoryRecords);
         }
 
-
         ImGui::Begin("Memory Introspection", nullptr);
         auto now = std::chrono::steady_clock::now();
         std::chrono::duration<double> elapsedSeconds = now - m_startTime;
@@ -2053,7 +1980,6 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
 
 }
 
-
 void Menu::Cleanup() {
         if (m_imguiBackend == rhi::Backend::Vulkan) {
 #if BASICRENDERER_HAS_IMGUI_VULKAN
@@ -2105,7 +2031,6 @@ void Menu::Cleanup() {
         m_shadowVirtualShadowStatsQuery = {};
 		m_shadowVirtualShadowRuntimeStateQuery = {};
     }
-
 
 uint32_t Menu::AllocateImGuiDescriptor() {
         std::lock_guard lock(imguiHeapMutex_);

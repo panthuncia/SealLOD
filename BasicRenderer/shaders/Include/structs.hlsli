@@ -1208,17 +1208,10 @@ struct CLodReyesDiceQueueEntry
 
 static const uint CLOD_REYES_FLAG_SKINNED = 1u << 0;
 static const uint CLOD_REYES_FLAG_DISPLACEMENT_ENABLED = 1u << 1;
-static const uint CLOD_REYES_FLAG_COARSE_DIRTY_ONLY_LEAF = 1u << 2;
 static const uint CLOD_REYES_FLAG_ROUTE_SHIFT = 8u;
 static const uint CLOD_REYES_FLAG_ROUTE_MASK = 0x3u << CLOD_REYES_FLAG_ROUTE_SHIFT;
 static const uint CLOD_REYES_ROUTE_VISIBILITY = 0u;
 static const uint CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM = 1u;
-static const uint CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM = 2u;
-
-bool CLodReyesIsCoarseDirtyOnlyLeaf(uint flags)
-{
-    return (flags & CLOD_REYES_FLAG_COARSE_DIRTY_ONLY_LEAF) != 0u;
-}
 
 uint CLodReyesDecodeRouteKind(uint flags)
 {
@@ -1240,14 +1233,6 @@ struct CLodReyesRasterWorkEntry
     uint rasterBucketIndex;
 };
 
-struct CLodReyesPackedRasterWorkGroupEntry
-{
-    uint firstCompactedRasterWorkIndex;
-    uint rasterWorkEntryCount;
-    uint requestedMicroTriangleCount;
-    uint reserved;
-};
-
 struct CLodReyesTelemetry
 {
     uint visibleClusterInputCount;
@@ -1264,10 +1249,6 @@ struct CLodReyesTelemetry
     uint dicedVertexEstimateCount;
     uint patchRasterizedMicroTriangleCount;
     uint rasterWorkEntryCount;
-    uint hardwareRasterMeshGroupCount;
-    uint hardwareRasterMicroTriangleCount;
-    uint hardwareRasterRequestedMicroTriangleCount;
-    uint hardwareRasterPackedWorkEntryCount;
     uint splitInputCounts[4];
     uint splitChildOutputCounts[4];
     uint splitDiceOutputCounts[4];
@@ -1284,9 +1265,6 @@ struct CLodReyesTelemetry
     uint splitFrustumCullCount;
     uint splitShadowDirtyCullCount;
     uint splitChildCullCount;
-    uint splitCoarseOnlyDirtyEligibleCount;
-    uint splitCoarseOnlyDirtyRejectedCount;
-    uint splitCoarseOnlyDirtyLeafOutputCount;
     uint splitConfigSelectionCounts[4];
     uint canonicalRotationCounts[3];
     uint siblingSharedEdgeCheckCount;

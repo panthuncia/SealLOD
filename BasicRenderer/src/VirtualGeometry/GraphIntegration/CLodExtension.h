@@ -111,10 +111,6 @@ private:
     std::shared_ptr<org::Buffer> m_histogramIndirectCommandPhase2;
     std::shared_ptr<org::Buffer> m_histogramIndirectCommandSw;
     std::shared_ptr<org::Buffer> m_histogramIndirectCommandPhase2Sw;
-    std::shared_ptr<org::Buffer> m_histogramIndirectCommandPageJob;
-    std::shared_ptr<org::Buffer> m_histogramIndirectCommandPhase2PageJob;
-    std::shared_ptr<org::Buffer> m_histogramIndirectCommandReyes;
-    std::shared_ptr<org::Buffer> m_histogramIndirectCommandPhase2Reyes;
     std::shared_ptr<org::Buffer> m_rasterBucketsHistogramBuffer;
 
     std::shared_ptr<org::Buffer> m_rasterBucketsOffsetsBuffer;
@@ -144,8 +140,6 @@ private:
     std::shared_ptr<org::Buffer> m_rasterBucketsIndirectArgsBufferPhase2;
     std::shared_ptr<org::Buffer> m_rasterBucketsIndirectArgsBufferSw;
     std::shared_ptr<org::Buffer> m_rasterBucketsIndirectArgsBufferPhase2Sw;
-    std::shared_ptr<org::Buffer> m_rasterBucketsIndirectArgsBufferPageJob;
-    std::shared_ptr<org::Buffer> m_rasterBucketsIndirectArgsBufferPhase2PageJob;
 
     std::shared_ptr<org::Buffer> m_reyesFullClusterOutputsBuffer;
     std::shared_ptr<org::Buffer> m_reyesFullClusterOutputsCounterBuffer;
@@ -176,8 +170,6 @@ private:
     std::shared_ptr<org::Buffer> m_reyesRasterWorkBuffer;
     std::shared_ptr<org::Buffer> m_reyesRasterWorkCounterBuffer;
     std::shared_ptr<org::Buffer> m_reyesRasterWorkIndirectArgsBuffer;
-    std::shared_ptr<org::Buffer> m_reyesCompactedRasterWorkIndicesBuffer;
-    std::shared_ptr<org::Buffer> m_reyesPackedRasterWorkGroupsBuffer;
     std::shared_ptr<org::Buffer> m_reyesTessTableConfigsBuffer;
     std::shared_ptr<org::Buffer> m_reyesTessTableVerticesBuffer;
     std::shared_ptr<org::Buffer> m_reyesTessTableTrianglesBuffer;
@@ -186,8 +178,6 @@ private:
     std::shared_ptr<org::Buffer> m_reyesRasterWorkBufferPhase2;
     std::shared_ptr<org::Buffer> m_reyesRasterWorkCounterBufferPhase2;
     std::shared_ptr<org::Buffer> m_reyesRasterWorkIndirectArgsBufferPhase2;
-    std::shared_ptr<org::Buffer> m_reyesCompactedRasterWorkIndicesBufferPhase2;
-    std::shared_ptr<org::Buffer> m_reyesPackedRasterWorkGroupsBufferPhase2;
     std::shared_ptr<org::Buffer> m_reyesTelemetryBufferPhase1;
     std::shared_ptr<org::Buffer> m_reyesTelemetryBufferPhase2;
 
@@ -202,7 +192,6 @@ private:
     uint32_t m_voxelRasterWorkCapacity = 0u;
     std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBuffer;
     std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBufferSw;
-    std::shared_ptr<org::Buffer> m_viewRasterInfoBuffer;
     std::shared_ptr<org::Buffer> m_deepVisibilityNodesBuffer;
     std::shared_ptr<org::Buffer> m_deepVisibilityCounterBuffer;
     std::shared_ptr<org::Buffer> m_deepVisibilityOverflowCounterBuffer;
@@ -257,7 +246,6 @@ private:
     std::shared_ptr<org::Buffer> m_shadowPageListHeaderBuffer;
     std::shared_ptr<org::Buffer> m_shadowDirtyPageFlagsBuffer;
     std::shared_ptr<org::PixelBuffer> m_shadowDirtyPageHierarchyTexture;
-    std::shared_ptr<org::PixelBuffer> m_shadowNonRasterablePageHierarchyTexture;
     std::shared_ptr<org::Buffer> m_shadowClipmapInfoBuffer;
     std::shared_ptr<org::Buffer> m_shadowMarkClipmapDataBuffer;
     std::shared_ptr<org::Buffer> m_shadowCompactMainCameraBuffer;
@@ -265,26 +253,6 @@ private:
     std::shared_ptr<org::Buffer> m_shadowDirectionalPageViewInfoBuffer;
     std::shared_ptr<org::Buffer> m_shadowRuntimeStateBuffer;
     std::shared_ptr<org::Buffer> m_shadowStatsBuffer;
-    std::shared_ptr<org::Buffer> m_swPageJobVisibleClustersBuffer;
-    std::shared_ptr<org::Buffer> m_swPageJobVisibleClusterTransformIndicesBuffer;
-    std::shared_ptr<org::Buffer> m_swPageJobVisibleClustersCounterBuffer;
-    std::shared_ptr<org::Buffer> m_swPageJobVisibleClustersBufferPhase2;
-    std::shared_ptr<org::Buffer> m_swPageJobVisibleClusterTransformIndicesBufferPhase2;
-    std::shared_ptr<org::Buffer> m_swPageJobVisibleClustersCounterBufferPhase2;
-    std::shared_ptr<org::Buffer> m_swPageJobRecordsBuffer;
-    std::shared_ptr<org::Buffer> m_swPageJobRecordsBufferSkinned;
-    std::shared_ptr<org::Buffer> m_swPageJobCountBuffer;
-    std::shared_ptr<org::Buffer> m_swPageJobCountBufferSkinned;
-    std::shared_ptr<org::Buffer> m_swPageJobRecordsBufferPhase2;
-    std::shared_ptr<org::Buffer> m_swPageJobRecordsBufferPhase2Skinned;
-    std::shared_ptr<org::Buffer> m_swPageJobCountBufferPhase2;
-    std::shared_ptr<org::Buffer> m_swPageJobCountBufferPhase2Skinned;
-    std::shared_ptr<org::Buffer> m_swPageJobIndirectArgsBuffer;
-    std::shared_ptr<org::Buffer> m_swPageJobIndirectArgsBufferSkinned;
-    std::shared_ptr<org::Buffer> m_swPageJobIndirectArgsBufferPhase2;
-    std::shared_ptr<org::Buffer> m_swPageJobIndirectArgsBufferPhase2Skinned;
-    std::shared_ptr<org::Buffer> m_swPageJobClusterTagsBuffer;
-    std::shared_ptr<org::Buffer> m_swPageJobClusterTagsBufferPhase2;
     std::shared_ptr<org::Buffer> m_vsmExpandedVisibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_vsmExpandedVisibleClustersBufferSw;
     std::shared_ptr<org::Buffer> m_vsmExpandedVisibleClusterTransformIndicesBufferSw;
@@ -296,8 +264,6 @@ private:
     uint32_t m_transparencyConfiguredRenderHeight = 0u;
     uint32_t m_shadowConfiguredBackingResolution = 0u;
     uint32_t m_shadowConfiguredMaxPhysicalPageCount = 0u;
-    uint32_t m_shadowConfiguredPageJobMaxPages = 0u;
-    uint32_t m_shadowConfiguredPageJobRecordCapacity = 0u;
     uint32_t m_shadowConfiguredComputeClusterCapacity = 0u;
     uint32_t m_shadowConfiguredExpandedRecordCapacity = 0u;
 };

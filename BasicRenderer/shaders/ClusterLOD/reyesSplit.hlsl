@@ -12,15 +12,6 @@
 static const uint REYES_SPLIT_GROUP_SIZE = 64u;
 static const uint REYES_SPLIT_TELEMETRY_PASS_COUNT = 5u;
 static const float REYES_SHADOW_FINE_TARGET_TEXELS_PER_MICRO_TRIANGLE = 1.0f;
-static const float REYES_SHADOW_COARSE_TARGET_PAGES_PER_TRIANGLE_DEFAULT = 10.0f;
-
-float ReyesGetShadowCoarseTargetTexelsPerTriangle()
-{
-    const float targetPagesPerTriangle = max(
-        CLOD_REYES_SPLIT_SHADOW_COARSE_TARGET_PAGES_PER_TRIANGLE,
-        REYES_SHADOW_COARSE_TARGET_PAGES_PER_TRIANGLE_DEFAULT);
-    return targetPagesPerTriangle * float(kCLodVirtualShadowPhysicalPageSize);
-}
 
 bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, Camera camera)
 {
@@ -444,57 +435,6 @@ bool ReyesPatchTouchesShadowDirtyPages(
         kCLodVirtualShadowHierarchyStaticMask);
 }
 
-bool ReyesPatchTouchesOnlyShadowDirtyPages(
-    float3 centerWorld,
-    float radiusWorld,
-    uint clipmapIndex,
-    uint viewID)
-{
-    if (CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX == 0xFFFFFFFFu ||
-        CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
-    {
-        return false;
-    }
-
-    uint arrayLayer = 0u;
-    uint2 baseResolution = 0u.xx;
-    float2 uvMin = 0.0f.xx;
-    float2 uvMax = 0.0f.xx;
-    if (!ReyesPatchBuildShadowHierarchyQuery(
-        centerWorld,
-        radiusWorld,
-        clipmapIndex,
-        viewID,
-        arrayLayer,
-        baseResolution,
-        uvMin,
-        uvMax))
-    {
-        return false;
-    }
-
-    Texture2DArray<uint> dirtyHierarchy = ResourceDescriptorHeap[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX];
-    if (!CLodVirtualShadowDirtyHierarchyAnyHit(
-            dirtyHierarchy,
-            arrayLayer,
-            baseResolution,
-            uvMin,
-            uvMax,
-            kCLodVirtualShadowHierarchyStaticMask))
-    {
-        return false;
-    }
-
-    Texture2DArray<uint> nonRasterableHierarchy = ResourceDescriptorHeap[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX];
-    return !CLodVirtualShadowDirtyHierarchyAnyHit(
-        nonRasterableHierarchy,
-        arrayLayer,
-        baseResolution,
-        uvMin,
-        uvMax,
-        1u);
-}
-
 bool ReyesPatchShouldCull(
     float3 worldPosition0,
     float3 worldPosition1,
@@ -530,7 +470,7 @@ bool ReyesPatchShouldCull(
     }
 
     if (!skinned &&
-        (routeKind == CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM || routeKind == CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM) &&
+        routeKind == CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM &&
         !ReyesPatchTouchesShadowDirtyPages(centerWorld, radiusWorld, clipmapIndex, viewID))
     {
         InterlockedAdd(telemetryBuffer[0].splitShadowDirtyCullCount, 1u);
@@ -676,39 +616,6 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const uint routeKind = CLodReyesDecodeRouteKind(splitEntry.flags);
     const bool skinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
-    bool emitCoarseDirtyOnlyLeaf = false;
-
-    if (routeKind == CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM)
-    {
-        float3 coarseCenterWorld = 0.0f.xxx;
-        float coarseRadiusWorld = 0.0f;
-        ReyesPatchBuildConservativeSphere(
-            currentPosition0WS,
-            currentPosition1WS,
-            currentPosition2WS,
-            displacementMagnitudeWS,
-            coarseCenterWorld,
-            coarseRadiusWorld);
-
-        if (skinned)
-        {
-            emitCoarseDirtyOnlyLeaf = true;
-        }
-        else if (ReyesPatchTouchesOnlyShadowDirtyPages(
-                coarseCenterWorld,
-                coarseRadiusWorld,
-                clipmapIndex,
-                splitEntry.viewID))
-        {
-            InterlockedAdd(telemetryBuffer[0].splitCoarseOnlyDirtyEligibleCount, 1u);
-            emitCoarseDirtyOnlyLeaf = true;
-        }
-        else if (CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX != 0xFFFFFFFFu &&
-                 CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
-        {
-            InterlockedAdd(telemetryBuffer[0].splitCoarseOnlyDirtyRejectedCount, 1u);
-        }
-    }
 
     if (ReyesPatchShouldCull(
             currentPosition0WS,
@@ -744,41 +651,8 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const uint nextSplitLevel = splitEntry.splitLevel + 1u;
     InterlockedMax(telemetryBuffer[0].deepestSplitLevelReached, nextSplitLevel);
 
-    if (emitCoarseDirtyOnlyLeaf)
-    {
-        uint diceIndex = 0u;
-        InterlockedAdd(diceQueueCounter[0], 1u, diceIndex);
-        if (diceIndex >= queueCapacity)
-        {
-            InterlockedAdd(diceQueueOverflowCounter[0], 1u);
-            InterlockedAdd(telemetryBuffer[0].diceQueueOverflowCounts[splitPassTelemetryIndex], 1u);
-            return;
-        }
-
-        CLodReyesDiceQueueEntry diceEntry;
-        diceEntry.visibleClusterIndex = splitEntry.visibleClusterIndex;
-        diceEntry.instanceID = splitEntry.instanceID;
-        diceEntry.localMeshletIndex = splitEntry.localMeshletIndex;
-        diceEntry.materialIndex = splitEntry.materialIndex;
-        diceEntry.viewID = splitEntry.viewID;
-        diceEntry.splitLevel = nextSplitLevel;
-        diceEntry.quantizedTessFactor = splitEntry.quantizedTessFactor;
-        diceEntry.flags = splitEntry.flags | CLOD_REYES_FLAG_COARSE_DIRTY_ONLY_LEAF;
-        diceEntry.sourcePrimitiveAndSplitConfig = (sourceTriangleIndex & 0xFFFFu);
-        diceEntry.domainVertex0UV = splitEntry.domainVertex0UV;
-        diceEntry.domainVertex1UV = splitEntry.domainVertex1UV;
-        diceEntry.domainVertex2UV = splitEntry.domainVertex2UV;
-        diceEntry.tessTableConfigIndex = 0u;
-        diceEntry.reserved = 0u;
-        diceQueue[diceIndex] = diceEntry;
-        InterlockedAdd(telemetryBuffer[0].splitCoarseOnlyDirtyLeafOutputCount, 1u);
-        InterlockedAdd(telemetryBuffer[0].splitDiceOutputCounts[splitPassTelemetryIndex], 1u);
-        InterlockedAdd(telemetryBuffer[0].finalDiceQueueEntryCount, 1u);
-        return;
-    }
-
     float3 edgeFactors = ReyesComputeVisibilityEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, camera);
-    if (routeKind == CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM || routeKind == CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM)
+    if (routeKind == CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM)
     {
         if (CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX != 0xFFFFFFFFu &&
             clipmapIndex < kCLodVirtualShadowClipmapCount)
@@ -788,16 +662,12 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             const CLodVirtualShadowClipmapInfo clipmapInfo = shadowClipmapInfos[clipmapIndex];
             if (CLodVirtualShadowClipmapIsValid(clipmapInfo))
             {
-                const float targetTexelsPerTriangle =
-                    routeKind == CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM
-                        ? REYES_SHADOW_FINE_TARGET_TEXELS_PER_MICRO_TRIANGLE
-                        : ReyesGetShadowCoarseTargetTexelsPerTriangle();
                 edgeFactors = ComputeReyesShadowEdgeTessFactors(
                     currentPosition0WS,
                     currentPosition1WS,
                     currentPosition2WS,
                     clipmapInfo,
-                    targetTexelsPerTriangle);
+                    REYES_SHADOW_FINE_TARGET_TEXELS_PER_MICRO_TRIANGLE);
             }
         }
     }

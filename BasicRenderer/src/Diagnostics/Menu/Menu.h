@@ -1,6 +1,5 @@
 #pragma once
 
-
 #include <directx/d3d12.h>
 #include <rhi.h>
 #include <rhi_interop_dx12.h>
@@ -354,7 +353,7 @@ private:
     std::function<CLodSoftwareRasterMode()> getCLodSoftwareRasterMode;
     std::function<void(CLodSoftwareRasterMode)> setCLodSoftwareRasterMode;
 
-    CLodVSMRasterMode m_clodVSMRasterMode = CLodVSMRasterMode::PageJob;
+    CLodVSMRasterMode m_clodVSMRasterMode = CLodVSMRasterMode::Standard;
     std::function<CLodVSMRasterMode()> getCLodVSMRasterMode;
     std::function<void(CLodVSMRasterMode)> setCLodVSMRasterMode;
 
@@ -393,34 +392,6 @@ private:
     bool m_clodDisableVirtualShadowPageCaching = false;
     std::function<bool()> getCLodDisableVirtualShadowPageCaching;
     std::function<void(bool)> setCLodDisableVirtualShadowPageCaching;
-
-    bool m_clodEnablePageJobVSM = false;
-    std::function<bool()> getCLodEnablePageJobVSM;
-    std::function<void(bool)> setCLodEnablePageJobVSM;
-
-    float m_clodReyesShadowCoarseTargetPagesPerTriangle = CLodReyesShadowCoarseTargetPagesPerTriangleDefault;
-    std::function<float()> getCLodReyesShadowCoarseTargetPagesPerTriangle;
-    std::function<void(float)> setCLodReyesShadowCoarseTargetPagesPerTriangle;
-
-    uint32_t m_clodPageJobDiameterThreshold = 64u;
-    std::function<uint32_t()> getCLodPageJobDiameterThreshold;
-    std::function<void(uint32_t)> setCLodPageJobDiameterThreshold;
-
-    float m_clodPageJobSparseRatio = 0.5f;
-    std::function<float()> getCLodPageJobSparseRatio;
-    std::function<void(float)> setCLodPageJobSparseRatio;
-
-    uint32_t m_clodPageJobMaxPagesPerCluster = 32u;
-    std::function<uint32_t()> getCLodPageJobMaxPagesPerCluster;
-    std::function<void(uint32_t)> setCLodPageJobMaxPagesPerCluster;
-
-    uint32_t m_clodPageJobRecordCapacity = CLodPageJobDefaultRecordCapacity;
-    std::function<uint32_t()> getCLodPageJobRecordCapacity;
-    std::function<void(uint32_t)> setCLodPageJobRecordCapacity;
-
-    bool m_clodPageJobForceAll = false;
-    std::function<bool()> getCLodPageJobForceAll;
-    std::function<void(bool)> setCLodPageJobForceAll;
 
     uint32_t m_clodForceTraversalDepthRoot = CLodForceTraversalDepthRootDisabled;
     std::function<uint32_t()> getCLodForceTraversalDepthRoot;

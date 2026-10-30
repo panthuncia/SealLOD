@@ -601,11 +601,11 @@ void SWRasterCluster(
             ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
         if (useCachedPositions)
         {
-            InterlockedAdd(cacheTelemetry[273u], vertCount);
+            InterlockedAdd(cacheTelemetry[244u], vertCount);
         }
         else if ((gs_vertexFlags & VERTEX_SKINNED) != 0u)
         {
-            InterlockedAdd(cacheTelemetry[274u], vertCount);
+            InterlockedAdd(cacheTelemetry[245u], vertCount);
         }
     }
 #endif

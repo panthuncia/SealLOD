@@ -16,9 +16,6 @@ static const uint REYES_TESS_TABLE_MAX_SEGMENTS = 11u;
 static const uint REYES_TESS_TABLE_FLIP_BIT = 1u << 15u;
 static const uint CLodReyesMaxVisibilityMicroTrianglesPerPatch = 128u;
 static const uint CLodReyesRasterBatchMicroTriangleCount = 16u;
-static const uint CLodReyesHardwareRasterPackedEntryCount = 5u;
-static const uint CLodReyesHardwareRasterMaxPackedMicroTriangles =
-    CLodReyesHardwareRasterPackedEntryCount * CLodReyesRasterBatchMicroTriangleCount;
 static const uint OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT = 2u;
 
 float ReyesViewportHeightPixels(CullingCameraInfo camera)
@@ -445,11 +442,6 @@ uint3 ReyesGetTessTableConfigTriangleVertexIndices(
 
 uint ReyesGetDicePatchSegments(CLodReyesDiceQueueEntry diceEntry)
 {
-    if (CLodReyesIsCoarseDirtyOnlyLeaf(diceEntry.flags))
-    {
-        return 1u;
-    }
-
     const uint3 tessFactors = ReyesDecodeTessTableFactors(diceEntry.tessTableConfigIndex);
     const uint tessSegments = max(tessFactors.x, max(tessFactors.y, tessFactors.z));
     return max(1u, tessSegments);
@@ -457,21 +449,11 @@ uint ReyesGetDicePatchSegments(CLodReyesDiceQueueEntry diceEntry)
 
 uint ReyesGetDicePatchMicroTriangleCount(StructuredBuffer<CLodReyesTessTableConfigEntry> configBuffer, CLodReyesDiceQueueEntry diceEntry)
 {
-    if (CLodReyesIsCoarseDirtyOnlyLeaf(diceEntry.flags))
-    {
-        return 1u;
-    }
-
     return ReyesGetTessTableConfigEntry(configBuffer, diceEntry.tessTableConfigIndex).numTriangles;
 }
 
 uint ReyesGetDicePatchVertexCount(StructuredBuffer<CLodReyesTessTableConfigEntry> configBuffer, CLodReyesDiceQueueEntry diceEntry)
 {
-    if (CLodReyesIsCoarseDirtyOnlyLeaf(diceEntry.flags))
-    {
-        return 3u;
-    }
-
     return ReyesGetTessTableConfigEntry(configBuffer, diceEntry.tessTableConfigIndex).numVertices;
 }
 
@@ -1551,14 +1533,6 @@ void ReyesDecodeMicroTrianglePatchDomain(
     out float3 bary1,
     out float3 bary2)
 {
-    if (CLodReyesIsCoarseDirtyOnlyLeaf(diceEntry.flags))
-    {
-        bary0 = float3(1.0f, 0.0f, 0.0f);
-        bary1 = float3(0.0f, 1.0f, 0.0f);
-        bary2 = float3(0.0f, 0.0f, 1.0f);
-        return;
-    }
-
     const uint3 triangleIndices = ReyesGetTessTableConfigTriangleVertexIndices(configBuffer, triangleBuffer, diceEntry.tessTableConfigIndex, triIndex);
     bary0 = ReyesGetTessTableConfigVertexBarycentrics(configBuffer, vertexBuffer, diceEntry.tessTableConfigIndex, triangleIndices.x);
     bary1 = ReyesGetTessTableConfigVertexBarycentrics(configBuffer, vertexBuffer, diceEntry.tessTableConfigIndex, triangleIndices.y);

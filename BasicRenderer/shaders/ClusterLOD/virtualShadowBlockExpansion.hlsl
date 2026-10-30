@@ -5,7 +5,7 @@
 #include "include/skinningCommon.hlsli"
 #include "include/clodStructs.hlsli"
 #include "include/clodPageAccess.hlsli"
-#include "include/clodPageJobRasterShared.hlsli"
+#include "include/clodPageVertexDecode.hlsli"
 #include "include/visibleClusterPacking.hlsli"
 #include "PerPassRootConstants/clodVirtualShadowBlockExpandRootConstants.h"
 #include "PerPassRootConstants/clodVirtualShadowBuildArgsRootConstants.h"
@@ -36,6 +36,17 @@ groupshared uint gs_outputBaseIndex;
 groupshared uint gs_committedCount;
 groupshared uint gs_emitPackedVirtualBlockOrigins[kVsmBlockTrackedCapacity];
 groupshared uint gs_emitPackedActiveRects[kVsmBlockTrackedCapacity];
+
+void VsmComputeScreenBounds(float2 screenPositions[SW_RASTER_MAX_VERTS], uint vertCount, out float2 ssMin, out float2 ssMax)
+{
+    ssMin = float2(1e30f, 1e30f);
+    ssMax = float2(-1e30f, -1e30f);
+    for (uint i = 0; i < vertCount; ++i)
+    {
+        ssMin = min(ssMin, screenPositions[i]);
+        ssMax = max(ssMax, screenPositions[i]);
+    }
+}
 
 void VsmStoreTrackedBlockMeta(uint slot, CLodVirtualShadowBlockMeta blockMeta)
 {
@@ -171,7 +182,7 @@ void VsmLoadClusterScreenCoverage(
 
     for (uint v = GI; v < vertCount; v += SW_RASTER_THREADS)
     {
-        float3 localPos = PJ_DecodeCompressedPosition(
+        float3 localPos = CLodPageDecodeCompressedPosition(
             v,
             positionBitstreamBase,
             desc.positionBitOffset,
@@ -180,8 +191,8 @@ void VsmLoadClusterScreenCoverage(
             int3(desc.minQx, desc.minQy, desc.minQz),
             pageSlabDescriptorIndex);
 #if defined(PSO_SKINNED)
-        SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
-        skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
+        SkinningInfluences skinning = CLodPageDecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
+        skinning = CLodPageDecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
         skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
         localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
             meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
@@ -245,7 +256,7 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
             pageSlabByteOffset,
             hdr.descriptorOffset,
             CLodVisibleClusterLocalMeshletIndex(packedCluster));
-        PJ_ComputeScreenBounds(gs_screenPos, CLodDescVertexCount(desc), ssMin, ssMax);
+        VsmComputeScreenBounds(gs_screenPos, CLodDescVertexCount(desc), ssMin, ssMax);
 #else
         ssMin = gs_coverageMin;
         ssMax = gs_coverageMax;

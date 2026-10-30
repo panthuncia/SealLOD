@@ -6,21 +6,21 @@
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
 #include "include/clodStructs.hlsli"
 #include "include/clodPageAccess.hlsli"
-#include "include/clodPageJobRasterShared.hlsli"
+#include "include/clodPageVertexDecode.hlsli"
 #include "include/visibleClusterPacking.hlsli"
 
 #define SW_CLUSTER_RASTER_THREADS 32
 #define DW_SKIN_CACHE_INVALID 0xFFFFFFFFu
 static const uint DW_SKIN_CACHE_ENTRY_STRIDE = 36u;
 static const uint DW_SKIN_CACHE_MAX_PROBES = 8u;
-static const uint DW_COUNTER_ELIGIBLE = 267u;
-static const uint DW_COUNTER_UNIQUE = 268u;
-static const uint DW_COUNTER_DUPLICATE = 269u;
-static const uint DW_COUNTER_REQUESTED_VERTICES = 270u;
-static const uint DW_COUNTER_SKINNED_VERTICES = 271u;
-static const uint DW_COUNTER_FALLBACK_VERTICES = 272u;
-static const uint DW_COUNTER_POSITION_BYTES_USED = 277u;
-static const uint DW_COUNTER_METADATA_BYTES_USED = 278u;
+static const uint DW_COUNTER_ELIGIBLE = 238u;
+static const uint DW_COUNTER_UNIQUE = 239u;
+static const uint DW_COUNTER_DUPLICATE = 240u;
+static const uint DW_COUNTER_REQUESTED_VERTICES = 241u;
+static const uint DW_COUNTER_SKINNED_VERTICES = 242u;
+static const uint DW_COUNTER_FALLBACK_VERTICES = 243u;
+static const uint DW_COUNTER_POSITION_BYTES_USED = 248u;
+static const uint DW_COUNTER_METADATA_BYTES_USED = 249u;
 
 void DWTelemetryAdd(uint counter, uint value)
 {
@@ -283,15 +283,15 @@ void DynamicWindSkinCacheSkinWorkCS(uint GI : SV_GroupIndex, uint3 groupId : SV_
         ResourceDescriptorHeap[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITIONS_DESCRIPTOR_INDEX];
     const uint positionBitstreamBase = slabOffset + pageHeader.positionBitstreamOffset;
     for (uint vertex = GI; vertex < vertexCount; vertex += SW_CLUSTER_RASTER_THREADS) {
-        float3 localPosition = PJ_DecodeCompressedPosition(
+        float3 localPosition = CLodPageDecodeCompressedPosition(
             vertex, positionBitstreamBase, meshletDescriptor.positionBitOffset,
             CLodDescBitsX(meshletDescriptor), CLodDescBitsY(meshletDescriptor),
             CLodDescBitsZ(meshletDescriptor), pageHeader.compressedPositionQuantExp,
             int3(meshletDescriptor.minQx, meshletDescriptor.minQy, meshletDescriptor.minQz),
             slabDescriptor);
-        SkinningInfluences skinning = PJ_DecodePackedJoints(
+        SkinningInfluences skinning = CLodPageDecodePackedJoints(
             vertex, pageHeader, meshletDescriptor, slabOffset, slabDescriptor);
-        skinning = PJ_DecodePackedWeights(
+        skinning = CLodPageDecodePackedWeights(
             vertex, pageHeader, meshletDescriptor, slabOffset, slabDescriptor, skinning);
         skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
         positions[positionBase + vertex] = ApplyAssemblySkinningToPosition(

@@ -1440,50 +1440,20 @@ void Menu::DrawCLodTelemetryWindow() {
             }
 
             ImGui::Separator();
-            ImGui::TextUnformatted("SW/HW/PageJob classification breakdown");
+            ImGui::TextUnformatted("SW/HW classification breakdown");
             {
                 const uint32_t contributing = counter(CLodWorkGraphCounterIndex::ClassifyContributing);
                 const uint32_t routedHW = counter(CLodWorkGraphCounterIndex::ClassifyRoutedHW);
                 const uint32_t routedSW = counter(CLodWorkGraphCounterIndex::ClassifyRoutedSW);
-                const uint32_t routedPJ = counter(CLodWorkGraphCounterIndex::ClassifyRoutedPageJob);
                 ImGui::Text("Contributing (survived cull): %u", contributing);
-                ImGui::Text("Routed -> HW: %u | SW: %u | PageJob: %u", routedHW, routedSW, routedPJ);
+                ImGui::Text("Routed -> HW: %u | SW: %u", routedHW, routedSW);
                 if (contributing > 0) {
-                    ImGui::Text("  HW: %.1f%% | SW: %.1f%% | PJ: %.1f%%",
+                    ImGui::Text("  HW: %.1f%% | SW: %.1f%%",
                         100.0f * routedHW / (float)contributing,
-                        100.0f * routedSW / (float)contributing,
-                        100.0f * routedPJ / (float)contributing);
+                        100.0f * routedSW / (float)contributing);
                 }
-
-                const uint32_t pjRejectReyes = counter(CLodWorkGraphCounterIndex::ClassifyPJRejectReyesDisplacement);
-                const uint32_t pjRejectAlpha = counter(CLodWorkGraphCounterIndex::ClassifyPJRejectAlphaTested);
-                const uint32_t pjRejectNoClipmap = counter(CLodWorkGraphCounterIndex::ClassifyPJRejectNoClipmapIndex);
-                const uint32_t pjRejectThreshold = counter(CLodWorkGraphCounterIndex::ClassifyPJRejectBelowThreshold);
-                const uint32_t pjRejectDisabled = counter(CLodWorkGraphCounterIndex::ClassifyPJRejectDisabled);
-                const uint32_t pjRejectAlreadySW = counter(CLodWorkGraphCounterIndex::ClassifyPJRejectAlreadySW);
-                const uint32_t swDisabled = counter(CLodWorkGraphCounterIndex::ClassifySwDisabled);
-                const uint32_t totalPJRejects = pjRejectReyes + pjRejectAlpha + pjRejectNoClipmap
-                    + pjRejectThreshold + pjRejectDisabled + pjRejectAlreadySW;
-
-                ImGui::Text("PageJob rejections (total: %u):", totalPJRejects);
-                ImGui::Text("  Disabled: %u | AlreadySW: %u | ReyesDisplacement: %u",
-                    pjRejectDisabled, pjRejectAlreadySW, pjRejectReyes);
-                ImGui::Text("  AlphaTested: %u | NoClipmapIdx: %u | BelowThreshold: %u",
-                    pjRejectAlpha, pjRejectNoClipmap, pjRejectThreshold);
-                ImGui::Text("  SW classification disabled (contributes but !swRasterEnabled): %u", swDisabled);
-            }
-
-            ImGui::Separator();
-            ImGui::TextUnformatted("PageJob WG pipeline");
-            {
-                const uint32_t buildProcessed = counter(CLodWorkGraphCounterIndex::PageJobBuildClustersProcessed);
-                const uint32_t buildEmitted = counter(CLodWorkGraphCounterIndex::PageJobBuildPagesEmitted);
-                ImGui::Text("Build: processed=%u emitted=%u", buildProcessed, buildEmitted);
-
-                const uint32_t rasterJobs = counter(CLodWorkGraphCounterIndex::PageJobRasterJobsLaunched);
-                const uint32_t pixWritten = counter(CLodWorkGraphCounterIndex::PageJobRasterPixelsWritten);
-                const uint32_t flagWrites = counter(CLodWorkGraphCounterIndex::PageJobRasterFlagWrites);
-                ImGui::Text("Raster: jobs=%u pixWritten=%u flagWrites=%u", rasterJobs, pixWritten, flagWrites);
+                ImGui::Text("  SW classification disabled (contributes but !swRasterEnabled): %u",
+                    counter(CLodWorkGraphCounterIndex::ClassifySwDisabled));
             }
 
             ImGui::Separator();
@@ -1779,10 +1749,6 @@ void Menu::DrawCLodTelemetryWindow() {
             telemetry.splitFrustumCullCount,
             telemetry.splitShadowDirtyCullCount,
             telemetry.splitChildCullCount);
-        ImGui::Text("Coarse dirty-only: eligible=%u rejected=%u leaf outputs=%u",
-            telemetry.splitCoarseOnlyDirtyEligibleCount,
-            telemetry.splitCoarseOnlyDirtyRejectedCount,
-            telemetry.splitCoarseOnlyDirtyLeafOutputCount);
         ImGui::Text("Dice: total queue inputs=%u valid patches=%u invalid domains=%u est triangles=%u est vertices=%u",
             totalDiceInputs,
             telemetry.dicedPatchCount,
@@ -1795,20 +1761,6 @@ void Menu::DrawCLodTelemetryWindow() {
             telemetry.patchRasterizedMicroTriangleCount,
             telemetry.rasterWorkOverflowPatchCount,
             telemetry.rasterWorkOverflowBatchCount);
-        ImGui::Text(
-            "Hardware Reyes: meshGroups=%u packed entries=%u emitted triangles=%u avg entries/group=%.2f avg emitted/group=%.2f avg requested/group=%.2f",
-            telemetry.hardwareRasterMeshGroupCount,
-            telemetry.hardwareRasterPackedWorkEntryCount,
-            telemetry.hardwareRasterMicroTriangleCount,
-            telemetry.hardwareRasterMeshGroupCount > 0u
-                ? static_cast<float>(telemetry.hardwareRasterPackedWorkEntryCount) / static_cast<float>(telemetry.hardwareRasterMeshGroupCount)
-                : 0.0f,
-            telemetry.hardwareRasterMeshGroupCount > 0u
-                ? static_cast<float>(telemetry.hardwareRasterMicroTriangleCount) / static_cast<float>(telemetry.hardwareRasterMeshGroupCount)
-                : 0.0f,
-            telemetry.hardwareRasterMeshGroupCount > 0u
-                ? static_cast<float>(telemetry.hardwareRasterRequestedMicroTriangleCount) / static_cast<float>(telemetry.hardwareRasterMeshGroupCount)
-                : 0.0f);
         ImGui::Text("Patch raster rejects: zeroCount=%u overflow=%u clip=%u area=%u bounds=%u clippedQuad=%u",
             telemetry.rasterZeroMicroTriangleCount,
             telemetry.rasterMicroTriangleOverflowCount,

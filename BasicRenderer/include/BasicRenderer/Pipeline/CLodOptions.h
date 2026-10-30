@@ -26,7 +26,6 @@ enum class CLodCullingBackend : uint8_t {
 enum class CLodVSMRasterMode : uint8_t {
     HardwareOnly,
     Standard,
-    PageJob,
     Reyes,
 };
 
@@ -73,7 +72,6 @@ inline constexpr int CLodCullingBackendCount = static_cast<int>(sizeof(CLodCulli
 inline constexpr const char* CLodVSMRasterModeNames[] = {
     "Hardware Only",
     "Standard",
-    "Page-Job",
     "Reyes",
 };
 inline constexpr int CLodVSMRasterModeCount = static_cast<int>(sizeof(CLodVSMRasterModeNames) / sizeof(CLodVSMRasterModeNames[0]));
@@ -102,16 +100,6 @@ constexpr bool CLodSoftwareRasterUsesWorkGraph(CLodSoftwareRasterMode mode)
 constexpr bool CLodVSMRasterModeUsesLegacyRasterOnly(CLodVSMRasterMode mode)
 {
     return mode == CLodVSMRasterMode::HardwareOnly;
-}
-
-constexpr bool CLodVSMRasterModeUsesLargeClusterPageJob(CLodVSMRasterMode mode)
-{
-    return mode == CLodVSMRasterMode::PageJob;
-}
-
-constexpr bool CLodVSMRasterModeUsesLargeClusterShadowRouting(CLodVSMRasterMode mode)
-{
-    return mode == CLodVSMRasterMode::PageJob || mode == CLodVSMRasterMode::Reyes;
 }
 
 constexpr bool CLodVSMRasterModeUsesReyes(CLodVSMRasterMode mode)

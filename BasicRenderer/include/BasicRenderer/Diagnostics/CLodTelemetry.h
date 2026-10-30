@@ -87,42 +87,10 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     ClusterCullShadowDirtyQueriesClipped,
     ClusterCullShadowDirtyRegionCoarseMipChecks,
 
-    PageJobBuildClustersProcessed,
-    PageJobBuildPagesEmitted,
-    PageJobBuildFallbackToHW,
-    PageJobRasterTrianglesClipped,
-    PageJobRasterPixelsWritten,
-    PageJobRasterFlagWrites,
-
     ClassifyContributing,
     ClassifyRoutedHW,
     ClassifyRoutedSW,
-    ClassifyRoutedPageJob,
-    ClassifyPJRejectReyesDisplacement,
-    ClassifyPJRejectAlphaTested,
-    ClassifyPJRejectNoClipmapIndex,
-    ClassifyPJRejectBelowThreshold,
-    ClassifyPJRejectDisabled,
-    ClassifyPJRejectAlreadySW,
     ClassifySwDisabled,
-
-    PageJobBuildGroupsLaunched,
-    PageJobBuildNoClipmap,
-    PageJobBuildPagesScanned,
-    PageJobBuildZeroDirtyPages,
-    PageJobRasterJobsLaunched,
-    PageJobRasterTotalTriangles,
-    PageJobRasterTrisDepthReject,
-    PageJobRasterTrisBackfaceCull,
-    PageJobRasterTrisAABBEmpty,
-    PageJobRasterTrisRasterized,
-    PageJobRasterPixelsTested,
-    PageJobRasterJobsWithPixels,
-
-    PageJobDbgPhysDescriptor,
-    PageJobDbgAtlasWidth,
-    PageJobDbgAtlasHeight,
-    PageJobDbgOobPixels,
 
     // Keep these appended at the end to match workGraphCulling.hlsl.
     ClusterCullBucketRecordsDispatched,
@@ -274,12 +242,12 @@ inline constexpr uint32_t CLodWorkGraphCounterCount =
     static_cast<uint32_t>(CLodWorkGraphCounterIndex::Count);
 inline constexpr uint32_t CLodWorkGraphTelemetryBufferCount =
     CLodWorkGraphCounterCount;
-static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedGroups) == 264u);
-static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedOutputTriangles) == 266u);
-static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheEligibleClusters) == 267u);
-static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices) == 274u);
-static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterArgsNonZeroBuckets) == 279u);
-static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterArgsDispatchGroups) == 280u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedGroups) == 235u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedOutputTriangles) == 237u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheEligibleClusters) == 238u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices) == 245u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterArgsNonZeroBuckets) == 250u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterArgsDispatchGroups) == 251u);
 
 struct CLodWorkGraphTelemetryCounters {
     std::array<uint32_t, CLodWorkGraphCounterCount> counters{};

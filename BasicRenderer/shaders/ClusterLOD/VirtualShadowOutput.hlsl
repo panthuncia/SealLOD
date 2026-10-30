@@ -9,11 +9,11 @@
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
 
 static const uint CLOD_TELEMETRY_DISABLED_DESCRIPTOR = 0xFFFFFFFFu;
-static const uint WG_COUNTER_RASTER_PIXEL_SHADER_INVOCATIONS = 125u;
-static const uint WG_COUNTER_RASTER_PIXEL_SCISSOR_REJECTED = 126u;
-static const uint WG_COUNTER_RASTER_PIXEL_VSM_CLIPMAP_REJECTED = 129u;
-static const uint WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED = 130u;
-static const uint WG_COUNTER_RASTER_PIXEL_VSM_WRITES = 131u;
+static const uint WG_COUNTER_RASTER_PIXEL_SHADER_INVOCATIONS = 96u;
+static const uint WG_COUNTER_RASTER_PIXEL_SCISSOR_REJECTED = 97u;
+static const uint WG_COUNTER_RASTER_PIXEL_VSM_CLIPMAP_REJECTED = 100u;
+static const uint WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED = 101u;
+static const uint WG_COUNTER_RASTER_PIXEL_VSM_WRITES = 102u;
 
 void CLodRasterPixelTelemetryAdd(uint counterIndex, uint value)
 {

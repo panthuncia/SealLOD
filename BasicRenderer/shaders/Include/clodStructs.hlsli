@@ -695,46 +695,4 @@ struct CLodSoftwareRasterMapping
     uint skinningInstanceSlot;
 };
 
-// ---------------------------------------------------------------------------
-// Page-job VSM software rasterization records.
-// Three-node pipeline: ClusterCull → PageJobBuild → PageJobExpand → PageJobRasterPage.
-// ---------------------------------------------------------------------------
-#define PAGEJOB_BUILD_THREADS            128
-#define PAGEJOB_BUILD_MAX_CLUSTERS       8
-#define PAGEJOB_EXPAND_THREADS           64
-#define PAGEJOB_RASTER_PAGE_THREADS      128
-#define PAGEJOB_TILE_PAGES_X             8
-#define PAGEJOB_TILE_PAGES_Y             8
-#define PAGEJOB_MAX_TILE_JOBS_PER_CLUSTER 256
-#define PAGEJOB_MAX_PAGES_PER_TILE       (PAGEJOB_TILE_PAGES_X * PAGEJOB_TILE_PAGES_Y)
-
-// Build-stage input: batch of cluster indices (same shape as SWRasterBatchRecord).
-struct PageJobBuildBatchRecord
-{
-    uint3 dispatchGrid : SV_DispatchGrid; // (1, 1, 1) — single group per batch
-    uint numClusters;                       // 1..PAGEJOB_BUILD_MAX_CLUSTERS
-    uint clusterIndices[PAGEJOB_BUILD_MAX_CLUSTERS];
-};
-
-// Expand-stage input: one (cluster, page-tile) pair. Build emits these.
-struct PageJobExpandRecord
-{
-    uint3 dispatchGrid : SV_DispatchGrid; // (1, 1, 1)
-    uint clusterIndex;                      // visible-cluster-buffer index
-    uint packedTileAndClipmap;              // tileMinPageX:8 | tileMinPageY:8 | clipmapLayer:5
-    uint packedPageBounds;                  // minPageX:8 | minPageY:8 | maxPageX:8 | maxPageY:8
-};
-
-// Raster-page-stage input: one (cluster, physical-page) pair. Expand emits these.
-struct PageJobRasterPageRecord
-{
-    uint3 dispatchGrid : SV_DispatchGrid; // (1, 1, 1)
-    uint clusterIndex;                      // visible-cluster-buffer index
-    uint physicalPageIndex;                 // physical atlas page index
-    uint packedPagePixelOriginAndClipmap;   // pagePixelMinX:16 | pagePixelMinY:16 (absolute virtual pixels)
-    uint packedAtlasOriginAndClipmap;       // atlasBaseX:16 | atlasBaseY:16
-    uint clipmapLayer;                      // clipmap layer for content-valid write-back
-    uint2 wrappedPageCoords;                // for page-table content-valid write-back
-};
-
 #endif // CLOD_STRUCTS_HLSLI

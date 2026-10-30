@@ -14,7 +14,6 @@ enum class ReyesClassifyMode : uint32_t
 {
     Default = 0u,
     ShadowFineDisplacedOnly = 1u,
-    ShadowCoarseLargeOnly = 2u,
 };
 
 struct ReyesClassifyBindings {

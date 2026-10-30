@@ -25,12 +25,12 @@ struct ReyesSplitFrameData {
 struct ReyesSplitBindings {
     org::DeclaredViewToken visible, inputQueue, inputCounter, outputQueue, outputCounter, outputOverflow;
     org::DeclaredViewToken diceQueue, diceCounter, diceOverflow, tessConfigs, tessVertices, tessTriangles;
-    org::DeclaredViewToken shadowClipmap, shadowDirty, shadowNonRasterable, telemetry;
+    org::DeclaredViewToken shadowClipmap, shadowDirty, telemetry;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken replayQueue, replayCounter, replayOverflow;
     org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;
-    uint32_t capacity = 0, maxPassCount = 0, phase = 0, coarseTargetBits = 0;
-    bool hasShadowClipmap = false, hasShadowDirty = false, hasShadowNonRasterable = false;
+    uint32_t capacity = 0, maxPassCount = 0, phase = 0;
+    bool hasShadowClipmap = false, hasShadowDirty = false;
     bool hasViewDepth = false, hasReplayQueue = false, hasReplayCounter = false, hasReplayOverflow = false;
     bool useAabbOcclusion = false;
 };
@@ -53,7 +53,6 @@ public:
         std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
         std::shared_ptr<org::Buffer> shadowClipmapInfoBuffer,
         std::shared_ptr<org::PixelBuffer> shadowDirtyHierarchyTexture,
-        std::shared_ptr<org::PixelBuffer> shadowNonRasterableHierarchyTexture,
         std::shared_ptr<org::Buffer> indirectArgsBuffer,
         std::shared_ptr<org::Buffer> telemetryBuffer,
         uint32_t maxSplitQueueEntries,
@@ -88,7 +87,6 @@ private:
     std::shared_ptr<org::Buffer> m_tessTableTrianglesBuffer;
     std::shared_ptr<org::Buffer> m_shadowClipmapInfoBuffer;
     std::shared_ptr<org::PixelBuffer> m_shadowDirtyHierarchyTexture;
-    std::shared_ptr<org::PixelBuffer> m_shadowNonRasterableHierarchyTexture;
     std::shared_ptr<org::Buffer> m_telemetryBuffer;
     bool m_enableViewDepthOcclusion = false;
     // Linear-depth SRV per view for patch occlusion; it embeds descriptors, so

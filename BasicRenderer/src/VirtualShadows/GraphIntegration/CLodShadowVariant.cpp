@@ -13,9 +13,6 @@
 #include <BasicRenderer/Extensions/ProducerPersistentState.h>
 #include "VirtualGeometry/GraphIntegration/CLodExtensionShared.h"
 #include <BasicRenderer/Extensions/VirtualShadowCasterProvider.h>
-#include "VirtualGeometry/Rasterization/RenderPasses/ClusterSoftwareRasterPageJobBuildArgsPass.h"
-#include "VirtualGeometry/Rasterization/RenderPasses/ClusterSoftwareRasterPageJobExpandPass.h"
-#include "VirtualGeometry/Rasterization/RenderPasses/ClusterSoftwareRasterPageJobRasterPass.h"
 #include "VirtualGeometry/Rasterization/RenderPasses/RasterBucketBlockOffsetsPass.h"
 #include "VirtualGeometry/Rasterization/RenderPasses/RasterBucketBlockScanPass.h"
 #include "VirtualGeometry/Rasterization/RenderPasses/RasterBucketCompactAndArgsPass.h"
@@ -26,11 +23,8 @@
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesCreateDispatchArgsPass.h"
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesDicePass.h"
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesQueueResetPass.h"
-#include "VirtualGeometry/Reyes/RenderPasses/ReyesRasterWorkCompactAndArgsPass.h"
-#include "VirtualGeometry/Reyes/RenderPasses/ReyesRasterWorkHistogramPass.h"
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesSeedPatchesPass.h"
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesSplitPass.h"
-#include "VirtualShadows/Rasterization/RenderPasses/ReyesVirtualShadowHardwareRasterPass.h"
 #include "VirtualShadows/Rasterization/RenderPasses/ReyesVirtualShadowRasterizationPass.h"
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapAllocatePagesPass.h"
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapDeduplicatePredictedPagesPass.h"
@@ -47,7 +41,6 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapGatherStatsPass.h"
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapInvalidatePagesPass.h"
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapMarkPagesPass.h"
-#include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapNonRasterableHierarchyPass.h"
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapResolveMarkedBlocksPass.h"
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapSetupPass.h"
 #include "VirtualGeometry/Streaming/CLodStreamingSystem.h"
@@ -99,329 +92,6 @@ VirtualShadowCasterBuildContext CLodShadowVariant::MakeCasterContext(CLodExtensi
         context.invalidationQueue = extension.m_options.virtualShadowCasters->GetInvalidationQueue();
     }
     return context;
-}
-
-std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
-    CLodExtension& extension,
-    const CLodVariantTraits& traits,
-    const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::ExternalPassDesc>& outPasses,
-    uint32_t phaseIndex)
-{
-    if (traits.rasterOutputKind != CLodRasterOutputKind::VirtualShadow) {
-        return {};
-    }
-
-    const ShadowRasterPhase phase = static_cast<ShadowRasterPhase>(phaseIndex);
-    const bool isPhase2 = phase == ShadowRasterPhase::Phase2;
-    const auto phaseSuffix = isPhase2 ? "2" : "1";
-    const auto& visibleClustersBuffer = isPhase2
-        ? extension.m_swPageJobVisibleClustersBufferPhase2
-        : extension.m_swPageJobVisibleClustersBuffer;
-    const auto& visibleClusterTransformIndicesBuffer = isPhase2
-        ? extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2
-        : extension.m_swPageJobVisibleClusterTransformIndicesBuffer;
-    const auto& visibleClustersCounterBuffer = isPhase2
-        ? extension.m_swPageJobVisibleClustersCounterBufferPhase2
-        : extension.m_swPageJobVisibleClustersCounterBuffer;
-    const auto& histogramBuffer = isPhase2
-        ? extension.m_rasterBucketsHistogramBufferPhase2Sw
-        : extension.m_rasterBucketsHistogramBufferSw;
-    const auto& writeCursorBuffer = isPhase2
-        ? extension.m_rasterBucketsWriteCursorBufferPhase2Sw
-        : extension.m_rasterBucketsWriteCursorBufferSw;
-    const auto& indirectArgsBuffer = isPhase2
-        ? extension.m_rasterBucketsIndirectArgsBufferPhase2PageJob
-        : extension.m_rasterBucketsIndirectArgsBufferPageJob;
-    const auto& histogramIndirectCommand = isPhase2
-        ? extension.m_histogramIndirectCommandPhase2PageJob
-        : extension.m_histogramIndirectCommandPageJob;
-    const auto& pageJobRecordsBuffer = isPhase2
-        ? extension.m_swPageJobRecordsBufferPhase2
-        : extension.m_swPageJobRecordsBuffer;
-    const auto& pageJobCountBuffer = isPhase2
-        ? extension.m_swPageJobCountBufferPhase2
-        : extension.m_swPageJobCountBuffer;
-    const auto& pageJobRecordsBufferSkinned = isPhase2
-        ? extension.m_swPageJobRecordsBufferPhase2Skinned
-        : extension.m_swPageJobRecordsBufferSkinned;
-    const auto& pageJobCountBufferSkinned = isPhase2
-        ? extension.m_swPageJobCountBufferPhase2Skinned
-        : extension.m_swPageJobCountBufferSkinned;
-    const auto& pageJobIndirectArgsBuffer = isPhase2
-        ? extension.m_swPageJobIndirectArgsBufferPhase2
-        : extension.m_swPageJobIndirectArgsBuffer;
-    const auto& pageJobIndirectArgsBufferSkinned = isPhase2
-        ? extension.m_swPageJobIndirectArgsBufferPhase2Skinned
-        : extension.m_swPageJobIndirectArgsBufferSkinned;
-    const auto& pageJobClusterTagsBuffer = isPhase2
-        ? extension.m_swPageJobClusterTagsBufferPhase2
-        : extension.m_swPageJobClusterTagsBuffer;
-
-    if (isPhase2) {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsCreateCommandPassPageJob2"),
-                std::make_shared<RasterBucketCreateCommandPass>(
-                    visibleClustersCounterBuffer,
-                    histogramIndirectCommand,
-                    extension.m_occlusionReplayStateBuffer,
-                    extension.m_occlusionNodeGpuInputsBuffer,
-                    extension.m_maxVisibleClusters,
-                    true)));
-    }
-    else {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsCreateCommandPassPageJob1"),
-                std::make_shared<RasterBucketCreateCommandPass>(
-                    visibleClustersCounterBuffer,
-                    histogramIndirectCommand,
-                    extension.m_occlusionReplayStateBuffer,
-                    extension.m_occlusionNodeGpuInputsBuffer,
-                    extension.m_maxVisibleClusters)));
-    }
-
-    if (isPhase2) {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsHistogramPassPageJob2"),
-                std::make_shared<RasterBucketHistogramPass>(
-                    visibleClustersBuffer,
-                    visibleClustersCounterBuffer,
-                    histogramIndirectCommand,
-                    histogramBuffer,
-                    nullptr,
-                    extension.m_workGraphTelemetryBuffer,
-                    nullptr,
-                    false,
-                    extension.m_maxVisibleClusters,
-                    true)));
-    }
-    else {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsHistogramPassPageJob1"),
-                std::make_shared<RasterBucketHistogramPass>(
-                    visibleClustersBuffer,
-                    visibleClustersCounterBuffer,
-                    histogramIndirectCommand,
-                    histogramBuffer,
-                    nullptr,
-                    extension.m_workGraphTelemetryBuffer,
-                    nullptr,
-                    false,
-                    extension.m_maxVisibleClusters)));
-    }
-
-    if (isPhase2) {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsPrefixScanPassPageJob2"),
-                std::make_shared<RasterBucketBlockScanPass>(
-                    histogramBuffer,
-                    extension.m_rasterBucketsOffsetsBuffer,
-                    extension.m_rasterBucketsBlockSumsBuffer,
-                    true)));
-    }
-    else {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsPrefixScanPassPageJob1"),
-                std::make_shared<RasterBucketBlockScanPass>(
-                    histogramBuffer,
-                    extension.m_rasterBucketsOffsetsBuffer,
-                    extension.m_rasterBucketsBlockSumsBuffer)));
-    }
-
-    if (isPhase2) {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsPrefixOffsetsPassPageJob2"),
-                std::make_shared<RasterBucketBlockOffsetsPass>(
-                    extension.m_rasterBucketsOffsetsBuffer,
-                    extension.m_rasterBucketsBlockSumsBuffer,
-                    extension.m_rasterBucketsScannedBlockSumsBuffer,
-                    extension.m_rasterBucketsTotalCountBuffer,
-                    true)));
-    }
-    else {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsPrefixOffsetsPassPageJob1"),
-                std::make_shared<RasterBucketBlockOffsetsPass>(
-                    extension.m_rasterBucketsOffsetsBuffer,
-                    extension.m_rasterBucketsBlockSumsBuffer,
-                    extension.m_rasterBucketsScannedBlockSumsBuffer,
-                    extension.m_rasterBucketsTotalCountBuffer)));
-    }
-
-    if (isPhase2) {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsCompactAndArgsPassPageJob2"),
-                std::make_shared<RasterBucketCompactAndArgsPass>(
-                    visibleClustersBuffer,
-                    visibleClusterTransformIndicesBuffer,
-                    visibleClustersCounterBuffer,
-                    visibleClustersCounterBuffer,
-                    nullptr,
-                    histogramIndirectCommand,
-                    histogramBuffer,
-                    extension.m_rasterBucketsOffsetsBuffer,
-                    writeCursorBuffer,
-                    extension.m_compactedVisibleClustersBuffer,
-                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
-                    indirectArgsBuffer,
-                    extension.m_sortedToUnsortedMappingBuffer,
-                    nullptr,
-                    extension.m_workGraphTelemetryBuffer,
-                    extension.m_maxVisibleClusters,
-                    false,
-                    false,
-                    true,
-                    true)));
-    }
-    else {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "RasterBucketsCompactAndArgsPassPageJob1"),
-                std::make_shared<RasterBucketCompactAndArgsPass>(
-                    visibleClustersBuffer,
-                    visibleClusterTransformIndicesBuffer,
-                    visibleClustersCounterBuffer,
-                    visibleClustersCounterBuffer,
-                    nullptr,
-                    histogramIndirectCommand,
-                    histogramBuffer,
-                    extension.m_rasterBucketsOffsetsBuffer,
-                    writeCursorBuffer,
-                    extension.m_compactedVisibleClustersBuffer,
-                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
-                    indirectArgsBuffer,
-                    extension.m_sortedToUnsortedMappingBuffer,
-                    nullptr,
-                    extension.m_workGraphTelemetryBuffer,
-                    extension.m_maxVisibleClusters,
-                    false,
-                    false,
-                    true)));
-    }
-
-    if (isPhase2) {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "SoftwareRasterPageJobExpandPass2"),
-                std::make_shared<ClusterSoftwareRasterPageJobExpandPass>(
-                    extension.m_compactedVisibleClustersBuffer,
-                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
-                    histogramBuffer,
-                    indirectArgsBuffer,
-                    extension.m_viewRasterInfoBuffer,
-                    extension.m_shadowPageTableTexture,
-                    extension.m_shadowClipmapInfoBuffer,
-                    pageJobRecordsBuffer,
-                    pageJobCountBuffer,
-                    pageJobRecordsBufferSkinned,
-                    pageJobCountBufferSkinned,
-                    pageJobClusterTagsBuffer,
-                    extension.m_shadowStatsBuffer,
-                    extension.m_shadowConfiguredPageJobRecordCapacity,
-                    slabGroup,
-                    true)));
-    }
-    else {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "SoftwareRasterPageJobExpandPass1"),
-                std::make_shared<ClusterSoftwareRasterPageJobExpandPass>(
-                    extension.m_compactedVisibleClustersBuffer,
-                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
-                    histogramBuffer,
-                    indirectArgsBuffer,
-                    extension.m_viewRasterInfoBuffer,
-                    extension.m_shadowPageTableTexture,
-                    extension.m_shadowClipmapInfoBuffer,
-                    pageJobRecordsBuffer,
-                    pageJobCountBuffer,
-                    pageJobRecordsBufferSkinned,
-                    pageJobCountBufferSkinned,
-                    pageJobClusterTagsBuffer,
-                    extension.m_shadowStatsBuffer,
-                    extension.m_shadowConfiguredPageJobRecordCapacity,
-                    slabGroup)));
-    }
-
-    if (isPhase2) {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "SoftwareRasterPageJobBuildArgsPass2"),
-                std::make_shared<ClusterSoftwareRasterPageJobBuildArgsPass>(
-                    pageJobCountBuffer,
-                    pageJobIndirectArgsBuffer,
-                    pageJobCountBufferSkinned,
-                    pageJobIndirectArgsBufferSkinned,
-                    true)));
-    }
-    else {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "SoftwareRasterPageJobBuildArgsPass1"),
-                std::make_shared<ClusterSoftwareRasterPageJobBuildArgsPass>(
-                    pageJobCountBuffer,
-                    pageJobIndirectArgsBuffer,
-                    pageJobCountBufferSkinned,
-                    pageJobIndirectArgsBufferSkinned)));
-    }
-
-    const std::string shadowRasterPassName = MakeVariantPassName(
-        traits,
-        std::string("SoftwareRasterPageJobRasterPass") + phaseSuffix);
-    if (isPhase2) {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                shadowRasterPassName,
-                std::make_shared<ClusterSoftwareRasterPageJobRasterPass>(
-                    extension.m_compactedVisibleClustersBuffer,
-                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
-                    extension.m_viewRasterInfoBuffer,
-                    extension.m_shadowPageTableTexture,
-                    extension.m_shadowStaticPhysicalPagesTexture,
-                    extension.m_shadowPhysicalPagesTexture,
-                    extension.m_shadowClipmapInfoBuffer,
-                    pageJobCountBuffer,
-                    pageJobRecordsBuffer,
-                    pageJobIndirectArgsBuffer,
-                    pageJobCountBufferSkinned,
-                    pageJobRecordsBufferSkinned,
-                    pageJobIndirectArgsBufferSkinned,
-                    extension.m_shadowStatsBuffer,
-                    slabGroup,
-                    true)));
-    }
-    else {
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                shadowRasterPassName,
-                std::make_shared<ClusterSoftwareRasterPageJobRasterPass>(
-                    extension.m_compactedVisibleClustersBuffer,
-                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
-                    extension.m_viewRasterInfoBuffer,
-                    extension.m_shadowPageTableTexture,
-                    extension.m_shadowStaticPhysicalPagesTexture,
-                    extension.m_shadowPhysicalPagesTexture,
-                    extension.m_shadowClipmapInfoBuffer,
-                    pageJobCountBuffer,
-                    pageJobRecordsBuffer,
-                    pageJobIndirectArgsBuffer,
-                    pageJobCountBufferSkinned,
-                    pageJobRecordsBufferSkinned,
-                    pageJobIndirectArgsBufferSkinned,
-                    extension.m_shadowStatsBuffer,
-                    slabGroup)));
-    }
-
-    return shadowRasterPassName;
 }
 
 std::string CLodShadowVariant::AppendFineRasterPassForPhase(
@@ -478,14 +148,6 @@ void CLodShadowVariant::RefreshConfiguredSettings(CLodExtension& extension)
 
     extension.m_shadowConfiguredBackingResolution = CLodVirtualShadowGetConfiguredMaxBackingResolution();
     extension.m_shadowConfiguredMaxPhysicalPageCount = CLodVirtualShadowGetConfiguredMaxPhysicalPageCapacity();
-    extension.m_shadowConfiguredPageJobMaxPages = std::max(
-        1u,
-        std::min(
-            SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodPageJobMaxPagesPerClusterSettingName)(),
-            255u));
-    extension.m_shadowConfiguredPageJobRecordCapacity = std::max(
-        1u,
-        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodPageJobRecordCapacitySettingName)());
     extension.m_shadowConfiguredComputeClusterCapacity =
         CLodVirtualShadowGetConfiguredComputeClusterCapacity(extension.m_maxVisibleClusters);
     const uint64_t budgetedExpandedRecordCapacity =
@@ -773,17 +435,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             shadowBuildDynamicActiveBlocksPassName));
     outPasses.push_back(std::move(shadowDirtyHierarchyPassDesc));
 
-    const std::string shadowNonRasterableHierarchyPassName = MakeVariantPassName(traits, "VirtualShadowNonRasterableHierarchyPass");
-    auto shadowNonRasterableHierarchyPassDesc = org::ExternalPassDesc::Compute(
-        shadowNonRasterableHierarchyPassName,
-        std::make_shared<VirtualShadowMapNonRasterableHierarchyPass>(
-            extension.m_shadowPageTableTexture,
-            extension.m_shadowNonRasterablePageHierarchyTexture,
-            extension.m_shadowClipmapInfoBuffer));
-    shadowNonRasterableHierarchyPassDesc.At(org::ExternalInsertPoint::After(shadowDirtyHierarchyPassName));
-    outPasses.push_back(std::move(shadowNonRasterableHierarchyPassDesc));
-
-    return shadowNonRasterableHierarchyPassName;
+    return shadowDirtyHierarchyPassName;
 }
 
 std::string CLodShadowVariant::AppendCasterRasterPasses(
@@ -885,24 +537,6 @@ void CLodShadowVariant::AppendStructuralTail(
     outPasses.push_back(std::move(shadowComposePagesPassDesc));
 }
 
-std::string CLodShadowVariant::AppendPhase1PageJobRasterPasses(
-    CLodExtension& extension,
-    const CLodVariantTraits& traits,
-    const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::ExternalPassDesc>& outPasses)
-{
-    return AppendPageJobRasterPassesForPhase(extension, traits, slabGroup, outPasses, 1u);
-}
-
-std::string CLodShadowVariant::AppendPhase2PageJobRasterPasses(
-    CLodExtension& extension,
-    const CLodVariantTraits& traits,
-    const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::ExternalPassDesc>& outPasses)
-{
-    return AppendPageJobRasterPassesForPhase(extension, traits, slabGroup, outPasses, 2u);
-}
-
 std::string CLodShadowVariant::AppendPhase1FineRasterPass(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
@@ -919,413 +553,6 @@ std::string CLodShadowVariant::AppendPhase2FineRasterPass(
     std::vector<org::ExternalPassDesc>& outPasses)
 {
     return AppendFineRasterPassForPhase(extension, traits, slabGroup, outPasses, 2u);
-}
-
-std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
-    CLodExtension& extension,
-    const CLodVariantTraits& traits,
-    const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::ExternalPassDesc>& outPasses)
-{
-    if (traits.rasterOutputKind != CLodRasterOutputKind::VirtualShadow) {
-        return {};
-    }
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeQueueResetPass1"),
-            std::make_shared<ReyesQueueResetPass>(
-                extension.m_reyesFullClusterOutputsCounterBuffer,
-                extension.m_reyesOwnedClustersCounterBuffer,
-                std::vector<std::shared_ptr<org::Buffer>>{ extension.m_reyesSplitQueueCounterBufferA, extension.m_reyesSplitQueueCounterBufferB },
-                std::vector<std::shared_ptr<org::Buffer>>{ extension.m_reyesSplitQueueOverflowBufferA, extension.m_reyesSplitQueueOverflowBufferB },
-                extension.m_reyesDiceQueueCounterBuffer,
-                extension.m_reyesDiceQueueOverflowBuffer,
-                nullptr,
-                extension.m_reyesTelemetryBufferPhase1,
-                1u,
-                true)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeCreateClassifyDispatchArgsPass1"),
-            std::make_shared<ReyesCreateDispatchArgsPass>(
-                extension.m_swPageJobVisibleClustersCounterBuffer,
-                extension.m_reyesClassifyIndirectArgsBuffer)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeClassifyPass1"),
-            std::make_shared<ReyesClassifyPass>(
-                extension.m_swPageJobVisibleClustersBuffer,
-                extension.m_swPageJobVisibleClustersCounterBuffer,
-                nullptr,
-                extension.m_reyesFullClusterOutputsBuffer,
-                extension.m_reyesFullClusterOutputsCounterBuffer,
-                extension.m_reyesFullClusterOutputCapacity,
-                extension.m_reyesOwnedClustersBuffer,
-                extension.m_reyesOwnedClustersCounterBuffer,
-                extension.m_reyesOwnedClusterCapacity,
-                nullptr,
-                extension.m_reyesClassifyIndirectArgsBuffer,
-                extension.m_reyesTelemetryBufferPhase1,
-                1u,
-                ReyesClassifyMode::ShadowCoarseLargeOnly)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeCreateSeedDispatchArgsPass1"),
-            std::make_shared<ReyesCreateDispatchArgsPass>(
-                extension.m_reyesOwnedClustersCounterBuffer,
-                extension.m_reyesSplitIndirectArgsBuffer)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeSeedPatchesPass1"),
-            std::make_shared<ReyesSeedPatchesPass>(
-                extension.m_swPageJobVisibleClustersBuffer,
-                extension.m_reyesOwnedClustersBuffer,
-                extension.m_reyesOwnedClustersCounterBuffer,
-                extension.m_reyesSplitQueueBufferA,
-                extension.m_reyesSplitQueueCounterBufferA,
-                extension.m_reyesSplitQueueOverflowBufferA,
-                extension.m_reyesSplitIndirectArgsBuffer,
-                slabGroup,
-                extension.m_reyesSplitQueueCapacity,
-                1u)));
-
-    const std::shared_ptr<org::Buffer> reyesLargeSplitBuffers[] = { extension.m_reyesSplitQueueBufferA, extension.m_reyesSplitQueueBufferB };
-    const std::shared_ptr<org::Buffer> reyesLargeSplitCounters[] = { extension.m_reyesSplitQueueCounterBufferA, extension.m_reyesSplitQueueCounterBufferB };
-    const std::shared_ptr<org::Buffer> reyesLargeSplitOverflows[] = { extension.m_reyesSplitQueueOverflowBufferA, extension.m_reyesSplitQueueOverflowBufferB };
-    for (uint32_t splitPassIndex = 0; splitPassIndex < CLodReyesMaxSplitPassCount; ++splitPassIndex) {
-        const uint32_t inputIndex = splitPassIndex & 1u;
-        const uint32_t outputIndex = inputIndex ^ 1u;
-
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "ReyesLargeCreateSplitDispatchArgsPass1_" + std::to_string(splitPassIndex)),
-                std::make_shared<ReyesCreateDispatchArgsPass>(
-                    reyesLargeSplitCounters[inputIndex],
-                    extension.m_reyesSplitIndirectArgsBuffer)));
-
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "ReyesLargeSplitPass1_" + std::to_string(splitPassIndex)),
-                std::make_shared<ReyesSplitPass>(
-                    extension.m_swPageJobVisibleClustersBuffer,
-                    reyesLargeSplitBuffers[inputIndex],
-                    reyesLargeSplitCounters[inputIndex],
-                    reyesLargeSplitBuffers[outputIndex],
-                    reyesLargeSplitCounters[outputIndex],
-                    reyesLargeSplitOverflows[outputIndex],
-                    extension.m_reyesDiceQueueBuffer,
-                    extension.m_reyesDiceQueueCounterBuffer,
-                    extension.m_reyesDiceQueueOverflowBuffer,
-                    extension.m_reyesTessTableConfigsBuffer,
-                    extension.m_reyesTessTableVerticesBuffer,
-                    extension.m_reyesTessTableTrianglesBuffer,
-                    extension.m_shadowClipmapInfoBuffer,
-                    extension.m_shadowDirtyPageHierarchyTexture,
-                    extension.m_shadowNonRasterablePageHierarchyTexture,
-                    extension.m_reyesSplitIndirectArgsBuffer,
-                    extension.m_reyesTelemetryBufferPhase1,
-                    extension.m_reyesSplitQueueCapacity,
-                    splitPassIndex,
-                    CLodReyesMaxSplitPassCount,
-                    1u)));
-    }
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeCreateDiceDispatchArgsPass1"),
-            std::make_shared<ReyesCreateDispatchArgsPass>(
-                extension.m_reyesDiceQueueCounterBuffer,
-                extension.m_reyesDiceIndirectArgsBuffer)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeDicePass1"),
-            std::make_shared<ReyesDicePass>(
-                extension.m_reyesDiceQueueBuffer,
-                extension.m_reyesDiceQueueCounterBuffer,
-                nullptr,
-                extension.m_reyesTessTableConfigsBuffer,
-                extension.m_reyesDiceIndirectArgsBuffer,
-                extension.m_reyesTelemetryBufferPhase1,
-                extension.m_reyesDiceQueueCapacity,
-                1u)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeBuildRasterWorkPass1"),
-            std::make_shared<ReyesBuildRasterWorkPass>(
-                extension.m_reyesDiceQueueBuffer,
-                extension.m_reyesDiceQueueCounterBuffer,
-                nullptr,
-                extension.m_reyesTessTableConfigsBuffer,
-                extension.m_reyesRasterWorkBuffer,
-                extension.m_reyesRasterWorkCounterBuffer,
-                extension.m_reyesDiceIndirectArgsBuffer,
-                extension.m_reyesTelemetryBufferPhase1,
-                extension.m_reyesRasterWorkCapacity)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "RasterBucketsCreateCommandPassReyesHW1"),
-            std::make_shared<RasterBucketCreateCommandPass>(
-                extension.m_reyesRasterWorkCounterBuffer,
-                extension.m_histogramIndirectCommandReyes,
-                extension.m_occlusionReplayStateBuffer,
-                extension.m_occlusionNodeGpuInputsBuffer,
-                extension.m_reyesRasterWorkCapacity)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesRasterWorkHistogramPass1"),
-            std::make_shared<ReyesRasterWorkHistogramPass>(
-                extension.m_reyesRasterWorkBuffer,
-                extension.m_reyesRasterWorkCounterBuffer,
-                extension.m_histogramIndirectCommandReyes,
-                extension.m_rasterBucketsHistogramBufferSw)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesRasterWorkPrefixScanPass1"),
-            std::make_shared<RasterBucketBlockScanPass>(
-                extension.m_rasterBucketsHistogramBufferSw,
-                extension.m_rasterBucketsOffsetsBuffer,
-                extension.m_rasterBucketsBlockSumsBuffer)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesRasterWorkPrefixOffsetsPass1"),
-            std::make_shared<RasterBucketBlockOffsetsPass>(
-                extension.m_rasterBucketsOffsetsBuffer,
-                extension.m_rasterBucketsBlockSumsBuffer,
-                extension.m_rasterBucketsScannedBlockSumsBuffer,
-                extension.m_rasterBucketsTotalCountBuffer)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesRasterWorkCompactAndArgsPass1"),
-            std::make_shared<ReyesRasterWorkCompactAndArgsPass>(
-                extension.m_reyesRasterWorkBuffer,
-                extension.m_reyesRasterWorkCounterBuffer,
-                extension.m_histogramIndirectCommandReyes,
-                extension.m_rasterBucketsHistogramBufferSw,
-                extension.m_rasterBucketsOffsetsBuffer,
-                extension.m_rasterBucketsWriteCursorBufferSw,
-                extension.m_reyesCompactedRasterWorkIndicesBuffer,
-                extension.m_reyesPackedRasterWorkGroupsBuffer,
-                extension.m_rasterBucketsIndirectArgsBufferPageJob)));
-
-    const std::string reyesLargeShadowRasterPassName = MakeVariantPassName(traits, "ReyesLargeVirtualShadowHardwareRasterPass1");
-    auto reyesLargeShadowRasterPassDesc = org::ExternalPassDesc::Render(
-        reyesLargeShadowRasterPassName,
-        std::make_shared<ReyesVirtualShadowHardwareRasterPass>(
-            extension.m_swPageJobVisibleClustersBuffer,
-            extension.m_rasterBucketsHistogramBufferSw,
-            extension.m_rasterBucketsIndirectArgsBufferPageJob,
-            extension.m_reyesPackedRasterWorkGroupsBuffer,
-            extension.m_reyesCompactedRasterWorkIndicesBuffer,
-            extension.m_reyesRasterWorkBuffer,
-            extension.m_reyesDiceQueueBuffer,
-            extension.m_reyesTessTableConfigsBuffer,
-            extension.m_reyesTessTableVerticesBuffer,
-            extension.m_reyesTessTableTrianglesBuffer,
-            extension.m_shadowPageTableTexture,
-            extension.m_shadowStaticPhysicalPagesTexture,
-            extension.m_shadowPhysicalPagesTexture,
-            extension.m_shadowClipmapInfoBuffer,
-            extension.m_reyesTelemetryBufferPhase1,
-            slabGroup));
-    reyesLargeShadowRasterPassDesc.GeometryPass();
-    outPasses.push_back(std::move(reyesLargeShadowRasterPassDesc));
-
-    return reyesLargeShadowRasterPassName;
-}
-
-std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
-    CLodExtension& extension,
-    const CLodVariantTraits& traits,
-    const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::ExternalPassDesc>& outPasses)
-{
-    if (traits.rasterOutputKind != CLodRasterOutputKind::VirtualShadow) {
-        return {};
-    }
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeQueueResetPass2"),
-            std::make_shared<ReyesQueueResetPass>(
-                extension.m_reyesFullClusterOutputsCounterBuffer,
-                extension.m_reyesOwnedClustersCounterBuffer,
-                std::vector<std::shared_ptr<org::Buffer>>{ extension.m_reyesSplitQueueCounterBufferA, extension.m_reyesSplitQueueCounterBufferB },
-                std::vector<std::shared_ptr<org::Buffer>>{ extension.m_reyesSplitQueueOverflowBufferA, extension.m_reyesSplitQueueOverflowBufferB },
-                extension.m_reyesDiceQueueCounterBuffer,
-                extension.m_reyesDiceQueueOverflowBuffer,
-                nullptr,
-                extension.m_reyesTelemetryBufferPhase2,
-                2u,
-                true)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeCreateClassifyDispatchArgsPass2"),
-            std::make_shared<ReyesCreateDispatchArgsPass>(
-                extension.m_swPageJobVisibleClustersCounterBufferPhase2,
-                extension.m_reyesClassifyIndirectArgsBufferPhase2)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeClassifyPass2"),
-            std::make_shared<ReyesClassifyPass>(
-                extension.m_swPageJobVisibleClustersBufferPhase2,
-                extension.m_swPageJobVisibleClustersCounterBufferPhase2,
-                nullptr,
-                extension.m_reyesFullClusterOutputsBuffer,
-                extension.m_reyesFullClusterOutputsCounterBuffer,
-                extension.m_reyesFullClusterOutputCapacity,
-                extension.m_reyesOwnedClustersBuffer,
-                extension.m_reyesOwnedClustersCounterBuffer,
-                extension.m_reyesOwnedClusterCapacity,
-                nullptr,
-                extension.m_reyesClassifyIndirectArgsBufferPhase2,
-                extension.m_reyesTelemetryBufferPhase2,
-                2u,
-                ReyesClassifyMode::ShadowCoarseLargeOnly)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeCreateSeedDispatchArgsPass2"),
-            std::make_shared<ReyesCreateDispatchArgsPass>(
-                extension.m_reyesOwnedClustersCounterBuffer,
-                extension.m_reyesSplitIndirectArgsBufferPhase2)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeSeedPatchesPass2"),
-            std::make_shared<ReyesSeedPatchesPass>(
-                extension.m_swPageJobVisibleClustersBufferPhase2,
-                extension.m_reyesOwnedClustersBuffer,
-                extension.m_reyesOwnedClustersCounterBuffer,
-                extension.m_reyesSplitQueueBufferA,
-                extension.m_reyesSplitQueueCounterBufferA,
-                extension.m_reyesSplitQueueOverflowBufferA,
-                extension.m_reyesSplitIndirectArgsBufferPhase2,
-                slabGroup,
-                extension.m_reyesSplitQueueCapacity,
-                2u)));
-
-    const std::shared_ptr<org::Buffer> reyesLargeSplitBuffersPhase2[] = { extension.m_reyesSplitQueueBufferA, extension.m_reyesSplitQueueBufferB };
-    const std::shared_ptr<org::Buffer> reyesLargeSplitCountersPhase2[] = { extension.m_reyesSplitQueueCounterBufferA, extension.m_reyesSplitQueueCounterBufferB };
-    const std::shared_ptr<org::Buffer> reyesLargeSplitOverflowsPhase2[] = { extension.m_reyesSplitQueueOverflowBufferA, extension.m_reyesSplitQueueOverflowBufferB };
-    for (uint32_t splitPassIndex = 0; splitPassIndex < CLodReyesMaxSplitPassCount; ++splitPassIndex) {
-        const uint32_t inputIndex = splitPassIndex & 1u;
-        const uint32_t outputIndex = inputIndex ^ 1u;
-
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "ReyesLargeCreateSplitDispatchArgsPass2_" + std::to_string(splitPassIndex)),
-                std::make_shared<ReyesCreateDispatchArgsPass>(
-                    reyesLargeSplitCountersPhase2[inputIndex],
-                    extension.m_reyesSplitIndirectArgsBufferPhase2)));
-
-        outPasses.push_back(
-            org::ExternalPassDesc::Compute(
-                MakeVariantPassName(traits, "ReyesLargeSplitPass2_" + std::to_string(splitPassIndex)),
-                std::make_shared<ReyesSplitPass>(
-                    extension.m_swPageJobVisibleClustersBufferPhase2,
-                    reyesLargeSplitBuffersPhase2[inputIndex],
-                    reyesLargeSplitCountersPhase2[inputIndex],
-                    reyesLargeSplitBuffersPhase2[outputIndex],
-                    reyesLargeSplitCountersPhase2[outputIndex],
-                    reyesLargeSplitOverflowsPhase2[outputIndex],
-                    extension.m_reyesDiceQueueBuffer,
-                    extension.m_reyesDiceQueueCounterBuffer,
-                    extension.m_reyesDiceQueueOverflowBuffer,
-                    extension.m_reyesTessTableConfigsBuffer,
-                    extension.m_reyesTessTableVerticesBuffer,
-                    extension.m_reyesTessTableTrianglesBuffer,
-                    extension.m_shadowClipmapInfoBuffer,
-                    extension.m_shadowDirtyPageHierarchyTexture,
-                    extension.m_shadowNonRasterablePageHierarchyTexture,
-                    extension.m_reyesSplitIndirectArgsBufferPhase2,
-                    extension.m_reyesTelemetryBufferPhase2,
-                    extension.m_reyesSplitQueueCapacity,
-                    splitPassIndex,
-                    CLodReyesMaxSplitPassCount,
-                    2u)));
-    }
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeCreateDiceDispatchArgsPass2"),
-            std::make_shared<ReyesCreateDispatchArgsPass>(
-                extension.m_reyesDiceQueueCounterBuffer,
-                extension.m_reyesDiceIndirectArgsBufferPhase2)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeDicePass2"),
-            std::make_shared<ReyesDicePass>(
-                extension.m_reyesDiceQueueBuffer,
-                extension.m_reyesDiceQueueCounterBuffer,
-                nullptr,
-                extension.m_reyesTessTableConfigsBuffer,
-                extension.m_reyesDiceIndirectArgsBufferPhase2,
-                extension.m_reyesTelemetryBufferPhase2,
-                extension.m_reyesDiceQueueCapacity,
-                2u)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeBuildRasterWorkPass2"),
-            std::make_shared<ReyesBuildRasterWorkPass>(
-                extension.m_reyesDiceQueueBuffer,
-                extension.m_reyesDiceQueueCounterBuffer,
-                nullptr,
-                extension.m_reyesTessTableConfigsBuffer,
-                extension.m_reyesRasterWorkBufferPhase2,
-                extension.m_reyesRasterWorkCounterBufferPhase2,
-                extension.m_reyesDiceIndirectArgsBufferPhase2,
-                extension.m_reyesTelemetryBufferPhase2,
-                extension.m_reyesRasterWorkCapacity)));
-
-    outPasses.push_back(
-        org::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, "ReyesLargeCreateRasterWorkDispatchArgsPass2"),
-            std::make_shared<ReyesCreateDispatchArgsPass>(
-                extension.m_reyesRasterWorkCounterBufferPhase2,
-                extension.m_reyesRasterWorkIndirectArgsBufferPhase2)));
-
-    const std::string reyesLargeShadowRasterPassName = MakeVariantPassName(traits, "ReyesLargeVirtualShadowRasterPass2");
-    auto reyesLargeShadowRasterPassDesc = org::ExternalPassDesc::Compute(
-        reyesLargeShadowRasterPassName,
-        std::make_shared<ReyesVirtualShadowRasterizationPass>(
-            extension.m_swPageJobVisibleClustersBufferPhase2,
-            extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2,
-            extension.m_reyesDiceQueueBuffer,
-            extension.m_reyesDiceQueueCounterBuffer,
-            extension.m_reyesRasterWorkBufferPhase2,
-            extension.m_reyesRasterWorkCounterBufferPhase2,
-            extension.m_reyesTessTableConfigsBuffer,
-            extension.m_reyesTessTableVerticesBuffer,
-            extension.m_reyesTessTableTrianglesBuffer,
-            extension.m_reyesRasterWorkIndirectArgsBufferPhase2,
-            extension.m_reyesTelemetryBufferPhase2,
-            extension.m_shadowPageTableTexture,
-            extension.m_shadowStaticPhysicalPagesTexture,
-            extension.m_shadowPhysicalPagesTexture,
-            extension.m_shadowClipmapInfoBuffer,
-            slabGroup,
-            MakeVariantResourceName(traits, "Reyes Virtual Shadow View Raster Info Buffer Phase2 Large"),
-            2u));
-    reyesLargeShadowRasterPassDesc.At(org::ExternalInsertPoint::Before("MaterialHistogramPass"));
-    outPasses.push_back(std::move(reyesLargeShadowRasterPassDesc));
-
-    return reyesLargeShadowRasterPassName;
 }
 
 std::shared_ptr<org::Resource> CLodShadowVariant::ProvideResource(CLodExtension& extension, org::ResourceIdentifier const& key)
@@ -1418,7 +645,6 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
     const flecs::entity typeEntity = traits.ensureTypeEntity(ecsWorld);
     const uint32_t maxShadowPhysicalPageCount = extension.m_shadowConfiguredMaxPhysicalPageCount;
-    const uint32_t pageJobRecordCapacity = extension.m_shadowConfiguredPageJobRecordCapacity;
     const uint32_t vsmExpandedRecordCapacity = extension.m_shadowConfiguredExpandedRecordCapacity;
     const uint32_t shadowAtlasPagesWide = CLodVirtualShadowPhysicalAtlasPagesWideFromPhysicalPageCount(
         maxShadowPhysicalPageCount,
@@ -1436,7 +662,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         shadowAtlasWidth * shadowAtlasHeight * sizeof(uint32_t) * 2u;
 
     spdlog::info(
-        "{}Shadow sizing: backingResolution={} physicalAtlas={}x{} pages={} texture={}x{} atlasLayers=2 combinedAtlasMiB={:.2f} computeClusters={} expandedRecords={} pageJobRecords={} pageJobMaxPages={}",
+        "{}Shadow sizing: backingResolution={} physicalAtlas={}x{} pages={} texture={}x{} atlasLayers=2 combinedAtlasMiB={:.2f} computeClusters={} expandedRecords={}",
         traits.resourcePrefix,
         extension.m_shadowConfiguredBackingResolution,
         shadowAtlasPagesWide,
@@ -1446,9 +672,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         shadowAtlasHeight,
         static_cast<double>(combinedAtlasBytes) / (1024.0 * 1024.0),
         extension.m_shadowConfiguredComputeClusterCapacity,
-        vsmExpandedRecordCapacity,
-        pageJobRecordCapacity,
-        extension.m_shadowConfiguredPageJobMaxPages);
+        vsmExpandedRecordCapacity);
 
     auto persistent = extension.m_options.persistentState;
     if (persistent && persistent->directionalVsm.pageTable)
@@ -1796,13 +1020,6 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         .add<CLodVirtualShadowDirtyHierarchyTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_shadowNonRasterablePageHierarchyTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateVirtualShadowDirtyHierarchyDescription());
-    extension.m_shadowNonRasterablePageHierarchyTexture->SetName(MakeVariantResourceName(traits, "Virtual Shadow Non-Rasterable Hierarchy"));
-    extension.m_shadowNonRasterablePageHierarchyTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowNonRasterablePageHierarchyTexture })
-        .add<CLodVirtualShadowNonRasterableHierarchyTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
-
     extension.m_shadowClipmapInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowMaxSupportedClipmapCount,
         sizeof(CLodVirtualShadowClipmapInfo),
@@ -1881,72 +1098,6 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         .add<CLodVirtualShadowStatsTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_swPageJobVisibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(extension.m_maxVisibleClusters * PackedVisibleClusterStrideBytes, true, false, true);
-    extension.m_swPageJobVisibleClustersBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Visible Clusters Buffer"));
-
-    extension.m_swPageJobVisibleClusterTransformIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        extension.m_maxVisibleClusters,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        true);
-    extension.m_swPageJobVisibleClusterTransformIndicesBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Visible Cluster Transform Indices Buffer"));
-
-    extension.m_swPageJobVisibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    extension.m_swPageJobVisibleClustersCounterBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Visible Clusters Counter Buffer"));
-
-    extension.m_swPageJobVisibleClustersBufferPhase2 = extension.m_swPageJobVisibleClustersBuffer;
-    extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2 = extension.m_swPageJobVisibleClusterTransformIndicesBuffer;
-    extension.m_swPageJobVisibleClustersCounterBufferPhase2 = extension.m_swPageJobVisibleClustersCounterBuffer;
-
-    extension.m_swPageJobRecordsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        pageJobRecordCapacity,
-        sizeof(CLodSoftwareRasterPageJobRecord),
-        true,
-        false,
-        false,
-        true);
-    extension.m_swPageJobRecordsBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Records Buffer"));
-    extension.m_swPageJobRecordsBufferSkinned = CreateAliasedUnmaterializedStructuredBuffer(
-        pageJobRecordCapacity,
-        sizeof(CLodSoftwareRasterPageJobRecord),
-        true,
-        false,
-        false,
-        true);
-    extension.m_swPageJobRecordsBufferSkinned->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Records Buffer Skinned"));
-
-    extension.m_swPageJobRecordsBufferPhase2 = extension.m_swPageJobRecordsBuffer;
-    extension.m_swPageJobRecordsBufferPhase2Skinned = extension.m_swPageJobRecordsBufferSkinned;
-
-    extension.m_swPageJobCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    extension.m_swPageJobCountBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Count Buffer"));
-    extension.m_swPageJobCountBufferSkinned = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    extension.m_swPageJobCountBufferSkinned->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Count Buffer Skinned"));
-
-    extension.m_swPageJobCountBufferPhase2 = extension.m_swPageJobCountBuffer;
-    extension.m_swPageJobCountBufferPhase2Skinned = extension.m_swPageJobCountBufferSkinned;
-
-    extension.m_swPageJobIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(RasterizeClustersCommand), true, false, false, false);
-    extension.m_swPageJobIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Indirect Args Buffer Phase1"));
-    extension.m_swPageJobIndirectArgsBufferSkinned = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(RasterizeClustersCommand), true, false, false, false);
-    extension.m_swPageJobIndirectArgsBufferSkinned->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Indirect Args Buffer Phase1 Skinned"));
-
-    extension.m_swPageJobIndirectArgsBufferPhase2 = extension.m_swPageJobIndirectArgsBuffer;
-    extension.m_swPageJobIndirectArgsBufferPhase2Skinned = extension.m_swPageJobIndirectArgsBufferSkinned;
-
-    extension.m_swPageJobClusterTagsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        extension.m_maxVisibleClusters,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    extension.m_swPageJobClusterTagsBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Cluster Tags Buffer"));
-
-    extension.m_swPageJobClusterTagsBufferPhase2 = extension.m_swPageJobClusterTagsBuffer;
-
     extension.m_vsmExpandedVisibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(
         static_cast<uint64_t>(vsmExpandedRecordCapacity) * PackedVisibleClusterStrideBytes,
         true,
@@ -1984,7 +1135,6 @@ void CLodShadowVariant::TagResourceUsages(CLodExtension& extension)
     tagTextureUsage(extension.m_shadowPhysicalPagesTexture, "Cluster LOD virtual shadow maps");
     tagTextureUsage(extension.m_shadowStaticPhysicalPagesTexture, "Cluster LOD virtual shadow maps");
     tagTextureUsage(extension.m_shadowDirtyPageHierarchyTexture, "Cluster LOD virtual shadow maps");
-    tagTextureUsage(extension.m_shadowNonRasterablePageHierarchyTexture, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowPageMetadataBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowInvalidationInputsBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowInvalidationCountBuffer, "Cluster LOD virtual shadow maps");
@@ -2024,26 +1174,6 @@ void CLodShadowVariant::TagResourceUsages(CLodExtension& extension)
     tagBufferUsage(extension.m_shadowDirectionalPageViewInfoBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowRuntimeStateBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowStatsBuffer, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobVisibleClustersBuffer, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobVisibleClusterTransformIndicesBuffer, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobVisibleClustersCounterBuffer, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobVisibleClustersBufferPhase2, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobVisibleClustersCounterBufferPhase2, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobRecordsBuffer, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobRecordsBufferSkinned, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobCountBuffer, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobCountBufferSkinned, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobRecordsBufferPhase2, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobRecordsBufferPhase2Skinned, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobCountBufferPhase2, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobCountBufferPhase2Skinned, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobIndirectArgsBuffer, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobIndirectArgsBufferSkinned, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobIndirectArgsBufferPhase2, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobIndirectArgsBufferPhase2Skinned, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobClusterTagsBuffer, "Cluster LOD virtual shadow maps");
-    tagBufferUsage(extension.m_swPageJobClusterTagsBufferPhase2, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_vsmExpandedVisibleClustersBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_vsmExpandedVisibleClustersBufferSw, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw, "Cluster LOD virtual shadow maps");
@@ -2068,27 +1198,6 @@ void CLodShadowVariant::ReleaseResourceBackings(CLodExtension& extension)
     releaseTextureBacking(extension.m_shadowPhysicalPagesTexture);
     releaseTextureBacking(extension.m_shadowStaticPhysicalPagesTexture);
     releaseTextureBacking(extension.m_shadowDirtyPageHierarchyTexture);
-    releaseTextureBacking(extension.m_shadowNonRasterablePageHierarchyTexture);
-    releaseBufferBacking(extension.m_swPageJobVisibleClustersBuffer);
-    releaseBufferBacking(extension.m_swPageJobVisibleClusterTransformIndicesBuffer);
-    releaseBufferBacking(extension.m_swPageJobVisibleClustersCounterBuffer);
-    releaseBufferBacking(extension.m_swPageJobVisibleClustersBufferPhase2);
-    releaseBufferBacking(extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2);
-    releaseBufferBacking(extension.m_swPageJobVisibleClustersCounterBufferPhase2);
-    releaseBufferBacking(extension.m_swPageJobRecordsBuffer);
-    releaseBufferBacking(extension.m_swPageJobRecordsBufferSkinned);
-    releaseBufferBacking(extension.m_swPageJobCountBuffer);
-    releaseBufferBacking(extension.m_swPageJobCountBufferSkinned);
-    releaseBufferBacking(extension.m_swPageJobRecordsBufferPhase2);
-    releaseBufferBacking(extension.m_swPageJobRecordsBufferPhase2Skinned);
-    releaseBufferBacking(extension.m_swPageJobCountBufferPhase2);
-    releaseBufferBacking(extension.m_swPageJobCountBufferPhase2Skinned);
-    releaseBufferBacking(extension.m_swPageJobIndirectArgsBuffer);
-    releaseBufferBacking(extension.m_swPageJobIndirectArgsBufferSkinned);
-    releaseBufferBacking(extension.m_swPageJobIndirectArgsBufferPhase2);
-    releaseBufferBacking(extension.m_swPageJobIndirectArgsBufferPhase2Skinned);
-    releaseBufferBacking(extension.m_swPageJobClusterTagsBuffer);
-    releaseBufferBacking(extension.m_swPageJobClusterTagsBufferPhase2);
     releaseBufferBacking(extension.m_vsmExpandedVisibleClustersBuffer);
     releaseBufferBacking(extension.m_vsmExpandedVisibleClustersBufferSw);
     releaseBufferBacking(extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw);
@@ -2104,8 +1213,6 @@ void CLodShadowVariant::RefreshResourcesForCurrentSettings(CLodExtension& extens
 
     const uint32_t previousBackingResolution = extension.m_shadowConfiguredBackingResolution;
     const uint32_t previousMaxPhysicalPageCount = extension.m_shadowConfiguredMaxPhysicalPageCount;
-    const uint32_t previousPageJobMaxPages = extension.m_shadowConfiguredPageJobMaxPages;
-    const uint32_t previousPageJobRecordCapacity = extension.m_shadowConfiguredPageJobRecordCapacity;
     const uint32_t previousComputeClusterCapacity = extension.m_shadowConfiguredComputeClusterCapacity;
     const uint32_t previousVisibleClusterCapacity = extension.m_visibleClusterCapacity;
 
@@ -2114,8 +1221,6 @@ void CLodShadowVariant::RefreshResourcesForCurrentSettings(CLodExtension& extens
     if (extension.m_shadowPhysicalPagesTexture &&
         previousBackingResolution == extension.m_shadowConfiguredBackingResolution &&
         previousMaxPhysicalPageCount == extension.m_shadowConfiguredMaxPhysicalPageCount &&
-        previousPageJobMaxPages == extension.m_shadowConfiguredPageJobMaxPages &&
-        previousPageJobRecordCapacity == extension.m_shadowConfiguredPageJobRecordCapacity &&
         previousComputeClusterCapacity == extension.m_shadowConfiguredComputeClusterCapacity &&
         previousVisibleClusterCapacity == GetVisibleClusterCapacity(extension)) {
         return;

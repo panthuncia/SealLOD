@@ -1884,22 +1884,12 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                                 CLodDisableVirtualShadowPageCachingSettingName)(
                                 request->document.at("cache_disabled").get<bool>());
                         }
-                        if (request->document.contains("block_soft_cap")) {
-                            br::extensions::MakeSettingSetter<uint32_t>(
-                                CLodPageJobMaxPagesPerClusterSettingName)(
-                                request->document.at("block_soft_cap").get<uint32_t>());
-                        }
                         if (request->document.contains("sw_raster_threshold")) {
                             br::extensions::MakeSettingSetter<uint32_t>(
                                 CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)(
                                 std::min(
                                     request->document.at("sw_raster_threshold").get<uint32_t>(),
                                     0xFFFFu));
-                        }
-                        if (request->document.contains("page_job_force_all")) {
-                            br::extensions::MakeSettingSetter<bool>(
-                                CLodPageJobForceAllSettingName)(
-                                request->document.at("page_job_force_all").get<bool>());
                         }
                         if (request->document.contains("dynamic_wind_bounds_cache_enabled")) {
                             br::extensions::MakeSettingSetter<bool>(CLodDynamicWindBoundsCacheEnabledSettingName)(
@@ -1922,10 +1912,9 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                             const CLodVSMRasterMode rasterMode =
                                 mode == "hardware" ? CLodVSMRasterMode::HardwareOnly :
                                 mode == "standard" ? CLodVSMRasterMode::Standard :
-                                mode == "page_job" ? CLodVSMRasterMode::PageJob :
                                 mode == "reyes" ? CLodVSMRasterMode::Reyes :
                                 throw std::runtime_error(
-                                    "raster_mode must be 'hardware', 'standard', 'page_job', or 'reyes'");
+                                    "raster_mode must be 'hardware', 'standard', or 'reyes'");
                             br::extensions::MakeSettingSetter<CLodVSMRasterMode>(
                                 CLodVSMRasterModeSettingName)(rasterMode);
                         }
@@ -1936,12 +1925,8 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)();
                     response["cache_disabled"] = br::extensions::MakeSettingGetter<bool>(
                         CLodDisableVirtualShadowPageCachingSettingName)();
-                    response["block_soft_cap"] = br::extensions::MakeSettingGetter<uint32_t>(
-                        CLodPageJobMaxPagesPerClusterSettingName)();
                     response["sw_raster_threshold"] = br::extensions::MakeSettingGetter<uint32_t>(
                         CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)();
-                    response["page_job_force_all"] = br::extensions::MakeSettingGetter<bool>(
-                        CLodPageJobForceAllSettingName)();
 					response["dynamic_wind_inner_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
 					response["dynamic_wind_outer_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
 					response["skinned_shadow_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
@@ -1974,7 +1959,6 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         CLodVSMRasterModeSettingName)();
                     response["raster_mode"] =
                         rasterMode == CLodVSMRasterMode::HardwareOnly ? "hardware" :
-                        rasterMode == CLodVSMRasterMode::PageJob ? "page_job" :
                         rasterMode == CLodVSMRasterMode::Reyes ? "reyes" : "standard";
                 } else if (command == "clod.workgraph.reload") {
                     if (!m_finished) throw std::runtime_error("cannot reload CLOD work graphs while profiling is active");

@@ -13,7 +13,6 @@ static const uint REYES_CLASSIFY_GROUP_SIZE = 64u;
 static const uint REYES_BARYCENTRIC_COORD_MAX = 0xFFFFu;
 static const uint REYES_CLASSIFY_MODE_DEFAULT = 0u;
 static const uint REYES_CLASSIFY_MODE_SHADOW_FINE_DISPLACED_ONLY = 1u;
-static const uint REYES_CLASSIFY_MODE_SHADOW_COARSE_LARGE_ONLY = 2u;
 
 bool TryAppendBudgetedEntry(RWStructuredBuffer<uint> counterBuffer, uint capacity, out uint dst)
 {
@@ -143,11 +142,6 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     {
         routeKind = CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM;
         emitOwnedCluster = hasEffectiveReyesDisplacement;
-    }
-    else if (classifyMode == REYES_CLASSIFY_MODE_SHADOW_COARSE_LARGE_ONLY)
-    {
-        routeKind = CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM;
-        emitOwnedCluster = !hasEffectiveReyesDisplacement;
     }
 
     const uint commonFlags =

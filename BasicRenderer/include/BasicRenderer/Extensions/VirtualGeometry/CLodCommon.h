@@ -29,15 +29,8 @@ inline constexpr const char* CLodWorkGraphReyesVisibilitySettingName = "clodWork
 inline constexpr const char* CLodWorkGraphRigidOnlySettingName = "clodWorkGraphRigidOnly";
 inline constexpr const char* CLodReyesResourceBudgetBytesSettingName = "clodReyesResourceBudgetBytes";
 inline constexpr const char* CLodDisableVirtualShadowPageCachingSettingName = "clodDisableVirtualShadowPageCaching";
-inline constexpr const char* CLodEnablePageJobVSMSettingName = "clodEnablePageJobVSM";
-inline constexpr const char* CLodReyesShadowCoarseTargetPagesPerTriangleSettingName = "clodReyesShadowCoarseTargetPagesPerTriangle";
-inline constexpr const char* CLodPageJobDiameterThresholdSettingName = "clodPageJobDiameterThreshold";
 inline constexpr const char* CLodSoftwareRasterDiameterThresholdSettingName = "clodSoftwareRasterDiameterThreshold";
 inline constexpr const char* CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName = "clodVirtualShadowSoftwareRasterDiameterThreshold";
-inline constexpr const char* CLodPageJobSparseRatioSettingName = "clodPageJobSparseRatio";
-inline constexpr const char* CLodPageJobMaxPagesPerClusterSettingName = "clodPageJobMaxPagesPerCluster";
-inline constexpr const char* CLodPageJobRecordCapacitySettingName = "clodPageJobRecordCapacity";
-inline constexpr const char* CLodPageJobForceAllSettingName = "clodPageJobForceAll";
 inline constexpr const char* CLodForceTraversalDepthRootSettingName = "clodForceTraversalDepthRoot";
 inline constexpr const char* CLodVisibleClusterCapacitySettingName = "clodVisibleClusterCapacity";
 inline constexpr const char* CLodPureComputePhase2ExpansionFactorSettingName = "clodPureComputePhase2ExpansionFactor";
@@ -55,7 +48,6 @@ inline constexpr uint32_t CLodPureComputeReplayExpansionFactorDefault = 1u;
 inline constexpr uint32_t CLodPureComputePhase2ExpansionFactorMin = 1u;
 inline constexpr uint32_t CLodPureComputePhase2ExpansionFactorMax = 64u;
 inline constexpr uint32_t CLodForceTraversalDepthRootDisabled = 0xFFFFFFFFu;
-inline constexpr const char* CLodWorkGraphComputePageJobDescriptorBufferId = "CLod::WorkGraphComputePageJobDescriptors";
 inline constexpr const char* CLodLevelInfosBufferId = "Builtin::CLod::LevelInfos";
 inline constexpr const char* CLodDirectionalVirtualShadowMaxBackingResolutionSettingName = "clodDirectionalVirtualShadowMaxBackingResolution";
 inline constexpr float CLodReyesTerrainNormalBlendDefault = 0.35f;
@@ -151,9 +143,6 @@ inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceSampleCoun
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName = "clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName = "clodDirectionalVirtualShadowReceiverTraceUncertaintyScale";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName = "clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale";
-inline constexpr float CLodReyesShadowCoarseTargetPagesPerTriangleDefault = 10.0f;
-inline constexpr float CLodReyesShadowCoarseTargetPagesPerTriangleMin = 0.25f;
-inline constexpr float CLodReyesShadowCoarseTargetPagesPerTriangleMax = 64.0f;
 inline constexpr uint32_t CLodAVBOITDefaultSliceCount = 16u;
 inline constexpr uint32_t CLodAVBOITDefaultVirtualSliceCount = 32u;
 inline constexpr uint32_t CLodAVBOITDepthWarpLUTResolution = 8192u;
@@ -194,25 +183,6 @@ struct RasterizeClustersCommand
     unsigned int rasterBucketID;
     unsigned int dispatchX, dispatchY, dispatchZ;
 };
-
-struct CLodSoftwareRasterPageJobRecord
-{
-    uint32_t sortedClusterIndex = 0u;
-    uint32_t physicalAndPageCoords = 0u;
-    uint32_t wrappedCoordsLayerAndFlags = 0u;
-};
-
-static_assert(sizeof(CLodSoftwareRasterPageJobRecord) == 12u, "CLodSoftwareRasterPageJobRecord size must match HLSL");
-
-struct CLodWorkGraphComputePageJobDescriptors
-{
-    uint32_t visibleClustersUAVDescriptorIndex = 0xFFFFFFFFu;
-    uint32_t visibleClustersCounterUAVDescriptorIndex = 0xFFFFFFFFu;
-    uint32_t visibleClusterTransformIndicesUAVDescriptorIndex = 0xFFFFFFFFu;
-    uint32_t pad1 = 0u;
-};
-
-static_assert(sizeof(CLodWorkGraphComputePageJobDescriptors) == 16u, "CLodWorkGraphComputePageJobDescriptors size must match HLSL");
 
 inline constexpr const char* CLodVoxelRasterQueueDescriptorBufferId = "CLod::VoxelRasterQueueDescriptors";
 
@@ -423,7 +393,6 @@ inline constexpr uint32_t CLodVirtualShadowMaxMarkTileCount =
     CLodVirtualShadowMaxMarkTileGridDimension * CLodVirtualShadowMaxMarkTileGridDimension;
 inline constexpr uint32_t CLodVirtualShadowMaxAllocationRequests = 1u << 16;
 inline constexpr uint32_t CLodVirtualShadowMaxInvalidationInputs = 1u << 16;
-inline constexpr uint32_t CLodPageJobDefaultRecordCapacity = 1u << 20;
 inline constexpr uint32_t CLodVirtualShadowMovedInstanceBitCapacity = 1u << 20;
 inline constexpr uint32_t CLodVirtualShadowPredictiveCandidateCapacity = 1u << 16;
 inline constexpr uint32_t CLodVirtualShadowPredictiveRawPageCapacity = 1u << 20;
@@ -1023,18 +992,6 @@ struct CLodVirtualShadowStats
     uint32_t blockExpandedRequestedRecordCount = 0u;
     uint32_t blockExpandedCommittedRecordCount = 0u;
     uint32_t blockExpandedDroppedRecordCount = 0u;
-    uint32_t pageJobRequestedRecordCount = 0u;
-    uint32_t pageJobCommittedRecordCount = 0u;
-    uint32_t pageJobDroppedRecordCount = 0u;
-    uint32_t pageJobDoubleSidedRecordCount = 0u;
-    uint32_t pageJobRasterJobCount = 0u;
-    uint32_t pageJobRasterTriangleCount = 0u;
-    uint32_t pageJobRasterDepthRejectedTriangleCount = 0u;
-    uint32_t pageJobRasterBackfaceRejectedTriangleCount = 0u;
-    uint32_t pageJobRasterCoveredPixelCount = 0u;
-    uint32_t pageJobRasterPageWriteCount = 0u;
-    uint32_t pageJobRasterClusterBoundsOverlapCount = 0u;
-    uint32_t pageJobRasterBboxRejectedTriangleCount = 0u;
     uint32_t setupWrappedClearedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t setupStaleDirtyClearedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t markResidentCleanHits[CLodVirtualShadowMaxSupportedClipmapCount] = {};
@@ -1056,24 +1013,17 @@ struct CLodVirtualShadowStats
 };
 
 static_assert(
-    sizeof(CLodVirtualShadowStats) == (67u * sizeof(uint32_t)) + (18u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
+    sizeof(CLodVirtualShadowStats) == (55u * sizeof(uint32_t)) + (18u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
     "CLodVirtualShadowStats size must match HLSL");
 
 
 inline constexpr uint32_t CLodReyesMaxSplitPassCount = 4u;
 inline constexpr uint32_t CLodReyesMaxVisibilityMicroTrianglesPerPatch = 128u;
 inline constexpr uint32_t CLodReyesRasterBatchMicroTriangleCount = 16u;
-inline constexpr uint32_t CLodReyesHardwareRasterPackedEntryCount = 5u;
-inline constexpr uint32_t CLodReyesHardwareRasterMaxPackedMicroTriangles =
-    CLodReyesHardwareRasterPackedEntryCount * CLodReyesRasterBatchMicroTriangleCount;
 inline constexpr uint32_t CLodReyesMaxSourceTrianglesPerVisibleCluster = 128u;
 inline constexpr uint32_t CLodReyesMaxRasterWorkItemsPerPatch =
     (CLodReyesMaxVisibilityMicroTrianglesPerPatch + CLodReyesRasterBatchMicroTriangleCount - 1u) / CLodReyesRasterBatchMicroTriangleCount;
-static_assert(CLodReyesHardwareRasterMaxPackedMicroTriangles * 3u <= 256u, "Reyes packed hardware raster experiment exceeds mesh-shader vertex output budget");
 inline constexpr float CLodReyesShadowFineTargetTexelsPerMicroTriangle = 1.0f;
-inline constexpr float CLodReyesShadowCoarseTargetPageFraction = 0.1f;
-inline constexpr float CLodReyesShadowCoarseTargetTexelsPerTriangle =
-    CLodReyesShadowCoarseTargetPageFraction * static_cast<float>(CLodVirtualShadowPhysicalPageSize);
 
 constexpr uint32_t CLodReyesPatchVisibilityIndexBase(uint32_t maxVisibleClusters)
 {
@@ -1084,12 +1034,10 @@ enum class CLodReyesRouteKind : uint32_t
 {
     Visibility = 0u,
     FineMicropolyVSM = 1u,
-    CoarseHardwareVSM = 2u,
 };
 
 inline constexpr uint32_t CLodReyesFlagSkinned = 1u << 0;
 inline constexpr uint32_t CLodReyesFlagDisplacementEnabled = 1u << 1;
-inline constexpr uint32_t CLodReyesFlagCoarseDirtyOnlyLeaf = 1u << 2;
 inline constexpr uint32_t CLodReyesFlagRouteShift = 8u;
 inline constexpr uint32_t CLodReyesFlagRouteMask = 0x3u << CLodReyesFlagRouteShift;
 
@@ -1191,16 +1139,6 @@ struct CLodReyesRasterWorkEntry
 
 static_assert(sizeof(CLodReyesRasterWorkEntry) == 16u, "CLodReyesRasterWorkEntry size must match HLSL");
 
-struct CLodReyesPackedRasterWorkGroupEntry
-{
-    uint32_t firstCompactedRasterWorkIndex = 0u;
-    uint32_t rasterWorkEntryCount = 0u;
-    uint32_t requestedMicroTriangleCount = 0u;
-    uint32_t reserved = 0u;
-};
-
-static_assert(sizeof(CLodReyesPackedRasterWorkGroupEntry) == 16u, "CLodReyesPackedRasterWorkGroupEntry size must match HLSL");
-
 inline constexpr uint64_t CLodReyesSplitQueueBufferTestCapBytes = 256ull * 1024ull * 1024ull;
 inline constexpr uint32_t CLodReyesMaxSplitQueueEntriesForTesting =
     static_cast<uint32_t>(CLodReyesSplitQueueBufferTestCapBytes / sizeof(CLodReyesSplitQueueEntry));
@@ -1265,10 +1203,6 @@ struct CLodReyesTelemetry
     uint32_t dicedVertexEstimateCount = 0u;
     uint32_t patchRasterizedMicroTriangleCount = 0u;
     uint32_t rasterWorkEntryCount = 0u;
-    uint32_t hardwareRasterMeshGroupCount = 0u;
-    uint32_t hardwareRasterMicroTriangleCount = 0u;
-    uint32_t hardwareRasterRequestedMicroTriangleCount = 0u;
-    uint32_t hardwareRasterPackedWorkEntryCount = 0u;
     uint32_t splitInputCounts[CLodReyesMaxSplitPassCount] = {};
     uint32_t splitChildOutputCounts[CLodReyesMaxSplitPassCount] = {};
     uint32_t splitDiceOutputCounts[CLodReyesMaxSplitPassCount] = {};
@@ -1285,9 +1219,6 @@ struct CLodReyesTelemetry
     uint32_t splitFrustumCullCount = 0u;
     uint32_t splitShadowDirtyCullCount = 0u;
     uint32_t splitChildCullCount = 0u;
-    uint32_t splitCoarseOnlyDirtyEligibleCount = 0u;
-    uint32_t splitCoarseOnlyDirtyRejectedCount = 0u;
-    uint32_t splitCoarseOnlyDirtyLeafOutputCount = 0u;
     uint32_t splitConfigSelectionCounts[4] = {};
     uint32_t canonicalRotationCounts[3] = {};
     uint32_t siblingSharedEdgeCheckCount = 0u;

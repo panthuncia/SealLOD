@@ -39,8 +39,6 @@ bool ShaderVariantRequestService::RequestShaderVariant(const ShaderVariantReques
 			normalized.materialRasterFlags, normalized.wireframe, normalized.singleView) != nullptr;
 	case ShaderVariantKind::ClusterLODVirtualShadowRaster:
 		return psoManager.TryGetClusterLODVirtualShadowRasterPSO(normalized.materialRasterFlags, normalized.wireframe) != nullptr;
-	case ShaderVariantKind::ClusterLODVirtualShadowReyesRaster:
-		return psoManager.TryGetClusterLODVirtualShadowReyesRasterPSO(normalized.materialRasterFlags, normalized.wireframe) != nullptr;
 	case ShaderVariantKind::ClusterLODDeepVisibilityRaster:
 		return psoManager.TryGetClusterLODDeepVisibilityRasterPSO(normalized.materialRasterFlags, normalized.wireframe) != nullptr;
 	case ShaderVariantKind::ClusterLODAVBOITOccupancy:

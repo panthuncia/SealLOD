@@ -999,30 +999,6 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #endif
 }
 
-[numthreads(32, 1, 1)]
-void PureComputeClusterFrontierCS(const uint3 dispatchThreadID : SV_DispatchThreadID, const uint GI : SV_GroupIndex)
-{
-    StructuredBuffer<PureComputeClusterRunRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
-    StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
-
-    const uint inputCount = inputCountBuffer[0];
-    const uint index = dispatchThreadID.x;
-    const uint groupBase = dispatchThreadID.x - GI;
-    const uint activeCount = (groupBase < inputCount) ? min(32u, inputCount - groupBase) : 0u;
-    const bool hasBucket = (index < inputCount);
-    CLodClusterRunRecord bucket = (CLodClusterRunRecord)0;
-    if (hasBucket) {
-        bucket = UnpackPureComputeClusterRunRecord(inputFrontier[index]);
-    }
-
-    uint swPending = 0u;
-    uint pageJobPending = 0u;
-    uint reyesPending = 0u;
-    // ClusterCullBody uses wave ops inside its meshlet loop, so all lanes in the wave
-    // must execute the same iteration count even when bucket sizes differ.
-    ClusterCullBody(bucket, hasBucket, true, GI, activeCount, 64u, swPending, pageJobPending, reyesPending);
-}
-
 groupshared CLodClusterRunRecord gs_phase2Records[64];
 groupshared uint gs_phase2ActiveClusterCount;
 
@@ -1091,8 +1067,7 @@ void PureComputeDenseClusterWorkCS(
         PackClusterIndexAndCount(UnpackClusterFirstIndex(inputBucket.clusterIndexAndCount) + laneInRecord, 1u);
 
     uint swPending = 0u;
-    uint pageJobPending = 0u;
     uint reyesPending = 0u;
     const uint telemetryActiveClusterCount = telemetryEnabled ? gs_phase2ActiveClusterCount : 0u;
-    ClusterCullBody(bucket, true, false, GI, telemetryActiveClusterCount, 1u, swPending, pageJobPending, reyesPending);
+    ClusterCullBody(bucket, true, false, GI, telemetryActiveClusterCount, 1u, swPending, reyesPending);
 }

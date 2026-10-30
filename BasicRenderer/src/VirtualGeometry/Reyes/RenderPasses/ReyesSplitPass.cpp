@@ -29,7 +29,6 @@ ReyesSplitPass::ReyesSplitPass(
     std::shared_ptr<org::Buffer> tessTableTrianglesBuffer,
     std::shared_ptr<org::Buffer> shadowClipmapInfoBuffer,
     std::shared_ptr<org::PixelBuffer> shadowDirtyHierarchyTexture,
-    std::shared_ptr<org::PixelBuffer> shadowNonRasterableHierarchyTexture,
     std::shared_ptr<org::Buffer> indirectArgsBuffer,
     std::shared_ptr<org::Buffer> telemetryBuffer,
     uint32_t maxSplitQueueEntries,
@@ -54,7 +53,6 @@ ReyesSplitPass::ReyesSplitPass(
     , m_tessTableTrianglesBuffer(std::move(tessTableTrianglesBuffer))
     , m_shadowClipmapInfoBuffer(std::move(shadowClipmapInfoBuffer))
     , m_shadowDirtyHierarchyTexture(std::move(shadowDirtyHierarchyTexture))
-    , m_shadowNonRasterableHierarchyTexture(std::move(shadowNonRasterableHierarchyTexture))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_enableViewDepthOcclusion(enableViewDepthOcclusion)
@@ -145,16 +143,12 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
     if (m_shadowDirtyHierarchyTexture) {
         bindings.shadowDirty = builder->ShaderResource(m_shadowDirtyHierarchyTexture, org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}).View(); bindings.hasShadowDirty = true;
     }
-    if (m_shadowNonRasterableHierarchyTexture) {
-        bindings.shadowNonRasterable = builder->ShaderResource(m_shadowNonRasterableHierarchyTexture, org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}).View(); bindings.hasShadowNonRasterable = true;
-    }
 
     builder->ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.capacity = m_maxSplitQueueEntries;
     bindings.maxPassCount = m_maxSplitPassCount;
     bindings.phase = m_phaseIndex;
     bindings.useAabbOcclusion = SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)();
-    bindings.coarseTargetBits = as_uint(std::max(SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesShadowCoarseTargetPagesPerTriangleSettingName)(), CLodReyesShadowCoarseTargetPagesPerTriangleMin));
     return bindings;
 }
 
@@ -203,7 +197,6 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     c[CLOD_REYES_SPLIT_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
     c[CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = bindings.hasShadowClipmap ? srv(bindings.shadowClipmap) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty ? srv(bindings.shadowDirty) : 0xFFFFFFFFu;
-    c[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowNonRasterable ? srv(bindings.shadowNonRasterable) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.hasViewDepth
         ? bindings.viewDepthLayout.Publish(preparation, m_viewDepthPublisher, m_viewDepthTable.Rows())
         : 0xFFFFFFFFu;
@@ -213,7 +206,6 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     c[CLOD_REYES_SPLIT_ENABLE_PATCH_OCCLUSION] = bindings.hasViewDepth && bindings.hasReplayQueue && bindings.hasReplayCounter && bindings.hasReplayOverflow;
     c[CLOD_REYES_SPLIT_PHASE_INDEX] = bindings.phase;
     c[CLOD_REYES_SPLIT_USE_AABB_OCCLUSION] = bindings.useAabbOcclusion ? 1u : 0u;
-    c[UintRootConstant18] = bindings.coarseTargetBits;
     data.clear.constants = data.split.constants;
     return data;
 }

@@ -931,15 +931,11 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.composedPageCount,
                 static_cast<uint64_t>(stats.composedPageCount) * physicalPageTexelCount);
             spdlog::info(
-                "CLOD VSM raster expansion frame={}: swBlocks(requested={},committed={},dropped={}) pageJobs(requested={},committed={},dropped={},doubleSided={})",
+                "CLOD VSM raster expansion frame={}: swBlocks(requested={},committed={},dropped={})",
                 requestedFrame,
                 stats.blockExpandedRequestedRecordCount,
                 stats.blockExpandedCommittedRecordCount,
-                stats.blockExpandedDroppedRecordCount,
-                stats.pageJobRequestedRecordCount,
-                stats.pageJobCommittedRecordCount,
-                stats.pageJobDroppedRecordCount,
-                stats.pageJobDoubleSidedRecordCount);
+                stats.blockExpandedDroppedRecordCount);
             spdlog::info(
                 "CLOD VSM dirty sources frame={}: residentDirtyHits={} dirtyPages={} visitedDirty={} predictiveInvalidated={} currentBoundsInvalidated={} previousBoundsInvalidated={}",
                 requestedFrame,
@@ -949,21 +945,6 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 sumClipmapCounters(stats.predictiveInvalidatedPageTableEntries),
                 sumClipmapCounters(stats.invalidatedCurrentBoundsPageTableEntries),
                 sumClipmapCounters(stats.invalidatedPreviousBoundsPageTableEntries));
-            spdlog::info(
-                "CLOD VSM page-job raster frame={}: jobs={} clusterBoundsOverlap={} triangles(total={},depthRejected={},backfaceRejected={},bboxRejected={}) coveredPixels={} pageWrites={} emptyJobs={}",
-                requestedFrame,
-                stats.pageJobRasterJobCount,
-                stats.pageJobRasterClusterBoundsOverlapCount,
-                stats.pageJobRasterTriangleCount,
-                stats.pageJobRasterDepthRejectedTriangleCount,
-                stats.pageJobRasterBackfaceRejectedTriangleCount,
-                stats.pageJobRasterBboxRejectedTriangleCount,
-                stats.pageJobRasterCoveredPixelCount,
-                stats.pageJobRasterPageWriteCount,
-                stats.pageJobRasterJobCount > stats.pageJobRasterPageWriteCount
-                    ? stats.pageJobRasterJobCount - stats.pageJobRasterPageWriteCount
-                    : 0u);
-
             if (!normalBudgetValid || !upgradeBudgetValid || !renderedWithinAdmission ||
                 !admittedPagesCleared) {
                 spdlog::error(
@@ -1057,16 +1038,11 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites));
                 spdlog::info(
-                    "CLOD VSM routing frame={}: contributing={} hardware={} software={} pageJob={} pageJobReject(alpha={},reyes={},threshold={},disabled={})",
+                    "CLOD VSM routing frame={}: contributing={} hardware={} software={}",
                     requestedFrame,
                     counter(CLodWorkGraphCounterIndex::ClassifyContributing),
                     counter(CLodWorkGraphCounterIndex::ClassifyRoutedHW),
-                    counter(CLodWorkGraphCounterIndex::ClassifyRoutedSW),
-                    counter(CLodWorkGraphCounterIndex::ClassifyRoutedPageJob),
-                    counter(CLodWorkGraphCounterIndex::ClassifyPJRejectAlphaTested),
-                    counter(CLodWorkGraphCounterIndex::ClassifyPJRejectReyesDisplacement),
-                    counter(CLodWorkGraphCounterIndex::ClassifyPJRejectBelowThreshold),
-                    counter(CLodWorkGraphCounterIndex::ClassifyPJRejectDisabled));
+                    counter(CLodWorkGraphCounterIndex::ClassifyRoutedSW));
                 spdlog::info(
                     "CLOD VSM pixel attribution frame={}: hw(invocations={},pageRejected={},writes={}) sw(available=false)",
                     requestedFrame,

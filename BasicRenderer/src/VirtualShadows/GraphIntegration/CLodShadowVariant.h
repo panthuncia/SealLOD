@@ -32,32 +32,12 @@ public:
         const CLodVariantTraits& traits,
         std::vector<org::ExternalPassDesc>& outPasses,
         const std::string& afterPassName);
-    static std::string AppendPhase1PageJobRasterPasses(
-        CLodExtension& extension,
-        const CLodVariantTraits& traits,
-        const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::ExternalPassDesc>& outPasses);
-    static std::string AppendPhase2PageJobRasterPasses(
-        CLodExtension& extension,
-        const CLodVariantTraits& traits,
-        const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase1FineRasterPass(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
         std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase2FineRasterPass(
-        CLodExtension& extension,
-        const CLodVariantTraits& traits,
-        const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::ExternalPassDesc>& outPasses);
-    static std::string AppendPhase1ReyesLargeRasterPasses(
-        CLodExtension& extension,
-        const CLodVariantTraits& traits,
-        const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::ExternalPassDesc>& outPasses);
-    static std::string AppendPhase2ReyesLargeRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
@@ -71,12 +51,6 @@ public:
 
 private:
     static VirtualShadowCasterBuildContext MakeCasterContext(CLodExtension& extension);
-    static std::string AppendPageJobRasterPassesForPhase(
-        CLodExtension& extension,
-        const CLodVariantTraits& traits,
-        const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::ExternalPassDesc>& outPasses,
-        uint32_t phaseIndex);
     static std::string AppendFineRasterPassForPhase(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
