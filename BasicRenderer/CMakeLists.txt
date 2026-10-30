@@ -29,13 +29,18 @@ if(NOT TARGET BasicTelemetry::Core)
 endif()
 basicrenderer_resolve_dependencies("${BASICRENDERER_REPO_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/_deps")
 
-if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if(BASICRENDERER_MSVC_ABI AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     get_filename_component(_basicrenderer_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(_basicrenderer_clang_root_dir "${_basicrenderer_clang_bin_dir}" DIRECTORY)
     set(_basicrenderer_clang_libomp "${_basicrenderer_clang_root_dir}/lib/libomp.lib")
     if(EXISTS "${_basicrenderer_clang_libomp}")
-        set(OpenMP_C_FLAGS "/openmp" CACHE STRING "OpenMP C flags for clang-cl" FORCE)
-        set(OpenMP_CXX_FLAGS "/openmp" CACHE STRING "OpenMP CXX flags for clang-cl" FORCE)
+        if(MSVC)
+            set(_basicrenderer_openmp_flag "/openmp")
+        else()
+            set(_basicrenderer_openmp_flag "-fopenmp")
+        endif()
+        set(OpenMP_C_FLAGS "${_basicrenderer_openmp_flag}" CACHE STRING "OpenMP C flags for Clang" FORCE)
+        set(OpenMP_CXX_FLAGS "${_basicrenderer_openmp_flag}" CACHE STRING "OpenMP CXX flags for Clang" FORCE)
         set(OpenMP_C_LIB_NAMES "libomp" CACHE STRING "OpenMP C libraries for clang-cl" FORCE)
         set(OpenMP_CXX_LIB_NAMES "libomp" CACHE STRING "OpenMP CXX libraries for clang-cl" FORCE)
         set(OpenMP_libomp_LIBRARY "${_basicrenderer_clang_libomp}" CACHE FILEPATH "LLVM OpenMP runtime for clang-cl" FORCE)
@@ -603,7 +608,6 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedComputeDispatch.cpp"
     "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedEnvironmentDispatch.cpp"
     "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedFullscreenDraw.cpp"
-    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedLegacyAdmission.cpp"
     "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedRenderIndirect.cpp"
     "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedResourceClears.cpp"
     "tests/PublicHeaders/Scene_RendererComponents.cpp"
@@ -748,7 +752,7 @@ if(BASICRENDERER_BUILD_INTEROP_VALIDATION)
         "${BASICRENDERER_SOURCE_ROOT}/validation/SARPInteropValidation.cpp")
     target_compile_features(SARPInteropValidation PRIVATE cxx_std_23)
     target_include_directories(SARPInteropValidation PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
-    target_link_libraries(SARPInteropValidation PRIVATE OpenRenderGraph::OpenRenderGraph spdlog::spdlog_header_only)
+    target_link_libraries(SARPInteropValidation PRIVATE OpenRenderGraph::OpenRenderGraph ${BASICRENDERER_SPDLOG_TARGET})
     target_link_libraries(${PROJECT_NAME} PRIVATE SARPInteropValidation)
     target_compile_definitions(${PROJECT_NAME} PUBLIC BASICRENDERER_HAS_INTEROP_VALIDATION=1)
 else()
@@ -864,7 +868,7 @@ if(_basicrenderer_imgui_vulkan_backend_candidates)
     set_source_files_properties("${_basicrenderer_imgui_vulkan_backend}" PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON
         COMPILE_DEFINITIONS "IMGUI_IMPL_VULKAN_NO_PROTOTYPES;VK_USE_PLATFORM_WIN32_KHR"
-        COMPILE_OPTIONS "/w")
+        COMPILE_OPTIONS "$<IF:$<BOOL:${MSVC}>,/w,-w>")
 else()
     message(FATAL_ERROR "BasicRenderer: imgui_impl_vulkan.cpp source was not found. Vulkan ImGui must compile the backend locally with IMGUI_IMPL_VULKAN_NO_PROTOTYPES instead of using the prebuilt imgui library backend.")
 endif()
@@ -1496,12 +1500,15 @@ add_compile_definitions(NOMINMAX)
 target_compile_definitions(ShaderPreprocessTests PRIVATE NOMINMAX)
 
 # Disable warnings for signed/unsigned mismatch
-add_compile_options("/wd4267")
+if(MSVC)
+    add_compile_options("/wd4267")
+endif()
 
-# Link-only: /DEBUG on Debug/RelWithDebInfo.
-set(BASICRENDERER_MSVC_PDB_LINK_OPTIONS
-    $<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:/DEBUG>
-)
+# Link-only: /DEBUG on Debug/RelWithDebInfo. clang++ links with debug info from -g already.
+set(BASICRENDERER_MSVC_PDB_LINK_OPTIONS)
+if(MSVC)
+    list(APPEND BASICRENDERER_MSVC_PDB_LINK_OPTIONS $<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:/DEBUG>)
+endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND NOT CMAKE_CROSSCOMPILING)
     # Use larger PDB pages for native MSVC to avoid "limit exceeded for program
     # database" when debug symbols grow large.
@@ -1582,7 +1589,7 @@ PRIVATE
     lz4::lz4
     xatlas
     geometry-central
-    spdlog::spdlog_header_only 
+    ${BASICRENDERER_SPDLOG_TARGET} 
     Microsoft::DirectXTex 
     imgui::imgui 
     Microsoft.GSL::GSL
@@ -1623,7 +1630,7 @@ PRIVATE
 
 target_link_libraries(${PROJECT_NAME}
 PUBLIC
-    spdlog::spdlog_header_only
+    ${BASICRENDERER_SPDLOG_TARGET}
     Microsoft::DirectX-Headers
     meshoptimizer
     flecs::flecs
@@ -1651,7 +1658,7 @@ endif()
 target_link_libraries(${BASICRENDERER_DEMO_TARGET}
 PRIVATE
     ${PROJECT_NAME}
-    spdlog::spdlog_header_only
+    ${BASICRENDERER_SPDLOG_TARGET}
     imgui::imgui
     Pix::headers
     "${BASICRENDERER_SOURCE_ROOT}/WinPixEventRuntime.lib"
@@ -1829,6 +1836,9 @@ if(MSVC)
     target_compile_options(PipelineRecipeTests PRIVATE /std:c++latest)
     target_compile_options(MaterialEvalVariantTests PRIVATE /std:c++latest)
     target_compile_options(VirtualShadowBudgetTests PRIVATE /std:c++latest)
+else()
+    set_target_properties(SkeletonArtifactCacheTests PipelineRecipeTests MaterialEvalVariantTests VirtualShadowBudgetTests
+        PROPERTIES CXX_STANDARD 26)
 endif()
 
 enable_testing()

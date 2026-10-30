@@ -1,4 +1,5 @@
 #include <BasicRenderer/Renderer.h>
+#include "OpenRenderGraph/GraphHost.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <BasicRenderer/Diagnostics/NvPerfIntegration.h>
 #include <BasicRenderer/Extensions/RenderContext.h>
@@ -322,7 +323,7 @@ void Renderer::Render() {
             passExecutionContext.endGpuPassRange = [activeBackend](rhi::CommandList commandList, rhi::Queue queue) {
                 br::telemetry::nvperf::EndPassRange(activeBackend, commandList, queue);
             };
-            currentRenderGraph->Execute(passExecutionContext); // Main render graph execution
+            org::GraphHost::ExecuteFrame(*currentRenderGraph, passExecutionContext); // Main render graph execution
             passExecutionContext.beginGpuPassRange = {};
             passExecutionContext.endGpuPassRange = {};
             static const std::filesystem::path submittedCameraTracePath = [] {
@@ -474,7 +475,7 @@ void Renderer::Render() {
     if (graphicsQueue.Submit({&presentationCommandList, 1}) != rhi::Result::Ok) {
         throw std::runtime_error("Presentation tail submission failed");
     }
-    currentRenderGraph->ConfirmPresentationTailSubmission();
+    org::GraphHost::ConfirmPresentation(*currentRenderGraph);
     basic_telemetry::AddCounter("ORG.PresentationTail.Submitted");
 
     // Present the frame

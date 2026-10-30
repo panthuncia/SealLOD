@@ -74,12 +74,38 @@ endif()
 
 project ("BasicRenderer")
 
+# The MSVC ABI under any front end: cl, clang-cl, or clang++ targeting *-windows-msvc. `MSVC` alone is false for clang++,
+# which takes GNU-style flags; cl-style flags stay behind `MSVC`.
+if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+  set(BASICRENDERER_MSVC_ABI ON)
+else()
+  set(BASICRENDERER_MSVC_ABI OFF)
+endif()
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MsvcAbiPackages.cmake")
+basicrenderer_find_msvc_abi_packages()
+
+# The spdlog flavor every renderer library links. One per binary: header-only copies of its definitions collide with the
+# compiled library's at link time. It seeds BasicRHI's, OpenRenderGraph's and AsyncStateGraph's own switches.
+set(BASICRENDERER_SPDLOG_TARGET "spdlog::spdlog_header_only" CACHE STRING "spdlog target linked by BasicRenderer (spdlog::spdlog: the compiled library)")
+foreach(_basicrenderer_spdlog_var IN ITEMS BASICRHI_SPDLOG_TARGET OPENRENDERGRAPH_SPDLOG_TARGET ORG_ASYNC_STATE_GRAPH_SPDLOG_TARGET)
+  if(NOT DEFINED CACHE{${_basicrenderer_spdlog_var}})
+    set(${_basicrenderer_spdlog_var} "${BASICRENDERER_SPDLOG_TARGET}" CACHE STRING "spdlog target (BASICRENDERER_SPDLOG_TARGET)")
+  endif()
+endforeach()
+
 if(CMAKE_MAP_IMPORTED_CONFIG_DEBUG STREQUAL "RelWithDebInfo;Release")
   unset(CMAKE_MAP_IMPORTED_CONFIG_DEBUG CACHE)
 endif()
 
-if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if(BASICRENDERER_MSVC_ABI AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
+  if(NOT MSVC)
+    # The MSVC CRT's "unsafe function" deprecations, which clang++ (GNU driver) turns into -Werror failures.
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    # Precompiled headers carry the templates they instantiate, so translation units using them don't instantiate them
+    # again (passed to cc1: compiles without a PCH ignore it silently).
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-Xclang -fpch-instantiate-templates>")
+  endif()
 endif()
 
 function(basicrenderer_use_release_library_for_debug target_name)
@@ -178,13 +204,15 @@ if (WIN32)
   add_compile_definitions(NOMINMAX)
 endif()
 
-if (MSVC)
+if (BASICRENDERER_MSVC_ABI)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
   else()
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
   endif()
   add_compile_definitions(_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING)
+endif()
+if (MSVC)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
 endif()

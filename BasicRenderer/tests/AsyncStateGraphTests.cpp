@@ -2463,7 +2463,7 @@ int main() {
 
     auto& ecs = RendererECSManager::GetInstance();
     ecs.Initialize();
-    Check(&ecs.GetWorld() != nullptr);
+    Check(ecs.GetWorld().c_ptr() != nullptr);
     std::atomic_bool rejectedWorkerAccess{ false };
     auto ecsScope = scheduler.CreateScope("RendererECSOwnershipTest");
     Check(scheduler.Submit(ecsScope, TaskLane::Streaming, TaskDomain::RendererState,

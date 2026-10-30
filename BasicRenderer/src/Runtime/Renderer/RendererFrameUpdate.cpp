@@ -3,6 +3,7 @@
 //
 
 #include <BasicRenderer/Renderer.h>
+#include "OpenRenderGraph/GraphHost.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 #include "Runtime/Publication/PersistentRendererPublication.h"
 
@@ -1472,7 +1473,7 @@ void Renderer::Update(float elapsedSeconds) {
             m_dynamicPresentationColor->SetResource(
                 m_presentationColorResources[m_preparationFrameIndex]);
         }
-        currentRenderGraph->Update(context, deviceManager.GetDevice());
+        org::GraphHost::PrepareFrame(*currentRenderGraph, context, deviceManager.GetDevice());
     });
     ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "after RenderGraphUpdate");
 

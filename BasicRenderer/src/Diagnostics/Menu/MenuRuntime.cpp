@@ -949,32 +949,6 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         .build();
 }
 
-static bool PassUsesResourceAdapter(const void* passAndRes, uint64_t resourceId, int passKind) {
-    auto checkRequirements = [&](const auto& resources) {
-        bool found = false;
-        ForEachFrameRequirement(resources, [&](const auto& req) {
-            if (req.resourceHandleAndRange.resource.GetGlobalResourceID() == resourceId) {
-                found = true;
-            }
-        });
-        return found;
-    };
-    switch (passKind) {
-    case 1: { // Compute
-        auto& pr = *reinterpret_cast<const org::RenderGraph::ComputePassAndResources*>(passAndRes);
-        return checkRequirements(pr.resources);
-    }
-    case 2: { // Copy
-        auto& pr = *reinterpret_cast<const org::RenderGraph::CopyPassAndResources*>(passAndRes);
-        return checkRequirements(pr.resources);
-    }
-    default: { // Render (0)
-        auto& pr = *reinterpret_cast<const org::RenderGraph::RenderPassAndResources*>(passAndRes);
-        return checkRequirements(pr.resources);
-    }
-    }
-}
-
 void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
     m_sceneOverlapStatus = context.sceneOverlapStatus;
 	// A platform window/context may exist while the renderer backend is
@@ -1989,7 +1963,7 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
     }
     
     // A persistent graph traces its schedule only while the inspector shows it.
-    const bool persistentGraph = m_renderGraph && m_renderGraph->PersistentExecutionEnabled();
+    const bool persistentGraph = m_renderGraph != nullptr;
     if (m_renderGraph && m_renderGraph->ScheduleTraceEnabled() != (showRG && persistentGraph))
         m_renderGraph->SetScheduleTraceEnabled(showRG && persistentGraph);
     if (showRG && persistentGraph) {
@@ -2000,42 +1974,6 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         else
             ImGui::TextWrapped("No schedule yet: the graph traces its executables from the next frame it prepares.");
         ImGui::End();
-    } else if (showRG) {
-		ImGui::Begin("Render Graph Inspector", nullptr);
-		org::RGInspectorOptions opts;
-        if ((m_imguiBackend == rhi::Backend::D3D12 || m_imguiBackend == rhi::Backend::Vulkan) && g_pd3dSrvDescHeap) {
-            opts.imguiAllocDescriptor = [this]() { return AllocateImGuiDescriptor(); };
-            opts.imguiFreeDescriptor = [this](uint32_t idx) { FreeImGuiDescriptor(idx); };
-            opts.imguiGpuHandle = [this](uint32_t idx) { return GetImGuiGpuDescriptorHandle(idx); };
-            opts.imguiHeapHandle = GetImGuiHeapHandle();
-            opts.device = []() { return DeviceManager::GetInstance().GetDevice(); };
-            opts.graphicsQueue = []() { return DeviceManager::GetInstance().GetGraphicsQueue(); };
-        }
-        org::RGInspector::Show(m_renderGraph->GetBatches(),
-            m_renderGraph->GetQueueRegistry(),
-            PassUsesResourceAdapter,
-            [this](uint64_t resourceId) -> std::string {
-                if (!m_renderGraph) return {};
-                auto resource = m_renderGraph->GetResourceByID(resourceId);
-                if (!resource) return {};
-                return resource->GetName();
-            },
-            [this](uint64_t resourceId) -> org::Resource* {
-                if (!m_renderGraph) return nullptr;
-                auto resource = m_renderGraph->GetResourceByID(resourceId);
-                return resource ? resource.get() : nullptr;
-            },
-            [this](const std::string& passName, org::Resource* resource, const org::RangeSpec& range, org::ReadbackCaptureCallback callback) {
-                if (!m_renderGraph) {
-                    return;
-                }
-                if (auto* readbackService = m_renderGraph->GetReadbackService()) {
-                    readbackService->RequestReadbackCapture(passName, resource, range, std::move(callback));
-                }
-            },
-            opts);
-        ImGui::End();
-
     }
 
     if (showCLodTelemetry) {

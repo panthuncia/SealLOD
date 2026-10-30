@@ -25,6 +25,8 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <variant>
 #include <vector>
 
 // Third-party - spdlog (included in 84 TUs, ~12s build cost)
@@ -32,3 +34,10 @@
 
 // DirectX
 #include <DirectXMath.h>
+
+// Stable headers most translation units parse (Clang -ftime-trace: tools/build_time_report.py in SARP). Headers under
+// active edit (OpenRenderGraph, BasicRenderer) stay out: a change to one would rebuild every translation unit.
+#include <boost/container_hash/hash.hpp>
+#include <flecs.h>
+#include <rhi.h>
+#include <rhi_helpers.h>

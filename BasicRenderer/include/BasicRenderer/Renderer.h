@@ -228,7 +228,7 @@ private:
     std::shared_ptr<ProducerPersistentState> m_producerPersistentState = std::make_shared<ProducerPersistentState>();
 
 	std::string m_environmentName;
-	std::unique_ptr<Environment> m_currentEnvironment = nullptr;
+	std::unique_ptr<Environment> m_currentEnvironment;
     std::shared_ptr<org::PixelBuffer> m_defaultEnvironmentCubemap = nullptr;
     std::shared_ptr<org::PixelBuffer> m_defaultEnvironmentPrefilteredCubemap = nullptr;
     std::shared_ptr<org::PixelBuffer> m_blueNoiseTexture = nullptr;
@@ -238,19 +238,19 @@ private:
     bool m_warnedMissingPrimaryCamera = false;
 
     // GPU resource managers
-    std::unique_ptr<LightManager> m_pLightManager = nullptr;
-    std::unique_ptr<MeshManager> m_pMeshManager = nullptr;
-    std::unique_ptr<ObjectManager> m_pObjectManager = nullptr;
-    std::unique_ptr<IndirectCommandBufferManager> m_pIndirectCommandBufferManager = nullptr;
-    std::unique_ptr<ViewManager> m_pViewManager = nullptr;
+    std::unique_ptr<LightManager> m_pLightManager;
+    std::unique_ptr<MeshManager> m_pMeshManager;
+    std::unique_ptr<ObjectManager> m_pObjectManager;
+    std::unique_ptr<IndirectCommandBufferManager> m_pIndirectCommandBufferManager;
+    std::unique_ptr<ViewManager> m_pViewManager;
     br::render::DepthHistoryPublicationService m_depthHistory;
-	std::unique_ptr<EnvironmentManager> m_pEnvironmentManager = nullptr;
+	std::unique_ptr<EnvironmentManager> m_pEnvironmentManager;
 	br::render::EnvironmentWorkServices m_environmentWorkServices;
-    std::unique_ptr<MaterialManager> m_pMaterialManager = nullptr;
+    std::unique_ptr<MaterialManager> m_pMaterialManager;
 	std::shared_ptr<SkeletonManager> m_pSkeletonManager = nullptr;
-    std::unique_ptr<TerrainManager> m_pTerrainManager = nullptr;
-    std::unique_ptr<br::ReadbackManager> m_pReadbackManager = nullptr;
-    std::unique_ptr<TextureFactory> m_pTextureFactory = nullptr;
+    std::unique_ptr<TerrainManager> m_pTerrainManager;
+    std::unique_ptr<br::ReadbackManager> m_pReadbackManager;
+    std::unique_ptr<TextureFactory> m_pTextureFactory;
     std::shared_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
     // The renderer's versioned-buffer retirement clock and pools (advanced by frame-slot and graph retirement).
     std::shared_ptr<br::render::VersionedBufferRuntime> m_versionedBuffers;

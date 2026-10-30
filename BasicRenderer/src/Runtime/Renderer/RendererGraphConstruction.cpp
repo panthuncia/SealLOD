@@ -4,6 +4,7 @@
 
 #include <BasicRenderer/Renderer.h>
 #include "Runtime/Publication/PersistentRendererPublication.h"
+#include "OpenRenderGraph/GraphHost.h"
 
 #define _USE_MATH_DEFINES
 #include <optional>
@@ -259,9 +260,11 @@ void Renderer::CreateRenderGraph() {
         ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), phase);
     };
 
+    // GraphHost::Build resets the graph (every queue is stalled above), runs this declaration, then the structural build
+    // and Setup.
+    org::GraphHost::Build(*newGraph, [&](org::RenderGraph&) {
     {
-    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::ResetForRebuild");
-    newGraph->ResetForRebuild();
+    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::AfterReset");
     // CreateRenderGraph stalls every queue before teardown. ResetForRebuild
     // can retire another wave of resources/descriptors after the pre-reset
     // descriptor drain above. Consume that wave before draining API objects:
@@ -585,29 +588,15 @@ void Renderer::CreateRenderGraph() {
 
     //newGraph->SetMinimumAutomaticSchedulingQueues(QueueKind::Compute, 3);
 
-    {
-    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::CompileStructural");
-	spdlog::info("Renderer::CreateRenderGraph entering CompileStructural");
-    newGraph->CompileStructural();
-	spdlog::info("Renderer::CreateRenderGraph leaving CompileStructural");
-    }
-    {
-        // Segment placement is explicit: passes whose touched-resource set is
-        // only known per frame cannot live in the persistent main executable.
-        newGraph->SetPersistentSegment("Builtin::Uploads", org::RenderGraph::PersistentSegmentKind::Pre);
-        newGraph->SetPersistentSegment("CLod::AsyncUpload", org::RenderGraph::PersistentSegmentKind::Tail);
-        newGraph->SetPersistentSegment("Builtin::Readbacks", org::RenderGraph::PersistentSegmentKind::Tail);
-        newGraph->SetPersistentSegment("CLod::StreamingReadbackCopy", org::RenderGraph::PersistentSegmentKind::Tail);
-        newGraph->SetPersistentExecutionEnabled(true);
-        spdlog::info("Persistent render graph execution enabled");
-    }
-    probeGraphBuildPhase("CreateRenderGraph after CompileStructural");
-    {
-    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::Setup");
-	spdlog::info("Renderer::CreateRenderGraph entering Setup");
-    newGraph->Setup();
-	spdlog::info("Renderer::CreateRenderGraph leaving Setup");
-    }
+    // Segment placement is explicit: passes whose touched-resource set is
+    // only known per frame cannot live in the persistent main executable.
+    newGraph->SetPersistentSegment("Builtin::Uploads", org::RenderGraph::PersistentSegmentKind::Pre);
+    newGraph->SetPersistentSegment("CLod::AsyncUpload", org::RenderGraph::PersistentSegmentKind::Tail);
+    newGraph->SetPersistentSegment("Builtin::Readbacks", org::RenderGraph::PersistentSegmentKind::Tail);
+    newGraph->SetPersistentSegment("CLod::StreamingReadbackCopy", org::RenderGraph::PersistentSegmentKind::Tail);
+	spdlog::info("Renderer::CreateRenderGraph entering the structural build and Setup");
+    });
+	spdlog::info("Renderer::CreateRenderGraph leaving the structural build and Setup");
     probeGraphBuildPhase("CreateRenderGraph after Setup");
 
 	rebuildRenderGraph = false;

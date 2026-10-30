@@ -25,7 +25,7 @@ set_target_properties(BRNifly PROPERTIES
 
 target_link_libraries(BRNifly PRIVATE
     nlohmann_json::nlohmann_json
-    spdlog::spdlog_header_only
+    ${BASICRENDERER_SPDLOG_TARGET}
     usd
     usdGeom
     usdShade

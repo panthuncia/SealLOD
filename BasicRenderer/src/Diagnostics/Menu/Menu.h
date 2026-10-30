@@ -45,7 +45,6 @@
 #include <BasicRenderer/Pipeline/RendererSettings.h>
 #include "PostProcessing/ToneMapping/TonemapTypes.h"
 #include "PostProcessing/Upscaling/UpscalingManager.h"
-#include "DebugUI/RenderGraphInspector.h"
 #include "DebugUI/ScheduleInspector.h"
 #include "DebugUI/MemoryIntrospectionWidget.h"
 #include "Resources/ReadbackRequest.h"

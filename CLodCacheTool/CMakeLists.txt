@@ -156,7 +156,7 @@ endif()
 # Link libraries
 target_link_libraries(CLodCacheTool PRIVATE
 	BasicTelemetry::Core
-	spdlog::spdlog_header_only
+	${BASICRENDERER_SPDLOG_TARGET}
     assimp::assimp
     nlohmann_json::nlohmann_json
     meshoptimizer
