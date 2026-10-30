@@ -37,6 +37,7 @@
 #include <BasicRenderer/Diagnostics/SamplingControlServer.h>
 #include <BasicRenderer/Diagnostics/StatisticalSampler.h>
 #include "Resources/Buffers/DynamicBufferBase.h"
+#include "Render/RenderGraph/RenderGraph.h"
 #include "BasicRenderer/Assets/Import/ModelLoader.h"
 #include <rhi_interop_dx12.h>
 #include <d3d12sdklayers.h>
@@ -505,6 +506,37 @@ std::optional<std::filesystem::path> FindCommandLinePath(
     }
     const auto end = commandLine.find_first_of(" \t", valuePosition);
     return std::filesystem::path(commandLine.substr(valuePosition, end - valuePosition));
+}
+
+// Every value of a repeatable option, in order.
+std::vector<std::string> FindCommandLineValues(std::string_view commandLine, std::string_view option)
+{
+    std::vector<std::string> values;
+    for (size_t at = commandLine.find(option); at != std::string_view::npos; at = commandLine.find(option, at + option.size())) {
+        if (const auto value = FindCommandLinePath(commandLine.substr(at), option)) values.push_back(value->string());
+    }
+    return values;
+}
+
+// --model <path>[@scale]: the models the demo loads. Defaults to the Bistro exterior.
+struct DemoModel {
+    std::string path;
+    float scale = 1.0f;
+};
+
+std::vector<DemoModel> FindDemoModels(std::string_view commandLine)
+{
+    std::vector<DemoModel> models;
+    for (const auto& value : FindCommandLineValues(commandLine, "--model")) {
+        DemoModel model{value};
+        if (const auto at = value.rfind('@'); at != std::string::npos) {
+            model.path = value.substr(0, at);
+            model.scale = std::stof(value.substr(at + 1));
+        }
+        models.push_back(std::move(model));
+    }
+    if (models.empty()) models.push_back({"models/bistroExterior.glb"});
+    return models;
 }
 
 std::optional<std::string> FindCommandLineValue(std::string_view commandLine, std::string_view option)
@@ -1105,9 +1137,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         auto baseScene = std::make_shared<Scene>();
 
-        auto dragonScene = LoadModel("models/transparent_dragon.glb");
-        dragonScene->GetRoot().set<Components::Scale>({ 10, 10, 10 });
-        dragonScene->GetRoot().set<Components::Position>({ -3, 5, 0 });
+        std::vector<std::shared_ptr<Scene>> modelScenes;
+        for (const auto& model : FindDemoModels(commandLine)) {
+            auto modelScene = LoadModel(model.path);
+            modelScene->GetRoot().set<Components::Scale>({ model.scale, model.scale, model.scale });
+            modelScenes.push_back(std::move(modelScene));
+        }
 
     //auto carScene = LoadModel("models/porche.glb");
     //carScene->GetRoot().set<Components::Scale>({ 0.6, 0.6, 0.6 });
@@ -1118,9 +1153,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	//mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });
 	//mountainScene->GetRoot().set<Components::Position>({ 0.0, -2.0, 0.0 });
 
-    auto tigerScene = LoadModel("models/tiger.glb");
-    tigerScene->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
-	tigerScene->GetRoot().set<Components::Position>({3, 5, 0});
 
 	//auto shiba = LoadModel("models/shiba.glb");
 
@@ -1265,7 +1297,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
  //   mountainScene->GetRoot().set<Components::Position>({ 0.0, -10.0, 0.0 });
 	//renderer.GetCurrentScene()->AppendScene(mountainScene->Clone());
 
-	renderer.GetCurrentScene()->AppendScene(dragonScene->Clone());
+        for (const auto& modelScene : modelScenes) renderer.GetCurrentScene()->AppendScene(modelScene->Clone());
     
 	//renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
 
@@ -1343,7 +1375,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     uint32_t clodStressResidentAtLastMove = 0;
     bool clodStressFailed = false;
     auto lastUpdateTime = std::chrono::system_clock::now();
+    // --exit-after-seconds <n>: quit on its own, for scripted runs.
+    std::optional<std::chrono::steady_clock::time_point> exitAt;
+    if (const auto seconds = FindCommandLineValue(commandLine, "--exit-after-seconds"))
+        exitAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int64_t>(std::stod(*seconds) * 1000.0));
     while (msg.message != WM_QUIT) {
+        if (exitAt && std::chrono::steady_clock::now() >= *exitAt) {
+            exitAt.reset();
+            PostQuitMessage(0);
+        }
         if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);

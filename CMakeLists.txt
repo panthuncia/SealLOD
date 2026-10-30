@@ -157,6 +157,9 @@ endif()
 
 option(BASICRHI_ENABLE_RESHAPE "Enable GPU-Reshape-backed debug instrumentation in BasicRHI" OFF)
 set(BASICRHI_ENABLE_IMGUI ON CACHE BOOL "Build ImGui instrumentation widgets required by BasicRenderer" FORCE)
+set(BASICRHI_ENABLE_VULKAN ON CACHE BOOL "Build the Vulkan backend BasicRenderer's D3D12/Vulkan interop uses" FORCE)
+set(OPENRENDERGRAPH_ENABLE_DEBUG_UI ON CACHE BOOL "Build the OpenRenderGraph inspector used by BasicRenderer." FORCE)
+set(OPENRENDERGRAPH_ENABLE_SCHEDULE_UI ON CACHE BOOL "Build the persistent schedule inspector used by BasicRenderer." FORCE)
 option(BASICRENDERER_BUILD_BRNIFLY "Build the GPL-separated BRNifly NIF middleware executable" ON)
 set(BASICRENDERER_VULKAN_INCLUDE_DIR "" CACHE PATH "Preferred Vulkan SDK include directory. Leave empty to auto-detect a Vulkan SDK with VK_EXT_descriptor_heap.")
 

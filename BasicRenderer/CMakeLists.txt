@@ -577,6 +577,22 @@ target_include_directories(BasicRendererHeaders INTERFACE
     "${BASICRENDERER_SOURCE_ROOT}/include")
 target_link_libraries(BasicRendererHeaders INTERFACE ORGModuleServices::AsyncPrimitives)
 target_link_libraries(${PROJECT_NAME} PUBLIC BasicRendererHeaders)
+# TBB::tbb is USD's bundled legacy TBB; BasicRenderer uses the oneTBB headers, whose import library (tbb12) comes from vcpkg.
+set(_br_vcpkg_installed_dir "${VCPKG_INSTALLED_DIR}")
+if(NOT _br_vcpkg_installed_dir)
+    set(_br_vcpkg_installed_dir "${_VCPKG_INSTALLED_DIR}")
+endif()
+find_library(BASICRENDERER_VCPKG_TBB12_LIBRARY NAMES tbb12
+    PATHS "${_br_vcpkg_installed_dir}/${VCPKG_TARGET_TRIPLET}/lib" NO_DEFAULT_PATH)
+if(BASICRENDERER_VCPKG_TBB12_LIBRARY)
+    target_link_libraries(${PROJECT_NAME} PUBLIC "${BASICRENDERER_VCPKG_TBB12_LIBRARY}")
+endif()
+# The menu draws ORG's memory and schedule inspectors.
+foreach(_br_org_ui OpenRenderGraph::DebugUI OpenRenderGraph::ScheduleUI)
+    if(TARGET ${_br_org_ui})
+        target_link_libraries(${PROJECT_NAME} PUBLIC ${_br_org_ui})
+    endif()
+endforeach()
 target_sources(${PROJECT_NAME} PRIVATE
     "src/Runtime/Publication/PersistentRendererPublication.h"
     "src/Runtime/Publication/PersistentRendererPublication.cpp")
