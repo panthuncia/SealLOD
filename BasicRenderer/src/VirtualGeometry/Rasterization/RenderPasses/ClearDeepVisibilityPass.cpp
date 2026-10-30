@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Rasterization/RenderPasses/ClearDeepVisibilityPass.h"
+#include "Render/PassBuilders.h"
 
 #include <vector>
 

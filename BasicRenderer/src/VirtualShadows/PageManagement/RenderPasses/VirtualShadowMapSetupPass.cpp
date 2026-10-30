@@ -1,4 +1,5 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapSetupPass.h"
+#include "Render/PassBuilders.h"
 #include "BasicRenderer/Streaming/LightStateArtifacts.h"
 
 #include <array>

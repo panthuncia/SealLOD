@@ -19,7 +19,7 @@
 #include "BasicRenderer/Pipeline/RenderPhase.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeCommands.h"
-#include "Render/RenderGraph/RenderGraph.h"
+namespace org { class RenderGraph; }
 #include "Resources/PixelBuffer.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 

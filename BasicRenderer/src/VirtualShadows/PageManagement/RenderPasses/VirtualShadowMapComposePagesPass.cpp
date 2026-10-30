@@ -1,4 +1,5 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapComposePagesPass.h"
+#include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"

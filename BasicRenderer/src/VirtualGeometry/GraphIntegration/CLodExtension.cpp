@@ -1,4 +1,5 @@
 #include "VirtualGeometry/GraphIntegration/CLodExtension.h"
+#include "Render/RenderGraph/RenderGraph.h"
 
 #include "Transparency/GraphIntegration/CLodAlphaVariant.h"
 #include "VirtualGeometry/GraphIntegration/CLodExtensionShared.h"
@@ -374,7 +375,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
     bool uploadTessellationTable,
     bool preserveDiceCountForPhase2Replay,
     bool workGraphReyesVisibility,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+    std::vector<org::ExternalPassDesc>& outPasses,
     std::string& shadowClearDirtyBitsAfterPassName)
 {
     const auto phaseSuffix = std::to_string(phaseIndex);
@@ -391,7 +392,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
 
     if (uploadTessellationTable) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesTessellationTableUploadPass"),
                 std::make_shared<ReyesTessellationTableUploadPass>(
                     m_reyesTessTableConfigsBuffer,
@@ -404,7 +405,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
     }
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesQueueResetPass" + phaseSuffix),
             std::make_shared<ReyesQueueResetPass>(
                 m_reyesFullClusterOutputsCounterBuffer,
@@ -428,7 +429,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
 
     if (phaseIndex == 2u && traits.type == CLodExtensionType::VisiblityBuffer) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesCreateReplayDiceMergeDispatchArgs2"),
                 std::make_shared<ReyesCreateDispatchArgsPass>(
                     m_reyesReplayDiceQueueCounterBuffer,
@@ -438,7 +439,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                     reyesDiceQueueCapacity)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesReplayDiceMergePass2"),
                 std::make_shared<ReyesReplayMergePass>(
                     ReyesReplayMergeKind::Dice,
@@ -453,14 +454,14 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
     }
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesCreateClassifyDispatchArgsPass" + phaseSuffix),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 currentVisibleClustersCounterBuffer,
                 classifyIndirectArgsBuffer)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesClassifyPass" + phaseSuffix),
             std::make_shared<ReyesClassifyPass>(
                 m_visibleClustersBuffer,
@@ -481,14 +482,14 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                     : ReyesClassifyMode::Default)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesCreateSeedDispatchArgsPass" + phaseSuffix),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 m_reyesOwnedClustersCounterBuffer,
                 splitIndirectArgsBuffer)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesSeedPatchesPass" + phaseSuffix),
             std::make_shared<ReyesSeedPatchesPass>(
                 m_visibleClustersBuffer,
@@ -504,7 +505,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
 
     if (phaseIndex == 2u && traits.type == CLodExtensionType::VisiblityBuffer) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesCreateReplaySplitMergeDispatchArgs2"),
                 std::make_shared<ReyesCreateDispatchArgsPass>(
                     m_reyesReplaySplitQueueCounterBuffer,
@@ -514,7 +515,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                     reyesSplitQueueCapacity)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesReplaySplitMergePass2"),
                 std::make_shared<ReyesReplayMergePass>(
                     ReyesReplayMergeKind::Split,
@@ -536,14 +537,14 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
         const uint32_t outputIndex = inputIndex ^ 1u;
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesCreateSplitDispatchArgsPass" + phaseSuffix + "_" + std::to_string(splitPassIndex)),
                 std::make_shared<ReyesCreateDispatchArgsPass>(
                     reyesSplitCounters[inputIndex],
                     splitIndirectArgsBuffer)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesSplitPass" + phaseSuffix + "_" + std::to_string(splitPassIndex)),
                 std::make_shared<ReyesSplitPass>(
                     m_visibleClustersBuffer,
@@ -575,7 +576,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
 
     if (phaseIndex == 1u) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesCreateDiceDispatchArgsPass1"),
                 std::make_shared<ReyesCreateDispatchArgsPass>(
                     m_reyesDiceQueueCounterBuffer,
@@ -583,7 +584,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesCreateDiceDispatchArgsPass2"),
                 std::make_shared<ReyesCreateDispatchArgsPass>(
                     m_reyesDiceQueueCounterBuffer,
@@ -592,7 +593,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
     }
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesDicePass" + phaseSuffix),
             std::make_shared<ReyesDicePass>(
                 m_reyesDiceQueueBuffer,
@@ -606,7 +607,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
 
     if (preserveDiceCountForPhase2Replay) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Copy(
+            org::ExternalPassDesc::Copy(
                 MakeVariantPassName(traits, "ReyesCopyDiceCountPass1"),
                 std::make_shared<ReyesCopyCounterPass>(
                     m_reyesDiceQueueCounterBuffer,
@@ -632,7 +633,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
     }
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesBuildRasterWorkPass" + phaseSuffix),
             std::make_shared<ReyesBuildRasterWorkPass>(
                 m_reyesDiceQueueBuffer,
@@ -655,7 +656,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                 slabGroup)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesCreateRasterWorkDispatchArgsPass" + phaseSuffix),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 rasterWorkCounterBuffer,
@@ -1629,7 +1630,7 @@ std::vector<org::ResourceIdentifier> CLodExtension::GetSupportedKeys()
     return CLodShadowVariant::GetSupportedKeys(*this);
 }
 
-void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses)
 {
     PrepareForBuild(rg);
 
@@ -1819,9 +1820,9 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                         : nullptr,
                     useWorkGraphReyesVisibility ? m_reyesDiceQueueCapacity : 0u));
 
-        auto cullPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto cullPassDesc = org::ExternalPassDesc::Compute(
             cullPassName, std::static_pointer_cast<org::RenderPass>(cullPass));
-        cullPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(afterPassName));
+        cullPassDesc.At(org::ExternalInsertPoint::After(afterPassName));
         outPasses.push_back(std::move(cullPassDesc));
     };
     const auto appendRasterBucketCompactionPasses = [&](uint32_t phaseIndex, const std::shared_ptr<org::Buffer>& reyesOwnershipBitsetBuffer) {
@@ -1847,7 +1848,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             isPhase1 ? std::shared_ptr<org::Buffer>{} : m_visibleClustersCounterBuffer;
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsHistogramPass" + phaseSuffix),
                 std::make_shared<RasterBucketHistogramPass>(
                     m_visibleClustersBuffer,
@@ -1861,7 +1862,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     m_visibleClusterCapacity)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsPrefixScanPass" + phaseSuffix),
                 std::make_shared<RasterBucketBlockScanPass>(
                     histogramBuffer,
@@ -1869,7 +1870,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     m_rasterBucketsBlockSumsBuffer)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsPrefixOffsetsPass" + phaseSuffix),
                 std::make_shared<RasterBucketBlockOffsetsPass>(
                     m_rasterBucketsOffsetsBuffer,
@@ -1878,7 +1879,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     totalCountBuffer)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsCompactAndArgsPass" + phaseSuffix),
                 std::make_shared<RasterBucketCompactAndArgsPass>(
                     m_visibleClustersBuffer,
@@ -1927,7 +1928,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             isPhase1 ? m_rasterBucketsIndirectArgsBuffer : m_rasterBucketsIndirectArgsBufferPhase2;
         const std::string passName = MakeVariantPassName(traits, "RasterizeClustersPass" + phaseSuffix);
 
-        auto rasterizePassDesc = org::RenderGraph::ExternalPassDesc::Render(
+        auto rasterizePassDesc = org::ExternalPassDesc::Render(
             passName,
             std::make_shared<ClusterRasterizationPass>(
                 rasterizePassInputs,
@@ -1960,7 +1961,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                 m_streamingSystem ? m_streamingSystem->GetSourceGroupMismatchDetailsBuffer() : nullptr,
                 shadowDynamicPhysicalPages));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
-            rasterizePassDesc.At(org::RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
+            rasterizePassDesc.At(org::ExternalInsertPoint::Before("MaterialHistogramPass"));
         }
         rasterizePassDesc.GeometryPass();
         outPasses.push_back(std::move(rasterizePassDesc));
@@ -1996,7 +1997,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             isPhase1 ? std::shared_ptr<org::Buffer>{} : m_swVisibleClustersCounterBuffer;
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsCreateCommandPassSW" + phaseSuffix),
                 std::make_shared<RasterBucketCreateCommandPass>(
                     swVisibleClustersCounterBuffer,
@@ -2007,7 +2008,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     true)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsHistogramPassSW" + phaseSuffix),
                 std::make_shared<RasterBucketHistogramPass>(
                     m_visibleClustersBuffer,
@@ -2022,7 +2023,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     true)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsPrefixScanPassSW" + phaseSuffix),
                 std::make_shared<RasterBucketBlockScanPass>(
                     swHistogramBuffer,
@@ -2031,7 +2032,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     true)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsPrefixOffsetsPassSW" + phaseSuffix),
                 std::make_shared<RasterBucketBlockOffsetsPass>(
                     m_rasterBucketsOffsetsBuffer,
@@ -2041,7 +2042,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     true)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsCompactAndArgsPassSW" + phaseSuffix),
                 std::make_shared<RasterBucketCompactAndArgsPass>(
                     m_visibleClustersBuffer,
@@ -2089,7 +2090,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                 isPhase1 ? m_rasterBucketsTotalCountBuffer : m_rasterBucketsTotalCountBufferPhase1Sw;
 
             outPasses.push_back(
-                org::RenderGraph::ExternalPassDesc::Compute(
+                org::ExternalPassDesc::Compute(
                     MakeVariantPassName(traits, "VirtualShadowBlockHistogramPassSW" + phaseSuffix),
                     std::make_shared<VirtualShadowBlockExpandPass>(
                         VirtualShadowBlockExpandMode::Histogram,
@@ -2112,7 +2113,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                         true)));
 
             outPasses.push_back(
-                org::RenderGraph::ExternalPassDesc::Compute(
+                org::ExternalPassDesc::Compute(
                     MakeVariantPassName(traits, "VirtualShadowBlockPrefixScanPassSW" + phaseSuffix),
                     std::make_shared<RasterBucketBlockScanPass>(
                         blockHistogramBuffer,
@@ -2121,7 +2122,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                         true)));
 
             outPasses.push_back(
-                org::RenderGraph::ExternalPassDesc::Compute(
+                org::ExternalPassDesc::Compute(
                     MakeVariantPassName(traits, "VirtualShadowBlockPrefixOffsetsPassSW" + phaseSuffix),
                     std::make_shared<RasterBucketBlockOffsetsPass>(
                         m_rasterBucketsOffsetsBuffer,
@@ -2131,7 +2132,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                         true)));
 
             outPasses.push_back(
-                org::RenderGraph::ExternalPassDesc::Compute(
+                org::ExternalPassDesc::Compute(
                     MakeVariantPassName(traits, "VirtualShadowBlockEmitPassSW" + phaseSuffix),
                     std::make_shared<VirtualShadowBlockExpandPass>(
                         VirtualShadowBlockExpandMode::Emit,
@@ -2154,7 +2155,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                         true)));
 
             outPasses.push_back(
-                org::RenderGraph::ExternalPassDesc::Compute(
+                org::ExternalPassDesc::Compute(
                     MakeVariantPassName(traits, "VirtualShadowBuildArgsPassSW" + phaseSuffix),
                     std::make_shared<VirtualShadowBuildRasterArgsPass>(
                         blockHistogramBuffer,
@@ -2170,7 +2171,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         }
 
         const std::string passName = MakeVariantPassName(traits, "SoftwareRasterizeClustersPass" + phaseSuffix);
-        auto softwareRasterPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto softwareRasterPassDesc = org::ExternalPassDesc::Compute(
             passName,
             std::make_shared<ClusterSoftwareRasterizationPass>(
                     swRasterClustersBuffer,
@@ -2187,7 +2188,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     slabGroup,
                     true));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
-            softwareRasterPassDesc.At(org::RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
+            softwareRasterPassDesc.At(org::ExternalInsertPoint::Before("MaterialHistogramPass"));
         }
         outPasses.push_back(std::move(softwareRasterPassDesc));
 
@@ -2203,11 +2204,11 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         }
 
         const std::string passName = MakeVariantPassName(traits, "LinearDepthCopyPass" + std::to_string(phaseIndex));
-        auto depthCopyPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto depthCopyPassDesc = org::ExternalPassDesc::Compute(
             passName,
             std::make_shared<PerViewLinearDepthCopyPass>(phaseIndex == 2u));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
-            auto depthCopyInsertPoint = org::RenderGraph::ExternalInsertPoint::Before("DeferredShadingPass");
+            auto depthCopyInsertPoint = org::ExternalInsertPoint::Before("DeferredShadingPass");
             if (phaseIndex == 2u && SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")()) {
                 depthCopyInsertPoint.AlsoBefore("GTAOFilterPass");
             }
@@ -2216,18 +2217,18 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         outPasses.push_back(std::move(depthCopyPassDesc));
     };
     const auto appendLinearDepthDownsamplePass = [&](uint32_t phaseIndex, const std::string& afterPassName = {}) {
-        auto downsamplePassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto downsamplePassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "LinearDepthDownsamplePass" + std::to_string(phaseIndex)),
             std::make_shared<DownsamplePass>());
         if (!afterPassName.empty()) {
-            auto downsampleInsertPoint = org::RenderGraph::ExternalInsertPoint::After(afterPassName);
+            auto downsampleInsertPoint = org::ExternalInsertPoint::After(afterPassName);
             if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
                 downsampleInsertPoint.AlsoBefore("DeferredShadingPass");
             }
             downsamplePassDesc.At(std::move(downsampleInsertPoint));
         }
         else if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
-            downsamplePassDesc.At(org::RenderGraph::ExternalInsertPoint::Before("DeferredShadingPass"));
+            downsamplePassDesc.At(org::ExternalInsertPoint::Before("DeferredShadingPass"));
         }
         outPasses.push_back(std::move(downsamplePassDesc));
     };
@@ -2261,7 +2262,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         }
 
         const std::string voxelRasterPassName = MakeVariantPassName(traits, "VoxelSoftwareRasterizePass" + std::to_string(phaseIndex));
-        auto voxelRasterPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto voxelRasterPassDesc = org::ExternalPassDesc::Compute(
             voxelRasterPassName,
             std::make_shared<VoxelSoftwareRasterizationPass>(
                     m_visibleClustersBuffer,
@@ -2281,13 +2282,13 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     slabGroup,
                     m_voxelRasterWorkCapacity));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
-            auto voxelInsertPoint = org::RenderGraph::ExternalInsertPoint::After(lastRasterPassName);
+            auto voxelInsertPoint = org::ExternalInsertPoint::After(lastRasterPassName);
             voxelInsertPoint.AlsoBefore("MaterialHistogramPass");
             voxelInsertPoint.AlsoBefore("BuildPixelListPass");
             voxelRasterPassDesc.At(std::move(voxelInsertPoint));
         }
         else {
-            voxelRasterPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(lastRasterPassName));
+            voxelRasterPassDesc.At(org::ExternalInsertPoint::After(lastRasterPassName));
         }
         voxelRasterPassDesc.PreferQueue(org::QueueKind::Graphics);
         outPasses.push_back(std::move(voxelRasterPassDesc));
@@ -2418,7 +2419,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
     appendStreamingTailPasses();
 }
 
-void CLodExtension::GatherFramePasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+void CLodExtension::GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses)
 {
     if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
         m_streamingSystem->GatherFramePasses(rg, outPasses);

@@ -253,11 +253,13 @@ public:
         if (!resource) {
             throw std::runtime_error("Pipeline output factory returned null: " + slot.identifier.ToString());
         }
-        m_graph.RegisterResource(slot.identifier, resource);
+        RegisterOutput(slot.identifier, resource);
         return resource;
     }
 
 private:
+    void RegisterOutput(const org::ResourceIdentifier& id, std::shared_ptr<org::Resource> resource) const;
+
     org::RenderGraph& m_graph;
     const ResourceBindings& m_bindings;
     TechniqueCallback m_buildTechnique;

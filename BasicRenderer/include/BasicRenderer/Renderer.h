@@ -6,6 +6,7 @@
 #define DX12RENDERER_H
 
 #include <windows.h>
+#include "Interfaces/IResourceProvider.h"
 #include <chrono>
 #include <cstdint>
 #include <directxmath.h>
@@ -202,7 +203,7 @@ private:
 
     std::shared_ptr<Scene> currentScene;
 
-    std::unique_ptr<org::RenderGraph> currentRenderGraph = nullptr;
+    std::unique_ptr<org::RenderGraph> currentRenderGraph;
     bool m_renderGraphRuntimeInitialized = false;
     br::pipeline::PipelineRecipe m_pipelineRecipe;
     std::optional<br::pipeline::PipelineRecipe> m_pendingPipelineRecipe;

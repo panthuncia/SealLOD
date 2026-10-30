@@ -6,7 +6,7 @@
 #include <optional>
 #include <string>
 #include <vector>
-#include <OpenRenderGraph/OpenRenderGraph.h>
+#include "Render/PipelineState.h"
 
 #pragma warning(push, 0)
 #include "ThirdParty/DirectX/dxcapi.h"

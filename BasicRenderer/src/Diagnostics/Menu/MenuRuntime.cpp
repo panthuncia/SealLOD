@@ -1,4 +1,5 @@
 #include <BasicRenderer/Scene/Scene.h>
+#include "Render/RenderGraph/RenderGraph.h"
 #include "Diagnostics/Menu/Menu.h"
 
 Menu& Menu::GetInstance() {

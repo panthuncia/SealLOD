@@ -1,4 +1,5 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapAllocatePagesPass.h"
+#include "Render/PassBuilders.h"
 
 #include "BuiltinResources.h"
 #include "Runtime/Device/DeviceManager.h"

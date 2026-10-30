@@ -1362,8 +1362,8 @@ void TestInvalidRecipes()
     Require(!missingBinning.Validate().valid, "RVT without binning must fail validation");
 
     auto duplicateExtensions = br::pipeline::MakeBasicRendererDemoPipeline();
-    duplicateExtensions.AddExtension("duplicate", [] { return std::unique_ptr<org::RenderGraph::IRenderGraphExtension>{}; });
-    duplicateExtensions.AddExtension("duplicate", [] { return std::unique_ptr<org::RenderGraph::IRenderGraphExtension>{}; });
+    duplicateExtensions.AddExtension("duplicate", [] { return std::unique_ptr<org::IRenderGraphExtension>{}; });
+    duplicateExtensions.AddExtension("duplicate", [] { return std::unique_ptr<org::IRenderGraphExtension>{}; });
     Require(!duplicateExtensions.Validate().valid, "duplicate extension ids must fail validation");
 
     org::TextureDescription environmentDescription;

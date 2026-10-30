@@ -1,4 +1,6 @@
 #include "ProceduralWind/ProceduralWindExtension.h"
+#include "Render/RenderGraph/RenderGraph.h"
+#include "Resources/Buffers/Buffer.h"
 #include "ProceduralWind/DynamicWindGPU.h"
 
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
@@ -1512,7 +1514,7 @@ private:
 
 ProceduralWindExtension::ProceduralWindExtension(std::shared_ptr<ProceduralWindRuntime> runtime) : m_runtime(std::move(runtime)) {}
 
-void ProceduralWindExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& out)
+void ProceduralWindExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& out)
 {
     auto resources = std::make_shared<WindSharedResources>(m_runtime, rg.GetReadbackService());
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletons", resources->visibleSkeletons);
@@ -1521,27 +1523,27 @@ void ProceduralWindExtension::GatherStructuralPasses(org::RenderGraph& rg, std::
 	rg.RegisterResource(DynamicWindFieldSlice0ResourceName, resources->fieldSlices[0]);
 	rg.RegisterResource(DynamicWindFieldSlice1ResourceName, resources->fieldSlices[1]);
 	rg.RegisterResource(DynamicWindFrameStateResourceName, resources->frameState);
-    auto earlyInsertion = org::RenderGraph::ExternalInsertPoint::Before("CLodOpaque::HierarchicalCullingPass1");
-    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::UploadFieldPair", std::make_shared<WindResidencyPass>(resources)).At(earlyInsertion));
-    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ResetTransient", std::make_shared<WindResetPass>(resources)).At(earlyInsertion));
-    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase1", std::make_shared<WindActivatePass>(resources, false)).At(earlyInsertion));
-    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase1", std::make_shared<WindBuildCommandsPass>(resources, false)).At(earlyInsertion));
-	out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase1", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(earlyInsertion));
-    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase1", std::make_shared<WindIndirectSimulatePass>(resources)).At(earlyInsertion));
+    auto earlyInsertion = org::ExternalInsertPoint::Before("CLodOpaque::HierarchicalCullingPass1");
+    out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::UploadFieldPair", std::make_shared<WindResidencyPass>(resources)).At(earlyInsertion));
+    out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::ResetTransient", std::make_shared<WindResetPass>(resources)).At(earlyInsertion));
+    out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase1", std::make_shared<WindActivatePass>(resources, false)).At(earlyInsertion));
+    out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase1", std::make_shared<WindBuildCommandsPass>(resources, false)).At(earlyInsertion));
+	out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase1", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(earlyInsertion));
+    out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase1", std::make_shared<WindIndirectSimulatePass>(resources)).At(earlyInsertion));
 
-    auto lateInsertion = org::RenderGraph::ExternalInsertPoint::After("CLodOpaque::LinearDepthDownsamplePass1");
+    auto lateInsertion = org::ExternalInsertPoint::After("CLodOpaque::LinearDepthDownsamplePass1");
     lateInsertion.AlsoBefore("CLodOpaque::HierarchicalCullingPass2");
     lateInsertion.AlsoBefore("CLodShadow::HierarchicalCullingPass1");
-    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase2", std::make_shared<WindActivatePass>(resources, true)).At(lateInsertion));
-    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase2", std::make_shared<WindBuildCommandsPass>(resources, true)).At(lateInsertion));
-	out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase2", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(lateInsertion));
-    out.push_back(org::RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase2", std::make_shared<WindIndirectSimulatePass>(resources, true)).At(lateInsertion));
-    auto debugInsertion = org::RenderGraph::ExternalInsertPoint::After("TonemappingPass");
+    out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase2", std::make_shared<WindActivatePass>(resources, true)).At(lateInsertion));
+    out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase2", std::make_shared<WindBuildCommandsPass>(resources, true)).At(lateInsertion));
+	out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase2", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(lateInsertion));
+    out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase2", std::make_shared<WindIndirectSimulatePass>(resources, true)).At(lateInsertion));
+    auto debugInsertion = org::ExternalInsertPoint::After("TonemappingPass");
     // Keep debug composition before the scene output becomes presentation-ready.
     // final backbuffer access so the enhanced RENDER_TARGET -> PRESENT
     // transition is not undone before IDXGISwapChain::Present.
     debugInsertion.AlsoBefore("PresentationReadyPass");
-    out.push_back(org::RenderGraph::ExternalPassDesc::Render(
+    out.push_back(org::ExternalPassDesc::Render(
         "ProceduralWind::DebugActiveSkeletons",
         std::make_shared<WindSkeletonDebugPass>(resources))
         .At(debugInsertion));

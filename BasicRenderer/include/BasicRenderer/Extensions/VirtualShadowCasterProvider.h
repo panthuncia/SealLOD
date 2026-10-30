@@ -10,7 +10,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
@@ -82,15 +83,15 @@ struct VirtualShadowCasterTelemetryTag {
 class VirtualShadowPassBuilder {
 public:
     VirtualShadowPassBuilder(
-        std::vector<org::RenderGraph::ExternalPassDesc>& passes,
+        std::vector<org::ExternalPassDesc>& passes,
         std::string afterPass,
         std::string beforePass = {});
 
-    void Add(org::RenderGraph::ExternalPassDesc pass);
+    void Add(org::ExternalPassDesc pass);
     const std::string& LastPassName() const;
 
 private:
-    std::vector<org::RenderGraph::ExternalPassDesc>& m_passes;
+    std::vector<org::ExternalPassDesc>& m_passes;
     std::string m_lastPass;
     std::string m_beforePass;
 };

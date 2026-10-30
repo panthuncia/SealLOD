@@ -1,4 +1,5 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapDeduplicatePredictedPagesPass.h"
+#include "Render/PassBuilders.h"
 
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"

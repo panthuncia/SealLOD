@@ -1,8 +1,14 @@
 #include <BasicRenderer/Pipeline/PipelineRecipe.h>
 
 #include <BasicRenderer/Extensions/BuiltinResources.h>
+#include "Render/RenderGraph/RenderGraph.h"
 
 namespace br::pipeline {
+
+void PipelineBuildContext::RegisterOutput(const org::ResourceIdentifier& id, std::shared_ptr<org::Resource> resource) const
+{
+    m_graph.RegisterResource(id, std::move(resource));
+}
 
 namespace {
 bool HasRequiredView(uint8_t requiredViews, ResourceViewCapability capability)

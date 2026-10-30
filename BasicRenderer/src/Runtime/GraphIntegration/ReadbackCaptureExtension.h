@@ -5,22 +5,23 @@
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
-#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 #include "RenderPasses/ReadbackCapturePass.h"
 #include "RenderPasses/ReadbackCopyCapturePass.h"
 #include "Render/Runtime/IReadbackService.h"
 
-class ReadbackCaptureExtension final : public org::RenderGraph::IRenderGraphExtension {
+class ReadbackCaptureExtension final : public org::IRenderGraphExtension {
 public:
     explicit ReadbackCaptureExtension(std::shared_ptr<org::runtime::IReadbackService> readbackService)
         : m_readbackService(readbackService) {
     }
 
-    void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>&) override {
+    void GatherStructuralPasses(org::RenderGraph&, std::vector<org::ExternalPassDesc>&) override {
         // Readback capture is per-frame and ephemeral; we emit it via GatherFramePasses().
     }
 
-    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& out) override {
+    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& out) override {
         if (!m_readbackService) {
             return;
         }
@@ -82,8 +83,8 @@ public:
             // of end-of-frame contents run after the graph.
             const bool afterGraph = capture.passName == org::runtime::kReadbackAfterGraph;
             const auto where = afterGraph
-                ? org::RenderGraph::ExternalInsertPoint::End()
-                : org::RenderGraph::ExternalInsertPoint::After(capture.passName);
+                ? org::ExternalInsertPoint::End()
+                : org::ExternalInsertPoint::After(capture.passName);
             auto& localIndex = localIndexByAnchorPass[capture.passName];
             const std::string passInstanceName =
                 "ReadbackCapture::" +
@@ -100,7 +101,7 @@ public:
 
                 auto pass = std::make_shared<org::ReadbackCopyCapturePass>(inputs, resource, std::move(capture.callback), m_readbackService, passInstanceName);
                 out.push_back(
-                    org::RenderGraph::ExternalPassDesc::Copy(
+                    org::ExternalPassDesc::Copy(
                         passInstanceName,
                         std::move(pass))
                         .At(where)
@@ -117,7 +118,7 @@ public:
 
                 auto pass = std::make_shared<org::ReadbackCapturePass>(inputs, resource, std::move(capture.callback), m_readbackService, passInstanceName);
                 out.push_back(
-                    org::RenderGraph::ExternalPassDesc::Render(
+                    org::ExternalPassDesc::Render(
                         passInstanceName,
                         std::move(pass))
                         .At(where)

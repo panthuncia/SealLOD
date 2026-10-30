@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
-#include <OpenRenderGraph/OpenRenderGraph.h>
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 
-using RenderGraphExtensionFactory = std::function<std::unique_ptr<org::RenderGraph::IRenderGraphExtension>()>;
+using RenderGraphExtensionFactory = std::function<std::unique_ptr<org::IRenderGraphExtension>()>;

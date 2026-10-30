@@ -1,4 +1,5 @@
 #include <BasicRenderer/Scene/Scene.h>
+#include "Render/RenderGraph/RenderGraph.h"
 #include "Diagnostics/Menu/Menu.h"
 
 void Menu::TryFinalizeCLodCaptureStats(CLodWorkGraphCaptureState& captureState, uint64_t captureId, const char* captureLabel) {

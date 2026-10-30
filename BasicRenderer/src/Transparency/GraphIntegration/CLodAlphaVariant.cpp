@@ -174,9 +174,9 @@ org::TextureDescription CreateAVBOITEarlyDepthDescription()
     return desc;
 }
 
-org::RenderGraph::ExternalInsertPoint MakeTransparentTailInsertPoint()
+org::ExternalInsertPoint MakeTransparentTailInsertPoint()
 {
-    auto insertPoint = org::RenderGraph::ExternalInsertPoint::After("LightCullingPass");
+    auto insertPoint = org::ExternalInsertPoint::After("LightCullingPass");
     insertPoint.after.push_back("CLodShadow::VirtualShadowClearDirtyBitsPass");
     insertPoint.before.push_back("Screen-Space Reflections Pass");
     insertPoint.before.push_back("UpscalingPass");
@@ -184,9 +184,9 @@ org::RenderGraph::ExternalInsertPoint MakeTransparentTailInsertPoint()
     return insertPoint;
 }
 
-org::RenderGraph::ExternalInsertPoint MakeTransparentCompositeInsertPoint()
+org::ExternalInsertPoint MakeTransparentCompositeInsertPoint()
 {
-    auto insertPoint = org::RenderGraph::ExternalInsertPoint::After("Specular IBL & SSR Composite Pass");
+    auto insertPoint = org::ExternalInsertPoint::After("Specular IBL & SSR Composite Pass");
     insertPoint.after.push_back("SkyboxPass");
     insertPoint.after.push_back("Forward render pass");
     insertPoint.after.push_back("Screen-Space Reflections Pass");
@@ -505,7 +505,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
     bool useAVBOIT,
     bool useReyesForThisVariant,
     bool disableReyesTessellation,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     if (traits.type != CLodExtensionType::AlphaBlend) {
         return;
@@ -513,7 +513,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
 
     if (useAVBOIT) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Render(
+            org::ExternalPassDesc::Render(
                 MakeVariantPassName(traits, kTransparentExtinctionSetupPassName),
                 std::make_shared<AVBOITSetupPass>(
                     extension.m_AVBOITConfigBuffer,
@@ -530,18 +530,18 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
                     extension.m_AVBOITNormalizationTexture,
                     extension.m_AVBOITShadingExtinctionTexture)));
 
-        auto adaptiveFitPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto adaptiveFitPassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionAdaptiveFitPassName),
             std::make_shared<AVBOITAdaptiveFitPass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITFitStateBuffer));
-        adaptiveFitPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
+        adaptiveFitPassDesc.At(org::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionSetupPassName)));
         outPasses.push_back(std::move(adaptiveFitPassDesc));
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Render(
+            org::ExternalPassDesc::Render(
                 MakeVariantPassName(traits, "ClearDeepVisibilityPass"),
                 std::make_shared<ClearDeepVisibilityPass>(
                     extension.m_deepVisibilityCounterBuffer,
@@ -550,7 +550,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
 
         if (useReyesForThisVariant) {
             outPasses.push_back(
-                org::RenderGraph::ExternalPassDesc::Compute(
+                org::ExternalPassDesc::Compute(
                     MakeVariantPassName(traits, "ReyesPatchRasterPass1"),
                     std::make_shared<ReyesDeepVisibilityRasterizationPass>(
                         extension.m_visibleClustersBuffer,
@@ -579,7 +579,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
         occupancyPassInputs.wireframe = false;
         occupancyPassInputs.renderPhase = renderPhase;
         occupancyPassInputs.outputKind = CLodRasterOutputKind::AVBOITOccupancy;
-        auto occupancyPassDesc = org::RenderGraph::ExternalPassDesc::Render(
+        auto occupancyPassDesc = org::ExternalPassDesc::Render(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyPassName),
             std::make_shared<ClusterRasterizationPass>(
                 occupancyPassInputs,
@@ -607,53 +607,53 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
                 nullptr,
                 extension.m_AVBOITOccupancySliceMaskTexture));
         occupancyPassDesc.GeometryPass();
-        occupancyPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
+        occupancyPassDesc.At(org::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionAdaptiveFitPassName)));
         outPasses.push_back(std::move(occupancyPassDesc));
 
-        auto occupancyHistogramPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto occupancyHistogramPassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyHistogramPassName),
             std::make_shared<AVBOITOccupancyHistogramPass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITOccupancyTexture,
                 extension.m_AVBOITOccupancySliceMaskTexture,
                 extension.m_AVBOITOccupancyHistogramBuffer));
-        occupancyHistogramPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
+        occupancyHistogramPassDesc.At(org::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyPassName)));
         outPasses.push_back(std::move(occupancyHistogramPassDesc));
 
-        auto adaptiveFitUpdatePassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto adaptiveFitUpdatePassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionAdaptiveFitUpdatePassName),
             std::make_shared<AVBOITAdaptiveFitUpdatePass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITOccupancyHistogramBuffer,
                 extension.m_AVBOITFitStateBuffer));
-        adaptiveFitUpdatePassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
+        adaptiveFitUpdatePassDesc.At(org::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyHistogramPassName)));
         outPasses.push_back(std::move(adaptiveFitUpdatePassDesc));
 
-        auto depthWarpPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto depthWarpPassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionDepthWarpPassName),
             std::make_shared<AVBOITDepthWarpPass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITOccupancyHistogramBuffer,
                 extension.m_AVBOITDepthWarpLUTBuffer));
-        depthWarpPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
+        depthWarpPassDesc.At(org::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionAdaptiveFitUpdatePassName)));
         outPasses.push_back(std::move(depthWarpPassDesc));
 
-        auto occupancyRemapPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto occupancyRemapPassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyRemapPassName),
             std::make_shared<AVBOITOccupancyRemapPass>(
                 extension.m_AVBOITConfigBuffer,
                 extension.m_AVBOITOccupancyTexture,
                 extension.m_AVBOITOccupancySliceMaskTexture,
                 extension.m_AVBOITDepthWarpLUTBuffer));
-        occupancyRemapPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
+        occupancyRemapPassDesc.At(org::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionDepthWarpPassName)));
         outPasses.push_back(std::move(occupancyRemapPassDesc));
 
-        auto sparseClearPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto sparseClearPassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentExtinctionSparseClearPassName),
             std::make_shared<AVBOITSparseClearPass>(
                 extension.m_AVBOITConfigBuffer,
@@ -662,7 +662,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
                 extension.m_AVBOITExtinctionTexture,
                 extension.m_AVBOITChromaticExtinctionTexture,
                 extension.m_AVBOITZeroTransmittanceSliceTexture));
-        sparseClearPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(
+        sparseClearPassDesc.At(org::ExternalInsertPoint::After(
             MakeVariantPassName(traits, kTransparentExtinctionOccupancyRemapPassName)));
         outPasses.push_back(std::move(sparseClearPassDesc));
     }
@@ -674,7 +674,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
     rasterizePassInputs.outputKind = useAVBOIT
         ? CLodRasterOutputKind::AVBOIT
         : traits.rasterOutputKind;
-    auto rasterizeDeepVisibilityPassDesc = org::RenderGraph::ExternalPassDesc::Render(
+    auto rasterizeDeepVisibilityPassDesc = org::ExternalPassDesc::Render(
         MakeVariantPassName(
             traits,
             useAVBOIT
@@ -721,14 +721,14 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
     const RenderPhase& renderPhase,
     bool useAVBOIT,
     bool disableReyesTessellation,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     if (traits.type != CLodExtensionType::AlphaBlend) {
         return;
     }
 
     if (useAVBOIT) {
-        auto integratePassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto integratePassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentTransmittanceIntegratePassName),
             std::make_shared<AVBOITIntegratePass>(
                 extension.m_AVBOITConfigBuffer,
@@ -743,7 +743,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         integratePassDesc.At(MakeTransparentTailInsertPoint());
         outPasses.push_back(std::move(integratePassDesc));
 
-        auto earlyDepthBuildPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto earlyDepthBuildPassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentVBOITEarlyDepthBuildPassName),
             std::make_shared<AVBOITEarlyDepthBuildPass>(
                 extension.m_AVBOITConfigBuffer,
@@ -757,7 +757,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         }
         outPasses.push_back(std::move(earlyDepthBuildPassDesc));
 
-        auto earlyDepthPassDesc = org::RenderGraph::ExternalPassDesc::Render(
+        auto earlyDepthPassDesc = org::ExternalPassDesc::Render(
             MakeVariantPassName(traits, kTransparentVBOITEarlyDepthPassName),
             std::make_shared<AVBOITEarlyDepthPass>(
                 extension.m_AVBOITConfigBuffer,
@@ -776,7 +776,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         shadePassInputs.wireframe = false;
         shadePassInputs.renderPhase = renderPhase;
         shadePassInputs.outputKind = CLodRasterOutputKind::AVBOITShading;
-        auto shadePassDesc = org::RenderGraph::ExternalPassDesc::Render(
+        auto shadePassDesc = org::ExternalPassDesc::Render(
             MakeVariantPassName(traits, kTransparentVBOITShadePassName),
             std::make_shared<ClusterRasterizationPass>(
                 shadePassInputs,
@@ -812,7 +812,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         }
         outPasses.push_back(std::move(shadePassDesc));
 
-        auto resolvePassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+        auto resolvePassDesc = org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, kTransparentVBOITResolvePassName),
             std::make_shared<AVBOITResolvePass>(
                 extension.m_AVBOITConfigBuffer,
@@ -828,7 +828,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
         return;
     }
 
-    auto resolveDeepVisibilityPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto resolveDeepVisibilityPassDesc = org::ExternalPassDesc::Compute(
         MakeVariantPassName(traits, "DeepVisibilityResolvePass"),
         std::make_shared<DeepVisibilityResolvePass>(
             extension.m_visibleClustersBuffer,

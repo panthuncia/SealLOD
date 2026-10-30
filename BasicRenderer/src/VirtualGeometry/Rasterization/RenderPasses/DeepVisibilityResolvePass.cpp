@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Rasterization/RenderPasses/DeepVisibilityResolvePass.h"
+#include "Render/PassBuilders.h"
 
 #include <bit>
 

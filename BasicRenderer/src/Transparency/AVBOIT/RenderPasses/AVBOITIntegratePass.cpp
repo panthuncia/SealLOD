@@ -1,4 +1,5 @@
 #include "Transparency/AVBOIT/RenderPasses/AVBOITIntegratePass.h"
+#include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BuiltinResources.h"

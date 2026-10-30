@@ -1,4 +1,5 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapBuildMarkTilesPass.h"
+#include "Render/PassBuilders.h"
 
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"

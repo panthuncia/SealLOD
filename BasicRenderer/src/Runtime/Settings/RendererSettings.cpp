@@ -1,4 +1,6 @@
 #include <BasicRenderer/Renderer.h>
+#include "Render/Runtime/OpenRenderGraphSettings.h"
+#include "Render/RenderGraph/Aliasing/RenderGraphAliasingSubsystem.h"
 #include <rhi_debug.h>
 
 #include <algorithm>

@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesQueueResetPass.h"
+#include "Render/PassBuilders.h"
 #include "Runtime/StateGraph/InvocationRevision.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"

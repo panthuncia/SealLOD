@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Rasterization/RenderPasses/PerViewLinearDepthCopyPass.h"
+#include "Render/PassBuilders.h"
 
 #include "Scene/Views/ViewManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"

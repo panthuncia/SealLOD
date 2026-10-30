@@ -1,4 +1,5 @@
 #include "Transparency/AVBOIT/RenderPasses/AVBOITOccupancyHistogramPass.h"
+#include "Render/PassBuilders.h"
 
 #include <array>
 

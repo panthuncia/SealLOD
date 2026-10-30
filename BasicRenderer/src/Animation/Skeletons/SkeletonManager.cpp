@@ -1,4 +1,5 @@
 #include "Animation/Skeletons/SkeletonManager.h"
+#include "BasicTelemetry/Tracy.h"
 
 #include <BasicTelemetry/Telemetry.h>
 #include <optional>

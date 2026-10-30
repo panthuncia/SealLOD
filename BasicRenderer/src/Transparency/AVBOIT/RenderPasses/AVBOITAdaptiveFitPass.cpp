@@ -1,4 +1,5 @@
 #include "Transparency/AVBOIT/RenderPasses/AVBOITAdaptiveFitPass.h"
+#include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"

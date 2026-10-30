@@ -1,4 +1,5 @@
 #include "Materials/TextureStreaming/TextureStreamingManager.h"
+#include "Render/PassBuilders.h"
 
 #include "../generated/BuiltinResources.h"
 #include "Assets/Textures/TextureFactory.h"

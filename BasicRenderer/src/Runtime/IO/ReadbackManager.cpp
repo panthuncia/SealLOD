@@ -1,4 +1,6 @@
 #include "Runtime/IO/ReadbackManager.h"
+#include "Resources/Buffers/Buffer.h"
+#include "Render/PassBuilders.h"
 
 #include <DirectXTex.h>
 #include <spdlog/spdlog.h>

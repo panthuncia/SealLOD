@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Voxels/RenderPasses/VoxelSoftwareRasterizationPass.h"
+#include "Render/PassBuilders.h"
 
 #include <algorithm>
 

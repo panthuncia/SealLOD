@@ -13,7 +13,7 @@
 #include "BasicRenderer/Pipeline/RenderPhase.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedRenderIndirect.h"
-#include "Render/RenderGraph/RenderGraph.h"
+namespace org { class RenderGraph; }
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"

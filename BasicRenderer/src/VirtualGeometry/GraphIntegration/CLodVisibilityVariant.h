@@ -4,7 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 
 class CLodExtension;
 struct CLodVariantTraits;
@@ -16,34 +17,34 @@ public:
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static void AppendPhase2ReyesRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase1FineRasterPass(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase2FineRasterPass(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
 
 private:
     static void AppendReyesRasterPassesForPhase(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+        std::vector<org::ExternalPassDesc>& outPasses,
         uint32_t phaseIndex);
     static std::string AppendFineRasterPassForPhase(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+        std::vector<org::ExternalPassDesc>& outPasses,
         uint32_t phaseIndex);
 };

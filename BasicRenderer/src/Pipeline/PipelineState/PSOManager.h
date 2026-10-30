@@ -18,7 +18,8 @@
 #include <boost/container_hash/hash.hpp>
 
 #include <rhi.h>
-#include <OpenRenderGraph/OpenRenderGraph.h>
+#include "Render/PipelineState.h"
+#include "Render/QueueKind.h"
 
 #pragma warning(push, 0)   // Disable all warnings for dxc header
 #include "ThirdParty/DirectX/dxcapi.h"

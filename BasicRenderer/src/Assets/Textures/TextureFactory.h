@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include "Interfaces/IDynamicDeclaredResources.h"
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -8,7 +9,12 @@
 #include <string_view>
 
 #include "BasicRenderer/Extensions/Buffers/LazyDynamicStructuredBuffer.h"
-#include "OpenRenderGraph/OpenRenderGraph.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "Resources/PixelBuffer.h"
+#include "Resources/TextureDescription.h"
+#include "Resources/Buffers/Buffer.h"
+#include "Render/Runtime/IUploadService.h"
+#include "Render/Runtime/IReadbackService.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 #include "Render/Runtime/FrameWorkQueue.h"

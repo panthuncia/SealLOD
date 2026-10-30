@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesBuildRasterWorkPass.h"
+#include "Render/PassBuilders.h"
 #include "Runtime/StateGraph/InvocationRevision.h"
 
 #include "Runtime/Device/DeviceManager.h"

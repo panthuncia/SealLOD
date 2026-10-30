@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include "Render/PassBuilders.h"
 #include <memory>
 
 #include "Pipeline/PipelineState/PSOManager.h"

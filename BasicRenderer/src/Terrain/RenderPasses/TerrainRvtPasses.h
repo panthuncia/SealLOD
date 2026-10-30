@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "Render/PassBuilders.h"
 #include "Runtime/StateGraph/InvocationRevision.h"
 
 #include <algorithm>

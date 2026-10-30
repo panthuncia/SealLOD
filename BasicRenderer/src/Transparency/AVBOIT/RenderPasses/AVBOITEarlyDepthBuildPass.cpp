@@ -1,4 +1,5 @@
 #include "Transparency/AVBOIT/RenderPasses/AVBOITEarlyDepthBuildPass.h"
+#include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"

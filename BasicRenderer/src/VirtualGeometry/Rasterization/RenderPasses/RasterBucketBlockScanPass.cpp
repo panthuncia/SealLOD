@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Rasterization/RenderPasses/RasterBucketBlockScanPass.h"
+#include "Render/PassBuilders.h"
 
 #include "Materials/MaterialManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"

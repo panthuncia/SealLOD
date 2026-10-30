@@ -6,7 +6,8 @@
 #include <vector>
 
 #include "Interfaces/IResourceProvider.h"
-#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 
 class CLodExtension;
 struct CLodVariantTraits;
@@ -20,47 +21,47 @@ public:
     static std::string AppendStructuralPrelude(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static void AppendStructuralTail(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+        std::vector<org::ExternalPassDesc>& outPasses,
         const std::string& shadowClearDirtyBitsAfterPassName);
     static std::string AppendCasterRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+        std::vector<org::ExternalPassDesc>& outPasses,
         const std::string& afterPassName);
     static std::string AppendPhase1PageJobRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase2PageJobRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase1FineRasterPass(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase2FineRasterPass(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase1ReyesLargeRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static std::string AppendPhase2ReyesLargeRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
     static void InitializeResources(CLodExtension& extension);
     static void TagResourceUsages(CLodExtension& extension);
     static void ReleaseResourceBackings(CLodExtension& extension);
@@ -74,12 +75,12 @@ private:
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+        std::vector<org::ExternalPassDesc>& outPasses,
         uint32_t phaseIndex);
     static std::string AppendFineRasterPassForPhase(
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+        std::vector<org::ExternalPassDesc>& outPasses,
         uint32_t phaseIndex);
 };

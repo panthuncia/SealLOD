@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Rasterization/RenderPasses/RasterBucketHistogramPass.h"
+#include "Render/PassBuilders.h"
 
 #include <stdexcept>
 #include <vector>

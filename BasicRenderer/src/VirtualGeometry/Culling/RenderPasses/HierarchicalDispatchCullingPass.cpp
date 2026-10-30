@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Culling/RenderPasses/CapturedCullingCommandSink.h"
+#include "Render/PassBuilders.h"
 #include "VirtualGeometry/Culling/RenderPasses/HierarchicalDispatchCullingPass.h"
 #include "VirtualGeometry/Culling/PreparedCullingWorkloads.h"
 #include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeCommands.h"

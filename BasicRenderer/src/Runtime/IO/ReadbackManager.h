@@ -9,7 +9,9 @@
 
 #include <rhi.h>
 
-#include "OpenRenderGraph/OpenRenderGraph.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "Resources/PixelBuffer.h"
+#include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 
 namespace br {

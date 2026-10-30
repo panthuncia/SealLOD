@@ -13,7 +13,11 @@
 #include <spdlog/spdlog.h>
 #include <rhi.h>
 
-#include "OpenRenderGraph/OpenRenderGraph.h"
+#include "Resources/Resource.h"
+#include "Resources/Buffers/Buffer.h"
+#include "Render/Runtime/BufferUploadPolicy.h"
+#include "Render/Runtime/UploadPolicyServiceAccess.h"
+#include "Render/Runtime/UploadTypes.h"
 #include "BasicRenderer/Extensions/Buffers/BufferView.h"
 #include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"

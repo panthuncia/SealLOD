@@ -3,7 +3,8 @@
 #include <memory>
 #include <vector>
 
-#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 
 class CLodExtension;
 namespace org { class ResourceGroup; }
@@ -26,7 +27,7 @@ public:
         bool useAVBOIT,
         bool useReyesForThisVariant,
         bool disableReyesTessellation,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
 
 private:
     static void AppendSinglePassResolveTail(
@@ -36,5 +37,5 @@ private:
         const RenderPhase& renderPhase,
         bool useAVBOIT,
         bool disableReyesTessellation,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+        std::vector<org::ExternalPassDesc>& outPasses);
 };

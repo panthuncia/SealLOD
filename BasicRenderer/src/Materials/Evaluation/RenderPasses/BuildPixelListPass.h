@@ -1,5 +1,6 @@
 #pragma once
 #include "BuiltinResources.h"
+#include "Render/PassBuilders.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "RenderPasses/Base/PersistentTypedPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"

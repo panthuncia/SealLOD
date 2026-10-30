@@ -1,7 +1,8 @@
 #pragma once
 
 #include <rhi.h>
-#include <OpenRenderGraph/OpenRenderGraph.h>
+#include "Render/DescriptorHeap.h"
+#include "Resources/PixelBuffer.h"
 #include <memory>
 #include <span>
 #include <vector>

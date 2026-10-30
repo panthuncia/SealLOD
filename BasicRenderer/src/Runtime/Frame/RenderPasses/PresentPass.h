@@ -1,7 +1,7 @@
 #pragma once
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "Render/PassBuilders.h"
+#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BuiltinResources.h"
 
 struct PresentationCopyBindings {

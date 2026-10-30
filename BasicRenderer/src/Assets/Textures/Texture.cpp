@@ -1,4 +1,5 @@
 #include "BasicRenderer/Assets/Texture.h"
+#include "Render/MemoryIntrospectionAPI.h"
 #include "Assets/Textures/TextureFactory.h"
 
 #include <algorithm>

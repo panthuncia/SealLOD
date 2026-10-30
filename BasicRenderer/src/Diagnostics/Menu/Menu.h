@@ -37,6 +37,7 @@
 #include <unordered_map>
 
 #include "BasicRenderer/Extensions/RenderContext.h"
+#include "Render/RenderGraph/Aliasing/RenderGraphAliasingSubsystem.h"
 #include "Utilities/Utilities.h"
 #include <BasicRenderer/Diagnostics/OutputTypes.h>
 #include "BasicRenderer/Assets/Import/ModelLoader.h"

@@ -1,4 +1,5 @@
 #include "VirtualShadows/Rasterization/RenderPasses/ReyesVirtualShadowHardwareRasterPass.h"
+#include "Render/PassBuilders.h"
 
 #include "Materials/MaterialManager.h"
 #include "Scene/Views/ViewManager.h"

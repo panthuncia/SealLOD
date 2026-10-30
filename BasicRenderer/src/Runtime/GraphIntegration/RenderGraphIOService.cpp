@@ -21,34 +21,34 @@ void RenderGraphIOService::SetRegistry(org::ResourceRegistry& registry) {
 }
 
 void RenderGraphIOService::GatherStructuralPasses(
-    std::vector<org::RenderGraph::ExternalPassDesc>& out) {
+    std::vector<org::ExternalPassDesc>& out) {
     if (auto pass = m_uploads->GetUploadPass())
-        out.push_back(org::RenderGraph::ExternalPassDesc::Render("Builtin::Uploads", pass)
-            .At(org::RenderGraph::ExternalInsertPoint::Begin(0)));
+        out.push_back(org::ExternalPassDesc::Render("Builtin::Uploads", pass)
+            .At(org::ExternalInsertPoint::Begin(0)));
     if (auto pass = m_textures->GetMipmappingPass())
-        out.push_back(org::RenderGraph::ExternalPassDesc::Compute("Builtin::Mipmapping", pass)
-            .At(org::RenderGraph::ExternalInsertPoint::Begin(1)));
+        out.push_back(org::ExternalPassDesc::Compute("Builtin::Mipmapping", pass)
+            .At(org::ExternalInsertPoint::Begin(1)));
     if (auto pass = m_textures->GetBC7CompressionPass())
-        out.push_back(org::RenderGraph::ExternalPassDesc::Compute("Builtin::BC7Compression", pass)
-            .At(org::RenderGraph::ExternalInsertPoint::Begin(2)));
+        out.push_back(org::ExternalPassDesc::Compute("Builtin::BC7Compression", pass)
+            .At(org::ExternalInsertPoint::Begin(2)));
     if (auto pass = m_textures->GetBC7CompressionCopyPass())
-        out.push_back(org::RenderGraph::ExternalPassDesc::Render("Builtin::BC7CompressionCopy", pass)
-            .At(org::RenderGraph::ExternalInsertPoint::Begin(3)));
+        out.push_back(org::ExternalPassDesc::Render("Builtin::BC7CompressionCopy", pass)
+            .At(org::ExternalInsertPoint::Begin(3)));
     if (auto pass = m_textures->GetBC7CompressionReadbackPass())
-        out.push_back(org::RenderGraph::ExternalPassDesc::Copy("Builtin::BC7CompressionReadback", pass)
-            .At(org::RenderGraph::ExternalInsertPoint::Begin(4))
+        out.push_back(org::ExternalPassDesc::Copy("Builtin::BC7CompressionReadback", pass)
+            .At(org::ExternalInsertPoint::Begin(4))
             .PinToQueue(static_cast<org::QueueSlotIndex>(2)));
     if (auto pass = m_readbacks->GetReadbackPass())
-        out.push_back(org::RenderGraph::ExternalPassDesc::Render("Builtin::Readbacks", pass)
-            .At(org::RenderGraph::ExternalInsertPoint::End(0))
+        out.push_back(org::ExternalPassDesc::Render("Builtin::Readbacks", pass)
+            .At(org::ExternalInsertPoint::End(0))
             .PinToQueue(static_cast<org::QueueSlotIndex>(0)));
 }
 
 void RenderGraphIOService::GatherFramePasses(
-    std::vector<org::RenderGraph::ExternalPassDesc>& out) {
+    std::vector<org::ExternalPassDesc>& out) {
     if (auto pass = m_textureStreamingFeedback->CreateTextureStreamingFeedbackReadbackPass())
-        out.push_back(org::RenderGraph::ExternalPassDesc::Copy("Material::TextureStreamingReadback", pass)
-            .At(org::RenderGraph::ExternalInsertPoint::After("MenuRenderPass"))
+        out.push_back(org::ExternalPassDesc::Copy("Material::TextureStreamingReadback", pass)
+            .At(org::ExternalInsertPoint::After("MenuRenderPass"))
             .PreferQueue(org::QueueKind::Copy));
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include "Render/PassBuilders.h"
 #include <memory>
 #include <utility>
 

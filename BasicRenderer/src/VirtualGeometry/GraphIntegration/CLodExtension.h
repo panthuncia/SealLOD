@@ -5,7 +5,8 @@
 #include <vector>
 
 #include "Interfaces/IResourceProvider.h"
-#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
 
 namespace org { class Buffer; }
@@ -29,7 +30,7 @@ struct CLodExtensionOptions {
     std::shared_ptr<org::ResourceGroup> slabResourceGroup;
 };
 
-class CLodExtension final : public org::RenderGraph::IRenderGraphExtension, public org::IResourceProvider {
+class CLodExtension final : public org::IRenderGraphExtension, public org::IResourceProvider {
 public:
     explicit CLodExtension(
         CLodExtensionType type,
@@ -41,8 +42,8 @@ public:
     void Initialize(org::RenderGraph& rg) override;
     void Shutdown(org::RenderGraph& rg) override;
     void OnRegistryReset(org::ResourceRegistry* reg) override;
-    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses) override;
-    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses) override;
+    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) override;
+    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) override;
     std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
     std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
 
@@ -80,7 +81,7 @@ private:
         bool uploadTessellationTable,
         bool preserveDiceCountForPhase2Replay,
         bool workGraphReyesVisibility,
-        std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+        std::vector<org::ExternalPassDesc>& outPasses,
         std::string& shadowClearDirtyBitsAfterPassName);
 
     CLodExtensionType m_type;

@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Streaming/CLodStreamingSystem.h"
+#include "Render/RenderGraph/RenderGraph.h"
 #include "VirtualGeometry/Streaming/CLodStreamingInternals.h"
 #include "VirtualGeometry/Streaming/CLodStreamingTraceInternals.h"
 
@@ -1365,7 +1366,7 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
 
 }
 
-void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses) {
+void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) {
     if (!m_nonResidentBitsResolver) {
         m_nonResidentBitsResolver = std::make_shared<PublishedStateResourceResolver>(
             br::render::PublishedStateSource::ProcessSource(),
@@ -1387,12 +1388,12 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, m_usedGroupsBuffer);
 
     auto asyncUploadInsertPoint =
-        org::RenderGraph::ExternalInsertPoint::After("EvaluateMaterialGroupsPass");
+        org::ExternalInsertPoint::After("EvaluateMaterialGroupsPass");
     asyncUploadInsertPoint.AlsoBefore("GTAOFilterPass");
     asyncUploadInsertPoint.AlsoBefore("DeferredShadingPass");
     asyncUploadInsertPoint.keepExtensionOrder = false;
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Copy(
+        org::ExternalPassDesc::Copy(
             "CLod::AsyncUpload",
             std::make_shared<CLodStructuralAsyncUploadPass>(
                 [this](CLodAsyncUploadSnapshot& outSnapshot) -> bool {
@@ -1470,19 +1471,19 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
             RequestStreamingFrameWork();
         });
 
-    auto streamingBeginPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto streamingBeginPassDesc = org::ExternalPassDesc::Compute(
         "CLod::StreamingBeginFramePass",
         streamingBeginPass);
     // Keep the CLod front-end behind the visibility/depth clear so the graph
     // cannot legally sink ClearVisibilityBufferPass after CLod rasterization.
     auto streamingBeginInsertPoint =
-        org::RenderGraph::ExternalInsertPoint::After("ClearVisibilityBufferPass");
+        org::ExternalInsertPoint::After("ClearVisibilityBufferPass");
     streamingBeginInsertPoint.keepExtensionOrder = false;
     streamingBeginPassDesc.At(std::move(streamingBeginInsertPoint));
     outPasses.push_back(std::move(streamingBeginPassDesc));
 }
 
-void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses) {
+void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) {
     (void)rg;
     const bool hasStreamingFeedbackSort = EnsureParallelSortResources();
     if (hasStreamingFeedbackSort) {
@@ -1499,10 +1500,10 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
             m_parallelSortState->reduceScanArgs);
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 "CLod::StreamingFeedbackSort",
                 feedbackSortPass)
-                .At(org::RenderGraph::ExternalInsertPoint::After("PresentationReadyPass"))
+                .At(org::ExternalInsertPoint::After("PresentationReadyPass"))
                 .PreferQueue(org::QueueKind::Graphics));
     }
 
@@ -1605,10 +1606,10 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
         });
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Copy(
+        org::ExternalPassDesc::Copy(
             "CLod::StreamingReadbackCopy",
             readbackPass)
-            .At(org::RenderGraph::ExternalInsertPoint::After(
+            .At(org::ExternalInsertPoint::After(
                 hasStreamingFeedbackSort ? "CLod::StreamingFeedbackSort" : "PresentationReadyPass"))
             .PreferQueue(org::QueueKind::Graphics));
 
@@ -1652,14 +1653,14 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
     };
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Copy(
+        org::ExternalPassDesc::Copy(
             "CLod::DirectStorageLaunch",
             std::make_shared<CLodDirectStorageLaunchPass>(std::move(launchInputs)))
-            .At(org::RenderGraph::ExternalInsertPoint::After("PresentationReadyPass"))
+            .At(org::ExternalInsertPoint::After("PresentationReadyPass"))
             .PreferQueue(org::QueueKind::Graphics));
 }
 
-void CLodStreamingSystem::GatherFramePasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses) {
+void CLodStreamingSystem::GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) {
     (void)rg;
     PublishStreamingFrameWorkForFrame();
 

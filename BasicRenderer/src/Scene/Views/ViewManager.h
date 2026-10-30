@@ -8,7 +8,13 @@
 #include <functional>
 #include <flecs.h>
 
-#include "OpenRenderGraph/OpenRenderGraph.h"
+#include "Resources/PixelBuffer.h"
+#include "Resources/ResourceIdentifier.h"
+#include "Resources/Resource.h"
+#include "Resources/ResourceGroup.h"
+#include "Resources/DynamicResource.h"
+#include "Interfaces/IResourceResolver.h"
+#include "Interfaces/IResourceProvider.h"
 #include "VirtualShadows/Views/ShadowViewService.h"
 #include "BasicRenderer/Streaming/ViewStateArtifacts.h"
 #include "BasicRenderer/Extensions/Buffers/LazyDynamicStructuredBuffer.h"

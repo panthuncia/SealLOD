@@ -3,6 +3,7 @@
 //
 
 #include <BasicRenderer/Renderer.h>
+#include "Render/RenderGraph/RenderGraph.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 #include <spdlog/spdlog.h>
 #include <rhi_debug.h>

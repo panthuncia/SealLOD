@@ -11,7 +11,9 @@
 #include "BasicRenderer/Assets/Import/Filetypes.h"
 #include <BasicRenderer/Assets/TextureTypes.h>
 #include "BasicRenderer/Assets/MaterialTextureStreaming.h"
-#include "OpenRenderGraph/OpenRenderGraph.h"
+#include "Resources/PixelBuffer.h"
+#include "Resources/TextureDescription.h"
+#include "Render/Runtime/IDescriptorService.h"
 
 class TextureFactory;
 #include "Resources/Sampler.h"

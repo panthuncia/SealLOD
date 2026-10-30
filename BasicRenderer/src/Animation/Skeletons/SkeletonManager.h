@@ -9,7 +9,12 @@
 #include <utility>
 #include <vector>
 
-#include "OpenRenderGraph/OpenRenderGraph.h"
+#include "Resources/ResourceIdentifier.h"
+#include "Resources/Resource.h"
+#include "Interfaces/IResourceResolver.h"
+#include "Interfaces/IResourceProvider.h"
+#include "Render/Runtime/IUploadService.h"
+#include "Render/Runtime/UploadTypes.h"
 #include "BasicRenderer/Extensions/Buffers/DynamicBuffer.h"
 #include <BasicRenderer/Extensions/Resources/DynamicStructuredBuffer.h>
 #include "BasicRenderer/Extensions/ShaderBuffers.h"

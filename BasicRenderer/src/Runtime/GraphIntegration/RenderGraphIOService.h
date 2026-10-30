@@ -1,6 +1,7 @@
 #pragma once
 
-#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 
 #include <memory>
 #include <vector>
@@ -19,8 +20,8 @@ public:
         br::ReadbackManager&, ITextureStreamingFeedbackService&) noexcept;
 
     void SetRegistry(org::ResourceRegistry&);
-    void GatherStructuralPasses(std::vector<org::RenderGraph::ExternalPassDesc>&);
-    void GatherFramePasses(std::vector<org::RenderGraph::ExternalPassDesc>&);
+    void GatherStructuralPasses(std::vector<org::ExternalPassDesc>&);
+    void GatherFramePasses(std::vector<org::ExternalPassDesc>&);
 
 private:
     TextureFactory* m_textures;

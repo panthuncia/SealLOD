@@ -11,7 +11,12 @@
 #include <cstddef>
 
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
-#include "OpenRenderGraph/OpenRenderGraph.h"
+#include "Resources/ResourceIdentifier.h"
+#include "Resources/Resource.h"
+#include "Resources/ResourceGroup.h"
+#include "Resources/Buffers/Buffer.h"
+#include "Interfaces/IResourceResolver.h"
+#include "Interfaces/IResourceProvider.h"
 #include "BasicRenderer/Extensions/Buffers/LazyDynamicStructuredBuffer.h"
 #include <BasicRenderer/Extensions/Resources/DynamicStructuredBuffer.h>
 #include "BasicRenderer/Scene/Components.h"

@@ -16,7 +16,8 @@
 
 #include "VirtualGeometry/GeometryStorage/CLodGeometryStorage.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
-#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/RenderGraph/RenderGraphExtension.h"
+namespace org { class RenderGraph; }
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "VirtualGeometry/Streaming/CLodPageLRU.h"
@@ -72,9 +73,9 @@ public:
     void ShutdownGraphResources();
     void QuiesceGraphResourceAccess();
     void OnRegistryReset(org::ResourceRegistry* reg);
-    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
-    void GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
-    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::RenderGraph::ExternalPassDesc>& outPasses);
+    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses);
+    void GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses);
+    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses);
     std::shared_ptr<org::Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
     std::shared_ptr<org::Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
     void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<org::Buffer>> buffers);

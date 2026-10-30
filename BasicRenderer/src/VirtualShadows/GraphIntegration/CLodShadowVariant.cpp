@@ -63,9 +63,9 @@ bool AreRendererShadowsEnabled()
     return SettingsManager::GetInstance().getSettingGetter<bool>("enableShadows")();
 }
 
-org::RenderGraph::ExternalInsertPoint MakeShadowTailInsertPoint(const std::string& afterPassName)
+org::ExternalInsertPoint MakeShadowTailInsertPoint(const std::string& afterPassName)
 {
-    auto insertPoint = org::RenderGraph::ExternalInsertPoint::After(afterPassName);
+    auto insertPoint = org::ExternalInsertPoint::After(afterPassName);
     // The dynamic atlas contains current-pose skinned depth. Keep the complete
     // shadow producer chain ahead of every lighting consumer instead of
     // allowing deferred/forward shading to sample the previous frame.
@@ -105,7 +105,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+    std::vector<org::ExternalPassDesc>& outPasses,
     uint32_t phaseIndex)
 {
     if (traits.rasterOutputKind != CLodRasterOutputKind::VirtualShadow) {
@@ -160,7 +160,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
 
     if (isPhase2) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsCreateCommandPassPageJob2"),
                 std::make_shared<RasterBucketCreateCommandPass>(
                     visibleClustersCounterBuffer,
@@ -172,7 +172,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsCreateCommandPassPageJob1"),
                 std::make_shared<RasterBucketCreateCommandPass>(
                     visibleClustersCounterBuffer,
@@ -184,7 +184,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
 
     if (isPhase2) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsHistogramPassPageJob2"),
                 std::make_shared<RasterBucketHistogramPass>(
                     visibleClustersBuffer,
@@ -200,7 +200,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsHistogramPassPageJob1"),
                 std::make_shared<RasterBucketHistogramPass>(
                     visibleClustersBuffer,
@@ -216,7 +216,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
 
     if (isPhase2) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsPrefixScanPassPageJob2"),
                 std::make_shared<RasterBucketBlockScanPass>(
                     histogramBuffer,
@@ -226,7 +226,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsPrefixScanPassPageJob1"),
                 std::make_shared<RasterBucketBlockScanPass>(
                     histogramBuffer,
@@ -236,7 +236,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
 
     if (isPhase2) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsPrefixOffsetsPassPageJob2"),
                 std::make_shared<RasterBucketBlockOffsetsPass>(
                     extension.m_rasterBucketsOffsetsBuffer,
@@ -247,7 +247,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsPrefixOffsetsPassPageJob1"),
                 std::make_shared<RasterBucketBlockOffsetsPass>(
                     extension.m_rasterBucketsOffsetsBuffer,
@@ -258,7 +258,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
 
     if (isPhase2) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsCompactAndArgsPassPageJob2"),
                 std::make_shared<RasterBucketCompactAndArgsPass>(
                     visibleClustersBuffer,
@@ -284,7 +284,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsCompactAndArgsPassPageJob1"),
                 std::make_shared<RasterBucketCompactAndArgsPass>(
                     visibleClustersBuffer,
@@ -310,7 +310,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
 
     if (isPhase2) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "SoftwareRasterPageJobExpandPass2"),
                 std::make_shared<ClusterSoftwareRasterPageJobExpandPass>(
                     extension.m_compactedVisibleClustersBuffer,
@@ -332,7 +332,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "SoftwareRasterPageJobExpandPass1"),
                 std::make_shared<ClusterSoftwareRasterPageJobExpandPass>(
                     extension.m_compactedVisibleClustersBuffer,
@@ -354,7 +354,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
 
     if (isPhase2) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "SoftwareRasterPageJobBuildArgsPass2"),
                 std::make_shared<ClusterSoftwareRasterPageJobBuildArgsPass>(
                     pageJobCountBuffer,
@@ -365,7 +365,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "SoftwareRasterPageJobBuildArgsPass1"),
                 std::make_shared<ClusterSoftwareRasterPageJobBuildArgsPass>(
                     pageJobCountBuffer,
@@ -379,7 +379,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
         std::string("SoftwareRasterPageJobRasterPass") + phaseSuffix);
     if (isPhase2) {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 shadowRasterPassName,
                 std::make_shared<ClusterSoftwareRasterPageJobRasterPass>(
                     extension.m_compactedVisibleClustersBuffer,
@@ -401,7 +401,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     }
     else {
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 shadowRasterPassName,
                 std::make_shared<ClusterSoftwareRasterPageJobRasterPass>(
                     extension.m_compactedVisibleClustersBuffer,
@@ -428,7 +428,7 @@ std::string CLodShadowVariant::AppendFineRasterPassForPhase(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+    std::vector<org::ExternalPassDesc>& outPasses,
     uint32_t phaseIndex)
 {
     if (traits.type != CLodExtensionType::Shadow) {
@@ -442,7 +442,7 @@ std::string CLodShadowVariant::AppendFineRasterPassForPhase(
         traits,
         std::string("ReyesVirtualShadowRasterPass") + phaseSuffix);
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             reyesShadowRasterPassName,
             std::make_shared<ReyesVirtualShadowRasterizationPass>(
                 extension.m_visibleClustersBuffer,
@@ -507,14 +507,14 @@ uint32_t CLodShadowVariant::GetVisibleClusterCapacity(const CLodExtension& exten
 std::string CLodShadowVariant::AppendStructuralPrelude(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     if (traits.type != CLodExtensionType::Shadow) {
         return {};
     }
 
     const std::string shadowSetupPassName = MakeVariantPassName(traits, "VirtualShadowSetupPass");
-    auto shadowSetupPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowSetupPassDesc = org::ExternalPassDesc::Compute(
         shadowSetupPassName,
         std::make_shared<VirtualShadowMapSetupPass>(
             extension.m_shadowPageTableTexture,
@@ -530,19 +530,19 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowPredictiveInvalidationCandidateCountBuffer,
             extension.m_options.virtualShadowCasters,
             extension.m_shadowVirtualResourcesNeedReset));
-    shadowSetupPassDesc.At(org::RenderGraph::ExternalInsertPoint::After("CLod::StreamingBeginFramePass"));
+    shadowSetupPassDesc.At(org::ExternalInsertPoint::After("CLod::StreamingBeginFramePass"));
     outPasses.push_back(std::move(shadowSetupPassDesc));
     extension.m_shadowVirtualResourcesNeedReset = false;
 
     const std::string shadowFreeWrappedPagesPassName = MakeVariantPassName(traits, "VirtualShadowFreeWrappedPagesPass");
-    auto shadowFreeWrappedPagesPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowFreeWrappedPagesPassDesc = org::ExternalPassDesc::Compute(
         shadowFreeWrappedPagesPassName,
         std::make_shared<VirtualShadowMapFreeWrappedPagesPass>(
             extension.m_shadowPageTableTexture,
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowClipmapInfoBuffer,
             extension.m_shadowStatsBuffer));
-    shadowFreeWrappedPagesPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowSetupPassName));
+    shadowFreeWrappedPagesPassDesc.At(org::ExternalInsertPoint::After(shadowSetupPassName));
     outPasses.push_back(std::move(shadowFreeWrappedPagesPassDesc));
 
     const std::string shadowInvalidatePagesPassName = MakeVariantPassName(traits, "VirtualShadowInvalidatePagesPass");
@@ -557,7 +557,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             preparationBuilder);
         invalidateAfterPassName = preparationBuilder.LastPassName();
     }
-    auto shadowInvalidatePagesPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowInvalidatePagesPassDesc = org::ExternalPassDesc::Compute(
         shadowInvalidatePagesPassName,
         std::make_shared<VirtualShadowMapInvalidatePagesPass>(
             extension.m_shadowInvalidationInputsBuffer,
@@ -572,21 +572,21 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_options.virtualShadowCasters
                 ? extension.m_options.virtualShadowCasters->GetInvalidationQueue()
                 : nullptr));
-    shadowInvalidatePagesPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(invalidateAfterPassName));
+    shadowInvalidatePagesPassDesc.At(org::ExternalInsertPoint::After(invalidateAfterPassName));
     outPasses.push_back(std::move(shadowInvalidatePagesPassDesc));
 
     const std::string shadowMarkPagesPassName = MakeVariantPassName(traits, "VirtualShadowMarkPagesPass");
     const std::string shadowBuildMarkTilesPassName = MakeVariantPassName(traits, "VirtualShadowBuildMarkTilesPass");
-    auto shadowBuildMarkTilesPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowBuildMarkTilesPassDesc = org::ExternalPassDesc::Compute(
         shadowBuildMarkTilesPassName,
         std::make_shared<VirtualShadowMapBuildMarkTilesPass>(
             extension.m_shadowMarkTileWorkBuffer,
             extension.m_shadowMarkTileCountBuffer));
-    shadowBuildMarkTilesPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowInvalidatePagesPassName));
+    shadowBuildMarkTilesPassDesc.At(org::ExternalInsertPoint::After(shadowInvalidatePagesPassName));
     outPasses.push_back(std::move(shadowBuildMarkTilesPassDesc));
 
     const std::string shadowBuildMarkTileDispatchArgsPassName = MakeVariantPassName(traits, "VirtualShadowBuildMarkTileDispatchArgsPass");
-    auto shadowBuildMarkTileDispatchArgsPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowBuildMarkTileDispatchArgsPassDesc = org::ExternalPassDesc::Compute(
         shadowBuildMarkTileDispatchArgsPassName,
         std::make_shared<ReyesCreateDispatchArgsPass>(
             extension.m_shadowMarkTileCountBuffer,
@@ -594,10 +594,10 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             nullptr,
             128u,
             CLodVirtualShadowMaxMarkTileCount));
-    shadowBuildMarkTileDispatchArgsPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowBuildMarkTilesPassName));
+    shadowBuildMarkTileDispatchArgsPassDesc.At(org::ExternalInsertPoint::After(shadowBuildMarkTilesPassName));
     outPasses.push_back(std::move(shadowBuildMarkTileDispatchArgsPassDesc));
 
-    auto shadowMarkPagesPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowMarkPagesPassDesc = org::ExternalPassDesc::Compute(
         shadowMarkPagesPassName,
         std::make_shared<VirtualShadowMapMarkPagesPass>(
             extension.m_shadowMarkTileWorkBuffer,
@@ -608,12 +608,12 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowMarkedBlocksListBuffer,
             extension.m_shadowMarkedBlocksCountBuffer,
             extension.m_shadowReceiverSubpageMaskBuffer));
-    shadowMarkPagesPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowBuildMarkTileDispatchArgsPassName));
+    shadowMarkPagesPassDesc.At(org::ExternalInsertPoint::After(shadowBuildMarkTileDispatchArgsPassName));
     shadowMarkPagesPassDesc.preferredQueueKind = org::QueueKind::Graphics;
     outPasses.push_back(std::move(shadowMarkPagesPassDesc));
 
     const std::string shadowResolveMarkedBlocksPassName = MakeVariantPassName(traits, "VirtualShadowResolveMarkedBlocksPass");
-    auto shadowResolveMarkedBlocksPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowResolveMarkedBlocksPassDesc = org::ExternalPassDesc::Compute(
         shadowResolveMarkedBlocksPassName,
         std::make_shared<VirtualShadowMapResolveMarkedBlocksPass>(
             extension.m_shadowMarkedBlocksMaskBuffer,
@@ -626,12 +626,12 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowDirtyPageFlagsBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowStatsBuffer));
-    shadowResolveMarkedBlocksPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowMarkPagesPassName));
+    shadowResolveMarkedBlocksPassDesc.At(org::ExternalInsertPoint::After(shadowMarkPagesPassName));
     shadowResolveMarkedBlocksPassDesc.preferredQueueKind = org::QueueKind::Graphics;
     outPasses.push_back(std::move(shadowResolveMarkedBlocksPassDesc));
 
     const std::string shadowBuildPageListsPassName = MakeVariantPassName(traits, "VirtualShadowBuildPageListsPass");
-    auto shadowBuildPageListsPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowBuildPageListsPassDesc = org::ExternalPassDesc::Compute(
         shadowBuildPageListsPassName,
         std::make_shared<VirtualShadowMapBuildPageListsPass>(
             extension.m_shadowPageTableTexture,
@@ -640,11 +640,11 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowFreePhysicalPagesBuffer,
             extension.m_shadowReusablePhysicalPagesBuffer,
             extension.m_shadowPageListHeaderBuffer));
-    shadowBuildPageListsPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowResolveMarkedBlocksPassName));
+    shadowBuildPageListsPassDesc.At(org::ExternalInsertPoint::After(shadowResolveMarkedBlocksPassName));
     outPasses.push_back(std::move(shadowBuildPageListsPassDesc));
 
     const std::string shadowBuildDispatchArgsPassName = MakeVariantPassName(traits, "VirtualShadowBuildAllocationDispatchArgsPass");
-    auto shadowBuildDispatchArgsPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowBuildDispatchArgsPassDesc = org::ExternalPassDesc::Compute(
         shadowBuildDispatchArgsPassName,
         std::make_shared<ReyesCreateDispatchArgsPass>(
             extension.m_shadowAllocationCountBuffer,
@@ -652,11 +652,11 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             nullptr,
             64u,
             extension.m_shadowConfiguredMaxPhysicalPageCount));
-    shadowBuildDispatchArgsPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowBuildPageListsPassName));
+    shadowBuildDispatchArgsPassDesc.At(org::ExternalInsertPoint::After(shadowBuildPageListsPassName));
     outPasses.push_back(std::move(shadowBuildDispatchArgsPassDesc));
 
     const std::string shadowPreAllocateStatsPassName = MakeVariantPassName(traits, "VirtualShadowPreAllocateStatsPass");
-    auto shadowPreAllocateStatsPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowPreAllocateStatsPassDesc = org::ExternalPassDesc::Compute(
         shadowPreAllocateStatsPassName,
         std::make_shared<VirtualShadowMapGatherStatsPass>(
             extension.m_shadowPageTableTexture,
@@ -667,11 +667,11 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowClipmapInfoBuffer,
             extension.m_shadowStatsBuffer,
             true));
-    shadowPreAllocateStatsPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowBuildDispatchArgsPassName));
+    shadowPreAllocateStatsPassDesc.At(org::ExternalInsertPoint::After(shadowBuildDispatchArgsPassName));
     outPasses.push_back(std::move(shadowPreAllocateStatsPassDesc));
 
     const std::string shadowAllocationPassName = MakeVariantPassName(traits, "VirtualShadowAllocatePagesPass");
-    auto shadowAllocationPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowAllocationPassDesc = org::ExternalPassDesc::Compute(
         shadowAllocationPassName,
         std::make_shared<VirtualShadowMapAllocatePagesPass>(
             extension.m_shadowAllocationRequestsBuffer,
@@ -685,11 +685,11 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowReusablePhysicalPagesBuffer,
             extension.m_shadowPageListHeaderBuffer,
             extension.m_shadowStatsBuffer));
-    shadowAllocationPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowPreAllocateStatsPassName));
+    shadowAllocationPassDesc.At(org::ExternalInsertPoint::After(shadowPreAllocateStatsPassName));
     outPasses.push_back(std::move(shadowAllocationPassDesc));
 
     const std::string shadowGatherStatsPassName = MakeVariantPassName(traits, "VirtualShadowGatherStatsPass");
-    auto shadowGatherStatsPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowGatherStatsPassDesc = org::ExternalPassDesc::Compute(
         shadowGatherStatsPassName,
         std::make_shared<VirtualShadowMapGatherStatsPass>(
             extension.m_shadowPageTableTexture,
@@ -700,11 +700,11 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowClipmapInfoBuffer,
             extension.m_shadowStatsBuffer,
             false));
-    shadowGatherStatsPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowAllocationPassName));
+    shadowGatherStatsPassDesc.At(org::ExternalInsertPoint::After(shadowAllocationPassName));
     outPasses.push_back(std::move(shadowGatherStatsPassDesc));
 
     const std::string shadowAdmitPagesPassName = MakeVariantPassName(traits, "VirtualShadowAdmitPagesPass");
-    auto shadowAdmitPagesPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowAdmitPagesPassDesc = org::ExternalPassDesc::Compute(
         shadowAdmitPagesPassName,
         std::make_shared<VirtualShadowMapAdmitPagesPass>(
             extension.m_shadowPageTableTexture,
@@ -716,11 +716,11 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowStatsBuffer,
             extension.m_streamingSystem ? extension.m_streamingSystem->GetVirtualShadowUpgradeQueue()
                                         : VirtualShadowUpgradeQueue{}));
-    shadowAdmitPagesPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowGatherStatsPassName));
+    shadowAdmitPagesPassDesc.At(org::ExternalInsertPoint::After(shadowGatherStatsPassName));
     outPasses.push_back(std::move(shadowAdmitPagesPassDesc));
 
     const std::string shadowClearPagesPassName = MakeVariantPassName(traits, "VirtualShadowClearPagesPass");
-    auto shadowClearPagesPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowClearPagesPassDesc = org::ExternalPassDesc::Compute(
         shadowClearPagesPassName,
         std::make_shared<VirtualShadowMapClearPagesPass>(
             extension.m_shadowStaticPhysicalPagesTexture,
@@ -731,24 +731,24 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowClipmapInfoBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowStatsBuffer));
-    shadowClearPagesPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowAdmitPagesPassName));
+    shadowClearPagesPassDesc.At(org::ExternalInsertPoint::After(shadowAdmitPagesPassName));
     outPasses.push_back(std::move(shadowClearPagesPassDesc));
 
     const std::string shadowBuildActiveBlocksPassName = MakeVariantPassName(traits, "VirtualShadowBuildActiveBlocksPass");
-    auto shadowBuildActiveBlocksPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowBuildActiveBlocksPassDesc = org::ExternalPassDesc::Compute(
         shadowBuildActiveBlocksPassName,
         std::make_shared<VirtualShadowMapBuildActiveBlocksPass>(
             extension.m_shadowPageTableTexture,
             extension.m_shadowClipmapInfoBuffer,
             extension.m_shadowActiveBlockMetadataBuffer));
-    shadowBuildActiveBlocksPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowClearPagesPassName));
+    shadowBuildActiveBlocksPassDesc.At(org::ExternalInsertPoint::After(shadowClearPagesPassName));
     outPasses.push_back(std::move(shadowBuildActiveBlocksPassDesc));
 
     const std::string shadowBuildDynamicActiveBlocksPassName =
         MakeVariantPassName(
             traits, "VirtualShadowBuildDynamicActiveBlocksPass");
     auto shadowBuildDynamicActiveBlocksPassDesc =
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             shadowBuildDynamicActiveBlocksPassName,
             std::make_shared<VirtualShadowMapBuildActiveBlocksPass>(
                 extension.m_shadowPageTableTexture,
@@ -756,31 +756,31 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
                 extension.m_shadowDynamicActiveBlockMetadataBuffer,
                 true));
     shadowBuildDynamicActiveBlocksPassDesc.At(
-        org::RenderGraph::ExternalInsertPoint::After(
+        org::ExternalInsertPoint::After(
             shadowBuildActiveBlocksPassName));
     outPasses.push_back(
         std::move(shadowBuildDynamicActiveBlocksPassDesc));
 
     const std::string shadowDirtyHierarchyPassName = MakeVariantPassName(traits, "VirtualShadowDirtyHierarchyPass");
-    auto shadowDirtyHierarchyPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowDirtyHierarchyPassDesc = org::ExternalPassDesc::Compute(
         shadowDirtyHierarchyPassName,
         std::make_shared<VirtualShadowMapDirtyHierarchyPass>(
             extension.m_shadowPageTableTexture,
             extension.m_shadowDirtyPageHierarchyTexture,
             extension.m_shadowClipmapInfoBuffer));
     shadowDirtyHierarchyPassDesc.At(
-        org::RenderGraph::ExternalInsertPoint::After(
+        org::ExternalInsertPoint::After(
             shadowBuildDynamicActiveBlocksPassName));
     outPasses.push_back(std::move(shadowDirtyHierarchyPassDesc));
 
     const std::string shadowNonRasterableHierarchyPassName = MakeVariantPassName(traits, "VirtualShadowNonRasterableHierarchyPass");
-    auto shadowNonRasterableHierarchyPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowNonRasterableHierarchyPassDesc = org::ExternalPassDesc::Compute(
         shadowNonRasterableHierarchyPassName,
         std::make_shared<VirtualShadowMapNonRasterableHierarchyPass>(
             extension.m_shadowPageTableTexture,
             extension.m_shadowNonRasterablePageHierarchyTexture,
             extension.m_shadowClipmapInfoBuffer));
-    shadowNonRasterableHierarchyPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowDirtyHierarchyPassName));
+    shadowNonRasterableHierarchyPassDesc.At(org::ExternalInsertPoint::After(shadowDirtyHierarchyPassName));
     outPasses.push_back(std::move(shadowNonRasterableHierarchyPassDesc));
 
     return shadowNonRasterableHierarchyPassName;
@@ -789,7 +789,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
 std::string CLodShadowVariant::AppendCasterRasterPasses(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+    std::vector<org::ExternalPassDesc>& outPasses,
     const std::string& afterPassName)
 {
     if (traits.type != CLodExtensionType::Shadow || afterPassName.empty() ||
@@ -808,7 +808,7 @@ std::string CLodShadowVariant::AppendCasterRasterPasses(
 void CLodShadowVariant::AppendStructuralTail(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses,
+    std::vector<org::ExternalPassDesc>& outPasses,
     const std::string& shadowClearDirtyBitsAfterPassName)
 {
     if (traits.type != CLodExtensionType::Shadow || shadowClearDirtyBitsAfterPassName.empty()) {
@@ -817,7 +817,7 @@ void CLodShadowVariant::AppendStructuralTail(
 
     const std::string shadowExpandPredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowFinalizeFallbackPagesPass");
     spdlog::info("CLod shadow structural tail: construct {} begin", shadowExpandPredictedPagesPassName);
-    auto shadowExpandPredictedPagesPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowExpandPredictedPagesPassDesc = org::ExternalPassDesc::Compute(
         shadowExpandPredictedPagesPassName,
         std::make_shared<VirtualShadowMapExpandPredictedPagesPass>(
             extension.m_shadowPredictiveInvalidationCandidatesBuffer,
@@ -833,12 +833,12 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowConfiguredMaxPhysicalPageCount));
     spdlog::info("CLod shadow structural tail: construct {} complete", shadowExpandPredictedPagesPassName);
     shadowExpandPredictedPagesPassDesc.At(
-        org::RenderGraph::ExternalInsertPoint::After(shadowClearDirtyBitsAfterPassName));
+        org::ExternalInsertPoint::After(shadowClearDirtyBitsAfterPassName));
     outPasses.push_back(std::move(shadowExpandPredictedPagesPassDesc));
 
     const std::string shadowDeduplicatePredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowDeduplicateFallbackPagesPass");
     spdlog::info("CLod shadow structural tail: construct {} begin", shadowDeduplicatePredictedPagesPassName);
-    auto shadowDeduplicatePredictedPagesPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowDeduplicatePredictedPagesPassDesc = org::ExternalPassDesc::Compute(
         shadowDeduplicatePredictedPagesPassName,
         std::make_shared<VirtualShadowMapDeduplicatePredictedPagesPass>(
             extension.m_shadowPredictiveRawPagesBuffer,
@@ -853,11 +853,11 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowConfiguredMaxPhysicalPageCount));
     spdlog::info("CLod shadow structural tail: construct {} complete", shadowDeduplicatePredictedPagesPassName);
     shadowDeduplicatePredictedPagesPassDesc.At(
-        org::RenderGraph::ExternalInsertPoint::After(shadowExpandPredictedPagesPassName));
+        org::ExternalInsertPoint::After(shadowExpandPredictedPagesPassName));
     outPasses.push_back(std::move(shadowDeduplicatePredictedPagesPassDesc));
 
     const std::string shadowClearDirtyBitsPassName = MakeVariantPassName(traits, "VirtualShadowClearDirtyBitsPass");
-    auto shadowClearDirtyBitsPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto shadowClearDirtyBitsPassDesc = org::ExternalPassDesc::Compute(
         shadowClearDirtyBitsPassName,
         std::make_shared<VirtualShadowMapClearDirtyBitsPass>(
             extension.m_shadowPageTableTexture,
@@ -866,13 +866,13 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowAllocationIndirectArgsBuffer,
             extension.m_shadowDirtyPageFlagsBuffer,
             extension.m_shadowStatsBuffer));
-    shadowClearDirtyBitsPassDesc.At(org::RenderGraph::ExternalInsertPoint::After(shadowDeduplicatePredictedPagesPassName));
+    shadowClearDirtyBitsPassDesc.At(org::ExternalInsertPoint::After(shadowDeduplicatePredictedPagesPassName));
     outPasses.push_back(std::move(shadowClearDirtyBitsPassDesc));
 
     const std::string shadowComposePagesPassName =
         MakeVariantPassName(traits, "VirtualShadowComposePagesPass");
     auto shadowComposePagesPassDesc =
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             shadowComposePagesPassName,
             std::make_shared<VirtualShadowMapComposePagesPass>(
                 extension.m_shadowStaticPhysicalPagesTexture,
@@ -889,7 +889,7 @@ std::string CLodShadowVariant::AppendPhase1PageJobRasterPasses(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     return AppendPageJobRasterPassesForPhase(extension, traits, slabGroup, outPasses, 1u);
 }
@@ -898,7 +898,7 @@ std::string CLodShadowVariant::AppendPhase2PageJobRasterPasses(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     return AppendPageJobRasterPassesForPhase(extension, traits, slabGroup, outPasses, 2u);
 }
@@ -907,7 +907,7 @@ std::string CLodShadowVariant::AppendPhase1FineRasterPass(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     return AppendFineRasterPassForPhase(extension, traits, slabGroup, outPasses, 1u);
 }
@@ -916,7 +916,7 @@ std::string CLodShadowVariant::AppendPhase2FineRasterPass(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     return AppendFineRasterPassForPhase(extension, traits, slabGroup, outPasses, 2u);
 }
@@ -925,14 +925,14 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     if (traits.rasterOutputKind != CLodRasterOutputKind::VirtualShadow) {
         return {};
     }
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeQueueResetPass1"),
             std::make_shared<ReyesQueueResetPass>(
                 extension.m_reyesFullClusterOutputsCounterBuffer,
@@ -947,14 +947,14 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 true)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeCreateClassifyDispatchArgsPass1"),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 extension.m_swPageJobVisibleClustersCounterBuffer,
                 extension.m_reyesClassifyIndirectArgsBuffer)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeClassifyPass1"),
             std::make_shared<ReyesClassifyPass>(
                 extension.m_swPageJobVisibleClustersBuffer,
@@ -973,14 +973,14 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 ReyesClassifyMode::ShadowCoarseLargeOnly)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeCreateSeedDispatchArgsPass1"),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 extension.m_reyesOwnedClustersCounterBuffer,
                 extension.m_reyesSplitIndirectArgsBuffer)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeSeedPatchesPass1"),
             std::make_shared<ReyesSeedPatchesPass>(
                 extension.m_swPageJobVisibleClustersBuffer,
@@ -1002,14 +1002,14 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
         const uint32_t outputIndex = inputIndex ^ 1u;
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesLargeCreateSplitDispatchArgsPass1_" + std::to_string(splitPassIndex)),
                 std::make_shared<ReyesCreateDispatchArgsPass>(
                     reyesLargeSplitCounters[inputIndex],
                     extension.m_reyesSplitIndirectArgsBuffer)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesLargeSplitPass1_" + std::to_string(splitPassIndex)),
                 std::make_shared<ReyesSplitPass>(
                     extension.m_swPageJobVisibleClustersBuffer,
@@ -1036,14 +1036,14 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
     }
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeCreateDiceDispatchArgsPass1"),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 extension.m_reyesDiceQueueCounterBuffer,
                 extension.m_reyesDiceIndirectArgsBuffer)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeDicePass1"),
             std::make_shared<ReyesDicePass>(
                 extension.m_reyesDiceQueueBuffer,
@@ -1056,7 +1056,7 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 1u)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeBuildRasterWorkPass1"),
             std::make_shared<ReyesBuildRasterWorkPass>(
                 extension.m_reyesDiceQueueBuffer,
@@ -1070,7 +1070,7 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 extension.m_reyesRasterWorkCapacity)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "RasterBucketsCreateCommandPassReyesHW1"),
             std::make_shared<RasterBucketCreateCommandPass>(
                 extension.m_reyesRasterWorkCounterBuffer,
@@ -1080,7 +1080,7 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 extension.m_reyesRasterWorkCapacity)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesRasterWorkHistogramPass1"),
             std::make_shared<ReyesRasterWorkHistogramPass>(
                 extension.m_reyesRasterWorkBuffer,
@@ -1089,7 +1089,7 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 extension.m_rasterBucketsHistogramBufferSw)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesRasterWorkPrefixScanPass1"),
             std::make_shared<RasterBucketBlockScanPass>(
                 extension.m_rasterBucketsHistogramBufferSw,
@@ -1097,7 +1097,7 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 extension.m_rasterBucketsBlockSumsBuffer)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesRasterWorkPrefixOffsetsPass1"),
             std::make_shared<RasterBucketBlockOffsetsPass>(
                 extension.m_rasterBucketsOffsetsBuffer,
@@ -1106,7 +1106,7 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 extension.m_rasterBucketsTotalCountBuffer)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesRasterWorkCompactAndArgsPass1"),
             std::make_shared<ReyesRasterWorkCompactAndArgsPass>(
                 extension.m_reyesRasterWorkBuffer,
@@ -1120,7 +1120,7 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 extension.m_rasterBucketsIndirectArgsBufferPageJob)));
 
     const std::string reyesLargeShadowRasterPassName = MakeVariantPassName(traits, "ReyesLargeVirtualShadowHardwareRasterPass1");
-    auto reyesLargeShadowRasterPassDesc = org::RenderGraph::ExternalPassDesc::Render(
+    auto reyesLargeShadowRasterPassDesc = org::ExternalPassDesc::Render(
         reyesLargeShadowRasterPassName,
         std::make_shared<ReyesVirtualShadowHardwareRasterPass>(
             extension.m_swPageJobVisibleClustersBuffer,
@@ -1149,14 +1149,14 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     const std::shared_ptr<org::ResourceGroup>& slabGroup,
-    std::vector<org::RenderGraph::ExternalPassDesc>& outPasses)
+    std::vector<org::ExternalPassDesc>& outPasses)
 {
     if (traits.rasterOutputKind != CLodRasterOutputKind::VirtualShadow) {
         return {};
     }
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeQueueResetPass2"),
             std::make_shared<ReyesQueueResetPass>(
                 extension.m_reyesFullClusterOutputsCounterBuffer,
@@ -1171,14 +1171,14 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
                 true)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeCreateClassifyDispatchArgsPass2"),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 extension.m_swPageJobVisibleClustersCounterBufferPhase2,
                 extension.m_reyesClassifyIndirectArgsBufferPhase2)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeClassifyPass2"),
             std::make_shared<ReyesClassifyPass>(
                 extension.m_swPageJobVisibleClustersBufferPhase2,
@@ -1197,14 +1197,14 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
                 ReyesClassifyMode::ShadowCoarseLargeOnly)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeCreateSeedDispatchArgsPass2"),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 extension.m_reyesOwnedClustersCounterBuffer,
                 extension.m_reyesSplitIndirectArgsBufferPhase2)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeSeedPatchesPass2"),
             std::make_shared<ReyesSeedPatchesPass>(
                 extension.m_swPageJobVisibleClustersBufferPhase2,
@@ -1226,14 +1226,14 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
         const uint32_t outputIndex = inputIndex ^ 1u;
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesLargeCreateSplitDispatchArgsPass2_" + std::to_string(splitPassIndex)),
                 std::make_shared<ReyesCreateDispatchArgsPass>(
                     reyesLargeSplitCountersPhase2[inputIndex],
                     extension.m_reyesSplitIndirectArgsBufferPhase2)));
 
         outPasses.push_back(
-            org::RenderGraph::ExternalPassDesc::Compute(
+            org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "ReyesLargeSplitPass2_" + std::to_string(splitPassIndex)),
                 std::make_shared<ReyesSplitPass>(
                     extension.m_swPageJobVisibleClustersBufferPhase2,
@@ -1260,14 +1260,14 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
     }
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeCreateDiceDispatchArgsPass2"),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 extension.m_reyesDiceQueueCounterBuffer,
                 extension.m_reyesDiceIndirectArgsBufferPhase2)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeDicePass2"),
             std::make_shared<ReyesDicePass>(
                 extension.m_reyesDiceQueueBuffer,
@@ -1280,7 +1280,7 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
                 2u)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeBuildRasterWorkPass2"),
             std::make_shared<ReyesBuildRasterWorkPass>(
                 extension.m_reyesDiceQueueBuffer,
@@ -1294,14 +1294,14 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
                 extension.m_reyesRasterWorkCapacity)));
 
     outPasses.push_back(
-        org::RenderGraph::ExternalPassDesc::Compute(
+        org::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, "ReyesLargeCreateRasterWorkDispatchArgsPass2"),
             std::make_shared<ReyesCreateDispatchArgsPass>(
                 extension.m_reyesRasterWorkCounterBufferPhase2,
                 extension.m_reyesRasterWorkIndirectArgsBufferPhase2)));
 
     const std::string reyesLargeShadowRasterPassName = MakeVariantPassName(traits, "ReyesLargeVirtualShadowRasterPass2");
-    auto reyesLargeShadowRasterPassDesc = org::RenderGraph::ExternalPassDesc::Compute(
+    auto reyesLargeShadowRasterPassDesc = org::ExternalPassDesc::Compute(
         reyesLargeShadowRasterPassName,
         std::make_shared<ReyesVirtualShadowRasterizationPass>(
             extension.m_swPageJobVisibleClustersBufferPhase2,
@@ -1322,7 +1322,7 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
             slabGroup,
             MakeVariantResourceName(traits, "Reyes Virtual Shadow View Raster Info Buffer Phase2 Large"),
             2u));
-    reyesLargeShadowRasterPassDesc.At(org::RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
+    reyesLargeShadowRasterPassDesc.At(org::ExternalInsertPoint::Before("MaterialHistogramPass"));
     outPasses.push_back(std::move(reyesLargeShadowRasterPassDesc));
 
     return reyesLargeShadowRasterPassName;

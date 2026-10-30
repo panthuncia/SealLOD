@@ -1,4 +1,5 @@
 #include "Transparency/AVBOIT/RenderPasses/AVBOITEarlyDepthPass.h"
+#include "Render/PassBuilders.h"
 
 #include "BuiltinResources.h"
 #include "Render/ShaderAPI.h"

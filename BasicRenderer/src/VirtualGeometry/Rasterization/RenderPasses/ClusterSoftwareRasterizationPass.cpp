@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Rasterization/RenderPasses/ClusterSoftwareRasterizationPass.h"
+#include "Render/PassBuilders.h"
 
 #include <algorithm>
 

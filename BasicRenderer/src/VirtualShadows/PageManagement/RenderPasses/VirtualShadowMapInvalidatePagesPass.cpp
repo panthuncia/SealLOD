@@ -1,4 +1,5 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapInvalidatePagesPass.h"
+#include "Render/PassBuilders.h"
 
 #include <vector>
 

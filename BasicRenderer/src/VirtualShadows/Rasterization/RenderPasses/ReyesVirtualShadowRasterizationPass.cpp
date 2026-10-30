@@ -1,4 +1,5 @@
 #include "VirtualShadows/Rasterization/RenderPasses/ReyesVirtualShadowRasterizationPass.h"
+#include "Render/PassBuilders.h"
 
 #include <string_view>
 

@@ -1,4 +1,5 @@
 #include "Transparency/AVBOIT/RenderPasses/AVBOITSetupPass.h"
+#include "Render/PassBuilders.h"
 
 #include "Scene/Views/ViewManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
