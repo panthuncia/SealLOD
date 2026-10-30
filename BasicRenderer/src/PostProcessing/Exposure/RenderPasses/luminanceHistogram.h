@@ -5,18 +5,26 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Utilities/Utilities.h"
 #include "../shaders/PerPassRootConstants/luminanceHistogramRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
-class LuminanceHistogramPass : public org::TypedRenderGraphPass<LuminanceHistogramPass, br::render::PreparedComputeDispatch> {
+struct LuminanceHistogramBindings {
+    org::PipelineState pipeline;
+};
+struct LuminanceHistogramFrame {
+    uint32_t groupsX = 0, groupsY = 0;
+};
+
+class LuminanceHistogramPass : public org::TypedRenderGraphPass<LuminanceHistogramPass, LuminanceHistogramFrame, LuminanceHistogramBindings> {
 public:
     LuminanceHistogramPass() {
         CreateComputePSO();
     }
 
-    void Declare(org::PassBuilder& builder) {
+    LuminanceHistogramBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         builder.ShaderResource(Builtin::Color::HDRColorTarget);
         builder.UnorderedAccess(Builtin::PostProcessing::LuminanceHistogram);
+        return {m_pso};
     }
 
     void Initialize() {
@@ -25,33 +33,22 @@ public:
 
 
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+    LuminanceHistogramFrame Prepare(const LuminanceHistogramBindings& bindings, const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedComputeDispatch data{};
-        // On a peer device (interop validation) the execution installs that device's heaps.
-        if (preparation.backendInstance == org::BackendInstanceId::Primary) {
-            data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-            data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        } else {
-            PSOManager::GetInstance().ResolvePipeline(m_pso, preparation.backendInstance); // Builds the peer's pipeline once.
+        // A peer device (interop validation) binds its own build of the pipeline.
+        if (preparation.backendInstance != org::BackendInstanceId::Primary) {
+            PSOManager::GetInstance().ResolvePipeline(bindings.pipeline, preparation.backendInstance); // Builds the peer's pipeline once.
         }
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-        auto program = preparation.CaptureProgramBinding(m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-
-
-        data.constants[MIN_LOG_LUMINANCE] = as_uint(0.001f);
-        data.constants[INVERSE_LOG_LUM_RANGE] = as_uint(1.0f / (log2(10.0f) - log2(0.1f)));
         const auto sampledWidth = (context->renderResolution.x + 3u) / 4u;
         const auto sampledHeight = (context->renderResolution.y + 3u) / 4u;
-        data.groupsX = (sampledWidth + 15u) / 16u;
-        data.groupsY = (sampledHeight + 15u) / 16u;
-        return data;
+        return {(sampledWidth + 15u) / 16u, (sampledHeight + 15u) / 16u};
     }
 
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const LuminanceHistogramBindings& bindings, const LuminanceHistogramFrame& frame, org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[MIN_LOG_LUMINANCE] = as_uint(0.001f);
+        constants[INVERSE_LOG_LUM_RANGE] = as_uint(1.0f / (log2(10.0f) - log2(0.1f)));
+        br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
     }
 
     void ShutdownPass() {

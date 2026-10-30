@@ -1,8 +1,13 @@
 #include "VirtualGeometry/Culling/RenderPasses/WorkGraphCullingPass.h"
 #include "Render/PassBuilders.h"
+#include "Render/ShaderAPI.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
+#include <span>
 #include <stdexcept>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -12,6 +17,7 @@
 #include <BasicTelemetry/Telemetry.h>
 
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
@@ -87,7 +93,12 @@ void WorkGraphCullingPass::InstallWorkGraph(CompiledWorkGraph compiled)
         m_scratchBuffer->SetMemoryUsageHint("Work graph scratch buffer");
     }
     m_workGraph = std::make_shared<rhi::WorkGraphPtr>(std::move(compiled.graph));
-    m_workGraphResources = std::move(compiled.resources);
+    // The graph is not a pipeline state, but its descriptor slots resolve from
+    // the pass's declarations the same way a pipeline's do.
+    auto slots = std::make_shared<org::PipelineStatePayload>(rhi::PipelinePtr{}, 0u, std::move(compiled.resources),
+        1u, 0u, 0u, std::string("HierarchicalCulling work graph"));
+    slots->layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
+    m_workGraphSlots = std::move(slots);
     m_workGraphInitialization->initialized.store(false, std::memory_order_release);
 }
 
@@ -176,9 +187,9 @@ br::render::CullingUploader WorkGraphCullingPass::Uploader() const
     };
 }
 
-void WorkGraphCullingPass::DeclareSceneInputs(org::PassBuilder& builder)
+org::ResourceBindingToken WorkGraphCullingPass::DeclareSceneInputs(org::PassBuilder& builder)
 {
-    builder.UnorderedAccess(m_scratchBuffer);
+    const auto scratch = builder.UnorderedAccess(m_scratchBuffer).Resource();
     builder.UnorderedAccess(
         Builtin::CLod::StreamingLoadRequestKeys,
         Builtin::CLod::StreamingLoadRequests,
@@ -272,6 +283,7 @@ void WorkGraphCullingPass::DeclareSceneInputs(org::PassBuilder& builder)
     if (m_resources.pagePoolSlabs) {
         builder.ShaderResource(ResourceGroupResolver(m_resources.pagePoolSlabs));
     }
+    return scratch;
 }
 
 std::optional<WorkGraphVirtualShadowBindings> WorkGraphCullingPass::DeclareVirtualShadow(org::PassBuilder& builder)
@@ -318,11 +330,19 @@ std::optional<WorkGraphReyesBindings> WorkGraphCullingPass::DeclareReyes(org::Pa
 
 WorkGraphCullingBindings WorkGraphCullingPass::Declare(org::PassBuilder& builder)
 {
-    DeclareSceneInputs(builder);
+    const auto scratch = DeclareSceneInputs(builder);
 
     const auto& outputs = m_resources.outputs;
     const auto& replay = m_resources.occlusionReplay;
     WorkGraphCullingBindings bindings{};
+    bindings.clearPipeline = m_clearPipelineState;
+    bindings.createCommandPipeline = m_createCommandPipelineState;
+    bindings.scratch = scratch;
+    bindings.maxVisibleClusters = m_config.maxVisibleClusters;
+    bindings.reyesDiceQueueCapacity = m_resources.reyes.diceQueueCapacity;
+    bindings.isFirstPass = m_config.isFirstPass;
+    bindings.swClassification = m_config.UsesSWClassification();
+    bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();
     if (m_config.UsesPerViewDepthOcclusion()) bindings.viewDepthLayout = m_viewDepthLayout.Layout();
     if (m_config.UsesSWClassification()) bindings.viewRasterInfoLayout = m_viewRasterInfoLayout.Layout();
     bindings.visible = builder.UnorderedAccess(outputs.visibleClusters).View();
@@ -364,20 +384,21 @@ WorkGraphCullingBindings WorkGraphCullingPass::Declare(org::PassBuilder& builder
     return bindings;
 }
 
-void WorkGraphCullingPass::FillGraphConstants(uint32_t* root, const WorkGraphCullingBindings& bindings,
-    const br::render::CullingSettings& settings, const org::PassPrepareContext& preparation) const
+namespace {
+
+// The root constants every node of the graph reads.
+void FillGraphConstants(br::render::MiscConstants& root, const WorkGraphCullingBindings& bindings,
+    const WorkGraphCullingFrame& frame, org::PassRecordContext& context)
 {
-    const auto view = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    const auto view = [&](const org::DeclaredViewToken& token) { return context.Index(token); };
     root[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = view(bindings.visible);
     root[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = view(bindings.transforms);
     root[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = view(bindings.visibleCounter);
     root[CLOD_WG_SW_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = view(bindings.swCounter);
     root[CLOD_WG_TELEMETRY_DESCRIPTOR_INDEX] = view(bindings.telemetry);
-    root[CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT] = settings.forcedTraversalDepth;
-    if (m_config.UsesSWClassification())
-        root[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] =
-            bindings.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoTable, m_viewRasterInfoLayout.Rows());
-    root[CLOD_WG_FLAGS] = br::render::BuildCullingFlags(m_config, settings);
+    root[CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT] = frame.settings.forcedTraversalDepth;
+    if (bindings.swClassification) root[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = frame.viewRasterInfoTable;
+    root[CLOD_WG_FLAGS] = frame.cullingFlags;
 
     if (const auto& shadow = bindings.virtualShadow) {
         root[CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX] = view(shadow->pageTable);
@@ -407,20 +428,21 @@ void WorkGraphCullingPass::FillGraphConstants(uint32_t* root, const WorkGraphCul
         root[CLOD_WG_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = view(reyes->tessTableVertices);
         root[CLOD_WG_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = view(reyes->tessTableTriangles);
         root[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX] = view(reyes->telemetry);
-        root[CLOD_WG_REYES_DICE_QUEUE_CAPACITY] = m_resources.reyes.diceQueueCapacity;
+        root[CLOD_WG_REYES_DICE_QUEUE_CAPACITY] = bindings.reyesDiceQueueCapacity;
     }
     root[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX] = view(bindings.replay);
     root[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = view(bindings.replayState);
     root[CLOD_WG_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = view(bindings.nodeInputs);
-    root[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = m_config.UsesPerViewDepthOcclusion()
-        ? bindings.viewDepthLayout.Publish(preparation, m_viewDepthTable, m_viewDepthLayout.Rows()) : 0u;
-    root[CLOD_WG_VISIBLE_CLUSTERS_CAPACITY] = m_config.maxVisibleClusters;
+    root[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.perViewDepthOcclusion ? frame.viewDepthTable : 0u;
+    root[CLOD_WG_VISIBLE_CLUSTERS_CAPACITY] = bindings.maxVisibleClusters;
     // Phase 2 appends after phase 1's clusters.
     root[CLOD_WG_HW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX] = view(bindings.phase1Counter.value_or(bindings.visibleCounter));
     root[CLOD_WG_SW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX] = view(bindings.phase1SwCounter.value_or(bindings.swCounter));
 }
 
-br::render::PreparedComputeCommandSequence WorkGraphCullingPass::BuildRecipe(
+}
+
+WorkGraphCullingFrame WorkGraphCullingPass::Prepare(
     const WorkGraphCullingBindings& bindings, const org::PassPrepareContext& preparation) const
 {
     const auto* update = preparation.preparationData
@@ -429,8 +451,8 @@ br::render::PreparedComputeCommandSequence WorkGraphCullingPass::BuildRecipe(
         ? preparation.preparationData->Get<RenderContext>() : nullptr;
     if (!update || !render || !m_workGraph || !m_scratchBuffer) return {};
 
-    const auto view = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
     if (bindings.voxelQueues) {
+        const auto view = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
         const auto& queues = *bindings.voxelQueues;
         CLodVoxelRasterQueueDescriptors descriptors{};
         descriptors.rigidWorkRecordsUAVDescriptorIndex = view(queues[0]);
@@ -441,131 +463,24 @@ br::render::PreparedComputeCommandSequence WorkGraphCullingPass::BuildRecipe(
         m_voxelQueueTable.Upload(descriptors, Uploader());
     }
 
-    br::render::PreparedComputeCommandBuilder preparedCommands(
-        preparation,
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    auto& commands = preparedCommands.Commands();
-    const auto capture = [&](const auto& resource) { return preparedCommands.Capture(resource); };
-    const auto constants = [&](const uint32_t* values) {
-        preparedCommands.Constants(values, NumMiscUintRootConstants, MiscUintRootSignatureIndex);
-    };
-    const auto uavBarrier = [&](std::initializer_list<std::shared_ptr<org::Buffer>> resources) {
-        preparedCommands.Barriers(resources, rhi::ResourceAccessType::UnorderedAccess,
-            rhi::ResourceAccessType::UnorderedAccess);
-    };
-    const auto clear = [&](org::DeclaredViewToken token, const std::shared_ptr<org::Buffer>& buffer, uint32_t count = 1u) {
-        if (!buffer) return;
-        preparedCommands.Bind(m_clearPipelineState);
-        uint32_t values[NumMiscUintRootConstants]{};
-        values[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = view(token);
-        values[CLOD_CLEAR_UINT_BUFFER_COUNT] = count;
-        constants(values);
-        preparedCommands.Dispatch((count + 63u) / 64u, 1, 1);
-        uavBarrier({buffer});
-    };
-
+    WorkGraphCullingFrame frame;
+    frame.active = true;
+    frame.workGraph = m_workGraph;
+    frame.workGraphSlots = m_workGraphSlots;
     // The work graph never implemented the frustum-culling toggle or the
     // receiver subpage mask, so both stay at their defaults.
-    auto settings = br::render::ReadCullingSettings(m_config, false);
-    settings.frustumCulling = true;
-
-    if (m_config.isFirstPass && settings.telemetry)
-        clear(bindings.telemetry, m_resources.telemetry, CLodWorkGraphTelemetryBufferCount);
-    if (bindings.voxelQueues) {
-        clear((*bindings.voxelQueues)[1], m_resources.voxelQueues.rigidWorkCounter);
-        clear((*bindings.voxelQueues)[3], m_resources.voxelQueues.skinnedWorkCounter);
-    }
-    if (bindings.reyes && m_config.isFirstPass) {
-        clear(bindings.reyes->diceQueueCounter, m_resources.reyes.diceQueueCounter);
-        clear(bindings.reyes->diceQueueOverflow, m_resources.reyes.diceQueueOverflow);
-    }
-
-    uint32_t root[NumMiscUintRootConstants]{};
-    FillGraphConstants(root, bindings, settings, preparation);
-
-    const auto& outputs = m_resources.outputs;
-    const auto& replay = m_resources.occlusionReplay;
-    preparedCommands.SetWorkGraph(m_workGraph, capture(m_scratchBuffer), false);
-    commands.emplace_back(br::render::PreparedComputeDescriptorIndices{
-        CaptureResourceDescriptorIndices(m_workGraphResources)});
-    constants(root);
-
-    if (m_config.isFirstPass) {
-        // PrepareInvocation fills the CPU records with this frame's workloads.
-        commands.emplace_back(br::render::PreparedWorkGraphCpuDispatch{});
-        uavBarrier({outputs.visibleClustersCounter, replay.state, replay.replay});
-    } else {
-        uavBarrier({replay.replay, replay.nodeGpuInputs});
-        commands.emplace_back(br::render::PreparedWorkGraphGpuDispatch{capture(replay.nodeGpuInputs), 0});
-    }
-
-    br::render::PreparedBufferBarrierBatch outputBarriers;
-    const auto appendOutput = [&](const std::shared_ptr<org::Buffer>& resource, rhi::ResourceAccessType after) {
-        if (resource) outputBarriers.barriers.push_back({capture(resource),
-            rhi::ResourceAccessType::UnorderedAccess, after,
-            rhi::ResourceSyncState::ComputeShading, rhi::ResourceSyncState::ComputeShading});
-    };
-    appendOutput(outputs.visibleClustersCounter, rhi::ResourceAccessType::ShaderResource);
-    appendOutput(replay.state, rhi::ResourceAccessType::ShaderResource);
+    frame.settings = br::render::ReadCullingSettings(m_config, false);
+    frame.settings.frustumCulling = true;
+    frame.cullingFlags = br::render::BuildCullingFlags(m_config, frame.settings);
     if (m_config.UsesSWClassification())
-        appendOutput(outputs.swVisibleClustersCounter, rhi::ResourceAccessType::UnorderedAccess);
-    if (m_voxelQueueTable.Enabled()) {
-        const auto& voxels = m_resources.voxelQueues;
-        appendOutput(voxels.rigidWorkCounter, rhi::ResourceAccessType::ShaderResource);
-        appendOutput(voxels.skinnedWorkCounter, rhi::ResourceAccessType::ShaderResource);
-        appendOutput(voxels.rigidWork, rhi::ResourceAccessType::ShaderResource);
-        appendOutput(voxels.skinnedWork, rhi::ResourceAccessType::ShaderResource);
-    }
-    commands.emplace_back(std::move(outputBarriers));
+        frame.viewRasterInfoTable =
+            bindings.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoTable, m_viewRasterInfoLayout.Rows());
+    if (m_config.UsesPerViewDepthOcclusion())
+        frame.viewDepthTable = bindings.viewDepthLayout.Publish(preparation, m_viewDepthTable, m_viewDepthLayout.Rows());
+    frame.rasterBucketCount = render->preparedRasterBucketCount;
 
-    // Build the raster bucket histogram command, and patch phase 2's GPU node
-    // inputs with this frame's replay record counts and addresses. The command
-    // shader also reads the graph constants already in root.
-    preparedCommands.Bind(m_createCommandPipelineState);
-    root[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = view(bindings.visibleCounterSrv);
-    root[CLOD_CREATE_RASTER_BUCKET_HISTOGRAM_COMMAND_DESCRIPTOR_INDEX] = view(bindings.histogram);
-    root[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = view(bindings.replayStateSrv);
-    root[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = view(bindings.nodeInputs);
-    root[CLOD_CREATE_NUM_RASTER_BUCKETS] = render->preparedRasterBucketCount;
-    root[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = m_config.maxVisibleClusters;
-    root[CLOD_CREATE_NODE_INPUT_COUNT] = m_resources.reyes.enabled ? 4u : 2u;
-    const auto replayAddress = GetNativeBufferDeviceAddress(
-        preparedCommands.Context().ResolveCapturedResource(capture(replay.replay)));
-    const auto inputAddress = GetNativeBufferDeviceAddress(
-        preparedCommands.Context().ResolveCapturedResource(capture(replay.nodeGpuInputs)));
-    commands.emplace_back(br::render::PreparedComputeAddressConstants{
-        MiscUintRootSignatureIndex, 0,
-        std::vector<uint32_t>(root, root + NumMiscUintRootConstants),
-        {{replayAddress, CLOD_CREATE_REPLAY_ADDRESS_LOW, CLOD_CREATE_REPLAY_ADDRESS_HIGH},
-         {inputAddress, CLOD_CREATE_NODE_INPUT_ADDRESS_LOW, CLOD_CREATE_NODE_INPUT_ADDRESS_HIGH}}});
-    commands.emplace_back(br::render::PreparedDispatchGroups{1, 1, 1});
-
-    return std::move(preparedCommands).FinishData();
-}
-
-std::vector<uint64_t> WorkGraphCullingPass::RecipeRevision(const org::PassPrepareContext& preparation) const
-{
-    const auto* render = preparation.preparationData ? preparation.preparationData->Get<RenderContext>() : nullptr;
-    std::vector<uint64_t> revision{SettingsManager::GetInstance().Revision(),
-        reinterpret_cast<uintptr_t>(m_workGraph.get()),
-        reinterpret_cast<uintptr_t>(m_clearPipelineState.PeekPayload()),
-        reinterpret_cast<uintptr_t>(m_createCommandPipelineState.PeekPayload()),
-        render ? render->preparedRasterBucketCount : 0u};
-    if (preparation.preparationData && preparation.preparationData->Get<UpdateContext>()) {
-        if (m_config.UsesSWClassification()) m_viewRasterInfoLayout.AppendRowRevision(revision);
-    }
-    return revision;
-}
-
-WorkGraphCullingInvocation WorkGraphCullingPass::PrepareInvocation(
-    const br::render::PreparedComputeCommandSequence&, const WorkGraphCullingBindings&,
-    const org::PassPrepareContext& preparation) const
-{
-    WorkGraphCullingInvocation invocation;
-    const auto* render = preparation.preparationData ? preparation.preparationData->Get<RenderContext>() : nullptr;
-    if (!render || !m_workGraph || !m_scratchBuffer) return invocation;
-    invocation.initializeBacking = !m_workGraphInitialization->initialized.load(std::memory_order_acquire);
-    if (invocation.initializeBacking) preparation.Reserve(m_workGraphInitialization,
+    frame.initializeBacking = !m_workGraphInitialization->initialized.load(std::memory_order_acquire);
+    if (frame.initializeBacking) preparation.Reserve(m_workGraphInitialization,
         +[](WorkGraphInitializationState& state, org::SubmissionContext) {
             state.initialized.store(true, std::memory_order_release);
         });
@@ -582,9 +497,121 @@ WorkGraphCullingInvocation WorkGraphCullingPass::PrepareInvocation(
             workload.drawRecordVisibilityGenerationCount, workload.dispatchGridX, workload.dispatchGridY, workload.dispatchGridZ});
         basic_telemetry::SetGauge("SARP.Culling.GraphWorkloadRecords.WorkGraph",
             static_cast<std::int64_t>(records.size()));
-        invocation.cpuDispatch = br::render::PreparedWorkGraphCpuDispatch::From(0u, records);
+        frame.cpuRecordStride = static_cast<uint32_t>(sizeof(ObjectCullRecord));
+        frame.cpuRecords.resize(records.size() * sizeof(ObjectCullRecord));
+        if (!records.empty()) std::memcpy(frame.cpuRecords.data(), records.data(), frame.cpuRecords.size());
     }
-    return invocation;
+    return frame;
+}
+
+void WorkGraphCullingPass::Record(const WorkGraphCullingBindings& bindings, const WorkGraphCullingFrame& frame,
+    org::PassRecordContext& context)
+{
+    if (!frame.active) return;
+    auto& commands = context.Commands();
+    // The graph runs against the global compute root signature.
+    context.Retain(frame.workGraphSlots);
+    commands.BindLayout(frame.workGraphSlots->layout);
+
+    using OutputBarrier = std::pair<org::ResourceBindingToken, rhi::ResourceAccessType>;
+    const auto barriers = [&](std::span<const OutputBarrier> list) {
+        std::vector<rhi::BufferBarrier> batch;
+        batch.reserve(list.size());
+        for (const auto& [token, after] : list) {
+            rhi::BufferBarrier barrier{};
+            barrier.buffer = context.Resolve(token).GetHandle();
+            barrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
+            barrier.afterAccess = after;
+            barrier.beforeSync = barrier.afterSync = rhi::ResourceSyncState::ComputeShading;
+            batch.push_back(barrier);
+        }
+        if (batch.empty()) return;
+        rhi::BarrierBatch barrierBatch{};
+        barrierBatch.buffers = rhi::Span<rhi::BufferBarrier>(batch.data(), static_cast<uint32_t>(batch.size()));
+        commands.Barriers(barrierBatch);
+    };
+    constexpr auto uav = rhi::ResourceAccessType::UnorderedAccess;
+    constexpr auto read = rhi::ResourceAccessType::ShaderResource;
+    const auto clear = [&](const org::DeclaredViewToken& token, uint32_t count = 1u) {
+        br::render::MiscConstants values{};
+        values[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = context.Index(token);
+        values[CLOD_CLEAR_UINT_BUFFER_COUNT] = count;
+        br::render::DispatchCompute(context, bindings.clearPipeline, values, (count + 63u) / 64u);
+        barriers(std::array{OutputBarrier{token.Resource(), uav}});
+    };
+
+    if (bindings.isFirstPass && frame.settings.telemetry)
+        clear(bindings.telemetry, CLodWorkGraphTelemetryBufferCount);
+    if (bindings.voxelQueues) {
+        clear((*bindings.voxelQueues)[1]);
+        clear((*bindings.voxelQueues)[3]);
+    }
+    if (bindings.reyes && bindings.isFirstPass) {
+        clear(bindings.reyes->diceQueueCounter);
+        clear(bindings.reyes->diceQueueOverflow);
+    }
+
+    br::render::MiscConstants root{};
+    FillGraphConstants(root, bindings, frame, context);
+
+    context.SetWorkGraph(frame.workGraph, bindings.scratch, frame.initializeBacking);
+    const auto slots = context.DescriptorSlotIndices(*frame.workGraphSlots);
+    if (!slots.empty()) commands.PushConstants(rhi::ShaderStage::Compute, 0,
+        org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
+        static_cast<uint32_t>(slots.size()), slots.data());
+    commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
+        NumMiscUintRootConstants, root.data());
+
+    if (bindings.isFirstPass) {
+        if (!frame.cpuRecords.empty()) {
+            rhi::WorkGraphDispatchDesc dispatch{};
+            dispatch.dispatchMode = rhi::WorkGraphDispatchMode::NodeCpuInput;
+            dispatch.nodeCpuInput.entryPointIndex = 0u;
+            dispatch.nodeCpuInput.pRecords = frame.cpuRecords.data();
+            dispatch.nodeCpuInput.numRecords = static_cast<uint32_t>(frame.cpuRecords.size() / frame.cpuRecordStride);
+            dispatch.nodeCpuInput.recordByteStride = frame.cpuRecordStride;
+            commands.DispatchWorkGraph(dispatch);
+        }
+        barriers(std::array{OutputBarrier{bindings.visibleCounter.Resource(), uav},
+            OutputBarrier{bindings.replayState.Resource(), uav}, OutputBarrier{bindings.replay.Resource(), uav}});
+    } else {
+        barriers(std::array{OutputBarrier{bindings.replay.Resource(), uav},
+            OutputBarrier{bindings.nodeInputs.Resource(), uav}});
+        rhi::WorkGraphDispatchDesc dispatch{};
+        dispatch.dispatchMode = rhi::WorkGraphDispatchMode::MultiNodeGpuInput;
+        dispatch.multiNodeGpuInput.inputBuffer = context.Resolve(bindings.nodeInputs).GetHandle();
+        dispatch.multiNodeGpuInput.inputAddressOffset = 0;
+        commands.DispatchWorkGraph(dispatch);
+    }
+
+    std::vector<OutputBarrier> outputs{
+        {bindings.visibleCounter.Resource(), read}, {bindings.replayState.Resource(), read}};
+    if (bindings.swClassification) outputs.push_back({bindings.swCounter.Resource(), uav});
+    if (bindings.voxelQueues) {
+        const auto& voxels = *bindings.voxelQueues;
+        for (const size_t queue : {1u, 3u, 0u, 2u}) outputs.push_back({voxels[queue].Resource(), read});
+    }
+    barriers(outputs);
+
+    // Build the raster bucket histogram command, and patch phase 2's GPU node
+    // inputs with this frame's replay record counts and addresses. The command
+    // shader also reads the graph constants already in root.
+    context.BindComputePipeline(bindings.createCommandPipeline);
+    root[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = context.Index(bindings.visibleCounterSrv);
+    root[CLOD_CREATE_RASTER_BUCKET_HISTOGRAM_COMMAND_DESCRIPTOR_INDEX] = context.Index(bindings.histogram);
+    root[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = context.Index(bindings.replayStateSrv);
+    root[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = context.Index(bindings.nodeInputs);
+    root[CLOD_CREATE_NUM_RASTER_BUCKETS] = frame.rasterBucketCount;
+    root[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = bindings.maxVisibleClusters;
+    root[CLOD_CREATE_NODE_INPUT_COUNT] = bindings.reyes ? 4u : 2u;
+    const auto replayAddress = GetNativeBufferDeviceAddress(context.Resolve(bindings.replay));
+    const auto inputAddress = GetNativeBufferDeviceAddress(context.Resolve(bindings.nodeInputs));
+    root[CLOD_CREATE_REPLAY_ADDRESS_LOW] = static_cast<uint32_t>(replayAddress);
+    root[CLOD_CREATE_REPLAY_ADDRESS_HIGH] = static_cast<uint32_t>(replayAddress >> 32u);
+    root[CLOD_CREATE_NODE_INPUT_ADDRESS_LOW] = static_cast<uint32_t>(inputAddress);
+    root[CLOD_CREATE_NODE_INPUT_ADDRESS_HIGH] = static_cast<uint32_t>(inputAddress >> 32u);
+    br::render::PushMiscConstants(context, root);
+    commands.Dispatch(1, 1, 1);
 }
 
 void WorkGraphCullingPass::Update(const org::UpdateExecutionContext& executionContext)

@@ -12,7 +12,7 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "BasicRenderer/Pipeline/RenderPhase.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedRenderIndirect.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 namespace org { class RenderGraph; }
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
@@ -33,6 +33,7 @@ struct ClusterRasterizationPassInputs {
 };
 
 struct ClusterRasterBindings {
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken histogram, visible, transforms, mapping;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken telemetry, mismatchCounter, mismatchDetails;
@@ -45,11 +46,30 @@ struct ClusterRasterBindings {
     org::DeclaredTableLayout<CLodViewRasterInfo> viewTable;
     bool hasTelemetry = false, hasMismatch = false, virtualShadow = false;
     bool deepVisibility = false, avboit = false, hasVisibleResolve = false, hasDepth = false;
+    bool hasColors = false, avboitShading = false, singleViewVisibility = false;
+};
+
+// One indirect mesh dispatch per raster bucket with a resolved pipeline.
+struct ClusterRasterStep {
+    org::PipelineState pipeline;
+    uint64_t argumentsOffset = 0;
+};
+struct ClusterRasterFrame {
+    std::vector<ClusterRasterStep> steps;
+    std::array<rhi::ClearValue, 3> colorClears{};
+    rhi::ClearValue depthClear{};
+    uint32_t width = 1, height = 1;
+    uint32_t viewRasterInfoTable = 0;
+    uint32_t deepVisibilityNodeCapacity = 1;
+    uint32_t virtualShadowPageTableResolution = 0, virtualShadowVirtualResolution = 0;
+    bool shadows = false, punctualLights = false, gtao = false;
+    bool telemetryEnabled = false;
+    bool phase1VisibilityDiagnostics = false;
 };
 
 class ClusterRasterizationPass
     : public org::TypedRenderGraphPass<ClusterRasterizationPass,
-          org::EmptyPassFrameData, ClusterRasterBindings, br::render::PreparedRenderIndirectSequence>,
+          ClusterRasterFrame, ClusterRasterBindings>,
       public org::IDynamicDeclaredResources {
 public:
     ClusterRasterizationPass(
@@ -88,15 +108,9 @@ public:
     void Initialize();
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const;
-    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedRenderIndirectSequence&,
-        const ClusterRasterBindings&, const org::PassPrepareContext&) const { return {}; }
-    br::render::PreparedRenderIndirectSequence BuildRecipe(const ClusterRasterBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const br::render::PreparedRenderIndirectSequence& data, const org::EmptyPassFrameData&,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedRenderIndirectSequence(data, recording);
-    }
+    ClusterRasterFrame Prepare(const ClusterRasterBindings&, const org::PassPrepareContext& preparation) const;
+    static void Record(const ClusterRasterBindings& bindings, const ClusterRasterFrame& frame,
+        org::PassRecordContext& context);
 
 private:
     bool m_wireframe = false;
@@ -106,7 +120,7 @@ private:
 
     std::vector<CLodViewRasterInfo> m_viewRasterInfos; // Rows without descriptors (change detection).
     // Built by Update from the view snapshot; its descriptors are resolved and
-    // the table published when the recipe is built.
+    // the table published when the frame is prepared.
     struct ViewInput {
         uint32_t camera;
         std::shared_ptr<org::PixelBuffer> visibility, headPointers;

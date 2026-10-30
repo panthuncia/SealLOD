@@ -5,17 +5,26 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Utilities/Utilities.h"
 #include "../shaders/PerPassRootConstants/luminanceHistogramAverageRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
-class LuminanceHistogramAveragePass : public org::TypedRenderGraphPass<LuminanceHistogramAveragePass, br::render::PreparedComputeDispatch> {
+struct LuminanceHistogramAverageBindings {
+    org::PipelineState pipeline;
+};
+struct LuminanceHistogramAverageFrame {
+    float deltaTime = 0.0f;
+    uint32_t pixelCount = 0;
+};
+
+class LuminanceHistogramAveragePass : public org::TypedRenderGraphPass<LuminanceHistogramAveragePass, LuminanceHistogramAverageFrame, LuminanceHistogramAverageBindings> {
 public:
     LuminanceHistogramAveragePass() {
         CreateComputePSO();
     }
 
-    void Declare(org::PassBuilder& builder) {
+    LuminanceHistogramAverageBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         builder.UnorderedAccess(Builtin::PostProcessing::LuminanceHistogram, Builtin::PostProcessing::AdaptedLuminance, "FFX::LPMConstants");
+        return {m_pso};
     }
 
     void Initialize() {
@@ -24,29 +33,19 @@ public:
 
 
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+    LuminanceHistogramAverageFrame Prepare(const LuminanceHistogramAverageBindings&, const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        auto payload = m_pso.GetPayload();
-        br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-        auto program = preparation.CaptureProgramBinding(std::move(payload));
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-
-
-        data.constants[MIN_LOG_LUMINANCE] = as_uint(0.001f);
-        data.constants[LOG_LUMINANCE_RANGE] = as_uint(log2(10.0f) - log2(0.1f));
-        data.constants[TIME_COEFFICIENT] = as_uint(context->deltaTime);
-        data.constants[NUM_PIXELS] = as_uint(static_cast<float>(
-            context->renderResolution.x * context->renderResolution.y));
-        data.groupsX = 1;
-        return data;
+        return {context->deltaTime, context->renderResolution.x * context->renderResolution.y};
     }
 
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const LuminanceHistogramAverageBindings& bindings, const LuminanceHistogramAverageFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[MIN_LOG_LUMINANCE] = as_uint(0.001f);
+        constants[LOG_LUMINANCE_RANGE] = as_uint(log2(10.0f) - log2(0.1f));
+        constants[TIME_COEFFICIENT] = as_uint(frame.deltaTime);
+        constants[NUM_PIXELS] = as_uint(static_cast<float>(frame.pixelCount));
+        br::render::DispatchCompute(context, bindings.pipeline, constants, 1);
     }
 
     void ShutdownPass() {

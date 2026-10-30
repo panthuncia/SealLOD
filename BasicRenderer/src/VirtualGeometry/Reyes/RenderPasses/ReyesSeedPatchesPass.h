@@ -6,12 +6,14 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesSeedPatchesBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visible;
     org::DeclaredViewToken owned;
     org::DeclaredViewToken ownedCounter;
@@ -23,7 +25,7 @@ struct ReyesSeedPatchesBindings {
 };
 
 class ReyesSeedPatchesPass final : public org::TypedRenderGraphPass<ReyesSeedPatchesPass,
-    br::render::PreparedComputeIndirect, ReyesSeedPatchesBindings> {
+    org::EmptyPassFrameData, ReyesSeedPatchesBindings> {
 public:
     ReyesSeedPatchesPass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -38,10 +40,7 @@ public:
         uint32_t phaseIndex);
 
     ReyesSeedPatchesBindings Declare(org::PassBuilder& builder);
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputeIndirect Prepare(const ReyesSeedPatchesBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesSeedPatchesBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
+    static void Record(const ReyesSeedPatchesBindings& bindings, org::PassRecordContext& recording);
     void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:

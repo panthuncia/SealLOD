@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <vector>
 
 #include <rhi.h>
 
@@ -10,37 +9,29 @@
 
 namespace org { class Buffer; }
 
-struct RasterBucketCompactAndArgsPreparedData {
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    rhi::PipelineLayoutHandle layout{};
-    org::PreparedProgramReference clearProgram{}, compactProgram{};
-    rhi::CommandSignatureHandle commandSignature{};
-    org::PreparedResourceReference indirectCommand{}, cursorResource{};
-    std::vector<unsigned int> clearDescriptorIndices, compactDescriptorIndices;
-    std::vector<uint32_t> clearConstants, compactConstants;
-    uint32_t clearGroups = 0;
-    bool enabled = false;
-};
-
 struct RasterBucketCompactAndArgsBindings {
+    org::PipelineState clearPipeline, compactPipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visibleClusters, visibleTransforms, visibleCount, compactedBaseCount, readBaseCount;
     org::ResourceBindingToken indirectCommand;
     org::DeclaredViewToken histogram, offsets, writeCursor, compactedClusters;
     org::DeclaredViewToken compactedTransforms, indirectArgs, sortedMapping, reyesOwnership, telemetry;
-    uint32_t numBuckets = 0;
     uint32_t maxVisibleClusters = 0;
-    bool enabled = false;
     bool appendToExisting = false;
     bool readReverse = false;
     bool buildSoftwareRasterDispatch = false;
     bool hasReadBaseCount = false;
     bool hasReyesOwnership = false;
     bool hasTelemetry = false;
+};
+struct RasterBucketCompactAndArgsFrame {
+    uint32_t numBuckets = 0;
+    bool enabled = false;
     bool telemetryEnabled = false;
 };
 
 class RasterBucketCompactAndArgsPass : public org::TypedRenderGraphPass<RasterBucketCompactAndArgsPass,
-    RasterBucketCompactAndArgsPreparedData, RasterBucketCompactAndArgsBindings>,
+    RasterBucketCompactAndArgsFrame, RasterBucketCompactAndArgsBindings>,
     public org::IDynamicDeclaredResources {
 public:
     RasterBucketCompactAndArgsPass(
@@ -66,15 +57,14 @@ public:
         bool runWhenComputeSWRasterEnabledOnly = false);
 
     RasterBucketCompactAndArgsBindings Declare(org::PassBuilder& builder);
-    RasterBucketCompactAndArgsPreparedData Prepare(const RasterBucketCompactAndArgsBindings&,
+    RasterBucketCompactAndArgsFrame Prepare(const RasterBucketCompactAndArgsBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const RasterBucketCompactAndArgsBindings&,
-        const RasterBucketCompactAndArgsPreparedData&, org::PassRecordContext&);
+        const RasterBucketCompactAndArgsFrame&, org::PassRecordContext&);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
 
 private:
-    using PreparedData = RasterBucketCompactAndArgsPreparedData;
     org::PipelineState m_pso;
     org::PipelineState m_clearPipeline;
     std::shared_ptr<rhi::CommandSignaturePtr> m_compactionCommandSignature;

@@ -6,11 +6,13 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct ReyesDiceBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken queue;
     org::DeclaredViewToken counter;
     org::DeclaredViewToken readOffset;
@@ -22,7 +24,7 @@ struct ReyesDiceBindings {
 };
 
 class ReyesDicePass final : public org::TypedRenderGraphPass<ReyesDicePass,
-    br::render::PreparedComputeIndirect, ReyesDiceBindings> {
+    org::EmptyPassFrameData, ReyesDiceBindings> {
 public:
     ReyesDicePass(
         std::shared_ptr<org::Buffer> diceQueueBuffer,
@@ -35,9 +37,7 @@ public:
         uint32_t phaseIndex);
 
     ReyesDiceBindings Declare(org::PassBuilder& builder);
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputeIndirect Prepare(const ReyesDiceBindings&, const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesDiceBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
+    static void Record(const ReyesDiceBindings& bindings, org::PassRecordContext& recording);
 
 private:
     std::shared_ptr<org::Buffer> m_diceQueueBuffer;

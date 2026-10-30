@@ -4,11 +4,12 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct ReyesCreateDispatchArgsBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken sourceCounter, indirectArgs, sourceBaseCounter;
     uint32_t threadsPerGroup = 0;
     uint32_t maxWorkItemCount = 0;
@@ -16,7 +17,7 @@ struct ReyesCreateDispatchArgsBindings {
 };
 
 class ReyesCreateDispatchArgsPass final : public org::TypedRenderGraphPass<ReyesCreateDispatchArgsPass,
-    br::render::PreparedComputeDispatch, ReyesCreateDispatchArgsBindings> {
+    org::EmptyPassFrameData, ReyesCreateDispatchArgsBindings> {
 public:
     ReyesCreateDispatchArgsPass(
         std::shared_ptr<org::Buffer> sourceCounterBuffer,
@@ -27,11 +28,7 @@ public:
 
     ReyesCreateDispatchArgsBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputeDispatch Prepare(const ReyesCreateDispatchArgsBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesCreateDispatchArgsBindings&,
-        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    static void Record(const ReyesCreateDispatchArgsBindings& bindings, org::PassRecordContext& recording);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     void ShutdownPass();
 

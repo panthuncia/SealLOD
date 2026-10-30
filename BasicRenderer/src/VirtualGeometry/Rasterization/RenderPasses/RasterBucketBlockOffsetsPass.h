@@ -3,18 +3,22 @@
 #include <memory>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct RasterBucketBlockOffsetsBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken offsets, blockSums, scannedBlockSums, totalCount;
+};
+struct RasterBucketBlockOffsetsFrame {
     uint32_t numBuckets = 0;
-    bool enabled = false;
+    uint32_t numBlocks = 0;
+    uint32_t groups = 0;
 };
 
 class RasterBucketBlockOffsetsPass : public org::TypedRenderGraphPass<RasterBucketBlockOffsetsPass,
-    br::render::PreparedComputeDispatch, RasterBucketBlockOffsetsBindings> {
+    RasterBucketBlockOffsetsFrame, RasterBucketBlockOffsetsBindings> {
 public:
     RasterBucketBlockOffsetsPass(
         std::shared_ptr<org::Buffer> offsetsBuffer,
@@ -24,11 +28,10 @@ public:
         bool runWhenComputeSWRasterEnabledOnly = false);
 
     RasterBucketBlockOffsetsBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputeDispatch Prepare(const RasterBucketBlockOffsetsBindings&,
+    RasterBucketBlockOffsetsFrame Prepare(const RasterBucketBlockOffsetsBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const RasterBucketBlockOffsetsBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& context) {
-        br::render::RecordPreparedComputeDispatch(data, context);
-    }
+    static void Record(const RasterBucketBlockOffsetsBindings& bindings, const RasterBucketBlockOffsetsFrame& frame,
+        org::PassRecordContext& context);
     void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
@@ -39,6 +42,5 @@ private:
     std::shared_ptr<org::Buffer> m_scannedBlockSumsBuffer;
     std::shared_ptr<org::Buffer> m_totalCountBuffer;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
-    uint32_t m_numBuckets = 0;
     bool m_enabled = false;
 };

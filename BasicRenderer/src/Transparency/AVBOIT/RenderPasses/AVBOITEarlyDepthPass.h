@@ -4,27 +4,19 @@
 
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/ShaderBuffers.h"
-#include <array>
-#include <vector>
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct AVBOITEarlyDepthFrameData {
-    bool enabled = false;
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    org::PreparedProgramReference program;
-    org::PreparedDescriptorReference depth;
-    org::PreparedResourceReference arguments, count;
-    rhi::CommandSignatureHandle signature{};
     rhi::ClearValue clear{};
     uint32_t width = 0, height = 0, maximumCount = 0;
-    std::vector<unsigned int> descriptorIndices;
-    std::array<unsigned int, NumMiscUintRootConstants> constants{};
 };
 
 struct AVBOITEarlyDepthBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
     org::DeclaredViewToken config;
     org::ResourceBindingToken arguments, count;
     org::DeclaredViewToken depth;

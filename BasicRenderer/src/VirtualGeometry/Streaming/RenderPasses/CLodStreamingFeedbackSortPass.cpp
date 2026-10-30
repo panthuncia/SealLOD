@@ -1,5 +1,4 @@
 #include "VirtualGeometry/Streaming/RenderPasses/CLodStreamingFeedbackSortPass.h"
-#include "Runtime/StateGraph/InvocationRevision.h"
 
 #include <array>
 
@@ -79,6 +78,7 @@ CLodStreamingFeedbackSortPass::CLodStreamingFeedbackSortPass(
 StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBuilder& declaration) {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     StreamingFeedbackSortBindings bindings;
+    bindings.pipelines = {m_setupPso, m_countPso, m_reducePso, m_scanPso, m_scanAddPso, m_scatterPso};
     bindings.requestCounter = declaration.ShaderResource(m_requestCounter);
     const std::shared_ptr<org::Buffer> uavs[] = {m_requestKeys, m_requests, m_keyScratch, m_payloadScratch,
         m_sumTable, m_reduceTable, m_constants};
@@ -91,102 +91,58 @@ StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBu
 }
 
 StreamingFeedbackSortFrameData CLodStreamingFeedbackSortPass::Prepare(
-    const StreamingFeedbackSortBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    StreamingFeedbackSortFrameData data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.signature = preparation.CaptureCommandSignature(CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature());
-    data.programs = {preparation.CaptureProgramBinding(m_setupPso), preparation.CaptureProgramBinding(m_countPso),
-        preparation.CaptureProgramBinding(m_reducePso), preparation.CaptureProgramBinding(m_scanPso),
-        preparation.CaptureProgramBinding(m_scanAddPso), preparation.CaptureProgramBinding(m_scatterPso)};
-    for (size_t i = 0; i < bindings.uavs.size(); ++i)
-        data.uavResources[i] = preparation.DeclaredReference(bindings.uavs[i]);
-    data.indirectResources = {preparation.CaptureResource(bindings.countScatterIndirect),
-        preparation.CaptureResource(bindings.reduceScanIndirect)};
-    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
-    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
-    auto constants = [&](org::DeclaredViewToken sourceKeys, org::DeclaredViewToken destKeys,
-        org::DeclaredViewToken sourcePayloads, org::DeclaredViewToken destPayloads, uint32_t iteration) {
-        std::array<unsigned int, NumMiscUintRootConstants> c{};
-        c[CLOD_STREAMING_SORT_REQUEST_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.requestCounter);
-        c[CLOD_STREAMING_SORT_CONSTANTS_DESCRIPTOR_INDEX] = uav(bindings.uavs[6]);
-        c[CLOD_STREAMING_SORT_COUNT_SCATTER_ARGS_DESCRIPTOR_INDEX] = uav(bindings.countScatterUav);
-        c[CLOD_STREAMING_SORT_REDUCE_SCAN_ARGS_DESCRIPTOR_INDEX] = uav(bindings.reduceScanUav);
-        c[CLOD_STREAMING_SORT_SOURCE_KEYS_DESCRIPTOR_INDEX] = uav(sourceKeys);
-        c[CLOD_STREAMING_SORT_DEST_KEYS_DESCRIPTOR_INDEX] = uav(destKeys);
-        c[CLOD_STREAMING_SORT_SUM_TABLE_DESCRIPTOR_INDEX] = uav(bindings.uavs[4]);
-        c[CLOD_STREAMING_SORT_REDUCE_TABLE_DESCRIPTOR_INDEX] = uav(bindings.uavs[5]);
-        c[CLOD_STREAMING_SORT_SOURCE_PAYLOADS_DESCRIPTOR_INDEX] = uav(sourcePayloads);
-        c[CLOD_STREAMING_SORT_DEST_PAYLOADS_DESCRIPTOR_INDEX] = uav(destPayloads);
-        c[CLOD_STREAMING_SORT_ITERATION_INDEX] = iteration; c[CLOD_STREAMING_SORT_REQUEST_CAPACITY] = CLodStreamingRequestCapacity;
+    const StreamingFeedbackSortBindings&, const org::PassPrepareContext&) const {
+    return {CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature()};
+}
+
+void CLodStreamingFeedbackSortPass::Record(const StreamingFeedbackSortBindings& bindings,
+    const StreamingFeedbackSortFrameData& frame, org::PassRecordContext& context) {
+    const auto& uavs = bindings.uavs;
+    const auto constants = [&](const org::DeclaredViewToken& sourceKeys, const org::DeclaredViewToken& destKeys,
+        const org::DeclaredViewToken& sourcePayloads, const org::DeclaredViewToken& destPayloads) {
+        br::render::MiscConstants c{};
+        c[CLOD_STREAMING_SORT_REQUEST_COUNTER_DESCRIPTOR_INDEX] = context.Index(bindings.requestCounter);
+        c[CLOD_STREAMING_SORT_CONSTANTS_DESCRIPTOR_INDEX] = context.Index(uavs[6]);
+        c[CLOD_STREAMING_SORT_COUNT_SCATTER_ARGS_DESCRIPTOR_INDEX] = context.Index(bindings.countScatterUav);
+        c[CLOD_STREAMING_SORT_REDUCE_SCAN_ARGS_DESCRIPTOR_INDEX] = context.Index(bindings.reduceScanUav);
+        c[CLOD_STREAMING_SORT_SOURCE_KEYS_DESCRIPTOR_INDEX] = context.Index(sourceKeys);
+        c[CLOD_STREAMING_SORT_DEST_KEYS_DESCRIPTOR_INDEX] = context.Index(destKeys);
+        c[CLOD_STREAMING_SORT_SUM_TABLE_DESCRIPTOR_INDEX] = context.Index(uavs[4]);
+        c[CLOD_STREAMING_SORT_REDUCE_TABLE_DESCRIPTOR_INDEX] = context.Index(uavs[5]);
+        c[CLOD_STREAMING_SORT_SOURCE_PAYLOADS_DESCRIPTOR_INDEX] = context.Index(sourcePayloads);
+        c[CLOD_STREAMING_SORT_DEST_PAYLOADS_DESCRIPTOR_INDEX] = context.Index(destPayloads);
+        c[CLOD_STREAMING_SORT_ITERATION_INDEX] = 0;
+        c[CLOD_STREAMING_SORT_REQUEST_CAPACITY] = CLodStreamingRequestCapacity;
         return c;
     };
-    data.constants[0] = constants(bindings.uavs[0], bindings.uavs[2], bindings.uavs[1], bindings.uavs[3], 0);
-    data.constants[1] = constants(bindings.uavs[2], bindings.uavs[0], bindings.uavs[3], bindings.uavs[1], 0);
-    return data;
-}
-
-void CLodStreamingFeedbackSortPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
-    br::render::AppendFrameHeapRevision(preparation, out);
-    out.push_back(br::render::PipelineRevision(m_setupPso));
-    out.push_back(br::render::PipelineRevision(m_countPso));
-    out.push_back(br::render::PipelineRevision(m_reducePso));
-    out.push_back(br::render::PipelineRevision(m_scanPso));
-    out.push_back(br::render::PipelineRevision(m_scanAddPso));
-    out.push_back(br::render::PipelineRevision(m_scatterPso));
-    out.push_back(br::render::OwnerRevision(CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature()));
-}
-
-void CLodStreamingFeedbackSortPass::Record(const StreamingFeedbackSortBindings&,
-    const StreamingFeedbackSortFrameData& data, org::PassRecordContext& recording) {
-    auto& commands = recording.Commands();
-    br::render::BindPreparedDescriptorHeaps(commands, data.resourceHeap, data.samplerHeap);
+    // Even iterations sort from the request buffers into scratch, odd ones back.
+    const std::array<br::render::MiscConstants, 2> pingPong{
+        constants(uavs[0], uavs[2], uavs[1], uavs[3]),
+        constants(uavs[2], uavs[0], uavs[3], uavs[1])};
     const auto uavBarrier = [&] {
-        std::array<rhi::BufferBarrier, 7> barriers{};
-        for (size_t i = 0; i < barriers.size(); ++i) {
-            barriers[i].buffer = recording.Resolve(data.uavResources[i]).GetHandle();
-            barriers[i].beforeAccess = barriers[i].afterAccess = rhi::ResourceAccessType::UnorderedAccess;
-            barriers[i].beforeSync = barriers[i].afterSync = rhi::ResourceSyncState::ComputeShading;
-        }
-        rhi::BarrierBatch batch{};
-        batch.buffers = {barriers.data(), static_cast<uint32_t>(barriers.size())};
-        commands.Barriers(batch);
+        context.BufferBarriers({uavs[0].Resource(), uavs[1].Resource(), uavs[2].Resource(), uavs[3].Resource(),
+            uavs[4].Resource(), uavs[5].Resource(), uavs[6].Resource()},
+            rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceAccessType::UnorderedAccess);
     };
-    const auto dispatch = [&](size_t programIndex, const auto& constants, int argumentIndex) {
-        const auto& binding = data.programs[programIndex];
-        commands.BindLayout(recording.ResolveLayout(binding.program));
-        commands.BindPipeline(recording.Resolve(binding.program));
-        if (!binding.descriptorIndices.empty()) commands.PushConstants(rhi::ShaderStage::Compute, 0,
-            org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-            static_cast<uint32_t>(binding.descriptorIndices.size()), binding.descriptorIndices.data());
-        commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
-            NumMiscUintRootConstants, constants.data());
-        if (argumentIndex < 0) commands.Dispatch(1, 1, 1);
-        else commands.ExecuteIndirect(data.signature,
-            recording.Resolve(data.indirectResources[argumentIndex]).GetHandle(), 0, {}, 0, 1);
+    const std::array<org::ResourceBindingToken, 2> indirect{bindings.countScatterIndirect, bindings.reduceScanIndirect};
+    const auto dispatch = [&](size_t pipelineIndex, const br::render::MiscConstants& c, int argumentIndex) {
+        context.BindComputePipeline(bindings.pipelines[pipelineIndex]);
+        br::render::PushMiscConstants(context, c);
+        if (argumentIndex < 0) context.Commands().Dispatch(1, 1, 1);
+        else context.ExecuteIndirect(frame.signature, indirect[argumentIndex]);
         uavBarrier();
     };
-    dispatch(0, data.constants[0], -1);
-    std::array<rhi::BufferBarrier, 2> indirectBarriers{};
-    for (size_t i = 0; i < indirectBarriers.size(); ++i) {
-        auto& barrier = indirectBarriers[i];
-        barrier.buffer = recording.Resolve(data.indirectResources[i]).GetHandle();
-        barrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
-        barrier.afterAccess = rhi::ResourceAccessType::IndirectArgument;
-        barrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
-        barrier.afterSync = rhi::ResourceSyncState::ExecuteIndirect;
-    }
-    rhi::BarrierBatch batch{};
-    batch.buffers = {indirectBarriers.data(), static_cast<uint32_t>(indirectBarriers.size())};
-    commands.Barriers(batch);
+    dispatch(0, pingPong[0], -1);
+    context.BufferBarriers({bindings.countScatterIndirect, bindings.reduceScanIndirect},
+        rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceAccessType::IndirectArgument,
+        rhi::ResourceSyncState::ComputeShading, rhi::ResourceSyncState::ExecuteIndirect);
     for (uint32_t iteration = 0; iteration < 8; ++iteration) {
-        auto constants = data.constants[iteration & 1u];
-        constants[CLOD_STREAMING_SORT_ITERATION_INDEX] = iteration;
-        dispatch(1, constants, 0);
-        dispatch(2, constants, 1);
-        dispatch(3, constants, -1);
-        dispatch(4, constants, 1);
-        dispatch(5, constants, 0);
+        auto c = pingPong[iteration & 1u];
+        c[CLOD_STREAMING_SORT_ITERATION_INDEX] = iteration;
+        dispatch(1, c, 0);
+        dispatch(2, c, 1);
+        dispatch(3, c, -1);
+        dispatch(4, c, 1);
+        dispatch(5, c, 0);
     }
 }

@@ -11,32 +11,32 @@
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
-struct VoxelRasterFrameData {
-    struct Step {
-        org::PreparedProgramBinding buildProgram{}, rasterProgram{};
-        std::array<uint32_t, NumMiscUintRootConstants> constants{};
-        org::PreparedResourceReference arguments{};
-    };
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    rhi::CommandSignatureHandle commandSignature{};
-    std::array<Step, 2> steps;
-};
-
 struct VoxelRasterBindings {
+    org::PipelineState buildArgs;
+    // Rigid then skinned, without and with telemetry.
+    std::array<org::PipelineState, 2> raster, telemetryRaster;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visible, transforms, telemetry;
     std::array<org::DeclaredViewToken, 2> workRecords, workCounters, indirectArgs;
     org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages;
     org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;
+    uint32_t voxelWorkCapacity = 0;
     bool hasTelemetry = false, virtualShadow = false;
+};
+struct VoxelRasterFrame {
+    uint32_t viewRasterInfoTable = 0;
+    uint32_t pageTableResolution = 0, virtualResolution = 0;
+    bool telemetry = false;
 };
 
 class VoxelSoftwareRasterizationPass
-    : public org::TypedRenderGraphPass<VoxelSoftwareRasterizationPass, VoxelRasterFrameData, VoxelRasterBindings>,
+    : public org::TypedRenderGraphPass<VoxelSoftwareRasterizationPass, VoxelRasterFrame, VoxelRasterBindings>,
       public org::IDynamicDeclaredResources {
 public:
     VoxelSoftwareRasterizationPass(
@@ -61,9 +61,9 @@ public:
     VoxelRasterBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>& out) const;
-    VoxelRasterFrameData Prepare(const VoxelRasterBindings&, const org::PassPrepareContext& preparation) const;
-    static void Record(const VoxelRasterBindings&, const VoxelRasterFrameData&, org::PassRecordContext&);
+    VoxelRasterFrame Prepare(const VoxelRasterBindings&, const org::PassPrepareContext& preparation) const;
+    static void Record(const VoxelRasterBindings& bindings, const VoxelRasterFrame& frame,
+        org::PassRecordContext& context);
 
 private:
     org::PipelineState m_buildArgsPso;

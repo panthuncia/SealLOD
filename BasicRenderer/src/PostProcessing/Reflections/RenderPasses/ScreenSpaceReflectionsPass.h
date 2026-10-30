@@ -67,6 +67,7 @@ public:
             recording.Commands(), data.camera, data.hdr.get(), data.depth.get(),
             data.normals.get(), data.motion.get(),
             data.environment.get(), data.brdf.get(), data.output.get());
+        recording.RestoreDescriptorHeaps();
     }
 
 private:

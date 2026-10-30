@@ -1,10 +1,8 @@
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesQueueResetPass.h"
 #include "Render/PassBuilders.h"
-#include "Runtime/StateGraph/InvocationRevision.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
-#include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/UploadTypes.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
@@ -62,6 +60,8 @@ ReyesQueueResetBindings ReyesQueueResetPass::Declare(org::PassBuilder& declarati
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     ReyesQueueResetBindings bindings{
+        m_clearCountersPso,
+        m_clearOwnershipBitsetPso,
         builder->UnorderedAccess(m_fullClusterCounter),
         builder->UnorderedAccess(m_ownedClusterCounter),
         {}, {},
@@ -90,28 +90,21 @@ ReyesQueueResetBindings ReyesQueueResetPass::Declare(org::PassBuilder& declarati
         bindings.splitQueueOverflowCounters.push_back(builder->UnorderedAccess(splitQueueOverflowCounter));
     }
 
+    bindings.ownershipBitsetWordCount = m_ownershipBitsetWordCount;
+    bindings.clearDiceQueueCounter = m_clearDiceQueueCounter;
+
     builder->ConstantBuffer(Builtin::PerFrameBuffer);
     return bindings;
 }
 
 void ReyesQueueResetPass::Initialize() {}
 
-br::render::PreparedComputePipelineSequence ReyesQueueResetPass::Prepare(
-    const ReyesQueueResetBindings& bindings, const org::PassPrepareContext& preparation) const
+void ReyesQueueResetPass::Record(const ReyesQueueResetBindings& bindings, org::PassRecordContext& recording)
 {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    br::render::PreparedComputePipelineSequence data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.steps.reserve(2);
-    auto& counters = data.steps.emplace_back();
-    auto program = preparation.CaptureProgramBinding(m_clearCountersPso);
-    counters.program = program.program;
-    counters.descriptorIndices = std::move(program.descriptorIndices);
-    counters.groupsX = 1;
-    auto& c = counters.constants;
-    const auto uavIndex = [&](org::DeclaredViewToken token) {
-        return preparation.Resolve(token).index;
+    // Both dispatches share one constant block; the counter clear sees the bitset fields too.
+    br::render::MiscConstants c{};
+    const auto uavIndex = [&](const org::DeclaredViewToken& token) {
+        return recording.Index(token);
     };
     c[CLOD_REYES_RESET_FULL_CLUSTER_COUNTER_DESCRIPTOR_INDEX] = uavIndex(bindings.fullClusterCounter);
     c[CLOD_REYES_RESET_OWNED_CLUSTER_COUNTER_DESCRIPTOR_INDEX] = uavIndex(bindings.ownedClusterCounter);
@@ -121,36 +114,21 @@ br::render::PreparedComputePipelineSequence ReyesQueueResetPass::Prepare(
     c[CLOD_REYES_RESET_SPLIT_QUEUE_OVERFLOW_B_DESCRIPTOR_INDEX] = uavIndex(bindings.splitQueueOverflowCounters.at(1));
     c[CLOD_REYES_RESET_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = uavIndex(bindings.diceQueueCounter);
     c[CLOD_REYES_RESET_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = uavIndex(bindings.diceQueueOverflowCounter);
-    c[CLOD_REYES_RESET_CLEAR_DICE_QUEUE_COUNTER] = m_clearDiceQueueCounter ? 1u : 0u;
+    c[CLOD_REYES_RESET_CLEAR_DICE_QUEUE_COUNTER] = bindings.clearDiceQueueCounter ? 1u : 0u;
     c[CLOD_REYES_RESET_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = bindings.replaySplitQueueCounter ? uavIndex(*bindings.replaySplitQueueCounter) : 0xFFFFFFFFu;
     c[CLOD_REYES_RESET_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = bindings.replaySplitQueueOverflowCounter ? uavIndex(*bindings.replaySplitQueueOverflowCounter) : 0xFFFFFFFFu;
     c[CLOD_REYES_RESET_REPLAY_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = bindings.replayDiceQueueCounter ? uavIndex(*bindings.replayDiceQueueCounter) : 0xFFFFFFFFu;
     c[CLOD_REYES_RESET_REPLAY_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = bindings.replayDiceQueueOverflowCounter ? uavIndex(*bindings.replayDiceQueueOverflowCounter) : 0xFFFFFFFFu;
-    if (bindings.ownershipBitset && m_ownershipBitsetWordCount) {
-        br::render::PreparedComputePipelineSequence::Step bitset{};
-        auto bitsetProgram = preparation.CaptureProgramBinding(m_clearOwnershipBitsetPso);
-        bitset.program = bitsetProgram.program;
-        bitset.descriptorIndices = std::move(bitsetProgram.descriptorIndices);
+    const bool clearBitset = bindings.ownershipBitset && bindings.ownershipBitsetWordCount;
+    if (clearBitset) {
         c[CLOD_REYES_RESET_OWNERSHIP_BITSET_DESCRIPTOR_INDEX] = uavIndex(*bindings.ownershipBitset);
-        c[CLOD_REYES_RESET_OWNERSHIP_BITSET_WORD_COUNT] = m_ownershipBitsetWordCount;
-        bitset.constants = c;
-        bitset.groupsX = (m_ownershipBitsetWordCount + 63u) / 64u;
-        data.steps.push_back(std::move(bitset));
+        c[CLOD_REYES_RESET_OWNERSHIP_BITSET_WORD_COUNT] = bindings.ownershipBitsetWordCount;
     }
-    return data;
-}
-
-void ReyesQueueResetPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
-    br::render::AppendFrameHeapRevision(preparation, out);
-    out.push_back(br::render::PipelineRevision(m_clearCountersPso));
-    out.push_back(br::render::PipelineRevision(m_clearOwnershipBitsetPso));
-    out.push_back(static_cast<uint64_t>(m_clearDiceQueueCounter));
-    out.push_back(static_cast<uint64_t>(m_ownershipBitsetWordCount));
-}
-
-void ReyesQueueResetPass::Record(const ReyesQueueResetBindings&,
-    const br::render::PreparedComputePipelineSequence& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputePipelineSequence(data, recording);
+    br::render::DispatchCompute(recording, bindings.clearCountersPipeline, c, 1);
+    if (clearBitset) {
+        br::render::DispatchCompute(recording, bindings.clearOwnershipBitsetPipeline, c,
+            (bindings.ownershipBitsetWordCount + 63u) / 64u);
+    }
 }
 
 void ReyesQueueResetPass::Update(const org::UpdateExecutionContext& executionContext)

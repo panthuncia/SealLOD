@@ -1,7 +1,7 @@
 #pragma once
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Runtime/Device/DeviceManager.h"
@@ -11,7 +11,16 @@
 
 #include <vector>
 
-class EnvironmentSHPass : public org::TypedRenderGraphPass<EnvironmentSHPass, br::render::PreparedComputeDispatchSequence>, public org::IDynamicDeclaredResources {
+struct EnvironmentSHBindings {
+	org::PipelineState pipeline;
+	uint32_t samplerIndex = 0;
+};
+struct EnvironmentSHFrame {
+	struct Job { uint32_t cubemapResolution = 0, environmentIndex = 0; };
+	std::vector<Job> jobs;
+};
+
+class EnvironmentSHPass : public org::TypedRenderGraphPass<EnvironmentSHPass, EnvironmentSHFrame, EnvironmentSHBindings>, public org::IDynamicDeclaredResources {
 public:
 	EnvironmentSHPass() = default;
 
@@ -37,7 +46,7 @@ public:
 	~EnvironmentSHPass() {
 	}
 
-	void Declare(org::PassBuilder& builder) {
+	EnvironmentSHBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
 		for (const auto& j : m_pending) {
 			if (!j->work.srcCubemap) continue;
@@ -48,6 +57,7 @@ public:
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 
 		m_declaredResourcesChanged = false;
+		return {m_PSO, m_samplerIndex};
 	}
 
 
@@ -62,33 +72,29 @@ public:
         }
     }
 
-    br::render::PreparedComputeDispatchSequence Prepare(const org::PassPrepareContext& preparation) {
-        br::render::PreparedComputeDispatchSequence data;
-        if (m_pending.empty()) return data;
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        auto program = preparation.CaptureProgramBinding(m_PSO);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        for (const auto& entry : m_pending) {
-            const auto& job = entry->work;
-            br::render::PreparedComputeDispatchSequence::Step step;
-            step.constants[UintRootConstant0] = job.cubemapResolution;
-            step.constants[UintRootConstant1] = m_samplerIndex;
-            step.constants[UintRootConstant2] = job.environmentIndex;
-            step.groupsX = step.groupsY = (job.cubemapResolution + 15) / 16;
-            step.groupsZ = 6;
-            data.steps.push_back(step);
-        }
+    EnvironmentSHFrame Prepare(const EnvironmentSHBindings&, const org::PassPrepareContext& preparation) {
+        EnvironmentSHFrame frame;
+        if (m_pending.empty()) return frame;
+        for (const auto& entry : m_pending)
+            frame.jobs.push_back({entry->work.cubemapResolution, entry->work.environmentIndex});
         m_work.Reserve(m_pending, preparation);
         m_pending.clear();
         m_declaredResourcesChanged = true;
-        return data;
+        return frame;
     }
 
-    static void Record(const br::render::PreparedComputeDispatchSequence& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatchSequence(data, recording);
+    static void Record(const EnvironmentSHBindings& bindings, const EnvironmentSHFrame& frame, org::PassRecordContext& context) {
+        if (frame.jobs.empty()) return;
+        context.BindComputePipeline(bindings.pipeline);
+        for (const auto& job : frame.jobs) {
+            br::render::MiscConstants constants{};
+            constants[UintRootConstant0] = job.cubemapResolution;
+            constants[UintRootConstant1] = bindings.samplerIndex;
+            constants[UintRootConstant2] = job.environmentIndex;
+            br::render::PushMiscConstants(context, constants);
+            const uint32_t groups = (job.cubemapResolution + 15) / 16;
+            context.Commands().Dispatch(groups, groups, 6);
+        }
     }
 
 	bool DeclaredResourcesChanged() const override {

@@ -9,17 +9,22 @@
 #include <Resources/Buffers/Buffer.h>
 #include "Render/Runtime/IDescriptorService.h"
 #include "Render/Runtime/UploadTypes.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include <array>
 #include <span>
 
+struct GTAOFilterFrame {
+    uint32_t groupsX = 0, groupsY = 0;
+};
 struct GTAOFilterBindings {
+    org::PipelineState pipeline;
+    uint32_t samplerIndex = 0;
     org::DeclaredViewToken depth;
     std::array<org::DeclaredViewToken, 5> workingDepths;
 };
 
 class GTAOFilterPass : public org::TypedRenderGraphPass<GTAOFilterPass,
-    br::render::PreparedComputeDispatch, GTAOFilterBindings> {
+    GTAOFilterFrame, GTAOFilterBindings> {
 public:
     GTAOFilterPass() {
         CreatePointClampSampler();
@@ -60,6 +65,8 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         GTAOFilterBindings bindings{};
+        bindings.pipeline = PrefilterDepths16x16PSO;
+        bindings.samplerIndex = m_samplerIndex;
         bindings.depth = builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })).View();
         std::array<org::UavView, 5> views{};
         for (uint32_t mip = 0; mip < views.size(); ++mip) views[mip].mip = mip;
@@ -70,26 +77,20 @@ public:
 
 
 
-    br::render::PreparedComputeDispatch Prepare(const GTAOFilterBindings& bindings,
+    GTAOFilterFrame Prepare(const GTAOFilterBindings&,
         const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        auto payload = PrefilterDepths16x16PSO.GetPayload(); br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(std::move(payload));
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-
-        data.constants[UintRootConstant0] = m_samplerIndex;
-        data.constants[UintRootConstant1] = preparation.Resolve(bindings.depth).index;
-        for (uint32_t mip = 0; mip < 5; ++mip)
-            data.constants[UintRootConstant2 + mip] = preparation.Resolve(bindings.workingDepths[mip]).index;
-        data.groupsX = (context->renderResolution.x + 15u) / 16u; data.groupsY = (context->renderResolution.y + 15u) / 16u;
-        return data;
+        return {(context->renderResolution.x + 15u) / 16u, (context->renderResolution.y + 15u) / 16u};
     }
 
-    static void Record(const GTAOFilterBindings&, const br::render::PreparedComputeDispatch& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const GTAOFilterBindings& bindings, const GTAOFilterFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[UintRootConstant0] = bindings.samplerIndex;
+        constants[UintRootConstant1] = context.Index(bindings.depth);
+        for (uint32_t mip = 0; mip < 5; ++mip)
+            constants[UintRootConstant2 + mip] = context.Index(bindings.workingDepths[mip]);
+        br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
     }
 
     void ShutdownPass() {

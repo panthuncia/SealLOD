@@ -5,19 +5,20 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapDeduplicatePredictedPagesBindings {
+    org::PipelineState clearStatePipeline, deduplicatePipeline;
     org::DeclaredViewToken rawPages, rawCount, scratch, pages, pageCount;
     org::DeclaredViewToken stats, pageTable, pageMetadata, dirtyFlags;
     uint32_t physicalPageCount = 0;
 };
 
 class VirtualShadowMapDeduplicatePredictedPagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapDeduplicatePredictedPagesPass,
-    br::render::PreparedComputePipelineSequence, VirtualShadowMapDeduplicatePredictedPagesBindings> {
+    org::EmptyPassFrameData, VirtualShadowMapDeduplicatePredictedPagesBindings> {
 public:
     VirtualShadowMapDeduplicatePredictedPagesPass(
         std::shared_ptr<org::Buffer> predictiveRawPagesBuffer,
@@ -32,10 +33,7 @@ public:
         uint32_t physicalPageCount);
 
     VirtualShadowMapDeduplicatePredictedPagesBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputePipelineSequence Prepare(const VirtualShadowMapDeduplicatePredictedPagesBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const VirtualShadowMapDeduplicatePredictedPagesBindings&,
-        const br::render::PreparedComputePipelineSequence&, org::PassRecordContext&);
+    static void Record(const VirtualShadowMapDeduplicatePredictedPagesBindings&, org::PassRecordContext&);
 
 private:
 

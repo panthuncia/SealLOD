@@ -6,11 +6,13 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct ReyesQueueResetBindings {
+    org::PipelineState clearCountersPipeline;
+    org::PipelineState clearOwnershipBitsetPipeline;
     org::DeclaredViewToken fullClusterCounter;
     org::DeclaredViewToken ownedClusterCounter;
     std::vector<org::DeclaredViewToken> splitQueueCounters;
@@ -23,10 +25,12 @@ struct ReyesQueueResetBindings {
     std::optional<org::DeclaredViewToken> replayDiceQueueCounter;
     std::optional<org::DeclaredViewToken> replayDiceQueueOverflowCounter;
     std::optional<org::DeclaredViewToken> ownershipBitset;
+    uint32_t ownershipBitsetWordCount = 0u;
+    bool clearDiceQueueCounter = true;
 };
 
 class ReyesQueueResetPass final : public org::TypedRenderGraphPass<ReyesQueueResetPass,
-    br::render::PreparedComputePipelineSequence, ReyesQueueResetBindings> {
+    org::EmptyPassFrameData, ReyesQueueResetBindings> {
 public:
     ReyesQueueResetPass(
         std::shared_ptr<org::Buffer> fullClusterCounter,
@@ -46,11 +50,7 @@ public:
 
     ReyesQueueResetBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputePipelineSequence Prepare(
-        const ReyesQueueResetBindings&, const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesQueueResetBindings&,
-        const br::render::PreparedComputePipelineSequence&, org::PassRecordContext&);
+    static void Record(const ReyesQueueResetBindings& bindings, org::PassRecordContext& recording);
     void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:

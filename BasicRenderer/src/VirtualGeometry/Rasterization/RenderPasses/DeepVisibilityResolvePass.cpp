@@ -168,43 +168,35 @@ bool DeepVisibilityResolvePass::DeclaredResourcesChanged() const
     return m_declaredResourcesChanged;
 }
 
-br::render::PreparedComputeDispatch DeepVisibilityResolvePass::Prepare(
-    const DeepVisibilityResolveBindings& bindings, const org::PassPrepareContext& preparation) const
+DeepVisibilityResolveFrame DeepVisibilityResolvePass::Prepare(
+    const DeepVisibilityResolveBindings& bindings, const org::PassPrepareContext&) const
 {
-    br::render::PreparedComputeDispatch data{};
-    if (!bindings.ready) return data;
-    const auto& context = *preparation.preparationData->Get<UpdateContext>();
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    const auto& pso = PSOManager::GetInstance().GetClusterLODDeepVisibilityResolvePSO(bindings.globalPsoFlags);
-    auto binding = preparation.CaptureProgramBinding(pso);
-    data.program = binding.program;
-    data.descriptorIndices = std::move(binding.descriptorIndices);
-    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
-    data.constants[MiscEnableShadows] = bindings.shadows;
-    data.constants[MiscEnablePunctualLights] = bindings.punctualLights;
-    data.constants[MiscEnableGTAO] = bindings.gtao;
-    data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_HEAD_POINTER_DESCRIPTOR_INDEX] = srv(bindings.headPointers);
-    data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_NODE_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.nodes);
-    data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.counter);
-    data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_OVERFLOW_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.overflow);
-    data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.visibleClusters);
-    data.constants[CLOD_DEEP_VISIBILITY_RESOLVE_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
-    data.constants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = bindings.hasDiceQueue ? srv(bindings.diceQueue) : 0xFFFFFFFFu;
-    data.constants[VISBUF_REYES_PATCH_INDEX_BASE] = bindings.patchIndexBase;
-    data.constants[VISBUF_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = bindings.hasTessTables ? srv(bindings.tessConfigs) : 0xFFFFFFFFu;
-    data.constants[VISBUF_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = bindings.hasTessTables ? srv(bindings.tessVertices) : 0xFFFFFFFFu;
-    data.constants[VISBUF_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = bindings.hasTessTables ? srv(bindings.tessTriangles) : 0xFFFFFFFFu;
-    data.constants[VISBUF_REYES_USE_NORMAL_MAPS] = bindings.useNormalMaps ? 1u : 0u;
-    data.constants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(bindings.terrainNormalBlend);
-    data.constants[VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS] = bindings.terrainNormalMipBias;
-    data.constants[VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT] = std::bit_cast<uint32_t>(bindings.objectNormalMapBlend);
-    data.groupsX = (bindings.width + 7u) / 8u;
-    data.groupsY = (bindings.height + 7u) / 8u;
-    return data;
+    if (!bindings.ready) return {};
+    return {PSOManager::GetInstance().GetClusterLODDeepVisibilityResolvePSO(bindings.globalPsoFlags), true};
 }
 
-void DeepVisibilityResolvePass::Record(const DeepVisibilityResolveBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void DeepVisibilityResolvePass::Record(const DeepVisibilityResolveBindings& bindings,
+    const DeepVisibilityResolveFrame& frame, org::PassRecordContext& context) {
+    if (!frame.ready) return;
+    br::render::MiscConstants constants{};
+    constants[MiscEnableShadows] = bindings.shadows;
+    constants[MiscEnablePunctualLights] = bindings.punctualLights;
+    constants[MiscEnableGTAO] = bindings.gtao;
+    constants[CLOD_DEEP_VISIBILITY_RESOLVE_HEAD_POINTER_DESCRIPTOR_INDEX] = context.Index(bindings.headPointers);
+    constants[CLOD_DEEP_VISIBILITY_RESOLVE_NODE_BUFFER_DESCRIPTOR_INDEX] = context.Index(bindings.nodes);
+    constants[CLOD_DEEP_VISIBILITY_RESOLVE_COUNTER_DESCRIPTOR_INDEX] = context.Index(bindings.counter);
+    constants[CLOD_DEEP_VISIBILITY_RESOLVE_OVERFLOW_COUNTER_DESCRIPTOR_INDEX] = context.Index(bindings.overflow);
+    constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = context.Index(bindings.visibleClusters);
+    constants[CLOD_DEEP_VISIBILITY_RESOLVE_STATS_DESCRIPTOR_INDEX] = context.Index(bindings.stats);
+    constants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = bindings.hasDiceQueue ? context.Index(bindings.diceQueue) : 0xFFFFFFFFu;
+    constants[VISBUF_REYES_PATCH_INDEX_BASE] = bindings.patchIndexBase;
+    constants[VISBUF_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = bindings.hasTessTables ? context.Index(bindings.tessConfigs) : 0xFFFFFFFFu;
+    constants[VISBUF_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = bindings.hasTessTables ? context.Index(bindings.tessVertices) : 0xFFFFFFFFu;
+    constants[VISBUF_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = bindings.hasTessTables ? context.Index(bindings.tessTriangles) : 0xFFFFFFFFu;
+    constants[VISBUF_REYES_USE_NORMAL_MAPS] = bindings.useNormalMaps ? 1u : 0u;
+    constants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(bindings.terrainNormalBlend);
+    constants[VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS] = static_cast<uint32_t>(bindings.terrainNormalMipBias);
+    constants[VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT] = std::bit_cast<uint32_t>(bindings.objectNormalMapBlend);
+    br::render::DispatchCompute(context, frame.pipeline, constants,
+        (bindings.width + 7u) / 8u, (bindings.height + 7u) / 8u);
 }

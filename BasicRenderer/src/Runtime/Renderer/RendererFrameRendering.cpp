@@ -1,5 +1,6 @@
 #include <BasicRenderer/Renderer.h>
 #include "OpenRenderGraph/GraphHost.h"
+#include "Resources/DynamicResource.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <BasicRenderer/Diagnostics/NvPerfIntegration.h>
 #include <BasicRenderer/Extensions/RenderContext.h>

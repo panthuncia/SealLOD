@@ -6,7 +6,7 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
@@ -20,9 +20,13 @@ struct DeepVisibilityResolveBindings {
     bool useNormalMaps = false;
     float terrainNormalBlend = 0, terrainNormalMipBias = 0, objectNormalMapBlend = 0;
 };
+struct DeepVisibilityResolveFrame {
+    org::PipelineState pipeline;
+    bool ready = false;
+};
 
 class DeepVisibilityResolvePass final : public org::TypedRenderGraphPass<DeepVisibilityResolvePass,
-    br::render::PreparedComputeDispatch, DeepVisibilityResolveBindings>, public org::IDynamicDeclaredResources {
+    DeepVisibilityResolveFrame, DeepVisibilityResolveBindings>, public org::IDynamicDeclaredResources {
 public:
     DeepVisibilityResolvePass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -40,9 +44,10 @@ public:
     void Initialize();
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    br::render::PreparedComputeDispatch Prepare(const DeepVisibilityResolveBindings&,
+    DeepVisibilityResolveFrame Prepare(const DeepVisibilityResolveBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const DeepVisibilityResolveBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording);
+    static void Record(const DeepVisibilityResolveBindings& bindings, const DeepVisibilityResolveFrame& frame,
+        org::PassRecordContext& context);
 
 private:
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;

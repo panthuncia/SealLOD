@@ -132,7 +132,7 @@ ReyesVirtualShadowRasterBindings ReyesVirtualShadowRasterizationPass::Declare(or
     if (m_slabResourceGroup) {
         builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
-    return {builder->ShaderResource(m_visibleClustersBuffer).View(), builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
+    return {m_pso, m_commandSignature, builder->ShaderResource(m_visibleClustersBuffer).View(), builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         builder->ShaderResource(m_diceQueueBuffer).View(), builder->ShaderResource(m_diceQueueCounterBuffer).View(),
         builder->ShaderResource(m_rasterWorkBuffer).View(), builder->ShaderResource(m_rasterWorkCounterBuffer).View(),
         builder->ShaderResource(m_tessTableConfigsBuffer).View(), builder->ShaderResource(m_tessTableVerticesBuffer).View(),
@@ -140,7 +140,7 @@ ReyesVirtualShadowRasterBindings ReyesVirtualShadowRasterizationPass::Declare(or
         builder->UnorderedAccess(m_telemetryBuffer).View(), builder->ShaderResource(m_viewRasterInfoBuffer).View(),
         builder->UnorderedAccess(m_virtualShadowPageTableTexture, org::UavView{static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}).View(), builder->UnorderedAccess(m_virtualShadowPhysicalPagesTexture).View(),
         builder->UnorderedAccess(m_virtualShadowDynamicPagesTexture).View(), builder->ShaderResource(m_virtualShadowClipmapInfoBuffer).View(),
-        m_phaseIndex, m_shadowConfig.pageTableResolution, m_shadowConfig.virtualResolution};
+        m_phaseIndex};
 }
 
 void ReyesVirtualShadowRasterizationPass::Update(const org::UpdateExecutionContext& executionContext)
@@ -187,49 +187,36 @@ bool ReyesVirtualShadowRasterizationPass::DeclaredResourcesChanged() const
     return m_declaredResourcesChanged;
 }
 
-br::render::PreparedComputeIndirect ReyesVirtualShadowRasterizationPass::Prepare(
-    const ReyesVirtualShadowRasterBindings& bindings, const org::PassPrepareContext& preparation) const
+ReyesVirtualShadowRasterFrame ReyesVirtualShadowRasterizationPass::Prepare(
+    const ReyesVirtualShadowRasterBindings&, const org::PassPrepareContext&) const
 {
-    br::render::PreparedComputeIndirect data{};
-    const auto& context = *preparation.preparationData->Get<UpdateContext>();
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    auto binding = preparation.CaptureProgramBinding(m_pso);
-    data.program = binding.program;
-    data.descriptorIndices = std::move(binding.descriptorIndices);
-    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
-    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
-    data.constants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = srv(bindings.visible);
-    data.constants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = srv(bindings.transforms);
-    data.constants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.diceCounter);
-    data.constants[CLOD_REYES_PATCH_RASTER_WORK_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.work);
-    data.constants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_DESCRIPTOR_INDEX] = srv(bindings.diceQueue);
-    data.constants[CLOD_REYES_PATCH_RASTER_VIEW_RASTER_INFO_DESCRIPTOR_INDEX] = srv(bindings.viewInfo);
-    data.constants[CLOD_REYES_PATCH_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
-    data.constants[CLOD_REYES_PATCH_RASTER_PHASE_INDEX] = bindings.phase;
-    data.constants[CLOD_REYES_PATCH_RASTER_WORK_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.workCounter);
-    data.constants[CLOD_REYES_PATCH_RASTER_PATCH_INDEX_BASE] = 0u;
-    data.constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = srv(bindings.tessConfigs);
-    data.constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = srv(bindings.tessVertices);
-    data.constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = srv(bindings.tessTriangles);
-
-    data.constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-        uav(bindings.pageTable);
-    data.constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
-    data.constants[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] =
-        uav(bindings.physicalPages);
-    data.constants[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
-        uav(bindings.dynamicPages);
-    data.constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = bindings.pageTableResolution;
-    data.constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
-    data.constants[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = bindings.virtualResolution;
-
-    data.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
-    data.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
-    return data;
+    return {m_shadowConfig.pageTableResolution, m_shadowConfig.virtualResolution};
 }
 
-void ReyesVirtualShadowRasterizationPass::Record(const ReyesVirtualShadowRasterBindings&,
-    const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeIndirect(data, recording);
+void ReyesVirtualShadowRasterizationPass::Record(const ReyesVirtualShadowRasterBindings& bindings,
+    const ReyesVirtualShadowRasterFrame& frame, org::PassRecordContext& recording) {
+    const auto index = [&](const org::DeclaredViewToken& token) { return recording.Index(token); };
+    br::render::MiscConstants constants{};
+    constants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = index(bindings.visible);
+    constants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = index(bindings.transforms);
+    constants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = index(bindings.diceCounter);
+    constants[CLOD_REYES_PATCH_RASTER_WORK_BUFFER_DESCRIPTOR_INDEX] = index(bindings.work);
+    constants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_DESCRIPTOR_INDEX] = index(bindings.diceQueue);
+    constants[CLOD_REYES_PATCH_RASTER_VIEW_RASTER_INFO_DESCRIPTOR_INDEX] = index(bindings.viewInfo);
+    constants[CLOD_REYES_PATCH_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = index(bindings.telemetry);
+    constants[CLOD_REYES_PATCH_RASTER_PHASE_INDEX] = bindings.phase;
+    constants[CLOD_REYES_PATCH_RASTER_WORK_COUNTER_DESCRIPTOR_INDEX] = index(bindings.workCounter);
+    constants[CLOD_REYES_PATCH_RASTER_PATCH_INDEX_BASE] = 0u;
+    constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = index(bindings.tessConfigs);
+    constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = index(bindings.tessVertices);
+    constants[CLOD_REYES_PATCH_RASTER_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = index(bindings.tessTriangles);
+
+    constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = index(bindings.pageTable);
+    constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = index(bindings.clipmapInfo);
+    constants[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = index(bindings.physicalPages);
+    constants[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = index(bindings.dynamicPages);
+    constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
+    constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+    constants[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = frame.virtualResolution;
+    br::render::DispatchComputeIndirect(recording, bindings.pipeline, constants, bindings.commandSignature, bindings.indirectArgs);
 }

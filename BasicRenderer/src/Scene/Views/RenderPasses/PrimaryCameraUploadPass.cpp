@@ -49,15 +49,17 @@ PrimaryCameraUploadPass::PrimaryCameraUploadPass(
     }
 }
 
-void PrimaryCameraUploadPass::Declare(org::PassBuilder& builder) {
-    builder.CopyDestination(m_cameraDestination);
-    builder.CopyDestination(m_cullingDestination);
-    for (const auto& staging : m_staging) builder.CopySource(staging);
+PrimaryCameraUploadBindings PrimaryCameraUploadPass::Declare(org::PassBuilder& builder) {
+    PrimaryCameraUploadBindings bindings;
+    bindings.cameraDestination = builder.CopyDestination(m_cameraDestination);
+    bindings.cullingDestination = builder.CopyDestination(m_cullingDestination);
+    for (const auto& staging : m_staging) bindings.staging.push_back(builder.CopySource(staging));
     builder.PreferQueue(org::QueueKind::Graphics);
+    return bindings;
 }
 
 PreparedPrimaryCameraUpload PrimaryCameraUploadPass::Prepare(
-    const org::PassPrepareContext& preparation) {
+    const PrimaryCameraUploadBindings&, const org::PassPrepareContext& preparation) const {
     const auto* inputs = preparation.preparationData->Get<RendererFrameInputs>();
     if (!inputs || inputs->FrameSlot() >= m_staging.size())
         throw std::logic_error("PrimaryCameraUploadPass requires valid frame-owned inputs");
@@ -65,7 +67,7 @@ PreparedPrimaryCameraUpload PrimaryCameraUploadPass::Prepare(
     if (!upload.viewID || upload.cameraBufferIndex != 0)
         throw std::logic_error("Primary camera upload must target reserved view slot zero");
 
-    auto& staging = m_staging[inputs->FrameSlot()];
+    const auto& staging = m_staging[inputs->FrameSlot()];
     void* mapped = nullptr;
     staging->GetAPIResource().Map(&mapped, 0, 0);
     if (!mapped) throw std::runtime_error("Failed to map primary camera upload staging buffer");
@@ -78,20 +80,16 @@ PreparedPrimaryCameraUpload PrimaryCameraUploadPass::Prepare(
     basic_telemetry::AddCounter("SARP.Camera.Upload.Prepared");
     basic_telemetry::SetGauge("SARP.Camera.Upload.PreparedRevision",
         static_cast<std::int64_t>(upload.revision));
-    return {
-        preparation.CaptureResource(staging->GetGlobalResourceID()),
-        preparation.CaptureResource(m_cameraDestination->GetGlobalResourceID()),
-        preparation.CaptureResource(m_cullingDestination->GetGlobalResourceID()),
-        upload.revision, upload.frameNumber };
+    return {inputs->FrameSlot(), upload.revision, upload.frameNumber};
 }
 
-void PrimaryCameraUploadPass::Record(const PreparedPrimaryCameraUpload& data,
-    org::PassRecordContext& recording) {
-    const auto source = recording.Resolve(data.staging).GetHandle();
+void PrimaryCameraUploadPass::Record(const PrimaryCameraUploadBindings& bindings,
+    const PreparedPrimaryCameraUpload& data, org::PassRecordContext& recording) {
+    const auto source = recording.Resolve(bindings.staging.at(data.stagingSlot)).GetHandle();
     recording.Commands().CopyBufferRegion(
-        recording.Resolve(data.cameraDestination).GetHandle(), 0, source, 0, sizeof(CameraInfo));
+        recording.Resolve(bindings.cameraDestination).GetHandle(), 0, source, 0, sizeof(CameraInfo));
     recording.Commands().CopyBufferRegion(
-        recording.Resolve(data.cullingDestination).GetHandle(), 0, source, CullingOffset,
+        recording.Resolve(bindings.cullingDestination).GetHandle(), 0, source, CullingOffset,
         sizeof(CullingCameraInfo));
     basic_telemetry::AddCounter("SARP.Camera.Upload.Recorded");
     basic_telemetry::SetGauge("SARP.Camera.Upload.RecordedRevision",

@@ -4,18 +4,23 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapGatherStatsBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken pageTable, allocationCount, allocationArgs, header, pageMetadata, clipmapInfo, stats;
     bool capturePreAllocateState = false;
 };
 
+struct VirtualShadowMapGatherStatsFrame {
+    uint32_t pageTableResolution = 0;
+};
+
 class VirtualShadowMapGatherStatsPass final : public org::TypedRenderGraphPass<VirtualShadowMapGatherStatsPass,
-    br::render::PreparedComputeDispatch, VirtualShadowMapGatherStatsBindings> {
+    VirtualShadowMapGatherStatsFrame, VirtualShadowMapGatherStatsBindings> {
 public:
     VirtualShadowMapGatherStatsPass(
         std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -29,10 +34,10 @@ public:
 
     VirtualShadowMapGatherStatsBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapGatherStatsBindings&,
+    VirtualShadowMapGatherStatsFrame Prepare(const VirtualShadowMapGatherStatsBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapGatherStatsBindings&,
-        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+        const VirtualShadowMapGatherStatsFrame&, org::PassRecordContext&);
     void ShutdownPass();
 
 private:

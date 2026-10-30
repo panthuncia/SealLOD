@@ -4,9 +4,16 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Materials/Publication/MaterialStateArtifacts.h"
 #include "BasicRenderer/Assets/TechniqueDescriptor.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
-class MaterialUAVResetPass : public org::TypedRenderGraphPass<MaterialUAVResetPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
+struct MaterialUAVResetBindings {
+    org::PipelineState pipeline;
+};
+struct MaterialUAVResetFrame {
+    uint32_t slotsUsed = 0;
+};
+
+class MaterialUAVResetPass : public org::TypedRenderGraphPass<MaterialUAVResetPass, MaterialUAVResetFrame, MaterialUAVResetBindings> {
 public:
     MaterialUAVResetPass() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -17,41 +24,30 @@ public:
             "ClearMaterialCountersPSO");
     }
 
-    void Declare(org::PassBuilder& builder) {
+    MaterialUAVResetBindings Declare(org::PassBuilder& builder) {
         builder.UnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer",
             "Builtin::VisUtil::MaterialWriteCursorBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.PreferQueue(org::QueueKind::Compute);
+        return {m_pso};
     }
 
-    br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
+    MaterialUAVResetFrame Prepare(const MaterialUAVResetBindings&, const org::PassPrepareContext& preparation) const {
         const auto* update = preparation.preparationData->Get<UpdateContext>();
         const auto* render = preparation.preparationData->Get<RenderContext>();
         if (!update && !render) throw std::logic_error("MaterialUAVResetPass requires frame context");
-        br::render::PreparedComputeDispatch data{};
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-        auto program = CaptureProgramBinding(preparation, m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
         const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
         const auto materialState = published
             ? published->materials.payload.Get<br::render::PublishedMaterialState>()
             : nullptr;
-        data.constants[0] = materialState ? materialState->compileFlagSlotsUsed : 0u;
-        data.groupsX = (data.constants[0] + 63u) / 64u;
-        return data;
+        return {materialState ? materialState->compileFlagSlotsUsed : 0u};
     }
 
-    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const {
-        const auto* update = preparation.preparationData->Get<UpdateContext>();
-        const auto* render = preparation.preparationData->Get<RenderContext>();
-        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
-        return {reinterpret_cast<uintptr_t>(m_pso.PeekPayload()), published ? published->materials.revision : 0u};
-    }
-    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&,
-        const org::PassPrepareContext&) const { return {}; }
-    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const MaterialUAVResetBindings& bindings, const MaterialUAVResetFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[0] = frame.slotsUsed;
+        br::render::DispatchCompute(context, bindings.pipeline, constants, (frame.slotsUsed + 63u) / 64u);
     }
 
 private:

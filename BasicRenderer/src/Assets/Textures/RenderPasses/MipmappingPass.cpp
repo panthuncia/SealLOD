@@ -284,20 +284,30 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::Pixel
 }
 
 
-void TextureFactory::MipmappingPass::Declare(org::PassBuilder& declaration)
+TextureMipmappingBindings TextureFactory::MipmappingPass::Declare(org::PassBuilder& declaration)
 {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     m_declaredResourcesChanged = false;
     m_declaredJobs = m_jobs.Pending();
-    m_declaredJobViews.clear();
-    m_declaredJobViews.reserve(m_declaredJobs.size());
+    TextureMipmappingBindings bindings;
+    bindings.jobs.reserve(m_declaredJobs.size());
     for (const auto& entry : m_declaredJobs) {
         const auto& j = entry->work;
-        auto& views = m_declaredJobViews.emplace_back();
+        auto& views = bindings.jobs.emplace_back();
         views.constants = builder->ShaderResource(j.constantsBuffer).View();
         auto tex = j.texture;
         if (!tex) continue;
+        views.hasTexture = true;
+        views.preserveAlphaCoverage = j.preserveAlphaCoverage;
+        views.isSrgb = j.isSrgb;
+        views.constantsIndex = j.constantsIndex;
+        views.dispatchThreadGroupCountXY[0] = j.dispatchThreadGroupCountXY[0];
+        views.dispatchThreadGroupCountXY[1] = j.dispatchThreadGroupCountXY[1];
+        views.sliceCount = j.sliceCount;
+        views.mipsToGenerate = j.mipsToGenerate;
+        views.width = tex->GetInternalWidth();
+        views.height = tex->GetInternalHeight();
 
         // SPD reads only mip0. Alpha coverage mode reads each previous mip in sequence.
         if (j.preserveAlphaCoverage) {
@@ -307,10 +317,15 @@ void TextureFactory::MipmappingPass::Declare(org::PassBuilder& declaration)
             auto use = builder->ShaderResource(Subresources(tex, org::Mip{ 0, j.mipsToGenerate }),
                 std::span<const org::SrvView>(requests));
             views.alphaSources = std::move(use.views);
+            bindings.alphaReset = GetOrCreateAlphaPipeline(L"AlphaMipResetStatsCS", m_psoAlphaReset, m_hasPsoAlphaReset, "AlphaMip[ResetStats]");
+            bindings.alphaDownsample = GetOrCreateAlphaPipeline(L"AlphaMipDownsampleCS", m_psoAlphaDownsample, m_hasPsoAlphaDownsample, "AlphaMip[Downsample]");
+            bindings.alphaResolveScale = GetOrCreateAlphaPipeline(L"AlphaMipResolveScaleCS", m_psoAlphaResolveScale, m_hasPsoAlphaResolveScale, "AlphaMip[ResolveScale]");
+            bindings.alphaApplyScale = GetOrCreateAlphaPipeline(L"AlphaMipApplyScaleCS", m_psoAlphaApplyScale, m_hasPsoAlphaApplyScale, "AlphaMip[ApplyScale]");
         }
         else {
             views.source = builder->ShaderResource(Subresources(tex, org::Mip{ 0, 1 }),
                 org::SrvView{j.isArray ? static_cast<uint32_t>(org::SRVViewType::Texture2DArray) : UINT32_MAX}).View();
+            views.pipeline = GetOrCreatePipeline(j.valueType, j.isArray);
         }
         if (j.mipsToGenerate > 0) {
             std::vector<org::UavView> requests;
@@ -330,63 +345,57 @@ void TextureFactory::MipmappingPass::Declare(org::PassBuilder& declaration)
             views.counter = builder->UnorderedAccess(j.counter).View();
         }
     }
+    return bindings;
 }
 
-br::render::PreparedComputePipelineSequence TextureFactory::MipmappingPass::Prepare(const org::PassPrepareContext& preparation)
+org::EmptyPassFrameData TextureFactory::MipmappingPass::Prepare(const TextureMipmappingBindings& bindings,
+    const org::PassPrepareContext& preparation)
 {
-    br::render::PreparedComputePipelineSequence data{};
     // Publications arriving after declaration belong to the next frame.
     const auto jobs = m_declaredJobs;
-    if (jobs.empty()) return data;
-    const auto& context = *preparation.preparationData->Get<UpdateContext>();
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    const auto append = [&](const org::PreparedProgramBinding& binding, const auto& constants,
-        uint32_t x, uint32_t y, uint32_t z, bool barrier) {
-        br::render::PreparedComputePipelineSequence::Step step{};
-        step.program = binding.program;
-        step.descriptorIndices = binding.descriptorIndices;
-        std::copy(std::begin(constants), std::end(constants), step.constants.begin());
-        step.groupsX = x; step.groupsY = y; step.groupsZ = z;
-        step.uavBarrierAfter = barrier;
-        data.steps.push_back(std::move(step));
-    };
-    // Process all jobs queued for this frame
+    if (jobs.empty()) return {};
+    // Each job's SPD constants carry the bindless indices of its mip UAVs.
     for (size_t jobIndex = 0; jobIndex < jobs.size(); ++jobIndex) {
-        const auto& entry = jobs[jobIndex];
-        const auto& j = entry->work;
-        const auto& views = m_declaredJobViews.at(jobIndex);
-        const uint32_t constantsSrvIndex = preparation.Resolve(views.constants).index;
+        const auto& j = jobs[jobIndex]->work;
+        const auto& views = bindings.jobs.at(jobIndex);
         if (!j.texture) continue;
         auto constants = j.cpuConstants;
         for (uint32_t mip = 0; mip < constants.mips; ++mip)
             constants.mipUavDescriptorIndices[mip] = preparation.Resolve(views.outputs.at(mip)).index;
         j.constantsBuffer->UpdateView(j.constantsView.get(), &constants);
+    }
 
-        if (j.preserveAlphaCoverage) {
-            org::PipelineState& resetPso = GetOrCreateAlphaPipeline(L"AlphaMipResetStatsCS", m_psoAlphaReset, m_hasPsoAlphaReset, "AlphaMip[ResetStats]");
-            org::PipelineState& downsamplePso = GetOrCreateAlphaPipeline(L"AlphaMipDownsampleCS", m_psoAlphaDownsample, m_hasPsoAlphaDownsample, "AlphaMip[Downsample]");
-            org::PipelineState& resolvePso = GetOrCreateAlphaPipeline(L"AlphaMipResolveScaleCS", m_psoAlphaResolveScale, m_hasPsoAlphaResolveScale, "AlphaMip[ResolveScale]");
-            org::PipelineState& applyPso = GetOrCreateAlphaPipeline(L"AlphaMipApplyScaleCS", m_psoAlphaApplyScale, m_hasPsoAlphaApplyScale, "AlphaMip[ApplyScale]");
+    m_jobs.Reserve(jobs, preparation);
+    m_declaredResourcesChanged = true;
+    return {};
+}
 
-            const auto reset = preparation.CaptureProgramBinding(resetPso);
-            const auto downsample = preparation.CaptureProgramBinding(downsamplePso);
-            const auto resolve = preparation.CaptureProgramBinding(resolvePso);
-            const auto apply = preparation.CaptureProgramBinding(applyPso);
+void TextureFactory::MipmappingPass::Record(const TextureMipmappingBindings& bindings, org::PassRecordContext& context)
+{
+    // Process all jobs queued for this frame
+    for (const auto& views : bindings.jobs) {
+        if (!views.hasTexture) continue;
+
+        if (views.preserveAlphaCoverage) {
             constexpr uint32_t kStatsWordsPerMip = 260u;
-            const uint32_t statsUav = preparation.Resolve(views.alphaStats).index;
-            const uint32_t scalesUav = preparation.Resolve(views.alphaScales).index;
-            const uint32_t flags = j.isSrgb ? 1u : 0u;
+            const uint32_t statsUav = context.Index(views.alphaStats);
+            const uint32_t scalesUav = context.Index(views.alphaScales);
+            const uint32_t flags = views.isSrgb ? 1u : 0u;
+            const auto dispatch = [&](const org::PipelineState& pipeline, const br::render::MiscConstants& root,
+                uint32_t x, uint32_t y) {
+                br::render::DispatchCompute(context, pipeline, root, x, y);
+                context.UavBarrier();
+            };
 
-            for (uint32_t mip = 1; mip <= j.mipsToGenerate; ++mip) {
+            for (uint32_t mip = 1; mip <= views.mipsToGenerate; ++mip) {
                 const uint32_t srcMip = mip - 1u;
-                const uint32_t srcW = (std::max)(1u, j.texture->GetInternalWidth() >> srcMip);
-                const uint32_t srcH = (std::max)(1u, j.texture->GetInternalHeight() >> srcMip);
-                const uint32_t dstW = (std::max)(1u, j.texture->GetInternalWidth() >> mip);
-                const uint32_t dstH = (std::max)(1u, j.texture->GetInternalHeight() >> mip);
+                const uint32_t srcW = (std::max)(1u, views.width >> srcMip);
+                const uint32_t srcH = (std::max)(1u, views.height >> srcMip);
+                const uint32_t dstW = (std::max)(1u, views.width >> mip);
+                const uint32_t dstH = (std::max)(1u, views.height >> mip);
                 const uint32_t statsBase = mip * kStatsWordsPerMip;
 
-                unsigned int root[NumMiscUintRootConstants]{};
+                br::render::MiscConstants root{};
                 root[UintRootConstant2] = statsUav;
                 root[UintRootConstant3] = scalesUav;
                 root[UintRootConstant4] = srcW;
@@ -397,37 +406,26 @@ br::render::PreparedComputePipelineSequence TextureFactory::MipmappingPass::Prep
                 root[UintRootConstant9] = mip;
                 root[UintRootConstant10] = flags;
 
-                append(reset, root, (kStatsWordsPerMip + 255u) / 256u, 1, 1, true);
+                dispatch(bindings.alphaReset, root, (kStatsWordsPerMip + 255u) / 256u, 1);
 
-                root[UintRootConstant0] = preparation.Resolve(views.alphaSources.at(srcMip)).index;
-                root[UintRootConstant1] = preparation.Resolve(views.outputs.at(srcMip)).index;
-                append(downsample, root, (dstW + 7u) / 8u, (dstH + 7u) / 8u, 1, true);
+                root[UintRootConstant0] = context.Index(views.alphaSources.at(srcMip));
+                root[UintRootConstant1] = context.Index(views.outputs.at(srcMip));
+                dispatch(bindings.alphaDownsample, root, (dstW + 7u) / 8u, (dstH + 7u) / 8u);
 
-                append(resolve, root, 1, 1, 1, true);
+                dispatch(bindings.alphaResolveScale, root, 1, 1);
 
-                append(apply, root, (dstW + 7u) / 8u, (dstH + 7u) / 8u, 1, true);
+                dispatch(bindings.alphaApplyScale, root, (dstW + 7u) / 8u, (dstH + 7u) / 8u);
             }
         }
         else {
-            // Pick SRV (2D vs array)
-            const uint32_t srcSrvIndex = preparation.Resolve(views.source).index;
+            br::render::MiscConstants root{};
+            root[UintRootConstant0] = context.Index(views.counter);
+            root[UintRootConstant1] = context.Index(views.source);
+            root[UintRootConstant2] = context.Index(views.constants);
+            root[UintRootConstant3] = views.constantsIndex;
 
-            org::PipelineState& pso = GetOrCreatePipeline(j.valueType, j.isArray);
-
-            const auto binding = preparation.CaptureProgramBinding(pso);
-
-            unsigned int root[NumMiscUintRootConstants]{};
-            root[UintRootConstant0] = preparation.Resolve(views.counter).index;
-            root[UintRootConstant1] = srcSrvIndex;
-            root[UintRootConstant2] = constantsSrvIndex;
-            root[UintRootConstant3] = j.constantsIndex;
-
-            append(binding, root, j.dispatchThreadGroupCountXY[0],
-                j.dispatchThreadGroupCountXY[1], j.sliceCount, false);
+            br::render::DispatchCompute(context, views.pipeline, root, views.dispatchThreadGroupCountXY[0],
+                views.dispatchThreadGroupCountXY[1], views.sliceCount);
         }
     }
-
-    m_jobs.Reserve(jobs, preparation);
-    m_declaredResourcesChanged = true;
-    return data;
 }

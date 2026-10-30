@@ -5,14 +5,19 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/IDescriptorService.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
+struct GTAODenoiseFrame {
+    uint32_t groupsX = 0, groupsY = 0;
+};
 struct GTAODenoiseBindings {
+    org::PipelineState pipeline;
+    uint32_t samplerIndex = 0;
     org::DeclaredViewToken workingAO, workingEdges, outputAO;
 };
 
 class GTAODenoisePass : public org::TypedRenderGraphPass<GTAODenoisePass,
-    br::render::PreparedComputeDispatch, GTAODenoiseBindings> {
+    GTAODenoiseFrame, GTAODenoiseBindings> {
 public:
     GTAODenoisePass() {
         CreatePointClampSampler();
@@ -24,6 +29,8 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return {
+            DenoiseLastPassPSO,
+            m_samplerIndex,
             builder.ShaderResource(Builtin::GTAO::WorkingAOTerm1),
             builder.ShaderResource(Builtin::GTAO::WorkingEdges),
             builder.UnorderedAccess(Builtin::GTAO::OutputAOTerm) };
@@ -35,31 +42,21 @@ public:
 
 
 
-    br::render::PreparedComputeDispatch Prepare(const GTAODenoiseBindings& bindings,
+    GTAODenoiseFrame Prepare(const GTAODenoiseBindings&,
         const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        auto payload = DenoiseLastPassPSO.GetPayload();
-        br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle();
-        auto program = preparation.CaptureProgramBinding(std::move(payload));
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-
-
-        data.constants[UintRootConstant0] = preparation.Resolve(bindings.workingAO).index;
-        data.constants[UintRootConstant1] = preparation.Resolve(bindings.workingEdges).index;
-        data.constants[UintRootConstant2] = m_samplerIndex;
-        data.constants[UintRootConstant3] = preparation.Resolve(bindings.outputAO).index;
-        data.groupsX = (context->renderResolution.x + XE_GTAO_NUMTHREADS_X * 2u - 1u) / (XE_GTAO_NUMTHREADS_X * 2u);
-        data.groupsY = (context->renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1u) / XE_GTAO_NUMTHREADS_Y;
-        return data;
+        return {(context->renderResolution.x + XE_GTAO_NUMTHREADS_X * 2u - 1u) / (XE_GTAO_NUMTHREADS_X * 2u),
+            (context->renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1u) / XE_GTAO_NUMTHREADS_Y};
     }
 
-    static void Record(const GTAODenoiseBindings&, const br::render::PreparedComputeDispatch& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const GTAODenoiseBindings& bindings, const GTAODenoiseFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[UintRootConstant0] = context.Index(bindings.workingAO);
+        constants[UintRootConstant1] = context.Index(bindings.workingEdges);
+        constants[UintRootConstant2] = bindings.samplerIndex;
+        constants[UintRootConstant3] = context.Index(bindings.outputAO);
+        br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
     }
 
     void ShutdownPass() {

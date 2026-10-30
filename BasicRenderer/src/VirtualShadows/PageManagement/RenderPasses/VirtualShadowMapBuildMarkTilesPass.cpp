@@ -8,7 +8,6 @@
 #include "Render/Runtime/UploadTypes.h"
 #include "Resources/Buffers/Buffer.h"
 #include "../shaders/PerPassRootConstants/clodVirtualShadowBuildMarkTilesRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 VirtualShadowMapBuildMarkTilesPass::VirtualShadowMapBuildMarkTilesPass(
     std::shared_ptr<org::Buffer> tileWorkBuffer,
@@ -28,7 +27,7 @@ VirtualShadowMapBuildMarkTilesBindings VirtualShadowMapBuildMarkTilesPass::Decla
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }));
-    return {builder.UnorderedAccess(m_tileWorkBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
+    return {m_pso, builder.UnorderedAccess(m_tileWorkBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
 }
 
 void VirtualShadowMapBuildMarkTilesPass::Initialize() {}
@@ -40,32 +39,23 @@ void VirtualShadowMapBuildMarkTilesPass::Update(const org::UpdateExecutionContex
     UploadBufferData(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_tileCountBuffer), 0);
 }
 
-
-
-br::render::PreparedComputeDispatch VirtualShadowMapBuildMarkTilesPass::Prepare(
-    const VirtualShadowMapBuildMarkTilesBindings& bindings, const org::PassPrepareContext& preparation) const {
+VirtualShadowMapBuildMarkTilesFrame VirtualShadowMapBuildMarkTilesPass::Prepare(
+    const VirtualShadowMapBuildMarkTilesBindings&, const org::PassPrepareContext& preparation) const {
     const auto* context = preparation.preparationData->Get<UpdateContext>();
-    auto payload = m_pso.GetPayload();
-    br::render::PreparedComputeDispatch data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    auto program = preparation.CaptureProgramBinding(std::move(payload));
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_TILE_WORK_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.tileWork).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_TILE_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.tileCount).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_SCREEN_WIDTH] = context->renderResolution.x;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_SCREEN_HEIGHT] = context->renderResolution.y;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_MAX_TILE_COUNT] = CLodVirtualShadowMaxMarkTileCount;
-    data.groupsX = (context->renderResolution.x + CLodVirtualShadowMarkTileSize - 1u) / CLodVirtualShadowMarkTileSize;
-    data.groupsY = (context->renderResolution.y + CLodVirtualShadowMarkTileSize - 1u) / CLodVirtualShadowMarkTileSize;
-    return data;
+    return {context->renderResolution.x, context->renderResolution.y};
 }
 
 void VirtualShadowMapBuildMarkTilesPass::ShutdownPass() {}
 
-void VirtualShadowMapBuildMarkTilesPass::Record(const VirtualShadowMapBuildMarkTilesBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void VirtualShadowMapBuildMarkTilesPass::Record(const VirtualShadowMapBuildMarkTilesBindings& bindings,
+    const VirtualShadowMapBuildMarkTilesFrame& frame, org::PassRecordContext& recording) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_TILE_WORK_DESCRIPTOR_INDEX] = recording.Index(bindings.tileWork);
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_TILE_COUNT_DESCRIPTOR_INDEX] = recording.Index(bindings.tileCount);
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_SCREEN_WIDTH] = frame.screenWidth;
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_SCREEN_HEIGHT] = frame.screenHeight;
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_MARK_TILES_MAX_TILE_COUNT] = CLodVirtualShadowMaxMarkTileCount;
+    br::render::DispatchCompute(recording, bindings.pipeline, constants,
+        (frame.screenWidth + CLodVirtualShadowMarkTileSize - 1u) / CLodVirtualShadowMarkTileSize,
+        (frame.screenHeight + CLodVirtualShadowMarkTileSize - 1u) / CLodVirtualShadowMarkTileSize);
 }

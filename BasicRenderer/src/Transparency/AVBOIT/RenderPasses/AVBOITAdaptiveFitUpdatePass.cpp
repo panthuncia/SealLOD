@@ -26,36 +26,22 @@ AVBOITAdaptiveFitUpdatePass::AVBOITAdaptiveFitUpdatePass(
 AVBOITAdaptiveFitUpdateBindings AVBOITAdaptiveFitUpdatePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_fitStateBuffer)};
+    return {m_pso, builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_fitStateBuffer)};
 }
 
-br::render::PreparedComputeDispatch AVBOITAdaptiveFitUpdatePass::Prepare(const AVBOITAdaptiveFitUpdateBindings& bindings, const org::PassPrepareContext& preparation) const {
-    br::render::PreparedComputeDispatch data{};
+AVBOITAdaptiveFitUpdateFrame AVBOITAdaptiveFitUpdatePass::Prepare(const AVBOITAdaptiveFitUpdateBindings&, const org::PassPrepareContext&) const {
     if (!m_configBuffer || !m_occupancyHistogramBuffer || !m_fitStateBuffer) {
         return {};
     }
 
-    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
-    auto& context = *renderContext;
-
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-
-    auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.config).index;
-    misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_STATE_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.state).index;
-    misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_HISTOGRAM_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.histogram).index;
-
-    data.groupsX = 1u; data.groupsY = 1u; data.groupsZ = 1u;
-    return data;
+    return {1u, 1u};
 }
 
-void AVBOITAdaptiveFitUpdatePass::Record(const AVBOITAdaptiveFitUpdateBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void AVBOITAdaptiveFitUpdatePass::Record(const AVBOITAdaptiveFitUpdateBindings& bindings, const AVBOITAdaptiveFitUpdateFrame& frame, org::PassRecordContext& context) {
+    if (!frame.groupsX || !frame.groupsY) return;
+    br::render::MiscConstants constants{};
+    constants[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_CONFIG_DESCRIPTOR_INDEX] = context.Index(bindings.config);
+    constants[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_STATE_DESCRIPTOR_INDEX] = context.Index(bindings.state);
+    constants[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_HISTOGRAM_DESCRIPTOR_INDEX] = context.Index(bindings.histogram);
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
 }

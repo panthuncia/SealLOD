@@ -20,7 +20,7 @@
 #include "RenderPasses/Base/RenderPass.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include <BasicRenderer/Extensions/Resources/DynamicStructuredBuffer.h>
 #include "Resources/PixelBuffer.h"
 #include "Render/Runtime/IReadbackService.h"
@@ -110,30 +110,6 @@ struct WindBoneGPU {
     DirectX::XMFLOAT4X4 inverseBind{};
 };
 
-struct WindRootConstants {
-    std::uint32_t boneEntries = 0u;
-    std::uint32_t scratchForward = 0u;
-    std::uint32_t scratchInverse = 0u;
-    std::uint32_t skinningInfo = 0u;
-    std::uint32_t forwardSkin = 0u;
-    std::uint32_t inverseSkin = 0u;
-    std::uint32_t inverseBind = 0u;
-    std::uint32_t boneCount = 0u;
-    float elapsedSeconds = 0.0f;
-    float windX = 1.0f;
-    float windY = 0.0f;
-    float strength = 0.0f;
-    float gustStrength = 0.0f;
-    std::uint32_t fieldSlice0 = 0u;
-    std::uint32_t fieldSlice1 = 0u;
-    std::uint32_t fieldDimensions = 0u;
-    float fieldCellSize = 0.0f;
-    float fieldOriginX = 0.0f;
-    float fieldOriginY = 0.0f;
-    float fieldInterpolation = 0.0f;
-    std::uint32_t fieldValid = 0u;
-};
-
 struct WindTypeGPU {
     std::uint32_t firstBone = 0u;
     std::uint32_t boneCount = 0u;
@@ -215,7 +191,6 @@ struct WindTransientConstants {
 static_assert(sizeof(WindBoneGPU) == 256u);
 static_assert(sizeof(WindTypeGPU) == 80u);
 static_assert(sizeof(WindActiveInstanceGPU) == 32u);
-static_assert(sizeof(WindRootConstants) % sizeof(std::uint32_t) == 0u);
 
 struct WindSharedResources {
     std::shared_ptr<org::GloballyIndexedResource> inverseBindResource;
@@ -842,21 +817,7 @@ struct WindSharedResources {
     br::render::TransientWindRegion transientRegion{};
 };
 
-void BindAndDispatch(org::PassExecutionContext& executionContext, const org::PipelineState& pso, const WindRootConstants& constants)
-{
-    auto* renderContext = executionContext.hostData->Get<RenderContext>();
-    auto& commandList = executionContext.commandList;
-    commandList.SetDescriptorHeaps(renderContext->textureDescriptorHeap.GetHandle(), renderContext->samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(br::extensions::GetComputePipelineLayout());
-    commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
-    commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
-        sizeof(constants) / sizeof(std::uint32_t), reinterpret_cast<const std::uint32_t*>(&constants));
-    commandList.Dispatch((constants.boneCount + kThreadsPerGroup - 1u) / kThreadsPerGroup, 1u, 1u);
-}
-
-struct PreparedWindResidency {};
-
-class WindResidencyPass final : public org::TypedRenderGraphPass<WindResidencyPass, PreparedWindResidency> {
+class WindResidencyPass final : public org::TypedRenderGraphPass<WindResidencyPass> {
 public:
     explicit WindResidencyPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources)) {}
     void Declare(org::PassBuilder& builder) {
@@ -870,22 +831,10 @@ public:
         m_resources->inverseBindResource = m_resourceRegistryView->RequestSharedAs<org::GloballyIndexedResource>(
             Builtin::SkeletonResources::InverseBindMatrices);
     }
-    PreparedWindResidency Prepare(const org::PassPrepareContext&) { return {}; }
-    static void Record(const PreparedWindResidency&, org::PassRecordContext&) {}
+    static void Record(org::PassRecordContext&) {}
 private:
     std::shared_ptr<WindSharedResources> m_resources;
 };
-
-void PrepareTransient(org::PassExecutionContext& context, const org::PipelineState& pso, const WindTransientConstants& constants)
-{
-    auto* renderContext = context.hostData->Get<RenderContext>();
-    auto& commandList = context.commandList;
-    commandList.SetDescriptorHeaps(renderContext->textureDescriptorHeap.GetHandle(), renderContext->samplerDescriptorHeap.GetHandle());
-    commandList.BindLayout(br::extensions::GetComputePipelineLayout());
-    commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
-    commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
-        sizeof(constants) / sizeof(std::uint32_t), reinterpret_cast<const std::uint32_t*>(&constants));
-}
 
 const ProceduralWindFrameSettings& WindFrameSettings(
     const org::PassPrepareContext& preparation)
@@ -933,31 +882,18 @@ WindTransientViews DeclareWindTransientViews(org::PassBuilder& builder, const Wi
     return views;
 }
 
+// The frame values of the transient constant block; its descriptor fields are filled at record time by
+// ResolveTransientViews.
 WindTransientConstants MakeTransientConstants(const WindSharedResources& resources,
-    const org::PassPrepareContext& preparation, const WindTransientViews& views,
     const ProceduralWindFrameSettings& settings)
 {
     WindTransientConstants c{};
-    c.types = preparation.Resolve(views.types).index;
-    c.bones = preparation.Resolve(views.bones).index;
-    c.activeInstances = preparation.Resolve(views.activeInstances).index;
-    c.typeCounters = preparation.Resolve(views.typeCounters).index;
-    c.counters = preparation.Resolve(views.counters).index;
-    c.placements = views.hasPlacements ? preparation.Resolve(views.placements).index : 0u;
-    c.indirectCommands = preparation.Resolve(views.indirectCommands).index;
-    c.skinningInfo = preparation.Resolve(views.skinningInfo).index;
-    c.forwardSkin = preparation.Resolve(views.forwardSkin).index;
-    c.inverseSkin = preparation.Resolve(views.inverseSkin).index;
-    c.inverseBind = preparation.Resolve(views.inverseBind).index;
-	c.allocationRecords = preparation.Resolve(views.allocationRecords).index;
     c.placementCount = resources.residentPlacementCount;
     c.typeCount = resources.typeCount;
     c.transformBase = resources.transientRegion.transformBaseMatrices;
     c.inverseBase = resources.transientRegion.inverseSkinBaseMatrices;
     c.matrixCapacity = resources.transientRegion.capacityMatrices;
     c.phaseAndDepthDescriptor = 0u;
-    c.fieldSlice0 = preparation.Resolve(views.fieldSlice0).index;
-    c.fieldSlice1 = preparation.Resolve(views.fieldSlice1).index;
     const auto& resident = resources.residentPair;
     c.fieldDimensions = (resident.metadata.width & 0xffffu) | ((resident.metadata.height & 0xffffu) << 16u);
     c.fieldCellSize = resident.metadata.cellSize;
@@ -988,6 +924,34 @@ WindTransientConstants MakeTransientConstants(const WindSharedResources& resourc
     return c;
 }
 
+// Fills the descriptor fields of the transient constant block from the pass's declared views.
+void ResolveTransientViews(WindTransientConstants& c, const org::PassRecordContext& recording,
+    const WindTransientViews& views)
+{
+    c.types = recording.Index(views.types);
+    c.bones = recording.Index(views.bones);
+    c.activeInstances = recording.Index(views.activeInstances);
+    c.typeCounters = recording.Index(views.typeCounters);
+    c.counters = recording.Index(views.counters);
+    c.placements = views.hasPlacements ? recording.Index(views.placements) : 0u;
+    c.indirectCommands = recording.Index(views.indirectCommands);
+    c.skinningInfo = recording.Index(views.skinningInfo);
+    c.forwardSkin = recording.Index(views.forwardSkin);
+    c.inverseSkin = recording.Index(views.inverseSkin);
+    c.inverseBind = recording.Index(views.inverseBind);
+	c.allocationRecords = recording.Index(views.allocationRecords);
+    c.fieldSlice0 = recording.Index(views.fieldSlice0);
+    c.fieldSlice1 = recording.Index(views.fieldSlice1);
+}
+
+br::render::MiscConstants PackTransientConstants(const WindTransientConstants& constants)
+{
+    static_assert(sizeof(constants) <= sizeof(br::render::MiscConstants));
+    br::render::MiscConstants packed{};
+    std::memcpy(packed.data(), &constants, sizeof(constants));
+    return packed;
+}
+
 struct WindVisibleSkeletonViews {
     org::DeclaredViewToken skeletons, counter, membership;
 };
@@ -998,19 +962,24 @@ WindVisibleSkeletonViews DeclareVisibleSkeletonViews(org::PassBuilder& builder, 
         builder.UnorderedAccess(resources.visibleSkeletonMembership).View()};
 }
 
-void SetVisibleSkeletonConstants(WindTransientConstants& constants, const org::PassPrepareContext& preparation,
-    const WindVisibleSkeletonViews& views, uint32_t residentPlacementCount)
+// The visible-skeleton tables ride in the first quality-curve slots; the placement count is a frame value
+// and the descriptors are resolved at record time.
+void SetVisibleSkeletonCount(WindTransientConstants& constants, uint32_t residentPlacementCount)
 {
-	constants.qualityCurveScreen[0] = std::bit_cast<float>(
-		preparation.Resolve(views.skeletons).index);
-	constants.qualityCurveScreen[1] = std::bit_cast<float>(
-		preparation.Resolve(views.counter).index);
-	constants.qualityCurveScreen[2] = std::bit_cast<float>(
-		preparation.Resolve(views.membership).index);
 	constants.qualityCurveScreen[3] = std::bit_cast<float>(residentPlacementCount);
 }
 
+void ResolveVisibleSkeletonViews(WindTransientConstants& constants, const org::PassRecordContext& recording,
+    const WindVisibleSkeletonViews& views)
+{
+	constants.qualityCurveScreen[0] = std::bit_cast<float>(recording.Index(views.skeletons));
+	constants.qualityCurveScreen[1] = std::bit_cast<float>(recording.Index(views.counter));
+	constants.qualityCurveScreen[2] = std::bit_cast<float>(recording.Index(views.membership));
+}
+
 struct WindPassBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
     WindTransientViews views;
     WindVisibleSkeletonViews visibleViews;
     org::DeclaredViewToken diagnostics, processedCounts, deferredEntries, baseTypeLookup;
@@ -1019,7 +988,19 @@ struct WindPassBindings {
     bool hasDepth = false, hasActiveSkinnedPlacements = false;
 };
 
-class WindResetPass final : public org::TypedRenderGraphPass<WindResetPass, br::render::PreparedComputeDispatch, WindPassBindings>,
+struct WindDispatchFrame {
+    WindTransientConstants constants{};
+    uint32_t groups = 0;
+    bool useDepth = false;
+};
+
+struct WindIndirectFrame {
+    WindTransientConstants constants{};
+    uint32_t maximumCount = 0;
+    bool enabled = false;
+};
+
+class WindResetPass final : public org::TypedRenderGraphPass<WindResetPass, WindDispatchFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
     explicit WindResetPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources))
@@ -1030,6 +1011,7 @@ public:
     WindPassBindings Declare(org::PassBuilder& builder)
     {
         WindPassBindings bindings{};
+        bindings.pipeline = m_pso;
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
         m_declaredInverseBindResource = m_resources->inverseBindResource;
         bindings.visibleViews = DeclareVisibleSkeletonViews(builder, *m_resources);
@@ -1045,26 +1027,24 @@ public:
     bool DeclaredResourcesChanged() const override {
         return m_declaredInverseBindResource != m_resources->inverseBindResource;
     }
-    br::render::PreparedComputeDispatch Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
+    WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
     {
-        br::render::PreparedComputeDispatch data{};
-        if (!m_resources->transientRegion.valid || !bindings.views.inverseBind.layout) return data;
-        auto constants = MakeTransientConstants(*m_resources, preparation, bindings.views, WindFrameSettings(preparation));
-        constants.bones = preparation.Resolve(bindings.diagnostics).index;
-        constants.placementCount = m_resources->residentTransformCount;
-        constants.allocationRecords = preparation.Resolve(bindings.processedCounts).index;
-        SetVisibleSkeletonConstants(constants, preparation, bindings.visibleViews, m_resources->residentPlacementCount);
-        data.layout = br::extensions::GetComputePipelineLayout();
-        auto program = CaptureProgramBinding(preparation, m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        static_assert(sizeof(constants) <= sizeof(data.constants));
-        std::memcpy(data.constants.data(), &constants, sizeof(constants));
-        data.groupsX = ((std::max)({m_resources->residentTransformCount, constants.typeCount, 64u}) + 63u) / 64u;
-        return data;
+        WindDispatchFrame frame{};
+        if (!m_resources->transientRegion.valid || !bindings.views.inverseBind.layout) return frame;
+        frame.constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
+        frame.constants.placementCount = m_resources->residentTransformCount;
+        SetVisibleSkeletonCount(frame.constants, m_resources->residentPlacementCount);
+        frame.groups = ((std::max)({m_resources->residentTransformCount, frame.constants.typeCount, 64u}) + 63u) / 64u;
+        return frame;
     }
-    static void Record(const WindPassBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const WindPassBindings& bindings, const WindDispatchFrame& frame, org::PassRecordContext& recording) {
+        if (!frame.groups) return;
+        auto constants = frame.constants;
+        ResolveTransientViews(constants, recording, bindings.views);
+        constants.bones = recording.Index(bindings.diagnostics);
+        constants.allocationRecords = recording.Index(bindings.processedCounts);
+        ResolveVisibleSkeletonViews(constants, recording, bindings.visibleViews);
+        br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
@@ -1072,7 +1052,7 @@ private:
     org::PipelineState m_pso;
 };
 
-class WindActivatePass final : public org::TypedRenderGraphPass<WindActivatePass, br::render::PreparedComputeDispatch, WindPassBindings>,
+class WindActivatePass final : public org::TypedRenderGraphPass<WindActivatePass, WindDispatchFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
     WindActivatePass(std::shared_ptr<WindSharedResources> resources, bool latePhase)
@@ -1084,6 +1064,7 @@ public:
     WindPassBindings Declare(org::PassBuilder& builder)
     {
         WindPassBindings bindings{};
+        bindings.pipeline = m_pso;
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
         m_declaredInverseBindResource = m_resources->inverseBindResource;
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
@@ -1126,12 +1107,13 @@ public:
     bool DeclaredResourcesChanged() const override {
         return m_declaredResourcesChanged || m_declaredInverseBindResource != m_resources->inverseBindResource;
     }
-    br::render::PreparedComputeDispatch Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
+    WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
     {
-        br::render::PreparedComputeDispatch data{};
-        if (!m_resources->residentPlacementCount || !bindings.views.inverseBind.layout) return data;
+        WindDispatchFrame frame{};
+        if (!m_resources->residentPlacementCount || !bindings.views.inverseBind.layout) return frame;
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        auto constants = MakeTransientConstants(*m_resources, preparation, bindings.views, WindFrameSettings(preparation));
+        auto& constants = frame.constants;
+        constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
         if (context) {
             const auto view = std::ranges::find(context->Views(),
                 context->primaryViewID, &PreparedViewFrameData::id);
@@ -1142,24 +1124,23 @@ public:
         constants.lateReserve = (std::max)(constants.capacityTarget,
             context ? context->proceduralWind.outerRadius : 0.0f);
         constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
-        if (bindings.hasDepth && context && context->proceduralWind.occlusionCullingEnabled)
-            constants.phaseAndDepthDescriptor |= preparation.Resolve(bindings.depth).index & kDepthDescriptorMask;
-        constants.bones = preparation.Resolve(bindings.diagnostics).index;
-        constants.fieldSlice0 = bindings.hasActiveSkinnedPlacements
-            ? preparation.Resolve(bindings.activeSkinnedPlacements).index : 0u;
-        constants.fieldSlice1 = preparation.Resolve(bindings.deferredEntries).index;
-        constants.fieldDimensions = preparation.Resolve(bindings.baseTypeLookup).index;
+        frame.useDepth = bindings.hasDepth && context && context->proceduralWind.occlusionCullingEnabled;
         constants.allocationRecords = m_resources->baseTypeLookup->Size();
-        data.layout = br::extensions::GetComputePipelineLayout();
-        auto program = CaptureProgramBinding(preparation, m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        static_assert(sizeof(constants) <= sizeof(data.constants)); std::memcpy(data.constants.data(), &constants, sizeof(constants));
-        data.groupsX = (constants.placementCount + 63u) / 64u;
-        return data;
+        frame.groups = (constants.placementCount + 63u) / 64u;
+        return frame;
     }
-    static void Record(const WindPassBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const WindPassBindings& bindings, const WindDispatchFrame& frame, org::PassRecordContext& recording) {
+        if (!frame.groups) return;
+        auto constants = frame.constants;
+        ResolveTransientViews(constants, recording, bindings.views);
+        if (frame.useDepth)
+            constants.phaseAndDepthDescriptor |= recording.Index(bindings.depth) & kDepthDescriptorMask;
+        constants.bones = recording.Index(bindings.diagnostics);
+        constants.fieldSlice0 = bindings.hasActiveSkinnedPlacements
+            ? recording.Index(bindings.activeSkinnedPlacements) : 0u;
+        constants.fieldSlice1 = recording.Index(bindings.deferredEntries);
+        constants.fieldDimensions = recording.Index(bindings.baseTypeLookup);
+        br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
@@ -1171,7 +1152,7 @@ private:
     bool m_latePhase = false;
 };
 
-class WindBuildCommandsPass final : public org::TypedRenderGraphPass<WindBuildCommandsPass, br::render::PreparedComputeDispatch, WindPassBindings>,
+class WindBuildCommandsPass final : public org::TypedRenderGraphPass<WindBuildCommandsPass, WindDispatchFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
     WindBuildCommandsPass(std::shared_ptr<WindSharedResources> r, bool latePhase)
@@ -1181,6 +1162,7 @@ public:
     }
     WindPassBindings Declare(org::PassBuilder& b) {
         WindPassBindings bindings{};
+        bindings.pipeline = m_pso;
         bindings.views = DeclareWindTransientViews(b, *m_resources);
         m_declaredInverseBindResource = m_resources->inverseBindResource;
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
@@ -1193,28 +1175,26 @@ public:
     bool DeclaredResourcesChanged() const override {
         return m_declaredInverseBindResource != m_resources->inverseBindResource;
     }
-    br::render::PreparedComputeDispatch Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
-        br::render::PreparedComputeDispatch data{};
-        if (!m_resources->typeCount || !bindings.views.inverseBind.layout) return data;
-        auto constants = MakeTransientConstants(*m_resources, preparation, bindings.views, WindFrameSettings(preparation));
-        constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
-        constants.bones = preparation.Resolve(bindings.diagnostics).index;
-        constants.fieldSlice0 = preparation.Resolve(bindings.processedCounts).index;
-        data.layout = br::extensions::GetComputePipelineLayout();
-        auto program = CaptureProgramBinding(preparation, m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        static_assert(sizeof(constants) <= sizeof(data.constants)); std::memcpy(data.constants.data(), &constants, sizeof(constants));
-        data.groupsX = 1u;
-        return data;
+    WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
+        WindDispatchFrame frame{};
+        if (!m_resources->typeCount || !bindings.views.inverseBind.layout) return frame;
+        frame.constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
+        frame.constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
+        frame.groups = 1u;
+        return frame;
     }
-    static void Record(const WindPassBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const WindPassBindings& bindings, const WindDispatchFrame& frame, org::PassRecordContext& recording) {
+        if (!frame.groups) return;
+        auto constants = frame.constants;
+        ResolveTransientViews(constants, recording, bindings.views);
+        constants.bones = recording.Index(bindings.diagnostics);
+        constants.fieldSlice0 = recording.Index(bindings.processedCounts);
+        br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
 private: std::shared_ptr<WindSharedResources> m_resources; std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource; org::PipelineState m_pso; bool m_latePhase = false;
 };
 
-class WindFinalizeAllocationsPass final : public org::TypedRenderGraphPass<WindFinalizeAllocationsPass, br::render::PreparedComputeDispatch, WindPassBindings>,
+class WindFinalizeAllocationsPass final : public org::TypedRenderGraphPass<WindFinalizeAllocationsPass, WindDispatchFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
 	explicit WindFinalizeAllocationsPass(std::shared_ptr<WindSharedResources> resources)
@@ -1226,6 +1206,7 @@ public:
 	}
 	WindPassBindings Declare(org::PassBuilder& builder) {
         WindPassBindings bindings{};
+        bindings.pipeline = m_pso;
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
         m_declaredInverseBindResource = m_resources->inverseBindResource;
         bindings.visibleViews = DeclareVisibleSkeletonViews(builder, *m_resources);
@@ -1239,23 +1220,22 @@ public:
 	bool DeclaredResourcesChanged() const override {
         return m_declaredInverseBindResource != m_resources->inverseBindResource;
     }
-	br::render::PreparedComputeDispatch Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
-		br::render::PreparedComputeDispatch data{};
-		if (!m_resources->typeCount || !m_resources->residentPlacementCount || !bindings.views.inverseBind.layout) return data;
-		auto constants = MakeTransientConstants(*m_resources, preparation, bindings.views, WindFrameSettings(preparation));
-		constants.bones = preparation.Resolve(bindings.diagnostics).index;
-		constants.fieldSlice0 = preparation.Resolve(bindings.boneRemaps).index;
-		SetVisibleSkeletonConstants(constants, preparation, bindings.visibleViews, m_resources->residentPlacementCount);
-		data.layout = br::extensions::GetComputePipelineLayout();
-		auto program = CaptureProgramBinding(preparation, m_pso);
-		data.program = program.program;
-		data.descriptorIndices = std::move(program.descriptorIndices);
-		static_assert(sizeof(constants) <= sizeof(data.constants)); std::memcpy(data.constants.data(), &constants, sizeof(constants));
-		data.groupsX = (m_resources->residentPlacementCount + kThreadsPerGroup - 1u) / kThreadsPerGroup;
-		return data;
+	WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
+		WindDispatchFrame frame{};
+		if (!m_resources->typeCount || !m_resources->residentPlacementCount || !bindings.views.inverseBind.layout) return frame;
+		frame.constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
+		SetVisibleSkeletonCount(frame.constants, m_resources->residentPlacementCount);
+		frame.groups = (m_resources->residentPlacementCount + kThreadsPerGroup - 1u) / kThreadsPerGroup;
+		return frame;
 	}
-	static void Record(const WindPassBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-		br::render::RecordPreparedComputeDispatch(data, recording);
+	static void Record(const WindPassBindings& bindings, const WindDispatchFrame& frame, org::PassRecordContext& recording) {
+		if (!frame.groups) return;
+		auto constants = frame.constants;
+		ResolveTransientViews(constants, recording, bindings.views);
+		constants.bones = recording.Index(bindings.diagnostics);
+		constants.fieldSlice0 = recording.Index(bindings.boneRemaps);
+		ResolveVisibleSkeletonViews(constants, recording, bindings.visibleViews);
+		br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
 	}
 private:
 	std::shared_ptr<WindSharedResources> m_resources;
@@ -1263,18 +1243,21 @@ private:
 	org::PipelineState m_pso;
 };
 
-class WindIndirectSimulatePass final : public org::TypedRenderGraphPass<WindIndirectSimulatePass, br::render::PreparedComputeIndirect, WindPassBindings>,
+class WindIndirectSimulatePass final : public org::TypedRenderGraphPass<WindIndirectSimulatePass, WindIndirectFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
     WindIndirectSimulatePass(std::shared_ptr<WindSharedResources> r, bool latePhase = false)
         : m_resources(std::move(r)), m_latePhase(latePhase) {
         m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(), L"SARPShaders/ProceduralWind.hlsl", L"SimulateWindInstancesCS", {}, "ProceduralWind.SimulateIndirect");
         rhi::IndirectArg args[] = {{.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},{.kind=rhi::IndirectArgKind::Dispatch}};
-        m_signature = std::make_shared<rhi::CommandSignaturePtr>();
-        br::extensions::GetRenderDevice().CreateCommandSignature({rhi::Span<rhi::IndirectArg>(args,2),sizeof(WindIndirectCommand)}, br::extensions::GetComputePipelineLayout(), *m_signature);
+        auto signature = std::make_shared<rhi::CommandSignaturePtr>();
+        br::extensions::GetRenderDevice().CreateCommandSignature({rhi::Span<rhi::IndirectArg>(args,2),sizeof(WindIndirectCommand)}, br::extensions::GetComputePipelineLayout(), *signature);
+        m_signature = std::move(signature);
     }
     WindPassBindings Declare(org::PassBuilder& b) {
         WindPassBindings bindings{};
+        bindings.pipeline = m_pso;
+        bindings.signature = m_signature;
         bindings.views = DeclareWindTransientViews(b, *m_resources);
         m_declaredInverseBindResource = m_resources->inverseBindResource;
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
@@ -1289,43 +1272,37 @@ public:
     bool DeclaredResourcesChanged() const override {
         return m_declaredInverseBindResource != m_resources->inverseBindResource;
     }
-    br::render::PreparedComputeIndirect Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
-        br::render::PreparedComputeIndirect data{};
-        if (!m_resources->typeCount || !bindings.views.inverseBind.layout) { data.enabled = false; return data; }
-        auto constants = MakeTransientConstants(*m_resources, preparation, bindings.views, WindFrameSettings(preparation));
-        constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
-        constants.allocationRecords = preparation.Resolve(bindings.diagnostics).index;
-        auto program = CaptureProgramBinding(preparation, m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        data.commandSignature = preparation.CaptureCommandSignature(m_signature);
-        data.argumentsReference = preparation.CaptureResource(bindings.argumentsBinding);
-        data.countBufferReference = preparation.CaptureResource(bindings.countBinding); data.countOffset = sizeof(uint32_t);
-        data.maximumCount = m_resources->typeCount;
-        static_assert(sizeof(constants) <= sizeof(data.constants)); std::memcpy(data.constants.data(), &constants, sizeof(constants));
-        return data;
+    WindIndirectFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
+        WindIndirectFrame frame{};
+        if (!m_resources->typeCount || !bindings.views.inverseBind.layout) return frame;
+        frame.constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
+        frame.constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
+        frame.maximumCount = m_resources->typeCount;
+        frame.enabled = true;
+        return frame;
     }
-    static void Record(const WindPassBindings&, const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeIndirect(data, recording);
+    static void Record(const WindPassBindings& bindings, const WindIndirectFrame& frame, org::PassRecordContext& recording) {
+        if (!frame.enabled) return;
+        auto constants = frame.constants;
+        ResolveTransientViews(constants, recording, bindings.views);
+        constants.allocationRecords = recording.Index(bindings.diagnostics);
+        br::render::DispatchComputeIndirect(recording, bindings.pipeline, PackTransientConstants(constants),
+            bindings.signature, bindings.argumentsBinding, 0, frame.maximumCount, bindings.countBinding, sizeof(uint32_t));
     }
-private: std::shared_ptr<WindSharedResources> m_resources; std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource; org::PipelineState m_pso; std::shared_ptr<rhi::CommandSignaturePtr> m_signature; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource; org::PipelineState m_pso; std::shared_ptr<const rhi::CommandSignaturePtr> m_signature; bool m_latePhase = false;
 };
 
 struct WindSkeletonDebugFrameData {
     bool drawSkeletons = false;
     bool drawBoundingSpheres = false;
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    org::PreparedDescriptorReference target{};
     DirectX::XMUINT2 outputResolution{};
-    org::PreparedProgramBinding skeletonProgram{}, sphereProgram{};
-    rhi::CommandSignatureHandle signature{};
-    org::PreparedResourceReference indirectCommands{}, allocationCounters{};
-    std::array<uint32_t, 12> constants{};
     uint32_t typeCount = 0;
     uint32_t residentPlacementCount = 0;
 };
 
 struct WindSkeletonDebugBindings {
+    org::PipelineState skeletonPipeline, spherePipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
     org::ResourceBindingToken indirectCommands{}, allocationCounters{};
     org::DeclaredViewToken target{};
     org::DeclaredViewToken types, bones, activeInstances, forwardSkin, inverseBind, skinningInfo;
@@ -1343,7 +1320,6 @@ public:
         shaders.meshShader = { L"shaders/debugSkeleton.hlsl", L"MSWindMain", L"ms_6_6" };
         shaders.pixelShader = { L"shaders/debugSkeleton.hlsl", L"PSWindMain", L"ps_6_6" };
         const auto compiled = br::extensions::CompileShaders(shaders);
-        m_bindings = compiled.resourceDescriptorSlots;
         auto layout = br::extensions::GetGraphicsPipelineLayout();
         rhi::SubobjLayout soLayout{ layout };
         rhi::SubobjShader soMS{ rhi::ShaderStage::Mesh, rhi::DXIL(compiled.meshShader.Get()), "MSWindMain" };
@@ -1361,16 +1337,17 @@ public:
         const rhi::PipelineStreamItem items[] = { rhi::Make(soLayout), rhi::Make(soMS), rhi::Make(soPS),
             rhi::Make(soRaster), rhi::Make(soBlend), rhi::Make(soDepth), rhi::Make(soTargets),
             rhi::Make(soSample), rhi::Make(soTopology) };
-        m_pso = std::make_shared<rhi::PipelinePtr>();
-        if (Failed(br::extensions::GetRenderDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), *m_pso)))
+        rhi::PipelinePtr skeletonPso;
+        if (Failed(br::extensions::GetRenderDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), skeletonPso)))
             throw std::runtime_error("Failed to create procedural-wind skeleton debug PSO");
-        (*m_pso)->SetName("ProceduralWind.SkeletonDebug.PSO");
+        skeletonPso->SetName("ProceduralWind.SkeletonDebug.PSO");
+        m_skeletonPipeline = org::PipelineState(std::move(skeletonPso), compiled.resourceIDsHash,
+            compiled.resourceDescriptorSlots, {}, layout);
 
         ShaderInfoBundle sphereShaders;
         sphereShaders.meshShader = { L"shaders/debugSkeleton.hlsl", L"MSWindAssemblySphereMain", L"ms_6_6" };
         sphereShaders.pixelShader = { L"shaders/debugSkeleton.hlsl", L"PSWindAssemblySphereMain", L"ps_6_6" };
         const auto compiledSphere = br::extensions::CompileShaders(sphereShaders);
-        m_sphereBindings = compiledSphere.resourceDescriptorSlots;
         rhi::SubobjShader sphereMS{ rhi::ShaderStage::Mesh, rhi::DXIL(compiledSphere.meshShader.Get()), "MSWindAssemblySphereMain" };
         rhi::SubobjShader spherePS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiledSphere.pixelShader.Get()), "PSWindAssemblySphereMain" };
         rhi::RasterState sphereRaster{}; sphereRaster.fill = rhi::FillMode::Wireframe; sphereRaster.cull = rhi::CullMode::None;
@@ -1379,22 +1356,28 @@ public:
         const rhi::PipelineStreamItem sphereItems[] = { rhi::Make(soLayout), rhi::Make(sphereMS), rhi::Make(spherePS),
             rhi::Make(sphereRasterState), rhi::Make(soBlend), rhi::Make(soDepth), rhi::Make(soTargets),
             rhi::Make(soSample), rhi::Make(sphereTopology) };
-        m_spherePso = std::make_shared<rhi::PipelinePtr>();
+        rhi::PipelinePtr spherePso;
         if (Failed(br::extensions::GetRenderDevice().CreatePipeline(
-                sphereItems, static_cast<uint32_t>(std::size(sphereItems)), *m_spherePso)))
+                sphereItems, static_cast<uint32_t>(std::size(sphereItems)), spherePso)))
             throw std::runtime_error("Failed to create procedural-wind assembly-sphere debug PSO");
-        (*m_spherePso)->SetName("ProceduralWind.AssemblySphereDebug.PSO");
+        spherePso->SetName("ProceduralWind.AssemblySphereDebug.PSO");
+        m_spherePipeline = org::PipelineState(std::move(spherePso), compiledSphere.resourceIDsHash,
+            compiledSphere.resourceDescriptorSlots, {}, layout);
         rhi::IndirectArg args[] = {
             {.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},
             {.kind=rhi::IndirectArgKind::DispatchMesh}
         };
-        m_signature = std::make_shared<rhi::CommandSignaturePtr>();
+        auto signature = std::make_shared<rhi::CommandSignaturePtr>();
         br::extensions::GetRenderDevice().CreateCommandSignature(
-            {rhi::Span<rhi::IndirectArg>(args, 2), sizeof(WindIndirectCommand)}, layout, *m_signature);
+            {rhi::Span<rhi::IndirectArg>(args, 2), sizeof(WindIndirectCommand)}, layout, *signature);
+        m_signature = std::move(signature);
     }
     WindSkeletonDebugBindings Declare(org::PassBuilder& declaration)
     {
         WindSkeletonDebugBindings bindings{};
+        bindings.skeletonPipeline = m_skeletonPipeline;
+        bindings.spherePipeline = m_spherePipeline;
+        bindings.signature = m_signature;
         m_declaredInverseBindResource = m_resources->inverseBindResource;
         bindings.types = declaration.ShaderResource(m_resources->windTypes).View();
         bindings.bones = declaration.ShaderResource(m_resources->boneEntries).View();
@@ -1435,67 +1418,44 @@ public:
         if ((!drawSkeletons && !drawBoundingSpheres) || !m_resources->typeCount || !bindings.inverseBind.layout) return data;
         data.drawSkeletons = drawSkeletons;
         data.drawBoundingSpheres = drawBoundingSpheres;
-        data.resourceHeap = rc->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = rc->samplerDescriptorHeap.GetHandle();
-        data.target = preparation.Capture(bindings.target);
         data.outputResolution = rc->outputResolution;
         data.typeCount = m_resources->typeCount;
         data.residentPlacementCount = m_resources->residentPlacementCount;
         preparation.Retain(m_resources);
-        if (drawSkeletons) {
-            data.skeletonProgram = preparation.CaptureProgramBinding(m_pso, m_bindings);
-            data.signature = preparation.CaptureCommandSignature(m_signature);
-            data.indirectCommands = preparation.CaptureResource(bindings.indirectCommands);
-            data.allocationCounters = preparation.CaptureResource(bindings.allocationCounters);
-        }
-        if (drawBoundingSpheres)
-            data.sphereProgram = preparation.CaptureProgramBinding(m_spherePso, m_sphereBindings);
-        data.constants = {
-            preparation.Resolve(bindings.types).index, preparation.Resolve(bindings.bones).index,
-            preparation.Resolve(bindings.activeInstances).index,
-            preparation.Resolve(bindings.forwardSkin).index,
-            preparation.Resolve(bindings.inverseBind).index,
-            preparation.Resolve(bindings.skinningInfo).index,
-            preparation.Resolve(bindings.perFrame).index,
-            preparation.Resolve(bindings.camera).index,
-            0u,
-            bindings.hasPlacements ? preparation.Resolve(bindings.placements).index : 0u,
-            bindings.hasActivePlacements ? preparation.Resolve(bindings.activePlacements).index : 0u,
-            m_resources->residentPlacementCount };
         return data;
     }
-    static void Record(const WindSkeletonDebugBindings&, const WindSkeletonDebugFrameData& data,
+    static void Record(const WindSkeletonDebugBindings& bindings, const WindSkeletonDebugFrameData& data,
         org::PassRecordContext& recording)
     {
         if (!data.drawSkeletons && !data.drawBoundingSpheres) return;
+        const std::array<uint32_t, 12> constants = {
+            recording.Index(bindings.types), recording.Index(bindings.bones),
+            recording.Index(bindings.activeInstances),
+            recording.Index(bindings.forwardSkin),
+            recording.Index(bindings.inverseBind),
+            recording.Index(bindings.skinningInfo),
+            recording.Index(bindings.perFrame),
+            recording.Index(bindings.camera),
+            0u,
+            bindings.hasPlacements ? recording.Index(bindings.placements) : 0u,
+            bindings.hasActivePlacements ? recording.Index(bindings.activePlacements) : 0u,
+            data.residentPlacementCount };
         auto& cmd = recording.Commands();
-        cmd.SetDescriptorHeaps(data.resourceHeap, data.samplerHeap);
-        rhi::PassBeginInfo pass{}; rhi::ColorAttachment color{};
-        color.rtv = recording.Resolve(data.target); color.loadOp = rhi::LoadOp::Load; color.storeOp = rhi::StoreOp::Store;
+        const auto color = br::render::ColorTarget(recording, bindings.target);
+        rhi::PassBeginInfo pass{};
         pass.colors = { &color }; pass.width = data.outputResolution.x; pass.height = data.outputResolution.y; pass.debugName = "Wind Skeleton Debug Overlay";
         cmd.BeginPass(pass);
-        const auto program = data.drawSkeletons ? data.skeletonProgram.program : data.sphereProgram.program;
-        cmd.BindLayout(recording.ResolveLayout(program));
-        cmd.PushConstants(rhi::ShaderStage::AllGraphics, 0, MiscUintRootSignatureIndex, 0, 12, data.constants.data());
         if (data.drawSkeletons) {
             cmd.SetPrimitiveTopology(rhi::PrimitiveTopology::LineList);
-            cmd.BindPipeline(recording.Resolve(data.skeletonProgram.program));
-            if (!data.skeletonProgram.descriptorIndices.empty())
-                cmd.PushConstants(rhi::ShaderStage::AllGraphics, 0,
-                    org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-                    static_cast<uint32_t>(data.skeletonProgram.descriptorIndices.size()),
-                    data.skeletonProgram.descriptorIndices.data());
-            cmd.ExecuteIndirect(data.signature, recording.Resolve(data.indirectCommands).GetHandle(), 0,
-                recording.Resolve(data.allocationCounters).GetHandle(), sizeof(uint32_t), data.typeCount);
+            recording.BindGraphicsPipeline(bindings.skeletonPipeline);
+            recording.PushConstants(MiscUintRootSignatureIndex, constants);
+            recording.ExecuteIndirect(bindings.signature, bindings.indirectCommands, 0, data.typeCount,
+                bindings.allocationCounters, sizeof(uint32_t));
         }
         if (data.drawBoundingSpheres && data.residentPlacementCount != 0u) {
             cmd.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-            cmd.BindPipeline(recording.Resolve(data.sphereProgram.program));
-            if (!data.sphereProgram.descriptorIndices.empty())
-                cmd.PushConstants(rhi::ShaderStage::AllGraphics, 0,
-                    org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-                    static_cast<uint32_t>(data.sphereProgram.descriptorIndices.size()),
-                    data.sphereProgram.descriptorIndices.data());
+            recording.BindGraphicsPipeline(bindings.spherePipeline);
+            recording.PushConstants(MiscUintRootSignatureIndex, constants);
             cmd.DispatchMesh(data.residentPlacementCount, 1u, 1u);
         }
         cmd.EndPass();
@@ -1503,11 +1463,9 @@ public:
 private:
     std::shared_ptr<WindSharedResources> m_resources;
     std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource;
-    std::shared_ptr<rhi::PipelinePtr> m_pso;
-    std::shared_ptr<rhi::PipelinePtr> m_spherePso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_signature;
-    org::PipelineResources m_bindings;
-    org::PipelineResources m_sphereBindings;
+    org::PipelineState m_skeletonPipeline;
+    org::PipelineState m_spherePipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> m_signature;
 };
 
 } // namespace

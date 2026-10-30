@@ -5,37 +5,39 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Runtime/Settings/SettingsManager.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
-class ClusterGenerationPass : public org::TypedRenderGraphPass<ClusterGenerationPass, br::render::PreparedComputeDispatch> {
+struct ClusterGenerationBindings {
+	org::PipelineState pipeline;
+};
+struct ClusterGenerationFrame {
+	uint32_t groupsX = 0, groupsY = 0, groupsZ = 0;
+};
+
+class ClusterGenerationPass : public org::TypedRenderGraphPass<ClusterGenerationPass, ClusterGenerationFrame, ClusterGenerationBindings> {
 public:
 	ClusterGenerationPass() { CreatePSO(); }
 
 	~ClusterGenerationPass() {
 	}
 
-	void Declare(org::PassBuilder& builder) {
+	ClusterGenerationBindings Declare(org::PassBuilder& builder) {
 		builder.ShaderResource(Builtin::CameraBuffer);
 		builder.UnorderedAccess(Builtin::Light::ClusterBuffer);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
+		return {m_PSO};
 	}
 
-	br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+	ClusterGenerationFrame Prepare(const ClusterGenerationBindings&, const org::PassPrepareContext& preparation) const {
 		const auto* update = preparation.preparationData->Get<UpdateContext>();
 		const auto* render = preparation.preparationData->Get<RenderContext>();
 		if (!update && !render) throw std::logic_error("ClusterGenerationPass requires frame context");
-		br::render::PreparedComputeDispatch data{};
-		data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-		auto program = CaptureProgramBinding(preparation, m_PSO);
-		data.program = program.program;
-		data.descriptorIndices = std::move(program.descriptorIndices);
 		const auto size = update ? update->lightClusterSize : render->lightClusterSize;
-		data.groupsX = size.x; data.groupsY = size.y; data.groupsZ = size.z;
-		return data;
+		return {size.x, size.y, size.z};
 	}
-	static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-		br::render::RecordPreparedComputeDispatch(data, recording);
+	static void Record(const ClusterGenerationBindings& bindings, const ClusterGenerationFrame& frame, org::PassRecordContext& context) {
+		br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY, frame.groupsZ);
 	}
 
 private:

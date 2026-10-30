@@ -5,7 +5,7 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedResourceClears.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
@@ -16,7 +16,7 @@ struct ClearDeepVisibilityBindings {
 };
 
 class ClearDeepVisibilityPass final : public org::TypedRenderGraphPass<ClearDeepVisibilityPass,
-    br::render::PreparedResourceClears, ClearDeepVisibilityBindings>, public org::IDynamicDeclaredResources {
+    org::EmptyPassFrameData, ClearDeepVisibilityBindings>, public org::IDynamicDeclaredResources {
 public:
     ClearDeepVisibilityPass(
         std::shared_ptr<org::Buffer> deepVisibilityCounterBuffer,
@@ -26,10 +26,7 @@ public:
     ClearDeepVisibilityBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    br::render::PreparedResourceClears Prepare(const ClearDeepVisibilityBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const ClearDeepVisibilityBindings&,
-        const br::render::PreparedResourceClears&, org::PassRecordContext&);
+    static void Record(const ClearDeepVisibilityBindings& bindings, org::PassRecordContext& context);
 
 private:
     std::shared_ptr<org::Buffer> m_deepVisibilityCounterBuffer;

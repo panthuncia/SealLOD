@@ -30,27 +30,13 @@ AVBOITOccupancyRemapBindings AVBOITOccupancyRemapPass::Declare(org::PassBuilder&
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.UnorderedAccess(m_occupancySliceMaskTexture);
-    return {builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_depthWarpLUTBuffer), builder.UnorderedAccess(m_occupancyTexture)};
+    return {m_pso, builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_depthWarpLUTBuffer), builder.UnorderedAccess(m_occupancyTexture)};
 }
 
-br::render::PreparedComputeDispatch AVBOITOccupancyRemapPass::Prepare(const AVBOITOccupancyRemapBindings& bindings, const org::PassPrepareContext& preparation) const {
-    br::render::PreparedComputeDispatch data{};
+AVBOITOccupancyRemapFrame AVBOITOccupancyRemapPass::Prepare(const AVBOITOccupancyRemapBindings& bindings, const org::PassPrepareContext& preparation) const {
     if (!m_configBuffer || !m_occupancyTexture || !m_occupancySliceMaskTexture || !m_depthWarpLUTBuffer) {
         return {};
     }
-
-    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
-    auto& context = *renderContext;
-
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-
-    auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_CONFIG_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.config).index;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_LUT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.lut).index;
 
     const auto& occupancy = preparation.Describe(bindings.occupancy);
     const uint32_t groupCountX = (occupancy.texture.width + 7u) / 8u;
@@ -59,10 +45,13 @@ br::render::PreparedComputeDispatch AVBOITOccupancyRemapPass::Prepare(const AVBO
         return {};
     }
 
-    data.groupsX = groupCountX; data.groupsY = groupCountY; data.groupsZ = 1u;
-    return data;
+    return {groupCountX, groupCountY};
 }
 
-void AVBOITOccupancyRemapPass::Record(const AVBOITOccupancyRemapBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void AVBOITOccupancyRemapPass::Record(const AVBOITOccupancyRemapBindings& bindings, const AVBOITOccupancyRemapFrame& frame, org::PassRecordContext& context) {
+    if (!frame.groupsX || !frame.groupsY) return;
+    br::render::MiscConstants constants{};
+    constants[CLOD_AVBOIT_VBOIT_DEPTH_WARP_CONFIG_DESCRIPTOR_INDEX] = context.Index(bindings.config);
+    constants[CLOD_AVBOIT_VBOIT_DEPTH_WARP_LUT_DESCRIPTOR_INDEX] = context.Index(bindings.lut);
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
 }

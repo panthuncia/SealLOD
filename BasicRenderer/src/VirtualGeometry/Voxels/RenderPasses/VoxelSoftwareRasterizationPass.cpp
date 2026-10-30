@@ -16,33 +16,36 @@
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
-void VoxelSoftwareRasterizationPass::Record(const VoxelRasterBindings&, const VoxelRasterFrameData& data,
-    org::PassRecordContext& recording) {
-    auto& commands = recording.Commands();
-    commands.SetDescriptorHeaps(data.resourceHeap, data.samplerHeap);
-    for (const auto& step : data.steps) {
-        commands.BindLayout(recording.ResolveLayout(step.buildProgram.program));
-        commands.BindPipeline(recording.Resolve(step.buildProgram.program));
-        if (!step.buildProgram.descriptorIndices.empty()) commands.PushConstants(rhi::ShaderStage::Compute, 0,
-            org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-            static_cast<uint32_t>(step.buildProgram.descriptorIndices.size()), step.buildProgram.descriptorIndices.data());
-        commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
-            NumMiscUintRootConstants, step.constants.data());
-        commands.Dispatch(1u, 1u, 1u);
-        const auto arguments = recording.Resolve(step.arguments).GetHandle();
-        rhi::BufferBarrier barrier{};
-        barrier.buffer = arguments;
-        barrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
-        barrier.afterAccess = rhi::ResourceAccessType::IndirectArgument;
-        barrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
-        barrier.afterSync = rhi::ResourceSyncState::ExecuteIndirect;
-        rhi::BarrierBatch barriers{}; barriers.buffers = {&barrier, 1}; commands.Barriers(barriers);
-        commands.BindLayout(recording.ResolveLayout(step.rasterProgram.program));
-        commands.BindPipeline(recording.Resolve(step.rasterProgram.program));
-        if (!step.rasterProgram.descriptorIndices.empty()) commands.PushConstants(rhi::ShaderStage::Compute, 0,
-            org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-            static_cast<uint32_t>(step.rasterProgram.descriptorIndices.size()), step.rasterProgram.descriptorIndices.data());
-        commands.ExecuteIndirect(data.commandSignature, arguments, 0, {}, 0, 1);
+void VoxelSoftwareRasterizationPass::Record(const VoxelRasterBindings& bindings, const VoxelRasterFrame& frame,
+    org::PassRecordContext& context) {
+    br::render::MiscConstants misc{};
+    misc[CLOD_RASTER_VOXEL_WORK_CAPACITY] = bindings.voxelWorkCapacity;
+    misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = context.Index(bindings.visible);
+    misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = context.Index(bindings.transforms);
+    misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = frame.telemetry ? context.Index(bindings.telemetry) : 0xFFFFFFFFu;
+    misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = frame.viewRasterInfoTable;
+    if (bindings.virtualShadow) {
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = context.Index(bindings.pageTable);
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = context.Index(bindings.clipmapInfo);
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = context.Index(bindings.physicalPages);
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = context.Index(bindings.dynamicPages);
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = frame.virtualResolution;
+    }
+    for (uint32_t i = 0; i < 2; ++i) {
+        auto constants = misc;
+        constants[CLOD_RASTER_VOXEL_WORK_RECORDS_DESCRIPTOR_INDEX] = context.Index(bindings.workRecords[i]);
+        constants[CLOD_RASTER_VOXEL_WORK_COUNTER_DESCRIPTOR_INDEX] = context.Index(bindings.workCounters[i]);
+        constants[CLOD_RASTER_VOXEL_INDIRECT_ARGS_DESCRIPTOR_INDEX] = context.Index(bindings.indirectArgs[i]);
+        br::render::DispatchCompute(context, bindings.buildArgs, constants, 1u);
+        const auto arguments = bindings.indirectArgs[i].Resource();
+        context.BufferBarriers({arguments},
+            rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceAccessType::IndirectArgument,
+            rhi::ResourceSyncState::ComputeShading, rhi::ResourceSyncState::ExecuteIndirect);
+        // The raster pipeline shares the layout, so the constants pushed for the build stay bound.
+        context.BindComputePipeline(frame.telemetry ? bindings.telemetryRaster[i] : bindings.raster[i]);
+        context.ExecuteIndirect(bindings.commandSignature, arguments);
     }
 }
 
@@ -190,11 +193,13 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
     if (m_slabResourceGroup) {
         builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
-    VoxelRasterBindings bindings{
+    VoxelRasterBindings bindings{m_buildArgsPso, {m_rigidRasterPso, m_skinnedRasterPso},
+        {m_rigidTelemetryRasterPso, m_skinnedTelemetryRasterPso}, m_dispatchCommandSignature,
         builder->ShaderResource(m_visibleClustersBuffer).View(),
         builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         {}};
     bindings.viewRasterInfoLayout = m_viewRasterInfoTable.Layout();
+    bindings.voxelWorkCapacity = m_voxelWorkCapacity;
     bindings.hasTelemetry = static_cast<bool>(m_telemetryBuffer);
     if (bindings.hasTelemetry) bindings.telemetry = builder->UnorderedAccess(m_telemetryBuffer).View();
     for (uint32_t i = 0; i < 2; ++i) {
@@ -225,54 +230,17 @@ bool VoxelSoftwareRasterizationPass::DeclaredResourcesChanged() const
     return m_declaredResourcesChanged;
 }
 
-void VoxelSoftwareRasterizationPass::InvocationRevision(const org::PassPrepareContext&,
-    std::vector<uint64_t>& out) const {
-    m_viewRasterInfoTable.AppendRowRevision(out);
-}
-
-VoxelRasterFrameData VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBindings& bindings,
+VoxelRasterFrame VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBindings& bindings,
     const org::PassPrepareContext& preparation) const
 {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    VoxelRasterFrameData data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.commandSignature = preparation.CaptureCommandSignature(m_dispatchCommandSignature);
-    const auto srv = [&](org::DeclaredViewToken token) {
-        return preparation.Resolve(token).index;
-    };
-    const auto uav = [&](org::DeclaredViewToken token) {
-        return preparation.Resolve(token).index;
-    };
-    std::array<uint32_t, NumMiscUintRootConstants> misc{};
-    misc[CLOD_RASTER_VOXEL_WORK_CAPACITY] = m_voxelWorkCapacity;
-    misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = srv(bindings.visible);
-    misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = srv(bindings.transforms);
-    misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = bindings.hasTelemetry && IsCLodWorkGraphTelemetryEnabled()
-        ? uav(bindings.telemetry) : 0xFFFFFFFFu;
-    misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] =
+    VoxelRasterFrame frame{};
+    frame.telemetry = bindings.hasTelemetry && IsCLodWorkGraphTelemetryEnabled();
+    frame.viewRasterInfoTable =
         bindings.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoPublisher, m_viewRasterInfoTable.Rows());
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
-            uav(bindings.pageTable);
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = srv(bindings.clipmapInfo);
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = uav(bindings.physicalPages);
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] = uav(bindings.dynamicPages);
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
-        misc[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = config.virtualResolution;
+        frame.pageTableResolution = config.pageTableResolution;
+        frame.virtualResolution = config.virtualResolution;
     }
-    const bool telemetry = bindings.hasTelemetry && IsCLodWorkGraphTelemetryEnabled();
-    for (uint32_t i = 0; i < data.steps.size(); ++i) {
-        auto& step = data.steps[i]; step.constants = misc;
-        step.constants[CLOD_RASTER_VOXEL_WORK_RECORDS_DESCRIPTOR_INDEX] = srv(bindings.workRecords[i]);
-        step.constants[CLOD_RASTER_VOXEL_WORK_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.workCounters[i]);
-        step.constants[CLOD_RASTER_VOXEL_INDIRECT_ARGS_DESCRIPTOR_INDEX] = uav(bindings.indirectArgs[i]);
-        step.buildProgram = preparation.CaptureProgramBinding(m_buildArgsPso);
-        const org::PipelineState& raster = telemetry ? (i == 0 ? m_rigidTelemetryRasterPso : m_skinnedTelemetryRasterPso)
-            : (i == 0 ? m_rigidRasterPso : m_skinnedRasterPso);
-        step.rasterProgram = preparation.CaptureProgramBinding(raster);
-        step.arguments = preparation.DeclaredReference(bindings.indirectArgs[i]);
-    }
-    return data;
+    return frame;
 }

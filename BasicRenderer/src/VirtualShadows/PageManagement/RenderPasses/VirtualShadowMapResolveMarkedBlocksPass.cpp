@@ -8,7 +8,6 @@
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 #include "../shaders/PerPassRootConstants/clodVirtualShadowResolveMarkedBlocksRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 VirtualShadowMapResolveMarkedBlocksPass::VirtualShadowMapResolveMarkedBlocksPass(
     std::shared_ptr<org::Buffer> markedBlocksMaskBuffer,
@@ -43,12 +42,11 @@ VirtualShadowMapResolveMarkedBlocksPass::VirtualShadowMapResolveMarkedBlocksPass
 VirtualShadowMapResolveMarkedBlocksBindings VirtualShadowMapResolveMarkedBlocksPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.ShaderResource(m_markedBlocksMaskBuffer), builder.ShaderResource(m_markedBlocksListBuffer),
+    return {m_pso, builder.ShaderResource(m_markedBlocksMaskBuffer), builder.ShaderResource(m_markedBlocksListBuffer),
         builder.ShaderResource(m_markedBlocksCountBuffer), builder.UnorderedAccess(m_allocationRequestsBuffer),
         builder.UnorderedAccess(m_allocationCountBuffer), builder.ShaderResource(m_markClipmapDataBuffer),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_dirtyPageFlagsBuffer),
-        builder.UnorderedAccess(m_directionalPageViewInfoBuffer), builder.UnorderedAccess(m_statsBuffer),
-        m_activeClipmapCount};
+        builder.UnorderedAccess(m_directionalPageViewInfoBuffer), builder.UnorderedAccess(m_statsBuffer)};
 }
 
 void VirtualShadowMapResolveMarkedBlocksPass::Initialize() {}
@@ -61,36 +59,27 @@ void VirtualShadowMapResolveMarkedBlocksPass::Update(const org::UpdateExecutionC
         CLodVirtualShadowMaxSupportedClipmapCount);
 }
 
-
-
-br::render::PreparedComputeDispatch VirtualShadowMapResolveMarkedBlocksPass::Prepare(
-    const VirtualShadowMapResolveMarkedBlocksBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-    auto payload = m_pso.GetPayload(); br::render::PreparedComputeDispatch data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(std::move(payload));
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MASK_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.mask).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_LIST_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.list).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.count).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUESTS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.requests).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUEST_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.requestCount).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.dirtyFlags).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageViewInfo).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_ACTIVE_CLIPMAP_COUNT] = bindings.activeClipmapCount;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_CLIPMAP_DATA_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.clipmapData).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MAX_REQUEST_COUNT] = config.maxAllocationRequests;
-    data.groupsX = (CLodVirtualShadowMaxMarkedBlockCount + 63u) / 64u;
-    return data;
+VirtualShadowMapResolveMarkedBlocksFrame VirtualShadowMapResolveMarkedBlocksPass::Prepare(
+    const VirtualShadowMapResolveMarkedBlocksBindings&, const org::PassPrepareContext&) const {
+    return {m_activeClipmapCount, CLodVirtualShadowBuildRuntimeResolutionConfig().maxAllocationRequests};
 }
 
 void VirtualShadowMapResolveMarkedBlocksPass::ShutdownPass() {}
 
-void VirtualShadowMapResolveMarkedBlocksPass::Record(const VirtualShadowMapResolveMarkedBlocksBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void VirtualShadowMapResolveMarkedBlocksPass::Record(const VirtualShadowMapResolveMarkedBlocksBindings& bindings,
+    const VirtualShadowMapResolveMarkedBlocksFrame& frame, org::PassRecordContext& recording) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MASK_DESCRIPTOR_INDEX] = recording.Index(bindings.mask);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_LIST_DESCRIPTOR_INDEX] = recording.Index(bindings.list);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_COUNT_DESCRIPTOR_INDEX] = recording.Index(bindings.count);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUESTS_DESCRIPTOR_INDEX] = recording.Index(bindings.requests);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_REQUEST_COUNT_DESCRIPTOR_INDEX] = recording.Index(bindings.requestCount);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] = recording.Index(bindings.pageTable);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = recording.Index(bindings.dirtyFlags);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.pageViewInfo);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_STATS_DESCRIPTOR_INDEX] = recording.Index(bindings.stats);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_ACTIVE_CLIPMAP_COUNT] = frame.activeClipmapCount;
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_CLIPMAP_DATA_DESCRIPTOR_INDEX] = recording.Index(bindings.clipmapData);
+    constants[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MAX_REQUEST_COUNT] = frame.maxAllocationRequests;
+    br::render::DispatchCompute(recording, bindings.pipeline, constants, (CLodVirtualShadowMaxMarkedBlockCount + 63u) / 64u);
 }

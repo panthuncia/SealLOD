@@ -12,13 +12,15 @@
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesPatchRasterBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
     org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
     org::ResourceBindingToken indirectArgs;
@@ -28,8 +30,12 @@ struct ReyesPatchRasterBindings {
     bool enabled = false;
 };
 
+struct ReyesPatchRasterFrame {
+    uint32_t viewRasterInfoTableIndex = 0xFFFFFFFFu;
+};
+
 class ReyesPatchRasterizationPass final : public org::TypedRenderGraphPass<ReyesPatchRasterizationPass,
-    br::render::PreparedComputeIndirect, ReyesPatchRasterBindings>, public org::IDynamicDeclaredResources {
+    ReyesPatchRasterFrame, ReyesPatchRasterBindings>, public org::IDynamicDeclaredResources {
 public:
     ReyesPatchRasterizationPass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -51,10 +57,10 @@ public:
     ReyesPatchRasterBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputeIndirect Prepare(const ReyesPatchRasterBindings&,
+    ReyesPatchRasterFrame Prepare(const ReyesPatchRasterBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesPatchRasterBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
+    static void Record(const ReyesPatchRasterBindings& bindings, const ReyesPatchRasterFrame& frame,
+        org::PassRecordContext& recording);
 
 private:
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;

@@ -44,7 +44,6 @@ public:
         CLodRasterOutputKind outputKind, bool bindVisibility = true);
     void Declare(org::PassBuilder& builder);
     uint32_t Publish(const org::PassPrepareContext& preparation, const org::PreparedTablePublisher& publisher) const;
-    void AppendRowRevision(std::vector<uint64_t>& out) const;
     org::DeclaredTableLayout<CLodViewRasterInfo> Layout() const { return m_layout; }
     std::span<const CLodViewRasterInfo> Rows() const { return m_rows; }
 private:

@@ -1,13 +1,10 @@
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesCreateDispatchArgsPass.h"
 #include "Render/PassBuilders.h"
-#include "Runtime/StateGraph/InvocationRevision.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
-#include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "../shaders/PerPassRootConstants/clodReyesCreateDispatchArgsRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 ReyesCreateDispatchArgsPass::ReyesCreateDispatchArgsPass(
     std::shared_ptr<org::Buffer> sourceCounterBuffer,
@@ -32,7 +29,7 @@ ReyesCreateDispatchArgsPass::ReyesCreateDispatchArgsPass(
 ReyesCreateDispatchArgsBindings ReyesCreateDispatchArgsPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    ReyesCreateDispatchArgsBindings bindings{builder.ShaderResource(m_sourceCounterBuffer),
+    ReyesCreateDispatchArgsBindings bindings{m_pso, builder.ShaderResource(m_sourceCounterBuffer),
         builder.UnorderedAccess(m_indirectArgsBuffer)};
     if (m_sourceBaseCounterBuffer) {
         bindings.sourceBaseCounter = builder.ShaderResource(m_sourceBaseCounterBuffer);
@@ -60,35 +57,14 @@ void ReyesCreateDispatchArgsPass::ShutdownPass()
 {
 }
 
-br::render::PreparedComputeDispatch ReyesCreateDispatchArgsPass::Prepare(
-    const ReyesCreateDispatchArgsBindings& bindings, const org::PassPrepareContext& preparation) const
-{
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    auto payload = m_pso.GetPayload();
-    br::render::PreparedComputeDispatch data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    auto program = preparation.CaptureProgramBinding(std::move(payload));
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_SOURCE_COUNTER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.sourceCounter).index;
-    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_OUTPUT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.indirectArgs).index;
-    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_THREADS_PER_GROUP] = bindings.threadsPerGroup;
-    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_SOURCE_BASE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasSourceBaseCounter
-        ? preparation.Resolve(bindings.sourceBaseCounter).index : 0xFFFFFFFFu;
-    data.constants[CLOD_REYES_CREATE_DISPATCH_ARGS_MAX_WORK_ITEM_COUNT] = bindings.maxWorkItemCount;
-    data.groupsX = 1;
-    return data;
-}
-
-void ReyesCreateDispatchArgsPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
-    br::render::AppendFrameHeapRevision(preparation, out);
-    out.push_back(br::render::PipelineRevision(m_pso));
-    out.push_back(static_cast<uint64_t>(br::render::HandleRevision(PSOManager::GetInstance().GetComputeRootSignature().GetHandle())));
-}
-
-void ReyesCreateDispatchArgsPass::Record(const ReyesCreateDispatchArgsBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void ReyesCreateDispatchArgsPass::Record(const ReyesCreateDispatchArgsBindings& bindings,
+    org::PassRecordContext& recording) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_REYES_CREATE_DISPATCH_ARGS_SOURCE_COUNTER_DESCRIPTOR_INDEX] = recording.Index(bindings.sourceCounter);
+    constants[CLOD_REYES_CREATE_DISPATCH_ARGS_OUTPUT_DESCRIPTOR_INDEX] = recording.Index(bindings.indirectArgs);
+    constants[CLOD_REYES_CREATE_DISPATCH_ARGS_THREADS_PER_GROUP] = bindings.threadsPerGroup;
+    constants[CLOD_REYES_CREATE_DISPATCH_ARGS_SOURCE_BASE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasSourceBaseCounter
+        ? recording.Index(bindings.sourceBaseCounter) : 0xFFFFFFFFu;
+    constants[CLOD_REYES_CREATE_DISPATCH_ARGS_MAX_WORK_ITEM_COUNT] = bindings.maxWorkItemCount;
+    br::render::DispatchCompute(recording, bindings.pipeline, constants, 1);
 }

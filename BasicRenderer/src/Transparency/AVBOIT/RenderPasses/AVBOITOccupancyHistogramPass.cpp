@@ -33,7 +33,7 @@ AVBOITOccupancyHistogramPass::AVBOITOccupancyHistogramPass(
 AVBOITOccupancyHistogramBindings AVBOITOccupancyHistogramPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {
+    return {m_pso, 
         builder.ShaderResource(m_configBuffer),
         builder.UnorderedAccess(m_occupancyTexture),
         builder.UnorderedAccess(m_occupancySliceMaskTexture),
@@ -56,28 +56,12 @@ void AVBOITOccupancyHistogramPass::Update(const org::UpdateExecutionContext& exe
         0);
 }
 
-br::render::PreparedComputeDispatch AVBOITOccupancyHistogramPass::Prepare(
+AVBOITOccupancyHistogramFrame AVBOITOccupancyHistogramPass::Prepare(
     const AVBOITOccupancyHistogramBindings& bindings,
     const org::PassPrepareContext& preparation) const {
-    br::render::PreparedComputeDispatch data{};
     if (!m_configBuffer || !m_occupancyTexture || !m_occupancySliceMaskTexture || !m_occupancyHistogramBuffer) {
         return {};
     }
-
-    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
-    auto& context = *renderContext;
-
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-
-    auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_OCCUPANCY_HISTOGRAM_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.config).index;
-    misc[CLOD_AVBOIT_VBOIT_OCCUPANCY_HISTOGRAM_BUFFER_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.histogram).index;
 
     const auto& occupancy = preparation.Describe(bindings.occupancy);
     const uint32_t groupCountX = (occupancy.texture.width + 7u) / 8u;
@@ -86,11 +70,13 @@ br::render::PreparedComputeDispatch AVBOITOccupancyHistogramPass::Prepare(
         return {};
     }
 
-    data.groupsX = groupCountX; data.groupsY = groupCountY; data.groupsZ = 1u;
-    return data;
+    return {groupCountX, groupCountY};
 }
 
-void AVBOITOccupancyHistogramPass::Record(const AVBOITOccupancyHistogramBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void AVBOITOccupancyHistogramPass::Record(const AVBOITOccupancyHistogramBindings& bindings, const AVBOITOccupancyHistogramFrame& frame, org::PassRecordContext& context) {
+    if (!frame.groupsX || !frame.groupsY) return;
+    br::render::MiscConstants constants{};
+    constants[CLOD_AVBOIT_VBOIT_OCCUPANCY_HISTOGRAM_CONFIG_DESCRIPTOR_INDEX] = context.Index(bindings.config);
+    constants[CLOD_AVBOIT_VBOIT_OCCUPANCY_HISTOGRAM_BUFFER_DESCRIPTOR_INDEX] = context.Index(bindings.histogram);
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
 }

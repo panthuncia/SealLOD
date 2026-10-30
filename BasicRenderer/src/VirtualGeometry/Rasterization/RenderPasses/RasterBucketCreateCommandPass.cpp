@@ -8,7 +8,6 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
 #include "../shaders/PerPassRootConstants/clodCreateCommandRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 RasterBucketCreateCommandPass::RasterBucketCreateCommandPass(
     std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
@@ -34,47 +33,36 @@ RasterBucketCreateCommandPass::RasterBucketCreateCommandPass(
 }
 
 RasterBucketCreateCommandBindings RasterBucketCreateCommandPass::Declare(org::PassBuilder& builder) {
-    RasterBucketCreateCommandBindings bindings{builder.ShaderResource(m_visibleClustersCounterBuffer),
+    RasterBucketCreateCommandBindings bindings{m_pso, builder.ShaderResource(m_visibleClustersCounterBuffer),
         builder.UnorderedAccess(m_histogramIndirectCommand)};
     if (m_patchReplayNodeInputs) {
         bindings.replayState = builder.ShaderResource(m_occlusionReplayStateBuffer);
         bindings.nodeInputs = builder.UnorderedAccess(m_occlusionNodeGpuInputsBuffer);
     }
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    bindings.numBuckets = m_numBuckets;
     bindings.visibleCapacity = m_visibleClustersCapacity;
-    bindings.enabled = m_enabled;
     bindings.patchReplay = m_patchReplayNodeInputs;
     return bindings;
 }
 
-
-br::render::PreparedComputeDispatch RasterBucketCreateCommandPass::Prepare(
-    const RasterBucketCreateCommandBindings& bindings, const org::PassPrepareContext& preparation) const {
+RasterBucketCreateCommandFrame RasterBucketCreateCommandPass::Prepare(
+    const RasterBucketCreateCommandBindings&, const org::PassPrepareContext& preparation) const {
     const auto* context = preparation.preparationData->Get<UpdateContext>();
-    const uint32_t numBuckets = context->preparedRasterBucketCount;
     const bool enabled = !m_runWhenComputeSWRasterEnabledOnly ||
         CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)());
-    br::render::PreparedComputeDispatch data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    data.program = preparation.CaptureProgram(m_pso);
-    data.descriptorIndices = CaptureResourceDescriptorIndices(m_pso.GetResourceDescriptorSlots());
-    data.constants[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.visibleCount).index;
-    data.constants[CLOD_CREATE_RASTER_BUCKET_HISTOGRAM_COMMAND_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.indirectCommand).index;
-    data.constants[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = bindings.patchReplay ? preparation.Resolve(bindings.replayState).index : 0xFFFFFFFFu;
-    data.constants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = bindings.patchReplay ? preparation.Resolve(bindings.nodeInputs).index : 0xFFFFFFFFu;
-    data.constants[CLOD_CREATE_NUM_RASTER_BUCKETS] = numBuckets;
-    data.constants[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = bindings.visibleCapacity;
-    data.groupsX = enabled ? 1u : 0u;
-    return data;
+    return {context->preparedRasterBucketCount, enabled ? 1u : 0u};
 }
 
-void RasterBucketCreateCommandPass::Update(const org::UpdateExecutionContext& executionContext) {
-    const auto* context = executionContext.hostData->Get<UpdateContext>();
-    m_numBuckets = context->preparedRasterBucketCount;
-    m_enabled = !m_runWhenComputeSWRasterEnabledOnly ||
-        CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)());
+void RasterBucketCreateCommandPass::Record(const RasterBucketCreateCommandBindings& bindings,
+    const RasterBucketCreateCommandFrame& frame, org::PassRecordContext& context) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = context.Index(bindings.visibleCount);
+    constants[CLOD_CREATE_RASTER_BUCKET_HISTOGRAM_COMMAND_DESCRIPTOR_INDEX] = context.Index(bindings.indirectCommand);
+    constants[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] =
+        bindings.patchReplay ? context.Index(bindings.replayState) : 0xFFFFFFFFu;
+    constants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] =
+        bindings.patchReplay ? context.Index(bindings.nodeInputs) : 0xFFFFFFFFu;
+    constants[CLOD_CREATE_NUM_RASTER_BUCKETS] = frame.numBuckets;
+    constants[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = bindings.visibleCapacity;
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groups);
 }
-

@@ -6,14 +6,20 @@
 #include "Resources/PixelBuffer.h"
 #include "ThirdParty/XeGTAO.h"
 #include "Render/Runtime/IDescriptorService.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
+struct GTAOMainFrame {
+    uint32_t noiseIndex = 0;
+    uint32_t groupsX = 0, groupsY = 0;
+};
 struct GTAOMainBindings {
+    org::PipelineState pipeline;
+    uint32_t samplerIndex = 0;
     org::DeclaredViewToken workingDepths, normals, workingAO, workingEdges;
 };
 
 class GTAOMainPass : public org::TypedRenderGraphPass<GTAOMainPass,
-    br::render::PreparedComputeDispatch, GTAOMainBindings> {
+    GTAOMainFrame, GTAOMainBindings> {
 public:
     GTAOMainPass() {
         CreatePointClampSampler();
@@ -26,6 +32,8 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return {
+            GTAOHighPSO,
+            m_samplerIndex,
             builder.ShaderResource(Builtin::GTAO::WorkingDepths),
             builder.ShaderResource(Builtin::Surface::NormalRoughness),
             builder.UnorderedAccess(Builtin::GTAO::WorkingAOTerm1),
@@ -38,29 +46,26 @@ public:
 
 
 
-    br::render::PreparedComputeDispatch Prepare(const GTAOMainBindings& bindings,
+    GTAOMainFrame Prepare(const GTAOMainBindings&,
         const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        auto payload = GTAOHighPSO.GetPayload(); br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(std::move(payload));
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-
-        data.constants[UintRootConstant0] = static_cast<uint32_t>(context->frameNumber % 64);
-        data.constants[UintRootConstant1] = m_samplerIndex;
-        data.constants[UintRootConstant2] = preparation.Resolve(bindings.workingDepths).index;
-        data.constants[UintRootConstant3] = preparation.Resolve(bindings.normals).index;
-        data.constants[UintRootConstant4] = preparation.Resolve(bindings.workingAO).index;
-        data.constants[UintRootConstant5] = preparation.Resolve(bindings.workingEdges).index;
-        data.groupsX = (context->renderResolution.x + XE_GTAO_NUMTHREADS_X - 1u) / XE_GTAO_NUMTHREADS_X;
-        data.groupsY = (context->renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1u) / XE_GTAO_NUMTHREADS_Y;
-        return data;
+        GTAOMainFrame frame{};
+        frame.noiseIndex = static_cast<uint32_t>(context->frameNumber % 64);
+        frame.groupsX = (context->renderResolution.x + XE_GTAO_NUMTHREADS_X - 1u) / XE_GTAO_NUMTHREADS_X;
+        frame.groupsY = (context->renderResolution.y + XE_GTAO_NUMTHREADS_Y - 1u) / XE_GTAO_NUMTHREADS_Y;
+        return frame;
     }
 
-    static void Record(const GTAOMainBindings&, const br::render::PreparedComputeDispatch& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const GTAOMainBindings& bindings, const GTAOMainFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[UintRootConstant0] = frame.noiseIndex;
+        constants[UintRootConstant1] = bindings.samplerIndex;
+        constants[UintRootConstant2] = context.Index(bindings.workingDepths);
+        constants[UintRootConstant3] = context.Index(bindings.normals);
+        constants[UintRootConstant4] = context.Index(bindings.workingAO);
+        constants[UintRootConstant5] = context.Index(bindings.workingEdges);
+        br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
     }
 
     void ShutdownPass() {

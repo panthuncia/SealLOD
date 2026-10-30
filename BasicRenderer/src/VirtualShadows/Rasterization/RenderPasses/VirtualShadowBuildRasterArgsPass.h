@@ -9,17 +9,21 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "../shaders/PerPassRootConstants/clodVirtualShadowBuildArgsRootConstants.h"
 
 namespace org { class Buffer; }
 
 struct VirtualShadowBuildRasterArgsBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken histogram, offsets, arguments;
+};
+struct VirtualShadowBuildRasterArgsFrame {
+    uint32_t numBuckets = 0;
 };
 
 class VirtualShadowBuildRasterArgsPass : public org::TypedRenderGraphPass<VirtualShadowBuildRasterArgsPass,
-    br::render::PreparedComputeDispatch, VirtualShadowBuildRasterArgsBindings> {
+    VirtualShadowBuildRasterArgsFrame, VirtualShadowBuildRasterArgsBindings> {
 public:
     VirtualShadowBuildRasterArgsPass(
         std::shared_ptr<org::Buffer> histogramBuffer,
@@ -42,7 +46,7 @@ public:
     VirtualShadowBuildRasterArgsBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         declaration.ConstantBuffer(Builtin::PerFrameBuffer);
-        return {declaration.ShaderResource(m_histogramBuffer),
+        return {m_pso, declaration.ShaderResource(m_histogramBuffer),
             declaration.ShaderResource(m_offsetsBuffer),
             declaration.UnorderedAccess(m_indirectArgsBuffer)};
     }
@@ -62,7 +66,7 @@ public:
         }
     }
 
-    br::render::PreparedComputeDispatch Prepare(const VirtualShadowBuildRasterArgsBindings& bindings,
+    VirtualShadowBuildRasterArgsFrame Prepare(const VirtualShadowBuildRasterArgsBindings&,
         const org::PassPrepareContext& preparation) const {
 
         if (m_runWhenComputeSWRasterEnabledOnly &&
@@ -70,26 +74,18 @@ public:
             return {};
         }
 
-        const auto& context = *preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedComputeDispatch data{};
-        const uint32_t numBuckets = context.preparedRasterBucketCount;
-        if (numBuckets == 0u) return {};
-        data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-        auto program = preparation.CaptureProgramBinding(m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        data.constants[CLOD_VSM_BUILD_ARGS_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.histogram).index;
-        data.constants[CLOD_VSM_BUILD_ARGS_OFFSETS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.offsets).index;
-        data.constants[CLOD_VSM_BUILD_ARGS_INDIRECT_ARGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.arguments).index;
-        data.constants[CLOD_VSM_BUILD_ARGS_NUM_BUCKETS] = numBuckets;
-        data.groupsX = (numBuckets + 63u) / 64u;
-        return data;
+        return {preparation.preparationData->Get<UpdateContext>()->preparedRasterBucketCount};
     }
 
-    static void Record(const VirtualShadowBuildRasterArgsBindings&,
-        const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    // Zero buckets (or a skipped frame) dispatches nothing.
+    static void Record(const VirtualShadowBuildRasterArgsBindings& bindings,
+        const VirtualShadowBuildRasterArgsFrame& frame, org::PassRecordContext& recording) {
+        br::render::MiscConstants constants{};
+        constants[CLOD_VSM_BUILD_ARGS_HISTOGRAM_DESCRIPTOR_INDEX] = recording.Index(bindings.histogram);
+        constants[CLOD_VSM_BUILD_ARGS_OFFSETS_DESCRIPTOR_INDEX] = recording.Index(bindings.offsets);
+        constants[CLOD_VSM_BUILD_ARGS_INDIRECT_ARGS_DESCRIPTOR_INDEX] = recording.Index(bindings.arguments);
+        constants[CLOD_VSM_BUILD_ARGS_NUM_BUCKETS] = frame.numBuckets;
+        br::render::DispatchCompute(recording, bindings.pipeline, constants, (frame.numBuckets + 63u) / 64u);
     }
 
 private:

@@ -40,6 +40,7 @@ AVBOITIntegrateBindings AVBOITIntegratePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     AVBOITIntegrateBindings bindings{
+        m_pso,
         builder.ShaderResource(m_configBuffer),
         builder.ShaderResource(m_fitStateBuffer),
         builder.UnorderedAccess(m_occupancyTexture) };
@@ -68,38 +69,24 @@ bool AVBOITIntegratePass::DeclaredResourcesChanged() const
     return m_declaredResourcesChanged;
 }
 
-br::render::PreparedComputeDispatch AVBOITIntegratePass::Prepare(
+AVBOITIntegrateFrame AVBOITIntegratePass::Prepare(
     const AVBOITIntegrateBindings& bindings, const org::PassPrepareContext& preparation) const {
-    br::render::PreparedComputeDispatch data{};
     if (!m_configBuffer || !m_fitStateBuffer || !m_occupancyTexture || !m_coverageTexture ||
         !m_occupancySliceMaskTexture || !m_scalarExtinctionTexture || !m_chromaticExtinctionTexture ||
         !m_zeroTransmittanceSliceTexture) {
         return {};
     }
 
-    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
-    auto& context = *renderContext;
-
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-
-    auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_INTEGRATE_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.config).index;
-    misc[CLOD_AVBOIT_VBOIT_INTEGRATE_FIT_STATE_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.state).index;
-
     const auto& occupancy = preparation.Describe(bindings.occupancy);
     const uint32_t groupCountX = (occupancy.texture.width + 7u) / 8u;
     const uint32_t groupCountY = (occupancy.texture.height + 7u) / 8u;
-    data.groupsX = groupCountX; data.groupsY = groupCountY; data.groupsZ = 1u;
-    return data;
+    return {groupCountX, groupCountY};
 }
 
-void AVBOITIntegratePass::Record(const AVBOITIntegrateBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void AVBOITIntegratePass::Record(const AVBOITIntegrateBindings& bindings, const AVBOITIntegrateFrame& frame, org::PassRecordContext& context) {
+    if (!frame.groupsX || !frame.groupsY) return;
+    br::render::MiscConstants constants{};
+    constants[CLOD_AVBOIT_VBOIT_INTEGRATE_CONFIG_DESCRIPTOR_INDEX] = context.Index(bindings.config);
+    constants[CLOD_AVBOIT_VBOIT_INTEGRATE_FIT_STATE_DESCRIPTOR_INDEX] = context.Index(bindings.state);
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
 }

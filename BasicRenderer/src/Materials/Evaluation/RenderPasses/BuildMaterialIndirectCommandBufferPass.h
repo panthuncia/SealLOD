@@ -4,12 +4,20 @@
 #include "Pipeline/PipelineState/CommandSignatureManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Materials/Publication/MaterialStateArtifacts.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
+
+struct BuildMaterialIndirectCommandBufferBindings {
+    org::PipelineState pipeline;
+};
+struct BuildMaterialIndirectCommandBufferFrame {
+    uint32_t slotsUsed = 0;
+};
 
 // Runs after histogram + prefix sum + pixel list build.
 // Fills a single indirect arguments buffer with one entry per material.
 // Each entry encodes 4 root constants and a 2D dispatch sized to process all pixels of that material.
-class BuildMaterialIndirectCommandBufferPass : public org::TypedRenderGraphPass<BuildMaterialIndirectCommandBufferPass, org::EmptyPassFrameData, org::LegacyPassBindings, br::render::PreparedComputeDispatch> {
+class BuildMaterialIndirectCommandBufferPass : public org::TypedRenderGraphPass<BuildMaterialIndirectCommandBufferPass,
+    BuildMaterialIndirectCommandBufferFrame, BuildMaterialIndirectCommandBufferBindings> {
 public:
     BuildMaterialIndirectCommandBufferPass() {
         // Build PSO for the args builder kernel
@@ -21,46 +29,33 @@ public:
             "VisUtil_BuildEvaluateIndirectArgsPSO");
     }
 
-    void Declare(org::PassBuilder& b) {
+    BuildMaterialIndirectCommandBufferBindings Declare(org::PassBuilder& b) {
         b.ShaderResource(
             "Builtin::VisUtil::MaterialPixelCountBuffer",
             "Builtin::VisUtil::MaterialOffsetBuffer");
         b.UnorderedAccess("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
 		b.ConstantBuffer(Builtin::PerFrameBuffer);
         b.PreferQueue(org::QueueKind::Compute);
+        return {m_pso};
     }
 
-    br::render::PreparedComputeDispatch BuildRecipe(const org::PassPrepareContext& preparation) const {
+    BuildMaterialIndirectCommandBufferFrame Prepare(const BuildMaterialIndirectCommandBufferBindings&,
+        const org::PassPrepareContext& preparation) const {
         const auto* update = preparation.preparationData->Get<UpdateContext>();
         const auto* render = preparation.preparationData->Get<RenderContext>();
         if (!update && !render) throw std::logic_error("BuildMaterialIndirectCommandBufferPass requires frame context");
-        br::render::PreparedComputeDispatch data{};
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-        auto program = CaptureProgramBinding(preparation, m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
         const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
         const auto materialState = published
             ? published->materials.payload.Get<br::render::PublishedMaterialState>()
             : nullptr;
-        data.constants[0] = materialState ? materialState->compileFlagSlotsUsed : 0u;
-        data.groupsX = (data.constants[0] + 63u) / 64u;
-        return data;
+        return {materialState ? materialState->compileFlagSlotsUsed : 0u};
     }
 
-    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const {
-        const auto* update = preparation.preparationData->Get<UpdateContext>();
-        const auto* render = preparation.preparationData->Get<RenderContext>();
-        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
-        const auto resolution = update ? update->renderResolution : render->renderResolution;
-        return {reinterpret_cast<uintptr_t>(m_pso.PeekPayload()),
-            published ? published->materials.revision : 0u, resolution.x, resolution.y};
-    }
-    org::EmptyPassFrameData PrepareInvocation(const br::render::PreparedComputeDispatch&,
-        const org::PassPrepareContext&) const { return {}; }
-    static void Record(const br::render::PreparedComputeDispatch& data, const org::EmptyPassFrameData&,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const BuildMaterialIndirectCommandBufferBindings& bindings,
+        const BuildMaterialIndirectCommandBufferFrame& frame, org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[0] = frame.slotsUsed;
+        br::render::DispatchCompute(context, bindings.pipeline, constants, (frame.slotsUsed + 63u) / 64u);
     }
 
 private:

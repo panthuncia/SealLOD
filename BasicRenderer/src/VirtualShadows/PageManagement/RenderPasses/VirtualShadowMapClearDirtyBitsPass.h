@@ -6,19 +6,24 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapClearDirtyBitsBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken pageTable;
     org::DeclaredViewToken dirtyFlags;
     org::DeclaredViewToken stats;
 };
 
+struct VirtualShadowMapClearDirtyBitsFrame {
+    uint32_t pageTableResolution = 0;
+};
+
 class VirtualShadowMapClearDirtyBitsPass final : public org::TypedRenderGraphPass<VirtualShadowMapClearDirtyBitsPass,
-    br::render::PreparedComputeDispatch, VirtualShadowMapClearDirtyBitsBindings> {
+    VirtualShadowMapClearDirtyBitsFrame, VirtualShadowMapClearDirtyBitsBindings> {
 public:
     VirtualShadowMapClearDirtyBitsPass(
         std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -30,10 +35,10 @@ public:
 
     VirtualShadowMapClearDirtyBitsBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapClearDirtyBitsBindings&,
+    VirtualShadowMapClearDirtyBitsFrame Prepare(const VirtualShadowMapClearDirtyBitsBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapClearDirtyBitsBindings&,
-        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+        const VirtualShadowMapClearDirtyBitsFrame&, org::PassRecordContext&);
     void ShutdownPass();
 
 private:

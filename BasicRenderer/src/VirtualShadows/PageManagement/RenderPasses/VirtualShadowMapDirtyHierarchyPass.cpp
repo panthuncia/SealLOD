@@ -9,7 +9,6 @@
 #include "Resources/Buffers/Buffer.h"
 #include "BasicRenderer/Assets/Texture.h"
 #include "../shaders/PerPassRootConstants/clodVirtualShadowDirtyHierarchyRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 VirtualShadowMapDirtyHierarchyPass::VirtualShadowMapDirtyHierarchyPass(
     std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -36,39 +35,37 @@ VirtualShadowMapDirtyHierarchyBindings VirtualShadowMapDirtyHierarchyPass::Decla
         mipViews.push_back({static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull), mip});
     auto hierarchy = builder.UnorderedAccess(Subresources(m_dirtyHierarchyTexture, org::FromMip{0}), std::span<const org::UavView>{mipViews});
     return {
+        m_pso,
         builder.ShaderResource(Subresources(m_pageTableTexture, org::Mip{0, 1}), {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),
         std::move(hierarchy.views),
         builder.ShaderResource(m_clipmapInfoBuffer)};
 }
 
-br::render::PreparedComputeDispatchSequence VirtualShadowMapDirtyHierarchyPass::Prepare(
-    const VirtualShadowMapDirtyHierarchyBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-    br::render::PreparedComputeDispatchSequence data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    const uint32_t mipCount = static_cast<uint32_t>(bindings.hierarchy.size()); data.steps.reserve(mipCount);
-    for (uint32_t mip = 0; mip < mipCount; ++mip) {
-        const bool pageTable = mip == 0; const uint32_t src = pageTable ? config.pageTableResolution : (std::max)(config.pageTableResolution >> (mip - 1u), 1u);
-        const uint32_t dst = pageTable ? src : (src > 1u ? src >> 1u : 1u); br::render::PreparedComputeDispatchSequence::Step step{};
-        step.uavBarrierBefore = !pageTable;
-        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_DESCRIPTOR_INDEX] = pageTable
-            ? preparation.Resolve(bindings.pageTable).index
-            : preparation.Resolve(bindings.hierarchy[mip - 1u]).index;
-        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_DEST_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.hierarchy[mip]).index;
-        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_IS_PAGE_TABLE] = pageTable ? 1u : 0u;
-        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_RESOLUTION] = src;
-        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
-        step.constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_INFO_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.clipmapInfo).index;
-        step.groupsX = (dst + 7u) / 8u; step.groupsY = step.groupsX; step.groupsZ = CLodVirtualShadowMaxSupportedClipmapCount; data.steps.push_back(std::move(step));
-    }
-    return data;
+VirtualShadowMapDirtyHierarchyFrame VirtualShadowMapDirtyHierarchyPass::Prepare(
+    const VirtualShadowMapDirtyHierarchyBindings&, const org::PassPrepareContext&) const {
+    return {CLodVirtualShadowBuildRuntimeResolutionConfig().pageTableResolution};
 }
 
-void VirtualShadowMapDirtyHierarchyPass::Record(const VirtualShadowMapDirtyHierarchyBindings&,
-    const br::render::PreparedComputeDispatchSequence& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatchSequence(data, recording);
+void VirtualShadowMapDirtyHierarchyPass::Record(const VirtualShadowMapDirtyHierarchyBindings& bindings,
+    const VirtualShadowMapDirtyHierarchyFrame& frame, org::PassRecordContext& recording) {
+    const uint32_t mipCount = static_cast<uint32_t>(bindings.hierarchy.size());
+    if (mipCount == 0) return;
+    recording.BindComputePipeline(bindings.pipeline);
+    for (uint32_t mip = 0; mip < mipCount; ++mip) {
+        const bool pageTable = mip == 0; const uint32_t src = pageTable ? frame.pageTableResolution : (std::max)(frame.pageTableResolution >> (mip - 1u), 1u);
+        const uint32_t dst = pageTable ? src : (src > 1u ? src >> 1u : 1u);
+        if (!pageTable) recording.UavBarrier();
+        br::render::MiscConstants constants{};
+        constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_DESCRIPTOR_INDEX] = pageTable
+            ? recording.Index(bindings.pageTable)
+            : recording.Index(bindings.hierarchy[mip - 1u]);
+        constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_DEST_DESCRIPTOR_INDEX] = recording.Index(bindings.hierarchy[mip]);
+        constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_IS_PAGE_TABLE] = pageTable ? 1u : 0u;
+        constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_RESOLUTION] = src;
+        constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+        constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.clipmapInfo);
+        br::render::PushMiscConstants(recording, constants);
+        const uint32_t groups = (dst + 7u) / 8u;
+        recording.Commands().Dispatch(groups, groups, CLodVirtualShadowMaxSupportedClipmapCount);
+    }
 }

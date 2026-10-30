@@ -578,8 +578,7 @@ target_link_libraries(BasicRendererHeaders INTERFACE ORGModuleServices::AsyncPri
 target_link_libraries(${PROJECT_NAME} PUBLIC BasicRendererHeaders)
 target_sources(${PROJECT_NAME} PRIVATE
     "src/Runtime/Publication/PersistentRendererPublication.h"
-    "src/Runtime/Publication/PersistentRendererPublication.cpp"
-    "src/Materials/Evaluation/RenderPasses/PersistentMaterialEvaluationPass.h")
+    "src/Runtime/Publication/PersistentRendererPublication.cpp")
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
 foreach(_basicrenderer_api_category IN ITEMS
     Runtime Scene Assets Streaming Pipeline Extensions Diagnostics)
@@ -598,13 +597,7 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Assets_TextureResidency.cpp"
     "tests/PublicHeaders/Extensions_Input_InputAction.cpp"
     "tests/PublicHeaders/Extensions_Input_InputContext.cpp"
-    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedComputeBarrier.cpp"
-    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedComputeCommands.cpp"
-    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedComputeDispatch.cpp"
-    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedEnvironmentDispatch.cpp"
-    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedFullscreenDraw.cpp"
-    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedRenderIndirect.cpp"
-    "tests/PublicHeaders/Extensions_PreparedRenderGraph_PreparedResourceClears.cpp"
+    "tests/PublicHeaders/Extensions_RecordHelpers.cpp"
     "tests/PublicHeaders/Scene_RendererComponents.cpp"
     "tests/PublicHeaders/Pipeline_PipelineKind.cpp"
     "tests/PublicHeaders/Assets_CachePaths.cpp"

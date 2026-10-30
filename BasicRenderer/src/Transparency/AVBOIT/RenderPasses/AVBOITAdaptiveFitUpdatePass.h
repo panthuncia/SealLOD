@@ -3,12 +3,18 @@
 #include <memory>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
-struct AVBOITAdaptiveFitUpdateBindings { org::DeclaredViewToken config, histogram, state; };
-class AVBOITAdaptiveFitUpdatePass final : public org::TypedRenderGraphPass<AVBOITAdaptiveFitUpdatePass, br::render::PreparedComputeDispatch, AVBOITAdaptiveFitUpdateBindings> {
+struct AVBOITAdaptiveFitUpdateBindings {
+    org::PipelineState pipeline;
+    org::DeclaredViewToken config, histogram, state;
+};
+struct AVBOITAdaptiveFitUpdateFrame {
+    uint32_t groupsX = 0, groupsY = 1;
+};
+class AVBOITAdaptiveFitUpdatePass final : public org::TypedRenderGraphPass<AVBOITAdaptiveFitUpdatePass, AVBOITAdaptiveFitUpdateFrame, AVBOITAdaptiveFitUpdateBindings> {
 public:
     AVBOITAdaptiveFitUpdatePass(
         std::shared_ptr<org::Buffer> configBuffer,
@@ -16,8 +22,8 @@ public:
         std::shared_ptr<org::Buffer> fitStateBuffer);
 
     AVBOITAdaptiveFitUpdateBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputeDispatch Prepare(const AVBOITAdaptiveFitUpdateBindings&, const org::PassPrepareContext&) const;
-    static void Record(const AVBOITAdaptiveFitUpdateBindings&, const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    AVBOITAdaptiveFitUpdateFrame Prepare(const AVBOITAdaptiveFitUpdateBindings&, const org::PassPrepareContext&) const;
+    static void Record(const AVBOITAdaptiveFitUpdateBindings&, const AVBOITAdaptiveFitUpdateFrame&, org::PassRecordContext&);
 
 private:
     std::shared_ptr<org::Buffer> m_configBuffer;

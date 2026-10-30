@@ -9,24 +9,21 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
-#include "BasicRenderer/Extensions/ShaderBuffers.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "../shaders/PerPassRootConstants/clodRayTracingSetupRootConstants.h"
 
 struct RayTracedReflectionsFrameData {
     std::shared_ptr<br::render::CLodRayTracingSystem> service;
+    // The ray-tracing service records through the device it was built on.
+    rhi::Device device;
     std::shared_ptr<org::PixelBuffer> output;
     std::shared_ptr<org::Buffer> pageSources, buildInfos, clasData, clasAddresses;
     std::shared_ptr<org::Buffer> blasData, blasAddresses, tlasInstances;
-    org::PreparedProgramBinding setup{}, tlasSetup{};
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
     uint32_t pageSourceCount = 0, buildClusterCapacity = 0;
-    uint32_t pageSourcesSRV = 0, buildInfosUAV = 0;
-    uint32_t blasAddressesSRV = 0, tlasInstancesUAV = 0;
-    uint32_t outputUAV = 0;
-    org::PreparedDescriptorReference outputCpuUAV{}, outputShaderUAV{};
 };
 
 struct RayTracedReflectionsBindings {
+    org::PipelineState setupPipeline, tlasSetupPipeline;
     org::DeclaredViewToken outputShader, outputCpu, pageSources, buildInfos;
     org::DeclaredViewToken blasAddressesSrv, tlasInstances;
     bool hasServiceResources = false;
@@ -53,6 +50,8 @@ public:
             Builtin::Surface::SpecularAo, Builtin::CameraBuffer,
             Builtin::Environment::CurrentPrefilteredCubemap);
         RayTracedReflectionsBindings bindings{};
+        bindings.setupPipeline = m_setupPso;
+        bindings.tlasSetupPipeline = m_tlasSetupPso;
         const auto output = builder.UnorderedAccessClear(Builtin::PostProcessing::ScreenSpaceReflections);
         bindings.outputShader = output.View(0);
         bindings.outputCpu = output.View(1);
@@ -125,19 +124,9 @@ public:
         frame.clasData = m_clasData; frame.clasAddresses = m_clasAddresses;
         frame.blasData = m_blasData; frame.blasAddresses = m_blasAddresses;
         frame.tlasInstances = m_tlasInstances;
-        frame.setup = preparation.CaptureProgramBinding(m_setupPso);
-        frame.tlasSetup = preparation.CaptureProgramBinding(m_tlasSetupPso);
-        frame.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        frame.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+        frame.device = DeviceManager::GetInstance().GetDevice();
         frame.pageSourceCount = service->GetGpuPageSourceCount();
         frame.buildClusterCapacity = service->GetStats().buildableClusters;
-        frame.pageSourcesSRV = preparation.Resolve(bindings.pageSources).index;
-        frame.buildInfosUAV = preparation.Resolve(bindings.buildInfos).index;
-        if (frame.blasAddresses) frame.blasAddressesSRV = preparation.Resolve(bindings.blasAddressesSrv).index;
-        if (frame.tlasInstances) frame.tlasInstancesUAV = preparation.Resolve(bindings.tlasInstances).index;
-        frame.outputCpuUAV = preparation.Capture(bindings.outputCpu);
-        frame.outputShaderUAV = preparation.Capture(bindings.outputShader);
-        frame.outputUAV = preparation.Resolve(bindings.outputShader).index;
         preparation.Retain(frame.output);
         preparation.Retain(frame.pageSources); preparation.Retain(frame.buildInfos);
         preparation.Retain(frame.clasData); preparation.Retain(frame.clasAddresses);
@@ -146,24 +135,14 @@ public:
         return frame;
     }
 
-    static void Record(const RayTracedReflectionsBindings&,
+    static void Record(const RayTracedReflectionsBindings& bindings,
         const RayTracedReflectionsFrameData& frame,
         org::PassRecordContext& recording) {
         if (!frame.output) return;
         std::unique_lock<std::mutex> serviceLock;
         if (frame.service) serviceLock = std::unique_lock(frame.service->FrameOperationMutex());
         auto& commands = recording.Commands();
-        commands.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
         bool traced = false;
-        auto bind = [&](const org::PreparedProgramBinding& program) {
-            commands.BindLayout(recording.ResolveLayout(program.program));
-            commands.BindPipeline(recording.Resolve(program.program));
-            if (!program.descriptorIndices.empty()) commands.PushConstants(
-                rhi::ShaderStage::Compute, 0,
-                org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-                static_cast<uint32_t>(program.descriptorIndices.size()),
-                program.descriptorIndices.data());
-        };
         auto barrier = [&](const std::shared_ptr<org::Buffer>& buffer,
             rhi::ResourceAccessType before, rhi::ResourceAccessType after,
             rhi::ResourceSyncState beforeSync, rhi::ResourceSyncState afterSync) {
@@ -175,16 +154,15 @@ public:
             rhi::BarrierBatch batch{}; batch.buffers = {&value}; commands.Barriers(batch);
         };
         if (frame.service && frame.pageSources && frame.buildInfos) {
-            bind(frame.setup);
-            uint32_t constants[NumMiscUintRootConstants]{};
+            recording.BindComputePipeline(bindings.setupPipeline);
+            br::render::MiscConstants constants{};
             constants[CLOD_RT_SETUP_PAGE_SOURCES_DESCRIPTOR_INDEX] =
-                frame.pageSourcesSRV;
+                recording.Index(bindings.pageSources);
             constants[CLOD_RT_SETUP_BUILD_INFOS_DESCRIPTOR_INDEX] =
-                frame.buildInfosUAV;
+                recording.Index(bindings.buildInfos);
             constants[CLOD_RT_SETUP_PAGE_SOURCE_COUNT] = frame.pageSourceCount;
             constants[CLOD_RT_SETUP_BUILD_CLUSTER_CAPACITY] = frame.buildClusterCapacity;
-            commands.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex,
-                0, NumMiscUintRootConstants, constants);
+            br::render::PushMiscConstants(recording, constants);
             commands.Dispatch((frame.pageSourceCount + 63u) / 64u, 1u, 1u);
             barrier(frame.buildInfos, rhi::ResourceAccessType::UnorderedAccess,
                 rhi::ResourceAccessType::ShaderResource, rhi::ResourceSyncState::ComputeShading,
@@ -210,14 +188,13 @@ public:
                         rhi::ResourceAccessType::ShaderResource,
                         rhi::ResourceSyncState::BuildRaytracingAccelerationStructure,
                         rhi::ResourceSyncState::ComputeShading);
-                    bind(frame.tlasSetup);
-                    uint32_t tlas[NumMiscUintRootConstants]{};
+                    recording.BindComputePipeline(bindings.tlasSetupPipeline);
+                    br::render::MiscConstants tlas{};
                     tlas[CLOD_RT_SETUP_BLAS_ADDRESSES_DESCRIPTOR_INDEX] =
-                        frame.blasAddressesSRV;
+                        recording.Index(bindings.blasAddressesSrv);
                     tlas[CLOD_RT_SETUP_TLAS_INSTANCES_DESCRIPTOR_INDEX] =
-                        frame.tlasInstancesUAV;
-                    commands.PushConstants(rhi::ShaderStage::Compute, 0,
-                        MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, tlas);
+                        recording.Index(bindings.tlasInstances);
+                    br::render::PushMiscConstants(recording, tlas);
                     commands.Dispatch(1u, 1u, 1u);
                     barrier(frame.tlasInstances, rhi::ResourceAccessType::UnorderedAccess,
                         rhi::ResourceAccessType::RaytracingAccelerationStructureRead,
@@ -225,21 +202,15 @@ public:
                         rhi::ResourceSyncState::BuildRaytracingAccelerationStructure);
                     frame.service->ExecuteTlasBuild(commands);
                     if (frame.service->HasRayTracingPipeline()) {
-                        frame.service->ExecuteTraceRays(DeviceManager::GetInstance().GetDevice(),
-                            commands, *frame.output, frame.outputUAV,
+                        frame.service->ExecuteTraceRays(frame.device,
+                            commands, *frame.output, recording.Index(bindings.outputShader),
                             frame.output->GetWidth(), frame.output->GetHeight());
                         traced = frame.service->GetStats().traceRaysSubmitted;
                     }
                 }
             }
         }
-        if (!traced) {
-            rhi::UavClearInfo clear{};
-            clear.cpuVisible = recording.Resolve(frame.outputCpuUAV);
-            clear.shaderVisible = recording.Resolve(frame.outputShaderUAV);
-            clear.resource = frame.output->GetAPIResource();
-            commands.ClearUavFloat(clear, {});
-        }
+        if (!traced) br::render::ClearUavFloat(recording, bindings.outputShader, bindings.outputCpu, 0.0f);
     }
 
 private:

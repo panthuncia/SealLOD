@@ -2,7 +2,6 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Render/PassBuilders.h"
-#include "Runtime/StateGraph/InvocationRevision.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,7 +23,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Runtime/Detail/MaterialEvaluationBuildInputs.h"
 #include "BasicRenderer/Diagnostics/TerrainRvtTelemetry.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Runtime/GraphIntegration/Resolvers/ECSResourceResolver.h"
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
 #include <BasicRenderer/Extensions/ResourceComponent.h>
@@ -192,23 +191,30 @@ namespace TerrainRvt
         return { DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } };
     }
 
-    inline br::render::PreparedComputeDispatch PrepareDispatch(const org::PassPrepareContext& preparation, const org::PipelineState& pso,
-        uint32_t groupsX, uint32_t groupsY = 1u, uint32_t groupsZ = 1u)
+    struct PipelineBindings {
+        org::PipelineState pipeline;
+    };
+
+    // Dispatch sizes derived from the RVT settings of the frame being prepared.
+    struct DispatchFrame {
+        uint32_t groupsX = 0;
+        uint32_t groupsY = 1;
+    };
+
+    inline DispatchFrame DispatchForItems(uint32_t itemCount, uint32_t threadsPerGroup)
     {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-        auto program = preparation.CaptureProgramBinding(pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        data.groupsX = groupsX; data.groupsY = groupsY; data.groupsZ = groupsZ;
-        return data;
+        const auto dispatch = Dispatch2DForItems(itemCount, threadsPerGroup);
+        return { dispatch.first, dispatch.second };
     }
 }
 
-class TerrainRvtFrameResetPass final : public org::TypedRenderGraphPass<TerrainRvtFrameResetPass, br::render::PreparedComputeDispatch> {
+struct TerrainRvtFrameResetFrame {
+    br::render::MiscConstants constants{};
+    TerrainRvt::DispatchFrame dispatch;
+};
+
+class TerrainRvtFrameResetPass final : public org::TypedRenderGraphPass<TerrainRvtFrameResetPass,
+    TerrainRvtFrameResetFrame, TerrainRvt::PipelineBindings> {
 public:
     TerrainRvtFrameResetPass()
     {
@@ -220,7 +226,7 @@ public:
             "TerrainRvt.FrameReset.PSO");
     }
 
-    void Declare(org::PassBuilder& b)
+    TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.UnorderedAccess(
@@ -235,37 +241,20 @@ public:
             Builtin::Terrain::RvtStats);
         b.ShaderResource(Builtin::CameraBuffer, Builtin::Terrain::Sets);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
+        return { m_pso };
     }
 
-    void InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
-        br::render::AppendFrameHeapRevision(preparation, out);
-        out.push_back(SettingsManager::GetInstance().Revision());
-        out.push_back(br::render::PipelineRevision(m_pso));
-        out.push_back(br::render::HandleRevision(PSOManager::GetInstance().GetComputeRootSignature().GetHandle()));
-    }
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
+    TerrainRvtFrameResetFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
     {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-
-        br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-
-
-        auto program = preparation.CaptureProgramBinding(m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        TerrainRvt::FillInfoRootConstants(data.constants.data());
-        const auto dispatch = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPageTableEntries(), 64u);
-        data.groupsX = dispatch.first;
-        data.groupsY = dispatch.second;
-        return data;
+        TerrainRvtFrameResetFrame frame{};
+        TerrainRvt::FillInfoRootConstants(frame.constants.data());
+        frame.dispatch = TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
+        return frame;
     }
 
-
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const TerrainRvt::PipelineBindings& bindings, const TerrainRvtFrameResetFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::DispatchCompute(context, bindings.pipeline, frame.constants, frame.dispatch.groupsX, frame.dispatch.groupsY);
     }
 
 private:
@@ -273,12 +262,13 @@ private:
 };
 
 struct TerrainRvtMarkVisibilityMaterialPagesBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken visibleClusters, visibleCount;
     uint32_t visibleCapacity = 0;
 };
 
 class TerrainRvtMarkVisibilityMaterialPagesPass final : public org::TypedRenderGraphPass<TerrainRvtMarkVisibilityMaterialPagesPass,
-    br::render::PreparedComputeDispatch, TerrainRvtMarkVisibilityMaterialPagesBindings> {
+    org::EmptyPassFrameData, TerrainRvtMarkVisibilityMaterialPagesBindings> {
 public:
     explicit TerrainRvtMarkVisibilityMaterialPagesPass(const MaterialEvaluationBuildInputs& services)
     {
@@ -298,6 +288,7 @@ public:
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         TerrainRvtMarkVisibilityMaterialPagesBindings bindings{
+            m_pso,
             b.ShaderResource(m_visibleClustersResource).View(),
             b.ShaderResource(m_visibleClustersCounterResource).View(),
             m_visibleClusterCapacity};
@@ -328,35 +319,16 @@ public:
 
     void Initialize() {}
 
-    br::render::PreparedComputeDispatch Prepare(
-        const TerrainRvtMarkVisibilityMaterialPagesBindings& bindings,
-        const org::PassPrepareContext& preparation) const
-    {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-
-        br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-
-
-        auto program = preparation.CaptureProgramBinding(m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        data.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.visibleClusters).index;
-        data.constants[VISBUF_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.visibleCount).index;
-        data.groupsX = (std::max(bindings.visibleCapacity, 1u) + 63u) / 64u;
-        return data;
-    }
-
     void ShutdownPass()
     {
         m_slabResourceGroup.reset();
     }
 
-    static void Record(const TerrainRvtMarkVisibilityMaterialPagesBindings&,
-        const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const TerrainRvtMarkVisibilityMaterialPagesBindings& bindings, org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = context.Index(bindings.visibleClusters);
+        constants[VISBUF_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = context.Index(bindings.visibleCount);
+        br::render::DispatchCompute(context, bindings.pipeline, constants, (std::max(bindings.visibleCapacity, 1u) + 63u) / 64u);
     }
 
 private:
@@ -367,7 +339,12 @@ private:
     uint32_t m_visibleClusterCapacity = 0u;
 };
 
-class TerrainRvtResolveRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtResolveRequestsPass, br::render::PreparedComputePipelineSequence> {
+struct TerrainRvtResolveRequestsBindings {
+    org::PipelineState clear, resolve;
+};
+
+class TerrainRvtResolveRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtResolveRequestsPass,
+    TerrainRvt::DispatchFrame, TerrainRvtResolveRequestsBindings> {
 public:
     TerrainRvtResolveRequestsPass()
     {
@@ -386,7 +363,7 @@ public:
             "TerrainRvt.ResolveRequests.PSO");
     }
 
-    void Declare(org::PassBuilder& b)
+    TerrainRvtResolveRequestsBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(
@@ -401,35 +378,18 @@ public:
                 Builtin::Terrain::RvtGenerationList,
                 Builtin::Terrain::RvtStats);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
+        return { m_clearPso, m_resolvePso };
     }
 
-    br::render::PreparedComputePipelineSequence Prepare(const org::PassPrepareContext& preparation)
+    TerrainRvt::DispatchFrame Prepare(const TerrainRvtResolveRequestsBindings&, const org::PassPrepareContext&) const
     {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedComputePipelineSequence data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-        auto append = [&](org::PipelineState& pso, uint32_t x, uint32_t y) {
-
-            br::render::PreparedComputePipelineSequence::Step step{};
-
-
-            auto program = preparation.CaptureProgramBinding(pso);
-            step.program = program.program;
-            step.descriptorIndices = std::move(program.descriptorIndices);
-            step.groupsX = x; step.groupsY = y;
-            data.steps.push_back(std::move(step));
-        };
-        append(m_clearPso, 1u, 1u);
-        const auto dispatch = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxGeneratedPagesPerFrame(), 64u);
-        append(m_resolvePso, dispatch.first, dispatch.second);
-        return data;
+        return TerrainRvt::DispatchForItems(TerrainRvt::MaxGeneratedPagesPerFrame(), 64u);
     }
 
-
-    static void Record(const br::render::PreparedComputePipelineSequence& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputePipelineSequence(data, recording);
+    static void Record(const TerrainRvtResolveRequestsBindings& bindings, const TerrainRvt::DispatchFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::DispatchCompute(context, bindings.clear, {}, 1u, 1u);
+        br::render::DispatchCompute(context, bindings.resolve, {}, frame.groupsX, frame.groupsY);
     }
 
 private:
@@ -437,7 +397,8 @@ private:
     org::PipelineState m_resolvePso;
 };
 
-class TerrainRvtClearFeedbackRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtClearFeedbackRequestsPass, br::render::PreparedComputeDispatch> {
+class TerrainRvtClearFeedbackRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtClearFeedbackRequestsPass,
+    TerrainRvt::DispatchFrame, TerrainRvt::PipelineBindings> {
 public:
     TerrainRvtClearFeedbackRequestsPass()
     {
@@ -449,32 +410,32 @@ public:
             "TerrainRvt.ClearFeedbackRequests.PSO");
     }
 
-    void Declare(org::PassBuilder& b)
+    TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(Builtin::Terrain::RvtInfo);
         b.UnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtCounters);
+        return { m_pso };
     }
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
+    TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
     {
-        const auto dispatch = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPageTableEntries(), 64u);
-        return TerrainRvt::PrepareDispatch(preparation, m_pso,
-            dispatch.first, dispatch.second);
+        return TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
     }
 
-
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const TerrainRvt::PipelineBindings& bindings, const TerrainRvt::DispatchFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
     }
 
 private:
     org::PipelineState m_pso;
 };
 
-class TerrainRvtBuildHeightResidentCachePass final : public org::TypedRenderGraphPass<TerrainRvtBuildHeightResidentCachePass, br::render::PreparedComputeDispatch> {
+class TerrainRvtBuildHeightResidentCachePass final : public org::TypedRenderGraphPass<TerrainRvtBuildHeightResidentCachePass,
+    TerrainRvt::DispatchFrame, TerrainRvt::PipelineBindings> {
 public:
     TerrainRvtBuildHeightResidentCachePass()
     {
@@ -486,7 +447,7 @@ public:
             "TerrainRvt.BuildHeightResidentCache.PSO");
     }
 
-    void Declare(org::PassBuilder& b)
+    TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(
@@ -496,25 +457,25 @@ public:
             Builtin::Terrain::RvtPageKeys);
         b.UnorderedAccess(Builtin::Terrain::RvtHeightResidentCache);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
+        return { m_pso };
     }
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
+    TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
     {
-        const auto dispatch = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPageTableEntries(), 64u);
-        return TerrainRvt::PrepareDispatch(preparation, m_pso,
-            dispatch.first, dispatch.second);
+        return TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
     }
 
-
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const TerrainRvt::PipelineBindings& bindings, const TerrainRvt::DispatchFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
     }
 
 private:
     org::PipelineState m_pso;
 };
 
-class TerrainRvtBuildGenerateDispatchArgsPass final : public org::TypedRenderGraphPass<TerrainRvtBuildGenerateDispatchArgsPass, br::render::PreparedComputeDispatch> {
+class TerrainRvtBuildGenerateDispatchArgsPass final : public org::TypedRenderGraphPass<TerrainRvtBuildGenerateDispatchArgsPass,
+    org::EmptyPassFrameData, TerrainRvt::PipelineBindings> {
 public:
     TerrainRvtBuildGenerateDispatchArgsPass()
     {
@@ -526,29 +487,32 @@ public:
             "TerrainRvt.BuildGenerateDispatchArgs.PSO");
     }
 
-    void Declare(org::PassBuilder& b)
+    TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtCounters);
         b.UnorderedAccess(Builtin::Terrain::RvtGenerateDispatchArgs);
+        return { m_pso };
     }
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation)
-    {
-        return TerrainRvt::PrepareDispatch(preparation, m_pso,
-            1u);
-    }
-
-
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const TerrainRvt::PipelineBindings& bindings, org::PassRecordContext& context) {
+        br::render::DispatchCompute(context, bindings.pipeline, {}, 1u);
     }
 
 private:
     org::PipelineState m_pso;
 };
 
-class TerrainRvtGeneratePagesPass final : public org::TypedRenderGraphPass<TerrainRvtGeneratePagesPass, br::render::PreparedComputeIndirect> {
+struct TerrainRvtGeneratePagesBindings {
+    org::PipelineState pipeline;
+    org::ResourceBindingToken arguments;
+};
+struct TerrainRvtGeneratePagesFrame {
+    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
+};
+
+class TerrainRvtGeneratePagesPass final : public org::TypedRenderGraphPass<TerrainRvtGeneratePagesPass,
+    TerrainRvtGeneratePagesFrame, TerrainRvtGeneratePagesBindings> {
 public:
     TerrainRvtGeneratePagesPass()
     {
@@ -560,7 +524,7 @@ public:
             "TerrainRvt.GeneratePages.PSO");
     }
 
-    void Declare(org::PassBuilder& b)
+    TerrainRvtGeneratePagesBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(
@@ -584,45 +548,27 @@ public:
                 Builtin::Terrain::RvtMaterialAtlas,
                 Builtin::Terrain::RvtStats,
                 Builtin::Material::TextureStreamingFeedbackBuffer);
-        b.IndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs);
+        const auto arguments = b.IndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
+        return { m_pso, arguments };
     }
 
-    void Initialize()
+    TerrainRvtGeneratePagesFrame Prepare(const TerrainRvtGeneratePagesBindings&, const org::PassPrepareContext&) const
     {
-        m_argsBuffer = m_resourceRegistryView->RequestPtr<org::Resource>(Builtin::Terrain::RvtGenerateDispatchArgs);
+        return { CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature() };
     }
 
-    br::render::PreparedComputeIndirect Prepare(const org::PassPrepareContext& preparation)
-    {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedComputeIndirect data{};
-        data.enabled = m_argsBuffer != nullptr;
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.commandSignature = preparation.CaptureCommandSignature(CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature());
-        if (m_argsBuffer) data.argumentsReference = preparation.CaptureResource(m_argsBuffer->GetGlobalResourceID());
-        auto program = preparation.CaptureProgramBinding(m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        return data;
-    }
-
-    void ShutdownPass()
-    {
-        m_argsBuffer = nullptr;
-    }
-
-    static void Record(const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeIndirect(data, recording);
+    static void Record(const TerrainRvtGeneratePagesBindings& bindings, const TerrainRvtGeneratePagesFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::DispatchComputeIndirect(context, bindings.pipeline, {}, frame.signature, bindings.arguments);
     }
 
 private:
     org::PipelineState m_pso;
-    org::Resource* m_argsBuffer = nullptr;
 };
 
-class TerrainRvtFinalizeGeneratedPagesPass final : public org::TypedRenderGraphPass<TerrainRvtFinalizeGeneratedPagesPass, br::render::PreparedComputeDispatchSequence> {
+class TerrainRvtFinalizeGeneratedPagesPass final : public org::TypedRenderGraphPass<TerrainRvtFinalizeGeneratedPagesPass,
+    TerrainRvt::DispatchFrame, TerrainRvt::PipelineBindings> {
 public:
     TerrainRvtFinalizeGeneratedPagesPass()
     {
@@ -634,7 +580,7 @@ public:
             "TerrainRvt.FinalizeGeneratedPages.PSO");
     }
 
-    void Declare(org::PassBuilder& b)
+    TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(
@@ -646,29 +592,18 @@ public:
                 Builtin::Terrain::RvtPageTable,
                 Builtin::Terrain::RvtPhysicalPageOwner);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
+        return { m_pso };
     }
 
-    br::render::PreparedComputeDispatchSequence Prepare(const org::PassPrepareContext& preparation)
+    TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
     {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-
-        br::render::PreparedComputeDispatchSequence data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-
-
-        auto program = preparation.CaptureProgramBinding(m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        const auto dispatch = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPhysicalPages(), 64u);
-        data.steps.push_back({.groupsX = dispatch.first, .groupsY = dispatch.second, .groupsZ = 1u, .uavBarrierAfter = true});
-        return data;
+        return TerrainRvt::DispatchForItems(TerrainRvt::MaxPhysicalPages(), 64u);
     }
 
-
-    static void Record(const br::render::PreparedComputeDispatchSequence& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatchSequence(data, recording);
+    static void Record(const TerrainRvt::PipelineBindings& bindings, const TerrainRvt::DispatchFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
+        context.UavBarrier();
     }
 
 private:

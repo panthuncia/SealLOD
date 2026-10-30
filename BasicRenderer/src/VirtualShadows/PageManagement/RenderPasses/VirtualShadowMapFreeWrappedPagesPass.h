@@ -4,17 +4,23 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapFreeWrappedPagesBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken pageTable, pageMetadata, clipmapInfo, stats;
 };
 
+struct VirtualShadowMapFreeWrappedPagesFrame {
+    uint32_t pageTableResolution = 0;
+    uint32_t maxPhysicalPages = 0;
+};
+
 class VirtualShadowMapFreeWrappedPagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapFreeWrappedPagesPass,
-    br::render::PreparedComputeDispatch, VirtualShadowMapFreeWrappedPagesBindings> {
+    VirtualShadowMapFreeWrappedPagesFrame, VirtualShadowMapFreeWrappedPagesBindings> {
 public:
     VirtualShadowMapFreeWrappedPagesPass(
         std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -24,10 +30,10 @@ public:
 
     VirtualShadowMapFreeWrappedPagesBindings Declare(org::PassBuilder& builder);
     void Initialize();
-    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapFreeWrappedPagesBindings&,
+    VirtualShadowMapFreeWrappedPagesFrame Prepare(const VirtualShadowMapFreeWrappedPagesBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapFreeWrappedPagesBindings&,
-        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+        const VirtualShadowMapFreeWrappedPagesFrame&, org::PassRecordContext&);
     void ShutdownPass();
 
 private:

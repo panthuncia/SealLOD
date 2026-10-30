@@ -3,13 +3,19 @@
 #include <memory>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
-struct AVBOITSparseClearBindings { org::DeclaredViewToken config, occupancy; };
-class AVBOITSparseClearPass final : public org::TypedRenderGraphPass<AVBOITSparseClearPass, br::render::PreparedComputeDispatch, AVBOITSparseClearBindings> {
+struct AVBOITSparseClearBindings {
+    org::PipelineState pipeline;
+    org::DeclaredViewToken config, occupancy;
+};
+struct AVBOITSparseClearFrame {
+    uint32_t groupsX = 0, groupsY = 1;
+};
+class AVBOITSparseClearPass final : public org::TypedRenderGraphPass<AVBOITSparseClearPass, AVBOITSparseClearFrame, AVBOITSparseClearBindings> {
 public:
     AVBOITSparseClearPass(
         std::shared_ptr<org::Buffer> configBuffer,
@@ -20,8 +26,8 @@ public:
         std::shared_ptr<org::PixelBuffer> zeroTransmittanceSliceTexture);
 
     AVBOITSparseClearBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputeDispatch Prepare(const AVBOITSparseClearBindings&, const org::PassPrepareContext&) const;
-    static void Record(const AVBOITSparseClearBindings&, const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    AVBOITSparseClearFrame Prepare(const AVBOITSparseClearBindings&, const org::PassPrepareContext&) const;
+    static void Record(const AVBOITSparseClearBindings&, const AVBOITSparseClearFrame&, org::PassRecordContext&);
 
 private:
     std::shared_ptr<org::Buffer> m_configBuffer;

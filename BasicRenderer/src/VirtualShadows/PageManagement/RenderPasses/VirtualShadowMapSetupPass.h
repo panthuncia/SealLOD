@@ -9,21 +9,26 @@
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 class VirtualShadowCasterRegistry;
 
 struct VirtualShadowMapSetupBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken pageTable, pageMetadata, allocationCount, dirtyFlags;
     org::DeclaredViewToken clipmapInfo, markClipmapData, stats, runtimeState, fallbackCandidateCount;
+};
+struct VirtualShadowMapSetupFrame {
+    uint32_t pageTableResolution = 0;
+    uint32_t packedConfig0 = 0, packedConfig1 = 0;
     uint32_t packedFlags = 0;
     float autoBiasScale = 0.0f;
 };
 
 class VirtualShadowMapSetupPass final : public org::TypedRenderGraphPass<VirtualShadowMapSetupPass,
-    br::render::PreparedComputeDispatch, VirtualShadowMapSetupBindings> {
+    VirtualShadowMapSetupFrame, VirtualShadowMapSetupBindings> {
 public:
     VirtualShadowMapSetupPass(
         std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -43,10 +48,10 @@ public:
     VirtualShadowMapSetupBindings Declare(org::PassBuilder& builder);
     void Initialize();
     void Update(const org::UpdateExecutionContext& executionContext) override;
-    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapSetupBindings&,
+    VirtualShadowMapSetupFrame Prepare(const VirtualShadowMapSetupBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapSetupBindings&,
-        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+        const VirtualShadowMapSetupFrame&, org::PassRecordContext&);
     void ShutdownPass();
 
 private:

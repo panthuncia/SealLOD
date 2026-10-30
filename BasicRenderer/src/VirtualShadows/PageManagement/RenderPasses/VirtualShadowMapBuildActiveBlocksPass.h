@@ -4,12 +4,13 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapBuildActiveBlocksBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken pageTable;
     org::DeclaredViewToken clipmapInfo;
     org::DeclaredViewToken output;
@@ -17,7 +18,7 @@ struct VirtualShadowMapBuildActiveBlocksBindings {
 };
 
 class VirtualShadowMapBuildActiveBlocksPass final : public org::TypedRenderGraphPass<VirtualShadowMapBuildActiveBlocksPass,
-    br::render::PreparedComputeDispatch, VirtualShadowMapBuildActiveBlocksBindings> {
+    org::EmptyPassFrameData, VirtualShadowMapBuildActiveBlocksBindings> {
 public:
     VirtualShadowMapBuildActiveBlocksPass(
         std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -27,10 +28,7 @@ public:
 
     VirtualShadowMapBuildActiveBlocksBindings Declare(org::PassBuilder& builder);
     void Initialize() {}
-    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapBuildActiveBlocksBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const VirtualShadowMapBuildActiveBlocksBindings&,
-        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    static void Record(const VirtualShadowMapBuildActiveBlocksBindings&, org::PassRecordContext&);
     void ShutdownPass() {}
 
 private:

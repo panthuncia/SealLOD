@@ -5,14 +5,16 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedResourceClears.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include <array>
 #include <vector>
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
-using AVBOITSetupFrameData = br::render::PreparedResourceClears;
+struct AVBOITSetupFrameData {
+    std::vector<rhi::ClearValue> targetClears;
+};
 
 struct AVBOITSetupBindings {
     struct Clear {

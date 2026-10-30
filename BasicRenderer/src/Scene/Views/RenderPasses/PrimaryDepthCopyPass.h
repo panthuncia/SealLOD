@@ -3,39 +3,39 @@
 #include <unordered_map>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 
-class PrimaryDepthCopyPass : public org::TypedRenderGraphPass<PrimaryDepthCopyPass, br::render::PreparedComputeDispatch> {
+struct PrimaryDepthCopyBindings {
+	org::PipelineState pipeline;
+};
+struct PrimaryDepthCopyFrame {
+	uint32_t groupsX = 0, groupsY = 0;
+};
+
+class PrimaryDepthCopyPass : public org::TypedRenderGraphPass<PrimaryDepthCopyPass, PrimaryDepthCopyFrame, PrimaryDepthCopyBindings> {
 public:
 	PrimaryDepthCopyPass() {
 		CreatePSO();
 	}
 
-	void Declare(org::PassBuilder& declaration) {
+	PrimaryDepthCopyBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* builder = &declaration;
 		builder->ShaderResource(Builtin::PrimaryCamera::VisibilityTexture);
 		builder->UnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap);
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
+		return {m_pso};
 	}
 
-    br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+    PrimaryDepthCopyFrame Prepare(const PrimaryDepthCopyBindings&, const org::PassPrepareContext& preparation) const {
         const auto& context = *preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-        auto program = preparation.CaptureProgramBinding(m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        data.groupsX = (context.renderResolution.x + 7u) / 8u;
-        data.groupsY = (context.renderResolution.y + 7u) / 8u;
-        return data;
+        return {(context.renderResolution.x + 7u) / 8u, (context.renderResolution.y + 7u) / 8u};
     }
 
-    static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const PrimaryDepthCopyBindings& bindings, const PrimaryDepthCopyFrame& frame, org::PassRecordContext& context) {
+        br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
     }
 
 private:

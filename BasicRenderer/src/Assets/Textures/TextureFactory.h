@@ -16,7 +16,6 @@
 #include "Render/Runtime/IUploadService.h"
 #include "Render/Runtime/IReadbackService.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 #include "Render/Runtime/FrameWorkQueue.h"
 
 namespace org { class PixelBuffer; }

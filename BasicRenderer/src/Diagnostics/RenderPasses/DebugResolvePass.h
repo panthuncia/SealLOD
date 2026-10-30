@@ -4,13 +4,19 @@
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedFullscreenDraw.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
-struct DebugResolveBindings { org::DeclaredViewToken target; };
+struct DebugResolveBindings {
+	org::PipelineState pipeline;
+	org::DeclaredViewToken target;
+};
+struct DebugResolveFrame {
+	uint32_t width = 0, height = 0;
+};
 
 class DebugResolvePass
     : public org::TypedRenderGraphPass<DebugResolvePass,
-          br::render::PreparedFullscreenDraw, DebugResolveBindings> {
+          DebugResolveFrame, DebugResolveBindings> {
 public:
 	DebugResolvePass() {
 		CreatePSO();
@@ -19,26 +25,19 @@ public:
 	DebugResolveBindings Declare(org::PassBuilder& builder) {
 		builder.ShaderResource(Builtin::DebugVisualization, Builtin::CameraBuffer);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
-		return {builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
+		return {m_pso, builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
 	}
 
-	br::render::PreparedFullscreenDraw Prepare(const DebugResolveBindings& bindings,
+	DebugResolveFrame Prepare(const DebugResolveBindings&,
 		const org::PassPrepareContext& preparation) const {
 		const auto* context = preparation.preparationData->Get<UpdateContext>();
-		br::render::PreparedFullscreenDraw data{};
-		data.targetResource = preparation.DeclaredReference(bindings.target);
-		data.renderTargetReference = preparation.Capture(bindings.target);
-		data.loadOp = rhi::LoadOp::Load;
-		data.width = context->outputResolution.x; data.height = context->outputResolution.y;
-
-		br::render::BindPreparedProgram(
-			data, preparation, m_pso);
-		return data;
+		return {context->outputResolution.x, context->outputResolution.y};
 	}
 
-	static void Record(const DebugResolveBindings&, const br::render::PreparedFullscreenDraw& data,
-		org::PassRecordContext& recording) {
-		br::render::RecordPreparedFullscreenDraw(data, recording);
+	static void Record(const DebugResolveBindings& bindings, const DebugResolveFrame& frame,
+		org::PassRecordContext& context) {
+		br::render::DrawFullscreen(context, bindings.pipeline, {}, br::render::ColorTarget(context, bindings.target),
+			frame.width, frame.height);
 	}
 
 private:

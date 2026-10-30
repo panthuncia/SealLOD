@@ -9,12 +9,14 @@
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesBuildRasterWorkBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken diceQueue, diceCounter, readOffset, tessConfigs, output, outputCounter, telemetry;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken visibleClusters, visibleTransforms, replayQueue, replayCounter, replayOverflow;
@@ -24,8 +26,12 @@ struct ReyesBuildRasterWorkBindings {
     bool hasReplayQueue = false, hasReplayCounter = false, hasReplayOverflow = false, useAabbOcclusion = false;
 };
 
+struct ReyesBuildRasterWorkFrame {
+    uint32_t viewDepthTableIndex = 0xFFFFFFFFu;
+};
+
 class ReyesBuildRasterWorkPass final : public org::TypedRenderGraphPass<ReyesBuildRasterWorkPass,
-    br::render::PreparedComputeIndirect, ReyesBuildRasterWorkBindings>, public org::IDynamicDeclaredResources {
+    ReyesBuildRasterWorkFrame, ReyesBuildRasterWorkBindings>, public org::IDynamicDeclaredResources {
 public:
     ReyesBuildRasterWorkPass(
         std::shared_ptr<org::Buffer> diceQueueBuffer,
@@ -50,10 +56,10 @@ public:
     ReyesBuildRasterWorkBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputeIndirect Prepare(const ReyesBuildRasterWorkBindings&,
+    ReyesBuildRasterWorkFrame Prepare(const ReyesBuildRasterWorkBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesBuildRasterWorkBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
+    static void Record(const ReyesBuildRasterWorkBindings& bindings, const ReyesBuildRasterWorkFrame& frame,
+        org::PassRecordContext& recording);
 
 private:
     std::shared_ptr<org::Buffer> m_diceQueueBuffer;

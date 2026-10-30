@@ -3,16 +3,23 @@
 #include <functional>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedFullscreenDraw.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Scene/Scene.h"
 
-struct SpecularIBLBindings { org::DeclaredViewToken target; };
+struct SpecularIBLBindings {
+    org::PipelineState pipeline;
+    org::DeclaredViewToken target;
+    bool gtaoEnabled = false;
+};
+struct SpecularIBLFrame {
+    uint32_t width = 0, height = 0;
+};
 
 class SpecularIBLPass : public org::TypedRenderGraphPass<SpecularIBLPass,
-    br::render::PreparedFullscreenDraw, SpecularIBLBindings> {
+    SpecularIBLFrame, SpecularIBLBindings> {
 public:
     SpecularIBLPass() {
         CreatePSO();
@@ -46,30 +53,23 @@ public:
         if (m_gtaoEnabled) {
             builder.ShaderResource(Builtin::GTAO::OutputAOTerm);
         }
-        return {builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget})};
+        return {m_pso, builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_gtaoEnabled};
     }
 
     void Initialize() {}
 
-    br::render::PreparedFullscreenDraw Prepare(const SpecularIBLBindings& bindings,
+    SpecularIBLFrame Prepare(const SpecularIBLBindings& bindings,
         const org::PassPrepareContext& preparation) const {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedFullscreenDraw data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.renderTargetReference = preparation.Capture(bindings.target);
         const auto& desc = preparation.Describe(bindings.target);
-        data.width = desc.texture.width;
-        data.height = desc.texture.height;
-        data.constantStage = rhi::ShaderStage::AllGraphics;
-        br::render::BindPreparedProgram(data, preparation, m_pso);
-        data.constants[MiscEnableGTAO] = m_gtaoEnabled;
-        return data;
+        return {desc.texture.width, desc.texture.height};
     }
 
-    static void Record(const SpecularIBLBindings&, const br::render::PreparedFullscreenDraw& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedFullscreenDraw(data, recording);
+    static void Record(const SpecularIBLBindings& bindings, const SpecularIBLFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[MiscEnableGTAO] = bindings.gtaoEnabled;
+        br::render::DrawFullscreen(context, bindings.pipeline, constants, br::render::ColorTarget(context, bindings.target),
+            frame.width, frame.height);
     }
 
     void ShutdownPass() {

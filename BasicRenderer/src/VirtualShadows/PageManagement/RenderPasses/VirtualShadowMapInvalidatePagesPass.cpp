@@ -16,7 +16,6 @@
 #include "Resources/PixelBuffer.h"
 #include <BasicRenderer/Extensions/VirtualShadowCasterProvider.h>
 #include "../shaders/PerPassRootConstants/clodVirtualShadowInvalidateRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 VirtualShadowMapInvalidatePagesPass::VirtualShadowMapInvalidatePagesPass(
     std::shared_ptr<org::Buffer> invalidationInputsBuffer,
@@ -75,11 +74,11 @@ VirtualShadowMapInvalidatePagesBindings VirtualShadowMapInvalidatePagesPass::Dec
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.ShaderResource(m_invalidationInputsBuffer), builder.ShaderResource(m_invalidationCountBuffer),
+    return {m_pso, m_boundsPso, builder.ShaderResource(m_invalidationInputsBuffer), builder.ShaderResource(m_invalidationCountBuffer),
         builder.ShaderResource(m_clipmapInfoBuffer), builder.ShaderResource(m_boundsInvalidationBuffer),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_dirtyPageFlagsBuffer),
         builder.UnorderedAccess(m_pageMetadataBuffer), builder.UnorderedAccess(m_directionalPageViewInfoBuffer),
-        builder.UnorderedAccess(m_statsBuffer), m_pendingInputCount, m_pendingBoundsCount, m_invalidateAllActiveClipmaps};
+        builder.UnorderedAccess(m_statsBuffer)};
 }
 
 void VirtualShadowMapInvalidatePagesPass::Update(const org::UpdateExecutionContext& executionContext)
@@ -180,49 +179,35 @@ void VirtualShadowMapInvalidatePagesPass::Update(const org::UpdateExecutionConte
         0);
 }
 
-br::render::PreparedComputePipelineSequence VirtualShadowMapInvalidatePagesPass::Prepare(
-    const VirtualShadowMapInvalidatePagesBindings& bindings, const org::PassPrepareContext& preparation) const
+VirtualShadowMapInvalidatePagesFrame VirtualShadowMapInvalidatePagesPass::Prepare(
+    const VirtualShadowMapInvalidatePagesBindings&, const org::PassPrepareContext&) const
 {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-    br::render::PreparedComputePipelineSequence data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    std::array<unsigned int, NumMiscUintRootConstants> constants{};
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_INPUTS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.inputs).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_INPUT_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.inputCount).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_INFO_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.clipmapInfo).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.dirtyFlags).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_METADATA_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageMetadata).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageViewInfo).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.bounds).index;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_COUNT] = bindings.pendingBoundsCount;
-    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_ALL_ACTIVE_CLIPMAPS] = bindings.invalidateAllActiveClipmaps ? 1u : 0u;
-    const auto append = [&](const org::PipelineState& pso, uint32_t groups) {
-        br::render::PreparedComputePipelineSequence::Step step{};
-        auto program = preparation.CaptureProgramBinding(pso);
-        step.program = program.program;
-        step.descriptorIndices = std::move(program.descriptorIndices);
-        step.constants = constants;
-        step.groupsX = groups;
-        data.steps.push_back(std::move(step));
-    };
-    if (bindings.pendingInputCount != 0u) append(m_pso, (bindings.pendingInputCount + 63u) / 64u);
-    if (bindings.pendingBoundsCount != 0u || bindings.invalidateAllActiveClipmaps) {
-        const uint32_t workCount = bindings.invalidateAllActiveClipmaps
-            ? config.pageTableResolution * config.pageTableResolution * CLodVirtualShadowMaxSupportedClipmapCount
-            : bindings.pendingBoundsCount;
-        append(m_boundsPso, (workCount + 63u) / 64u);
-    }
-    return data;
+    return {CLodVirtualShadowBuildRuntimeResolutionConfig().pageTableResolution,
+        m_pendingInputCount, m_pendingBoundsCount, m_invalidateAllActiveClipmaps};
 }
 
-void VirtualShadowMapInvalidatePagesPass::Record(const VirtualShadowMapInvalidatePagesBindings&,
-    const br::render::PreparedComputePipelineSequence& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputePipelineSequence(data, recording);
+void VirtualShadowMapInvalidatePagesPass::Record(const VirtualShadowMapInvalidatePagesBindings& bindings,
+    const VirtualShadowMapInvalidatePagesFrame& frame, org::PassRecordContext& recording) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_INPUTS_DESCRIPTOR_INDEX] = recording.Index(bindings.inputs);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_INPUT_COUNT_DESCRIPTOR_INDEX] = recording.Index(bindings.inputCount);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.clipmapInfo);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_DESCRIPTOR_INDEX] = recording.Index(bindings.pageTable);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] = recording.Index(bindings.dirtyFlags);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_METADATA_DESCRIPTOR_INDEX] = recording.Index(bindings.pageMetadata);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.pageViewInfo);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_STATS_DESCRIPTOR_INDEX] = recording.Index(bindings.stats);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_DESCRIPTOR_INDEX] = recording.Index(bindings.bounds);
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_COUNT] = frame.pendingBoundsCount;
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_ALL_ACTIVE_CLIPMAPS] = frame.invalidateAllActiveClipmaps ? 1u : 0u;
+    if (frame.pendingInputCount != 0u)
+        br::render::DispatchCompute(recording, bindings.pipeline, constants, (frame.pendingInputCount + 63u) / 64u);
+    if (frame.pendingBoundsCount != 0u || frame.invalidateAllActiveClipmaps) {
+        const uint32_t workCount = frame.invalidateAllActiveClipmaps
+            ? frame.pageTableResolution * frame.pageTableResolution * CLodVirtualShadowMaxSupportedClipmapCount
+            : frame.pendingBoundsCount;
+        br::render::DispatchCompute(recording, bindings.boundsPipeline, constants, (workCount + 63u) / 64u);
+    }
 }

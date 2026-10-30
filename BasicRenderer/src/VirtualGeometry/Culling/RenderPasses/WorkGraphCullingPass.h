@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -16,8 +17,8 @@
 
 #include <rhi.h>
 
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeCommands.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
+#include "Render/PipelineState.h"
 #include "Render/PreparedTablePublisher.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "VirtualGeometry/Culling/RenderPasses/CullingPassCommon.h"
@@ -40,6 +41,8 @@ struct WorkGraphReyesBindings {
 };
 
 struct WorkGraphCullingBindings {
+    org::PipelineState clearPipeline, createCommandPipeline;
+    org::ResourceBindingToken scratch;
     org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;  // SW classification only.
     org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;    // Per-view depth occlusion only.
     org::DeclaredViewToken visible, transforms, visibleCounter, visibleCounterSrv, swCounter, histogram, telemetry;
@@ -48,16 +51,34 @@ struct WorkGraphCullingBindings {
     std::optional<std::array<org::DeclaredViewToken, 4>> voxelQueues;
     std::optional<WorkGraphVirtualShadowBindings> virtualShadow;
     std::optional<WorkGraphReyesBindings> reyes;
+    uint32_t maxVisibleClusters = 0u;
+    uint32_t reyesDiceQueueCapacity = 0u;
+    bool isFirstPass = true;
+    bool swClassification = false;
+    bool perViewDepthOcclusion = false;
 };
 
-struct WorkGraphCullingInvocation {
+struct WorkGraphCullingFrame {
+    // The installed graph generation; shader hot reload installs a new one.
+    std::shared_ptr<const rhi::WorkGraphPtr> workGraph;
+    // The graph's ResourceDescriptorIndex slots and the global root signature, as a payload without a pipeline.
+    std::shared_ptr<const org::PipelineStatePayload> workGraphSlots;
+    br::render::CullingSettings settings;
+    uint32_t cullingFlags = 0u;
+    uint32_t viewRasterInfoTable = 0u;
+    uint32_t viewDepthTable = 0u;
+    uint32_t rasterBucketCount = 0u;
+    // Phase 1 launches from these CPU records (entry point 0).
+    std::vector<std::byte> cpuRecords;
+    uint32_t cpuRecordStride = 0u;
     bool initializeBacking = false;
-    br::render::PreparedWorkGraphCpuDispatch cpuDispatch;
+    // False when the frame has no render snapshot or no graph: nothing is recorded.
+    bool active = false;
 };
 
 class WorkGraphCullingPass
     : public org::TypedRenderGraphPass<WorkGraphCullingPass,
-          WorkGraphCullingInvocation, WorkGraphCullingBindings, br::render::PreparedComputeCommandSequence>
+          WorkGraphCullingFrame, WorkGraphCullingBindings>
     , public org::IDynamicDeclaredResources {
 public:
     WorkGraphCullingPass(CullingPassConfig config, CullingPassResources resources);
@@ -65,15 +86,9 @@ public:
 
     WorkGraphCullingBindings Declare(org::PassBuilder& builder);
     void Initialize() {}
-    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext&) const;
-    br::render::PreparedComputeCommandSequence BuildRecipe(const WorkGraphCullingBindings&,
-        const org::PassPrepareContext& preparation) const;
-    WorkGraphCullingInvocation PrepareInvocation(const br::render::PreparedComputeCommandSequence&,
-        const WorkGraphCullingBindings&, const org::PassPrepareContext&) const;
-    static void Record(const br::render::PreparedComputeCommandSequence& recipe, const WorkGraphCullingInvocation& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeCommands(recipe, recording, &data.cpuDispatch, data.initializeBacking);
-    }
+    WorkGraphCullingFrame Prepare(const WorkGraphCullingBindings&, const org::PassPrepareContext& preparation) const;
+    static void Record(const WorkGraphCullingBindings& bindings, const WorkGraphCullingFrame& frame,
+        org::PassRecordContext& context);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
     std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
@@ -101,12 +116,9 @@ private:
 
     CompiledWorkGraph CompileWorkGraph() const;
     void InstallWorkGraph(CompiledWorkGraph compiled);
-    void DeclareSceneInputs(org::PassBuilder& builder);
+    org::ResourceBindingToken DeclareSceneInputs(org::PassBuilder& builder);
     std::optional<WorkGraphVirtualShadowBindings> DeclareVirtualShadow(org::PassBuilder& builder);
     std::optional<WorkGraphReyesBindings> DeclareReyes(org::PassBuilder& builder);
-    // The root constants every node of the graph reads.
-    void FillGraphConstants(uint32_t* root, const WorkGraphCullingBindings& bindings,
-        const br::render::CullingSettings& settings, const org::PassPrepareContext& preparation) const;
     br::render::CullingUploader Uploader() const;
 
     CullingPassConfig m_config;
@@ -116,7 +128,7 @@ private:
     // Work-graph generations are immutable shared owners so prepared packets
     // may safely outlive a live-reload replacement on the pass object.
     std::shared_ptr<rhi::WorkGraphPtr> m_workGraph;
-    org::PipelineResources m_workGraphResources;
+    std::shared_ptr<const org::PipelineStatePayload> m_workGraphSlots;
     std::shared_ptr<org::Buffer> m_scratchBuffer;
     std::shared_ptr<WorkGraphInitializationState> m_workGraphInitialization =
         std::make_shared<WorkGraphInitializationState>();

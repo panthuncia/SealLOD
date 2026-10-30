@@ -1,7 +1,7 @@
 #pragma once
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedEnvironmentDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -15,11 +15,15 @@
 
 struct EnvironmentConversionBindings {
     struct Job { org::DeclaredViewToken source; std::array<org::DeclaredViewToken, 6> faces; uint32_t size = 0; };
+    org::PipelineState pipeline;
     std::vector<Job> jobs;
+};
+struct EnvironmentConversionFrame {
+    bool active = false;
 };
 
 class EnvironmentConversionPass : public org::TypedRenderGraphPass<EnvironmentConversionPass,
-    br::render::PreparedEnvironmentDispatch, EnvironmentConversionBindings>, public org::IDynamicDeclaredResources {
+    EnvironmentConversionFrame, EnvironmentConversionBindings>, public org::IDynamicDeclaredResources {
 public:
     EnvironmentConversionPass() {
 
@@ -28,6 +32,7 @@ public:
 
     EnvironmentConversionBindings Declare(org::PassBuilder& builder) {
         EnvironmentConversionBindings bindings;
+        bindings.pipeline = m_pso;
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         for (const auto& j : m_pending) {
             if (!j->work.srcTexture || !j->work.dstCubemap) continue;
@@ -54,30 +59,27 @@ public:
         if (pending != m_pending) { m_pending = std::move(pending); m_declaredResourcesChanged = true; }
     }
 
-    br::render::PreparedEnvironmentDispatch Prepare(const EnvironmentConversionBindings& bindings,
-        const org::PassPrepareContext& preparation) const {
-        br::render::PreparedEnvironmentDispatch data;
-        if (m_pending.empty()) return data;
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.program = preparation.CaptureProgram(m_pso);
-        data.constantCount = 4;
-        for (const auto& job : bindings.jobs) {
-            const auto size = job.size;
-            const auto src = preparation.Resolve(job.source).index;
-            for (uint32_t face = 0; face < 6; ++face)
-                data.faces.push_back({{src, preparation.Resolve(job.faces[face]).index,
-                    face, size, 0}, (size + 7) / 8});
-        }
+    EnvironmentConversionFrame Prepare(const EnvironmentConversionBindings&,
+        const org::PassPrepareContext& preparation) {
+        if (m_pending.empty()) return {};
         m_work.Reserve(m_pending, preparation);
         m_pending.clear(); m_declaredResourcesChanged = true;
-        return data;
+        return {true};
     }
 
-    static void Record(const EnvironmentConversionBindings&, const br::render::PreparedEnvironmentDispatch& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordEnvironmentDispatch(data, recording);
+    static void Record(const EnvironmentConversionBindings& bindings, const EnvironmentConversionFrame& frame,
+        org::PassRecordContext& context) {
+        if (!frame.active || bindings.jobs.empty()) return;
+        context.BindComputePipeline(bindings.pipeline);
+        for (const auto& job : bindings.jobs) {
+            const auto size = job.size;
+            const auto src = context.Index(job.source);
+            for (uint32_t face = 0; face < 6; ++face) {
+                const std::array<uint32_t, 4> constants{src, context.Index(job.faces[face]), face, size};
+                context.PushConstants(0, constants);
+                context.Commands().Dispatch((size + 7) / 8, (size + 7) / 8, 1);
+            }
+        }
     }
 
     bool DeclaredResourcesChanged() const override {
@@ -87,9 +89,9 @@ public:
 
 
 private:
-    mutable br::render::EnvironmentConversionWorkQueue m_work;
-    mutable br::render::EnvironmentConversionWorkQueue::Snapshot m_pending;
-    mutable bool m_declaredResourcesChanged = true;
+    br::render::EnvironmentConversionWorkQueue m_work;
+    br::render::EnvironmentConversionWorkQueue::Snapshot m_pending;
+    bool m_declaredResourcesChanged = true;
 
     org::PipelineState m_pso;
 

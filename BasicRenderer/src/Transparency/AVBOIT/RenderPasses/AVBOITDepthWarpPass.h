@@ -3,12 +3,18 @@
 #include <memory>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
-struct AVBOITDepthWarpBindings { org::DeclaredViewToken config, histogram, lut; };
-class AVBOITDepthWarpPass final : public org::TypedRenderGraphPass<AVBOITDepthWarpPass, br::render::PreparedComputeDispatch, AVBOITDepthWarpBindings> {
+struct AVBOITDepthWarpBindings {
+    org::PipelineState pipeline;
+    org::DeclaredViewToken config, histogram, lut;
+};
+struct AVBOITDepthWarpFrame {
+    uint32_t groupsX = 0, groupsY = 1;
+};
+class AVBOITDepthWarpPass final : public org::TypedRenderGraphPass<AVBOITDepthWarpPass, AVBOITDepthWarpFrame, AVBOITDepthWarpBindings> {
 public:
     AVBOITDepthWarpPass(
         std::shared_ptr<org::Buffer> configBuffer,
@@ -16,8 +22,8 @@ public:
         std::shared_ptr<org::Buffer> depthWarpLUTBuffer);
 
     AVBOITDepthWarpBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputeDispatch Prepare(const AVBOITDepthWarpBindings&, const org::PassPrepareContext&) const;
-    static void Record(const AVBOITDepthWarpBindings&, const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    AVBOITDepthWarpFrame Prepare(const AVBOITDepthWarpBindings&, const org::PassPrepareContext&) const;
+    static void Record(const AVBOITDepthWarpBindings&, const AVBOITDepthWarpFrame&, org::PassRecordContext&);
 
 private:
     std::shared_ptr<org::Buffer> m_configBuffer;

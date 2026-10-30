@@ -112,10 +112,7 @@ void AVBOITSetupPass::Update(const org::UpdateExecutionContext& executionContext
 
 AVBOITSetupFrameData AVBOITSetupPass::Prepare(
     const AVBOITSetupBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
     AVBOITSetupFrameData data;
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
     const auto index = [&](org::DeclaredViewToken token) {
         return token.layout ? preparation.Resolve(token).index : 0xFFFFFFFFu;
     };
@@ -130,27 +127,28 @@ AVBOITSetupFrameData AVBOITSetupPass::Prepare(
     config.shadingTransmittanceSRVDescriptorIndex = index(bindings.shadingTransmittance);
     config.zeroTransmittanceSliceUAVDescriptorIndex = index(bindings.clears.at(4).shaderViews.at(0));
     UploadBufferData(&config, sizeof(config), org::runtime::UploadTarget::FromShared(m_configBuffer), 0);
-    const auto append = [&](const AVBOITSetupBindings::Clear& binding, bool isFloat, float floatValue, uint32_t uintValue) {
-        if (binding.shaderViews.size() != binding.cpuViews.size()) throw std::logic_error("AVBOIT clear view declaration is incomplete");
-        for (size_t slice = 0; slice < binding.shaderViews.size(); ++slice) {
-            data.clears.push_back({preparation.DeclaredReference(binding.shaderViews[slice]),
-                preparation.Capture(binding.cpuViews[slice]),
-                preparation.Capture(binding.shaderViews[slice]),
-                floatValue, uintValue, isFloat});
-        }
-    };
     if (bindings.clears.size() != 5) throw std::logic_error("AVBOIT clear declaration is incomplete");
-    append(bindings.clears[0], true, 0, 0);
-    append(bindings.clears[1], true, 0, 0);
-    append(bindings.clears[2], false, 0, 0);
-    append(bindings.clears[3], true, 1, 0);
-    append(bindings.clears[4], false, 0, CLodAVBOITDefaultSliceCount);
+    for (const auto& binding : bindings.clears)
+        if (binding.shaderViews.size() != binding.cpuViews.size()) throw std::logic_error("AVBOIT clear view declaration is incomplete");
     for (const auto target : bindings.targets)
-        data.targets.push_back({preparation.Capture(target), preparation.ClearValue(target.Resource())});
+        data.targetClears.push_back(preparation.ClearValue(target.Resource()));
     return data;
 }
 
-void AVBOITSetupPass::Record(const AVBOITSetupBindings&,
+void AVBOITSetupPass::Record(const AVBOITSetupBindings& bindings,
     const AVBOITSetupFrameData& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedResourceClears(data, recording);
+    // Per clear group, in declaration order: occupancy, coverage, slice mask, integrated transmittance, zero slice.
+    struct ClearSpec { bool isFloat; float floatValue; uint32_t uintValue; };
+    static constexpr ClearSpec clearValues[] = {
+        {true, 0.0f, 0u}, {true, 0.0f, 0u}, {false, 0.0f, 0u}, {true, 1.0f, 0u}, {false, 0.0f, CLodAVBOITDefaultSliceCount}};
+    for (size_t group = 0; group < bindings.clears.size(); ++group) {
+        const auto& binding = bindings.clears[group];
+        const auto& value = clearValues[group];
+        for (size_t slice = 0; slice < binding.shaderViews.size(); ++slice) {
+            if (value.isFloat) br::render::ClearUavFloat(recording, binding.shaderViews[slice], binding.cpuViews[slice], value.floatValue);
+            else br::render::ClearUavUint(recording, binding.shaderViews[slice], binding.cpuViews[slice], value.uintValue);
+        }
+    }
+    for (size_t target = 0; target < bindings.targets.size(); ++target)
+        recording.Commands().ClearRenderTargetView(recording.View(bindings.targets[target]), data.targetClears[target]);
 }

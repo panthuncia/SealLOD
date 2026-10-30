@@ -8,7 +8,6 @@
 #include "Resources/Buffers/Buffer.h"
 #include "BasicRenderer/Assets/Texture.h"
 #include "../shaders/PerPassRootConstants/clodVirtualShadowBuildActiveBlocksRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 VirtualShadowMapBuildActiveBlocksPass::VirtualShadowMapBuildActiveBlocksPass(
     std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -32,34 +31,18 @@ VirtualShadowMapBuildActiveBlocksBindings VirtualShadowMapBuildActiveBlocksPass:
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),
+    return {m_pso, builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),
         builder.ShaderResource(m_clipmapInfoBuffer),
         builder.UnorderedAccess(m_activeBlockMetadataBuffer), m_dynamicPages};
 }
 
-
-
-br::render::PreparedComputeDispatch VirtualShadowMapBuildActiveBlocksPass::Prepare(
-    const VirtualShadowMapBuildActiveBlocksBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    auto payload = m_pso.GetPayload();
-    br::render::PreparedComputeDispatch data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    auto program = preparation.CaptureProgramBinding(std::move(payload));
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    data.constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
-    data.constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_CLIPMAP_INFO_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.clipmapInfo).index;
-    data.constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_OUTPUT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.output).index;
-    data.constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_COUNT] = CLodVirtualShadowMaxMarkedBlockCount;
-    data.constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_DYNAMIC] = bindings.dynamicPages ? 1u : 0u;
-    data.groupsX = (CLodVirtualShadowMaxMarkedBlockCount + 63u) / 64u;
-    return data;
-}
-
-void VirtualShadowMapBuildActiveBlocksPass::Record(const VirtualShadowMapBuildActiveBlocksBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void VirtualShadowMapBuildActiveBlocksPass::Record(const VirtualShadowMapBuildActiveBlocksBindings& bindings,
+    org::PassRecordContext& recording) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX] = recording.Index(bindings.pageTable);
+    constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_CLIPMAP_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.clipmapInfo);
+    constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_OUTPUT_DESCRIPTOR_INDEX] = recording.Index(bindings.output);
+    constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_COUNT] = CLodVirtualShadowMaxMarkedBlockCount;
+    constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_DYNAMIC] = bindings.dynamicPages ? 1u : 0u;
+    br::render::DispatchCompute(recording, bindings.pipeline, constants, (CLodVirtualShadowMaxMarkedBlockCount + 63u) / 64u);
 }

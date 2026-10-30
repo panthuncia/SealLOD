@@ -21,50 +21,20 @@
 #include "../../../../shaders/PerPassRootConstants/amplificationShaderRootConstants.h"
 #include "boost/container_hash/hash.hpp"
 
-namespace br::render {
-struct PreparedForwardIndirect {
+struct ForwardRenderFrame {
     struct Draw {
-        org::PreparedProgramBinding program{};
+        // The mesh pipeline for this workload's compile flags, and its indirect arguments (counted in place).
+        std::shared_ptr<const org::PipelineStatePayload> pipeline;
         org::PreparedResourceReference arguments{};
         uint64_t countOffset = 0;
         uint32_t maximumCount = 0;
     };
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    rhi::PipelineLayoutHandle layout{};
-    rhi::CommandSignatureHandle commandSignature{};
-    org::PreparedDescriptorReference color{}, depth{};
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     DirectX::XMUINT2 resolution{};
-    std::array<unsigned int, 3> settings{};
+    std::array<uint32_t, 3> settings{};
     std::vector<Draw> draws;
     bool enabled = false;
 };
-
-inline void RecordPreparedForwardIndirect(const PreparedForwardIndirect& data, org::RecordingContext& recording) {
-    if (!data.enabled) return;
-    auto& commands = recording.Commands();
-    if (data.resourceHeap.valid())
-        commands.SetDescriptorHeaps(data.resourceHeap,
-            data.samplerHeap.valid() ? std::optional{data.samplerHeap} : std::nullopt);
-    rhi::ColorAttachment color{}; color.rtv = recording.Resolve(data.color); color.loadOp = rhi::LoadOp::Load; color.storeOp = rhi::StoreOp::Store;
-    rhi::DepthAttachment depth{}; depth.dsv = recording.Resolve(data.depth); depth.depthLoad = rhi::LoadOp::Load; depth.depthStore = rhi::StoreOp::Store;
-    depth.stencilLoad = rhi::LoadOp::DontCare; depth.stencilStore = rhi::StoreOp::DontCare;
-    rhi::PassBeginInfo pass{}; pass.colors = {&color, 1}; pass.depth = &depth;
-    pass.width = data.resolution.x; pass.height = data.resolution.y; pass.debugName = "Forward Render Pass";
-    commands.BeginPass(pass); commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList); commands.BindLayout(data.layout);
-    commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, MiscUintRootSignatureIndex, MiscEnableShadows, 3, data.settings.data());
-    for (const auto& draw : data.draws) {
-        commands.BindLayout(recording.ResolveLayout(draw.program.program));
-        commands.BindPipeline(recording.Resolve(draw.program.program));
-        if (!draw.program.descriptorIndices.empty()) commands.PushConstants(rhi::ShaderStage::AllGraphics, 0,
-            org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-            static_cast<uint32_t>(draw.program.descriptorIndices.size()), draw.program.descriptorIndices.data());
-        const auto arguments = recording.Resolve(draw.arguments).GetHandle();
-        commands.ExecuteIndirect(data.commandSignature, arguments, 0, arguments,
-            draw.countOffset, draw.maximumCount);
-    }
-    commands.EndPass();
-}
-}
 
 struct ForwardRenderPassInputs {
     bool wireframe;
@@ -81,7 +51,7 @@ struct ForwardRenderBindings {
 
 class ForwardRenderPass
     : public org::TypedRenderGraphPass<ForwardRenderPass,
-        br::render::PreparedForwardIndirect, ForwardRenderBindings> {
+        ForwardRenderFrame, ForwardRenderBindings> {
 public:
     ForwardRenderPass()
     {
@@ -170,20 +140,15 @@ public:
             //m_primaryCameraMeshletBitfield = m_resourceRegistryView->RequestPtr<DynamicGloballyIndexedResource>(Builtin::PrimaryCamera::MeshletBitfield);
     }
 
-    br::render::PreparedForwardIndirect Prepare(const ForwardRenderBindings& bindings,
+    ForwardRenderFrame Prepare(const ForwardRenderBindings&,
         const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
         const auto published = context->publishedRendererState
             ? context->publishedRendererState->indirectWorkloads.payload.Get<br::render::PublishedIndirectState>() : nullptr;
         if (!published) return {};
-        br::render::PreparedForwardIndirect data{};
+        ForwardRenderFrame data{};
         data.enabled = true;
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle();
-        data.commandSignature = preparation.CaptureCommandSignature(
-            CommandSignatureManager::GetInstance().CaptureDispatchMeshCommandSignature());
-        data.color = preparation.Capture(bindings.color);
-        data.depth = preparation.Capture(bindings.depth);
+        data.commandSignature = CommandSignatureManager::GetInstance().CaptureDispatchMeshCommandSignature();
         data.resolution = context->renderResolution;
         data.settings = {context->lighting.shadowsEnabled,
             context->lighting.punctualLightingEnabled, context->lighting.gtaoEnabled};
@@ -197,19 +162,34 @@ public:
                 const auto requiredBytes = static_cast<uint64_t>(workload->count) * sizeof(DispatchMeshIndirectCommand);
                 if (backing->GetSize() < requiredBytes) continue;
             }
-            auto payload = PSOManager::GetInstance().GetMeshPSO(
+            ForwardRenderFrame::Draw draw{};
+            draw.pipeline = PSOManager::GetInstance().GetMeshPSO(
                 context->globalPSOFlags, workload->key.compileFlags, m_wireframe).GetPayload();
-            br::render::PreparedForwardIndirect::Draw draw{};
-            draw.program = preparation.CaptureProgramBinding(std::move(payload));
             draw.arguments = preparation.CaptureResource(workload->indirectArguments->GetGlobalResourceID());
             draw.countOffset = workload->indirectArguments->GetUAVCounterOffset(); draw.maximumCount = workload->count;
             data.draws.push_back(std::move(draw));
         }
         return data;
     }
-    static void Record(const ForwardRenderBindings&, const br::render::PreparedForwardIndirect& data,
+    static void Record(const ForwardRenderBindings& bindings, const ForwardRenderFrame& data,
         org::PassRecordContext& recording) {
-        br::render::RecordPreparedForwardIndirect(data, recording);
+        if (!data.enabled) return;
+        auto& commands = recording.Commands();
+        rhi::ColorAttachment color{}; color.rtv = recording.View(bindings.color); color.loadOp = rhi::LoadOp::Load; color.storeOp = rhi::StoreOp::Store;
+        rhi::DepthAttachment depth{}; depth.dsv = recording.View(bindings.depth); depth.depthLoad = rhi::LoadOp::Load; depth.depthStore = rhi::StoreOp::Store;
+        depth.stencilLoad = rhi::LoadOp::DontCare; depth.stencilStore = rhi::StoreOp::DontCare;
+        rhi::PassBeginInfo pass{}; pass.colors = {&color, 1}; pass.depth = &depth;
+        pass.width = data.resolution.x; pass.height = data.resolution.y; pass.debugName = "Forward Render Pass";
+        commands.BeginPass(pass); commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
+        if (!data.draws.empty()) recording.Retain(data.commandSignature);
+        for (const auto& draw : data.draws) {
+            recording.BindGraphicsPipeline(draw.pipeline);
+            recording.PushConstants(MiscUintRootSignatureIndex, data.settings, MiscEnableShadows);
+            const auto arguments = recording.Resolve(draw.arguments).GetHandle();
+            commands.ExecuteIndirect(data.commandSignature->Get().GetHandle(), arguments, 0, arguments,
+                draw.countOffset, draw.maximumCount);
+        }
+        commands.EndPass();
     }
 
 private:

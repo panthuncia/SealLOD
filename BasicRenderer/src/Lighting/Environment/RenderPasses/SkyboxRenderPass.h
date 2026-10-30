@@ -1,16 +1,20 @@
 #pragma once
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 
+struct SkyboxFrame {
+    uint32_t groupsX = 0, groupsY = 0;
+};
 struct SkyboxBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken depth, camera, environment, hdr, motion;
 };
 
 class SkyboxRenderPass : public org::TypedRenderGraphPass<SkyboxRenderPass,
-    br::render::PreparedComputeDispatch, SkyboxBindings> {
+    SkyboxFrame, SkyboxBindings> {
 public:
     SkyboxRenderPass() {
         CreatePSO();
@@ -22,6 +26,7 @@ public:
 		builder->ShaderResource(Builtin::Environment::CurrentCubemap);
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
         return {
+            m_pso,
             builder->ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
             builder->ShaderResource(Builtin::CameraBuffer),
             builder->ShaderResource(Builtin::Environment::InfoBuffer),
@@ -29,30 +34,21 @@ public:
             builder->UnorderedAccess(Builtin::Surface::Motion) };
     }
 
-    br::render::PreparedComputeDispatch Prepare(const SkyboxBindings& bindings,
+    SkyboxFrame Prepare(const SkyboxBindings& bindings,
         const org::PassPrepareContext& preparation) const {
-
-        const auto& context = *preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-        auto program = preparation.CaptureProgramBinding(m_pso);
-        data.program = program.program;
-        data.descriptorIndices = std::move(program.descriptorIndices);
-        data.constants[0] = preparation.Resolve(bindings.depth).index;
-        data.constants[1] = preparation.Resolve(bindings.camera).index;
-        data.constants[2] = preparation.Resolve(bindings.environment).index;
-        data.constants[3] = preparation.Resolve(bindings.hdr).index;
-		data.constants[4] = preparation.Resolve(bindings.motion).index;
         const auto& target = preparation.Describe(bindings.hdr);
-        data.groupsX = (target.texture.width + 7u) / 8u;
-        data.groupsY = (target.texture.height + 7u) / 8u;
-        return data;
+        return {(target.texture.width + 7u) / 8u, (target.texture.height + 7u) / 8u};
     }
 
-    static void Record(const SkyboxBindings&, const br::render::PreparedComputeDispatch& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeDispatch(data, recording);
+    static void Record(const SkyboxBindings& bindings, const SkyboxFrame& frame,
+        org::PassRecordContext& context) {
+        br::render::MiscConstants constants{};
+        constants[0] = context.Index(bindings.depth);
+        constants[1] = context.Index(bindings.camera);
+        constants[2] = context.Index(bindings.environment);
+        constants[3] = context.Index(bindings.hdr);
+        constants[4] = context.Index(bindings.motion);
+        br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
     }
 
 private:

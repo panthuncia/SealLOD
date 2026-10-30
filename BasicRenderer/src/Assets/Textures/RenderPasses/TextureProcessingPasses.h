@@ -1,19 +1,37 @@
 #pragma once
 
 #include "Assets/Textures/TextureFactory.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include <vector>
 
-class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<MipmappingPass, br::render::PreparedComputePipelineSequence>, public org::IDynamicDeclaredResources {
+// The mip chains taken at declaration, in queue order, with everything their dispatches need.
+struct TextureMipmappingBindings {
+        struct Job {
+            bool hasTexture = false;
+            bool preserveAlphaCoverage = false;
+            bool isSrgb = false;
+            org::PipelineState pipeline;
+            org::DeclaredViewToken constants, source, counter, alphaStats, alphaScales;
+            std::vector<org::DeclaredViewToken> alphaSources, outputs;
+            uint32_t constantsIndex = 0;
+            uint32_t dispatchThreadGroupCountXY[2]{};
+            uint32_t sliceCount = 1;
+            uint32_t mipsToGenerate = 0;
+            uint32_t width = 0, height = 0;
+        };
+        org::PipelineState alphaReset, alphaDownsample, alphaResolveScale, alphaApplyScale;
+        std::vector<Job> jobs;
+    };
+
+class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<MipmappingPass, org::EmptyPassFrameData, TextureMipmappingBindings>, public org::IDynamicDeclaredResources {
     public:
         // Called by TextureFactory when you create a texture with only mip0 uploaded.
         void EnqueueJob(const std::shared_ptr<org::PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage = false);
 
-        void Declare(org::PassBuilder& builder);
+        TextureMipmappingBindings Declare(org::PassBuilder& builder);
 
-        br::render::PreparedComputePipelineSequence Prepare(const org::PassPrepareContext& preparation);
-        static void Record(const br::render::PreparedComputePipelineSequence& data, org::PassRecordContext& recording) {
-            br::render::RecordPreparedComputePipelineSequence(data, recording);
-        }
+        org::EmptyPassFrameData Prepare(const TextureMipmappingBindings& bindings, const org::PassPrepareContext& preparation);
+        static void Record(const TextureMipmappingBindings& bindings, org::PassRecordContext& context);
 
         bool DeclaredResourcesChanged() const override {
             return m_declaredResourcesChanged || m_jobs.ReadCounters().pending != 0;
@@ -67,11 +85,6 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
 
         org::runtime::FrameWorkQueue<Job> m_jobs;
         org::runtime::FrameWorkQueue<Job>::Snapshot m_declaredJobs;
-        struct JobViews {
-            org::DeclaredViewToken constants, source, counter, alphaStats, alphaScales;
-            std::vector<org::DeclaredViewToken> alphaSources, outputs;
-        };
-        std::vector<JobViews> m_declaredJobViews;
 
         org::PipelineState m_psoFloat1_2D;
         org::PipelineState m_psoFloat1_Array;
@@ -103,21 +116,38 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
         std::atomic_bool m_declaredResourcesChanged = true;
     };
 
+// The jobs taken at declaration, each with its per-subresource dispatch inputs.
+struct TextureBC7CompressionBindings {
+        struct Subresource {
+            org::DeclaredViewToken source;
+            uint32_t footprintOffset = 0, rowPitch = 0, width = 0, height = 0;
+        };
+        struct Job {
+            std::vector<Subresource> subresources;
+            org::DeclaredViewToken blocks;
+        };
+        org::PipelineState pipeline;
+        std::vector<Job> jobs;
+    };
+// Indices into TextureBC7CompressionBindings::jobs of the jobs compressed this frame.
+struct TextureBC7CompressionFrame {
+        std::vector<uint32_t> jobs;
+    };
+
 class TextureFactory::BC7CompressionPass
         : public org::TypedRenderGraphPass<BC7CompressionPass,
-              br::render::PreparedComputePipelineSequence>,
+              TextureBC7CompressionFrame, TextureBC7CompressionBindings>,
           public org::IDynamicDeclaredResources {
     public:
         void EnqueueJob(const std::shared_ptr<BC7CompressionJob>& job);
 
         void Update(const org::UpdateExecutionContext& context) override;
 
-        void Declare(org::PassBuilder& builder);
-        br::render::PreparedComputePipelineSequence Prepare(const org::PassPrepareContext& preparation);
-        static void Record(const br::render::PreparedComputePipelineSequence& data,
-            org::PassRecordContext& recording) {
-            br::render::RecordPreparedComputePipelineSequence(data, recording);
-        }
+        TextureBC7CompressionBindings Declare(org::PassBuilder& builder);
+        TextureBC7CompressionFrame Prepare(const TextureBC7CompressionBindings& bindings,
+            const org::PassPrepareContext& preparation);
+        static void Record(const TextureBC7CompressionBindings& bindings, const TextureBC7CompressionFrame& frame,
+            org::PassRecordContext& context);
 
         // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
         bool DeclaredResourcesChanged() const override;
@@ -126,10 +156,9 @@ class TextureFactory::BC7CompressionPass
         org::PipelineState& GetOrCreatePipeline();
         org::PipelineState CreatePipeline() const;
 
+        // The jobs Declare took, in the order of TextureBC7CompressionBindings::jobs.
         struct DeclaredJob {
             std::shared_ptr<BC7CompressionJob> job;
-            std::vector<org::DeclaredViewToken> sources;
-            org::DeclaredViewToken blocks;
         };
         std::vector<DeclaredJob> m_declaredJobs;
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
@@ -141,7 +170,7 @@ class TextureFactory::BC7CompressionPass
 
 struct TextureFactory::BC7CompressionCopyFrameData {
         struct Copy {
-            org::PreparedResourceReference source{}, destination{};
+            org::ResourceBindingToken source{}, destination{};
             rhi::CopyableFootprint footprint{};
             uint32_t mip = 0, slice = 0;
         };
@@ -176,8 +205,8 @@ class TextureFactory::BC7CompressionCopyPass
 
 struct TextureFactory::BC7CompressionReadbackFrameData {
         struct Copy {
-            org::PreparedResourceReference source{};
-            rhi::ResourceHandle destination{};
+            org::ResourceBindingToken source{};
+            std::shared_ptr<org::Buffer> destination;
             rhi::CopyableFootprint footprint{};
             uint32_t mip = 0, slice = 0;
         };

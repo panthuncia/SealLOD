@@ -21,7 +21,8 @@
 #include <BasicRenderer/Extensions/Resources/PublishedStateResourceResolver.h>
 #include "Resources/Buffers/Buffer.h"
 #include "Utilities/TripleGenerationMailbox.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedRenderIndirect.h"
+#include "VirtualGeometry/Rasterization/RenderPasses/ClusterRasterizationPass.h"
+#include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
 #include <atomic>
 #include <cstring>
@@ -107,13 +108,14 @@ int main() {
     });
     {
         // A fresh list, and every layout switch, invalidate root arguments.
-        // Exercise the shared raster recorder without relying on a previous pass.
+        // Exercise the CLod raster recording without relying on a previous pass.
         struct CommandState {
             rhi::PipelineLayoutHandle layout{};
             bool constantsValid = false;
             unsigned draws = 0;
         } state;
         rhi::CommandListVTable table{};
+        table.abi_version = rhi::RHI_CL_ABI_MIN;
         table.beginPass = +[](rhi::CommandList*, const rhi::PassBeginInfo&) noexcept {};
         table.endPass = +[](rhi::CommandList*) noexcept {};
         table.setPrimitiveTopology = +[](rhi::CommandList*, rhi::PrimitiveTopology) noexcept {};
@@ -129,7 +131,7 @@ int main() {
             Check(state.layout.valid());
             if (binding == MiscUintRootSignatureIndex) {
                 Check(count == NumMiscUintRootConstants);
-                Check(static_cast<const unsigned int*>(data)[0] == 1234u);
+                Check(static_cast<const unsigned int*>(data)[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] == 1234u);
                 state.constantsValid = true;
             }
         };
@@ -142,24 +144,56 @@ int main() {
         rhi::CommandList commands;
         commands.impl = &state;
         commands.vt = &table;
+
+        // The pass's declarations, frozen by hand: four shader-resource views and the
+        // argument buffer, each its own resource.
         auto owner = std::make_shared<int>(0);
-        auto bindings = std::make_shared<org::FrozenExecutionBindings>(
-            std::vector<org::FrozenExecutionBindings::ResourceBinding>{
-                {rhi::Resource(rhi::ResourceHandle{1, 1}), owner}});
-        org::RecordingContext recording(commands, bindings);
-        recording.SetPreparedDependencies(std::make_shared<org::PreparedDependencySnapshot>(
-            std::vector<org::CapturedPipeline>{{{1, 1}, owner, {1, 1}}, {{2, 1}, owner, {2, 1}}},
-            std::vector<std::shared_ptr<const rhi::WorkGraphPtr>>{},
-            std::vector<org::PreparedDependencySnapshot::DescriptorBinding>{},
-            std::vector<std::shared_ptr<const void>>{},
-            std::vector<std::shared_ptr<const org::PreparedLifecycleEffect>>{}));
-        PreparedRenderIndirectSequence data;
-        data.constants[0] = 1234u;
-        data.arguments = {0};
-        data.steps.resize(2);
-        data.steps[0].program.program = {0};
-        data.steps[1].program.program = {1};
-        RecordPreparedRenderIndirectSequence(data, recording);
+        auto layout = std::make_shared<org::ResourceUseLayout>();
+        std::vector<org::FrozenExecutionBindings::ResourceBinding> resources;
+        auto slots = std::make_shared<org::FramePreparationContext::ResourceSlots>();
+        auto scope = std::make_shared<org::DeclaredRecordingScope>();
+        scope->layout = layout;
+        for (uint32_t use = 0; use < 5; ++use) {
+            const uint64_t id = 100u + use;
+            const rhi::DescriptorSlot descriptor(rhi::DescriptorHeapHandle{3, 1}, 10u + use);
+            layout->uses.push_back({{}, {rhi::ResourceAccessType::ShaderResource, rhi::ResourceLayout::Common,
+                rhi::ResourceSyncState::All}, {id, id}, {org::BindlessViewRequest{org::BindlessViewKind::ShaderResource}}});
+            auto views = std::make_shared<org::BindlessResourceViews>();
+            views->views.push_back({org::BindlessViewKind::ShaderResource, UINT32_MAX, 0, 0, descriptor});
+            resources.push_back({rhi::Resource(rhi::ResourceHandle{1u + use, 1}), owner, views});
+            slots->push_back({id, use});
+            scope->views.push_back(descriptor);
+        }
+        auto bindings = std::make_shared<const org::FrozenExecutionBindings>(std::move(resources));
+        org::RecordingContext base(commands, bindings);
+        auto recording = base.WithDeclaredResources(bindings, slots, scope);
+
+        // Native objects with handles only; nothing destroys them.
+        static int nativeObject = 0;
+        static const rhi::PipelineVTable pipelineTable{};
+        static const rhi::CommandSignatureVTable signatureTable{};
+        const auto pipeline = [&](uint32_t index) {
+            rhi::Pipeline native{rhi::PipelineHandle{index, 1}};
+            native.impl = &nativeObject;
+            native.vt = &pipelineTable;
+            return org::PipelineState(rhi::PipelinePtr(rhi::Device{}, native, nullptr), 0, {}, {},
+                rhi::PipelineLayoutHandle{index, 1});
+        };
+        rhi::CommandSignature signature{rhi::CommandSignatureHandle{1, 1}};
+        signature.impl = &nativeObject;
+        signature.vt = &signatureTable;
+
+        ClusterRasterBindings raster{};
+        raster.commandSignature = std::make_shared<const rhi::CommandSignaturePtr>(rhi::Device{}, signature, nullptr);
+        raster.histogram = {layout, 0, 0};
+        raster.visible = {layout, 1, 0};
+        raster.transforms = {layout, 2, 0};
+        raster.mapping = {layout, 3, 0};
+        raster.indirectArgs = layout->uses[4].binding;
+        ClusterRasterFrame frame;
+        frame.viewRasterInfoTable = 1234u;
+        frame.steps = {{pipeline(1), 0}, {pipeline(2), sizeof(RasterizeClustersCommand)}};
+        ClusterRasterizationPass::Record(raster, frame, recording);
         Check(state.draws == 2);
     }
     {

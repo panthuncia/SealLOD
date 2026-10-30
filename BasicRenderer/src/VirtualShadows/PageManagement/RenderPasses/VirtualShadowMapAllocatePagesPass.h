@@ -6,21 +6,27 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapAllocatePagesBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken requests, requestCount;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken clipmapInfo, pageTable;
     org::DeclaredViewToken pageMetadata, dirtyFlags, freePages, reusablePages, header, stats;
     uint32_t pageRenderBudget = 0;
 };
+struct VirtualShadowMapAllocatePagesFrame {
+    uint32_t pageTableResolution = 0;
+    uint32_t maxPhysicalPages = 0;
+};
 
 class VirtualShadowMapAllocatePagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapAllocatePagesPass,
-    br::render::PreparedComputeIndirect, VirtualShadowMapAllocatePagesBindings> {
+    VirtualShadowMapAllocatePagesFrame, VirtualShadowMapAllocatePagesBindings> {
 public:
     VirtualShadowMapAllocatePagesPass(
         std::shared_ptr<org::Buffer> allocationRequestsBuffer,
@@ -36,10 +42,10 @@ public:
         std::shared_ptr<org::Buffer> statsBuffer);
 
     VirtualShadowMapAllocatePagesBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputeIndirect Prepare(const VirtualShadowMapAllocatePagesBindings&,
+    VirtualShadowMapAllocatePagesFrame Prepare(const VirtualShadowMapAllocatePagesBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapAllocatePagesBindings&,
-        const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
+        const VirtualShadowMapAllocatePagesFrame&, org::PassRecordContext&);
 
 private:
     org::PipelineState m_pso;

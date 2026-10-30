@@ -4,19 +4,20 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapExpandPredictedPagesBindings {
+    org::PipelineState stampContentGenerationPipeline, expandPipeline, resetCandidateCountPipeline;
     org::DeclaredViewToken candidates, candidateCount, rawPages, rawCount, clipmapInfo;
     org::DeclaredViewToken scratch, stats, pageTable, pageMetadata, pageViewInfo;
     uint32_t physicalPageCount = 0;
 };
 
 class VirtualShadowMapExpandPredictedPagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapExpandPredictedPagesPass,
-    br::render::PreparedComputePipelineSequence, VirtualShadowMapExpandPredictedPagesBindings> {
+    org::EmptyPassFrameData, VirtualShadowMapExpandPredictedPagesBindings> {
 public:
     VirtualShadowMapExpandPredictedPagesPass(
         std::shared_ptr<org::Buffer> predictiveCandidatesBuffer,
@@ -32,10 +33,7 @@ public:
         uint32_t physicalPageCount);
 
     VirtualShadowMapExpandPredictedPagesBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputePipelineSequence Prepare(const VirtualShadowMapExpandPredictedPagesBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const VirtualShadowMapExpandPredictedPagesBindings&,
-        const br::render::PreparedComputePipelineSequence&, org::PassRecordContext&);
+    static void Record(const VirtualShadowMapExpandPredictedPagesBindings&, org::PassRecordContext&);
 
 private:
     org::PipelineState m_stampContentGenerationPso;

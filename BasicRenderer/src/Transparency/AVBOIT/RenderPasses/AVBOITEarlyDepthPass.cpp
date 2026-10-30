@@ -2,7 +2,6 @@
 #include "Render/PassBuilders.h"
 
 #include "BuiltinResources.h"
-#include "Render/ShaderAPI.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -100,6 +99,8 @@ AVBOITEarlyDepthBindings AVBOITEarlyDepthPass::Declare(org::PassBuilder& builder
     builder.ShaderResource(Builtin::CameraBuffer);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return {
+        m_pso,
+        m_commandSignature,
         builder.ShaderResource(m_configBuffer),
         builder.IndirectArguments(m_tileCommandsBuffer),
         builder.IndirectArguments(m_tileCountBuffer),
@@ -110,34 +111,19 @@ AVBOITEarlyDepthBindings AVBOITEarlyDepthPass::Declare(org::PassBuilder& builder
 AVBOITEarlyDepthFrameData AVBOITEarlyDepthPass::Prepare(
     const AVBOITEarlyDepthBindings& bindings, const org::PassPrepareContext& preparation) const {
     AVBOITEarlyDepthFrameData data;
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    data.enabled = true;
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    data.signature = preparation.CaptureCommandSignature(m_commandSignature);
-    data.arguments = preparation.CaptureResource(bindings.arguments);
-    data.count = preparation.CaptureResource(bindings.count);
-    data.depth = preparation.Capture(bindings.depth);
     data.clear = preparation.ClearValue(bindings.depth.Resource());
     const auto& depthDesc = preparation.Describe(bindings.depth);
     data.width = depthDesc.texture.width; data.height = depthDesc.texture.height;
     data.maximumCount = static_cast<uint32_t>(preparation.Describe(bindings.arguments).buffer.sizeBytes
         / sizeof(CLodAVBOITEarlyDepthTileIndirectCommand));
-    data.constants[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.config).index;
     return data;
 }
 
-void AVBOITEarlyDepthPass::Record(const AVBOITEarlyDepthBindings&,
+void AVBOITEarlyDepthPass::Record(const AVBOITEarlyDepthBindings& bindings,
     const AVBOITEarlyDepthFrameData& data, org::PassRecordContext& recording) {
-    if (!data.enabled) return;
     auto& commands = recording.Commands();
-    commands.SetDescriptorHeaps(data.resourceHeap, data.samplerHeap);
     rhi::DepthAttachment depth{};
-    depth.dsv = recording.Resolve(data.depth);
+    depth.dsv = recording.View(bindings.depth);
     depth.depthLoad = rhi::LoadOp::Clear; depth.depthStore = rhi::StoreOp::Store;
     depth.stencilLoad = rhi::LoadOp::DontCare; depth.stencilStore = rhi::StoreOp::DontCare;
     depth.clear = data.clear;
@@ -146,14 +132,10 @@ void AVBOITEarlyDepthPass::Record(const AVBOITEarlyDepthBindings&,
     pass.debugName = "CLod AVBOIT early depth";
     commands.BeginPass(pass);
     commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleStrip);
-    commands.BindLayout(recording.ResolveLayout(data.program));
-    commands.BindPipeline(recording.Resolve(data.program));
-    if (!data.descriptorIndices.empty()) commands.PushConstants(rhi::ShaderStage::AllGraphics, 0,
-        org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-        static_cast<uint32_t>(data.descriptorIndices.size()), data.descriptorIndices.data());
-    commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, MiscUintRootSignatureIndex, 0,
-        NumMiscUintRootConstants, data.constants.data());
-    commands.ExecuteIndirect(data.signature, recording.Resolve(data.arguments).GetHandle(), 0,
-        recording.Resolve(data.count).GetHandle(), 0, data.maximumCount);
+    recording.BindGraphicsPipeline(bindings.pipeline);
+    br::render::MiscConstants constants{};
+    constants[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_CONFIG_DESCRIPTOR_INDEX] = recording.Index(bindings.config);
+    br::render::PushMiscConstants(recording, constants);
+    recording.ExecuteIndirect(bindings.signature, bindings.arguments, 0, data.maximumCount, bindings.count, 0);
     commands.EndPass();
 }

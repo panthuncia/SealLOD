@@ -6,7 +6,7 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
@@ -17,6 +17,8 @@ enum class ReyesReplayMergeKind
 };
 
 struct ReyesReplayMergeBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken source;
     org::DeclaredViewToken sourceCounter;
     org::DeclaredViewToken dest;
@@ -28,7 +30,7 @@ struct ReyesReplayMergeBindings {
 };
 
 class ReyesReplayMergePass final : public org::TypedRenderGraphPass<ReyesReplayMergePass,
-    br::render::PreparedComputeIndirect, ReyesReplayMergeBindings> {
+    org::EmptyPassFrameData, ReyesReplayMergeBindings> {
 public:
     ReyesReplayMergePass(
         ReyesReplayMergeKind kind,
@@ -43,10 +45,7 @@ public:
 
     ReyesReplayMergeBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputeIndirect Prepare(const ReyesReplayMergeBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesReplayMergeBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
+    static void Record(const ReyesReplayMergeBindings& bindings, org::PassRecordContext& recording);
 
 private:
     ReyesReplayMergeKind m_kind = ReyesReplayMergeKind::Split;

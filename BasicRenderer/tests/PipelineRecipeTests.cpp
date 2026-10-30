@@ -1,15 +1,19 @@
 #include <iostream>
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include <BasicRenderer/Pipeline/PipelineRecipe.h>
 #include "BasicRenderer/Runtime/Detail/DepthHistoryService.h"
 #include "Render/RenderGraph/RhiExecution.h"
+#include "Render/ShaderAPI.h"
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeCommands.h"
 #include "Materials/Evaluation/RenderPasses/BuildPixelListPass.h"
 #include "Materials/Evaluation/RenderPasses/EvaluateMaterialGroupsPass.h"
-#include "Materials/Evaluation/RenderPasses/PersistentMaterialEvaluationPass.h"
 #include "Runtime/Publication/PersistentRendererPublication.h"
 #include "VirtualGeometry/Culling/RenderPasses/ComputeCullingPass.h"
 #include "VirtualGeometry/Rasterization/RenderPasses/ClusterSoftwareRasterizationPass.h"
@@ -18,100 +22,381 @@
 #include "../shaders/PerPassRootConstants/clodPureComputeCullingRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodWorkGraphRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
+#include "../shaders/PerPassRootConstants/clodCreateCommandRootConstants.h"
+#include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
 namespace {
-struct RecordedConstants {
-    std::vector<uint32_t> values;
-    std::vector<std::vector<uint32_t>> history;
-    uint32_t dispatches = 0;
-    std::array<uint32_t,3> groups{};
-    rhi::PipelineHandle pipeline{};
-    rhi::PipelineLayoutHandle layout{};
-    rhi::ResourceHandle barrierResource{}, indirectResource{}, workGraphBacking{}, workGraphInput{};
-    rhi::ResourceHandle indirectCountBuffer{};
-    uint64_t indirectOffset = 0;
-    uint64_t indirectCountOffset = 0;
-    uint32_t indirectCount = 0;
-    rhi::WorkGraphHandle workGraph{};
-    bool initializeBacking = false;
+
+// Command trace of a recording: every command the pass emits, in order, through
+// a capturing command list. No device is involved.
+struct Trace {
+    enum class Kind { Layout, Pipeline, Push, Dispatch, Indirect, Barrier };
+    struct Event {
+        Kind kind{};
+        // Layout/Pipeline: its index. Push/Dispatch: the pipeline bound at the time.
+        // Indirect: the argument resource.
+        uint32_t handle = 0;
+        // Push: the root parameter. Indirect: the command signature. Barrier: the
+        // first buffer's access after the barrier.
+        uint32_t root = 0;
+        uint64_t offset = 0;  // Indirect: the argument offset.
+        // Push: the constants. Dispatch: the groups. Barrier: the buffers.
+        std::vector<uint32_t> values;
+    };
+    std::vector<Event> events;
+    uint32_t pipeline = 0;
+
+    std::vector<Event> Of(Kind kind) const
+    {
+        std::vector<Event> result;
+        for (const auto& event : events) if (event.kind == kind) result.push_back(event);
+        return result;
+    }
+    std::vector<uint32_t> Handles(Kind kind) const
+    {
+        std::vector<uint32_t> result;
+        for (const auto& event : events) if (event.kind == kind) result.push_back(event.handle);
+        return result;
+    }
+    std::vector<uint32_t> Pipelines() const { return Handles(Kind::Pipeline); }
+    // The misc root-constant blocks pushed, optionally only those under one pipeline.
+    std::vector<std::vector<uint32_t>> MiscPushes(std::optional<uint32_t> pipeline = std::nullopt) const
+    {
+        std::vector<std::vector<uint32_t>> result;
+        for (const auto& event : events)
+            if (event.kind == Kind::Push && event.root == MiscUintRootSignatureIndex
+                && (!pipeline || event.handle == *pipeline))
+                result.push_back(event.values);
+        return result;
+    }
+    std::vector<std::vector<uint32_t>> DescriptorSlotPushes() const
+    {
+        std::vector<std::vector<uint32_t>> result;
+        for (const auto& event : events)
+            if (event.kind == Kind::Push && event.root == org::shaderapi::kResourceDescriptorIndicesRootParameter)
+                result.push_back(event.values);
+        return result;
+    }
 };
 
-void TestInvocationConstantRecording()
+rhi::CommandList TraceList(Trace& trace)
 {
-    RecordedConstants recorded;
-    rhi::CommandListVTable table{};
-    table.abi_version = rhi::RHI_CL_ABI_MIN;
-    table.pushConstants = +[](rhi::CommandList* commands, rhi::ShaderStage, uint32_t, uint32_t,
-        uint32_t, uint32_t count, const void* values) noexcept {
-        auto& state = *static_cast<RecordedConstants*>(commands->impl);
-        const auto* words = static_cast<const uint32_t*>(values);
-        state.values.assign(words, words + count);
-        state.history.push_back(state.values);
-    };
-    table.dispatch = +[](rhi::CommandList* commands, uint32_t, uint32_t, uint32_t) noexcept {
-        ++static_cast<RecordedConstants*>(commands->impl)->dispatches;
-    };
-    rhi::CommandList commands{rhi::CommandListHandle{1,1}};
-    commands.vt = &table;
-    commands.impl = &recorded;
-    auto bindings = std::make_shared<const org::FrozenExecutionBindings>(
-        std::vector<org::FrozenExecutionBindings::ResourceBinding>{});
-    org::RecordingContext context(commands, bindings);
-    br::render::PreparedComputeCommandSequence recipe;
-    recipe.commands.emplace_back(br::render::PreparedComputeConstants{7, 0, {10,20,30}, uint64_t{1} << 1});
-    recipe.commands.emplace_back(br::render::PreparedDispatchGroups{2,1,1});
-    const std::array<uint32_t,3> first{0,41,0}, second{0,42,0};
-    br::render::RecordPreparedComputeCommands(recipe, context, nullptr, {}, first);
-    if (recorded.values != std::vector<uint32_t>{10,41,30}) throw std::runtime_error("first invocation constants");
-    br::render::RecordPreparedComputeCommands(recipe, context, nullptr, {}, second);
-    if (recorded.values != std::vector<uint32_t>{10,42,30} || recorded.dispatches != 2)
-        throw std::runtime_error("fresh invocation constants and dispatches");
-    if (std::get<br::render::PreparedComputeConstants>(recipe.commands.front()).values != std::vector<uint32_t>{10,20,30})
-        throw std::runtime_error("recording mutated immutable recipe constants");
-    bool invalidInvocationRejected = false;
-    try { br::render::RecordPreparedComputeCommands(recipe, context); }
-    catch (const std::out_of_range&) { invalidInvocationRejected = true; }
-    if (!invalidInvocationRejected) throw std::runtime_error("missing invocation constant was accepted");
+    static const rhi::CommandListVTable table = [] {
+        rhi::CommandListVTable t{};
+        t.abi_version = rhi::RHI_CL_ABI_MIN;
+        t.bindLayout = +[](rhi::CommandList* list, rhi::PipelineLayoutHandle layout) noexcept {
+            static_cast<Trace*>(list->impl)->events.push_back({Trace::Kind::Layout, layout.index});
+        };
+        t.bindPipeline = +[](rhi::CommandList* list, rhi::PipelineHandle pipeline) noexcept {
+            auto& trace = *static_cast<Trace*>(list->impl);
+            trace.pipeline = pipeline.index;
+            trace.events.push_back({Trace::Kind::Pipeline, pipeline.index});
+        };
+        t.pushConstants = +[](rhi::CommandList* list, rhi::ShaderStage, uint32_t, uint32_t root,
+            uint32_t, uint32_t count, const void* values) noexcept {
+            auto& trace = *static_cast<Trace*>(list->impl);
+            const auto* words = static_cast<const uint32_t*>(values);
+            trace.events.push_back({Trace::Kind::Push, trace.pipeline, root, 0, std::vector<uint32_t>(words, words + count)});
+        };
+        t.dispatch = +[](rhi::CommandList* list, uint32_t x, uint32_t y, uint32_t z) noexcept {
+            auto& trace = *static_cast<Trace*>(list->impl);
+            trace.events.push_back({Trace::Kind::Dispatch, trace.pipeline, 0, 0, {x, y, z}});
+        };
+        t.executeIndirect = +[](rhi::CommandList* list, rhi::CommandSignatureHandle signature,
+            rhi::ResourceHandle arguments, uint64_t offset, rhi::ResourceHandle, uint64_t, uint32_t count) noexcept {
+            static_cast<Trace*>(list->impl)->events.push_back(
+                {Trace::Kind::Indirect, arguments.index, signature.index, offset, {count}});
+        };
+        t.barriers = +[](rhi::CommandList* list, const rhi::BarrierBatch& batch) noexcept {
+            Trace::Event event{Trace::Kind::Barrier};
+            for (uint32_t i = 0; i < batch.buffers.size; ++i) event.values.push_back(batch.buffers.data[i].buffer.index);
+            if (batch.buffers.size) event.root = static_cast<uint32_t>(batch.buffers.data[0].afterAccess);
+            static_cast<Trace*>(list->impl)->events.push_back(std::move(event));
+        };
+        return t;
+    }();
+    rhi::CommandList list{rhi::CommandListHandle{1, 1}};
+    list.vt = &table;
+    list.impl = &trace;
+    return list;
+}
 
-    // Exact object-cull arguments stay fresh between the immutable prefix and
-    // suffix; recording needs no pass object or live scene manager.
-    recorded.history.clear();
-    ComputeCullingRecipe culling;
-    culling.hasObjectCull = true;
-    culling.objectCullConstants[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] = 101;
-    culling.prefix.commands.emplace_back(br::render::PreparedComputeConstants{7,0,{11}});
-    culling.suffix.commands.emplace_back(br::render::PreparedComputeConstants{7,0,{99}});
-    ComputeCullingInvocation invocation;
-    invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] = 77;
-    invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] = 123;
-    invocation.workloads.push_back({.viewDataIndex = 3, .activeDrawSetIndicesSRVIndex = 4, .activeDrawCount = 5,
-        .drawRecordVisibilityGenerationSRVIndex = 6, .drawRecordVisibilityGenerationCount = 8, .shadowCasterClass = 2, .dispatchGridX = 7});
-    invocation.workloads.push_back({.viewDataIndex = 13, .activeDrawSetIndicesSRVIndex = 14, .activeDrawCount = 15,
-        .drawRecordVisibilityGenerationSRVIndex = 16, .drawRecordVisibilityGenerationCount = 18, .shadowCasterClass = 1, .dispatchGridX = 17});
-    ComputeCullingPass::Record(culling, invocation, context);
-    if (recorded.history.size() != 4 || recorded.history.front() != std::vector<uint32_t>{11}
-        || recorded.history.back() != std::vector<uint32_t>{99})
-        throw std::runtime_error("culling invocation escaped its prefix/suffix ordering");
-    for (size_t index = 0; index < invocation.workloads.size(); ++index) {
-        const auto& constants = recorded.history[index + 1];
-        const auto& workload = invocation.workloads[index];
-        if (constants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_COUNT] != workload.activeDrawCount
-            || constants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] != workload.viewDataIndex
-            || constants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] != workload.activeDrawSetIndicesSRVIndex
-            || constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] != workload.drawRecordVisibilityGenerationSRVIndex
-            || constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_COUNT] != workload.drawRecordVisibilityGenerationCount
-            || constants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] != workload.shadowCasterClass
-            || constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] != 77
-            || constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] != 123
-            || constants[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] != 101)
-            throw std::runtime_error("culling invocation did not use exact current arguments");
+// A pass's declarations built by hand, as the graph would freeze them for one
+// frame. Every declared resource publishes a shader-resource, unordered-access
+// and constant-buffer view, so recordings may read any of them.
+class DeclaredFrame {
+public:
+    using Kind = org::BindlessViewKind;
+    static uint32_t ResourceIndex(const org::DeclaredViewToken& token) { return 1000u + token.use; }
+    static uint32_t Descriptor(Kind kind, const org::DeclaredViewToken& token)
+    {
+        switch (kind) {
+        case Kind::UnorderedAccess: return 100u + token.use;
+        case Kind::ConstantBuffer: return 300u + token.use;
+        default: return 200u + token.use;
+        }
     }
+    static uint32_t Srv(const org::DeclaredViewToken& token) { return Descriptor(Kind::ShaderResource, token); }
+    static uint32_t Uav(const org::DeclaredViewToken& token) { return Descriptor(Kind::UnorderedAccess, token); }
+
+    // Declares one resource with one view; a name makes it what pipeline
+    // ResourceDescriptorIndex slots of that name resolve to.
+    org::DeclaredViewToken Declare(Kind kind = Kind::UnorderedAccess, const char* name = nullptr)
+    {
+        using A = rhi::ResourceAccessType;
+        const auto use = static_cast<uint32_t>(m_layout->uses.size());
+        const uint64_t id = 500u + use;
+        const auto access = kind == Kind::UnorderedAccess ? A::UnorderedAccess
+            : kind == Kind::ConstantBuffer ? A::ConstantBuffer : A::ShaderResource;
+        m_layout->uses.push_back({{}, {access, rhi::ResourceLayout::Common, rhi::ResourceSyncState::All},
+            {id, id}, {org::BindlessViewRequest{kind}}});
+        if (name) m_layout->namedViews.push_back({org::ResourceIdentifier{name}.hash, use, 0, kind});
+        return {m_layout, use, 0};
+    }
+
+    org::RecordingContext Context(rhi::CommandList list) const
+    {
+        std::vector<org::FrozenExecutionBindings::ResourceBinding> resources;
+        auto slots = std::make_shared<org::FramePreparationContext::ResourceSlots>();
+        auto scope = std::make_shared<org::DeclaredRecordingScope>();
+        scope->layout = m_layout;
+        for (uint32_t use = 0; use < m_layout->uses.size(); ++use) {
+            const org::DeclaredViewToken token{m_layout, use, 0};
+            auto views = std::make_shared<org::BindlessResourceViews>();
+            for (const auto kind : {Kind::ShaderResource, Kind::UnorderedAccess, Kind::ConstantBuffer})
+                views->views.push_back({kind, UINT32_MAX, 0, 0, Slot(Descriptor(kind, token))});
+            resources.push_back({rhi::Resource(rhi::ResourceHandle{ResourceIndex(token), 1}), m_owner, views});
+            slots->push_back({m_layout->uses[use].binding.globalResourceID, use});
+            scope->views.push_back(Slot(Descriptor(m_layout->uses[use].requiredViews[0].kind, token)));
+        }
+        auto bindings = std::make_shared<const org::FrozenExecutionBindings>(std::move(resources));
+        org::RecordingContext base(list, bindings);
+        return base.WithDeclaredResources(bindings, slots, scope);
+    }
+
+private:
+    static rhi::DescriptorSlot Slot(uint32_t index) { return rhi::DescriptorSlot(rhi::DescriptorHeapHandle{3, 1}, index); }
+    std::shared_ptr<org::ResourceUseLayout> m_layout = std::make_shared<org::ResourceUseLayout>();
+    std::shared_ptr<int> m_owner = std::make_shared<int>(0);
+};
+
+// Native objects with handles only; nothing destroys them.
+constexpr uint32_t kLayoutBase = 50u;
+int g_nativeObject = 0;
+
+rhi::PipelinePtr NativePipeline(uint32_t index)
+{
+    static const rhi::PipelineVTable table{};
+    rhi::Pipeline pipeline{rhi::PipelineHandle{index, 1}};
+    pipeline.impl = &g_nativeObject;
+    pipeline.vt = &table;
+    return rhi::PipelinePtr(rhi::Device{}, pipeline, nullptr);
+}
+
+org::PipelineState Pipeline(uint32_t index, org::PipelineResources resources = {})
+{
+    return org::PipelineState(NativePipeline(index), 0, std::move(resources), {},
+        rhi::PipelineLayoutHandle{kLayoutBase + index, 1});
+}
+
+std::shared_ptr<const org::PipelineStatePayload> Payload(uint32_t index, org::PipelineResources resources = {})
+{
+    auto payload = std::make_shared<org::PipelineStatePayload>(NativePipeline(index), 0, std::move(resources),
+        1, 0, 0, "TestPipeline" + std::to_string(index));
+    payload->layout = {kLayoutBase + index, 1};
+    return payload;
+}
+
+std::shared_ptr<const rhi::CommandSignaturePtr> Signature(uint32_t index)
+{
+    static const rhi::CommandSignatureVTable table{};
+    rhi::CommandSignature signature{rhi::CommandSignatureHandle{index, 1}};
+    signature.impl = &g_nativeObject;
+    signature.vt = &table;
+    return std::make_shared<const rhi::CommandSignaturePtr>(rhi::Device{}, signature, nullptr);
 }
 
 void Require(bool condition, const char* message)
 {
     if (!condition) {
         throw std::runtime_error(message);
+    }
+}
+
+template<class Exception, class F> bool Rejects(F&& record)
+{
+    try { record(); }
+    catch (const Exception&) { return true; }
+    return false;
+}
+
+// Compute culling: the culling programs are 1..12 in ComputeCullingPrograms
+// order, the dispatch signature 40.
+struct CullingFixture {
+    DeclaredFrame declared;
+    ComputeCullingBindings bindings;
+
+    CullingFixture(bool firstPass, bool windCache)
+    {
+        auto& b = bindings;
+        b.programs = {Pipeline(1), Pipeline(2), Pipeline(3), Pipeline(4), Pipeline(5), Pipeline(6),
+            Pipeline(7), Pipeline(8), Pipeline(9), Pipeline(10), Pipeline(11), Pipeline(12), Signature(40)};
+        b.visibleClusters = declared.Declare();
+        b.visibleClusterTransformIndices = declared.Declare();
+        b.visibleClustersCounter = declared.Declare();
+        b.swVisibleClustersCounter = declared.Declare();
+        b.rasterBucketHistogramCommand = declared.Declare();
+        b.telemetry = declared.Declare();
+        b.replay = declared.Declare();
+        b.replayState = declared.Declare();
+        auto& f = b.frontiers;
+        for (auto* token : {&f.currentNodes, &f.nextNodes, &f.currentLeaves, &f.nextLeaves, &f.clusters,
+                 &f.currentNodeCounter, &f.nextNodeCounter, &f.currentLeafCounter, &f.nextLeafCounter, &f.clusterCounter,
+                 &f.nodeDispatchArgs, &f.leafDispatchArgs, &f.clusterDispatchArgs})
+            *token = declared.Declare();
+        if (windCache) {
+            b.windBounds = declared.Declare();
+            b.windMembership = declared.Declare(DeclaredFrame::Kind::ShaderResource);
+        }
+        b.maxVisibleClusters = 4096u;
+        b.isFirstPass = firstPass;
+    }
+};
+
+void TestComputeCullingRecording()
+{
+    ComputeCullingFrame frame;
+    frame.active = true;
+    frame.cullingFlags = 0x5u;
+    frame.traversalDepth = 1u;
+    frame.expansionFactor = 4u;
+    frame.rasterBucketCount = 9u;
+    frame.viewRasterInfoTable = 61u;
+    frame.viewDepthTable = 62u;
+    frame.windEntryCount = 123u;
+    frame.windGeneration = 77u;
+    frame.workloads.push_back({.viewDataIndex = 3, .activeDrawSetIndicesSRVIndex = 4, .activeDrawCount = 5,
+        .drawRecordVisibilityGenerationSRVIndex = 6, .drawRecordVisibilityGenerationCount = 8, .shadowCasterClass = 2, .dispatchGridX = 7});
+    frame.workloads.push_back({.viewDataIndex = 13, .activeDrawSetIndicesSRVIndex = 14, .activeDrawCount = 15,
+        .drawRecordVisibilityGenerationSRVIndex = 16, .drawRecordVisibilityGenerationCount = 18, .shadowCasterClass = 1, .dispatchGridX = 17});
+
+    // Phase 1 with the DynamicWind bounds cache.
+    {
+        CullingFixture fixture(true, true);
+        const auto& b = fixture.bindings;
+        Trace trace;
+        auto context = fixture.declared.Context(TraceList(trace));
+        ComputeCullingPass::Record(b, frame, context);
+        Require(trace.Pipelines() == std::vector<uint32_t>{1, 1, 1, 1, 1, 7, 6, 4, 10, 11, 3, 12, 2},
+            "phase-1 culling stages changed order");
+        Require(trace.Handles(Trace::Kind::Layout) == std::vector<uint32_t>{51, 51, 51, 51, 51, 57, 56, 54, 60, 61, 53, 62, 52},
+            "culling programs were bound without their layouts");
+
+        const std::vector<org::DeclaredViewToken> counters{b.frontiers.currentNodeCounter, b.frontiers.nextNodeCounter,
+            b.frontiers.currentLeafCounter, b.frontiers.nextLeafCounter, b.frontiers.clusterCounter};
+        const auto clears = trace.MiscPushes(1);
+        Require(clears.size() == counters.size(), "culling did not clear every frontier counter");
+        for (size_t index = 0; index < counters.size(); ++index)
+            Require(clears[index][CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] == DeclaredFrame::Uav(counters[index])
+                && clears[index][CLOD_CLEAR_UINT_BUFFER_COUNT] == 1u, "frontier counter clear lost its target");
+
+        // Object culling: one dispatch per workload with exactly that workload's
+        // arguments, between the shared prefix and the traversal suffix.
+        const auto objectCull = trace.MiscPushes(7);
+        std::vector<Trace::Event> objectDispatches;
+        for (const auto& dispatch : trace.Of(Trace::Kind::Dispatch))
+            if (dispatch.handle == 7) objectDispatches.push_back(dispatch);
+        Require(objectCull.size() == frame.workloads.size() && objectDispatches.size() == frame.workloads.size(),
+            "object culling did not dispatch once per workload");
+        for (size_t index = 0; index < frame.workloads.size(); ++index) {
+            const auto& constants = objectCull[index];
+            const auto& workload = frame.workloads[index];
+            Require(constants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_COUNT] == workload.activeDrawCount
+                && constants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] == workload.viewDataIndex
+                && constants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] == workload.activeDrawSetIndicesSRVIndex
+                && constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] == workload.drawRecordVisibilityGenerationSRVIndex
+                && constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_COUNT] == workload.drawRecordVisibilityGenerationCount
+                && constants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] == workload.shadowCasterClass
+                && constants[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] == DeclaredFrame::Uav(b.frontiers.currentNodes)
+                && constants[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] == DeclaredFrame::Uav(b.frontiers.currentNodeCounter),
+                "object culling did not use the exact workload arguments");
+            Require(objectDispatches[index].values == std::vector<uint32_t>{workload.dispatchGridX, 1, 1},
+                "object culling dispatch grid changed");
+        }
+
+        // Every stage reading the shared block sees this frame's values and the
+        // declared views.
+        for (const uint32_t program : {7u, 6u, 4u, 10u, 11u, 3u, 12u}) {
+            for (const auto& constants : trace.MiscPushes(program)) {
+                Require(constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] == 77u
+                    && constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] == 123u
+                    && constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX] == DeclaredFrame::Uav(b.windBounds)
+                    && constants[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] == DeclaredFrame::Srv(b.windMembership),
+                    "DynamicWind bounds cache constants did not reach every culling stage");
+                Require(constants[CLOD_WG_FLAGS] == 0x5u && constants[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] == 61u
+                    && constants[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] == 0u
+                    && constants[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == DeclaredFrame::Uav(b.visibleClusters)
+                    && constants[CLOD_WG_HW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX] == DeclaredFrame::Srv(b.visibleClustersCounter)
+                    && constants[CLOD_PC_PHASE2_EXPANSION_FACTOR] == 4u,
+                    "shared culling constants lost frame values or declared views");
+            }
+        }
+        Require(trace.MiscPushes(3).front()[CLOD_PC_DISPATCH_THREADS_PER_GROUP] == 64u / frame.expansionFactor,
+            "dense cluster culling ignored the expansion factor");
+
+        const auto indirect = trace.Of(Trace::Kind::Indirect);
+        Require(indirect.size() == 3
+            && indirect[0].handle == DeclaredFrame::ResourceIndex(b.frontiers.nodeDispatchArgs)
+            && indirect[1].handle == DeclaredFrame::ResourceIndex(b.frontiers.leafDispatchArgs)
+            && indirect[2].handle == DeclaredFrame::ResourceIndex(b.frontiers.clusterDispatchArgs)
+            && std::all_of(indirect.begin(), indirect.end(), [](const auto& event) { return event.root == 40u; }),
+            "traversal lost its indirect dispatches");
+        const auto create = trace.MiscPushes(2);
+        Require(create.size() == 1 && create[0][CLOD_CREATE_NUM_RASTER_BUCKETS] == 9u
+            && create[0][CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] == 4096u
+            && create[0][CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] == DeclaredFrame::Srv(b.visibleClustersCounter),
+            "raster bucket command creation lost its frame values");
+
+        // A later frame records its own values from the same bindings.
+        auto next = frame;
+        next.windGeneration = 78u;
+        next.workloads.pop_back();
+        Trace nextTrace;
+        auto nextContext = fixture.declared.Context(TraceList(nextTrace));
+        ComputeCullingPass::Record(b, next, nextContext);
+        Require(nextTrace.MiscPushes(7).size() == 1
+            && nextTrace.MiscPushes(7)[0][CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] == 78u,
+            "culling recorded stale frame values");
+    }
+
+    // Phase 2 without the bounds cache: replay seeds the frontiers instead of
+    // object culling, and the cache reads as absent.
+    {
+        CullingFixture fixture(false, false);
+        Trace trace;
+        auto context = fixture.declared.Context(TraceList(trace));
+        ComputeCullingPass::Record(fixture.bindings, frame, context);
+        Require(trace.Pipelines() == std::vector<uint32_t>{1, 1, 1, 1, 1, 5, 8, 5, 9, 3, 12, 6, 4, 10, 11, 3, 12, 2},
+            "phase-2 culling stages changed order");
+        Require(trace.Of(Trace::Kind::Indirect).size() == 6, "phase-2 culling lost an indirect dispatch");
+        for (const auto& constants : trace.MiscPushes(8))
+            Require(constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX] == 0u
+                && constants[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] == 0u,
+                "an undeclared bounds cache was bound");
+        const auto replay = trace.MiscPushes(5);
+        Require(replay.size() == 2 && replay[0][CLOD_PC_REPLAY_SOURCE_INDEX] == 0u && replay[1][CLOD_PC_REPLAY_SOURCE_INDEX] == 1u,
+            "occlusion replay seeded its sources out of order");
+    }
+
+    // A frame without a render snapshot records nothing.
+    {
+        CullingFixture fixture(true, true);
+        auto inactive = frame;
+        inactive.active = false;
+        Trace trace;
+        auto context = fixture.declared.Context(TraceList(trace));
+        ComputeCullingPass::Record(fixture.bindings, inactive, context);
+        Require(trace.events.empty(), "inactive culling recorded commands");
     }
 }
 
@@ -197,439 +482,6 @@ void TestPersistentRendererPublicationBindings()
     try { PreparePersistentRendererPublication(replacement,*invalid); } catch (const std::exception&) { rejected = true; }
     Require(rejected && replacement->persistentPublication->graph->bindings.At(slot).recording->resource.GetHandle().index == 24,
         "missing producer seed rejects replacement without changing selection");
-}
-
-void TestPersistentDescriptorCommandRecording()
-{
-    org::persistent::GraphProgram program;
-    auto edit = program.BeginEdit();
-    auto owner = std::make_shared<const uint32_t>(1);
-    auto snapshot = std::make_shared<org::ResourceBindingSnapshot>();
-    snapshot->resource = rhi::Resource(rhi::ResourceHandle{11,1});
-    snapshot->backingGeneration = 1; snapshot->allocationOwner = owner; snapshot->descriptorOwner = owner;
-    auto views = std::make_shared<org::BindlessResourceViews>();
-    views->views.push_back({org::BindlessViewKind::ShaderResource,UINT32_MAX,0,0,
-        rhi::DescriptorSlot(rhi::DescriptorHeapHandle{3,1},7)});
-    snapshot->views = views;
-    org::persistent::BindingVersion binding;
-    binding.identity = (uint64_t{1} << 32) | 11; binding.backingRevision = 1;
-    binding.owner = owner; binding.recording = snapshot;
-    const auto slot = edit.AddResource(binding.shape,std::move(binding));
-    const auto pass = edit.AddPass({});
-    const auto resource = edit.Declare(pass,slot,{},
-        {static_cast<uint64_t>(rhi::ResourceAccessType::ShaderResource)
-            | static_cast<uint64_t>(rhi::ResourceAccessType::UnorderedAccess)
-            | static_cast<uint64_t>(rhi::ResourceAccessType::IndirectArgument),0,1,true});
-    const auto view = edit.DeclareView(resource,{});
-    org::compiler::CompileWorkspace workspace; std::atomic_bool cancelled{false};
-    auto held = edit.Build(workspace,cancelled);
-    Require(program.Install(held), "persistent descriptor bootstrap");
-    br::render::PreparedComputeCommandSequence commands;
-    auto nativeOwner = std::make_shared<const uint32_t>(3);
-    std::weak_ptr<const uint32_t> nativeLifetime = nativeOwner;
-    auto nativeProgram = std::make_shared<org::PipelineStatePayload>(
-        rhi::PipelinePtr(rhi::Device{},rhi::Pipeline(rhi::PipelineHandle{8,1}),nullptr),0,org::PipelineResources{});
-    nativeProgram->layout = {9,1}; nativeProgram->layoutOwner = nativeOwner;
-    commands.commands.emplace_back(br::render::PreparedBindPersistentComputeProgram{nativeProgram});
-    br::render::PreparedBufferBarrierBatch barriers;
-    barriers.barriers.push_back({resource,rhi::ResourceAccessType::UnorderedAccess,rhi::ResourceAccessType::IndirectArgument,
-        rhi::ResourceSyncState::ComputeShading,rhi::ResourceSyncState::ExecuteIndirect});
-    commands.commands.emplace_back(std::move(barriers));
-    commands.commands.emplace_back(br::render::PreparedExecuteIndirectCommand{{4,1},resource,64,3,nativeOwner,resource,8});
-    auto workGraph = std::make_shared<const rhi::WorkGraphPtr>(
-        rhi::Device{},rhi::WorkGraph(rhi::WorkGraphHandle{5,1}),nullptr);
-    commands.commands.emplace_back(br::render::PreparedSetWorkGraph{workGraph,resource,false});
-    commands.commands.emplace_back(br::render::PreparedWorkGraphGpuDispatch{resource,16});
-    commands.commands.emplace_back(br::render::PreparedPersistentDescriptorIndices{{view,std::nullopt}});
-    nativeOwner.reset(); nativeProgram.reset(); workGraph.reset();
-    br::render::ValidatePersistentComputeCommands(commands);
-    Require(!nativeLifetime.expired(), "immutable commands lost native owners");
-    RecordedConstants recorded;
-    rhi::CommandListVTable table{}; table.abi_version = rhi::RHI_CL_ABI_MIN;
-    table.bindPipeline = +[](rhi::CommandList* list,rhi::PipelineHandle pipeline) noexcept {
-        static_cast<RecordedConstants*>(list->impl)->pipeline = pipeline;
-    };
-    table.bindLayout = +[](rhi::CommandList* list,rhi::PipelineLayoutHandle layout) noexcept {
-        static_cast<RecordedConstants*>(list->impl)->layout = layout;
-    };
-    table.barriers = +[](rhi::CommandList* list,const rhi::BarrierBatch& batch) noexcept {
-        if (batch.buffers.size) static_cast<RecordedConstants*>(list->impl)->barrierResource = batch.buffers.data[0].buffer;
-    };
-    table.executeIndirect = +[](rhi::CommandList* list,rhi::CommandSignatureHandle,rhi::ResourceHandle arguments,
-        uint64_t offset,rhi::ResourceHandle countBuffer,uint64_t countOffset,uint32_t count) noexcept {
-        auto& recorded = *static_cast<RecordedConstants*>(list->impl);
-        recorded.indirectResource = arguments; recorded.indirectOffset = offset; recorded.indirectCount = count;
-        recorded.indirectCountBuffer = countBuffer; recorded.indirectCountOffset = countOffset;
-    };
-    table.setWorkGraph = +[](rhi::CommandList* list,const rhi::WorkGraphHandle& graph,const rhi::ResourceHandle& backing,bool initialize) noexcept {
-        auto& recorded = *static_cast<RecordedConstants*>(list->impl);
-        recorded.workGraph = graph; recorded.workGraphBacking = backing; recorded.initializeBacking = initialize;
-    };
-    table.dispatchWorkGraph = +[](rhi::CommandList* list,const rhi::WorkGraphDispatchDesc& dispatch) noexcept {
-        static_cast<RecordedConstants*>(list->impl)->workGraphInput = dispatch.multiNodeGpuInput.inputBuffer;
-    };
-    table.pushConstants = +[](rhi::CommandList* commands, rhi::ShaderStage, uint32_t, uint32_t,
-        uint32_t, uint32_t count, const void* values) noexcept {
-        auto& recorded = *static_cast<RecordedConstants*>(commands->impl);
-        const auto* words = static_cast<const uint32_t*>(values);
-        recorded.values.assign(words,words + count);
-        recorded.history.push_back(recorded.values);
-    };
-    rhi::CommandList list{rhi::CommandListHandle{1,1}}; list.vt = &table; list.impl = &recorded;
-    auto oldContext = org::RecordingContext::FromPersistentBindings(list,held);
-    br::render::RecordPreparedComputeCommands(commands,oldContext);
-    Require(recorded.values == std::vector<uint32_t>{7,UINT32_MAX}, "old publication descriptor indices");
-    Require(recorded.pipeline.index == 8 && recorded.layout.index == 9, "owned persistent program binding");
-    Require(recorded.barrierResource.index == 11 && recorded.indirectResource.index == 11
-        && recorded.workGraphBacking.index == 11 && recorded.workGraphInput.index == 11,
-        "persistent commands did not resolve held backing");
-    Require(recorded.indirectOffset == 64 && recorded.indirectCount == 3 && recorded.workGraph.index == 5
-        && recorded.indirectCountBuffer.index == 11 && recorded.indirectCountOffset == 8,
-        "persistent command structure changed");
-    {
-        // Exercise the actual renderer's material recording adapter, including
-        // scalar rotation while descriptors and commands stay unchanged.
-        br::render::PreparedComputeIndirectSequence recipe;
-        recipe.layout = {9,1}; recipe.commandSignature = {4,1}; recipe.arguments = {11,1};
-        br::render::PreparedComputeIndirectSequence::Step step;
-        step.pipeline = {8,1};
-        step.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = 777;
-        step.constants[VISBUF_REYES_PATCH_INDEX_BASE] = 777;
-        recipe.steps.push_back(step);
-        MaterialEvaluationInvocation first, second;
-        first.constants[VISBUF_REYES_USE_NORMAL_MAPS] = 0;
-        first.constants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(0.25f);
-        second.constants[VISBUF_REYES_USE_NORMAL_MAPS] = 1;
-        second.constants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(0.75f);
-        EvaluateMaterialGroupsPass::Record(recipe,first,oldContext);
-        Require(recorded.values[VISBUF_REYES_USE_NORMAL_MAPS] == 0
-            && recorded.values[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] == std::bit_cast<uint32_t>(0.25f),
-            "live material adapter lost first invocation values");
-        EvaluateMaterialGroupsPass::Record(recipe,second,oldContext);
-        Require(recorded.values[VISBUF_REYES_USE_NORMAL_MAPS] == 1
-            && recorded.values[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] == std::bit_cast<uint32_t>(0.75f)
-            && recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 777
-            && recorded.values[VISBUF_REYES_PATCH_INDEX_BASE] == 777
-            && recipe.steps.front().constants == step.constants,
-            "live material adapter mutated immutable bindings or retained stale scalars");
-        const auto recordedCount = recorded.history.size();
-        bool rejected = false;
-        try { br::render::RecordPreparedComputeIndirectSequence(recipe,oldContext,{}, {},uint64_t{1} << 1); }
-        catch (const std::out_of_range&) { rejected = true; }
-        Require(rejected && recorded.history.size() == recordedCount,
-            "incomplete indirect invocation modified the command list");
-    }
-    EvaluateMaterialGroupsPass::PersistentBindings materialBindings;
-    materialBindings.visibleClusters = view; materialBindings.visibleClusterTransformIndices = view;
-    materialBindings.arguments = resource; materialBindings.patchVisibilityIndexBase = 7;
-    auto capturedMaterialProgram = std::get<br::render::PreparedBindPersistentComputeProgram>(commands.commands.front()).program;
-    std::array<EvaluateMaterialGroupsPass::CapturedProgram,1> materialPrograms{{
-        {GetMaterialEvaluationShaderKey(MaterialCompileNone),capturedMaterialProgram,{}}}};
-    auto materialInterface = EvaluateMaterialGroupsPass::BuildPersistentProgramInterface(materialBindings,materialPrograms,
-        std::make_shared<const rhi::CommandSignaturePtr>(rhi::Device{},rhi::CommandSignature(rhi::CommandSignatureHandle{4,1}),nullptr));
-    auto materials = std::make_shared<br::render::PublishedMaterialState>();
-    materials->activeCompileFlags = {MaterialCompileNone}; materials->activeCompileFlagSlots = {2}; materials->compileFlagSlotsUsed = 3;
-    EvaluateMaterialGroupsPass::RecordingConfiguration normalConfiguration{false,0.25f,3,0.75f};
-    auto materialInvocation = EvaluateMaterialGroupsPass::PreparePersistentInvocation(materialInterface,materials,false,
-        OutputType::NORMAL,3*sizeof(MaterialEvaluationIndirectCommand),normalConfiguration);
-    EvaluateMaterialGroupsPass::RecordPersistent(materialInterface,materialInvocation,oldContext);
-    Require(recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 7
-        && recorded.values[VISBUF_REYES_PATCH_INDEX_BASE] == 7 && recorded.values[VISBUF_REYES_USE_NORMAL_MAPS] == 0
-        && recorded.indirectResource.index == 11 && recorded.indirectOffset == 2*sizeof(MaterialEvaluationIndirectCommand),
-        "persistent material preparation lost descriptors, scalar configuration or active argument slot");
-    auto rotation = program.BeginEdit(); auto next = held->bindings.At(slot);
-    auto replacement = std::make_shared<org::ResourceBindingSnapshot>(*next.recording);
-    auto replacementViews = std::make_shared<org::BindlessResourceViews>(*replacement->views);
-    replacementViews->views[0].descriptor.index = 19;
-    replacement->resource = rhi::Resource(rhi::ResourceHandle{12,1}); replacement->backingGeneration = 2;
-    next.identity = (uint64_t{1} << 32) | 12; next.backingRevision = 2;
-    replacement->views = replacementViews; next.recording = replacement;
-    rotation.ReplaceBinding(slot,std::move(next));
-    auto selected = rotation.Build(workspace,cancelled);
-    Require(program.Install(selected), "descriptor replacement installation");
-    Require(selected->executable == held->executable, "descriptor replacement rebuilt executable");
-    auto context = org::RecordingContext::FromPersistentBindings(list,selected);
-    br::render::RecordPreparedComputeCommands(commands,context);
-    Require(recorded.values == std::vector<uint32_t>{19,UINT32_MAX}, "current publication descriptor indices");
-    Require(recorded.barrierResource.index == 12 && recorded.indirectResource.index == 12 && recorded.indirectCountBuffer.index == 12
-        && recorded.workGraphBacking.index == 12 && recorded.workGraphInput.index == 12,
-        "persistent command template retained previous backing");
-    br::render::RecordPreparedComputeCommands(commands,context,nullptr,true);
-    Require(recorded.initializeBacking, "fresh work-graph initialization effect was ignored");
-    br::render::RecordPreparedComputeCommands(commands,oldContext);
-    Require(recorded.values == std::vector<uint32_t>{7,UINT32_MAX}, "held descriptor version changed");
-    Require(recorded.indirectResource.index == 11 && !recorded.initializeBacking, "held command bindings changed");
-    normalConfiguration.useNormalMaps = true;
-    auto changedMaterialInvocation = EvaluateMaterialGroupsPass::PreparePersistentInvocation(materialInterface,materials,false,
-        OutputType::NORMAL,3*sizeof(MaterialEvaluationIndirectCommand),normalConfiguration);
-    EvaluateMaterialGroupsPass::RecordPersistent(materialInterface,changedMaterialInvocation,context);
-    Require(recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 19
-        && recorded.values[VISBUF_REYES_PATCH_INDEX_BASE] == 7 && recorded.values[VISBUF_REYES_USE_NORMAL_MAPS] == 1
-        && recorded.indirectResource.index == 12,
-        "persistent material interface retained old bindings or ignored scalar-only invocation changes");
-    EvaluateMaterialGroupsPass::RecordPersistent(materialInterface,materialInvocation,oldContext);
-    Require(recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 7 && recorded.indirectResource.index == 11,
-        "held material invocation lost selected binding versions");
-    const auto recordedBeforeInvalidInvocation = recorded.history.size();
-    for (uint32_t failure = 0; failure < 3; ++failure) {
-        auto invalidInvocation = materialInvocation;
-        if (failure == 0) invalidInvocation.commands.push_back({UINT32_MAX,0});
-        if (failure == 1) invalidInvocation.argumentBufferBytes = invalidInvocation.commands[0].argumentsOffset;
-        if (failure == 2) invalidInvocation.materials.reset();
-        bool accepted = true;
-        try { EvaluateMaterialGroupsPass::RecordPersistent(materialInterface,invalidInvocation,oldContext); }
-        catch (const std::exception&) { accepted = false; }
-        Require(!accepted && recorded.history.size() == recordedBeforeInvalidInvocation,
-            "invalid material invocation partially mutated native recording");
-    }
-    materialInterface = {}; materialPrograms[0].program.reset(); capturedMaterialProgram.reset();
-    auto oversized = commands;
-    std::get<br::render::PreparedPersistentDescriptorIndices>(oversized.commands.back()).slots.resize(65);
-    bool rejected = false;
-    try { br::render::RecordPreparedComputeCommands(oversized,context); }
-    catch (const std::out_of_range&) { rejected = true; }
-    Require(rejected, "persistent descriptor root bounds");
-    auto invalid = commands;
-    std::get<br::render::PreparedPersistentDescriptorIndices>(invalid.commands.back()).slots[0] = org::persistent::ViewToken{};
-    rejected = false;
-    try { br::render::RecordPreparedComputeCommands(invalid,context); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected, "invalid descriptor token accepted");
-    br::render::PreparedComputeCommandSequence rootConstants;
-    rootConstants.commands.emplace_back(br::render::PreparedComputeConstants{
-        7,3,{10,20,30},uint64_t{1} << 1,{{0,view},{2,std::nullopt}}});
-    br::render::ValidatePersistentComputeCommands(rootConstants);
-    const std::array<uint32_t,3> scalars{0,41,0}, changedScalars{0,42,0};
-    br::render::RecordPreparedComputeCommands(rootConstants,oldContext,nullptr,{},scalars);
-    Require(recorded.values == std::vector<uint32_t>{7,41,UINT32_MAX},"held descriptor and invocation constant patches");
-    br::render::RecordPreparedComputeCommands(rootConstants,context,nullptr,{},changedScalars);
-    Require(recorded.values == std::vector<uint32_t>{19,42,UINT32_MAX},"current descriptor and invocation constant patches");
-    Require(std::get<br::render::PreparedComputeConstants>(rootConstants.commands[0]).values == std::vector<uint32_t>{10,20,30},
-        "descriptor patch mutated immutable constant template");
-    auto badConstantLayout = rootConstants;
-    std::get<br::render::PreparedComputeConstants>(badConstantLayout.commands[0]).bindingViews.push_back({1,view});
-    rejected = false;
-    try { br::render::ValidatePersistentComputeCommands(badConstantLayout); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected,"descriptor patch overlapped invocation scalar");
-    badConstantLayout = rootConstants;
-    std::get<br::render::PreparedComputeConstants>(badConstantLayout.commands[0]).bindingViews.push_back({0,view});
-    rejected = false;
-    try { br::render::ValidatePersistentComputeCommands(badConstantLayout); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected,"duplicate descriptor constant patch accepted");
-    badConstantLayout = rootConstants;
-    std::get<br::render::PreparedComputeConstants>(badConstantLayout.commands[0]).bindingViews[0].index = 3;
-    rejected = false;
-    try { br::render::RecordPreparedComputeCommands(badConstantLayout,context,nullptr,{},scalars); }
-    catch (const std::out_of_range&) { rejected = true; }
-    Require(rejected,"out-of-range descriptor constant patch accepted");
-    const std::array<br::render::SymbolicComputeConstant,4> symbolic{uint32_t{7},view,std::nullopt,uint32_t{123}};
-    auto copiedSymbolic = symbolic; copiedSymbolic[3] = uint32_t{456};
-    br::render::PreparedComputeCommandSequence symbolicCommands;
-    symbolicCommands.commands.emplace_back(br::render::BuildSymbolicComputeConstants(7,5,copiedSymbolic));
-    br::render::ValidatePersistentComputeCommands(symbolicCommands);
-    br::render::RecordPreparedComputeCommands(symbolicCommands,oldContext);
-    Require(recorded.values == std::vector<uint32_t>{7,7,UINT32_MAX,456},"symbolic constant construction lost descriptor origin");
-    br::render::RecordPreparedComputeCommands(symbolicCommands,context);
-    Require(recorded.values == std::vector<uint32_t>{7,19,UINT32_MAX,456},"scalar equal to old descriptor was remapped");
-    auto legacyResource = commands;
-    std::get<br::render::PreparedExecuteIndirectCommand>(legacyResource.commands[2]).arguments = org::PreparedResourceReference{};
-    rejected = false;
-    try { br::render::ValidatePersistentComputeCommands(legacyResource); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected, "persistent build accepted compiler resource index");
-    auto unownedSignature = commands;
-    std::get<br::render::PreparedExecuteIndirectCommand>(unownedSignature.commands[2]).signatureOwner.reset();
-    rejected = false;
-    try { br::render::ValidatePersistentComputeCommands(unownedSignature); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected, "persistent build accepted unowned indirect signature");
-    auto cpuRecords = commands;
-    cpuRecords.commands.emplace_back(br::render::PreparedWorkGraphCpuDispatch{0,4,{std::byte{1}}});
-    rejected = false;
-    try { br::render::ValidatePersistentComputeCommands(cpuRecords); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected, "persistent build accepted one-frame CPU records");
-    auto physicalAddress = commands;
-    physicalAddress.commands.emplace_back(br::render::PreparedComputeAddressConstants{0,0,{0,0},{{123,0,1}}});
-    rejected = false;
-    try { br::render::ValidatePersistentComputeCommands(physicalAddress); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    Require(rejected, "persistent build accepted captured physical address");
-    commands.commands.clear(); oversized.commands.clear(); invalid.commands.clear();
-    legacyResource.commands.clear(); unownedSignature.commands.clear();
-    cpuRecords.commands.clear(); physicalAddress.commands.clear();
-    Require(nativeLifetime.expired(), "persistent command versions retained historical native owners");
-}
-
-void TestPixelListInvocationPreparation()
-{
-    struct HostData final : org::IHostExecutionData {
-        UpdateContext update;
-        const void* TryGet(std::type_index type) const noexcept override {
-            return type == std::type_index(typeid(UpdateContext)) ? &update : nullptr;
-        }
-    } host;
-    auto material = std::make_shared<br::render::PublishedMaterialState>();
-    material->activeCompileFlags = {MaterialCompileFlags::MaterialCompileVoxel};
-    material->activeCompileFlagSlots = {7};
-    auto publication = std::make_shared<br::render::PublishedRendererState>();
-    publication->materials.payload = br::render::ArtifactPayload::Make<br::render::PublishedMaterialState>(material);
-    host.update.publishedRendererState = publication;
-    host.update.renderResolution = {17,9};
-    org::FramePreparationContext preparation; preparation.preparationData = &host;
-    br::render::PreparedComputeDispatch recipe;
-    recipe.layout = rhi::PipelineLayoutHandle{1,1}; recipe.pipeline = rhi::PipelineHandle{2,1};
-    recipe.descriptorIndices = {99,98};
-    recipe.constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = 91;
-    recipe.constants[VISBUF_VOXEL_MATERIAL_BIN_INDEX] = 11;
-    const auto first = BuildPixelListPass::PrepareInvocation(recipe,{},preparation);
-    Require(first.voxelMaterialBin == 7 && first.groupsX == 3 && first.groupsY == 2,
-        "pixel-list first invocation");
-    auto changedMaterial = std::make_shared<br::render::PublishedMaterialState>(*material);
-    changedMaterial->activeCompileFlagSlots = {17};
-    auto changed = std::make_shared<br::render::PublishedRendererState>(*publication);
-    changed->materials.revision = 2;
-    changed->materials.payload = br::render::ArtifactPayload::Make<br::render::PublishedMaterialState>(changedMaterial);
-    host.update.publishedRendererState = changed; host.update.renderResolution = {48,33};
-    const auto second = BuildPixelListPass::PrepareInvocation(recipe,{},preparation);
-    Require(second.voxelMaterialBin == 17 && second.groupsX == 6 && second.groupsY == 5,
-        "pixel-list current invocation");
-    RecordedConstants recorded;
-    rhi::CommandListVTable table{}; table.abi_version = rhi::RHI_CL_ABI_MIN;
-    table.bindLayout = +[](rhi::CommandList* list,rhi::PipelineLayoutHandle layout) noexcept {
-        static_cast<RecordedConstants*>(list->impl)->layout = layout;
-    };
-    table.bindPipeline = +[](rhi::CommandList* list,rhi::PipelineHandle pipeline) noexcept {
-        static_cast<RecordedConstants*>(list->impl)->pipeline = pipeline;
-    };
-    table.pushConstants = +[](rhi::CommandList* list, rhi::ShaderStage, uint32_t, uint32_t,
-        uint32_t, uint32_t count, const void* values) noexcept {
-        auto& state = *static_cast<RecordedConstants*>(list->impl);
-        const auto* words = static_cast<const uint32_t*>(values);
-        state.values.assign(words,words + count); state.history.push_back(state.values);
-    };
-    table.dispatch = +[](rhi::CommandList* list,uint32_t x,uint32_t y,uint32_t z) noexcept {
-        auto& state = *static_cast<RecordedConstants*>(list->impl);
-        ++state.dispatches; state.groups = {x,y,z};
-    };
-    rhi::CommandList list{rhi::CommandListHandle{1,1}}; list.vt = &table; list.impl = &recorded;
-    auto bindings = std::make_shared<const org::FrozenExecutionBindings>(
-        std::vector<org::FrozenExecutionBindings::ResourceBinding>{});
-    org::RecordingContext recording(list,bindings);
-    BuildPixelListPass::Record(recipe,first,recording);
-    Require(recorded.values[VISBUF_VOXEL_MATERIAL_BIN_INDEX] == 7 && recorded.groups == std::array<uint32_t,3>{3,2,1},
-        "pixel-list held invocation recording");
-    BuildPixelListPass::Record(recipe,second,recording);
-    Require(recorded.values[VISBUF_VOXEL_MATERIAL_BIN_INDEX] == 17 && recorded.groups == std::array<uint32_t,3>{6,5,1},
-        "pixel-list fresh invocation recording");
-    Require(recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 91
-        && recipe.constants[VISBUF_VOXEL_MATERIAL_BIN_INDEX] == 11 && recipe.descriptorIndices == std::vector<unsigned>{99,98},
-        "pixel-list invocation mutated stable bindings");
-    host.update.renderResolution = {0,0}; host.update.publishedRendererState.reset();
-    const auto empty = BuildPixelListPass::PrepareInvocation(recipe,{},preparation);
-    Require(empty.voxelMaterialBin == UINT32_MAX, "pixel-list absent material sentinel");
-    BuildPixelListPass::Record(recipe,empty,recording);
-    Require(recorded.dispatches == 2 && recorded.history.size() == 4, "zero pixel-list invocation recorded commands");
-    preparation.preparationData = nullptr;
-    bool rejected = false;
-    try { BuildPixelListPass::PrepareInvocation(recipe,{},preparation); } catch (const std::logic_error&) { rejected = true; }
-    Require(rejected, "pixel-list missing context");
-
-    org::persistent::GraphProgram graph;
-    auto edit = graph.BeginEdit();
-    std::array<org::persistent::ResourceSlotId,10> slots;
-    for (uint32_t i = 0; i < slots.size(); ++i) {
-        auto owner = std::make_shared<const uint32_t>(i);
-        auto snapshot = std::make_shared<org::ResourceBindingSnapshot>();
-        snapshot->resource = rhi::Resource(rhi::ResourceHandle{i+1,1});
-        snapshot->backingGeneration = 1; snapshot->allocationOwner = owner; snapshot->descriptorOwner = owner;
-        auto views = std::make_shared<org::BindlessResourceViews>();
-        const auto kind = i == 9 ? org::BindlessViewKind::ConstantBuffer :
-            (i >= 7 ? org::BindlessViewKind::UnorderedAccess : org::BindlessViewKind::ShaderResource);
-        views->views.push_back({kind,UINT32_MAX,0,0,rhi::DescriptorSlot(rhi::DescriptorHeapHandle{3,1},20+i)});
-        snapshot->views = views;
-        org::persistent::BindingVersion binding;
-        binding.identity = (uint64_t{1} << 32) | (i+1); binding.backingRevision = 1;
-        binding.shape = {1,1,false}; binding.owner = owner; binding.recording = snapshot;
-        slots[i] = edit.AddResource(binding.shape,binding);
-    }
-    PersistentBuildPixelListPass::Slots inputs;
-    inputs.visibleClusters = slots[0]; inputs.perFrame = slots[9]; inputs.patchVisibilityIndexBase = 31;
-    for (uint32_t i = 0; i < 6; ++i) inputs.shaderInputs[i] = slots[i+1];
-    inputs.outputs = {slots[7],slots[8]};
-    PersistentBuildPixelListPass author(inputs);
-    PersistentBuildPixelListPass::ProgramBuildInputs programInputs;
-    programInputs.native = recipe; programInputs.native.descriptorIndices.clear();
-    programInputs.descriptorOrder = {8,2,6,0};
-    using Executable = org::persistent::TypedPassExecutable<PersistentBuildPixelListPass>;
-    const auto executable = Executable::Build(edit,{},author,programInputs);
-    org::compiler::CompileWorkspace workspace; std::atomic_bool cancelled{false};
-    auto held = edit.Build(workspace,cancelled);
-    Require(graph.Install(held), "persistent pixel-list bootstrap");
-    host.update.publishedRendererState = publication; host.update.renderResolution = {17,9};
-    preparation.preparationData = &host;
-    auto oldPacket = executable.PrepareInvocation(*held,preparation);
-    auto oldRecording = org::RecordingContext::FromPersistentBindings(list,held);
-    oldPacket.Record(oldRecording);
-    Require(recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 20
-        && recorded.values[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] == UINT32_MAX
-        && recorded.values[VISBUF_REYES_PATCH_INDEX_BASE] == 31,
-        "persistent pixel-list symbolic bindings");
-    Require(recorded.history[recorded.history.size()-2] == std::vector<uint32_t>{29,23,27,21},
-        "persistent pixel-list reflected descriptor ordering");
-    auto rotation = graph.BeginEdit(); auto replacementBinding = held->bindings.At(slots[0]);
-    auto replacementSnapshot = std::make_shared<org::ResourceBindingSnapshot>(*replacementBinding.recording);
-    auto replacementViews = std::make_shared<org::BindlessResourceViews>(*replacementSnapshot->views);
-    replacementViews->views[0].descriptor.index = 101;
-    replacementSnapshot->views = replacementViews; replacementBinding.recording = replacementSnapshot;
-    rotation.ReplaceBinding(slots[0],replacementBinding);
-    auto current = rotation.Build(workspace,cancelled);
-    Require(graph.Install(current) && current->executable == held->executable,
-        "persistent pixel-list descriptor rotation rebuilt executable");
-    auto currentPacket = executable.PrepareInvocation(*current,preparation);
-    auto currentRecording = org::RecordingContext::FromPersistentBindings(list,current);
-    currentPacket.Record(currentRecording);
-    Require(recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 101,
-        "persistent pixel-list current descriptor");
-    auto heldPacket = executable.PrepareInvocation(*held,preparation);
-    heldPacket.Record(oldRecording);
-    Require(recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 20,
-        "persistent pixel-list held descriptor changed");
-    auto programEdit = graph.BeginEdit();
-    programInputs.native.pipeline = rhi::PipelineHandle{4,1};
-    programInputs.native.layout = rhi::PipelineLayoutHandle{5,1};
-    programInputs.descriptorOrder = {0,8};
-    const auto rebuilt = executable.RebuildProgramInterface(programEdit,author,programInputs);
-    auto programPublication = programEdit.Build(workspace,cancelled);
-    Require(graph.Install(programPublication) && programPublication->executable == current->executable,
-        "pixel-list program replacement rebuilt logical executable");
-    auto programPacket = rebuilt.PrepareInvocation(*programPublication,preparation);
-    auto programRecording = org::RecordingContext::FromPersistentBindings(list,programPublication);
-    programPacket.Record(programRecording);
-    Require(recorded.pipeline.index == programInputs.native.pipeline.index
-        && recorded.pipeline.generation == programInputs.native.pipeline.generation
-        && recorded.layout.index == programInputs.native.layout.index
-        && recorded.layout.generation == programInputs.native.layout.generation
-        && recorded.history[recorded.history.size()-2] == std::vector<uint32_t>{21,29},
-        "pixel-list replacement program/layout");
-    auto previousPacket = executable.PrepareInvocation(*current,preparation);
-    previousPacket.Record(currentRecording);
-    Require(recorded.pipeline.index == recipe.pipeline.index && recorded.pipeline.generation == recipe.pipeline.generation
-        && recorded.layout.index == recipe.layout.index && recorded.layout.generation == recipe.layout.generation,
-        "held pixel-list program/layout changed");
-    auto failedEdit = graph.BeginEdit();
-    auto invalidProgram = programInputs; invalidProgram.descriptorOrder = {9};
-    rejected = false;
-    try { rebuilt.RebuildProgramInterface(failedEdit,author,invalidProgram); }
-    catch (const std::out_of_range&) { rejected = true; }
-    Require(rejected, "pixel-list invalid reflection slot accepted");
-    rejected = false;
-    try { failedEdit.Build(workspace,cancelled); }
-    catch (const std::exception&) { rejected = true; }
-    Require(rejected && graph.Select() == programPublication,
-        "pixel-list failed program preparation changed selection");
 }
 
 void TestPublishedCullingInvocationPreparation()
@@ -837,6 +689,48 @@ void TestInvalidRecipes()
     invalidVoxel.Add<br::pipeline::ClusterLodVoxelTechnique>({ .workRecordCapacity = 0u });
     Require(!invalidVoxel.Validate().valid, "zero-capacity CLod voxel technique must fail validation");
 }
+
+void TestPixelListRecording()
+{
+    // The publication lookup BuildPixelListPass::Prepare turns into the voxel bin.
+    br::render::PublishedMaterialState material;
+    material.activeCompileFlags = {MaterialCompileFlags::MaterialCompileNone, MaterialCompileFlags::MaterialCompileVoxel};
+    material.activeCompileFlagSlots = {3, 7};
+    uint32_t bin = UINT32_MAX;
+    Require(material.TryGetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel, bin) && bin == 7,
+        "pixel-list voxel material bin lookup");
+    material.activeCompileFlagSlots.pop_back();
+    bin = UINT32_MAX;
+    Require(!material.TryGetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel, bin) && bin == UINT32_MAX,
+        "pixel-list absent material slot must keep the sentinel");
+
+    for (const bool diceQueue : {true, false}) {
+        DeclaredFrame declared;
+        BuildPixelListBindings bindings{Pipeline(5), declared.Declare(DeclaredFrame::Kind::ShaderResource)};
+        if (diceQueue) {
+            bindings.reyesDiceQueue = declared.Declare(DeclaredFrame::Kind::ShaderResource);
+            bindings.hasReyesDiceQueue = true;
+        }
+        bindings.patchVisibilityIndexBase = 31;
+        Trace trace;
+        auto context = declared.Context(TraceList(trace));
+        BuildPixelListPass::Record(bindings, {7, 3, 2}, context);
+        BuildPixelListPass::Record(bindings, {17, 6, 5}, context);
+        BuildPixelListPass::Record(bindings, {UINT32_MAX, 0, 0}, context);
+        const auto pushes = trace.MiscPushes(5);
+        const auto dispatches = trace.Of(Trace::Kind::Dispatch);
+        Require(pushes.size() == 2 && dispatches.size() == 2 && trace.Pipelines() == std::vector<uint32_t>{5, 5},
+            "zero-sized pixel-list frame recorded commands");
+        Require(pushes[0][VISBUF_VOXEL_MATERIAL_BIN_INDEX] == 7 && dispatches[0].values == std::vector<uint32_t>{3, 2, 1},
+            "pixel-list first frame recording");
+        Require(pushes[1][VISBUF_VOXEL_MATERIAL_BIN_INDEX] == 17 && dispatches[1].values == std::vector<uint32_t>{6, 5, 1},
+            "pixel-list later frame recording");
+        Require(pushes[1][VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == DeclaredFrame::Srv(bindings.visibleClusters)
+            && pushes[1][VISBUF_REYES_PATCH_INDEX_BASE] == 31
+            && pushes[1][VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX]
+                == (diceQueue ? DeclaredFrame::Srv(bindings.reyesDiceQueue) : UINT32_MAX),
+            "pixel-list declared views or absent dice queue");
+    }
 }
 
 void TestMaterialCommandSelection()
@@ -855,11 +749,6 @@ void TestMaterialCommandSelection()
         && constants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] == std::bit_cast<uint32_t>(0.25f)
         && constants[VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT] == std::bit_cast<uint32_t>(0.75f),
         "material constants confused descriptors with scalars or lost captured normal configuration");
-    const auto symbolic = EvaluateMaterialGroupsPass::BuildConstants<br::render::SymbolicComputeConstant>(bindings,configuration,
-        [](uint32_t) { return org::persistent::ViewToken{}; });
-    const auto patches = br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,symbolic);
-    Require(patches.bindingViews.size() == 6 && patches.values[VISBUF_REYES_PATCH_INDEX_BASE] == 777,
-        "material symbolic constants lost stable views or converted an equal-valued scalar");
     bindings.hasReyesDiceQueue = false; bindings.hasReyesTessTables = false;
     const auto missing = EvaluateMaterialGroupsPass::BuildConstants<uint32_t>(bindings,configuration,[](uint32_t value) { return value; });
     Require(missing[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] == UINT32_MAX
@@ -897,252 +786,223 @@ void TestMaterialCommandSelection()
         "material selection accepted a truncated argument buffer");
 }
 
-void TestTypedMaterialEvaluationPreparation()
+void TestMaterialEvaluationRecording()
 {
-    org::persistent::GraphProgram graph; auto edit = graph.BeginEdit();
-    auto owner = std::make_shared<const uint32_t>(1);
-    auto snapshot = std::make_shared<org::ResourceBindingSnapshot>();
-    snapshot->resource = rhi::Resource(rhi::ResourceHandle{21,1}); snapshot->backingGeneration = 1;
-    snapshot->allocationOwner = owner; snapshot->descriptorOwner = owner;
-    auto views = std::make_shared<org::BindlessResourceViews>();
-    views->views.push_back({org::BindlessViewKind::ShaderResource,UINT32_MAX,0,0,rhi::DescriptorSlot({3,1},17)});
-    snapshot->views = views;
-    org::persistent::BindingVersion binding;
-    binding.identity = (uint64_t{1} << 32) | 21; binding.backingRevision = 1; binding.owner = owner; binding.recording = snapshot;
-    const auto slot = edit.AddResource(binding.shape,binding);
-    const org::compiler::CompileResourceState access{
-        static_cast<uint64_t>(rhi::ResourceAccessType::ShaderResource)|static_cast<uint64_t>(rhi::ResourceAccessType::IndirectArgument),0,1,false};
-    auto author = std::make_unique<PersistentMaterialEvaluationPass>(PersistentMaterialEvaluationPass::Configuration{},
-        std::vector<PersistentMaterialEvaluationPass::ResourceAccess>{{slot,access,{},org::BindlessViewRequest{}}});
-    auto pipeline = std::make_shared<org::PipelineStatePayload>(
-        rhi::PipelinePtr(rhi::Device{},rhi::Pipeline(rhi::PipelineHandle{8,1}),nullptr),0,org::PipelineResources{});
-    pipeline->layout = {9,1}; pipeline->layoutOwner = owner;
-    pipeline->pipelineResources.mandatoryResourceDescriptorSlots = {"Builtin::Required"};
-    pipeline->pipelineResources.optionalResourceDescriptorSlots = {"Builtin::Optional"};
-    br::render::PublishedMaterialState captureMaterials;
-    captureMaterials.activeCompileFlags = {MaterialCompileNone,MaterialCompileNone};
-    captureMaterials.activeCompileFlagSlots = {0,1}; captureMaterials.compileFlagSlotsUsed = 2;
-    uint32_t captures = 0;
-    auto captured = EvaluateMaterialGroupsPass::CaptureProgramVersions(captureMaterials,false,OutputType::NORMAL,
-        2*sizeof(MaterialEvaluationIndirectCommand),[&](MaterialCompileFlags) { ++captures; return pipeline; });
-    Require(captures == 1 && captured.size() == 1 && captured[0].program == pipeline,
-        "material producer recaptured a shared shader key or lost exact program ownership");
-    bool missingProgramAccepted = true;
-    try { EvaluateMaterialGroupsPass::CaptureProgramVersions(captureMaterials,false,OutputType::NORMAL,
-        2*sizeof(MaterialEvaluationIndirectCommand),[](MaterialCompileFlags) { return std::shared_ptr<const org::PipelineStatePayload>{}; }); }
-    catch (const std::runtime_error&) { missingProgramAccepted = false; }
-    Require(!missingProgramAccepted,"material producer accepted an unready publication program");
-    auto signature = std::make_shared<const rhi::CommandSignaturePtr>(
-        rhi::Device{},rhi::CommandSignature(rhi::CommandSignatureHandle{4,1}),nullptr);
-    auto programs = PersistentMaterialEvaluationPass::MapCapturedPrograms(captured,{{org::ResourceIdentifier{"Builtin::Required"},0}},signature);
-    Require(programs.programs[0].descriptorAccesses.size() == 2 && programs.programs[0].descriptorAccesses[0] == 0
-        && !programs.programs[0].descriptorAccesses[1],"material reflection mapping lost access zero or optional absence");
-    auto executable = org::persistent::TypedPassExecutable<PersistentMaterialEvaluationPass>::Build(edit,{},*author,programs);
-    author.reset();
-    org::compiler::CompileWorkspace workspace; std::atomic_bool cancelled{false};
-    auto selected = edit.Build(workspace,cancelled); Require(graph.Install(selected),"typed material publication bootstrap failed");
-    auto materials = std::make_shared<br::render::PublishedMaterialState>();
-    materials->activeCompileFlags = {MaterialCompileNone}; materials->activeCompileFlagSlots = {1}; materials->compileFlagSlotsUsed = 2;
-    PersistentMaterialEvaluationPass::InvocationInputs inputs{materials,false,OutputType::NORMAL,2*sizeof(MaterialEvaluationIndirectCommand),{false,0.25f,3,0.75f}};
-    auto packet = executable.PrepareInvocation(*selected,inputs);
-    RecordedConstants recorded; rhi::CommandListVTable table{}; table.abi_version = rhi::RHI_CL_ABI_MIN;
-    table.bindPipeline = +[](rhi::CommandList* list,rhi::PipelineHandle handle) noexcept { static_cast<RecordedConstants*>(list->impl)->pipeline = handle; };
-    table.bindLayout = +[](rhi::CommandList* list,rhi::PipelineLayoutHandle handle) noexcept { static_cast<RecordedConstants*>(list->impl)->layout = handle; };
-    table.pushConstants = +[](rhi::CommandList* list,rhi::ShaderStage,uint32_t,uint32_t,uint32_t,uint32_t count,const void* data) noexcept {
-        const auto* values = static_cast<const uint32_t*>(data); static_cast<RecordedConstants*>(list->impl)->values.assign(values,values+count);
-    };
-    table.executeIndirect = +[](rhi::CommandList* list,rhi::CommandSignatureHandle,rhi::ResourceHandle resource,uint64_t offset,
-        rhi::ResourceHandle,uint64_t,uint32_t count) noexcept {
-        auto& trace = *static_cast<RecordedConstants*>(list->impl); trace.indirectResource = resource; trace.indirectOffset = offset; trace.indirectCount = count;
-    };
-    rhi::CommandList commands{rhi::CommandListHandle{1,1}}; commands.vt = &table; commands.impl = &recorded;
-    auto context = org::RecordingContext::FromPersistentBindings(commands,selected); packet.Record(context);
-    Require(recorded.pipeline.index == 8 && recorded.layout.index == 9 && recorded.indirectResource.index == 21
-        && recorded.indirectOffset == sizeof(MaterialEvaluationIndirectCommand) && recorded.indirectCount == 1
-        && recorded.values[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == 17,
-        "typed material invocation lost immutable program, binding or active-entry data after author destruction");
-    for (uint32_t failure = 0; failure < 3; ++failure) {
-        auto rejectedEdit = graph.BeginEdit();
-        PersistentMaterialEvaluationPass::Configuration invalidConfiguration;
-        auto invalidAccess = access;
-        if (failure == 0) invalidConfiguration.tessTableConfigs = 0;
-        if (failure == 1) invalidAccess.access = static_cast<uint64_t>(rhi::ResourceAccessType::ShaderResource);
-        if (failure == 2) invalidAccess.access = static_cast<uint64_t>(rhi::ResourceAccessType::IndirectArgument);
-        PersistentMaterialEvaluationPass invalidAuthor(invalidConfiguration,{{slot,invalidAccess,{},org::BindlessViewRequest{}}});
-        bool accepted = true;
-        try { org::persistent::TypedPassExecutable<PersistentMaterialEvaluationPass>::Build(rejectedEdit,{},invalidAuthor,programs); }
-        catch (const std::invalid_argument&) { accepted = false; }
-        Require(!accepted && graph.Select() == selected,"invalid material declarations changed selected publication");
-    }
-    const auto reflectedProgram = [&](org::PipelineResources reflection) {
-        auto replacement = std::make_shared<org::PipelineStatePayload>(
-            rhi::PipelinePtr(rhi::Device{},rhi::Pipeline(rhi::PipelineHandle{10,1}),nullptr),0,std::move(reflection),2);
-        replacement->layout = {11,1}; replacement->layoutOwner = owner;
-        return replacement;
-    };
-    PersistentMaterialEvaluationPass replacementAuthor({},{{slot,access,{},org::BindlessViewRequest{}}});
-    for (uint32_t failure = 0; failure < 3; ++failure) {
-        org::PipelineResources reflection;
-        reflection.mandatoryResourceDescriptorSlots = {failure == 1 ? "Builtin::Terrain::Rvt::Regions" : "Builtin::Required"};
-        auto invalidPrograms = programs; invalidPrograms.programs[0].program = reflectedProgram(std::move(reflection));
-        if (failure != 2) invalidPrograms.programs[0].descriptorAccesses = {std::nullopt};
-        auto rejectedEdit = graph.BeginEdit(); bool accepted = true;
-        try { executable.RebuildProgramInterface(rejectedEdit,replacementAuthor,invalidPrograms); }
-        catch (const std::invalid_argument&) { accepted = false; }
-        Require(!accepted && graph.Select() == selected,"missing material reflection changed selected publication");
-    }
-    for (bool disabledRvt : {false,true}) {
-        org::PipelineResources reflection;
-        if (disabledRvt) reflection.mandatoryResourceDescriptorSlots = {"Builtin::Terrain::Rvt::Regions"};
-        else reflection.optionalResourceDescriptorSlots = {"Builtin::Optional"};
-        auto replacements = programs; replacements.programs[0].program = reflectedProgram(std::move(reflection));
-        replacements.programs[0].descriptorAccesses = {std::nullopt};
-        PersistentMaterialEvaluationPass::Configuration configuration; configuration.terrainRvtEnabled = !disabledRvt;
-        PersistentMaterialEvaluationPass readyAuthor(configuration,{{slot,access,{},org::BindlessViewRequest{}}});
-        auto replacementEdit = graph.BeginEdit();
-        auto replacementExecutable = executable.RebuildProgramInterface(replacementEdit,readyAuthor,replacements);
-        auto publication = replacementEdit.Build(workspace,cancelled);
-        Require(graph.Install(publication) && publication->executable == selected->executable,
-            "compatible material program replacement rebuilt graph scheduling");
-        auto replacementPacket = replacementExecutable.PrepareInvocation(*publication,inputs);
-        auto replacementContext = org::RecordingContext::FromPersistentBindings(commands,publication);
-        replacementPacket.Record(replacementContext);
-        Require(recorded.pipeline.index == 10 && recorded.layout.index == 11 && recorded.indirectResource.index == 21,
-            "optional or disabled-RVT material replacement lost program or resource versions");
-        executable = replacementExecutable;
+    using Kind = DeclaredFrame::Kind;
+    constexpr uint64_t stride = sizeof(MaterialEvaluationIndirectCommand);
+    // The programs name a declared input, an RVT slot and an optional undeclared slot.
+    const org::PipelineResources reflection{{"Builtin::Test::MaterialInput", "Builtin::Terrain::Rvt::Regions"},
+        {"Builtin::Test::MaterialOptional"}};
+    for (const bool terrainRvt : {false, true}) {
+        DeclaredFrame declared;
+        EvaluateMaterialGroupsBindings bindings{};
+        bindings.visibleClusters = declared.Declare(Kind::ShaderResource);
+        bindings.visibleClusterTransformIndices = declared.Declare(Kind::ShaderResource);
+        const auto input = declared.Declare(Kind::ShaderResource, "Builtin::Test::MaterialInput");
+        const auto arguments = declared.Declare(Kind::ShaderResource);
+        bindings.arguments = arguments.Resource();
+        bindings.patchVisibilityIndexBase = 777;
+        bindings.terrainRvtEnabled = terrainRvt;
+        MaterialEvaluationFrame frame;
+        frame.signature = Signature(4);
+        frame.steps = {{Payload(8, reflection), 2 * stride}, {Payload(9, reflection), 5 * stride}};
+        frame.configuration = {false, 0.25f, 3, 0.75f};
+        Trace trace;
+        auto context = declared.Context(TraceList(trace));
+        if (terrainRvt) {
+            // With RVT enabled its slots are mandatory: an undeclared one fails
+            // before the pass emits anything.
+            Require(Rejects<std::invalid_argument>([&] { EvaluateMaterialGroupsPass::Record(bindings, frame, context); })
+                && trace.events.empty(), "material evaluation bound an undeclared RVT resource");
+            continue;
+        }
+        EvaluateMaterialGroupsPass::Record(bindings, frame, context);
+        Require(trace.Pipelines() == std::vector<uint32_t>{8, 9}
+            && trace.Handles(Trace::Kind::Layout) == std::vector<uint32_t>{58, 59},
+            "material evaluation lost a program or its layout");
+        const auto slots = trace.DescriptorSlotPushes();
+        Require(slots.size() == 2 && slots[0] == std::vector<uint32_t>{DeclaredFrame::Srv(input), UINT32_MAX, UINT32_MAX}
+            && slots[1] == slots[0], "material descriptor slots did not resolve declared, absent RVT and optional names");
+        const auto pushes = trace.MiscPushes();
+        Require(pushes.size() == 2 && pushes[0] == pushes[1], "material steps pushed different constants");
+        const auto& constants = pushes[0];
+        Require(constants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] == DeclaredFrame::Srv(bindings.visibleClusters)
+            && constants[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX]
+                == DeclaredFrame::Srv(bindings.visibleClusterTransformIndices)
+            && constants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] == UINT32_MAX
+            && constants[VISBUF_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] == UINT32_MAX
+            && constants[VISBUF_REYES_PATCH_INDEX_BASE] == 777 && constants[VISBUF_REYES_USE_NORMAL_MAPS] == 0
+            && constants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] == std::bit_cast<uint32_t>(0.25f)
+            && constants[VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS] == 3
+            && constants[VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT] == std::bit_cast<uint32_t>(0.75f),
+            "material constants lost declared views or the frame's normal configuration");
+        const auto indirect = trace.Of(Trace::Kind::Indirect);
+        Require(indirect.size() == 2 && indirect[0].offset == 2 * stride && indirect[1].offset == 5 * stride
+            && indirect[0].handle == DeclaredFrame::ResourceIndex(arguments) && indirect[1].root == 4,
+            "material evaluation lost its argument slots");
+        // Each step binds, pushes, then executes.
+        std::vector<Trace::Kind> order;
+        for (const auto& event : trace.events) order.push_back(event.kind);
+        using K = Trace::Kind;
+        Require(order == std::vector<K>{K::Layout, K::Pipeline, K::Push, K::Push, K::Indirect,
+            K::Layout, K::Pipeline, K::Push, K::Push, K::Indirect}, "material step commands changed order");
+
+        Trace empty;
+        auto emptyContext = declared.Context(TraceList(empty));
+        EvaluateMaterialGroupsPass::Record(bindings, MaterialEvaluationFrame{}, emptyContext);
+        Require(empty.events.empty(), "material evaluation without active programs recorded commands");
     }
 }
 
-void TestSoftwareRasterBucketSelection()
+void TestSoftwareRasterRecording()
 {
-    struct PrimaryBindings {
-        uint32_t histogram = 10, visible = 11, transforms = 12, viewInfo = 13, mapping = 14;
-        uint32_t pageTable = 15, clipmapInfo = 16, physicalPages = 17, dynamicPages = 18, telemetry = 19;
-        uint32_t skinMapping = 20, skinHash = 21, skinPositions = 22, skinAllocator = 23, skinWork = 24, skinArgs = 25, skinMembership = 26;
-        bool virtualShadow = true, hasTelemetry = true, hasSkinCache = true;
-    } primary;
-    const auto constants = ClusterSoftwareRasterizationPass::BuildPrimaryConstants<uint32_t>(primary,[](uint32_t value) { return value+100; });
-    // View raster info is published per preparation, not bound with the program.
-    Require(constants[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] == 110
-        && constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] == UINT32_MAX
-        && constants[CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] == UINT32_MAX,
-        "software raster primary constants lost selected descriptors or missing-cache defaults");
-    auto symbolic = ClusterSoftwareRasterizationPass::BuildPrimaryConstants<br::render::SymbolicComputeConstant>(primary,
-        [](uint32_t) { return org::persistent::ViewToken{}; });
-    Require(br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,symbolic).bindingViews.size() == 4,
-        "software raster primary constants lost stable view provenance");
-    ClusterSoftwareRasterizationPass::ApplyVirtualShadowConstants(symbolic,primary,{128,16384,10,1024},
-        [](uint32_t) { return org::persistent::ViewToken{}; },[](uint32_t) { return org::persistent::ViewToken{}; });
-    const auto shadowConstants = br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,symbolic);
-    Require(shadowConstants.bindingViews.size() == 16
-        && shadowConstants.values[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_ENTRY_COUNT] == 10
-        && shadowConstants.values[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] == 128,
-        "software raster shadow constants confused scalar shape with descriptor bindings");
-    auto numeric = constants;
-    ClusterSoftwareRasterizationPass::ApplyVirtualShadowConstants(numeric,primary,{128,16384,10,1024},
-        [](uint32_t value) { return value+100; },[](uint32_t value) { return value+200; });
-    Require(numeric[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] == 215
-        && numeric[CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] == 126,
-        "software raster shadow constants lost declared UAV or membership SRV selection");
-    auto nativeOwner = std::make_shared<const uint32_t>(1);
-    auto pipeline = std::make_shared<org::PipelineStatePayload>(
-        rhi::PipelinePtr(rhi::Device{},rhi::Pipeline(rhi::PipelineHandle{8,1}),nullptr),0,org::PipelineResources{});
-    pipeline->layout = {9,1}; pipeline->layoutOwner = nativeOwner;
-    const std::array<MaterialRasterFlags,2> sharedFlags{MaterialRasterFlagsNone,MaterialRasterFlagsNone};
-    uint32_t captures = 0;
-    const auto programs = ClusterSoftwareRasterizationPass::CaptureProgramVersions(2,sharedFlags,2*sizeof(RasterizeClustersCommand),
-        [&](MaterialRasterFlags) { ++captures; return pipeline; });
-    Require(captures == 1 && programs.size() == 1 && programs[0].program == pipeline,
-        "software raster producer lost exact versions or recaptured a shared program");
-    bool acceptedUnready = true;
-    try { ClusterSoftwareRasterizationPass::CaptureProgramVersions(2,sharedFlags,2*sizeof(RasterizeClustersCommand),
-        [](MaterialRasterFlags) { return std::shared_ptr<const org::PipelineStatePayload>{}; }); }
-    catch (const std::runtime_error&) { acceptedUnready = false; }
-    Require(!acceptedUnready,"software raster producer accepted an unready program");
-    uint32_t generation = 41;
-    Require(ClusterSoftwareRasterizationPass::PrepareInvocationGeneration(false,true,3,generation) == 0
-        && ClusterSoftwareRasterizationPass::PrepareInvocationGeneration(true,false,3,generation) == 0
-        && ClusterSoftwareRasterizationPass::PrepareInvocationGeneration(true,true,0,generation) == 0 && generation == 41,
-        "inactive software raster work consumed a skin-cache generation");
-    const auto heldGeneration = ClusterSoftwareRasterizationPass::PrepareInvocationGeneration(true,true,3,generation);
-    Require(heldGeneration == 42 && ClusterSoftwareRasterizationPass::PrepareInvocationGeneration(true,true,3,generation) == 43
-        && heldGeneration == 42,"fresh software raster invocations changed a held generation");
-    for (uint32_t boundary : {0x7FFFFFFEu,UINT32_MAX}) {
-        generation = boundary;
-        Require(ClusterSoftwareRasterizationPass::PrepareInvocationGeneration(true,true,1,generation) == 1,
-            "software raster generation wrap used a reserved or zero generation");
-    }
-    const std::array<MaterialRasterFlags,3> flags{MaterialRasterFlagsNone,MaterialRasterFlagsAlphaTest,MaterialRasterFlagsSkinned};
+    using Kind = DeclaredFrame::Kind;
     constexpr uint64_t stride = sizeof(RasterizeClustersCommand);
-    std::vector<uint32_t> selected; std::vector<uint64_t> offsets;
-    ClusterSoftwareRasterizationPass::VisitBuckets(3,flags,3*stride,
-        [&](MaterialRasterFlags flag,uint32_t bucket,uint64_t offset) {
-            Require(flag == flags[bucket],"software raster selected the wrong program flags");
-            selected.push_back(bucket); offsets.push_back(offset);
-        });
-    Require(selected == std::vector<uint32_t>{0,1,2} && offsets == std::vector<uint64_t>{0,stride,2*stride},
-        "software raster changed bucket order or indirect argument offsets");
-    for (bool missingFlags : {false,true}) {
-        uint32_t callbacks = 0; bool accepted = true;
-        try { ClusterSoftwareRasterizationPass::VisitBuckets(missingFlags ? 4 : 3,flags,missingFlags ? 4*stride : 3*stride-1,
-            [&](MaterialRasterFlags,uint32_t,uint64_t) { ++callbacks; }); }
-        catch (const std::out_of_range&) { accepted = false; }
-        Require(!accepted && !callbacks,"incomplete software raster publication partially built commands");
-    }
-    ClusterSoftwareRasterizationPass::VisitBuckets(0,{},0,
-        [](MaterialRasterFlags,uint32_t,uint64_t) { throw std::logic_error("empty raster selected work"); });
-}
+    const auto declareCommon = [](DeclaredFrame& declared, ClusterSoftwareRasterBindings& bindings) {
+        bindings.rasterSignature = Signature(20);
+        bindings.cacheDispatchSignature = Signature(21);
+        bindings.histogram = declared.Declare(Kind::ShaderResource);
+        bindings.visible = declared.Declare(Kind::ShaderResource);
+        bindings.transforms = declared.Declare(Kind::ShaderResource);
+        bindings.mapping = declared.Declare(Kind::ShaderResource);
+        const auto arguments = declared.Declare(Kind::ShaderResource);
+        bindings.indirectArgs = arguments.Resource();
+        return arguments;
+    };
 
-void TestSoftwareSkinCacheEmission()
-{
-    struct Frame {
-        bool enabled = true, hasSkinCache = true; uint32_t bucketCount = 2;
-        struct Raster { uint32_t commandSignature = 1; std::optional<uint32_t> argumentsReference = 2; } raster;
-        std::array<uint32_t,NumMiscUintRootConstants> cacheConstants{}, clearConstants{};
-        uint32_t clearProgram = 1, buildProgram = 2, finalizeProgram = 3, skinProgram = 4, resolveProgram = 5;
-        uint32_t cacheAllocator = 10, cacheHash = 11, cacheWorkRecords = 12, cacheIndirectArgs = 13, cachePositions = 14, cacheMapping = 15;
-        uint32_t cacheDispatchSignature = 2;
-    } frame;
-    struct Sink {
-        std::vector<uint32_t> programs, barriers;
-        std::vector<uint64_t> offsets;
-        uint32_t generation = 0, dispatches = 0, indirectBarrier = 0;
-        void Bind(uint32_t value) { programs.push_back(value); }
-        void Constants(const std::array<uint32_t,NumMiscUintRootConstants>& values) { generation = values[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION]; }
-        void Dispatch(uint32_t,uint32_t,uint32_t) { ++dispatches; }
-        void Indirect(uint32_t,uint32_t,uint64_t offset) { offsets.push_back(offset); }
-        void UavBarrier(uint32_t value) { barriers.push_back(value); }
-        void IndirectBarrier(uint32_t value) { indirectBarrier = value; }
-    } sink;
-    ClusterSoftwareRasterizationPass::EmitSkinCacheCommands(frame,42,sink);
-    Require(sink.programs == std::vector<uint32_t>{1,2,3,4,5} && sink.dispatches == 2 && sink.offsets.size() == 5
-        && sink.offsets[1] == sizeof(RasterizeClustersCommand) && sink.offsets[4] == sizeof(RasterizeClustersCommand)
-        && sink.barriers == std::vector<uint32_t>{10,11,10,12,14,15} && sink.indirectBarrier == 13
-        && sink.generation == 42 && frame.cacheConstants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] == 0,
-        "software skin-cache emission lost required phases, synchronization or fresh generation isolation");
-    for (bool missingArguments : {false,true}) {
-        Sink rejectedSink; auto invalid = frame;
-        if (missingArguments) invalid.raster.argumentsReference.reset();
-        bool accepted = true;
-        try { ClusterSoftwareRasterizationPass::EmitSkinCacheCommands(invalid,missingArguments ? 42 : 0,rejectedSink); }
-        catch (const std::invalid_argument&) { accepted = false; }
-        Require(!accepted && rejectedSink.programs.empty(),"invalid skin-cache invocation partially emitted commands");
+    // Visibility output: one indirect dispatch per bucket with a pipeline.
+    {
+        DeclaredFrame declared;
+        ClusterSoftwareRasterBindings bindings{};
+        const auto arguments = declareCommon(declared, bindings);
+        ClusterSoftwareRasterFrame frame;
+        frame.enabled = true;
+        frame.bucketCount = 3;
+        frame.viewRasterInfoTable = 66;
+        frame.steps = {{Pipeline(30), 0}, {Pipeline(32), 2 * stride}};
+        Trace trace;
+        auto context = declared.Context(TraceList(trace));
+        ClusterSoftwareRasterizationPass::Record(bindings, frame, context);
+        Require(trace.Pipelines() == std::vector<uint32_t>{30, 32}, "software raster changed bucket programs");
+        const auto indirect = trace.Of(Trace::Kind::Indirect);
+        Require(indirect.size() == 2 && indirect[0].offset == 0 && indirect[1].offset == 2 * stride
+            && indirect[0].root == 20 && indirect[1].handle == DeclaredFrame::ResourceIndex(arguments),
+            "software raster changed bucket argument offsets");
+        const auto pushes = trace.MiscPushes();
+        Require(pushes.size() == 2 && pushes[0] == pushes[1], "software raster steps pushed different constants");
+        Require(pushes[0][CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] == DeclaredFrame::Srv(bindings.histogram)
+            && pushes[0][CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] == DeclaredFrame::Srv(bindings.mapping)
+            && pushes[0][CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] == 66
+            && pushes[0][CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] == UINT32_MAX
+            && pushes[0][CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] == UINT32_MAX
+            && pushes[0][CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] == 0,
+            "software raster primary constants lost declared views or missing-cache defaults");
+
+        for (const bool enabled : {false, true}) {
+            auto idle = frame;
+            idle.enabled = enabled;
+            idle.bucketCount = enabled ? 0u : 3u;
+            Trace idleTrace;
+            auto idleContext = declared.Context(TraceList(idleTrace));
+            ClusterSoftwareRasterizationPass::Record(bindings, idle, idleContext);
+            Require(idleTrace.events.empty(), "inactive software raster recorded commands");
+        }
     }
+
+    // Virtual shadows with the DynamicWind skin cache: clear, build over every
+    // bucket, finalize, skin, resolve over every bucket, then rasterize.
+    {
+        DeclaredFrame declared;
+        ClusterSoftwareRasterBindings bindings{};
+        declareCommon(declared, bindings);
+        bindings.cacheClear = Pipeline(11);
+        bindings.cacheBuild = Pipeline(12);
+        bindings.cacheFinalize = Pipeline(13);
+        bindings.cacheSkin = Pipeline(14);
+        bindings.cacheResolve = Pipeline(15);
+        bindings.pageTable = declared.Declare();
+        bindings.clipmapInfo = declared.Declare(Kind::ShaderResource);
+        bindings.physicalPages = declared.Declare();
+        bindings.dynamicPages = declared.Declare();
+        bindings.telemetry = declared.Declare();
+        bindings.skinMapping = declared.Declare();
+        bindings.skinHash = declared.Declare();
+        bindings.skinPositions = declared.Declare();
+        bindings.skinAllocator = declared.Declare();
+        bindings.skinWork = declared.Declare();
+        bindings.skinArgs = declared.Declare();
+        bindings.skinMembership = declared.Declare(Kind::ShaderResource);
+        bindings.skinCacheHashEntries = 10;
+        bindings.skinCachePositionCapacity = 1024;
+        bindings.virtualShadow = bindings.hasTelemetry = bindings.hasSkinCache = true;
+        ClusterSoftwareRasterFrame frame;
+        frame.enabled = frame.hasSkinCache = true;
+        frame.bucketCount = 2;
+        frame.skinCacheGeneration = 42;
+        frame.pageTableResolution = 128;
+        frame.virtualResolution = 16384;
+        frame.steps = {{Pipeline(30), 0}, {Pipeline(31), stride}};
+        Trace trace;
+        auto context = declared.Context(TraceList(trace));
+        ClusterSoftwareRasterizationPass::Record(bindings, frame, context);
+        Require(trace.Pipelines() == std::vector<uint32_t>{11, 12, 13, 14, 15, 30, 31},
+            "software skin cache lost a phase or changed order");
+        const auto indirect = trace.Of(Trace::Kind::Indirect);
+        Require(indirect.size() == 7 && indirect[0].offset == 0 && indirect[1].offset == stride
+            && indirect[2].root == 21 && indirect[2].handle == DeclaredFrame::ResourceIndex(bindings.skinArgs)
+            && indirect[3].offset == 0 && indirect[4].offset == stride && indirect[6].offset == stride,
+            "software skin cache lost a bucket pass or its dispatch arguments");
+        std::vector<uint32_t> barriers;
+        for (const auto& barrier : trace.Of(Trace::Kind::Barrier)) barriers.insert(barriers.end(), barrier.values.begin(), barrier.values.end());
+        const auto resource = [](const org::DeclaredViewToken& token) { return DeclaredFrame::ResourceIndex(token); };
+        Require(barriers == std::vector<uint32_t>{resource(bindings.skinAllocator), resource(bindings.skinHash),
+            resource(bindings.skinAllocator), resource(bindings.skinWork), resource(bindings.skinArgs),
+            resource(bindings.skinPositions), resource(bindings.skinMapping)},
+            "software skin cache lost required synchronization");
+        Require(trace.Of(Trace::Kind::Barrier)[4].root == static_cast<uint32_t>(rhi::ResourceAccessType::IndirectArgument),
+            "skin dispatch arguments were not made indirect arguments");
+        const auto clear = trace.MiscPushes(11);
+        Require(clear.size() == 2 && clear[0][CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] == DeclaredFrame::Uav(bindings.skinAllocator)
+            && clear[0][CLOD_CLEAR_UINT_BUFFER_COUNT] == 2u
+            && clear[1][CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] == 42u,
+            "software skin cache clear or generation constants");
+        const auto steps = trace.MiscPushes(30);
+        Require(steps.size() == 1 && steps[0][CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_GENERATION] == 42u
+            && steps[0][CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] == DeclaredFrame::Uav(bindings.pageTable)
+            && steps[0][CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] == 128u
+            && steps[0][CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] == 16384u
+            && steps[0][CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_ENTRY_COUNT] == 10u
+            && steps[0][CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITION_CAPACITY] == 1024u
+            && steps[0][CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] == DeclaredFrame::Uav(bindings.telemetry)
+            && steps[0][CLOD_RASTER_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] == DeclaredFrame::Srv(bindings.skinMembership),
+            "software shadow raster constants confused scalar shape with declared views");
+        Require(trace.Of(Trace::Kind::Dispatch).size() == 2, "software skin cache clear/finalize dispatches");
+
+        // A reserved generation is rejected before anything is recorded.
+        for (const uint32_t reserved : {0u, 0x7FFFFFFFu}) {
+            auto invalid = frame;
+            invalid.skinCacheGeneration = reserved;
+            Trace rejected;
+            auto rejectedContext = declared.Context(TraceList(rejected));
+            Require(Rejects<std::invalid_argument>([&] {
+                ClusterSoftwareRasterizationPass::Record(bindings, invalid, rejectedContext); })
+                && rejected.events.empty(), "invalid skin-cache invocation partially recorded commands");
+        }
+    }
+}
 }
 
 int main()
 {
     try {
         TestResolverSnapshotLifetime();
-        TestInvocationConstantRecording();
+        TestComputeCullingRecording();
         TestPublishedCullingInvocationPreparation();
-        TestPersistentDescriptorCommandRecording();
         TestPersistentRendererPublicationBindings();
-        TestPixelListInvocationPreparation();
+        TestPixelListRecording();
         TestMaterialCommandSelection();
-        TestTypedMaterialEvaluationPreparation();
-        TestSoftwareRasterBucketSelection();
-        TestSoftwareSkinCacheEmission();
+        TestMaterialEvaluationRecording();
+        TestSoftwareRasterRecording();
         TestDepthHistoryReservationOwnership();
         TestDemoPreset();
         TestSarpPreset();

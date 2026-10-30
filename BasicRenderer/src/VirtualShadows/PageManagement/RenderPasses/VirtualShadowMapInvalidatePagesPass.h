@@ -5,7 +5,7 @@
 #include "Render/PipelineState.h"
 #include "BasicRenderer/Scene/RendererComponents.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
@@ -13,14 +13,18 @@ namespace org { class DynamicBuffer; }
 class VirtualShadowInvalidationQueue;
 
 struct VirtualShadowMapInvalidatePagesBindings {
+    org::PipelineState pipeline, boundsPipeline;
     org::DeclaredViewToken inputs, inputCount, clipmapInfo, bounds;
     org::DeclaredViewToken pageTable, dirtyFlags, pageMetadata, pageViewInfo, stats;
+};
+struct VirtualShadowMapInvalidatePagesFrame {
+    uint32_t pageTableResolution = 0;
     uint32_t pendingInputCount = 0, pendingBoundsCount = 0;
     bool invalidateAllActiveClipmaps = false;
 };
 
 class VirtualShadowMapInvalidatePagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapInvalidatePagesPass,
-    br::render::PreparedComputePipelineSequence, VirtualShadowMapInvalidatePagesBindings> {
+    VirtualShadowMapInvalidatePagesFrame, VirtualShadowMapInvalidatePagesBindings> {
 public:
     VirtualShadowMapInvalidatePagesPass(
         std::shared_ptr<org::Buffer> invalidationInputsBuffer,
@@ -36,10 +40,10 @@ public:
 
     VirtualShadowMapInvalidatePagesBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
-    br::render::PreparedComputePipelineSequence Prepare(const VirtualShadowMapInvalidatePagesBindings&,
+    VirtualShadowMapInvalidatePagesFrame Prepare(const VirtualShadowMapInvalidatePagesBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapInvalidatePagesBindings&,
-        const br::render::PreparedComputePipelineSequence&, org::PassRecordContext&);
+        const VirtualShadowMapInvalidatePagesFrame&, org::PassRecordContext&);
 
 private:
     org::PipelineState m_pso;

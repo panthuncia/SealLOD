@@ -96,13 +96,3 @@ uint32_t CLodDeclaredViewRasterTable::Publish(const org::PassPrepareContext& pre
     const org::PreparedTablePublisher& publisher) const {
     return m_layout.Publish(preparation, publisher, std::span<const CLodViewRasterInfo>(m_rows));
 }
-
-void CLodDeclaredViewRasterTable::AppendRowRevision(std::vector<uint64_t>& out) const {
-    uint64_t hash = 0xcbf29ce484222325ull ^ m_rows.size();
-    const auto* bytes = reinterpret_cast<const unsigned char*>(m_rows.data());
-    for (size_t i = 0; i < m_rows.size() * sizeof(CLodViewRasterInfo); ++i) {
-        hash ^= bytes[i];
-        hash *= 0x100000001b3ull;
-    }
-    out.push_back(hash);
-}

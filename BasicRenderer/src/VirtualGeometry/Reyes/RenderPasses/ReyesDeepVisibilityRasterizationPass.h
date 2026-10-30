@@ -11,13 +11,15 @@
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesDeepVisibilityRasterBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
     org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
     org::ResourceBindingToken indirectArgs;
@@ -28,8 +30,12 @@ struct ReyesDeepVisibilityRasterBindings {
     uint32_t nodeCapacity = 1u;
 };
 
+struct ReyesDeepVisibilityRasterFrame {
+    uint32_t viewRasterInfoTableIndex = 0xFFFFFFFFu;
+};
+
 class ReyesDeepVisibilityRasterizationPass final : public org::TypedRenderGraphPass<ReyesDeepVisibilityRasterizationPass,
-    br::render::PreparedComputeIndirect, ReyesDeepVisibilityRasterBindings>, public org::IDynamicDeclaredResources {
+    ReyesDeepVisibilityRasterFrame, ReyesDeepVisibilityRasterBindings>, public org::IDynamicDeclaredResources {
 public:
     ReyesDeepVisibilityRasterizationPass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -53,10 +59,9 @@ public:
     ReyesDeepVisibilityRasterBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputeIndirect Prepare(const ReyesDeepVisibilityRasterBindings&,
+    ReyesDeepVisibilityRasterFrame Prepare(const ReyesDeepVisibilityRasterBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesDeepVisibilityRasterBindings&, const br::render::PreparedComputeIndirect& data,
+    static void Record(const ReyesDeepVisibilityRasterBindings& bindings, const ReyesDeepVisibilityRasterFrame& frame,
         org::PassRecordContext& recording);
 
 private:

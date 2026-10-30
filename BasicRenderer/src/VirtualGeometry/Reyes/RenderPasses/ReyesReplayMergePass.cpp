@@ -1,16 +1,13 @@
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesReplayMergePass.h"
 #include "Render/PassBuilders.h"
-#include "Runtime/StateGraph/InvocationRevision.h"
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BuiltinResources.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
-#include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodReyesReplayMergeRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 ReyesReplayMergePass::ReyesReplayMergePass(
     ReyesReplayMergeKind kind,
@@ -56,7 +53,7 @@ ReyesReplayMergeBindings ReyesReplayMergePass::Declare(org::PassBuilder& builder
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.ShaderResource(m_sourceQueueBuffer), builder.ShaderResource(m_sourceQueueCounterBuffer),
+    return {m_pso, m_commandSignature, builder.ShaderResource(m_sourceQueueBuffer), builder.ShaderResource(m_sourceQueueCounterBuffer),
         builder.UnorderedAccess(m_destQueueBuffer), builder.UnorderedAccess(m_destQueueCounterBuffer),
         builder.UnorderedAccess(m_destQueueOverflowBuffer), builder.IndirectArguments(m_indirectArgsBuffer),
         builder.UnorderedAccess(m_telemetryBuffer), m_destQueueCapacity};
@@ -67,35 +64,17 @@ void ReyesReplayMergePass::Update(const org::UpdateExecutionContext& executionCo
     (void)executionContext;
 }
 
-br::render::PreparedComputeIndirect ReyesReplayMergePass::Prepare(
-    const ReyesReplayMergeBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    br::render::PreparedComputeIndirect data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
-    data.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
-    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
-    data.constants[CLOD_REYES_REPLAY_MERGE_SOURCE_DESCRIPTOR_INDEX] = srv(bindings.source);
-    data.constants[CLOD_REYES_REPLAY_MERGE_SOURCE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.sourceCounter);
-    data.constants[CLOD_REYES_REPLAY_MERGE_DEST_DESCRIPTOR_INDEX] = uav(bindings.dest);
-    data.constants[CLOD_REYES_REPLAY_MERGE_DEST_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.destCounter);
-    data.constants[CLOD_REYES_REPLAY_MERGE_DEST_OVERFLOW_DESCRIPTOR_INDEX] = uav(bindings.destOverflow);
-    data.constants[CLOD_REYES_REPLAY_MERGE_CAPACITY] = bindings.capacity;
-    data.constants[CLOD_REYES_REPLAY_MERGE_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
-    return data;
-}
-
-void ReyesReplayMergePass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
-    br::render::AppendFrameHeapRevision(preparation, out);
-    out.push_back(br::render::PipelineRevision(m_pso));
-    out.push_back(br::render::OwnerRevision(m_commandSignature));
-}
-
-void ReyesReplayMergePass::Record(const ReyesReplayMergeBindings&,
-    const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeIndirect(data, recording);
+void ReyesReplayMergePass::Record(const ReyesReplayMergeBindings& bindings, org::PassRecordContext& recording) {
+    br::render::MiscConstants constants{};
+    const auto srv = [&](const org::DeclaredViewToken& token) { return recording.Index(token); };
+    const auto uav = [&](const org::DeclaredViewToken& token) { return recording.Index(token); };
+    constants[CLOD_REYES_REPLAY_MERGE_SOURCE_DESCRIPTOR_INDEX] = srv(bindings.source);
+    constants[CLOD_REYES_REPLAY_MERGE_SOURCE_COUNTER_DESCRIPTOR_INDEX] = srv(bindings.sourceCounter);
+    constants[CLOD_REYES_REPLAY_MERGE_DEST_DESCRIPTOR_INDEX] = uav(bindings.dest);
+    constants[CLOD_REYES_REPLAY_MERGE_DEST_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.destCounter);
+    constants[CLOD_REYES_REPLAY_MERGE_DEST_OVERFLOW_DESCRIPTOR_INDEX] = uav(bindings.destOverflow);
+    constants[CLOD_REYES_REPLAY_MERGE_CAPACITY] = bindings.capacity;
+    constants[CLOD_REYES_REPLAY_MERGE_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
+    br::render::DispatchComputeIndirect(recording, bindings.pipeline, constants, bindings.commandSignature,
+        bindings.indirectArgs);
 }

@@ -1,25 +1,23 @@
 #pragma once
 
+#include <array>
 #include <memory>
 
 #include <rhi.h>
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct StreamingFeedbackSortFrameData {
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    rhi::CommandSignatureHandle signature{};
-    std::array<org::PreparedProgramBinding, 6> programs;
-    std::array<org::PreparedResourceReference, 7> uavResources;
-    std::array<org::PreparedResourceReference, 2> indirectResources;
-    std::array<std::array<unsigned int, NumMiscUintRootConstants>, 2> constants;
+    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
 };
 
 struct StreamingFeedbackSortBindings {
+    // Setup, count, reduce, scan, scan-add, scatter.
+    std::array<org::PipelineState, 6> pipelines;
     org::DeclaredViewToken requestCounter;
     std::array<org::DeclaredViewToken, 7> uavs;
     org::DeclaredViewToken countScatterUav, reduceScanUav;
@@ -42,11 +40,10 @@ public:
         std::shared_ptr<org::Buffer> reduceScanArgs);
 
     StreamingFeedbackSortBindings Declare(org::PassBuilder& builder);
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     StreamingFeedbackSortFrameData Prepare(const StreamingFeedbackSortBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const StreamingFeedbackSortBindings&,
-        const StreamingFeedbackSortFrameData& data, org::PassRecordContext& recording);
+    static void Record(const StreamingFeedbackSortBindings& bindings,
+        const StreamingFeedbackSortFrameData& frame, org::PassRecordContext& context);
 
 private:
     org::PipelineState m_setupPso;

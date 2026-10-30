@@ -11,7 +11,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Scene/Scene.h"
 #include "Materials/colorspaces.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedFullscreenDraw.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 #include "../shaders/FidelityFX/ffx_a.h"
 A_STATIC AF1 fs2S;
@@ -26,11 +26,17 @@ A_STATIC void LpmSetupOut(AU1 i, inAU4 v)
 #include "../shaders/PerPassRootConstants/tonemapRootConstants.h"
 
 struct TonemappingBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken lpm, bloomMip1, bloomMip2, target;
+    bool bloomEnabled = false;
+};
+struct TonemappingFrame {
+    uint32_t tonemapType = 0;
+    uint32_t width = 0, height = 0;
 };
 
 class TonemappingPass : public org::TypedRenderGraphPass<
-    TonemappingPass, br::render::PreparedFullscreenDraw, TonemappingBindings> {
+    TonemappingPass, TonemappingFrame, TonemappingBindings> {
 public:
 	explicit TonemappingPass(bool bloomEnabled = false)
         : m_bloomEnabled(bloomEnabled) {
@@ -51,6 +57,8 @@ public:
     TonemappingBindings Declare(org::PassBuilder& builder) {
         builder.ShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer);
         TonemappingBindings bindings{};
+        bindings.pipeline = m_pso;
+        bindings.bloomEnabled = m_bloomEnabled;
         bindings.target = builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor}).View();
         bindings.lpm = builder.ShaderResource(m_pLPMConstants).View();
         if (m_bloomEnabled) {
@@ -80,33 +88,27 @@ public:
             org::runtime::UploadTarget::FromShared(m_pLPMConstants), 0);
     }
 
-	br::render::PreparedFullscreenDraw Prepare(const TonemappingBindings& bindings,
+	TonemappingFrame Prepare(const TonemappingBindings&,
         const org::PassPrepareContext& preparation) const {
 		const auto* context = preparation.preparationData->Get<UpdateContext>();
-		br::render::PreparedFullscreenDraw data{};
-		data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-		data.targetResource = preparation.CaptureResource(bindings.target.Resource());
-		data.renderTargetReference = preparation.Capture(bindings.target);
-		data.loadOp = rhi::LoadOp::Clear;
-		data.clear.rgba[3] = 1.0f; data.width = context->outputResolution.x; data.height = context->outputResolution.y;
-
-        br::render::BindPreparedProgram(
-            data, preparation, m_pso);
-		data.constants[LPM_CONSTANTS_BUFFER_SRV_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.lpm).index;
-		data.constants[TONEMAP_TYPE] = context->tonemapType; data.constants[TONEMAP_BLOOM_ENABLED] = m_bloomEnabled ? 1u : 0u;
-		if (m_bloomEnabled) {
-			data.constants[TONEMAP_BLOOM_MIP1_SRV_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.bloomMip1).index;
-			data.constants[TONEMAP_BLOOM_MIP2_SRV_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.bloomMip2).index;
-			data.constants[TONEMAP_BLOOM_FILTER_RADIUS] = as_uint(0.001f);
-			data.constants[TONEMAP_BLOOM_ASPECT_RATIO] = as_uint(context->outputResolution.x / static_cast<float>(context->outputResolution.y));
-		}
-		return data;
+		return {static_cast<uint32_t>(context->tonemapType), context->outputResolution.x, context->outputResolution.y};
 	}
 
-    static void Record(const TonemappingBindings&, const br::render::PreparedFullscreenDraw& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedFullscreenDraw(data, recording);
-    }
+    static void Record(const TonemappingBindings& bindings, const TonemappingFrame& frame,
+        org::PassRecordContext& context) {
+		br::render::MiscConstants constants{};
+		constants[LPM_CONSTANTS_BUFFER_SRV_DESCRIPTOR_INDEX] = context.Index(bindings.lpm);
+		constants[TONEMAP_TYPE] = frame.tonemapType; constants[TONEMAP_BLOOM_ENABLED] = bindings.bloomEnabled ? 1u : 0u;
+		if (bindings.bloomEnabled) {
+			constants[TONEMAP_BLOOM_MIP1_SRV_DESCRIPTOR_INDEX] = context.Index(bindings.bloomMip1);
+			constants[TONEMAP_BLOOM_MIP2_SRV_DESCRIPTOR_INDEX] = context.Index(bindings.bloomMip2);
+			constants[TONEMAP_BLOOM_FILTER_RADIUS] = as_uint(0.001f);
+			constants[TONEMAP_BLOOM_ASPECT_RATIO] = as_uint(frame.width / static_cast<float>(frame.height));
+		}
+		auto color = br::render::ColorTarget(context, bindings.target, rhi::LoadOp::Clear);
+		color.clear.rgba[3] = 1.0f;
+		br::render::DrawFullscreen(context, bindings.pipeline, constants, color, frame.width, frame.height);
+	}
 
 private:
 

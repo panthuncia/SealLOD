@@ -27,23 +27,39 @@
 #include "BasicRenderer/Extensions/Buffers/PagePool.h"
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeCommands.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 struct EvaluateMaterialGroupsBindings {
     org::DeclaredViewToken visibleClusters, visibleClusterTransformIndices;
     org::DeclaredViewToken reyesDiceQueue, reyesTessTableConfigs;
     org::DeclaredViewToken reyesTessTableVertices, reyesTessTableTriangles;
+    org::ResourceBindingToken arguments;
     bool hasReyesDiceQueue = false, hasReyesTessTables = false;
+    // Without RVT the material programs still name the Builtin::Terrain::Rvt* slots; they bind as absent.
+    bool terrainRvtEnabled = false;
     uint32_t patchVisibilityIndexBase = 0;
 };
 
-struct MaterialEvaluationInvocation {
-    std::array<uint32_t,NumMiscUintRootConstants> constants{};
+struct MaterialEvaluationRecordingConfiguration {
+    bool useNormalMaps = true;
+    float terrainNormalBlend = 0;
+    uint32_t terrainNormalMipBias = 0;
+    float objectNormalMapBlend = 0;
+};
+
+struct MaterialEvaluationFrame {
+    // One indirect evaluation per active material program, in publication order.
+    struct Step {
+        std::shared_ptr<const org::PipelineStatePayload> program;
+        uint64_t argumentsOffset = 0;
+    };
+    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
+    std::vector<Step> steps;
+    MaterialEvaluationRecordingConfiguration configuration;
 };
 
 class EvaluateMaterialGroupsPass : public org::TypedRenderGraphPass<EvaluateMaterialGroupsPass,
-    MaterialEvaluationInvocation, EvaluateMaterialGroupsBindings, br::render::PreparedComputeIndirectSequence> {
+    MaterialEvaluationFrame, EvaluateMaterialGroupsBindings> {
 public:
     EvaluateMaterialGroupsPass(MaterialEvaluationBuildInputs inputs, bool terrainRvtEnabled)
         : m_inputs(std::move(inputs)), m_terrainRvtEnabled(terrainRvtEnabled) {
@@ -74,6 +90,7 @@ public:
             bindings.hasReyesTessTables = true;
         }
         bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
+        bindings.terrainRvtEnabled = m_terrainRvtEnabled;
         // clodResolveCommon.hlsli only decodes a visibility entry as a Reyes patch
         // when the dice queue is bound and the entry's index is at or above this
         // base. Without the dice queue, a patch entry is instead read as an
@@ -165,7 +182,7 @@ public:
                     Builtin::Terrain::RvtCounters,
                     Builtin::Terrain::RvtStats);
         }
-        b->IndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+        bindings.arguments = b->IndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
         return bindings;
     }
 
@@ -193,135 +210,7 @@ public:
         }
     }
 
-    struct RecordingConfiguration {
-        bool useNormalMaps = true;
-        float terrainNormalBlend = 0;
-        uint32_t terrainNormalMipBias = 0;
-        float objectNormalMapBlend = 0;
-    };
-    struct PersistentBindings {
-        org::persistent::ViewToken visibleClusters, visibleClusterTransformIndices;
-        org::persistent::ViewToken reyesDiceQueue, reyesTessTableConfigs, reyesTessTableVertices, reyesTessTableTriangles;
-        bool hasReyesDiceQueue = false, hasReyesTessTables = false;
-        uint32_t patchVisibilityIndexBase = 0;
-        org::persistent::BindingToken arguments;
-    };
-    struct CapturedProgram {
-        MaterialCompileFlags key;
-        std::shared_ptr<const org::PipelineStatePayload> program;
-        std::vector<std::optional<org::persistent::ViewToken>> descriptorViews;
-    };
-    struct ProgramVersion {
-        MaterialCompileFlags key;
-        std::shared_ptr<const org::PipelineStatePayload> program;
-    };
-    // Producer-only capture. All required active programs must be ready before
-    // the replacement is published; workers retain these exact versions.
-    template<class Capture>
-    static std::vector<ProgramVersion> CaptureProgramVersions(const br::render::PublishedMaterialState& materials,
-        bool terrainEvaluation, uint32_t outputType, uint64_t argumentBufferBytes, Capture&& capture) {
-        std::vector<ProgramVersion> result;
-        std::unordered_map<MaterialCompileFlags,uint32_t> captured;
-        VisitCommands(materials,terrainEvaluation,outputType,argumentBufferBytes,
-            [&](MaterialCompileFlags,MaterialCompileFlags key,uint32_t,uint64_t) {
-                if (captured.contains(key)) return;
-                auto program = capture(key);
-                if (!program || !program->pso.Get().GetHandle().valid() || !program->layout.valid() || !program->layoutOwner)
-                    throw std::runtime_error("Material publication program is not ready");
-                if (result.size() >= UINT32_MAX) throw std::overflow_error("Material publication programs exhausted");
-                captured.emplace(key,static_cast<uint32_t>(result.size()));
-                result.push_back({key,std::move(program)});
-            });
-        return result;
-    }
-    std::vector<ProgramVersion> CaptureProgramVersions(const br::render::PublishedMaterialState& materials,
-        bool terrainEvaluation, uint32_t outputType, uint64_t argumentBufferBytes) const {
-        return CaptureProgramVersions(materials,terrainEvaluation,outputType,argumentBufferBytes,
-            [&](MaterialCompileFlags key) -> std::shared_ptr<const org::PipelineStatePayload> {
-                const auto* program = m_inputs.pipelines->TryGetMaterialEvalPSO(key);
-                return program ? program->GetPayload() : nullptr;
-            });
-    }
-    struct PersistentProgramInterface {
-        std::vector<br::render::PreparedComputeCommandSequence> programs;
-        std::unordered_map<MaterialCompileFlags,uint32_t> programByKey;
-        std::shared_ptr<const rhi::CommandSignaturePtr> signature;
-        org::persistent::BindingToken arguments;
-    };
-    struct PersistentInvocation {
-        struct Command { uint32_t program; uint64_t argumentsOffset; };
-        std::shared_ptr<const br::render::PublishedMaterialState> materials;
-        std::vector<Command> commands;
-        uint64_t argumentBufferBytes = 0;
-        std::array<uint32_t,NumMiscUintRootConstants> constants{};
-    };
-    static constexpr uint64_t NormalConfigurationMask =
-        (uint64_t{1} << VISBUF_REYES_USE_NORMAL_MAPS) | (uint64_t{1} << VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT)
-        | (uint64_t{1} << VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS) | (uint64_t{1} << VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT);
-    static PersistentProgramInterface BuildPersistentProgramInterface(const PersistentBindings& bindings,
-        std::span<const CapturedProgram> programs, std::shared_ptr<const rhi::CommandSignaturePtr> signature) {
-        BT_ZONE_SCOPE("BR.MaterialEvaluation.BuildPersistentInterface");
-        PersistentProgramInterface result; result.arguments = bindings.arguments; result.signature = std::move(signature);
-        if (!programs.empty() && (!result.signature || !result.signature->Get().GetHandle().valid()))
-            throw std::invalid_argument("Material program interface has no owned command signature");
-        const auto constants = BuildConstants<br::render::SymbolicComputeConstant>(bindings,{},
-            [](org::persistent::ViewToken token) { return token; });
-        for (const auto& program : programs) {
-            if (result.programs.size() >= UINT32_MAX) throw std::overflow_error("Material program interface exhausted");
-            if (!result.programByKey.emplace(program.key,static_cast<uint32_t>(result.programs.size())).second)
-                throw std::invalid_argument("Material program interface has duplicate shader keys");
-            if (!program.program) throw std::invalid_argument("Material program interface has no program owner");
-            const auto& reflection = program.program->pipelineResources;
-            if (program.descriptorViews.size() != reflection.mandatoryResourceDescriptorSlots.size()+reflection.optionalResourceDescriptorSlots.size())
-                throw std::invalid_argument("Material program descriptor layout differs from reflection");
-            br::render::PreparedComputeCommandSequence commands;
-            commands.commands.emplace_back(br::render::PreparedBindPersistentComputeProgram{program.program});
-            if (!program.descriptorViews.empty())
-                commands.commands.emplace_back(br::render::PreparedPersistentDescriptorIndices{program.descriptorViews});
-            commands.commands.emplace_back(br::render::BuildSymbolicComputeConstants(MiscUintRootSignatureIndex,0,constants,NormalConfigurationMask));
-            br::render::ValidatePersistentComputeCommands(commands);
-            result.programs.push_back(std::move(commands));
-        }
-        return result;
-    }
-    static PersistentInvocation PreparePersistentInvocation(const PersistentProgramInterface& program,
-        std::shared_ptr<const br::render::PublishedMaterialState> materials, bool terrainEvaluation,
-        uint32_t outputType, uint64_t argumentBufferBytes, const RecordingConfiguration& configuration) {
-        BT_ZONE_SCOPE("BR.MaterialEvaluation.PreparePersistentInvocation");
-        PersistentInvocation result; result.materials = std::move(materials); result.argumentBufferBytes = argumentBufferBytes;
-        if (!result.materials) return result;
-        result.commands.reserve(result.materials->activeCompileFlags.size());
-        VisitCommands(*result.materials,terrainEvaluation,outputType,argumentBufferBytes,
-            [&](MaterialCompileFlags,MaterialCompileFlags key,uint32_t,uint64_t offset) {
-                const auto found = program.programByKey.find(key);
-                if (found != program.programByKey.end()) result.commands.push_back({found->second,offset});
-            });
-        if (result.commands.empty()) return result;
-        PersistentBindings unused;
-        result.constants = BuildConstants<uint32_t>(unused,configuration,[](org::persistent::ViewToken) { return 0u; });
-        return result;
-    }
-    static void RecordPersistent(const PersistentProgramInterface& program, const PersistentInvocation& invocation,
-        org::RecordingContext& recording) {
-        if (invocation.commands.empty()) return;
-        if (!program.signature || !program.signature->Get().GetHandle().valid())
-            throw std::invalid_argument("Material recording lost command signature ownership");
-        if (!invocation.materials) throw std::invalid_argument("Material recording lost semantic publication ownership");
-        constexpr uint64_t stride = sizeof(MaterialEvaluationIndirectCommand);
-        // Validate the fresh command list before mutating the native recorder.
-        // Stable interfaces were validated at publication; no resource scan occurs.
-        for (const auto& command : invocation.commands) {
-            if (command.program >= program.programs.size()) throw std::out_of_range("Material invocation program index exceeds interface");
-            if (command.argumentsOffset % stride || command.argumentsOffset > invocation.argumentBufferBytes
-                || stride > invocation.argumentBufferBytes-command.argumentsOffset)
-                throw std::out_of_range("Material invocation arguments exceed selected buffer");
-        }
-        const auto arguments = recording.Resolve(program.arguments).GetHandle();
-        for (const auto& command : invocation.commands) {
-            br::render::RecordPreparedComputeCommands(program.programs.at(command.program),recording,nullptr,{},invocation.constants);
-            recording.Commands().ExecuteIndirect(program.signature->Get().GetHandle(),arguments,command.argumentsOffset,{},0,1);
-        }
-    }
+    using RecordingConfiguration = MaterialEvaluationRecordingConfiguration;
     static RecordingConfiguration CaptureRecordingConfiguration() {
         return {CLodReyesUseNormalMaps(),CLodReyesTerrainNormalBlend(),CLodReyesTerrainNormalMipBias(),CLodReyesObjectNormalMapBlend()};
     }
@@ -348,74 +237,40 @@ public:
     }
 
 
-    br::render::PreparedComputeIndirectSequence BuildRecipe(const EvaluateMaterialGroupsBindings& bindings,
+    MaterialEvaluationFrame Prepare(const EvaluateMaterialGroupsBindings&,
         const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
         const auto materialState = context->publishedRendererState
             ? context->publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
         if (!materialState) return {};
-        br::render::PreparedComputeIndirectSequence data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.commandSignature = preparation.CaptureCommandSignature(m_inputs.commandSignatures->CaptureMaterialEvaluationCommandSignature());
-        data.argumentsReference = preparation.CaptureResource(m_materialEvalCmds->GetGlobalResourceID());
+        MaterialEvaluationFrame frame{};
+        frame.signature = m_inputs.commandSignatures->CaptureMaterialEvaluationCommandSignature();
         const bool terrainEvaluation = context->terrainRegionMaterialEvaluationEnabled;
         const auto outputType = context->outputType;
         const auto* buffer = dynamic_cast<org::BufferBase*>(m_materialEvalCmds);
-        std::optional<std::array<uint32_t,NumMiscUintRootConstants>> constants;
         VisitCommands(*materialState,terrainEvaluation,outputType,buffer ? buffer->GetBufferSize() : UINT64_MAX,
             [&](MaterialCompileFlags, MaterialCompileFlags shaderKey, uint32_t, uint64_t argOffset) {
             const org::PipelineState* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(shaderKey);
             if (!pso) return;
-            if (!constants) constants = BuildConstants<uint32_t>(bindings,{},
-                [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; });
-            auto capture = preparation;
-            capture.captureDescriptorIndices = [this, &preparation](const org::PipelineResources& resources) {
-                return CaptureMaterialResourceDescriptorIndices(resources, preparation);
-            };
-            auto program = capture.CaptureProgramBinding(*pso);
-            br::render::PreparedComputeIndirectSequence::Step step{};
-            step.program = program.program;
-            step.descriptorIndices = std::move(program.descriptorIndices);
-            step.constants = *constants;
-            step.argumentsOffset = argOffset; data.steps.push_back(std::move(step));
+            frame.steps.push_back({pso->GetPayload(), argOffset});
         });
-        return data;
+        if (!frame.steps.empty()) frame.configuration = CaptureRecordingConfiguration();
+        return frame;
     }
 
-    std::vector<uint64_t> RecipeRevision(const org::PassPrepareContext& preparation) const {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        const auto materialState = context->publishedRendererState
-            ? context->publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
-        std::vector<uint64_t> revision{static_cast<uint64_t>(context->outputType),
-            context->terrainRegionMaterialEvaluationEnabled};
-        // Material values are shader inputs. Only command membership, slots,
-        // and program replacement affect this recipe's recording structure.
-        revision.push_back(materialState ? materialState->compileFlagSlotsUsed : 0u);
-        revision.push_back(materialState ? materialState->activeCompileFlags.size() : 0u);
-        revision.push_back(materialState ? materialState->activeCompileFlagSlots.size() : 0u);
-        if (materialState) for (const auto flags : materialState->activeCompileFlags) {
-            auto key = GetMaterialEvaluationShaderKey(flags);
-            if (context->outputType == OutputType::COLOR) key |= MaterialCompileFlags::MaterialCompileMaterialEvalColorOnly;
-            const auto* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(key);
-            revision.push_back(static_cast<uint64_t>(flags));
-            revision.push_back(reinterpret_cast<uintptr_t>(pso ? pso->PeekPayload() : nullptr));
+    static void Record(const EvaluateMaterialGroupsBindings& bindings, const MaterialEvaluationFrame& frame,
+        org::PassRecordContext& context) {
+        if (frame.steps.empty()) return;
+        static constexpr std::string_view kRvtPrefixes[] = {"Builtin::Terrain::Rvt"};
+        org::PassRecordContext::BindOptions options{};
+        if (!bindings.terrainRvtEnabled) options.absentPrefixes = kRvtPrefixes;
+        const auto constants = BuildConstants<uint32_t>(bindings, frame.configuration,
+            [&](const org::DeclaredViewToken& token) { return context.Index(token); });
+        for (const auto& step : frame.steps) {
+            context.BindComputePipeline(step.program, options);
+            br::render::PushMiscConstants(context, constants);
+            context.ExecuteIndirect(frame.signature, bindings.arguments, step.argumentsOffset);
         }
-        if (materialState) for (const auto slot : materialState->activeCompileFlagSlots)
-            revision.push_back(slot);
-        return revision;
-    }
-    MaterialEvaluationInvocation PrepareInvocation(const br::render::PreparedComputeIndirectSequence& recipe,
-        const EvaluateMaterialGroupsBindings&, const org::PassPrepareContext&) const {
-        if (recipe.steps.empty()) return {};
-        // Resource operands belong to the immutable recording interface. These
-        // four scalar values are fresh even when that interface is unchanged.
-        EvaluateMaterialGroupsBindings unused;
-        return {BuildConstants<uint32_t>(unused,CaptureRecordingConfiguration(),
-            [](org::DeclaredViewToken) { return 0u; })};
-    }
-    static void Record(const br::render::PreparedComputeIndirectSequence& recipe, const MaterialEvaluationInvocation& invocation,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputeIndirectSequence(recipe, recording,{},invocation.constants,NormalConfigurationMask);
     }
 
     void ShutdownPass() {
@@ -425,27 +280,6 @@ public:
 
 private:
     MaterialEvaluationBuildInputs m_inputs;
-    // Registry descriptor indices embedded in the recipe must go through the
-    // preparation capture hook: the recipe revision only tracks indices it saw
-    // captured, so a material publication that rotates these buffers would
-    // otherwise leave a stale recipe (everything renders black).
-    std::vector<unsigned int> CaptureMaterialResourceDescriptorIndices(const org::PipelineResources& resources,
-        const org::PassPrepareContext& preparation) const {
-        auto resolve = [&](const org::ResourceIdentifier& binding, bool optional) {
-            return preparation.captureDescriptorIndex ? preparation.captureDescriptorIndex(binding, optional)
-                : m_resourceDescriptorIndexHelper->GetResourceDescriptorIndex(binding, optional);
-        };
-        std::vector<unsigned int> indices;
-        indices.reserve(resources.mandatoryResourceDescriptorSlots.size() + resources.optionalResourceDescriptorSlots.size());
-        for (const auto& binding : resources.mandatoryResourceDescriptorSlots) {
-            const bool allowMissing = !m_terrainRvtEnabled && binding.name.starts_with("Builtin::Terrain::Rvt");
-            indices.push_back(resolve(binding, allowMissing));
-        }
-        for (const auto& binding : resources.optionalResourceDescriptorSlots)
-            indices.push_back(resolve(binding, true));
-        return indices;
-    }
-
     bool m_terrainRvtEnabled = false;
     org::Resource* m_materialEvalCmds;
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;

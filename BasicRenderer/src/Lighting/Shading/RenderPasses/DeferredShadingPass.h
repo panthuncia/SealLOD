@@ -1,7 +1,6 @@
 #pragma once
 
 #include <functional>
-#include "Runtime/StateGraph/InvocationRevision.h"
 #include <chrono>
 #include <atomic>
 #include <spdlog/spdlog.h>
@@ -11,9 +10,16 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Scene/Scene.h"
 #include "Runtime/Settings/SettingsManager.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
-class DeferredShadingPass : public org::TypedRenderGraphPass<DeferredShadingPass, br::render::PreparedComputeDispatch> {
+// The deferred pipeline follows the global PSO flags, so it is chosen per frame.
+struct DeferredShadingFrame {
+	org::PipelineState pipeline;
+	std::array<uint32_t, 4> lighting{};
+	uint32_t groupsX = 0, groupsY = 0;
+};
+
+class DeferredShadingPass : public org::TypedRenderGraphPass<DeferredShadingPass, DeferredShadingFrame> {
 public:
 	explicit DeferredShadingPass(bool skyboxEnabled = false)
 		: m_skyboxEnabled(skyboxEnabled) {
@@ -82,41 +88,24 @@ public:
 
 	void Initialize() {}
 
-	br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+	DeferredShadingFrame Prepare(const org::PassPrepareContext& preparation) {
 		const auto* update = preparation.preparationData->Get<UpdateContext>();
 		const auto* render = preparation.preparationData->Get<RenderContext>();
 		if (!update && !render) throw std::logic_error("DeferredShadingPass requires frame context");
 		const auto globalFlags = update ? update->globalPSOFlags : render->globalPSOFlags;
 		const auto resolution = update ? update->renderResolution : render->renderResolution;
-		auto& pso = DeferredPipeline(globalFlags);
-		br::render::PreparedComputeDispatch data{};
-		data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-		auto program = CaptureProgramBinding(preparation, pso);
-		data.program = program.program;
-		data.descriptorIndices = std::move(program.descriptorIndices);
 		const auto& lighting = update ? update->lighting : render->lighting;
-		data.constants[MiscEnableShadows] = lighting.shadowsEnabled;
-		data.constants[MiscEnableShadows + 1] = lighting.punctualLightingEnabled;
-		data.constants[MiscEnableShadows + 2] = lighting.gtaoEnabled;
-		data.constants[MiscEnableShadows + 3] = m_skyboxEnabled;
-		data.groupsX = (resolution.x + 7u) / 8u; data.groupsY = (resolution.y + 7u) / 8u;
-		return data;
+		DeferredShadingFrame frame{};
+		frame.pipeline = DeferredPipeline(globalFlags);
+		frame.lighting = {lighting.shadowsEnabled, lighting.punctualLightingEnabled, lighting.gtaoEnabled, m_skyboxEnabled};
+		frame.groupsX = (resolution.x + 7u) / 8u; frame.groupsY = (resolution.y + 7u) / 8u;
+		return frame;
 	}
-	void InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
-		const auto* update = preparation.preparationData->Get<UpdateContext>();
-		const auto* render = preparation.preparationData->Get<RenderContext>();
-		if (!update && !render) return;
-		const auto globalFlags = update ? update->globalPSOFlags : render->globalPSOFlags;
-		const auto resolution = update ? update->renderResolution : render->renderResolution;
-		const auto& lighting = update ? update->lighting : render->lighting;
-		const auto pipeline = br::render::PipelineRevision(DeferredPipeline(globalFlags));
-		const auto layout = br::render::HandleRevision(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-		out.insert(out.end(), {static_cast<uint64_t>(globalFlags), static_cast<uint64_t>(resolution.x), static_cast<uint64_t>(resolution.y),
-			static_cast<uint64_t>(lighting.shadowsEnabled), static_cast<uint64_t>(lighting.punctualLightingEnabled),
-			static_cast<uint64_t>(lighting.gtaoEnabled), static_cast<uint64_t>(m_skyboxEnabled), pipeline, layout});
-	}
-	static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-		br::render::RecordPreparedComputeDispatch(data, recording);
+	static void Record(const DeferredShadingFrame& frame, org::PassRecordContext& context) {
+		br::render::MiscConstants constants{};
+		for (uint32_t index = 0; index < frame.lighting.size(); ++index)
+			constants[MiscEnableShadows + index] = frame.lighting[index];
+		br::render::DispatchCompute(context, frame.pipeline, constants, frame.groupsX, frame.groupsY);
 	}
 
 private:

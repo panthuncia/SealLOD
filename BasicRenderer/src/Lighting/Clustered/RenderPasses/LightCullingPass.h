@@ -6,20 +6,29 @@
 #include "Runtime/Device/DeviceManager.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
-class LightCullingPass : public org::TypedRenderGraphPass<LightCullingPass, br::render::PreparedComputeDispatch> {
+struct LightCullingBindings {
+	org::PipelineState pipeline;
+};
+struct LightCullingFrame {
+	uint32_t lightPagePoolSize = 0;
+	uint32_t groups = 0;
+};
+
+class LightCullingPass : public org::TypedRenderGraphPass<LightCullingPass, LightCullingFrame, LightCullingBindings> {
 public:
 	LightCullingPass() { CreatePSO(); }
 
 	~LightCullingPass() {
 	}
 
-	void Declare(org::PassBuilder& builder) {
+	LightCullingBindings Declare(org::PassBuilder& builder) {
 		builder.ShaderResource(Builtin::CameraBuffer, Builtin::Light::ActiveLightIndices, Builtin::Light::InfoBuffer);
 		builder.UnorderedAccess(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer, Builtin::Light::PagesCounter);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
+		return {m_PSO};
 	}
 
 	void Initialize() {
@@ -28,27 +37,25 @@ public:
 		m_pLightPagesCounter = m_resourceRegistryView->Resolve<org::Buffer>(m_lightPagesCounterHandle);
 	}
 
-	br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
+	LightCullingFrame Prepare(const LightCullingBindings&, const org::PassPrepareContext& preparation) const {
 		const auto* update = preparation.preparationData->Get<UpdateContext>();
 		const auto* render = preparation.preparationData->Get<RenderContext>();
 		if (!update && !render) throw std::logic_error("LightCullingPass requires frame context");
-		br::render::PreparedComputeDispatch data{};
-		data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-		auto program = CaptureProgramBinding(preparation, m_PSO);
-		data.program = program.program;
-		data.descriptorIndices = std::move(program.descriptorIndices);
+		LightCullingFrame frame{};
 		const auto state = update ? update->publishedRendererState : render->publishedRendererState;
 		const auto lights = state
 			? state->lights.payload.Get<br::render::PublishedLightTableState>() : nullptr;
-		data.constants[LIGHT_PAGES_POOL_SIZE] = lights
+		frame.lightPagePoolSize = lights
 			? lights->lightPagePoolSize
 			: (update ? update->LightPagePoolSize() : render->LightPagePoolSize());
 		const auto clusterSize = update ? update->lightClusterSize : render->lightClusterSize;
-		data.groupsX = (clusterSize.x * clusterSize.y * clusterSize.z + 127u) / 128u;
-		return data;
+		frame.groups = (clusterSize.x * clusterSize.y * clusterSize.z + 127u) / 128u;
+		return frame;
 	}
-	static void Record(const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-		br::render::RecordPreparedComputeDispatch(data, recording);
+	static void Record(const LightCullingBindings& bindings, const LightCullingFrame& frame, org::PassRecordContext& context) {
+		br::render::MiscConstants constants{};
+		constants[LIGHT_PAGES_POOL_SIZE] = frame.lightPagePoolSize;
+		br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groups);
 	}
 
 	void Update(const org::UpdateExecutionContext& context) override {

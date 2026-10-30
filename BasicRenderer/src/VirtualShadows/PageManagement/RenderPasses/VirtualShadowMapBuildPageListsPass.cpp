@@ -11,7 +11,6 @@
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 
 #include "../shaders/PerPassRootConstants/clodVirtualShadowBuildPageListsRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 VirtualShadowMapBuildPageListsPass::VirtualShadowMapBuildPageListsPass(
     std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -39,42 +38,31 @@ VirtualShadowMapBuildPageListsBindings VirtualShadowMapBuildPageListsPass::Decla
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_pageMetadataBuffer),
+    return {m_pso, builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_pageMetadataBuffer),
         builder.ShaderResource(m_allocationCountBuffer), builder.UnorderedAccess(m_freePhysicalPagesBuffer),
         builder.UnorderedAccess(m_reusablePhysicalPagesBuffer), builder.UnorderedAccess(m_pageListHeaderBuffer)};
 }
 
 void VirtualShadowMapBuildPageListsPass::Initialize() {}
 
-
-
-br::render::PreparedComputeDispatch VirtualShadowMapBuildPageListsPass::Prepare(
-    const VirtualShadowMapBuildPageListsBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
+VirtualShadowMapBuildPageListsFrame VirtualShadowMapBuildPageListsPass::Prepare(
+    const VirtualShadowMapBuildPageListsBindings&, const org::PassPrepareContext&) const {
     const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-    auto payload = m_pso.GetPayload();
-    br::render::PreparedComputeDispatch data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    auto program = preparation.CaptureProgramBinding(std::move(payload));
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_METADATA_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageMetadata).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_FREE_PAGES_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.freePages).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_REUSABLE_PAGES_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.reusablePages).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_HEADER_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.header).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PHYSICAL_PAGE_COUNT] = config.maxPhysicalPages;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
-    data.constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_ALLOCATION_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.allocationCount).index;
-    data.groupsX = 1;
-    return data;
+    return {config.maxPhysicalPages, config.pageTableResolution};
 }
 
 void VirtualShadowMapBuildPageListsPass::ShutdownPass() {}
 
-void VirtualShadowMapBuildPageListsPass::Record(const VirtualShadowMapBuildPageListsBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void VirtualShadowMapBuildPageListsPass::Record(const VirtualShadowMapBuildPageListsBindings& bindings,
+    const VirtualShadowMapBuildPageListsFrame& frame, org::PassRecordContext& recording) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_DESCRIPTOR_INDEX] = recording.Index(bindings.pageTable);
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_METADATA_DESCRIPTOR_INDEX] = recording.Index(bindings.pageMetadata);
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_FREE_PAGES_DESCRIPTOR_INDEX] = recording.Index(bindings.freePages);
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_REUSABLE_PAGES_DESCRIPTOR_INDEX] = recording.Index(bindings.reusablePages);
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_HEADER_DESCRIPTOR_INDEX] = recording.Index(bindings.header);
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PHYSICAL_PAGE_COUNT] = frame.maxPhysicalPages;
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
+    constants[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_ALLOCATION_COUNT_DESCRIPTOR_INDEX] = recording.Index(bindings.allocationCount);
+    br::render::DispatchCompute(recording, bindings.pipeline, constants, 1);
 }

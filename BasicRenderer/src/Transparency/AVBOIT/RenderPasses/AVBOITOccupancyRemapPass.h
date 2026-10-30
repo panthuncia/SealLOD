@@ -3,13 +3,19 @@
 #include <memory>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
-struct AVBOITOccupancyRemapBindings { org::DeclaredViewToken config, lut, occupancy; };
-class AVBOITOccupancyRemapPass final : public org::TypedRenderGraphPass<AVBOITOccupancyRemapPass, br::render::PreparedComputeDispatch, AVBOITOccupancyRemapBindings> {
+struct AVBOITOccupancyRemapBindings {
+    org::PipelineState pipeline;
+    org::DeclaredViewToken config, lut, occupancy;
+};
+struct AVBOITOccupancyRemapFrame {
+    uint32_t groupsX = 0, groupsY = 1;
+};
+class AVBOITOccupancyRemapPass final : public org::TypedRenderGraphPass<AVBOITOccupancyRemapPass, AVBOITOccupancyRemapFrame, AVBOITOccupancyRemapBindings> {
 public:
     AVBOITOccupancyRemapPass(
         std::shared_ptr<org::Buffer> configBuffer,
@@ -18,8 +24,8 @@ public:
         std::shared_ptr<org::Buffer> depthWarpLUTBuffer);
 
     AVBOITOccupancyRemapBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputeDispatch Prepare(const AVBOITOccupancyRemapBindings&, const org::PassPrepareContext&) const;
-    static void Record(const AVBOITOccupancyRemapBindings&, const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+    AVBOITOccupancyRemapFrame Prepare(const AVBOITOccupancyRemapBindings&, const org::PassPrepareContext&) const;
+    static void Record(const AVBOITOccupancyRemapBindings&, const AVBOITOccupancyRemapFrame&, org::PassRecordContext&);
 
 private:
     std::shared_ptr<org::Buffer> m_configBuffer;

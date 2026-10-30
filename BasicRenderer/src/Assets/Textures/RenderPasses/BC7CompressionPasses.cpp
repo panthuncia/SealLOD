@@ -169,13 +169,14 @@ org::PipelineState& TextureFactory::BC7CompressionPass::GetOrCreatePipeline()
     return m_psoMode6;
 }
 
-void TextureFactory::BC7CompressionPass::Declare(org::PassBuilder& builder)
+TextureBC7CompressionBindings TextureFactory::BC7CompressionPass::Declare(org::PassBuilder& builder)
 {
     std::scoped_lock lock(m_pendingMutex);
     m_declaredResourcesChanged.store(false, std::memory_order_release);
     m_declaredJobs.clear();
+    TextureBC7CompressionBindings bindings;
     if (m_pending.empty()) {
-        return;
+        return bindings;
     }
 
     for (const auto& job : m_pending) {
@@ -188,29 +189,31 @@ void TextureFactory::BC7CompressionPass::Declare(org::PassBuilder& builder)
             continue;
         }
 
-        auto& declared = m_declaredJobs.emplace_back();
-        declared.job = job;
-        declared.sources.reserve(job->subresources.size());
+        m_declaredJobs.push_back({job});
+        auto& declared = bindings.jobs.emplace_back();
+        declared.subresources.reserve(job->subresources.size());
         for (const auto& subresource : job->subresources) {
-            declared.sources.push_back(builder.ShaderResource(
+            declared.subresources.push_back({builder.ShaderResource(
                 Subresources(job->workingTexture, org::Mip{subresource.mip, 1}, org::Slice{subresource.slice, 1}),
-                org::SrvView{.mip = subresource.mip, .slice = subresource.slice}).View());
+                org::SrvView{.mip = subresource.mip, .slice = subresource.slice}).View(),
+                static_cast<uint32_t>(subresource.footprint.offset), subresource.footprint.rowPitch,
+                subresource.footprint.width, subresource.footprint.height});
         }
         declared.blocks = builder.UnorderedAccess(job->blockBuffer).View();
     }
+    if (!bindings.jobs.empty()) bindings.pipeline = GetOrCreatePipeline();
+    return bindings;
 }
 
-br::render::PreparedComputePipelineSequence TextureFactory::BC7CompressionPass::Prepare(
-    const org::PassPrepareContext& preparation)
+TextureBC7CompressionFrame TextureFactory::BC7CompressionPass::Prepare(
+    const TextureBC7CompressionBindings&, const org::PassPrepareContext& preparation)
 {
-    br::render::PreparedComputePipelineSequence data{};
+    TextureBC7CompressionFrame frame{};
     std::scoped_lock lock(m_pendingMutex);
-    if (m_pending.empty()) return data;
+    if (m_pending.empty()) return frame;
     const auto* context = preparation.preparationData
         ? preparation.preparationData->Get<UpdateContext>() : nullptr;
     if (!context) throw std::logic_error("BC7 compression requires the owned renderer snapshot");
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
 
     struct Transition { std::shared_ptr<BC7CompressionJob> job; uint32_t frameIndex = 0; };
     std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
@@ -240,24 +243,7 @@ br::render::PreparedComputePipelineSequence TextureFactory::BC7CompressionPass::
             waiting.push_back(job);
             continue;
         }
-        const auto binding = preparation.CaptureProgramBinding(GetOrCreatePipeline());
-        for (size_t index = 0; index < job->subresources.size(); ++index) {
-            const auto& subresource = job->subresources[index];
-            br::render::PreparedComputePipelineSequence::Step step{};
-            step.program = binding.program;
-            step.descriptorIndices = binding.descriptorIndices;
-            step.constants[UintRootConstant0] = preparation.Resolve(declared->sources.at(index)).index;
-            step.constants[UintRootConstant1] = preparation.Resolve(declared->blocks).index;
-            step.constants[UintRootConstant2] = static_cast<uint32_t>(subresource.footprint.offset);
-            step.constants[UintRootConstant3] = subresource.footprint.rowPitch;
-            step.constants[UintRootConstant4] = subresource.footprint.width;
-            step.constants[UintRootConstant5] = subresource.footprint.height;
-            const uint32_t blocksX = (subresource.footprint.width + 3u) / 4u;
-            const uint32_t blocksY = (subresource.footprint.height + 3u) / 4u;
-            step.groupsX = (blocksX + 7u) / 8u;
-            step.groupsY = (blocksY + 7u) / 8u;
-            data.steps.push_back(std::move(step));
-        }
+        frame.jobs.push_back(static_cast<uint32_t>(declared - m_declaredJobs.begin()));
         preparation.Retain(job);
         preparation.Reserve(std::make_shared<Transition>(Transition{job, preparation.frameIndex}),
             +[](Transition& transition, org::SubmissionContext) {
@@ -267,7 +253,27 @@ br::render::PreparedComputePipelineSequence TextureFactory::BC7CompressionPass::
             });
     }
     m_pending = std::move(waiting);
-    return data;
+    return frame;
+}
+
+void TextureFactory::BC7CompressionPass::Record(const TextureBC7CompressionBindings& bindings,
+    const TextureBC7CompressionFrame& frame, org::PassRecordContext& context)
+{
+    for (const uint32_t jobIndex : frame.jobs) {
+        const auto& job = bindings.jobs.at(jobIndex);
+        for (const auto& subresource : job.subresources) {
+            br::render::MiscConstants constants{};
+            constants[UintRootConstant0] = context.Index(subresource.source);
+            constants[UintRootConstant1] = context.Index(job.blocks);
+            constants[UintRootConstant2] = subresource.footprintOffset;
+            constants[UintRootConstant3] = subresource.rowPitch;
+            constants[UintRootConstant4] = subresource.width;
+            constants[UintRootConstant5] = subresource.height;
+            const uint32_t blocksX = (subresource.width + 3u) / 4u;
+            const uint32_t blocksY = (subresource.height + 3u) / 4u;
+            br::render::DispatchCompute(context, bindings.pipeline, constants, (blocksX + 7u) / 8u, (blocksY + 7u) / 8u);
+        }
+    }
 }
 
 void TextureFactory::BC7CompressionCopyPass::EnqueueJob(const std::shared_ptr<BC7CompressionJob>& job)
@@ -329,10 +335,8 @@ TextureFactory::BC7CompressionCopyFrameData TextureFactory::BC7CompressionCopyPa
             waiting.push_back(job);
             continue;
         }
-        const auto source = preparation.CaptureResource(declared->source);
-        const auto destination = preparation.CaptureResource(declared->destination);
         for (const auto& subresource : job->subresources) {
-            frame.copies.push_back({source, destination, subresource.footprint,
+            frame.copies.push_back({declared->source, declared->destination, subresource.footprint,
                 subresource.mip, subresource.slice});
         }
         preparation.Retain(job);
@@ -494,10 +498,9 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
         auto readback = org::Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
         if (!job->debugName.empty()) readback->SetName(job->debugName + "[BC7Readback]");
         preparation.Retain(readback);
-        const auto source = preparation.CaptureResource(declared->source);
         for (size_t index = 0; index < job->subresources.size(); ++index) {
             const auto& subresource = job->subresources[index];
-            frame.copies.push_back({source, readback->GetAPIResource().GetHandle(),
+            frame.copies.push_back({declared->source, readback,
                 footprints[index], subresource.mip, subresource.slice});
         }
         org::ReadbackCaptureRequest request{};
@@ -540,7 +543,7 @@ void TextureFactory::BC7CompressionReadbackPass::Record(
     for (const auto& copy : frame.copies) {
         rhi::BufferTextureCopyFootprint region{};
         region.texture = recording.Resolve(copy.source).GetHandle();
-        region.buffer = copy.destination;
+        region.buffer = copy.destination->GetAPIResource().GetHandle();
         region.mip = copy.mip;
         region.arraySlice = copy.slice;
         region.footprint = copy.footprint;

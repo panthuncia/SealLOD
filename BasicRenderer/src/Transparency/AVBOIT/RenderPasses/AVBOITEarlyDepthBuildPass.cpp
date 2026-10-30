@@ -31,7 +31,7 @@ AVBOITEarlyDepthBuildPass::AVBOITEarlyDepthBuildPass(
 AVBOITEarlyDepthBuildBindings AVBOITEarlyDepthBuildPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_zeroTransmittanceSliceTexture), builder.UnorderedAccess(m_tileCommandsBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
+    return {m_pso, builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_zeroTransmittanceSliceTexture), builder.UnorderedAccess(m_tileCommandsBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
 }
 
 void AVBOITEarlyDepthBuildPass::Update(const org::UpdateExecutionContext& executionContext)
@@ -55,26 +55,10 @@ void AVBOITEarlyDepthBuildPass::Update(const org::UpdateExecutionContext& execut
         0);
 }
 
-br::render::PreparedComputeDispatch AVBOITEarlyDepthBuildPass::Prepare(const AVBOITEarlyDepthBuildBindings& bindings, const org::PassPrepareContext& preparation) const {
-    br::render::PreparedComputeDispatch data{};
+AVBOITEarlyDepthBuildFrame AVBOITEarlyDepthBuildPass::Prepare(const AVBOITEarlyDepthBuildBindings& bindings, const org::PassPrepareContext& preparation) const {
     if (!m_configBuffer || !m_zeroTransmittanceSliceTexture || !m_tileCommandsBuffer || !m_tileCountBuffer) {
         return {};
     }
-
-    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
-    auto& context = *renderContext;
-
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-
-    auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_CONFIG_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.config).index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_ZERO_SLICE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.zeroSlice).index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMANDS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.commands).index;
-    misc[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMAND_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.count).index;
 
     const auto& zeroSlice = preparation.Describe(bindings.zeroSlice);
     const uint32_t groupCountX = (zeroSlice.texture.width + 7u) / 8u;
@@ -83,10 +67,15 @@ br::render::PreparedComputeDispatch AVBOITEarlyDepthBuildPass::Prepare(const AVB
         return {};
     }
 
-    data.groupsX = groupCountX; data.groupsY = groupCountY; data.groupsZ = 1u;
-    return data;
+    return {groupCountX, groupCountY};
 }
 
-void AVBOITEarlyDepthBuildPass::Record(const AVBOITEarlyDepthBuildBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void AVBOITEarlyDepthBuildPass::Record(const AVBOITEarlyDepthBuildBindings& bindings, const AVBOITEarlyDepthBuildFrame& frame, org::PassRecordContext& context) {
+    if (!frame.groupsX || !frame.groupsY) return;
+    br::render::MiscConstants constants{};
+    constants[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_CONFIG_DESCRIPTOR_INDEX] = context.Index(bindings.config);
+    constants[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_ZERO_SLICE_DESCRIPTOR_INDEX] = context.Index(bindings.zeroSlice);
+    constants[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMANDS_DESCRIPTOR_INDEX] = context.Index(bindings.commands);
+    constants[CLOD_AVBOIT_VBOIT_EARLY_DEPTH_BUILD_COMMAND_COUNT_DESCRIPTOR_INDEX] = context.Index(bindings.count);
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
 }

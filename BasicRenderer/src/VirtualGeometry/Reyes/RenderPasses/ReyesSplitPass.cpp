@@ -1,6 +1,5 @@
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesSplitPass.h"
 #include "Render/PassBuilders.h"
-#include "Runtime/StateGraph/InvocationRevision.h"
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
@@ -107,6 +106,9 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
             Builtin::CameraBuffer);
     builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     ReyesSplitBindings bindings;
+    bindings.clearCountersPipeline = m_clearCountersPso;
+    bindings.pipeline = m_pso;
+    bindings.commandSignature = m_commandSignature;
     bindings.visible = builder->ShaderResource(m_visibleClustersBuffer).View();
     bindings.inputQueue = builder->ShaderResource(m_inputSplitQueueBuffer).View();
     bindings.inputCounter = builder->ShaderResource(m_inputSplitQueueCounterBuffer).View();
@@ -163,23 +165,18 @@ void ReyesSplitPass::Update(const org::UpdateExecutionContext& executionContext)
 ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     const org::PassPrepareContext& preparation) const
 {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
     ReyesSplitFrameData data{};
-    data.clear.resourceHeap = data.split.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.clear.samplerHeap = data.split.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    auto clearProgram = preparation.CaptureProgramBinding(m_clearCountersPso);
-    data.clear.program = clearProgram.program;
-    data.clear.descriptorIndices = std::move(clearProgram.descriptorIndices);
-    data.clear.groupsX = 1;
-    auto splitProgram = preparation.CaptureProgramBinding(m_pso);
-    data.split.program = splitProgram.program;
-    data.split.descriptorIndices = std::move(splitProgram.descriptorIndices);
-    data.split.commandSignature = preparation.CaptureCommandSignature(m_commandSignature);
-    data.split.argumentsReference = preparation.CaptureResource(bindings.indirectArgs);
-    data.outputCounters = {preparation.DeclaredReference(bindings.outputCounter), preparation.DeclaredReference(bindings.outputOverflow)};
-    auto& c = data.split.constants;
-    const auto srv = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
-    const auto uav = [&](org::DeclaredViewToken token) { return preparation.Resolve(token).index; };
+    if (bindings.hasViewDepth) {
+        data.viewDepthTableIndex = bindings.viewDepthLayout.Publish(preparation, m_viewDepthPublisher, m_viewDepthTable.Rows());
+    }
+    return data;
+}
+
+void ReyesSplitPass::Record(const ReyesSplitBindings& bindings, const ReyesSplitFrameData& data,
+    org::PassRecordContext& recording) {
+    br::render::MiscConstants c{};
+    const auto srv = [&](const org::DeclaredViewToken& token) { return recording.Index(token); };
+    const auto uav = [&](const org::DeclaredViewToken& token) { return recording.Index(token); };
     c[CLOD_REYES_SPLIT_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = srv(bindings.visible);
     c[CLOD_REYES_SPLIT_MAX_PASS_COUNT] = bindings.maxPassCount;
     c[CLOD_REYES_SPLIT_INPUT_QUEUE_DESCRIPTOR_INDEX] = srv(bindings.inputQueue);
@@ -197,37 +194,18 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
     c[CLOD_REYES_SPLIT_TELEMETRY_DESCRIPTOR_INDEX] = uav(bindings.telemetry);
     c[CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = bindings.hasShadowClipmap ? srv(bindings.shadowClipmap) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] = bindings.hasShadowDirty ? srv(bindings.shadowDirty) : 0xFFFFFFFFu;
-    c[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = bindings.hasViewDepth
-        ? bindings.viewDepthLayout.Publish(preparation, m_viewDepthPublisher, m_viewDepthTable.Rows())
-        : 0xFFFFFFFFu;
+    c[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = data.viewDepthTableIndex;
     c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_DESCRIPTOR_INDEX] = bindings.hasReplayQueue ? uav(bindings.replayQueue) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX] = bindings.hasReplayCounter ? uav(bindings.replayCounter) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] = bindings.hasReplayOverflow ? uav(bindings.replayOverflow) : 0xFFFFFFFFu;
     c[CLOD_REYES_SPLIT_ENABLE_PATCH_OCCLUSION] = bindings.hasViewDepth && bindings.hasReplayQueue && bindings.hasReplayCounter && bindings.hasReplayOverflow;
     c[CLOD_REYES_SPLIT_PHASE_INDEX] = bindings.phase;
     c[CLOD_REYES_SPLIT_USE_AABB_OCCLUSION] = bindings.useAabbOcclusion ? 1u : 0u;
-    data.clear.constants = data.split.constants;
-    return data;
-}
 
-void ReyesSplitPass::InvocationRevision(const org::PassPrepareContext& preparation, std::vector<uint64_t>& out) const {
-    br::render::AppendFrameHeapRevision(preparation, out);
-    out.push_back(br::render::PipelineRevision(m_clearCountersPso));
-    out.push_back(br::render::PipelineRevision(m_pso));
-    out.push_back(br::render::OwnerRevision(m_commandSignature));
-}
-
-void ReyesSplitPass::Record(const ReyesSplitBindings&, const ReyesSplitFrameData& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data.clear, recording);
+    br::render::DispatchCompute(recording, bindings.clearCountersPipeline, c, 1);
     // Split atomics must observe the preceding counter reset.
-    std::array<rhi::BufferBarrier, 2> counters{};
-    for (size_t index = 0; index < counters.size(); ++index) {
-        counters[index].buffer = recording.Resolve(data.outputCounters[index]).GetHandle();
-        counters[index].beforeAccess = counters[index].afterAccess = rhi::ResourceAccessType::UnorderedAccess;
-        counters[index].beforeSync = counters[index].afterSync = rhi::ResourceSyncState::ComputeShading;
-    }
-    rhi::BarrierBatch barriers{};
-    barriers.buffers = {counters.data(), static_cast<uint32_t>(counters.size())};
-    recording.Commands().Barriers(barriers);
-    br::render::RecordPreparedComputeIndirect(data.split, recording);
+    recording.BufferBarriers({bindings.outputCounter.Resource(), bindings.outputOverflow.Resource()},
+        rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceAccessType::UnorderedAccess);
+    br::render::DispatchComputeIndirect(recording, bindings.pipeline, c, bindings.commandSignature,
+        bindings.indirectArgs);
 }

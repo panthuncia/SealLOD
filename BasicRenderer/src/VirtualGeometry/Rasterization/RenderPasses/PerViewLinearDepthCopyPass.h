@@ -2,22 +2,12 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include <array>
 #include <memory>
 #include <vector>
 
 namespace org { class PixelBuffer; }
-
-struct PerViewLinearDepthCopyPreparedView {
-    std::vector<uint32_t> constants;
-    uint32_t groupsX = 0, groupsY = 0;
-};
-struct PerViewLinearDepthCopyPreparedData {
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    rhi::PipelineLayoutHandle layout{};
-    org::PreparedProgramReference program{};
-    std::vector<PerViewLinearDepthCopyPreparedView> views;
-};
 
 struct PerViewLinearDepthCopyBindingView {
     org::DeclaredViewToken visibility, linearDepth;
@@ -27,13 +17,14 @@ struct PerViewLinearDepthCopyBindingView {
 };
 
 struct PerViewLinearDepthCopyBindings {
+    org::PipelineState pipeline;
     std::vector<PerViewLinearDepthCopyBindingView> views;
     org::DeclaredViewToken projectedDepth, canonicalDeviceDepth;
     bool hasProjectedDepth = false, hasCanonicalDeviceDepth = false;
 };
 
 class PerViewLinearDepthCopyPass : public org::TypedRenderGraphPass<PerViewLinearDepthCopyPass,
-    PerViewLinearDepthCopyPreparedData, PerViewLinearDepthCopyBindings>, public org::IDynamicDeclaredResources {
+    org::EmptyPassFrameData, PerViewLinearDepthCopyBindings>, public org::IDynamicDeclaredResources {
 public:
     explicit PerViewLinearDepthCopyPass(bool writeProjectedDepth = true);
 
@@ -41,14 +32,9 @@ public:
     void Initialize();
     void Update(const org::UpdateExecutionContext&) override;
     bool DeclaredResourcesChanged() const override;
-    PerViewLinearDepthCopyPreparedData Prepare(const PerViewLinearDepthCopyBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const PerViewLinearDepthCopyBindings&,
-        const PerViewLinearDepthCopyPreparedData&, org::PassRecordContext&);
+    static void Record(const PerViewLinearDepthCopyBindings& bindings, org::PassRecordContext& context);
 
 private:
-    using PreparedView = PerViewLinearDepthCopyPreparedView;
-    using PreparedData = PerViewLinearDepthCopyPreparedData;
     org::PipelineState m_pso;
     struct ViewSnapshot {
         std::shared_ptr<org::PixelBuffer> visibility, linearDepth;

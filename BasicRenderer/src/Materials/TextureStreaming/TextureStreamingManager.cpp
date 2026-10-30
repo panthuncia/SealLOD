@@ -155,8 +155,11 @@ namespace {
 		RG_DEFINE_PASS_INPUTS(MaterialTextureStreamingReadbackInputs, &MaterialTextureStreamingReadbackInputs::source);
 	};
 
+	struct MaterialTextureStreamingReadbackBindings {
+		org::ResourceBindingToken source, destination;
+	};
+
 	struct MaterialTextureStreamingReadbackFrameData {
-		org::PreparedResourceReference source{}, destination{};
 		uint64_t bytes = 0;
 	};
 
@@ -180,7 +183,7 @@ namespace {
 
 	class MaterialTextureStreamingReadbackPass final
 		: public org::TypedRenderGraphPass<MaterialTextureStreamingReadbackPass,
-			  MaterialTextureStreamingReadbackFrameData> {
+			  MaterialTextureStreamingReadbackFrameData, MaterialTextureStreamingReadbackBindings> {
 	public:
 		MaterialTextureStreamingReadbackPass(
 			std::shared_ptr<org::Resource> source,
@@ -194,23 +197,24 @@ namespace {
 			  m_cancel(std::move(cancel)) {
 		}
 
-		void Declare(org::PassBuilder& builder) {
-			builder.CopySource(m_source);
-			builder.CopyDestination(m_staging);
+		MaterialTextureStreamingReadbackBindings Declare(org::PassBuilder& builder) {
+			MaterialTextureStreamingReadbackBindings bindings{builder.CopySource(m_source),
+				builder.CopyDestination(m_staging)};
 			builder.PreferQueue(org::QueueKind::Copy);
+			return bindings;
 		}
-		MaterialTextureStreamingReadbackFrameData Prepare(const org::PassPrepareContext& preparation) {
+		MaterialTextureStreamingReadbackFrameData Prepare(const MaterialTextureStreamingReadbackBindings&,
+			const org::PassPrepareContext& preparation) const {
 			if (!m_source || !m_staging || m_bytes == 0) return {};
 			preparation.Reserve(std::make_shared<MaterialReadbackReservation>(
 				m_signal, m_submitted, m_cancel));
-			return {preparation.CaptureResource(m_source->GetGlobalResourceID()),
-				preparation.CaptureResource(m_staging->GetGlobalResourceID()), m_bytes};
+			return {m_bytes};
 		}
-		static void Record(const MaterialTextureStreamingReadbackFrameData& frame,
-			org::PassRecordContext& recording) {
-			if (frame.bytes) recording.Commands().CopyBufferRegion(
-				recording.Resolve(frame.destination).GetHandle(), 0,
-				recording.Resolve(frame.source).GetHandle(), 0, frame.bytes);
+		static void Record(const MaterialTextureStreamingReadbackBindings& bindings,
+			const MaterialTextureStreamingReadbackFrameData& frame, org::PassRecordContext& context) {
+			if (frame.bytes) context.Commands().CopyBufferRegion(
+				context.Resolve(bindings.destination).GetHandle(), 0,
+				context.Resolve(bindings.source).GetHandle(), 0, frame.bytes);
 		}
 	private:
 		std::shared_ptr<org::Resource> m_source;

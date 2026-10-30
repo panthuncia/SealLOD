@@ -1,19 +1,14 @@
 #pragma once
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BuiltinResources.h"
 
 struct PresentationCopyBindings {
 	org::ResourceBindingToken source{}, destination{};
 };
 
-struct PresentationCopyFrameData {
-	org::PreparedResourceReference source{}, destination{};
-};
-
 class PresentationCopyPass : public org::TypedRenderGraphPass<
-	PresentationCopyPass, PresentationCopyFrameData, PresentationCopyBindings> {
+	PresentationCopyPass, org::EmptyPassFrameData, PresentationCopyBindings> {
 public:
 	PresentationCopyBindings Declare(org::PassBuilder& builder) {
 		return {
@@ -21,18 +16,11 @@ public:
 			builder.CopyDestination(org::ResourceIdentifier{Builtin::Backbuffer})};
 	}
 
-	PresentationCopyFrameData Prepare(const PresentationCopyBindings& bindings,
-		const org::PassPrepareContext& preparation) const {
-		return {preparation.CaptureResource(bindings.source),
-			preparation.CaptureResource(bindings.destination)};
-	}
-
-	static void Record(const PresentationCopyBindings&,
-		const PresentationCopyFrameData& data, org::PassRecordContext& recording) {
+	static void Record(const PresentationCopyBindings& bindings, org::PassRecordContext& recording) {
 		rhi::TextureCopyRegion source{};
-		source.texture = recording.Resolve(data.source).GetHandle();
+		source.texture = recording.Resolve(bindings.source).GetHandle();
 		rhi::TextureCopyRegion destination{};
-		destination.texture = recording.Resolve(data.destination).GetHandle();
+		destination.texture = recording.Resolve(bindings.destination).GetHandle();
 		recording.Commands().CopyTextureRegion(destination, source);
 	}
 };

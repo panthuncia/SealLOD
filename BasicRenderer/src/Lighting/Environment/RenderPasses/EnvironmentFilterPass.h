@@ -3,8 +3,7 @@
 #include <filesystem>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedEnvironmentDispatch.h"
-#include "Render/PreparedPass.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -22,11 +21,15 @@ struct EnvironmentFilterBindings {
         std::vector<org::DeclaredViewToken> destinationFaces;
         uint32_t baseResolution = 0, mipCount = 0;
     };
+    org::PipelineState pipeline;
     std::vector<Job> jobs;
+};
+struct EnvironmentFilterFrame {
+    bool active = false;
 };
 
 class EnvironmentFilterPass : public org::TypedRenderGraphPass<EnvironmentFilterPass,
-    br::render::PreparedEnvironmentDispatch, EnvironmentFilterBindings>, public org::IDynamicDeclaredResources {
+    EnvironmentFilterFrame, EnvironmentFilterBindings>, public org::IDynamicDeclaredResources {
 public:
     EnvironmentFilterPass() {
         CreatePrefilterPSO();
@@ -34,6 +37,7 @@ public:
 
     EnvironmentFilterBindings Declare(org::PassBuilder& builder) {
         EnvironmentFilterBindings bindings;
+        bindings.pipeline = m_pso;
         for (const auto& j : m_pending) {
             if (!j->work.srcCubemap || !j->work.dstPrefilteredCubemap) continue;
             EnvironmentFilterBindings::Job job{};
@@ -62,34 +66,33 @@ public:
         if (pending != m_pending) { m_pending = std::move(pending); m_declaredResourcesChanged = true; }
     }
 
-    br::render::PreparedEnvironmentDispatch Prepare(const EnvironmentFilterBindings& bindings,
-        const org::PassPrepareContext& preparation) const {
-        br::render::PreparedEnvironmentDispatch data;
-        if (m_pending.empty()) return data;
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.program = preparation.CaptureProgram(m_pso);
-        data.constantCount = 5;
+    EnvironmentFilterFrame Prepare(const EnvironmentFilterBindings&,
+        const org::PassPrepareContext& preparation) {
+        if (m_pending.empty()) return {};
+        m_work.Reserve(m_pending, preparation);
+        m_pending.clear(); m_declaredResourcesChanged = true;
+        return {true};
+    }
+
+    static void Record(const EnvironmentFilterBindings& bindings, const EnvironmentFilterFrame& frame,
+        org::PassRecordContext& context) {
+        if (!frame.active) return;
+        bool bound = false;
         for (const auto& job : bindings.jobs) {
-            const auto src = preparation.Resolve(job.source).index;
+            const auto src = context.Index(job.source);
             const auto mipCount = job.mipCount;
             for (uint32_t mip = 0; mip < mipCount; ++mip) {
                 const auto size = std::max(1u, job.baseResolution >> mip);
                 const auto roughness = as_uint(mipCount > 1 ? float(mip) / float(mipCount - 1) : 0.0f);
-                for (uint32_t face = 0; face < 6; ++face)
-                    data.faces.push_back({{src, preparation.Resolve(job.destinationFaces[mip * 6 + face]).index,
-                        face, size, roughness}, (size + 7) / 8});
+                for (uint32_t face = 0; face < 6; ++face) {
+                    if (!bound) { context.BindComputePipeline(bindings.pipeline); bound = true; }
+                    const std::array<uint32_t, 5> constants{src, context.Index(job.destinationFaces[mip * 6 + face]),
+                        face, size, roughness};
+                    context.PushConstants(0, constants);
+                    context.Commands().Dispatch((size + 7) / 8, (size + 7) / 8, 1);
+                }
             }
         }
-        m_work.Reserve(m_pending, preparation);
-        m_pending.clear(); m_declaredResourcesChanged = true;
-        return data;
-    }
-
-    static void Record(const EnvironmentFilterBindings&, const br::render::PreparedEnvironmentDispatch& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordEnvironmentDispatch(data, recording);
     }
 
     bool DeclaredResourcesChanged() const override {
@@ -99,9 +102,9 @@ public:
 
 
 private:
-    mutable br::render::EnvironmentPrefilterWorkQueue m_work;
-    mutable br::render::EnvironmentPrefilterWorkQueue::Snapshot m_pending;
-    mutable bool m_declaredResourcesChanged = true;
+    br::render::EnvironmentPrefilterWorkQueue m_work;
+    br::render::EnvironmentPrefilterWorkQueue::Snapshot m_pending;
+    bool m_declaredResourcesChanged = true;
 
     org::PipelineState m_pso;
 

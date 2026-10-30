@@ -9,7 +9,7 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -40,10 +40,13 @@ struct DownsampleMapBindings {
     std::array<unsigned int, 3> dispatch{};
 };
 
-struct DownsampleBindings { std::vector<DownsampleMapBindings> maps; };
+struct DownsampleBindings {
+    org::PipelineState standardPipeline, arrayPipeline;
+    std::vector<DownsampleMapBindings> maps;
+};
 
 class DownsamplePass : public org::TypedRenderGraphPass<DownsamplePass,
-    br::render::PreparedComputePipelineSequence, DownsampleBindings>, public org::IDynamicDeclaredResources {
+    org::EmptyPassFrameData, DownsampleBindings>, public org::IDynamicDeclaredResources {
 public:
 
     DownsamplePass()
@@ -57,6 +60,8 @@ public:
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         SyncMapInfos(m_activeDepthMaps);
         DownsampleBindings bindings;
+        bindings.standardPipeline = downsamplePassPSO;
+        bindings.arrayPipeline = downsampleArrayPSO;
         bindings.maps.reserve(m_perMapInfo.size());
         for (auto& [resourceID, map] : m_perMapInfo) {
             (void)resourceID;
@@ -117,38 +122,27 @@ public:
         return m_declaredResourcesChanged;
     }
 
-    br::render::PreparedComputePipelineSequence Prepare(const DownsampleBindings& bindings,
+    // Publishes each map's SPD constants, which carry the bindless indices of its mip UAVs.
+    org::EmptyPassFrameData Prepare(const DownsampleBindings& bindings,
         const org::PassPrepareContext& preparation) const {
-        const auto& context = *preparation.preparationData->Get<UpdateContext>();
-        br::render::PreparedComputePipelineSequence data{};
-        data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-        const auto standard = preparation.CaptureProgramBinding(downsamplePassPSO);
-        const auto array = preparation.CaptureProgramBinding(downsampleArrayPSO);
-        data.steps.reserve(bindings.maps.size());
         for (const auto& map : bindings.maps) {
             std::vector<uint32_t> mipIndices;
             for (const auto& token : map.mipUavs) mipIndices.push_back(preparation.Resolve(token).index);
             map.uploadConstants(mipIndices);
-            const auto& program = map.isArrayLike ? array : standard;
-            br::render::PreparedComputePipelineSequence::Step item{};
-            item.program = program.program;
-            item.descriptorIndices = program.descriptorIndices;
-            item.constants[UintRootConstant0] = preparation.Resolve(map.counter).index;
-            item.constants[UintRootConstant1] = preparation.Resolve(map.source).index;
-            item.constants[UintRootConstant2] = preparation.Resolve(map.constants).index;
-            item.constants[UintRootConstant3] = map.constantsIndex;
-            item.groupsX = map.dispatch[0];
-            item.groupsY = map.dispatch[1];
-            item.groupsZ = map.dispatch[2];
-            data.steps.push_back(std::move(item));
         }
-        return data;
+        return {};
     }
 
-    static void Record(const DownsampleBindings&,
-        const br::render::PreparedComputePipelineSequence& data, org::PassRecordContext& recording) {
-        br::render::RecordPreparedComputePipelineSequence(data, recording);
+    static void Record(const DownsampleBindings& bindings, org::PassRecordContext& context) {
+        for (const auto& map : bindings.maps) {
+            br::render::MiscConstants constants{};
+            constants[UintRootConstant0] = context.Index(map.counter);
+            constants[UintRootConstant1] = context.Index(map.source);
+            constants[UintRootConstant2] = context.Index(map.constants);
+            constants[UintRootConstant3] = map.constantsIndex;
+            br::render::DispatchCompute(context, map.isArrayLike ? bindings.arrayPipeline : bindings.standardPipeline,
+                constants, map.dispatch[0], map.dispatch[1], map.dispatch[2]);
+        }
     }
 
 private:

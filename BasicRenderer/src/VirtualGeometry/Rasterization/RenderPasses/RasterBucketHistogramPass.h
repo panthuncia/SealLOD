@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <vector>
 
 #include <rhi.h>
 
@@ -9,34 +8,26 @@
 
 namespace org { class Buffer; }
 
-struct RasterBucketHistogramPreparedData {
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    rhi::PipelineLayoutHandle layout{};
-    org::PreparedProgramReference clearProgram{}, histogramProgram{};
-    rhi::CommandSignatureHandle commandSignature{};
-    org::PreparedResourceReference indirectArguments{}, histogramResource{};
-    std::vector<unsigned int> clearDescriptorIndices, histogramDescriptorIndices;
-    std::vector<uint32_t> clearConstants, histogramConstants;
-    uint32_t clearGroups = 0;
-    bool enabled = false;
-};
-
 struct RasterBucketHistogramBindings {
+    org::PipelineState clearPipeline, histogramPipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visibleClusters, visibleCount;
     org::ResourceBindingToken indirectArguments;
     org::DeclaredViewToken histogram, reyesOwnership, telemetry, readBaseCounter;
-    uint32_t numBuckets = 0;
     uint32_t visibleCapacity = 0;
-    bool enabled = false;
-    bool telemetryEnabled = false;
     bool readReverse = false;
     bool hasReyesOwnership = false;
     bool hasTelemetry = false;
     bool hasReadBaseCounter = false;
 };
+struct RasterBucketHistogramFrame {
+    uint32_t numBuckets = 0;
+    bool enabled = false;
+    bool telemetryEnabled = false;
+};
 
 class RasterBucketHistogramPass : public org::TypedRenderGraphPass<RasterBucketHistogramPass,
-    RasterBucketHistogramPreparedData, RasterBucketHistogramBindings> {
+    RasterBucketHistogramFrame, RasterBucketHistogramBindings> {
 public:
     RasterBucketHistogramPass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -52,14 +43,13 @@ public:
     ~RasterBucketHistogramPass();
 
     RasterBucketHistogramBindings Declare(org::PassBuilder& builder);
-    RasterBucketHistogramPreparedData Prepare(const RasterBucketHistogramBindings&,
+    RasterBucketHistogramFrame Prepare(const RasterBucketHistogramBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const RasterBucketHistogramBindings&,
-        const RasterBucketHistogramPreparedData&, org::PassRecordContext&);
+        const RasterBucketHistogramFrame&, org::PassRecordContext&);
     void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
-    using PreparedData = RasterBucketHistogramPreparedData;
     void CreatePipelines(
         rhi::Device device,
         rhi::PipelineLayoutHandle globalRootSignature,
@@ -79,6 +69,5 @@ private:
     bool m_readReverse = false;
     uint32_t m_visibleClustersCapacity = 0u;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
-    uint32_t m_numBuckets = 0u;
     bool m_enabled = false;
 };

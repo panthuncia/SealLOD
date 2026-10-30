@@ -3,18 +3,21 @@
 #include <memory>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct RasterBucketBlockScanBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken histogram, offsets, blockSums;
+};
+struct RasterBucketBlockScanFrame {
     uint32_t numBuckets = 0;
-    bool enabled = false;
+    uint32_t groups = 0;
 };
 
 class RasterBucketBlockScanPass : public org::TypedRenderGraphPass<RasterBucketBlockScanPass,
-    br::render::PreparedComputeDispatch, RasterBucketBlockScanBindings> {
+    RasterBucketBlockScanFrame, RasterBucketBlockScanBindings> {
 public:
     RasterBucketBlockScanPass(
         std::shared_ptr<org::Buffer> histogramBuffer,
@@ -23,11 +26,10 @@ public:
         bool runWhenComputeSWRasterEnabledOnly = false);
 
     RasterBucketBlockScanBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputeDispatch Prepare(const RasterBucketBlockScanBindings&,
+    RasterBucketBlockScanFrame Prepare(const RasterBucketBlockScanBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const RasterBucketBlockScanBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& context) {
-        br::render::RecordPreparedComputeDispatch(data, context);
-    }
+    static void Record(const RasterBucketBlockScanBindings& bindings, const RasterBucketBlockScanFrame& frame,
+        org::PassRecordContext& context);
     void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
@@ -37,6 +39,5 @@ private:
     std::shared_ptr<org::Buffer> m_offsetsBuffer;
     std::shared_ptr<org::Buffer> m_blockSumsBuffer;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
-    uint32_t m_numBuckets = 0;
     bool m_enabled = false;
 };

@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include <algorithm>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -168,24 +169,32 @@ br::render::CullingUploader ComputeCullingPass::Uploader() const
     };
 }
 
-void ComputeCullingPass::DeclareVirtualShadow(org::PassBuilder& builder) const
+ComputeCullingShadowViews ComputeCullingPass::DeclareVirtualShadow(org::PassBuilder& builder) const
 {
     const auto& shadow = m_resources.virtualShadow;
     builder.ShaderResource(
         Builtin::Shadows::CLodClipmapInfo,
         Builtin::Shadows::CLodDirectionalPageViewInfo,
         Builtin::Shadows::CLodCompactShadowCameras);
-    if (shadow.dirtyPageHierarchy) builder.ShaderResource(shadow.dirtyPageHierarchy);
-    if (shadow.invalidatedInstancesBitset) builder.ShaderResource(shadow.invalidatedInstancesBitset);
-    if (shadow.invalidationCount) builder.ShaderResource(shadow.invalidationCount);
-    if (shadow.predictiveInvalidationCandidates) builder.UnorderedAccess(shadow.predictiveInvalidationCandidates);
-    if (shadow.predictiveInvalidationCandidateCount) builder.UnorderedAccess(shadow.predictiveInvalidationCandidateCount);
-    if (shadow.pageTable) builder.UnorderedAccess(shadow.pageTable);
-    if (shadow.staticPhysicalPages) builder.UnorderedAccess(shadow.staticPhysicalPages);
-    if (shadow.dynamicPhysicalPages) builder.UnorderedAccess(shadow.dynamicPhysicalPages);
-    if (shadow.activeBlockMetadata) builder.ShaderResource(shadow.activeBlockMetadata);
-    if (shadow.receiverSubpageMask) builder.ShaderResource(shadow.receiverSubpageMask);
-    if (shadow.dynamicActiveBlockMetadata) builder.ShaderResource(shadow.dynamicActiveBlockMetadata);
+    ComputeCullingShadowViews views;
+    const auto srv = [&](const auto& resource, org::DeclaredViewToken& token) {
+        if (resource) token = builder.ShaderResource(resource).View();
+    };
+    const auto uav = [&](const auto& resource, org::DeclaredViewToken& token) {
+        if (resource) token = builder.UnorderedAccess(resource).View();
+    };
+    srv(shadow.dirtyPageHierarchy, views.dirtyPageHierarchy);
+    srv(shadow.invalidatedInstancesBitset, views.invalidatedInstancesBitset);
+    srv(shadow.invalidationCount, views.invalidationCount);
+    uav(shadow.predictiveInvalidationCandidates, views.predictiveInvalidationCandidates);
+    uav(shadow.predictiveInvalidationCandidateCount, views.predictiveInvalidationCandidateCount);
+    uav(shadow.pageTable, views.pageTable);
+    uav(shadow.staticPhysicalPages, views.staticPhysicalPages);
+    uav(shadow.dynamicPhysicalPages, views.dynamicPhysicalPages);
+    srv(shadow.activeBlockMetadata, views.activeBlockMetadata);
+    srv(shadow.receiverSubpageMask, views.receiverSubpageMask);
+    srv(shadow.dynamicActiveBlockMetadata, views.dynamicActiveBlockMetadata);
+    return views;
 }
 
 ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
@@ -205,17 +214,33 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     const auto& f = m_frontiers;
 
     ComputeCullingBindings bindings{};
+    bindings.programs = m_programs;
+    bindings.maxVisibleClusters = m_config.maxVisibleClusters;
+    bindings.isFirstPass = m_config.isFirstPass;
+    bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();
+    const auto uav = [&](const auto& resource) { return builder.UnorderedAccess(resource).View(); };
+    bindings.visibleClusters = uav(outputs.visibleClusters);
+    bindings.visibleClusterTransformIndices = uav(outputs.visibleClusterTransformIndices);
+    bindings.visibleClustersCounter = uav(outputs.visibleClustersCounter);
+    bindings.rasterBucketHistogramCommand = uav(outputs.rasterBucketHistogramCommand);
+    bindings.telemetry = uav(m_resources.telemetry);
+    bindings.replay = uav(replay.replay);
+    bindings.replayState = uav(replay.state);
+    auto& fv = bindings.frontiers;
+    fv.currentNodes = uav(f.currentNodes);
+    fv.nextNodes = uav(f.nextNodes);
+    fv.currentLeaves = uav(f.currentLeaves);
+    fv.nextLeaves = uav(f.nextLeaves);
+    fv.clusters = uav(f.clusters);
+    fv.currentNodeCounter = uav(f.currentNodeCounter);
+    fv.nextNodeCounter = uav(f.nextNodeCounter);
+    fv.currentLeafCounter = uav(f.currentLeafCounter);
+    fv.nextLeafCounter = uav(f.nextLeafCounter);
+    fv.clusterCounter = uav(f.clusterCounter);
+    fv.nodeDispatchArgs = uav(f.nodeDispatchArgs);
+    fv.leafDispatchArgs = uav(f.leafDispatchArgs);
+    fv.clusterDispatchArgs = uav(f.clusterDispatchArgs);
     builder.UnorderedAccess(
-        outputs.visibleClusters,
-        outputs.visibleClusterTransformIndices,
-        outputs.visibleClustersCounter,
-        outputs.rasterBucketHistogramCommand,
-        m_resources.telemetry,
-        replay.replay,
-        replay.state,
-        f.currentNodes, f.nextNodes, f.currentLeaves, f.nextLeaves, f.clusters,
-        f.currentNodeCounter, f.nextNodeCounter, f.currentLeafCounter, f.nextLeafCounter, f.clusterCounter,
-        f.nodeDispatchArgs, f.leafDispatchArgs, f.clusterDispatchArgs,
         Builtin::CLod::StreamingLoadRequestKeys,
         Builtin::CLod::StreamingLoadRequests,
         Builtin::CLod::StreamingLoadCounter,
@@ -285,21 +310,19 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     }
 
     if (m_config.UsesSWClassification() && outputs.swVisibleClustersCounter) {
-        builder.UnorderedAccess(outputs.swVisibleClustersCounter);
+        bindings.swVisibleClustersCounter = uav(outputs.swVisibleClustersCounter);
     }
     if (m_resources.pagePoolSlabs) {
         builder.ShaderResource(ResourceGroupResolver(m_resources.pagePoolSlabs));
     }
     if (m_windCache.bounds) {
-        builder.UnorderedAccess(m_windCache.bounds);
+        bindings.windBounds = uav(m_windCache.bounds);
         // This read both enforces SimulateInstancesPhase2 -> shadow traversal
         // ordering and limits caching to placements accepted by DynamicWind.
-        m_windCache.visibleMembership = m_resourceRegistryView
-            ->RequestPtr<org::GloballyIndexedResource>("Builtin::DynamicWind::VisibleSkeletonMembership");
-        builder.ShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
+        bindings.windMembership = builder.ShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership").View();
     }
     if (m_config.UsesVirtualShadowOutput()) {
-        DeclareVirtualShadow(builder);
+        bindings.shadow = DeclareVirtualShadow(builder);
     }
     if (m_config.UsesPerViewDepthOcclusion()) {
         m_viewDepthLayout.Declare(builder);
@@ -309,16 +332,18 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     bindings.viewRasterInfoLayout = m_viewRasterInfoLayout.Layout();
     if (!m_config.isFirstPass) {
         if (m_resources.phase1Counters.visibleClustersCounter)
-            builder.ShaderResource(m_resources.phase1Counters.visibleClustersCounter);
+            bindings.phase1VisibleClustersCounter =
+                builder.ShaderResource(m_resources.phase1Counters.visibleClustersCounter).View();
         if (m_resources.phase1Counters.swVisibleClustersCounter)
-            builder.ShaderResource(m_resources.phase1Counters.swVisibleClustersCounter);
+            bindings.phase1SwVisibleClustersCounter =
+                builder.ShaderResource(m_resources.phase1Counters.swVisibleClustersCounter).View();
     }
 
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return bindings;
 }
 
-ComputeCullingRecipe ComputeCullingPass::BuildRecipe(
+ComputeCullingFrame ComputeCullingPass::Prepare(
     const ComputeCullingBindings& declared, const org::PassPrepareContext& preparation) const
 {
     auto* renderContext = preparation.preparationData
@@ -338,86 +363,38 @@ ComputeCullingRecipe ComputeCullingPass::BuildRecipe(
     }
 
     auto& settings = SettingsManager::GetInstance();
-    ComputeCullingCommandInputs inputs{
-        .config = m_config,
-        .resources = m_resources,
-        .programs = m_programs,
-        .frontiers = m_frontiers,
-        .windCache = m_windCache,
-        .settings = br::render::ReadCullingSettings(m_config, m_resources.virtualShadow.receiverSubpageMask != nullptr),
-        .traversalDepth = m_traversalDepth,
-        .expansionFactor = CLodNormalizePureComputePhase2ExpansionFactor(settings.getSettingGetter<uint32_t>(
-            m_config.isFirstPass ? CLodPureComputePhase2ExpansionFactorSettingName
-                                 : CLodPureComputeReplayExpansionFactorSettingName)()),
-        .rasterBucketCount = renderContext->preparedRasterBucketCount,
-    };
-    inputs.viewRasterInfoTable =
+    ComputeCullingFrame frame;
+    frame.active = true;
+    frame.settings = br::render::ReadCullingSettings(m_config, m_resources.virtualShadow.receiverSubpageMask != nullptr);
+    frame.cullingFlags = br::render::BuildCullingFlags(m_config, frame.settings);
+    frame.traversalDepth = m_traversalDepth;
+    frame.expansionFactor = CLodNormalizePureComputePhase2ExpansionFactor(settings.getSettingGetter<uint32_t>(
+        m_config.isFirstPass ? CLodPureComputePhase2ExpansionFactorSettingName
+                             : CLodPureComputeReplayExpansionFactorSettingName)());
+    frame.rasterBucketCount = renderContext->preparedRasterBucketCount;
+    frame.viewRasterInfoTable =
         declared.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoTable, m_viewRasterInfoLayout.Rows());
     if (m_config.UsesPerViewDepthOcclusion())
-        inputs.viewDepthTable =
+        frame.viewDepthTable =
             declared.viewDepthLayout.Publish(preparation, m_viewDepthTable, m_viewDepthLayout.Rows());
-    return EmitComputeCullingCommands(inputs, preparation);
-}
-
-std::vector<uint64_t> ComputeCullingPass::RecipeRevision(const org::PassPrepareContext& preparation) const
-{
-    const auto* context = preparation.preparationData ? preparation.preparationData->Get<RenderContext>() : nullptr;
-    std::vector<uint64_t> revision{SettingsManager::GetInstance().Revision(), m_traversalDepth,
-        m_config.maxVisibleClusters, m_resources.voxelQueues.capacity,
-        context ? context->preparedRasterBucketCount : 0u,
-        reinterpret_cast<uintptr_t>(m_programs.dispatchSignature.get())};
-    const auto layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    revision.push_back((uint64_t{layout.generation} << 32) | layout.index);
-    for (const auto* program : m_programs.All())
-        revision.push_back(reinterpret_cast<uintptr_t>(program->PeekPayload()));
-    if (preparation.preparationData && preparation.preparationData->Get<UpdateContext>()) {
-        m_viewRasterInfoLayout.AppendRowRevision(revision);
+    frame.windEntryCount = m_windCache.entryCount;
+    frame.windGeneration = m_windCache.generation;
+    if (m_windCache.bounds && m_windCache.generation == 1u) {
+        spdlog::info("CLod DynamicWind bounds cache bindings: entries={} cacheDescriptor={} membershipDescriptor={}",
+            m_windCache.entryCount,
+            preparation.Resolve(declared.windBounds).index,
+            preparation.Resolve(declared.windMembership).index);
     }
-    return revision;
-}
-
-ComputeCullingInvocation ComputeCullingPass::PrepareInvocation(
-    const ComputeCullingRecipe& recipe, const ComputeCullingBindings&,
-    const org::PassPrepareContext& preparation) const
-{
-    const auto* context = preparation.preparationData ? preparation.preparationData->Get<RenderContext>() : nullptr;
-    ComputeCullingInvocation invocation;
-    invocation.publication = context ? context->publishedRendererState : nullptr;
-    invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] = m_windCache.generation;
-    invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] = m_windCache.entryCount;
-    if (recipe.hasObjectCull) {
-        const auto views = context ? std::span<const PreparedViewFrameData>{context->Views()}
-                                   : std::span<const PreparedViewFrameData>{};
-        invocation.workloads = br::render::PrepareCullingWorkloads(views, invocation.publication,
+    frame.publication = renderContext->publishedRendererState;
+    if (m_config.isFirstPass) {
+        const auto views = std::span<const PreparedViewFrameData>{renderContext->Views()};
+        frame.workloads = br::render::PrepareCullingWorkloads(views, frame.publication,
             m_config.renderPhase, m_config.clodOnlyWorkloads, m_config.useShadowCascadeViews,
             m_config.rasterOutputKind, kComputeCullingObjectThreadsPerGroup, "ComputeCullingPass");
         basic_telemetry::SetGauge("SARP.Culling.GraphWorkloadRecords.Dispatch",
-            static_cast<std::int64_t>(invocation.workloads.size()));
+            static_cast<std::int64_t>(frame.workloads.size()));
     }
-    return invocation;
-}
-
-void ComputeCullingPass::Record(const ComputeCullingRecipe& recipe,
-    const ComputeCullingInvocation& invocation, org::PassRecordContext& recording)
-{
-    br::render::RecordPreparedComputeCommands(recipe.prefix, recording, nullptr, {}, invocation.constants);
-    auto constants = recipe.objectCullConstants;
-    constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] =
-        invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION];
-    constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] =
-        invocation.constants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT];
-    for (const auto& workload : invocation.workloads) {
-        constants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_COUNT] = workload.activeDrawCount;
-        constants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] = workload.viewDataIndex;
-        constants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] = workload.activeDrawSetIndicesSRVIndex;
-        constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] = workload.drawRecordVisibilityGenerationSRVIndex;
-        constants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_COUNT] = workload.drawRecordVisibilityGenerationCount;
-        constants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] = workload.shadowCasterClass;
-        recording.Commands().PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
-            NumMiscUintRootConstants, constants.data());
-        recording.Commands().Dispatch(workload.dispatchGridX, workload.dispatchGridY, workload.dispatchGridZ);
-    }
-    br::render::RecordPreparedComputeCommands(recipe.suffix, recording, nullptr, {}, invocation.constants);
+    return frame;
 }
 
 void ComputeCullingPass::UpdateTraversalDepth(const UpdateContext& context)

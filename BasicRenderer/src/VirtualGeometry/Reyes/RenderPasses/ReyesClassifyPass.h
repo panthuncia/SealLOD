@@ -6,7 +6,7 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
@@ -17,6 +17,8 @@ enum class ReyesClassifyMode : uint32_t
 };
 
 struct ReyesClassifyBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visible, visibleCounter, readBaseCounter, fullClusters, fullCounter;
     org::DeclaredViewToken ownedClusters, ownedCounter, ownershipBitset, telemetry;
     org::ResourceBindingToken indirectArgs;
@@ -25,7 +27,7 @@ struct ReyesClassifyBindings {
 };
 
 class ReyesClassifyPass final : public org::TypedRenderGraphPass<ReyesClassifyPass,
-    br::render::PreparedComputeIndirect, ReyesClassifyBindings> {
+    org::EmptyPassFrameData, ReyesClassifyBindings> {
 public:
     ReyesClassifyPass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -44,10 +46,7 @@ public:
         ReyesClassifyMode classifyMode = ReyesClassifyMode::Default);
 
     ReyesClassifyBindings Declare(org::PassBuilder& builder);
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
-    br::render::PreparedComputeIndirect Prepare(const ReyesClassifyBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesClassifyBindings&, const br::render::PreparedComputeIndirect&, org::PassRecordContext&);
+    static void Record(const ReyesClassifyBindings& bindings, org::PassRecordContext& recording);
 
 private:
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;

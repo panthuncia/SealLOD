@@ -9,23 +9,28 @@
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesVirtualShadowRasterBindings {
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
     org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken telemetry, viewInfo;
     org::DeclaredViewToken pageTable, physicalPages, dynamicPages, clipmapInfo;
-    uint32_t phase = 0, pageTableResolution = 0, virtualResolution = 0;
+    uint32_t phase = 0;
+};
+struct ReyesVirtualShadowRasterFrame {
+    uint32_t pageTableResolution = 0, virtualResolution = 0;
 };
 
 class ReyesVirtualShadowRasterizationPass final : public org::TypedRenderGraphPass<ReyesVirtualShadowRasterizationPass,
-    br::render::PreparedComputeIndirect, ReyesVirtualShadowRasterBindings>, public org::IDynamicDeclaredResources {
+    ReyesVirtualShadowRasterFrame, ReyesVirtualShadowRasterBindings>, public org::IDynamicDeclaredResources {
 public:
     ReyesVirtualShadowRasterizationPass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -50,9 +55,10 @@ public:
     ReyesVirtualShadowRasterBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
-    br::render::PreparedComputeIndirect Prepare(const ReyesVirtualShadowRasterBindings&,
+    ReyesVirtualShadowRasterFrame Prepare(const ReyesVirtualShadowRasterBindings&,
         const org::PassPrepareContext& preparation) const;
-    static void Record(const ReyesVirtualShadowRasterBindings&, const br::render::PreparedComputeIndirect& data, org::PassRecordContext& recording);
+    static void Record(const ReyesVirtualShadowRasterBindings& bindings, const ReyesVirtualShadowRasterFrame& frame,
+        org::PassRecordContext& recording);
 
 private:
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;

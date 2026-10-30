@@ -8,7 +8,6 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
 #include "../shaders/PerPassRootConstants/clodPrefixOffsetsRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 RasterBucketBlockOffsetsPass::RasterBucketBlockOffsetsPass(
     std::shared_ptr<org::Buffer> offsetsBuffer,
@@ -31,32 +30,29 @@ RasterBucketBlockOffsetsPass::RasterBucketBlockOffsetsPass(
 
 RasterBucketBlockOffsetsBindings RasterBucketBlockOffsetsPass::Declare(org::PassBuilder& builder) {
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.UnorderedAccess(m_offsetsBuffer), builder.ShaderResource(m_blockSumsBuffer),
-        builder.UnorderedAccess(m_scannedBlockSumsBuffer), builder.UnorderedAccess(m_totalCountBuffer),
-        m_numBuckets, m_enabled};
+    return {m_pso, builder.UnorderedAccess(m_offsetsBuffer), builder.ShaderResource(m_blockSumsBuffer),
+        builder.UnorderedAccess(m_scannedBlockSumsBuffer), builder.UnorderedAccess(m_totalCountBuffer)};
 }
 
-
-br::render::PreparedComputeDispatch RasterBucketBlockOffsetsPass::Prepare(
-    const RasterBucketBlockOffsetsBindings& bindings, const org::PassPrepareContext& preparation) const {
+RasterBucketBlockOffsetsFrame RasterBucketBlockOffsetsPass::Prepare(
+    const RasterBucketBlockOffsetsBindings&, const org::PassPrepareContext& preparation) const {
     const auto* context = preparation.preparationData->Get<UpdateContext>();
     const uint32_t numBuckets = context->preparedRasterBucketCount;
     const bool enabled = numBuckets != 0u && (!m_runWhenComputeSWRasterEnabledOnly ||
         CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)()));
-    br::render::PreparedComputeDispatch data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    data.program = preparation.CaptureProgram(m_pso);
-    data.descriptorIndices = CaptureResourceDescriptorIndices(m_pso.GetResourceDescriptorSlots());
-    data.constants[CLOD_PREFIX_OFFSETS_NUM_BUCKETS] = numBuckets;
-    data.constants[CLOD_PREFIX_OFFSETS_NUM_BLOCKS] = (numBuckets + m_blockSize - 1u) / m_blockSize;
-    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.offsets).index;
-    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_BLOCK_SUMS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.blockSums).index;
-    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_SCANNED_BLOCK_SUMS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.scannedBlockSums).index;
-    data.constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_TOTAL_COUNT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.totalCount).index;
-    data.groupsX = enabled ? 1u : 0u;
-    return data;
+    return {numBuckets, (numBuckets + m_blockSize - 1u) / m_blockSize, enabled ? 1u : 0u};
+}
+
+void RasterBucketBlockOffsetsPass::Record(const RasterBucketBlockOffsetsBindings& bindings,
+    const RasterBucketBlockOffsetsFrame& frame, org::PassRecordContext& context) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_PREFIX_OFFSETS_NUM_BUCKETS] = frame.numBuckets;
+    constants[CLOD_PREFIX_OFFSETS_NUM_BLOCKS] = frame.numBlocks;
+    constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX] = context.Index(bindings.offsets);
+    constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_BLOCK_SUMS_DESCRIPTOR_INDEX] = context.Index(bindings.blockSums);
+    constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_SCANNED_BLOCK_SUMS_DESCRIPTOR_INDEX] = context.Index(bindings.scannedBlockSums);
+    constants[CLOD_PREFIX_OFFSETS_RASTER_BUCKETS_TOTAL_COUNT_DESCRIPTOR_INDEX] = context.Index(bindings.totalCount);
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groups);
 }
 
 void RasterBucketBlockOffsetsPass::Update(const org::UpdateExecutionContext& executionContext) {
@@ -68,8 +64,8 @@ void RasterBucketBlockOffsetsPass::Update(const org::UpdateExecutionContext& exe
 
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
-    m_numBuckets = context.preparedRasterBucketCount;
-    const uint32_t numBlocks = (m_numBuckets + m_blockSize - 1) / m_blockSize;
+    const uint32_t numBuckets = context.preparedRasterBucketCount;
+    const uint32_t numBlocks = (numBuckets + m_blockSize - 1) / m_blockSize;
 
     if (m_scannedBlockSumsBuffer->GetSize() < static_cast<size_t>(numBlocks) * sizeof(uint32_t)) {
         m_scannedBlockSumsBuffer->ResizeStructured(numBlocks);

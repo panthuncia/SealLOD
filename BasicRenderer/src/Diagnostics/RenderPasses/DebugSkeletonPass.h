@@ -24,7 +24,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include <BasicRenderer/Extensions/Resources/DynamicStructuredBuffer.h>
 #include "BasicRenderer/Scene/Scene.h"
-#include "BasicRenderer/Extensions/ShaderBuffers.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 struct SkeletonDebugLine {
     DirectX::XMFLOAT4 startWorld;
@@ -34,17 +34,12 @@ struct SkeletonDebugLine {
 
 struct DebugSkeletonFrameData {
     struct DrawRange { uint32_t lineOffset = 0, lineCount = 0; };
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    org::PreparedDescriptorReference target{};
     DirectX::XMUINT2 outputResolution{};
-    rhi::PipelineLayoutHandle layout{};
-    org::PreparedProgramBinding program{};
-    org::PreparedResourceReference lineResource{};
-    std::array<uint32_t, 3> constants{};
     std::vector<DrawRange> ranges;
 };
 
 struct DebugSkeletonBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken lines, perFrame, camera, target;
 };
 
@@ -61,7 +56,7 @@ public:
     DebugSkeletonBindings Declare(org::PassBuilder& declaration)
     {
         auto* builder = &declaration;
-        return {builder->ShaderResource(m_lineBuffer),
+        return {m_pso, builder->ShaderResource(m_lineBuffer),
             builder->ConstantBuffer(Builtin::PerFrameBuffer),
             builder->ShaderResource(Builtin::CameraBuffer),
             builder->RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
@@ -75,38 +70,27 @@ public:
         m_lines.clear();
     }
 
-    DebugSkeletonFrameData Prepare(const DebugSkeletonBindings& bindings,
+    DebugSkeletonFrameData Prepare(const DebugSkeletonBindings&,
         const org::PassPrepareContext& preparation) const
     {
         DebugSkeletonFrameData data{};
         if (m_drawRanges.empty()) return data;
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-        data.target = preparation.Capture(bindings.target);
         data.outputResolution = context->outputResolution;
-        data.layout = PSOManager::GetInstance().GetRootSignature().GetHandle();
-        data.program = preparation.CaptureProgramBinding(m_pso, m_resourceDescriptorBindings);
-        data.lineResource = preparation.DeclaredReference(bindings.lines);
-        data.constants = {
-            preparation.Resolve(bindings.lines).index,
-            preparation.Resolve(bindings.perFrame).index,
-            preparation.Resolve(bindings.camera).index };
         data.ranges.reserve(m_drawRanges.size());
         for (const auto& range : m_drawRanges)
             data.ranges.push_back({range.lineOffset, range.lineCount});
         return data;
     }
 
-    static void Record(const DebugSkeletonBindings&, const DebugSkeletonFrameData& data, org::PassRecordContext& recording)
+    static void Record(const DebugSkeletonBindings& bindings, const DebugSkeletonFrameData& data, org::PassRecordContext& recording)
     {
         if (data.ranges.empty()) return;
         auto& commandList = recording.Commands();
-        commandList.SetDescriptorHeaps(data.resourceHeap, data.samplerHeap);
 
         rhi::PassBeginInfo passInfo{};
         rhi::ColorAttachment colorAttachment{};
-        colorAttachment.rtv = recording.Resolve(data.target);
+        colorAttachment.rtv = recording.View(bindings.target);
         colorAttachment.loadOp = rhi::LoadOp::Load;
         colorAttachment.storeOp = rhi::StoreOp::Store;
         passInfo.colors = { &colorAttachment };
@@ -116,23 +100,11 @@ public:
         commandList.BeginPass(passInfo);
 
         commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::LineList);
-        commandList.BindLayout(data.layout);
-        commandList.BindPipeline(recording.Resolve(data.program.program));
-        if (!data.program.descriptorIndices.empty())
-            commandList.PushConstants(rhi::ShaderStage::AllGraphics, 0,
-                org::shaderapi::kResourceDescriptorIndicesRootParameter, 0,
-                static_cast<uint32_t>(data.program.descriptorIndices.size()),
-                data.program.descriptorIndices.data());
+        recording.BindGraphicsPipeline(bindings.pipeline);
 
-        uint32_t rootConstants[NumMiscUintRootConstants] = {};
-        std::copy(data.constants.begin(), data.constants.end(), rootConstants);
-        commandList.PushConstants(
-            rhi::ShaderStage::AllGraphics,
-            0,
-            MiscUintRootSignatureIndex,
-            0,
-            3,
-            rootConstants);
+        const std::array<uint32_t, 3> buffers{
+            recording.Index(bindings.lines), recording.Index(bindings.perFrame), recording.Index(bindings.camera)};
+        recording.PushConstants(MiscUintRootSignatureIndex, buffers);
 
         constexpr uint32_t kLinesPerMeshShaderGroup = 32u;
         for (const auto& range : data.ranges) {
@@ -140,15 +112,8 @@ public:
                 continue;
             }
 
-            rootConstants[3] = range.lineOffset;
-            rootConstants[4] = range.lineCount;
-            commandList.PushConstants(
-                rhi::ShaderStage::AllGraphics,
-                0,
-                MiscUintRootSignatureIndex,
-                3,
-                2,
-                rootConstants + 3);
+            const std::array<uint32_t, 2> lines{range.lineOffset, range.lineCount};
+            recording.PushConstants(MiscUintRootSignatureIndex, lines, 3);
 
             const uint32_t groupCount = (range.lineCount + kLinesPerMeshShaderGroup - 1u) / kLinesPerMeshShaderGroup;
             commandList.DispatchMesh(groupCount, 1, 1);
@@ -455,7 +420,6 @@ private:
         sib.meshShader = { L"shaders/debugSkeleton.hlsl", L"MSMain", L"ms_6_6" };
         sib.pixelShader = { L"shaders/debugSkeleton.hlsl", L"PSMain", L"ps_6_6" };
         auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-        m_resourceDescriptorBindings = compiled.resourceDescriptorSlots;
 
         auto& layout = PSOManager::GetInstance().GetRootSignature();
         rhi::SubobjLayout soLayout{ layout.GetHandle() };
@@ -508,19 +472,20 @@ private:
             rhi::Make(soTopology),
         };
 
-        m_pso = std::make_shared<rhi::PipelinePtr>();
-        const auto result = dev.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), *m_pso);
+        rhi::PipelinePtr pipeline;
+        const auto result = dev.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pipeline);
         if (Failed(result)) {
             throw std::runtime_error("Failed to create DebugSkeleton PSO");
         }
-        (*m_pso)->SetName("DebugSkeleton.PSO");
+        pipeline->SetName("DebugSkeleton.PSO");
+        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash, compiled.resourceDescriptorSlots,
+            PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout), soLayout.layout);
     }
 
     std::shared_ptr<DynamicStructuredBuffer<SkeletonDebugLine>> m_lineBuffer;
     std::vector<SkeletonDebugLine> m_lines;
     std::vector<DrawRange> m_drawRanges;
     std::shared_ptr<br::render::DebugSceneSnapshotService> m_snapshots;
-    std::shared_ptr<rhi::PipelinePtr> m_pso;
-    org::PipelineResources m_resourceDescriptorBindings;
+    org::PipelineState m_pso;
     bool m_loggedLineDiagnostics = false;
 };

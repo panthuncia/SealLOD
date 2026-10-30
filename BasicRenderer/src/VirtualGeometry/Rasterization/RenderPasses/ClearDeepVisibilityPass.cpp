@@ -68,22 +68,8 @@ bool ClearDeepVisibilityPass::DeclaredResourcesChanged() const
     return m_declaredResourcesChanged;
 }
 
-br::render::PreparedResourceClears ClearDeepVisibilityPass::Prepare(
-    const ClearDeepVisibilityBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto& context = *preparation.preparationData->Get<UpdateContext>();
-    br::render::PreparedResourceClears data{};
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    for (const auto binding : bindings.headPointers) {
-        data.clears.push_back({preparation.DeclaredReference(binding.gpu),
-            preparation.Capture(binding.cpu),
-            preparation.Capture(binding.gpu),
-            0.0f, 0xFFFFFFFFu, false});
+void ClearDeepVisibilityPass::Record(const ClearDeepVisibilityBindings& bindings, org::PassRecordContext& context) {
+    for (const auto& clear : bindings.headPointers) {
+        br::render::ClearUavUint(context, clear.gpu, clear.cpu, 0xFFFFFFFFu);
     }
-    return data;
-}
-
-void ClearDeepVisibilityPass::Record(const ClearDeepVisibilityBindings&,
-    const br::render::PreparedResourceClears& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedResourceClears(data, recording);
 }

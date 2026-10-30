@@ -4,41 +4,46 @@
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedFullscreenDraw.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 #include <string>
 
-struct BRDFIntegrationBindings { org::DeclaredViewToken target; };
+struct BRDFIntegrationBindings {
+    org::PipelineState pipeline;
+    org::DeclaredViewToken target;
+};
+struct BRDFIntegrationFrame {
+    rhi::ClearValue clear{};
+    uint32_t width = 0, height = 0;
+};
 
 class BRDFIntegrationPass
     : public org::TypedRenderGraphPass<BRDFIntegrationPass,
-          br::render::PreparedFullscreenDraw, BRDFIntegrationBindings> {
+          BRDFIntegrationFrame, BRDFIntegrationBindings> {
 public:
     BRDFIntegrationPass() {
         CreatePSO();
     }
 
     BRDFIntegrationBindings Declare(org::PassBuilder& builder) {
-        return {builder.RenderTarget(org::ResourceIdentifier{Builtin::BRDFLUT}).View()};
+        return {PSO, builder.RenderTarget(org::ResourceIdentifier{Builtin::BRDFLUT}).View()};
     }
 
-    br::render::PreparedFullscreenDraw Prepare(const BRDFIntegrationBindings& bindings,
+    BRDFIntegrationFrame Prepare(const BRDFIntegrationBindings& bindings,
         const org::PassPrepareContext& preparation) const {
-        br::render::PreparedFullscreenDraw data{};
-        data.renderTargetReference = preparation.Capture(bindings.target);
-        data.loadOp = rhi::LoadOp::Clear;
-        data.clear = preparation.ClearValue(bindings.target.Resource());
+        BRDFIntegrationFrame frame{};
+        frame.clear = preparation.ClearValue(bindings.target.Resource());
         const auto& desc = preparation.Describe(bindings.target);
-        data.width = desc.texture.width; data.height = desc.texture.height;
-        data.debugName = "BRDF Integration Pass";
-        br::render::BindPreparedProgram(
-            data, preparation, PSO);
-        return data;
+        frame.width = desc.texture.width; frame.height = desc.texture.height;
+        return frame;
     }
 
-    static void Record(const BRDFIntegrationBindings&, const br::render::PreparedFullscreenDraw& data,
-        org::PassRecordContext& recording) {
-        br::render::RecordPreparedFullscreenDraw(data, recording);
+    static void Record(const BRDFIntegrationBindings& bindings, const BRDFIntegrationFrame& frame,
+        org::PassRecordContext& context) {
+        auto color = br::render::ColorTarget(context, bindings.target, rhi::LoadOp::Clear);
+        color.clear = frame.clear;
+        br::render::DrawFullscreen(context, bindings.pipeline, {}, color, frame.width, frame.height,
+            "BRDF Integration Pass");
     }
 
 private:

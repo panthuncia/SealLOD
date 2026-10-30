@@ -24,36 +24,22 @@ AVBOITAdaptiveFitPass::AVBOITAdaptiveFitPass(
 AVBOITAdaptiveFitBindings AVBOITAdaptiveFitPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.UnorderedAccess(m_configBuffer), builder.ShaderResource(m_fitStateBuffer)};
+    return {m_pso, builder.UnorderedAccess(m_configBuffer), builder.ShaderResource(m_fitStateBuffer)};
 }
 
-br::render::PreparedComputeDispatch AVBOITAdaptiveFitPass::Prepare(
-    const AVBOITAdaptiveFitBindings& bindings, const org::PassPrepareContext& preparation) const {
-    br::render::PreparedComputeDispatch data{};
+AVBOITAdaptiveFitFrame AVBOITAdaptiveFitPass::Prepare(
+    const AVBOITAdaptiveFitBindings&, const org::PassPrepareContext&) const {
     if (!m_configBuffer || !m_fitStateBuffer) {
         return {};
     }
 
-    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
-    auto& context = *renderContext;
-
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-
-    auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_CONFIG_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.config).index;
-    misc[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_STATE_DESCRIPTOR_INDEX] =
-        preparation.Resolve(bindings.state).index;
-
-    data.groupsX = 1u; data.groupsY = 1u; data.groupsZ = 1u;
-    return data;
+    return {1u, 1u};
 }
 
-void AVBOITAdaptiveFitPass::Record(const AVBOITAdaptiveFitBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void AVBOITAdaptiveFitPass::Record(const AVBOITAdaptiveFitBindings& bindings, const AVBOITAdaptiveFitFrame& frame, org::PassRecordContext& context) {
+    if (!frame.groupsX || !frame.groupsY) return;
+    br::render::MiscConstants constants{};
+    constants[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_CONFIG_DESCRIPTOR_INDEX] = context.Index(bindings.config);
+    constants[CLOD_AVBOIT_VBOIT_ADAPTIVE_FIT_STATE_DESCRIPTOR_INDEX] = context.Index(bindings.state);
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
 }

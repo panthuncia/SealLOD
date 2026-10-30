@@ -5,19 +5,24 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapDirtyHierarchyBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken pageTable;
     std::vector<org::DeclaredViewToken> hierarchy;
     org::DeclaredViewToken clipmapInfo;
 };
 
+struct VirtualShadowMapDirtyHierarchyFrame {
+    uint32_t pageTableResolution = 0;
+};
+
 class VirtualShadowMapDirtyHierarchyPass final : public org::TypedRenderGraphPass<VirtualShadowMapDirtyHierarchyPass,
-    br::render::PreparedComputeDispatchSequence, VirtualShadowMapDirtyHierarchyBindings> {
+    VirtualShadowMapDirtyHierarchyFrame, VirtualShadowMapDirtyHierarchyBindings> {
 public:
     VirtualShadowMapDirtyHierarchyPass(
         std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -25,10 +30,10 @@ public:
         std::shared_ptr<org::Buffer> clipmapInfoBuffer);
 
     VirtualShadowMapDirtyHierarchyBindings Declare(org::PassBuilder& builder);
-    br::render::PreparedComputeDispatchSequence Prepare(const VirtualShadowMapDirtyHierarchyBindings&,
+    VirtualShadowMapDirtyHierarchyFrame Prepare(const VirtualShadowMapDirtyHierarchyBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapDirtyHierarchyBindings&,
-        const br::render::PreparedComputeDispatchSequence&, org::PassRecordContext&);
+        const VirtualShadowMapDirtyHierarchyFrame&, org::PassRecordContext&);
 
 private:
     org::PipelineState m_pso;

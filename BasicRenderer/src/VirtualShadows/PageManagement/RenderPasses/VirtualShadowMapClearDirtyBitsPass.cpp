@@ -10,7 +10,6 @@
 #include "BasicRenderer/Assets/Texture.h"
 
 #include "../shaders/PerPassRootConstants/clodVirtualShadowClearDirtyBitsRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 VirtualShadowMapClearDirtyBitsPass::VirtualShadowMapClearDirtyBitsPass(
     std::shared_ptr<org::PixelBuffer> pageTableTexture,
@@ -40,6 +39,7 @@ VirtualShadowMapClearDirtyBitsBindings VirtualShadowMapClearDirtyBitsPass::Decla
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return {
+        m_pso,
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}),
         builder.UnorderedAccess(m_dirtyFlagsBuffer),
         builder.UnorderedAccess(m_statsBuffer)};
@@ -49,30 +49,22 @@ void VirtualShadowMapClearDirtyBitsPass::Initialize()
 {
 }
 
-
-
-br::render::PreparedComputeDispatch VirtualShadowMapClearDirtyBitsPass::Prepare(
-    const VirtualShadowMapClearDirtyBitsBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-    auto payload = m_pso.GetPayload(); br::render::PreparedComputeDispatch data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle(); data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle(); auto program = preparation.CaptureProgramBinding(std::move(payload));
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.pageTable).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
-    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.stats).index;
-    data.constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.dirtyFlags).index;
-    data.groupsX = (config.pageTableResolution + 7u) / 8u; data.groupsY = data.groupsX; data.groupsZ = CLodVirtualShadowMaxSupportedClipmapCount;
-    return data;
+VirtualShadowMapClearDirtyBitsFrame VirtualShadowMapClearDirtyBitsPass::Prepare(
+    const VirtualShadowMapClearDirtyBitsBindings&, const org::PassPrepareContext&) const {
+    return {CLodVirtualShadowBuildRuntimeResolutionConfig().pageTableResolution};
 }
 
 void VirtualShadowMapClearDirtyBitsPass::ShutdownPass()
 {
 }
 
-void VirtualShadowMapClearDirtyBitsPass::Record(const VirtualShadowMapClearDirtyBitsBindings&,
-    const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void VirtualShadowMapClearDirtyBitsPass::Record(const VirtualShadowMapClearDirtyBitsBindings& bindings,
+    const VirtualShadowMapClearDirtyBitsFrame& frame, org::PassRecordContext& recording) {
+    br::render::MiscConstants constants{};
+    constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_DESCRIPTOR_INDEX] = recording.Index(bindings.pageTable);
+    constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
+    constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = recording.Index(bindings.stats);
+    constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = recording.Index(bindings.dirtyFlags);
+    const uint32_t groups = (frame.pageTableResolution + 7u) / 8u;
+    br::render::DispatchCompute(recording, bindings.pipeline, constants, groups, groups, CLodVirtualShadowMaxSupportedClipmapCount);
 }

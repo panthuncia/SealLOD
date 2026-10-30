@@ -114,6 +114,7 @@ public:
         data.service->Evaluate(recording.Commands(), data.camera,
             data.frameNumber, data.deltaTime, data.hdr.get(), data.output.get(),
             data.depth.get(), data.motion.get());
+        recording.RestoreDescriptorHeaps();
     }
 
 private:

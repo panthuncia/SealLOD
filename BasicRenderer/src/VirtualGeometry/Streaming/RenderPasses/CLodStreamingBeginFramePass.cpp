@@ -12,7 +12,6 @@
 #include "BuiltinResources.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
 
 CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     std::function<org::UploadInstance*()> getUploadInstance,
@@ -46,7 +45,7 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
 
 CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBuilder& builder) {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    CLodStreamingBeginFrameBindings bindings{builder.UnorderedAccess(m_loadCounter),
+    CLodStreamingBeginFrameBindings bindings{m_clearUintPipeline, builder.UnorderedAccess(m_loadCounter),
         builder.UnorderedAccess(m_loadRequestKeys), builder.UnorderedAccess(m_usedGroupsCounter)};
     builder.UnorderedAccess(m_runtimeState);
     if (m_sourceGroupMismatchCounter) {
@@ -54,32 +53,6 @@ CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBu
         bindings.hasSourceMismatchCounter = true;
     }
     return bindings;
-}
-
-br::render::PreparedComputeDispatchSequence CLodStreamingBeginFramePass::Prepare(
-    const CLodStreamingBeginFrameBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    br::render::PreparedComputeDispatchSequence data{};
-    data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-    data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_clearUintPipeline);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-    auto appendClear = [&](org::DeclaredViewToken token, bool present, uint32_t value, uint32_t count) {
-        if (!present || count == 0u) return;
-        br::render::PreparedComputeDispatchSequence::Step step{};
-        step.constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = preparation.Resolve(token).index;
-        step.constants[CLOD_CLEAR_UINT_BUFFER_VALUE] = value;
-        step.constants[CLOD_CLEAR_UINT_BUFFER_COUNT] = count;
-        step.groupsX = (count + 63u) / 64u;
-        data.steps.push_back(step);
-    };
-    appendClear(bindings.loadCounter, true, 0u, 1u);
-    appendClear(bindings.usedGroupsCounter, true, 0u, 1u);
-    appendClear(bindings.sourceMismatchCounter, bindings.hasSourceMismatchCounter, 0u, 1u);
-    appendClear(bindings.loadRequestKeys, true, 0xffffffffu, CLodStreamingRequestCapacity);
-    return data;
 }
 
 void CLodStreamingBeginFramePass::Update(const org::UpdateExecutionContext& executionContext) {
@@ -145,7 +118,19 @@ void CLodStreamingBeginFramePass::Update(const org::UpdateExecutionContext& exec
     }
 }
 
-void CLodStreamingBeginFramePass::Record(const CLodStreamingBeginFrameBindings&,
-    const br::render::PreparedComputeDispatchSequence& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatchSequence(data, recording);
+void CLodStreamingBeginFramePass::Record(const CLodStreamingBeginFrameBindings& bindings,
+    org::PassRecordContext& context) {
+    context.BindComputePipeline(bindings.clearUint);
+    const auto clear = [&](const org::DeclaredViewToken& token, uint32_t value, uint32_t count) {
+        br::render::MiscConstants constants{};
+        constants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = context.Index(token);
+        constants[CLOD_CLEAR_UINT_BUFFER_VALUE] = value;
+        constants[CLOD_CLEAR_UINT_BUFFER_COUNT] = count;
+        br::render::PushMiscConstants(context, constants);
+        context.Commands().Dispatch((count + 63u) / 64u, 1, 1);
+    };
+    clear(bindings.loadCounter, 0u, 1u);
+    clear(bindings.usedGroupsCounter, 0u, 1u);
+    if (bindings.hasSourceMismatchCounter) clear(bindings.sourceMismatchCounter, 0u, 1u);
+    clear(bindings.loadRequestKeys, 0xffffffffu, CLodStreamingRequestCapacity);
 }

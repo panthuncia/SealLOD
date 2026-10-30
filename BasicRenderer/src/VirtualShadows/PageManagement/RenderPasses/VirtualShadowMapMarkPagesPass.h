@@ -10,32 +10,25 @@
 #include "Render/PipelineState.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
-    struct VirtualShadowMarkFrameData {
-        rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-        org::PreparedProgramReference clearProgram, clearUint2Program, markProgram;
-        rhi::CommandSignatureHandle commandSignature{};
-        org::PreparedResourceReference indirectArguments;
-        std::vector<unsigned int> clearIndices, clearUint2Indices, markIndices;
-        std::array<unsigned int, NumMiscUintRootConstants> clearMask{}, clearReceiver{}, clearCount{}, mark{};
-        std::array<org::PreparedResourceReference, 3> barrierResources{};
-        uint32_t barrierCount = 2;
-        uint32_t receiverGroups = 0;
-        bool receiverUint2 = false;
-    };
+struct VirtualShadowMarkFrameData {
+    uint32_t screenWidth = 0, screenHeight = 0;
+    uint32_t activeClipmapCount = 0;
+    uint32_t receiverSubpageMode = 0;
+};
 
 struct VirtualShadowMapMarkPagesBindings {
+    org::PipelineState markPipeline, clearPipeline, clearUint2Pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken tileWork, tileCount;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken clipmapData;
     org::DeclaredViewToken mask, list, count;
     std::optional<org::DeclaredViewToken> receiverMask;
-    uint32_t activeClipmapCount = 0;
-    uint32_t receiverSubpageMode = 0;
 };
 
 class VirtualShadowMapMarkPagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapMarkPagesPass,

@@ -17,15 +17,13 @@ struct DebugSphereFrameData {
         DirectX::XMFLOAT4 bounds{};
         uint32_t perObjectIndex = 0;
     };
-    rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-    rhi::PipelineLayoutHandle layout{};
-    org::PreparedProgramReference program{};
-    uint32_t cameraBufferIndex = 0;
-    uint32_t objectBufferIndex = 0;
     std::vector<Sphere> spheres;
 };
 
 struct DebugSphereBindings {
+	// The mesh pipeline and its small push-constant layout, made outside PipelineState.
+	std::shared_ptr<const rhi::PipelinePtr> pipeline;
+	std::shared_ptr<const rhi::PipelineLayoutPtr> layout;
 	org::DeclaredViewToken cameraBuffer, objectBuffer;
 };
 
@@ -46,7 +44,7 @@ public:
 		builder->DepthReadWrite(Builtin::PrimaryCamera::DepthTexture);
 		builder->IsGeometryPass();
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
-		return {builder->ShaderResource(Builtin::CameraBuffer),
+		return {m_pso, m_debugLayout, builder->ShaderResource(Builtin::CameraBuffer),
 			builder->ShaderResource(Builtin::PerObjectBuffer)};
 	}
 
@@ -57,38 +55,30 @@ public:
 			m_spheres.push_back({sphere.bounds, sphere.perObjectIndex});
 	}
 
-	DebugSphereFrameData Prepare(const DebugSphereBindings& bindings, const org::PassPrepareContext& preparation) const {
-		const auto* context = preparation.preparationData->Get<UpdateContext>();
+	DebugSphereFrameData Prepare(const DebugSphereBindings&, const org::PassPrepareContext&) const {
 		DebugSphereFrameData data{};
-		data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-		data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
-		data.layout = (*m_debugLayout)->GetHandle();
-		data.program = preparation.CaptureProgram(m_pso);
-		preparation.Retain(m_debugLayout);
-		data.cameraBufferIndex = preparation.Resolve(bindings.cameraBuffer).index;
-		data.objectBufferIndex = preparation.Resolve(bindings.objectBuffer).index;
 		{
 			std::scoped_lock lock(m_spheresMutex);
 			data.spheres = m_spheres;
 		}
 		return data;
 	}
-	static void Record(const DebugSphereBindings&, const DebugSphereFrameData& data, org::PassRecordContext& recording) {
+	static void Record(const DebugSphereBindings& bindings, const DebugSphereFrameData& data, org::PassRecordContext& recording) {
 		if (data.spheres.empty()) return;
 		auto& commandList = recording.Commands();
-		commandList.SetDescriptorHeaps(data.resourceHeap, data.samplerHeap);
 		commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-		commandList.BindLayout(data.layout);
-		commandList.BindPipeline(recording.Resolve(data.program));
+		recording.Retain(bindings.layout);
+		recording.BindGraphicsPipeline(bindings.pipeline, (*bindings.layout)->GetHandle());
 		struct Constants {
 			float center[3]; float padding; float radius;
 			uint32_t perObjectIndex, cameraBufferIndex, objectBufferIndex;
 		};
+		const uint32_t cameraBufferIndex = recording.Index(bindings.cameraBuffer);
+		const uint32_t objectBufferIndex = recording.Index(bindings.objectBuffer);
 		for (const auto& sphere : data.spheres) {
 			Constants constants{{sphere.bounds.x, sphere.bounds.y, sphere.bounds.z}, 0.0f,
-				sphere.bounds.w, sphere.perObjectIndex, data.cameraBufferIndex, data.objectBufferIndex};
-			commandList.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, 8,
-				reinterpret_cast<const uint32_t*>(&constants));
+				sphere.bounds.w, sphere.perObjectIndex, cameraBufferIndex, objectBufferIndex};
+			recording.PushConstants(0, {reinterpret_cast<const uint32_t*>(&constants), 8});
 			commandList.DispatchMesh(1, 1, 1);
 		}
 	}

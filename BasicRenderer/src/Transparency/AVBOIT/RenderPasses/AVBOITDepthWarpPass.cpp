@@ -27,35 +27,24 @@ AVBOITDepthWarpPass::AVBOITDepthWarpPass(
 AVBOITDepthWarpBindings AVBOITDepthWarpPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_depthWarpLUTBuffer)};
+    return {m_pso, builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_depthWarpLUTBuffer)};
 }
 
-br::render::PreparedComputeDispatch AVBOITDepthWarpPass::Prepare(const AVBOITDepthWarpBindings& bindings, const org::PassPrepareContext& preparation) const {
-    br::render::PreparedComputeDispatch data{};
+AVBOITDepthWarpFrame AVBOITDepthWarpPass::Prepare(const AVBOITDepthWarpBindings&, const org::PassPrepareContext&) const {
     if (!m_configBuffer || !m_occupancyHistogramBuffer || !m_depthWarpLUTBuffer) {
         return {};
     }
 
-    const auto* renderContext = preparation.preparationData->Get<UpdateContext>();
-    auto& context = *renderContext;
-
-    data.resourceHeap = context.textureDescriptorHeap.GetHandle();
-    data.samplerHeap = context.samplerDescriptorHeap.GetHandle();
-    auto program = preparation.CaptureProgramBinding(m_pso);
-    data.program = program.program;
-    data.descriptorIndices = std::move(program.descriptorIndices);
-
-    auto& misc = data.constants;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_CONFIG_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.config).index;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_HISTOGRAM_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.histogram).index;
-    misc[CLOD_AVBOIT_VBOIT_DEPTH_WARP_LUT_DESCRIPTOR_INDEX] = preparation.Resolve(bindings.lut).index;
-
     const uint32_t groupCountX =
         (CLodAVBOITDepthWarpLUTResolution + 63u) / 64u;
-    data.groupsX = groupCountX; data.groupsY = 1u; data.groupsZ = 1u;
-    return data;
+    return {groupCountX, 1u};
 }
 
-void AVBOITDepthWarpPass::Record(const AVBOITDepthWarpBindings&, const br::render::PreparedComputeDispatch& data, org::PassRecordContext& recording) {
-    br::render::RecordPreparedComputeDispatch(data, recording);
+void AVBOITDepthWarpPass::Record(const AVBOITDepthWarpBindings& bindings, const AVBOITDepthWarpFrame& frame, org::PassRecordContext& context) {
+    if (!frame.groupsX || !frame.groupsY) return;
+    br::render::MiscConstants constants{};
+    constants[CLOD_AVBOIT_VBOIT_DEPTH_WARP_CONFIG_DESCRIPTOR_INDEX] = context.Index(bindings.config);
+    constants[CLOD_AVBOIT_VBOIT_DEPTH_WARP_HISTOGRAM_DESCRIPTOR_INDEX] = context.Index(bindings.histogram);
+    constants[CLOD_AVBOIT_VBOIT_DEPTH_WARP_LUT_DESCRIPTOR_INDEX] = context.Index(bindings.lut);
+    br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
 }

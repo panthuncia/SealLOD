@@ -11,18 +11,19 @@
 #include "Render/PipelineState.h"
 #include "Render/ShaderAPI.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct ReyesSplitFrameData {
-    br::render::PreparedComputeDispatch clear;
-    br::render::PreparedComputeIndirect split;
-    std::array<org::PreparedResourceReference, 2> outputCounters;
+    uint32_t viewDepthTableIndex = 0xFFFFFFFFu;
 };
 
 struct ReyesSplitBindings {
+    org::PipelineState clearCountersPipeline;
+    org::PipelineState pipeline;
+    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
     org::DeclaredViewToken visible, inputQueue, inputCounter, outputQueue, outputCounter, outputOverflow;
     org::DeclaredViewToken diceQueue, diceCounter, diceOverflow, tessConfigs, tessVertices, tessTriangles;
     org::DeclaredViewToken shadowClipmap, shadowDirty, telemetry;
@@ -67,7 +68,6 @@ public:
     ReyesSplitBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
-    void InvocationRevision(const org::PassPrepareContext&, std::vector<uint64_t>&) const;
     ReyesSplitFrameData Prepare(const ReyesSplitBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesSplitBindings&, const ReyesSplitFrameData&, org::PassRecordContext&);
 

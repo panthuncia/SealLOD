@@ -4,17 +4,22 @@
 
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "BasicRenderer/Extensions/PreparedRenderGraph/PreparedComputeDispatch.h"
+#include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct VirtualShadowMapBuildMarkTilesBindings {
+    org::PipelineState pipeline;
     org::DeclaredViewToken tileWork;
     org::DeclaredViewToken tileCount;
 };
+struct VirtualShadowMapBuildMarkTilesFrame {
+    uint32_t screenWidth = 0;
+    uint32_t screenHeight = 0;
+};
 
 class VirtualShadowMapBuildMarkTilesPass final : public org::TypedRenderGraphPass<VirtualShadowMapBuildMarkTilesPass,
-    br::render::PreparedComputeDispatch, VirtualShadowMapBuildMarkTilesBindings> {
+    VirtualShadowMapBuildMarkTilesFrame, VirtualShadowMapBuildMarkTilesBindings> {
 public:
     VirtualShadowMapBuildMarkTilesPass(
         std::shared_ptr<org::Buffer> tileWorkBuffer,
@@ -23,10 +28,10 @@ public:
     VirtualShadowMapBuildMarkTilesBindings Declare(org::PassBuilder& builder);
     void Initialize();
     void Update(const org::UpdateExecutionContext& executionContext) override;
-    br::render::PreparedComputeDispatch Prepare(const VirtualShadowMapBuildMarkTilesBindings&,
+    VirtualShadowMapBuildMarkTilesFrame Prepare(const VirtualShadowMapBuildMarkTilesBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const VirtualShadowMapBuildMarkTilesBindings&,
-        const br::render::PreparedComputeDispatch&, org::PassRecordContext&);
+        const VirtualShadowMapBuildMarkTilesFrame&, org::PassRecordContext&);
     void ShutdownPass();
 
 private:
