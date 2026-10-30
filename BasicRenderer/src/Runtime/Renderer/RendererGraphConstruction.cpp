@@ -591,7 +591,9 @@ void Renderer::CreateRenderGraph() {
     newGraph->CompileStructural();
 	spdlog::info("Renderer::CreateRenderGraph leaving CompileStructural");
     }
-    if (const auto* persistent = std::getenv("SARP_PERSISTENT_GRAPH"); persistent && persistent[0] == '1') {
+    // Persistent execution, except with a peer API: multi-RHI graphs stay on the old compiler until it is ported (ORG
+    // rebuild, phase 4).
+    if (DeviceManager::GetInstance().GetPeerBackend() == rhi::Backend::Null) {
         // Segment placement is explicit: passes whose touched-resource set is
         // only known per frame cannot live in the persistent main executable.
         newGraph->SetPersistentSegment("Builtin::Uploads", org::RenderGraph::PersistentSegmentKind::Pre);
@@ -599,7 +601,7 @@ void Renderer::CreateRenderGraph() {
         newGraph->SetPersistentSegment("Builtin::Readbacks", org::RenderGraph::PersistentSegmentKind::Tail);
         newGraph->SetPersistentSegment("CLod::StreamingReadbackCopy", org::RenderGraph::PersistentSegmentKind::Tail);
         newGraph->SetPersistentExecutionEnabled(true);
-        spdlog::info("Persistent render graph execution enabled (SARP_PERSISTENT_GRAPH=1)");
+        spdlog::info("Persistent render graph execution enabled");
     }
     probeGraphBuildPhase("CreateRenderGraph after CompileStructural");
     {

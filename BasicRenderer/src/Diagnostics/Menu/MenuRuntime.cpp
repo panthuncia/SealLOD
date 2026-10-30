@@ -1988,7 +1988,19 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         DrawPassTimingWindow();
     }
     
-    if (showRG) {
+    // A persistent graph traces its schedule only while the inspector shows it.
+    const bool persistentGraph = m_renderGraph && m_renderGraph->PersistentExecutionEnabled();
+    if (m_renderGraph && m_renderGraph->ScheduleTraceEnabled() != (showRG && persistentGraph))
+        m_renderGraph->SetScheduleTraceEnabled(showRG && persistentGraph);
+    if (showRG && persistentGraph) {
+        static org::debugui::ScheduleInspectorState scheduleInspector;
+        ImGui::Begin("Render Graph Inspector", nullptr);
+        if (const auto snapshot = m_renderGraph->GetPersistentScheduleSnapshot())
+            org::debugui::ShowScheduleInspector(*snapshot, scheduleInspector);
+        else
+            ImGui::TextWrapped("No schedule yet: the graph traces its executables from the next frame it prepares.");
+        ImGui::End();
+    } else if (showRG) {
 		ImGui::Begin("Render Graph Inspector", nullptr);
 		org::RGInspectorOptions opts;
         if ((m_imguiBackend == rhi::Backend::D3D12 || m_imguiBackend == rhi::Backend::Vulkan) && g_pd3dSrvDescHeap) {

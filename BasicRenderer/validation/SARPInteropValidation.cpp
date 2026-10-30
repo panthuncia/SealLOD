@@ -43,22 +43,14 @@ bool PlaceOnPeer(std::string_view passName) {
 		(configuration.bloom && passName == "BloomDownsamplePass2");
 }
 
-template<class Builder>
-void Apply(std::string_view passName, Builder& builder, rhi::Backend peerApi) {
+} // namespace
+
+bool SARPInteropValidation::Enabled() noexcept { return GetConfiguration().enabled; }
+void SARPInteropValidation::ApplyPassPolicy(std::string_view passName, org::RenderPassBuilder& builder, rhi::Backend peerApi) {
 	if (!PlaceOnPeer(passName)) return;
 	if (peerApi == rhi::Backend::Null)
 		throw std::runtime_error("SARP interop validation requested peer placement without an initialized peer API");
 	builder.RequireAPI(peerApi);
-}
-
-} // namespace
-
-bool SARPInteropValidation::Enabled() noexcept { return GetConfiguration().enabled; }
-void SARPInteropValidation::ApplyPassPolicy(std::string_view name, org::ComputePassBuilder& builder, rhi::Backend peerApi) {
-	Apply(name, builder, peerApi);
-}
-void SARPInteropValidation::ApplyPassPolicy(std::string_view name, org::RenderPassBuilder& builder, rhi::Backend peerApi) {
-	Apply(name, builder, peerApi);
 }
 
 } // namespace br::validation

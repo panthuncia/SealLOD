@@ -86,20 +86,6 @@ private:
 
     void ClearReadbacks();
 
-    void SaveCubemapToDDS(
-        rhi::Device& device,
-        org::imm::ImmediateCommandList& commandList,
-        std::shared_ptr<org::PixelBuffer> cubemap,
-        const std::wstring& outputFile,
-        uint64_t fenceValue);
-
-    void SaveTextureToDDS(
-        rhi::Device& device,
-        org::imm::ImmediateCommandList& commandList,
-        org::PixelBuffer* texture,
-        const std::wstring& outputFile,
-        uint64_t fenceValue);
-
     std::shared_ptr<ReadbackPass> m_readbackPass;
     std::shared_ptr<State> m_state;
     rhi::Timeline m_readbackFence;
