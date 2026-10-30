@@ -27,12 +27,16 @@ public:
 
     br::render::PreparedComputeDispatch Prepare(const org::PassPrepareContext& preparation) {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        auto payload = m_pso.GetPayload();
         br::render::PreparedComputeDispatch data{};
-        data.resourceHeap = context->textureDescriptorHeap.GetHandle();
-        data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+        // On a peer device (interop validation) the execution installs that device's heaps.
+        if (preparation.backendInstance == org::BackendInstanceId::Primary) {
+            data.resourceHeap = context->textureDescriptorHeap.GetHandle();
+            data.samplerHeap = context->samplerDescriptorHeap.GetHandle();
+        } else {
+            PSOManager::GetInstance().ResolvePipeline(m_pso, preparation.backendInstance); // Builds the peer's pipeline once.
+        }
         data.layout = PSOManager::GetInstance().GetComputeRootSignature().GetHandle();
-        auto program = preparation.CaptureProgramBinding(std::move(payload));
+        auto program = preparation.CaptureProgramBinding(m_pso);
         data.program = program.program;
         data.descriptorIndices = std::move(program.descriptorIndices);
 

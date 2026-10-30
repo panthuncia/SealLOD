@@ -591,9 +591,7 @@ void Renderer::CreateRenderGraph() {
     newGraph->CompileStructural();
 	spdlog::info("Renderer::CreateRenderGraph leaving CompileStructural");
     }
-    // Persistent execution, except with a peer API: multi-RHI graphs stay on the old compiler until it is ported (ORG
-    // rebuild, phase 4).
-    if (DeviceManager::GetInstance().GetPeerBackend() == rhi::Backend::Null) {
+    {
         // Segment placement is explicit: passes whose touched-resource set is
         // only known per frame cannot live in the persistent main executable.
         newGraph->SetPersistentSegment("Builtin::Uploads", org::RenderGraph::PersistentSegmentKind::Pre);
