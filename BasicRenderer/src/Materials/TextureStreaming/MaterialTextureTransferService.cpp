@@ -141,6 +141,10 @@ void MaterialTextureTransferService::Initialize()
 		[this] { PumpWorker(); },
 		[this] { RejectPendingWork(); });
 	m_shuttingDown.store(false, std::memory_order_release);
+	{
+		std::scoped_lock lifeLock(m_life->mutex);
+		m_life->service = this;
+	}
 	m_initialized = true;
 }
 
@@ -148,6 +152,10 @@ void MaterialTextureTransferService::Shutdown()
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::Shutdown");
 	m_shuttingDown.store(true, std::memory_order_release);
+	{
+		std::scoped_lock lifeLock(m_life->mutex);
+		m_life->service = nullptr;
+	}
 	m_pump.Stop();
 	if (m_taskScope.Valid()) m_taskScope.CancelAndWait();
 	uint64_t waitValue = 0;
@@ -250,13 +258,13 @@ MaterialTextureTransferService::EnqueueUpload(
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::EnqueueUpload");
 	if (!image || initialData.Empty()) return {};
-	image->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
 	std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
 	{
 		std::scoped_lock lock(m_mutex);
 		const bool existed = m_records.contains(image->GetGlobalResourceID());
 		artifact = EnsureTransferRecordLocked(image);
 		if (!existed) {
+			image->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
 			m_pending.push_back({image, std::move(description), std::move(initialData), true});
 			BT_PLOT("MaterialTextureTransfer.Pending", static_cast<int64_t>(m_pending.size()));
 		}
@@ -270,18 +278,62 @@ MaterialTextureTransferService::EnsureShaderReady(const std::shared_ptr<org::Pix
 {
 	BT_ZONE_SCOPE("MaterialTextureTransferService::EnsureShaderReady");
 	if (!image) return {};
-	image->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
 	std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
 	{
 		std::scoped_lock lock(m_mutex);
+		// A job-processed image already has its record (AdoptJobProcessed): its graph hands it to shader-resource state.
 		const bool existed = m_records.contains(image->GetGlobalResourceID());
 		artifact = EnsureTransferRecordLocked(image);
 		if (!existed) {
+			image->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
 			m_pending.push_back({image, image->GetDescription(), {}, false});
 		}
 	}
 	Pump();
 	return artifact;
+}
+
+std::shared_ptr<const br::render::TextureTransferArtifact> MaterialTextureTransferService::AdoptJobProcessed(
+	const std::shared_ptr<org::PixelBuffer>& image,
+	const std::function<bool(std::function<void()>)>& whenReady)
+{
+	BT_ZONE_SCOPE("MaterialTextureTransferService::AdoptJobProcessed");
+	if (!image) return {};
+	std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
+	{
+		std::scoped_lock lock(m_mutex);
+		artifact = EnsureTransferRecordLocked(image);
+	}
+	std::weak_ptr<org::PixelBuffer> weak = image;
+	auto complete = [life = m_life, weak] {
+		const auto texture = weak.lock();
+		if (!texture) return;
+		std::scoped_lock lifeLock(life->mutex);
+		if (life->service) life->service->CompleteJobProcessed(texture);
+	};
+	if (!whenReady || !whenReady(complete)) complete();
+	return artifact;
+}
+
+void MaterialTextureTransferService::CompleteJobProcessed(const std::shared_ptr<org::PixelBuffer>& image)
+{
+	std::shared_ptr<TransferState> transfer;
+	{
+		std::scoped_lock lock(m_mutex);
+		const auto record = m_records.find(image->GetGlobalResourceID());
+		if (record == m_records.end() || record->second.state != State::Pending) return;
+		record->second.state = State::Ready;
+		transfer = record->second.transferState;
+	}
+	image->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
+	org::RangeSpec whole{};
+	image->GetStateTracker()->Reset(
+		whole,
+		org::ResourceState{
+			rhi::ResourceAccessType::ShaderResource,
+			rhi::ResourceLayout::ShaderResource,
+			rhi::ResourceSyncState::AllShading});
+	PublishTransferState(transfer, State::Ready);
 }
 
 rhi::TextureBarrier MaterialTextureTransferService::MakeWholeTextureBarrier(

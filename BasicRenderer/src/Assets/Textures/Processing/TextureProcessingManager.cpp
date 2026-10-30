@@ -1184,8 +1184,14 @@ std::shared_ptr<TextureSourceData> PrepareTextureSourceDataForBackend(
 	const bool needCompression = meta.processing.requestBlockCompression && !sourceIsBlockCompressed;
 	const bool needDecompression = !meta.processing.requestBlockCompression && sourceIsBlockCompressed;
 	const bool needNormalConventionConversion = NeedsNormalConventionConversion(meta);
-	const bool needGpuAlphaMipChain = needMipChain && ShouldPreserveAlphaCoverage(meta, *sourceData);
-	const bool needCpuMipChain = needMipChain && !needGpuAlphaMipChain;
+	// A single-mip RGBA8 source bound for GPU BC7 gets its chain from the texture job graph's mip pass, ahead of compression
+	// (SubmitBC7CompressionJob); FinalizeTextureSourceDataOnCpu builds it if that route falls back to the CPU.
+	const bool gpuMipsBeforeBc7 = needMipChain && sourceMipLevels == 1u && !needNormalConventionConversion &&
+		!sourceIsBlockCompressed &&
+		rhi::helpers::stripSrgb(clampedSourceData->desc.format) == rhi::Format::R8G8B8A8_UNorm &&
+		ShouldUseGpuBc7Backend(*clampedSourceData, meta);
+	const bool needGpuMipChain = needMipChain && (ShouldPreserveAlphaCoverage(meta, *sourceData) || gpuMipsBeforeBc7);
+	const bool needCpuMipChain = needMipChain && !needGpuMipChain;
 
 	if (!needMipChain && !needCompression && !needDecompression && !needNormalConventionConversion) {
 		return clampedSourceData;
@@ -1260,14 +1266,35 @@ std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
 		throw std::runtime_error("TextureProcessingManager: prepared source data is null");
 	}
 
-	if (!meta.processing.requestBlockCompression) {
-		return preparedSourceData;
-	}
-
 	ScratchImage preparedImage;
 	HRESULT hr = InitializeScratchImageFromSource(*preparedSourceData, preparedImage);
 	if (FAILED(hr)) {
 		throw std::runtime_error("TextureProcessingManager: failed to initialize prepared scratch image");
+	}
+
+	// Prepared data left for GPU mips (PrepareTextureSourceDataForBackend) that reached the CPU instead: build the chain here.
+	const uint32_t requestedMipLevels = ResolveRequestedMipLevelCount(
+		meta.processing,
+		preparedSourceData->desc.imageDimensions[0].width,
+		preparedSourceData->desc.imageDimensions[0].height);
+	if (meta.processing.requestMipChain && !IsSourceBlockCompressed(*preparedSourceData) &&
+		GetTextureMipLevelCount(*preparedSourceData) < requestedMipLevels) {
+		ScratchImage mipChainImage;
+		hr = GenerateMipMaps(
+			preparedImage.GetImages(),
+			preparedImage.GetImageCount(),
+			preparedImage.GetMetadata(),
+			TEX_FILTER_DEFAULT,
+			requestedMipLevels,
+			mipChainImage);
+		if (FAILED(hr)) {
+			throw std::runtime_error("TextureProcessingManager: DirectXTex GenerateMipMaps failed");
+		}
+		preparedImage = std::move(mipChainImage);
+	}
+
+	if (!meta.processing.requestBlockCompression) {
+		return BuildSourceDataFromScratchImage(preparedImage);
 	}
 
 	ScratchImage compressedImage;

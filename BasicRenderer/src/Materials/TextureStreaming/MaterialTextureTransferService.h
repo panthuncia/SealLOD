@@ -41,6 +41,12 @@ public:
 		TextureFactory::TextureInitialData initialData);
 	std::shared_ptr<const br::render::TextureTransferArtifact> EnsureShaderReady(
 		const std::shared_ptr<org::PixelBuffer>& image);
+	// An image a render graph uploads and processes (the texture job graph's mips), left in shader-resource state on the
+	// graphics queue. whenReady(callback) arranges the callback for when that work completes on the GPU, or returns false
+	// when it already has. From then on the image is ready and this service owns it; until then it stays graph-managed.
+	std::shared_ptr<const br::render::TextureTransferArtifact> AdoptJobProcessed(
+		const std::shared_ptr<org::PixelBuffer>& image,
+		const std::function<bool(std::function<void()>)>& whenReady);
 	void RequestReadback(
 		const std::shared_ptr<org::PixelBuffer>& image,
 		std::wstring outputFile,
@@ -100,6 +106,7 @@ private:
 		std::function<void()> callback;
 	};
 	static void SaveReadbackToDds(InFlightBatch::ReadbackCompletion completion);
+	void CompleteJobProcessed(const std::shared_ptr<org::PixelBuffer>& image);
 	std::shared_ptr<const br::render::TextureTransferArtifact> EnsureTransferRecordLocked(
 		const std::shared_ptr<org::PixelBuffer>& image);
 	static void PublishTransferState(const std::shared_ptr<TransferState>& transfer,
@@ -129,5 +136,11 @@ private:
 	br::TaskScope m_taskScope;
 	br::SerializedTaskPump m_pump;
 	std::atomic_bool m_shuttingDown{ false };
+	// What a job-processed image's completion reaches this service through; cleared on shutdown.
+	struct Life {
+		std::mutex mutex;
+		MaterialTextureTransferService* service = nullptr;
+	};
+	std::shared_ptr<Life> m_life = std::make_shared<Life>();
 	bool m_initialized = false;
 };

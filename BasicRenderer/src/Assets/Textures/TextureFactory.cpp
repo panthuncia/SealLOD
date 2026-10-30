@@ -856,7 +856,8 @@ bool TextureFactory::SubmitBC7CompressionJob(
 
     org::TextureDescription workingDesc = preparedSourceData->desc;
     workingDesc.format = rhi::helpers::stripSrgb(workingDesc.format);
-    workingDesc.generateMipMaps = preserveAlphaCoverage && preparedMipLevels == 1u && requestMeta.processing.requestMipChain;
+    // Prepared data arrives with only its first mip when the GPU builds the chain (PrepareTextureSourceDataForBackend).
+    workingDesc.generateMipMaps = preparedMipLevels == 1u && requestMeta.processing.requestMipChain;
     workingDesc.hasUAV = false;
     workingDesc.uavFormat = rhi::Format::Unknown;
 
@@ -971,8 +972,19 @@ std::shared_ptr<org::PixelBuffer> TextureFactory::CreateMaterialResidentPixelBuf
 
 	const uint32_t slices = (desc.isCubemap ? 6u : 1u) * (std::max)(1u, desc.arraySize);
 	const uint32_t sourceMipLevels = GetTextureMipLevelCount(desc);
-	if (desc.generateMipMaps && !rhi::helpers::IsBlockCompressed(desc.format) &&
-		slices == 1u && sourceMipLevels == 1u && initialData.subresources.size() == 1u) {
+	const bool needsMips = desc.generateMipMaps && !rhi::helpers::IsBlockCompressed(desc.format) &&
+		slices == 1u && sourceMipLevels == 1u && initialData.subresources.size() == 1u &&
+		CalcMipCount(desc.imageDimensions[0].width, desc.imageDimensions[0].height) > 1u && maxMipLevels != 1u;
+	if (needsMips && m_jobUploadService) {
+		// The texture job graph uploads it and builds its chain; the transfer service owns it once the mips are ready, which is
+		// when its binding becomes ready (TextureStreamingManager::QueueBindingChanged).
+		auto image = CreateAlwaysResidentPixelBuffer(std::move(desc), std::move(initialData), debugName, false, false, maxMipLevels);
+		org::memory::SetResourceUsageHint(*image, "Material textures");
+		m_materialTextureTransferService->AdoptJobProcessed(image,
+			[this, texture = image.get()](std::function<void()> ready) { return WhenMipsReady(*texture, std::move(ready)); });
+		return image;
+	}
+	if (needsMips) {
 		uint32_t mipLevels = CalcMipCount(desc.imageDimensions[0].width, desc.imageDimensions[0].height);
 		if (maxMipLevels != 0u) mipLevels = (std::min)(mipLevels, maxMipLevels);
 		initialData.subresources = BuildMipChain2D(
