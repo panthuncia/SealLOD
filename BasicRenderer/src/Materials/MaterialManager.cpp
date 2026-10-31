@@ -2039,12 +2039,20 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			// allocation can also run ahead of immutable row completion; requesting a
 			// root for that partial extent creates a permanently obsolete retrying
 			// version that prevents its successor from owning the address.
+			// Slot allocation runs on admission workers under the registry lock, so
+			// read the row extent once. The root validates its exact table versions
+			// against this count; re-reading it after the captures could name a slot
+			// allocated in between, and that root would retry forever.
+			const auto materialRowCount = [&] {
+				RegistryLock registryLock(m_registryMutex);
+				return m_materialSlotsUsed;
+			}();
 			if (rowsRevision == 0 || evalCapture.writeSequence != rowsRevision ||
 				openPbrCapture.writeSequence != rowsRevision ||
 				m_materialRowsRevision.load(std::memory_order_acquire) != rowsRevision ||
-				baseCapture.elementCount != m_materialSlotsUsed ||
-				evalCapture.elementCount != m_materialSlotsUsed ||
-				openPbrCapture.elementCount != m_materialSlotsUsed) {
+				baseCapture.elementCount != materialRowCount ||
+				evalCapture.elementCount != materialRowCount ||
+				openPbrCapture.elementCount != materialRowCount) {
 				m_materialStateFingerprint = 0;
 				m_materialStateDirtyFrames = 4;
 				basic_telemetry::AddCounter("SARP.Material.GraphCaptureRaceDeferred");
@@ -2095,7 +2103,7 @@ std::uint64_t MaterialManager::CommitGpuVisibleSnapshot(bool forceGraphSnapshot)
 			auto input = std::make_shared<br::render::MaterialStateBuildInput>();
 			input->sourceFingerprint = fingerprint;
 			input->materialRowsRevision = rowsRevision;
-			input->materialRowCount = m_materialSlotsUsed;
+			input->materialRowCount = materialRowCount;
 			// Texture mip residency is owned by TextureStreamingManager. The descriptor
 			// indices captured in the material rows already name usable coarse-mip
 			// bindings and remain stable while streaming upgrades their contents. Do not
