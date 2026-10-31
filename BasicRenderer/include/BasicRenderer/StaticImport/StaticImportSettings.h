@@ -14,12 +14,23 @@
 
 namespace br::staticimport
 {
+	// How the pipeline uses the static scene recipe cache (StaticSceneRecipe.h).
+	enum class StaticRecipeCacheMode : std::uint8_t
+	{
+		Off,       // No cache: every cell is grouped from the placement source.
+		Read,      // Cached recipes are used; cache misses are not written back.
+		ReadWrite  // Cache misses are compiled once their assets are ready and persisted.
+	};
+
 	struct StaticImportSettings
 	{
 		// Streaming target.
 		bool streamingEnabled = true;
 		std::uint32_t cellRadius = 5;
 		std::uint32_t logFrameSpikeMs = 8;
+
+		// Recipe cache.
+		StaticRecipeCacheMode recipeCacheMode = StaticRecipeCacheMode::ReadWrite;
 
 		// Per-frame streaming budget. A backlog above highWaterDepth raises the
 		// budget to burstFrameBudgetUs while the previous tick stayed under
