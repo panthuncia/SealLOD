@@ -135,71 +135,14 @@ namespace br::staticimport
 	{
 		// A template batch is an exact dependency closure. This acceptance path is
 		// now an off-thread serialized lane, so use the configured bounded batch
-		// instead of the former 32-row main-thread latency cap. Larger batches also
-		// avoid serializing streaming behind dozens of MaterialUsageBatch barriers.
+		// instead of the former 32-row main-thread latency cap.
 		const auto configuredTemplateRequests = static_cast<std::size_t>(
 			_settings->maxTemplateRequestsPerFrame);
 		const auto maxTemplateRequestsPerFrame = configuredTemplateRequests == 0
 			? std::size_t{ 256 }
 			: (std::min)(configuredTemplateRequests, std::size_t{ 256 });
 		std::vector<StaticTemplateRequest> requests;
-		std::shared_ptr<const br::render::PublishedMaterialUsageBatch> materialAdmission;
-		if (!_importState->pendingStaticTemplateMaterialRequests.empty()) {
-			auto* graphRequests = _shared->hasSceneIngestionServices
-				? _shared->sceneIngestionServices.execution.stateRequests : nullptr;
-			if (!graphRequests || !_importState->pendingStaticTemplateMaterialVersion) return;
-			const auto completion = graphRequests->Snapshot(
-				_importState->pendingStaticTemplateMaterialVersion.version);
-			if (completion.readiness == br::render::ArtifactReadiness::Failed ||
-				completion.readiness == br::render::ArtifactReadiness::Cancelled) {
-				spdlog::warn("Static template material admission will be recaptured for artifact {}:{}",
-					completion.key.primaryID, completion.revision);
-				// Texture bindings may advance between CaptureMaterialUsage and graph
-				// dependency selection. That invalidates this immutable material row, not
-				// the mesh/material asset or its StaticTemplate identity. Treating the
-				// batch failure as terminal poisoned every dependent StaticVariant and
-				// left otherwise valid groups permanently counted as pending. Releasing
-				// the version rolls the reservation back; a fresh capture below observes
-				// the successor texture descriptors.
-				for (auto& request : _importState->pendingStaticTemplateMaterialRequests) {
-					(void)_drains->PushStreaming(
-						_bus->staticImportTemplateRequestOutput, std::move(request));
-				}
-				_importState->pendingStaticTemplateMaterialRequests.clear();
-				_importState->pendingStaticTemplateMaterialVersion = {};
-				_importState->pendingStaticTemplateMaterialAwaiter.Reset();
-				basic_telemetry::AddCounter(
-					"SARP.StaticImportService.MaterialAdmissionRecaptures");
-				_importState->staticTemplatePublicationNeedsBackoff.store(true, std::memory_order_release);
-				ScheduleStaticTemplatePublicationRetry();
-				return;
-			}
-			materialAdmission = completion.payload
-				.Get<br::render::PublishedMaterialUsageBatch>();
-			if (!materialAdmission) {
-				const auto now = std::chrono::steady_clock::now();
-				if (_importState->lastStaticTemplateMaterialDiagnostic ==
-						std::chrono::steady_clock::time_point{} ||
-					now - _importState->lastStaticTemplateMaterialDiagnostic >= std::chrono::seconds(5)) {
-					_importState->lastStaticTemplateMaterialDiagnostic = now;
-					const auto diagnostic = graphRequests->Diagnose(
-						_importState->pendingStaticTemplateMaterialVersion.version.address);
-					spdlog::error(
-						"Static template material batch is stalled: version={}:{}:{} readiness={} requests={} blockers={} chain='{}'",
-						static_cast<unsigned>(_importState->pendingStaticTemplateMaterialVersion.version.address.kind),
-						_importState->pendingStaticTemplateMaterialVersion.version.generation,
-						_importState->pendingStaticTemplateMaterialVersion.version.revision,
-						static_cast<unsigned>(completion.readiness),
-						_importState->pendingStaticTemplateMaterialRequests.size(),
-						diagnostic.blockers.size(), diagnostic.blockerChain);
-				}
-				ScheduleStaticTemplatePublicationRetry();
-				return;
-			}
-			requests = std::move(_importState->pendingStaticTemplateMaterialRequests);
-			_importState->pendingStaticTemplateMaterialVersion = {};
-			_importState->pendingStaticTemplateMaterialAwaiter.Reset();
-		} else {
+		{
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainTemplateRequests::DrainQueue");
 			const auto drainLimit = maxTemplateRequestsPerFrame;
 			_bus->staticImportTemplateRequestOutput.Drain(requests, drainLimit);
@@ -243,8 +186,6 @@ namespace br::staticimport
 		const auto templateDrainBegin = std::chrono::steady_clock::now();
 		auto* meshManager = _shared->sceneIngestionServices.meshes;
 		auto* materialManager = _shared->sceneIngestionServices.materials;
-		const bool textureProductionAvailable = _shared->sceneIngestionServices.assetRequests &&
-			_shared->sceneIngestionServices.assetRequests->CanUploadTextures();
 		{
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainTemplateRequests::PublicationWork");
 
@@ -300,137 +241,6 @@ namespace br::staticimport
 				BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainTemplateRequests::PrepareTemplateRows");
 				std::size_t missingMeshBuffer = 0;
 				std::size_t missingMaterialHeightTexture = 0;
-				std::unordered_map<Material*, std::uint32_t> materialUsageCounts;
-				std::unordered_map<Material*, std::shared_ptr<Material>> materialOwners;
-				std::unordered_map<std::uint32_t, Material*> materialsByID;
-				std::unordered_map<Material*, std::uint32_t> materialDataIndices;
-				materialUsageCounts.reserve(requests.size());
-				materialOwners.reserve(requests.size());
-				materialsByID.reserve(requests.size());
-				materialDataIndices.reserve(requests.size());
-				{
-					BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainTemplateRequests::PrepareTemplateRows::BatchMaterialUsage");
-					for (const auto& request : requests) {
-						if (request.mesh && request.material &&
-							request.mesh->GetPerMeshBufferView()) {
-							++materialUsageCounts[request.material.get()];
-							materialOwners.try_emplace(request.material.get(), request.material);
-							materialsByID.try_emplace(request.material->GetMaterialID(), request.material.get());
-						}
-					}
-					if (!materialAdmission && !materialUsageCounts.empty()) {
-						auto input = std::make_shared<br::render::MaterialUsageBatchBuildInput>();
-						input->refreshTextureBindings = textureProductionAvailable;
-						std::vector<br::render::MaterialUsageCapture> captures;
-						captures.reserve(materialUsageCounts.size());
-						std::vector<std::pair<std::uint32_t, std::uint32_t>> identity;
-						identity.reserve(materialUsageCounts.size());
-						for (const auto& [material, usageCount] : materialUsageCounts) {
-							const auto owner = materialOwners.find(material);
-							if (owner == materialOwners.end()) continue;
-							materialManager->RegisterMaterialSource(owner->second);
-							auto capture = materialManager->CaptureMaterialUsage(
-								*owner->second, usageCount, input->refreshTextureBindings);
-							input->entries.push_back(capture.entry);
-							captures.push_back(std::move(capture));
-							identity.emplace_back(material->GetMaterialID(), usageCount);
-						}
-						input->reservation = materialManager->ReserveMaterialUsage(captures);
-						std::vector<br::render::ArtifactRequirement> materialRequirements;
-						std::unordered_set<br::render::ArtifactAddress,
-							br::render::ArtifactAddress::Hasher> selectedBindings;
-						for (const auto& entry : input->entries) {
-							for (const auto& binding : entry.textureBindings) {
-								const br::render::ArtifactAddress address{
-									br::render::ArtifactKind::TextureBinding,
-									binding.streamingTextureID, 0 };
-								if (!selectedBindings.insert(address).second) continue;
-								// CaptureMaterialUsage observes a texture revision, but texture
-								// refresh can publish a successor before this batch reaches the
-								// graph.  An unleased ExactSnapshot then points at a reclaimed
-								// version forever.  The material row uses stable descriptor slots,
-								// so admit the newest binding at or beyond the captured revision;
-								// the producer still verifies those descriptor identities.
-								materialRequirements.push_back(br::render::LatestAtLeast(
-									address, binding.bindingRevision,
-									br::render::ArtifactReadiness::UploadSubmitted));
-							}
-						}
-						std::ranges::sort(identity);
-						std::uint64_t fingerprint = 1469598103934665603ull;
-						for (const auto& [materialID, usageCount] : identity) {
-							fingerprint ^= materialID + 0x9e3779b97f4a7c15ull +
-								(fingerprint << 6u) + (fingerprint >> 2u);
-							fingerprint ^= usageCount + 0x9e3779b97f4a7c15ull +
-								(fingerprint << 6u) + (fingerprint >> 2u);
-						}
-						for (const auto& entry : input->entries) {
-							for (const auto& binding : entry.textureBindings) {
-								fingerprint ^= binding.streamingTextureID + 0x9e3779b97f4a7c15ull +
-									(fingerprint << 6u) + (fingerprint >> 2u);
-								fingerprint ^= binding.bindingRevision + 0x9e3779b97f4a7c15ull +
-									(fingerprint << 6u) + (fingerprint >> 2u);
-							}
-						}
-						input->sourceFingerprint = fingerprint;
-						const br::render::ArtifactKey artifact{
-							br::render::ArtifactKind::MaterialUsageBatch,
-							++_importState->nextStaticTemplateMaterialBatchID,
-							0 };
-						if (auto* graphRequests = _shared->sceneIngestionServices.execution.stateRequests; graphRequests) {
-							auto requestResult = graphRequests->Request(
-								artifact, 1, std::move(materialRequirements),
-								br::render::ArtifactPayload::Make<br::render::MaterialUsageBatchBuildInput>(
-									std::move(input)),
-								fingerprint == 0 ? 1u : fingerprint);
-							if (requestResult) {
-								// Keep the graph lease alive until the next-frame acceptance
-								// poll consumes the payload. Retaining only VersionID allowed
-								// reclamation to turn the poll into a permanent Missing state.
-								_importState->pendingStaticTemplateMaterialVersion = requestResult.Handle();
-								_importState->pendingStaticTemplateMaterialAwaiter = graphRequests->AwaitExact(
-									// Acceptance is applied before a Ready completion is exposed at
-									// CpuReady. MaterialUsageBatch is a non-root selector and therefore
-									// is not independently promoted to Published.
-									requestResult.Handle(), br::render::ArtifactReadiness::CpuReady,
-									TaskLane::Streaming, TaskDomain::StaticImport,
-									[handoff = std::weak_ptr(_importState->staticImportCallbackHandoff)](
-										const br::render::ArtifactSnapshot&) {
-										if (const auto wake = handoff.lock()) {
-											wake->Invoke(StaticImportWorkSource::TemplatePublication);
-										}
-									},
-									// The acceptance poll reads the payload and
-									// treats a version without one as not yet
-									// ready, so the wake is what it needs either
-									// way; without it the poll never runs again.
-									[handoff = std::weak_ptr(_importState->staticImportCallbackHandoff)](
-										const br::render::ArtifactTermination& termination) {
-										basic_telemetry::AddCounter(
-											"SARP.StaticImport.MaterialUsageBatchTerminated");
-										spdlog::warn("StaticImport: material usage batch terminated: {}",
-											termination.error);
-										if (const auto wake = handoff.lock()) {
-											wake->Invoke(StaticImportWorkSource::TemplatePublication);
-										}
-									});
-								_importState->pendingStaticTemplateMaterialRequests = std::move(requests);
-								for (auto& request : leftovers) {
-									(void)_drains->PushStreaming(
-										_bus->staticImportTemplateRequestOutput, std::move(request));
-								}
-								return;
-							}
-						}
-					}
-					if (materialAdmission) {
-						for (const auto& [materialID, slot] : materialAdmission->materialSlots) {
-							const auto material = materialsByID.find(materialID);
-							if (material != materialsByID.end())
-								materialDataIndices.emplace(material->second, slot);
-						}
-					}
-				}
 				for (const auto& request : requests) {
 				if (!request.mesh || !request.material) {
 						continue;
@@ -441,20 +251,15 @@ namespace br::staticimport
 						continue;
 					}
 					{
-						uint32_t materialDataIndex = 0;
 						BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainTemplateRequests::PrepareTemplateRows::MaterialUsage");
-						{
-							BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainTemplateRequests::PrepareTemplateRows::MaterialUsage::LookupBatchedIndex");
-							const auto materialIndexIt = materialDataIndices.find(request.material.get());
-							if (materialIndexIt == materialDataIndices.end()) {
-								retryRequests.push_back(request);
-								continue;
-							}
-							materialDataIndex = materialIndexIt->second;
+						if (!request.materialDataIndex) {
+							publishedRefs.failedKeys.push_back(request.key);
+							continue;
 						}
+						const auto materialDataIndex = *request.materialDataIndex;
+						// The template keeps its admitted usage while it waits.
 						if (!IsMaterialReadyForTemplatePublication(*request.material)) {
 							BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainTemplateRequests::PrepareTemplateRows::MaterialUsage::HeightDependencyPending");
-							materialManager->DecrementMaterialUsageCount(*request.material);
 							++missingMaterialHeightTexture;
 							retryRequests.push_back(request);
 							continue;
@@ -536,9 +341,6 @@ namespace br::staticimport
 						if (registrations[i].pendingResources) {
 							if (i < templateSourceRequests.size()) {
 								const auto& pendingRequest = templateSourceRequests[i];
-								if (pendingRequest.material) {
-									materialManager->DecrementMaterialUsageCount(*pendingRequest.material);
-								}
 								if (pendingRequest.mesh && pendingRequest.material) {
 									const auto materialEvalVariants =
 										ComposeMaterialEvalVariantSet(*pendingRequest.mesh, *pendingRequest.material);
@@ -552,6 +354,7 @@ namespace br::staticimport
 							}
 							continue;
 						}
+						if (materials[i]) materialManager->DecrementMaterialUsageCount(*materials[i]);
 						publishedRefs.failedKeys.push_back(keys[i]);
 						continue;
 					}

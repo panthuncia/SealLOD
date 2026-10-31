@@ -20,6 +20,7 @@
 #include "Render/Runtime/IDescriptorService.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -855,6 +856,10 @@ br::render::MaterialUsageCapture MaterialManager::CaptureMaterialUsage(
 	// No manager state is read here beyond the descriptor service, which is
 	// installed once during startup: everything else comes from the Material
 	// itself. This used to serialize against the whole acceptance-domain flush.
+	// Each template admits its material separately, so captures of one material
+	// can run concurrently; the refresh rewrites the material's descriptor tuple.
+	static std::array<std::mutex, 64> captureStripes;
+	std::scoped_lock captureLock(captureStripes[material.GetMaterialID() % captureStripes.size()]);
 	if (refreshTextureBindings) material.RefreshTextureBindings(m_descriptorService.get());
 	br::render::MaterialUsageCapture capture{};
 	auto& entry = capture.entry;

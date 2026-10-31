@@ -2897,9 +2897,14 @@ int main() {
                 commits.fetch_add(1, std::memory_order_relaxed);
                 return true;
             });
+        std::atomic<unsigned> captures{ 0 };
         auto input = std::make_shared<MaterialUsageBatchBuildInput>();
-        input->sourceFingerprint = admitted->sourceFingerprint;
-        input->reservation = graphReservation;
+        input->capture = [&captures, graphReservation]() {
+            captures.fetch_add(1, std::memory_order_relaxed);
+            auto admission = std::make_shared<MaterialUsageAdmission>();
+            admission->reservation = graphReservation;
+            return std::shared_ptr<const MaterialUsageAdmission>(std::move(admission));
+        };
         const ArtifactKey batchKey{ ArtifactKind::MaterialUsageBatch, 0xfa11u, 0 };
         const auto batchRequest = graph.Request(batchKey, 1, {},
             ArtifactPayload::Make<MaterialUsageBatchBuildInput>(std::move(input)),
@@ -2911,6 +2916,7 @@ int main() {
         Check(ArtifactReachedMilestone(batchSnapshot.readiness, ArtifactReadiness::CpuReady));
         Check(publishedBatch && publishedBatch->materialSlots == admitted->materialSlots);
         Check(commits.load(std::memory_order_relaxed) == 1);
+        Check(captures.load(std::memory_order_relaxed) == 1);
 
         RegisterMaterialRowProducer(graph);
         auto row = std::make_shared<MaterialRowArtifact>();

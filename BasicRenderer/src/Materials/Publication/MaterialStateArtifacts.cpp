@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace br::render {
 namespace {
@@ -112,42 +113,71 @@ void RegisterMaterialRowProducer(AsyncStateGraph& graph) {
         BuildMaterialRow });
 }
 
+namespace {
+
+// The binding requirements of a capture: the newest binding at or beyond each
+// captured revision. Texture refresh can publish a successor before the batch is
+// admitted, and an exact requirement would then wait on a reclaimed version.
+std::vector<ArtifactRequirement> BindingRequirements(const MaterialUsageAdmission& admission) {
+    std::vector<ArtifactRequirement> requirements;
+    std::unordered_set<ArtifactAddress, ArtifactAddress::Hasher> selected;
+    for (const auto& entry : admission.entries) {
+        for (const auto& binding : entry.textureBindings) {
+            const ArtifactAddress address{ ArtifactKind::TextureBinding, binding.streamingTextureID, 0 };
+            if (!selected.insert(address).second) continue;
+            requirements.push_back(LatestAtLeast(
+                address, binding.bindingRevision, ArtifactReadiness::UploadSubmitted));
+        }
+    }
+    return requirements;
+}
+
+// Whether the selected bindings still carry the descriptors the rows were captured with.
+bool CaptureIsCurrent(const MaterialUsageAdmission& admission, const ArtifactBuildContext& context) {
+    for (const auto& entry : admission.entries) {
+        for (const auto& expected : entry.textureBindings) {
+            const auto binding = context.Dependency<PublishedTextureBinding>({
+                ArtifactKind::TextureBinding, expected.streamingTextureID, 0 });
+            if (!binding || binding.revision < expected.bindingRevision ||
+                binding.payload->imageDescriptorIndex != expected.imageDescriptorIndex ||
+                binding.payload->samplerDescriptorIndex != expected.samplerDescriptorIndex) return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 void RegisterMaterialUsageBatchProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::MaterialUsageBatch, {
         TaskLane::Streaming, TaskDomain::MaterialAcceptance,
         "MaterialStateArtifact::AdmitUsageBatch",
         [](const ArtifactBuildContext& context) {
             const auto input = context.input.Get<MaterialUsageBatchBuildInput>();
-            if (!input) return ArtifactBuildResult::Failure(
+            if (!input || !input->capture) return ArtifactBuildResult::Failure(
                 "material usage batch immutable input missing");
             if (context.stopRequested && context.stopRequested()) {
                 return ArtifactBuildResult::Cancelled();
             }
-            for (const auto& entry : input->entries) {
-                for (const auto& expected : entry.textureBindings) {
-                    const auto binding = context.Dependency<PublishedTextureBinding>({
-                        ArtifactKind::TextureBinding, expected.streamingTextureID, 0 });
-                    if (!binding || binding.revision < expected.bindingRevision ||
-                        binding.payload->imageDescriptorIndex != expected.imageDescriptorIndex ||
-                        binding.payload->samplerDescriptorIndex != expected.samplerDescriptorIndex) {
-                        // LatestAtLeast may legitimately select a texture successor
-                        // published after this immutable material row was captured. Its
-                        // descriptor indices then differ even though neither asset has
-                        // failed. Cancel this stale capture so the owner can roll back its
-                        // reservation and recapture against the successor binding.
-                        basic_telemetry::AddCounter(
-                            "SARP.Material.UsageBatchStaleTextureClosure");
-                        return ArtifactBuildResult::Cancelled();
-                    }
-                }
+            auto admission = context.checkpoint.Get<MaterialUsageAdmission>();
+            if (admission && !CaptureIsCurrent(*admission, context)) {
+                // A successor binding was published after the capture. Dropping the
+                // capture rolls its reservation back; the next one observes the successor.
+                basic_telemetry::AddCounter("SARP.Material.UsageBatchStaleTextureClosure");
+                admission.reset();
             }
-            if (!input->reservation || !input->reservation->Result()) {
-                return ArtifactBuildResult::Failure("material usage batch reservation missing");
+            if (!admission) {
+                admission = input->capture();
+                if (!admission || !admission->reservation || !admission->reservation->Result()) {
+                    return ArtifactBuildResult::Failure("material usage batch reservation missing");
+                }
+                return ArtifactBuildResult::Needs(BindingRequirements(*admission),
+                    ArtifactPayload::Make<MaterialUsageAdmission>(admission));
             }
             auto result = ArtifactBuildResult::Ready(
                 ArtifactPayload::Make<PublishedMaterialUsageBatch>(
-                    input->reservation->Result()));
-            const auto reservation = input->reservation;
+                    admission->reservation->Result()));
+            const auto reservation = admission->reservation;
             result.acceptance = { TaskLane::Streaming, TaskDomain::MaterialAcceptance,
                 [reservation](const ArtifactSnapshot&) {
                     if (!reservation->Commit()) {

@@ -35,6 +35,7 @@
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 #include <BasicRenderer/Streaming/RendererStateArtifacts.h>
 #include <BasicRenderer/Streaming/RendererStateRequestService.h>
+#include <BasicRenderer/Streaming/SceneAssetRequestService.h>
 #include <BasicRenderer/Streaming/SerializedTaskPump.h>
 #include <BasicRenderer/Streaming/StaticGeometryRequestService.h>
 #include <BasicRenderer/Streaming/StaticMaterialRequestService.h>
@@ -1112,7 +1113,14 @@ namespace br::staticimport
 					"static template artifact identity mismatch");
 			}
 
+			// The template waits on its own material only: the first build requests
+			// that material's usage admission and requires it, and the graph runs the
+			// build again once the admission is accepted. The checkpoint holds the
+			// admission's lease, so the requirement keeps resolving on later builds.
+			const auto admission = context.checkpoint.Get<StaticTemplateMaterialAdmission>();
 			StaticTemplateRequest requestToQueue;
+			std::shared_ptr<Material> materialToAdmit;
+			std::shared_ptr<Mesh> meshToPrepare;
 			std::uint64_t suspensionIdentity = 0;
 			{
 				std::lock_guard lock(_importState.staticTemplateGraphMutex);
@@ -1148,19 +1156,75 @@ namespace br::staticimport
 						return br::render::ArtifactBuildResult::Failure(
 							"static template source version is no longer available");
 					}
-					completion.requestQueued = true;
-					requestToQueue = source->second;
+					if (!admission) {
+						materialToAdmit = source->second.material;
+						meshToPrepare = source->second.mesh;
+					} else {
+						const auto batch = context.Dependency<br::render::PublishedMaterialUsageBatch>(
+							admission->batch.version.address);
+						if (!batch) {
+							return br::render::ArtifactBuildResult::Failure(
+								"static template material admission is missing");
+						}
+						const auto materialID = source->second.material->GetMaterialID();
+						const auto slot = std::ranges::find_if(batch.payload->materialSlots,
+							[materialID](const auto& entry) { return entry.first == materialID; });
+						if (slot == batch.payload->materialSlots.end()) {
+							return br::render::ArtifactBuildResult::Failure(
+								"static template material admission has no slot for its material");
+						}
+						completion.requestQueued = true;
+						requestToQueue = source->second;
+						requestToQueue.materialDataIndex = slot->second;
+					}
 				}
 			}
-			if (requestToQueue.mesh) {
+			if (materialToAdmit) {
+				auto* graphRequests = _shared.sceneIngestionServices.execution.stateRequests;
+				auto* materials = _shared.sceneIngestionServices.materials;
+				if (!graphRequests || !materials) {
+					return br::render::ArtifactBuildResult::Failure(
+						"static template material admission services are unavailable");
+				}
 				if (_pump.DirectStaticImportAvailable()) {
 					const std::vector<br::render::StaticMeshTemplateRequest> resources{
-						br::render::StaticMeshTemplateRequest{
-							requestToQueue.mesh, requestToQueue.material }
+						br::render::StaticMeshTemplateRequest{ meshToPrepare, materialToAdmit }
 					};
 					_shared.sceneIngestionServices.meshes
 						->PrepareStaticMeshTemplateResourcesAsync(resources);
 				}
+				materials->RegisterMaterialSource(materialToAdmit);
+				const bool refreshTextureBindings = _shared.sceneIngestionServices.assetRequests &&
+					_shared.sceneIngestionServices.assetRequests->CanUploadTextures();
+				auto batchInput = std::make_shared<br::render::MaterialUsageBatchBuildInput>();
+				batchInput->capture = [materials, material = std::move(materialToAdmit), refreshTextureBindings]() {
+					std::vector<br::render::MaterialUsageCapture> captures;
+					captures.push_back(materials->CaptureMaterialUsage(*material, 1u, refreshTextureBindings));
+					auto captured = std::make_shared<br::render::MaterialUsageAdmission>();
+					captured->reservation = materials->ReserveMaterialUsage(captures);
+					captured->entries.push_back(std::move(captures.front().entry));
+					return std::shared_ptr<const br::render::MaterialUsageAdmission>(std::move(captured));
+				};
+				const br::render::ArtifactKey batchKey{
+					br::render::ArtifactKind::MaterialUsageBatch,
+					_importState.nextStaticTemplateMaterialBatchID.fetch_add(1, std::memory_order_relaxed) + 1,
+					0 };
+				const auto requested = graphRequests->Request(batchKey, 1, {},
+					br::render::ArtifactPayload::Make<br::render::MaterialUsageBatchBuildInput>(
+						std::move(batchInput)),
+					batchKey.primaryID);
+				if (!requested) {
+					return br::render::ArtifactBuildResult::Failure(
+						"static template material admission request was rejected");
+				}
+				auto checkpoint = std::make_shared<StaticTemplateMaterialAdmission>();
+				checkpoint->batch = requested.Handle();
+				std::vector<br::render::ArtifactRequirement> requirements{
+					br::render::Exact(checkpoint->batch, br::render::ArtifactReadiness::CpuReady) };
+				return br::render::ArtifactBuildResult::Needs(std::move(requirements),
+					br::render::ArtifactPayload::Make<StaticTemplateMaterialAdmission>(std::move(checkpoint)));
+			}
+			if (requestToQueue.mesh) {
 				if (_drains.PushStreaming(
 						_workBus.staticImportTemplateRequestOutput, std::move(requestToQueue))) {
 					_shared.staticImportWorkScheduler.Signal(
@@ -1170,7 +1234,8 @@ namespace br::staticimport
 			}
 			return br::render::ArtifactBuildResult::Suspend(
 				br::render::ArtifactSuspension::External(
-					suspensionIdentity, "static template external GPU-row construction"));
+					suspensionIdentity, "static template external GPU-row construction"),
+				context.checkpoint);
 		}
 
 		bool ProcessStaticImportServiceCellJobForWorker()
@@ -2332,12 +2397,9 @@ namespace br::staticimport
 				// level-triggered ticket; timer polling created an unbounded control queue.
 				std::lock_guard publicationLock(_importState.staticImportPublicationWorkerMutex);
 				const auto before = _workBus.staticImportTemplateRequestOutput.Size();
-				const bool hadPendingAdmission = !_importState.pendingStaticTemplateMaterialRequests.empty();
 				_importState.staticTemplatePublicationNeedsBackoff.store(false, std::memory_order_release);
 				_pump.DrainTemplateRequests(StaticStreamBudget{});
-				const bool admissionPending = !_importState.pendingStaticTemplateMaterialRequests.empty();
-				const bool hasRunnableInput = !admissionPending &&
-					!_workBus.staticImportTemplateRequestOutput.Empty();
+				const bool hasRunnableInput = !_workBus.staticImportTemplateRequestOutput.Empty();
 				if (hasRunnableInput) {
 					if (_importState.staticTemplatePublicationNeedsBackoff.load(std::memory_order_acquire)) {
 						_pump.ScheduleStaticTemplatePublicationRetry();
@@ -2345,12 +2407,9 @@ namespace br::staticimport
 						_shared.staticImportWorkScheduler.Signal(StaticImportWorkSource::TemplatePublication);
 					}
 				}
-				// A pending material artifact is edge-woken by its exact awaiter. Treating
-				// that passive wait as productive work keeps this source permanently
-				// runnable and burns a StaticImport worker polling the graph snapshot.
-				// Only queued input or an actual state transition merits another claim.
-				return before != _workBus.staticImportTemplateRequestOutput.Size() ||
-					hadPendingAdmission != admissionPending || hasRunnableInput;
+				// Only queued input merits another claim: requests arrive with their
+				// material already admitted by their template's build.
+				return before != _workBus.staticImportTemplateRequestOutput.Size() || hasRunnableInput;
 			}
 			case StaticImportWorkSource::RetirementApply:
 				return ProcessStaticRetirementApplyForWorker();

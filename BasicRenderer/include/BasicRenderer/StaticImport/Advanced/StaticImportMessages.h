@@ -693,6 +693,12 @@ namespace br::staticimport
 		std::uint64_t sourceFingerprint{ 0 };
 	};
 
+	// A static template build's checkpoint: the lease on its material's usage admission.
+	struct StaticTemplateMaterialAdmission
+	{
+		br::render::ArtifactVersionHandle batch;
+	};
+
 	struct StaticImportBlockedGroup
 	{
 		std::uint64_t groupID{ 0 };

@@ -72,13 +72,17 @@ private:
     mutable bool m_resolved = false;
     mutable bool m_committed = false;
 };
-struct MaterialUsageBatchBuildInput {
-    std::uint64_t sourceFingerprint = 0;
-    // Requests a refresh through the material storage's configured texture
-    // service. Producer payloads never borrow the host's TextureFactory.
-    bool refreshTextureBindings = false;
+// One capture of a batch's material usage: the rows it reserved and the texture
+// bindings they were captured against.
+struct MaterialUsageAdmission {
     std::vector<MaterialUsageBatchEntry> entries;
     std::shared_ptr<const MaterialUsageReservation> reservation;
+};
+struct MaterialUsageBatchBuildInput {
+    // Captures and reserves the batch's usage. The producer captures again when a
+    // texture binding has moved past the capture, so the batch's consumers wait
+    // for the successor instead of failing.
+    std::function<std::shared_ptr<const MaterialUsageAdmission>()> capture;
 };
 
 

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,9 @@ namespace br::staticimport
 		DirectStaticTemplateKey key;
 		std::shared_ptr<Mesh> mesh;
 		std::shared_ptr<Material> material;
+		// The material slot this template's own usage admission reserved. Set
+		// before the request reaches the publication drain.
+		std::optional<std::uint32_t> materialDataIndex;
 	};
 
 	enum class StaticImportDependencyKind

@@ -52,14 +52,10 @@ namespace br::staticimport
 		bool staticTemplateProducerRegistered{ false };
 		bool staticVariantProducerRegistered{ false };
 
-		// Template material publication batching and backoff.
-		std::vector<StaticTemplateRequest> pendingStaticTemplateMaterialRequests;
-		br::render::ArtifactVersionHandle pendingStaticTemplateMaterialVersion{};
-		br::render::ArtifactAwaiter pendingStaticTemplateMaterialAwaiter;
+		// Template publication backoff, and the ids of templates' material admissions.
 		std::atomic_bool staticTemplatePublicationNeedsBackoff{ false };
 		std::atomic_bool staticTemplatePublicationRetryScheduled{ false };
-		std::chrono::steady_clock::time_point lastStaticTemplateMaterialDiagnostic{};
-		std::uint64_t nextStaticTemplateMaterialBatchID{ 0 };
+		std::atomic<std::uint64_t> nextStaticTemplateMaterialBatchID{ 0 };
 
 		// Static scene recipes: the store, persistence gating and variant bindings.
 		std::unique_ptr<br::staticimport::recipe::Store> staticSceneRecipeStore;
