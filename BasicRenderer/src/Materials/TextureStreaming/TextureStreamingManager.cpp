@@ -1830,9 +1830,16 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 		if (texture->IsPipelineTexture()) {
 			// A pipeline texture loads through its residency jobs, whose completion
 			// advances it again (AdvanceCompletedPipelineResidencies).
-			if (texture->NeedsPipelineResidency() && !RequestPipelineResidency(texture)) {
-				deferredTextureIDs.push_back(streamingTextureID);
+			if (texture->NeedsPipelineResidency()) {
+				if (!RequestPipelineResidency(texture)) deferredTextureIDs.push_back(streamingTextureID);
+				continue;
 			}
+			// The residency is loaded, but its prepared image may still be unpublished:
+			// a binding change coalesced behind an in-flight request, or one whose
+			// publication went stale, is retried through this list. No later residency
+			// completion will adopt it, and its image-table row and display gates follow
+			// that adoption, so a renderable requiring the gates would wait forever.
+			EnsureTextureUploadAdvanced(texture, textureFactory);
 			continue;
 		}
 		const uint64_t previousBindingRevision = texture->GetBindingRevision();
