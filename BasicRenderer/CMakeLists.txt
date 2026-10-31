@@ -459,6 +459,8 @@ set(SOURCES
     "src/Scene/Objects/ObjectManager.cpp"
     "src/Scene/Scene.cpp"
     "src/Scene/Views/ViewManager.cpp"
+    # src/StaticImport
+    "src/StaticImport/StaticSceneRecipe.cpp"
     # src/Telemetry
     "src/Diagnostics/Telemetry/FrameTaskGraphTelemetry.cpp"
     "src/Diagnostics/Telemetry/NvPerfIntegration.cpp"
