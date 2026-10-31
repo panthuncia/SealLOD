@@ -81,9 +81,6 @@ namespace br::staticimport
 			target.cellX,
 			target.cellY,
 			_settings->cellRadius);
-		for (const auto* extension : _extensions) {
-			extension->ExpandDesiredCellRect(target, cells.exterior);
-		}
 		return cells;
 	}
 
@@ -118,15 +115,9 @@ namespace br::staticimport
 	{
 		const auto updateBegin = std::chrono::steady_clock::now();
 		if (!_settings->streamingEnabled || !target.valid || !_hooks.ensureStaticWorldSnapshot()) {
-			for (auto* extension : _extensions) {
-				extension->OnStreamTargetCleared();
-			}
 			UpdateCameraTarget(target);
 			_counters->staticStreamUpdateUs += ElapsedUs(updateBegin);
 			return;
-		}
-		for (auto* extension : _extensions) {
-			extension->OnStreamTargetUpdated(target);
 		}
 		UpdateStaticStreamingDirectImportService(target, updateBegin);
 	}
@@ -491,15 +482,21 @@ namespace br::staticimport
 		BT_PLOT("SARP.StaticImportService.WorkloadCountFlushes", static_cast<int64_t>(updates.size()));
 	}
 
-	bool StaticImportStreamingPump::TrimPreparedBatchToDesiredGroups( PreparedDirectStaticImportBatch& batch, const StaticDesiredGroupRevisions& desiredGroups, const br::staticimport::StaticStreamTarget& target, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks)
+	bool StaticImportStreamingPump::IsHostGroupCurrent(const PreparedDirectStaticImport& prepared) const
+	{
+		return std::ranges::all_of(_extensions, [&](const auto* extension) {
+			return extension->IsHostGroupCurrent(prepared.groupID, prepared.residencyGeneration);
+		});
+	}
+
+	bool StaticImportStreamingPump::TrimPreparedBatchToDesiredGroups( PreparedDirectStaticImportBatch& batch, const StaticDesiredGroupRevisions& desiredGroups, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks) const
 	{
 		const auto shouldKeep = [&](const PreparedDirectStaticImport& prepared) {
 			if (prepared.residencyClass == StaticImportResidencyClass::HostGroup) {
-				return target.valid && target.interiorCellFormID == 0 && target.worldFormID == prepared.cellKey.worldFormID;
+				return IsHostGroupCurrent(prepared);
 			}
 			if (prepared.hostOwner) {
-				return target.valid &&
-					prepared.hostOwner->IsHostImportCurrent(target, prepared.cellKey, prepared.hostPayload);
+				return prepared.hostOwner->IsHostImportCurrent(prepared.hostPayload);
 			}
 			return desiredGroups.IsDesired(prepared.groupID, prepared.groupRevision);
 		};
@@ -798,7 +795,6 @@ namespace br::staticimport
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::UpdateStaticStreamingDirectImportService::PublishCamera");
 			UpdateCameraTarget(target);
 		}
-		auto currentDesiredStaticCells = BuildDesiredStaticCells(target);
 		// Queued requests are level-triggered. A pending material batch is not:
 		// its exact-version awaiter owns the next wake. Re-signalling that passive
 		// wait every frame creates an endless TemplatePublication drain with no
@@ -819,7 +815,6 @@ namespace br::staticimport
 				pendingOrSkipped,
 				upsertsThisFrame,
 				queueBudget,
-				currentDesiredStaticCells,
 				target,
 				std::addressof(dirtyWorkloadSpans));
 		}
@@ -903,7 +898,7 @@ namespace br::staticimport
 		_drains->ScheduleWorkerDrains();
 	}
 
-	void StaticImportStreamingPump::DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, const StaticDesiredCellArea& currentDesiredCells, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans)
+	void StaticImportStreamingPump::DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans)
 	{
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainReadyDiffs");
 		if (!_shared->hasSceneIngestionServices || !_shared->sceneIngestionServices.objects) {
@@ -958,11 +953,8 @@ namespace br::staticimport
 					ownership->MarkApplied();
 					_importState->staticAppliedPlacementCount += ownership->instanceCount;
 					++_importState->staticRuntimeGroupActiveCount;
-					// Groups a host added without a cell have no cell to report.
-					if (ownership->cellKey != StaticCellKey{}) {
-						for (auto* extension : _extensions) {
-							extension->OnCellGroupPublished(ownership->cellKey, ownership->generation, ownership->groupID);
-						}
+					for (auto* extension : _extensions) {
+						extension->OnGroupPublished(ownership->groupID);
 					}
 					applied += ownership->instanceCount;
 					++upsertsThisFrame;
@@ -1009,7 +1001,7 @@ namespace br::staticimport
 
 		auto* objectManager = _shared->sceneIngestionServices.objects;
 		for (auto* extension : _extensions) {
-			extension->DrainFrameWork(target);
+			extension->DrainFrameWork();
 		}
 		const auto pushAck = [this](StaticImportGroupAck ack) {
 			QueueStaticImportGroupAckForCoordinator(std::move(ack));
@@ -1088,15 +1080,13 @@ namespace br::staticimport
 						if (!coordinatorLivenessUnchanged) {
 							for (const auto& prepared : decision.item.batch.imports) {
 								if (prepared.hostOwner) {
-									if (!prepared.hostOwner->IsHostImportCurrent(target, prepared.cellKey, prepared.hostPayload)) {
+									if (!prepared.hostOwner->IsHostImportCurrent(prepared.hostPayload)) {
 										++staleDecisionGroups;
 									}
 									continue;
 								}
 								if (prepared.residencyClass == StaticImportResidencyClass::HostGroup) {
-									if (!std::ranges::all_of(_extensions, [&](const auto* extension) {
-											return extension->IsHostGroupCurrent(target, prepared.cellKey, prepared.residencyGeneration);
-										})) {
+									if (!IsHostGroupCurrent(prepared)) {
 										++staleDecisionGroups;
 									}
 								} else if (!_importState->staticDesiredGroupRevisions.IsDesired(
@@ -1396,7 +1386,7 @@ namespace br::staticimport
 								};
 								auto publishResult = br::staticimport::StaticHostGroupPublishResult::NotOwned;
 								for (auto* extension : _extensions) {
-									publishResult = extension->PublishHostGroup(publication, currentDesiredCells);
+									publishResult = extension->PublishHostGroup(publication);
 									if (publishResult != br::staticimport::StaticHostGroupPublishResult::NotOwned) break;
 								}
 								if (publishResult != br::staticimport::StaticHostGroupPublishResult::Accepted) {
@@ -1424,7 +1414,6 @@ namespace br::staticimport
 							if (prepared.hostOwner) {
 								removalPayload = *removalOwnership;
 								br::staticimport::StaticHostImportPublication publication{
-									.cell = prepared.cellKey,
 									.groupID = prepared.groupID,
 									.payload = prepared.hostPayload,
 									.destructionPayload = removalPayload,
@@ -1613,7 +1602,6 @@ namespace br::staticimport
 					staleBatch = !TrimPreparedBatchToDesiredGroups(
 						batch,
 						_importState->staticDesiredGroupRevisions,
-						target,
 						currentGeneration,
 						std::addressof(droppedAcks));
 					for (auto& droppedAck : droppedAcks) {

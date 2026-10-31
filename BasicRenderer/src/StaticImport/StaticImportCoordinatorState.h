@@ -134,14 +134,14 @@ namespace br::staticimport
 		std::uint64_t capacityHintDrawRecords{ 0 };
 		std::uint64_t livenessEpoch{ 1 };
 		std::uint64_t observedAssetReadinessGeneration{ 0 };
-		// One extension's cells blocked on dependencies (the host cell hooks).
-		struct HostCellBlocks
+		// One extension's host keys blocked on dependencies (the host key hooks).
+		struct HostKeyBlocks
 		{
-			std::unordered_map<StaticCellKey, std::unordered_set<StaticImportDependencyKey, StaticImportDependencyKeyHash>, StaticCellKeyHash> blockedCells;
-			std::unordered_map<StaticImportDependencyKey, std::unordered_set<StaticCellKey, StaticCellKeyHash>, StaticImportDependencyKeyHash> dependencyWaiters;
+			std::unordered_map<std::uint64_t, std::unordered_set<StaticImportDependencyKey, StaticImportDependencyKeyHash>> blockedKeys;
+			std::unordered_map<StaticImportDependencyKey, std::unordered_set<std::uint64_t>, StaticImportDependencyKeyHash> dependencyWaiters;
 		};
 		// Indexed like the registered extensions.
-		std::vector<HostCellBlocks> hostCellBlocks;
+		std::vector<HostKeyBlocks> hostKeyBlocks;
 		std::unordered_map<StaticImportDependencyKey, StaticImportDependencyRequest, StaticImportDependencyKeyHash> pendingDependencyRequests;
 		std::unordered_map<StaticImportDependencyKey, DelayedStaticImportDependencyRequest, StaticImportDependencyKeyHash> delayedDependencyRequests;
 		std::shared_ptr<StaticTemplateRefMap> templateRefs;
@@ -157,7 +157,7 @@ namespace br::staticimport
 		std::unordered_set<std::string> pendingShaderVariantKeys;
 		StaticImportCameraTarget latestTarget;
 		std::chrono::steady_clock::time_point lastStatsPublish{};
-		std::chrono::steady_clock::time_point lastBlockedHostCellDiagnostic{};
+		std::chrono::steady_clock::time_point lastBlockedHostKeyDiagnostic{};
 		std::chrono::steady_clock::time_point lastPendingGroupDiagnostic{};
 	};
 }

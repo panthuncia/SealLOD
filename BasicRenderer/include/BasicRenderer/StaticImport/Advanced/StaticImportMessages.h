@@ -149,8 +149,8 @@ namespace br::staticimport
 	struct PendingStaticGroup
 	{
 		// The cell whose streaming added the group; default (no cell) for groups a
-		// host adds through StaticImportRuntime::AddOrUpdateGroups. Only cell-level
-		// hooks, holds and traces read it.
+		// host adds through StaticImportRuntime::AddOrUpdateGroups. Only traces and
+		// diagnostics read it.
 		StaticCellKey cellKey;
 		// Opaque host batch key: preparation packets never span two, and it is
 		// the group's allocation scope. Cell groups use the cell's StaticCellKeyHash.
@@ -238,13 +238,6 @@ namespace br::staticimport
 	{
 		StaticCellKey key;
 		std::uint64_t generation{ 0 };
-		// Extensions whose PrepareCell requested OnCellHostPrepared for this cell.
-		struct HostCellPrepare
-		{
-			std::size_t extension{ 0 };
-			std::uint64_t value{ 0 };
-		};
-		std::vector<HostCellPrepare> hostCellPrepares;
 		std::vector<PreparedStaticGroup> groups;
 		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> lifecycleGroups;
 		std::size_t placementCount{ 0 };
@@ -254,27 +247,13 @@ namespace br::staticimport
 		bool worldspaceResident{ false };
 	};
 
-	// What a host cell layer did to the cell a group change belongs to
-	// (StaticImportRuntime::AddPreparedCell / RemoveCellGroups).
-	enum class StaticHostCellChange : std::uint8_t
-	{
-		None,     // A plain group change.
-		Prepared, // The cell's groups are added: OnCellPrepared / OnCellHostPrepared.
-		Left      // The cell's groups are removed: its host cell state is dropped.
-	};
-
 	// One host change to the flat group intake (StaticImportRuntime::AddOrUpdateGroups
-	// / RemoveGroups and the host cell operations), applied by the coordinator in
-	// submission order: the cell's extension hooks, then `removes`, then `adds`
-	// (unsealed records built on the caller's thread).
+	// / RemoveGroups / AddPreparedCell), applied by the coordinator in submission
+	// order: `removes`, then `adds` (unsealed records built on the caller's thread).
 	struct StaticGroupChanges
 	{
 		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> adds;
 		std::vector<std::uint64_t> removes;
-		StaticHostCellChange cellChange{ StaticHostCellChange::None };
-		StaticCellKey cell;
-		std::uint64_t cellGeneration{ 0 };
-		std::vector<PreparedStaticCell::HostCellPrepare> hostCellPrepares;
 	};
 
 	struct StaticGroupIntentToken
@@ -616,8 +595,6 @@ namespace br::staticimport
 		std::uint64_t requiredMutationGeneration{ 0 };
 		std::vector<std::shared_ptr<const StaticGraphGroupOwnership>> ownerships;
 		std::vector<StaticImportGroupAck::UnpublishedGroup> unpublished;
-		// Cells of the ownerships removals retired, for IStaticImportExtension::OnCellRetired.
-		std::vector<StaticCellKey> invalidatedCells;
 	};
 
 	struct PendingStaticImportPublication
@@ -663,7 +640,7 @@ namespace br::staticimport
 		std::size_t retirementRequestsQueued{ 0 };
 		std::size_t retirementsAwaitingPublication{ 0 };
 		std::size_t retirementCompletionsQueued{ 0 };
-		std::size_t pendingHostCells{ 0 };
+		std::size_t pendingHostKeys{ 0 };
 		std::uint64_t cellsEntered{ 0 };
 		std::uint64_t cellsLeft{ 0 };
 		std::uint64_t cellsPrepared{ 0 };

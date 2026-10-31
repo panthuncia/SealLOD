@@ -23,10 +23,10 @@
 //    they are replaced).
 // 3. UpdateStreaming with the current target, every frame. Hosts that place their
 //    own groups add, update and remove them with AddOrUpdateGroups / RemoveGroups at
-//    any time, and hosts that stream cells themselves add and remove cells' groups
-//    with PrepareRecipeCell / AddPreparedCell / RemoveCellGroups (their placement
-//    source then reports no cells); changes are taken once the first UpdateStreaming
-//    with a valid target started the pipeline.
+//    any time, and hosts that stream cells themselves add cells' groups with
+//    PrepareRecipeCell / AddPreparedCell and remove them with RemoveGroups (their
+//    placement source then reports no cells); changes are taken once the first
+//    UpdateStreaming with a valid target started the pipeline.
 // 4. Shutdown (or destroy it) before the shared state, the sources, the extensions and
 //    whatever the hooks reach. Shutdown stops every worker and coordinator task and
 //    flushes at most one bounded batch of pending recipe persistence.
@@ -102,15 +102,8 @@ namespace br::staticimport
 	// intake.
 	struct StaticImportRecipeCell
 	{
-		// The cell the groups are filed under: the extension cell hooks the runtime
-		// runs for it (PrepareCell, OnCellPrepared, OnCellHostPrepared,
-		// CollectGroupHold, OnGroupOwnershipAdded, OnCellGroupPublished, OnCellRetired)
-		// see this cell.
+		// The cell whose recipe the groups come from.
 		StaticCellKey cell;
-		// The stream target generation the cell entered under
-		// (IStaticImportPipelineAccess::StreamTargetGeneration), echoed to
-		// OnCellPrepared and OnCellHostPrepared.
-		std::uint64_t generation{ 0 };
 		// Host batch key of the groups (see StaticImportGroup::batchKey); 0 uses the
 		// cell's StaticCellKeyHash.
 		std::uint64_t batchKey{ 0 };
@@ -206,26 +199,20 @@ namespace br::staticimport
 		//
 		// For a host that streams cells itself: it looks a cell's recipe up, groups the
 		// cell's placements on a miss, prepares the cell's groups and adds them, and
-		// removes them when the cell leaves. The runtime runs the extension cell hooks
-		// for these cells as it does for the cells it streams. Changes apply in call
+		// removes them with RemoveGroups when the cell leaves. Changes apply in call
 		// order with the group changes above.
 
 		// The recipe cache's entry for `key`; null on a miss, or before the first
 		// UpdateStreaming opened the cache (or with StaticRecipeCacheMode::Off).
 		[[nodiscard]] std::shared_ptr<recipe::CellRecipeView> LookupRecipe(const recipe::CellKey& key) const;
 
-		// Prepares a cell's groups from its recipe on the caller's thread, running the
-		// extensions' PrepareCell. The groups of the result (lifecycleGroups, one
-		// record per group id) are added by AddPreparedCell, or dropped with it.
+		// Prepares a cell's groups from its recipe on the caller's thread. The groups
+		// of the result (lifecycleGroups, one record per group id) are added by
+		// AddPreparedCell, or dropped with it.
 		[[nodiscard]] PreparedStaticCell PrepareRecipeCell(StaticImportRecipeCell source);
 
-		// Adds a prepared cell's groups (replacing groups with their ids) after the
-		// extensions' OnCellPrepared and OnCellHostPrepared for the cell.
+		// Adds a prepared cell's groups, replacing groups with their ids.
 		void AddPreparedCell(PreparedStaticCell prepared);
-
-		// Removes a cell's groups, as RemoveGroups, after dropping the extensions'
-		// host cell state for the cell (OnHostCellDropped).
-		void RemoveCellGroups(const StaticCellKey& cell, std::span<const std::uint64_t> groupIDs);
 
 		// Stops the pipeline. Idempotent; the destructor calls it.
 		void Shutdown();
@@ -237,8 +224,8 @@ namespace br::staticimport
 
 		[[nodiscard]] const br::staticimport::StaticImportSettings& Settings() const;
 
-		// The cell area kept resident for `target`, including every extension's
-		// ExpandDesiredCellRect. Any thread.
+		// The cell area the runtime's own cell streaming keeps resident for `target`.
+		// Any thread.
 		[[nodiscard]] StaticDesiredCellArea BuildDesiredStaticCells(const br::staticimport::StaticStreamTarget& target) const;
 
 		// Whether the attached services can run direct static imports.

@@ -80,7 +80,7 @@ namespace br::staticimport
 				[this](StaticImportWorkSource source, const br::TaskContext& context) {
 					StaticImportServiceWorkerDrain(source, context);
 				})
-			, _staticImportAccess(_shared, _workBus, _importState, _drains, _coordinator, _pump)
+			, _staticImportAccess(_shared, _workBus, _importState, _drains, _coordinator)
 			, _coordinator(
 				StaticStreamingContext{ _shared, _workBus, _importState, _drains, _counters, _staticImportSettings, _staticAssets, _placements, _staticExtensions },
 				_staticImportLifecycleStore, _staticImportCapacityBroker,
@@ -364,22 +364,7 @@ namespace br::staticimport
 		{
 			StaticGroupChanges change;
 			change.adds = std::move(prepared.lifecycleGroups);
-			change.cellChange = StaticHostCellChange::Prepared;
-			change.cell = prepared.key;
-			change.cellGeneration = prepared.generation;
-			change.hostCellPrepares = std::move(prepared.hostCellPrepares);
-			(void)_drains.PushBlocking(_workBus.staticImportGroupChanges, std::move(change));
-		}
-
-		void RemoveCellGroups(const StaticCellKey& cell, std::span<const std::uint64_t> groupIDs)
-		{
-			StaticGroupChanges change;
-			change.removes.reserve(groupIDs.size());
-			for (const auto groupID : groupIDs) {
-				if (groupID != 0) change.removes.push_back(groupID);
-			}
-			change.cellChange = StaticHostCellChange::Left;
-			change.cell = cell;
+			if (change.adds.empty()) return;
 			(void)_drains.PushBlocking(_workBus.staticImportGroupChanges, std::move(change));
 		}
 
@@ -509,12 +494,13 @@ namespace br::staticimport
 
 		std::vector<br::staticimport::StaticGroupHold> CollectStaticGroupHolds(
 			const DirectStaticReadyGroup& ready,
-			const StaticCellKey& sourceCell) const
+			std::uint64_t groupID,
+			std::uint64_t batchKey) const
 		{
 			std::vector<br::staticimport::StaticGroupHold> holds;
 			holds.reserve(_staticExtensions.size());
 			for (std::size_t extensionIndex = 0; extensionIndex < _staticExtensions.size(); ++extensionIndex) {
-				br::staticimport::StaticGroupHoldSource source{ .cell = sourceCell };
+				br::staticimport::StaticGroupHoldSource source{ .groupID = groupID, .batchKey = batchKey };
 				if (ready.recipeVariantBinding) {
 					source.variantHold = std::addressof(
 						br::staticimport::StaticGroupHoldAt(ready.recipeVariantBinding->extensionHolds, extensionIndex));
@@ -1722,7 +1708,8 @@ namespace br::staticimport
 						preparedImport.ready = std::move(ready);
 						preparedImport.extensionHolds = CollectStaticGroupHolds(
 							preparedImport.ready,
-							preparedImport.cellKey);
+							preparedImport.groupID,
+							preparedImport.batchKey);
 						if (hasPreparedRecipe) {
 							recipeObjectPlan.transformRows += group.recipeImportCost.transformRows;
 							recipeObjectPlan.drawRecords += group.recipeImportCost.drawRecords;
@@ -2348,13 +2335,6 @@ namespace br::staticimport
 				auto ownership = group && group->ownership
 					? std::static_pointer_cast<const StaticGraphGroupOwnership>(group->ownership) : nullptr;
 				if (!ownership || ownership->groupRevision > removal.groupRevision) continue;
-				if (ownership->residencyClass == StaticImportResidencyClass::CellStatic &&
-					ownership->cellKey != StaticCellKey{} &&
-					std::ranges::none_of(pending.invalidatedCells, [&](const StaticCellKey& cell) {
-						return cell == ownership->cellKey;
-					})) {
-					pending.invalidatedCells.push_back(ownership->cellKey);
-				}
 				claim(ownership, true);
 			}
 			for (const auto& request : requestedOwnerships)
@@ -2427,11 +2407,6 @@ namespace br::staticimport
 					if (ownership->ConsumeApplied()) {
 						++completion.groups;
 						completion.placements += ownership->instanceCount;
-					}
-				}
-				for (const auto& cell : batch.invalidatedCells) {
-					for (auto* extension : _staticExtensions) {
-						extension->OnCellRetired(cell);
 					}
 				}
 				if (!completion.unpublished.empty()) {
@@ -2648,20 +2623,6 @@ namespace br::staticimport
 			ScheduleStaticSceneRecipePersistence();
 		}
 
-		// The extensions' per-cell data for a cell about to be prepared (PrepareCell).
-		void CollectHostCellPrepares(PreparedStaticCell& prepared) const
-		{
-			for (std::size_t extensionIndex = 0; extensionIndex < _staticExtensions.size(); ++extensionIndex) {
-				const auto request = _staticExtensions[extensionIndex]->PrepareCell(prepared.key);
-				if (request.requested) {
-					prepared.hostCellPrepares.push_back(PreparedStaticCell::HostCellPrepare{
-						.extension = extensionIndex,
-						.value = request.value,
-					});
-				}
-			}
-		}
-
 		// The recipe cache's entry for `recipeKey`, or null on a miss or without a
 		// cache. `pack` is the key's namespace when the caller already opened it.
 		std::shared_ptr<br::staticimport::recipe::CellRecipeView> LookupStaticSceneRecipe(
@@ -2854,8 +2815,6 @@ namespace br::staticimport
 				prepared.prepareUs = ElapsedUs(prepareBegin);
 				return prepared;
 			}
-			CollectHostCellPrepares(prepared);
-
 			const br::staticimport::recipe::CellKey recipeKey{
 				cellKey.worldFormID, cellKey.interiorCellFormID, cellKey.cellX, cellKey.cellY };
 			auto mappedRecipe = job.mappedRecipe;
@@ -2881,9 +2840,7 @@ namespace br::staticimport
 			const auto prepareBegin = std::chrono::steady_clock::now();
 			PreparedStaticCell prepared;
 			prepared.key = source.cell;
-			prepared.generation = source.generation;
 			prepared.recipeSceneBinding = std::move(source.scene);
-			CollectHostCellPrepares(prepared);
 			const auto batchKey = source.batchKey != 0
 				? source.batchKey
 				: static_cast<std::uint64_t>(StaticCellKeyHash{}(source.cell));
@@ -3010,10 +2967,6 @@ namespace br::staticimport
 		_impl->AddPreparedCell(std::move(prepared));
 	}
 
-	void StaticImportRuntime::RemoveCellGroups(const StaticCellKey& cell, std::span<const std::uint64_t> groupIDs)
-	{
-		_impl->RemoveCellGroups(cell, groupIDs);
-	}
 
 	void StaticImportRuntime::Shutdown()
 	{

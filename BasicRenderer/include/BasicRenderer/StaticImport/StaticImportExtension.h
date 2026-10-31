@@ -2,18 +2,21 @@
 
 // Extension points of the static import pipeline.
 //
-// The pipeline streams cell-resident static groups around a target on its own. A host
-// adds behaviour around that through extensions: content whose residency it manages
-// itself (host-resident groups, e.g. coarse stand-ins that cover cells until their
-// real groups arrive), per-group resources it tracks while a group is owned by the
-// scene, extra gates on template publication, and its own per-target work.
+// The pipeline imports the static groups a host adds, updates and removes. A host adds
+// behaviour around that through extensions: content whose residency it manages itself
+// (host-resident groups, e.g. coarse stand-ins it shows until other groups arrive),
+// per-group resources it tracks while a group is owned by the scene, notifications of
+// group publication and retirement, and extra gates on template publication.
 //
 // An extension can also run import work of its own inside the pipeline: worker work on
 // host work sources the pipeline schedules, dependencies the pipeline tracks next to
-// its own (host dependencies), cells of its own blocked on dependencies until they
-// resolve (host cells), prepared imports it publishes through the normal transaction
+// its own (host dependencies), keys of its own blocked on dependencies until they
+// resolve (host keys), prepared imports it publishes through the normal transaction
 // path and takes back on publication (host imports), and coordinator and per-frame
 // drains of its own results.
+//
+// Host keys, batch keys and group ids are opaque to the pipeline; what they stand for
+// (cells, blocks) is the host's.
 //
 // Any number of extensions may be registered; every hook is called on each of them in
 // registration order. All hooks default to doing nothing, so an extension overrides
@@ -30,8 +33,6 @@
 #include <DirectXMath.h>
 
 #include <BasicRenderer/Pipeline/DrawWorkload.h>
-#include <BasicRenderer/StaticImport/StaticCellGeometry.h>
-#include <BasicRenderer/StaticImport/StaticStreamTarget.h>
 #include <BasicRenderer/Streaming/ObjectRequests.h>
 
 class Material;
@@ -47,7 +48,9 @@ namespace br::staticimport
 	// What a group is built from, for CollectGroupHold.
 	struct StaticGroupHoldSource
 	{
-		StaticCellKey cell;
+		std::uint64_t groupID{ 0 };
+		// The group's host batch key (see StaticImportGroup::batchKey).
+		std::uint64_t batchKey{ 0 };
 		// When the group was bound through a recipe variant: the extension's hold
 		// from DescribeVariantBinding for that variant (which may itself be null).
 		// Null when the group has no variant binding.
@@ -56,18 +59,20 @@ namespace br::staticimport
 		std::span<const br::render::StaticGroupBuildInfo> buildInfos;
 	};
 
-	// A group whose residency an extension manages itself rather than the pipeline's
-	// cell streaming. It is prepared and published through the normal import path and
-	// offered back to extensions by PublishHostGroup.
+	// A group whose residency an extension manages itself rather than the host's group
+	// changes. It is prepared and published through the normal import path, kept while
+	// every extension's IsHostGroupCurrent holds, and offered back to extensions by
+	// PublishHostGroup.
 	struct StaticHostGroupRequest
 	{
-		// The cell the group is filed under while it is prepared.
-		StaticCellKey cell;
 		std::uint64_t groupID{ 0 };
+		// Host batch key (see StaticImportGroup::batchKey); 0 batches the group on its own.
+		std::uint64_t batchKey{ 0 };
 		std::string assetKey;
 		std::string name;
 		std::vector<DirectX::XMMATRIX> instanceWorldMatrices;
-		// The extension's own generation for the group, echoed back on publication.
+		// The extension's own generation for the group, echoed back to
+		// IsHostGroupCurrent and on publication.
 		std::uint64_t residencyGeneration{ 0 };
 	};
 
@@ -125,22 +130,12 @@ namespace br::staticimport
 	// A published host import, handed to the extension that owns it by PublishHostImport.
 	struct StaticHostImportPublication
 	{
-		StaticCellKey cell;
 		std::uint64_t groupID{ 0 };
 		const StaticHostPayload& payload;
 		// Destroys the import's renderer objects. The extension moves it out and owns
 		// it from then on.
 		br::render::StaticObjectRemovalPayload& destructionPayload;
 		std::span<const DrawWorkloadKey> workloadKeys;
-	};
-
-	// Per-cell data an extension collects while a static cell is prepared on a worker.
-	struct StaticCellPrepareRequest
-	{
-		// Whether the extension wants OnCellHostPrepared for the cell.
-		bool requested{ false };
-		// The extension's own value for the cell (e.g. a content hash), echoed back.
-		std::uint64_t value{ 0 };
 	};
 
 	// The narrow surface through which extensions act on the pipeline. Implemented by
@@ -154,12 +149,9 @@ namespace br::staticimport
 		virtual void SubmitHostGroup(StaticHostGroupRequest request) = 0;
 
 		// Schedules a coordinator drain, e.g. after an extension queued work that
-		// HasPendingCoordinatorWork reports. Safe from any thread.
+		// HasPendingCoordinatorWork or HasCoordinatorResults reports. Safe from any
+		// thread.
 		virtual void WakeCoordinator() = 0;
-
-		// The cell area the pipeline keeps resident for a target (including every
-		// extension's ExpandDesiredCellRect).
-		[[nodiscard]] virtual StaticDesiredCellArea DesiredCellArea(const StaticStreamTarget& target) const = 0;
 
 		// Records the live draw span of a workload after the extension changed the
 		// visibility of its own groups.
@@ -175,9 +167,6 @@ namespace br::staticimport
 		// Whether the pipeline is shutting down; work queued now will not be serviced.
 		[[nodiscard]] virtual bool IsStopping() const = 0;
 
-		// The generation of the latest stream target the host published.
-		[[nodiscard]] virtual std::uint64_t StreamTargetGeneration() const = 0;
-
 		// Claims a host work source for `owner`, whose RunHostWork then consumes it.
 		// `taskName` names its worker tasks and must outlive the pipeline. Call from
 		// OnAttached.
@@ -189,9 +178,9 @@ namespace br::staticimport
 		// any thread.
 		virtual void PublishHostWork(StaticHostWorkSource source) = 0;
 
-		// Whether `owner` has a dependency block on `cell` (see the host cell hooks).
-		// Coordinator thread only.
-		[[nodiscard]] virtual bool IsHostCellBlocked(const IStaticImportExtension& owner, const StaticCellKey& cell) const = 0;
+		// Whether `owner` has a dependency block on `hostKey` (see the host key
+		// hooks). Coordinator thread only.
+		[[nodiscard]] virtual bool IsHostKeyBlocked(const IStaticImportExtension& owner, std::uint64_t hostKey) const = 0;
 	};
 
 	class IStaticImportExtension
@@ -202,57 +191,20 @@ namespace br::staticimport
 		// The pipeline hands the extension its access surface once, before any other hook.
 		virtual void OnAttached(IStaticImportPipelineAccess& pipeline) { (void)pipeline; }
 
-		// ---- Stream target (the thread that publishes targets) ----
-
-		// Streaming is inactive this frame (disabled, no valid target, or no world data).
-		virtual void OnStreamTargetCleared() {}
-
-		// Streaming is active around `target` this frame. Called before the pipeline
-		// publishes the target to its coordinator.
-		virtual void OnStreamTargetUpdated(const StaticStreamTarget& target) { (void)target; }
-
-		// Grows the exterior cell rectangle kept resident for `target`, e.g. to whole
-		// blocks of host content the rectangle touches. Called once per extension in
-		// registration order; an extension returns its own closure. May run on any
-		// pipeline thread.
-		virtual void ExpandDesiredCellRect(const StaticStreamTarget& target, StaticCellRect& rect) const
-		{
-			(void)target;
-			(void)rect;
-		}
-
 		// ---- Coordinator (serialized coordinator drain, under the publication lock) ----
 
-		// The coordinator accepted a new target.
-		virtual void ProcessStreamTarget(const StaticStreamTarget& target) { (void)target; }
-
 		// Whether the extension has queued work for DrainCoordinatorWork. Checked on
-		// every coordinator tick while a target is valid, outside the publication lock.
+		// every coordinator tick, outside the publication lock.
 		[[nodiscard]] virtual bool HasPendingCoordinatorWork() const { return false; }
 
-		// Runs the work HasPendingCoordinatorWork reported, for the latest target.
-		virtual void DrainCoordinatorWork(const StaticStreamTarget& target) { (void)target; }
+		// Runs the work HasPendingCoordinatorWork reported. Host-resident groups that
+		// are no longer current afterwards (IsHostGroupCurrent) are dropped.
+		virtual void DrainCoordinatorWork() {}
 
-		// ---- Cell lifecycle notifications (any pipeline thread) ----
+		// ---- Group lifecycle notifications (any pipeline thread) ----
 
-		// The coordinator accepted a prepared cell expected to publish `expectedGroups`.
-		virtual void OnCellPrepared(const StaticCellKey& cell, std::uint64_t generation, std::uint32_t expectedGroups)
-		{
-			(void)cell;
-			(void)generation;
-			(void)expectedGroups;
-		}
-
-		// A cell-static group of `cell` became part of the published scene.
-		virtual void OnCellGroupPublished(const StaticCellKey& cell, std::uint64_t generation, std::uint64_t groupID)
-		{
-			(void)cell;
-			(void)generation;
-			(void)groupID;
-		}
-
-		// The renderer finished retiring removed groups of `cell`.
-		virtual void OnCellRetired(const StaticCellKey& cell) { (void)cell; }
+		// A host-added group became part of the published scene.
+		virtual void OnGroupPublished(std::uint64_t groupID) { (void)groupID; }
 
 		// ---- Group holds ----
 
@@ -266,22 +218,21 @@ namespace br::staticimport
 			return {};
 		}
 
-		// The hold kept with a prepared group until it is retired.
+		// The hold kept with a prepared group until it is retired. Any pipeline worker.
 		[[nodiscard]] virtual StaticGroupHold CollectGroupHold(const StaticGroupHoldSource& source) const
 		{
 			(void)source;
 			return {};
 		}
 
-		// A cell-static group's ownership entered the published scene.
-		virtual void OnGroupOwnershipAdded(std::uint64_t groupID, const StaticCellKey& cell, const StaticGroupHold& hold)
+		// A host-added group's ownership entered the published scene.
+		virtual void OnGroupOwnershipAdded(std::uint64_t groupID, const StaticGroupHold& hold)
 		{
 			(void)groupID;
-			(void)cell;
 			(void)hold;
 		}
 
-		// The renderer finished retiring a cell-static group.
+		// The renderer finished retiring a host-added group.
 		virtual void OnGroupRetired(std::uint64_t groupID, const StaticGroupHold& hold)
 		{
 			(void)groupID;
@@ -301,27 +252,18 @@ namespace br::staticimport
 		// ---- Host-resident groups ----
 
 		// Offers a published host-resident group; see StaticHostGroupPublishResult.
-		// `desiredCells` is the area the pipeline currently keeps resident.
-		virtual StaticHostGroupPublishResult PublishHostGroup(
-			StaticHostGroupPublication& publication,
-			const StaticDesiredCellArea& desiredCells)
+		virtual StaticHostGroupPublishResult PublishHostGroup(StaticHostGroupPublication& publication)
 		{
 			(void)publication;
-			(void)desiredCells;
 			return StaticHostGroupPublishResult::NotOwned;
 		}
 
-		// Whether a host-resident group filed under `cell` at `residencyGeneration` is
-		// still wanted for `target` (an exterior target when the pipeline asks before
-		// admitting work). The pipeline drops the group when any extension says no;
-		// an extension answers true for groups that are not its own.
-		[[nodiscard]] virtual bool IsHostGroupCurrent(
-			const StaticStreamTarget& target,
-			const StaticCellKey& cell,
-			std::uint64_t residencyGeneration) const
+		// Whether a host-resident group submitted at `residencyGeneration` is still
+		// wanted. The pipeline drops the group when any extension says no; an
+		// extension answers true for groups that are not its own. Any pipeline thread.
+		[[nodiscard]] virtual bool IsHostGroupCurrent(std::uint64_t groupID, std::uint64_t residencyGeneration) const
 		{
-			(void)target;
-			(void)cell;
+			(void)groupID;
 			(void)residencyGeneration;
 			return true;
 		}
@@ -369,49 +311,22 @@ namespace br::staticimport
 			return false;
 		}
 
-		// ---- Host cells (coordinator thread) ----
+		// ---- Host keys (coordinator thread) ----
 		//
-		// An extension can block a cell of its own on a set of dependencies; the
-		// pipeline tracks the block next to its own dependency waiters.
+		// An extension can block an opaque key of its own (e.g. a unit of content it
+		// prepares) on a set of dependencies; the pipeline tracks the block next to
+		// its own dependency waiters.
 
-		// Cells whose last blocking dependency resolved; their blocks are gone.
-		// Called once for every resolved dependency, possibly with no cells.
-		virtual void OnHostCellsUnblocked(std::span<const StaticCellKey> cells) { (void)cells; }
+		// Keys whose last blocking dependency resolved; their blocks are gone.
+		// Called once for every resolved dependency, possibly with no keys.
+		virtual void OnHostKeysUnblocked(std::span<const std::uint64_t> hostKeys) { (void)hostKeys; }
 
-		// The pipeline dropped the extension's coordinator state for `cell`: one of
-		// its blocking dependencies failed, the cell left the desired area, or
-		// IsHostCellWanted said no. Any block on the cell is already gone.
-		virtual void OnHostCellDropped(const StaticCellKey& cell) { (void)cell; }
+		// One of the blocking dependencies of `hostKey` failed; its block is gone.
+		virtual void OnHostKeyDropped(std::uint64_t hostKey) { (void)hostKey; }
 
-		// Whether a blocked cell is still wanted for a newly accepted target; blocks
-		// the extension no longer wants are dropped (see OnHostCellDropped).
-		[[nodiscard]] virtual bool IsHostCellWanted(const StaticStreamTarget& target, const StaticCellKey& cell) const
-		{
-			(void)target;
-			(void)cell;
-			return true;
-		}
-
-		// Cells the extension tracks as in flight on the coordinator, not counting
-		// blocked cells. Non-zero keeps the coordinator from reporting quiescence.
-		[[nodiscard]] virtual std::size_t PendingHostCellCount() const { return 0; }
-
-		// Collects the extension's per-cell data while a static cell is prepared.
-		// Any pipeline worker.
-		[[nodiscard]] virtual StaticCellPrepareRequest PrepareCell(const StaticCellKey& cell) const
-		{
-			(void)cell;
-			return {};
-		}
-
-		// The coordinator accepted a prepared cell for which PrepareCell requested a
-		// callback; `value` is what PrepareCell returned.
-		virtual void OnCellHostPrepared(const StaticCellKey& cell, std::uint64_t generation, std::uint64_t value)
-		{
-			(void)cell;
-			(void)generation;
-			(void)value;
-		}
+		// Keys the extension tracks as in flight on the coordinator, not counting
+		// blocked keys. Non-zero keeps the coordinator from reporting quiescence.
+		[[nodiscard]] virtual std::size_t PendingHostKeyCount() const { return 0; }
 
 		// ---- Coordinator drains (coordinator thread) ----
 
@@ -420,7 +335,7 @@ namespace br::staticimport
 		[[nodiscard]] virtual bool HasCoordinatorResults() const { return false; }
 
 		// Drains the extension's prepared results; runs right after the pipeline
-		// drains its prepared cells. Returns whether it did work.
+		// drains its prepared groups. Returns whether it did work.
 		virtual bool DrainPreparedResults() { return false; }
 
 		// Drains the extension's dependency results; runs right after the pipeline
@@ -429,15 +344,10 @@ namespace br::staticimport
 
 		// ---- Host imports ----
 
-		// Whether a host import the extension made for `cell` is still wanted for
-		// `target`. Any pipeline thread.
-		[[nodiscard]] virtual bool IsHostImportCurrent(
-			const StaticStreamTarget& target,
-			const StaticCellKey& cell,
-			const StaticHostPayload& payload) const
+		// Whether a host import the extension made is still wanted. Any pipeline
+		// thread.
+		[[nodiscard]] virtual bool IsHostImportCurrent(const StaticHostPayload& payload) const
 		{
-			(void)target;
-			(void)cell;
 			(void)payload;
 			return false;
 		}
@@ -446,12 +356,11 @@ namespace br::staticimport
 		// extension takes ownership of it.
 		virtual void PublishHostImport(StaticHostImportPublication& publication) { (void)publication; }
 
-		// ---- Frame drain (the thread that publishes stream targets) ----
+		// ---- Frame drain (the thread that ticks the runtime) ----
 
-		// Per-frame work while streaming is active around `target`, after the
-		// pipeline flushed its acknowledgement backlogs and before it publishes
-		// materialized transactions.
-		virtual void DrainFrameWork(const StaticStreamTarget& target) { (void)target; }
+		// Per-frame work while the pipeline runs, after it flushed its
+		// acknowledgement backlogs and before it publishes materialized transactions.
+		virtual void DrainFrameWork() {}
 	};
 
 	// The extension's hold in a per-extension hold list, or null when there is none.

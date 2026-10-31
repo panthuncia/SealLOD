@@ -98,7 +98,10 @@ namespace br::staticimport
 
 		// Drops the batch's imports whose group is no longer desired at their revision
 		// (host imports and host groups ask their owners). Returns whether any remain.
-		static bool TrimPreparedBatchToDesiredGroups( PreparedDirectStaticImportBatch& batch, const StaticDesiredGroupRevisions& desiredGroups, const br::staticimport::StaticStreamTarget& target, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks);
+		bool TrimPreparedBatchToDesiredGroups( PreparedDirectStaticImportBatch& batch, const StaticDesiredGroupRevisions& desiredGroups, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks) const;
+
+		// Every extension's IsHostGroupCurrent for a prepared host-resident group.
+		[[nodiscard]] bool IsHostGroupCurrent(const PreparedDirectStaticImport& prepared) const;
 
 		void CompleteStaticTemplateArtifacts(StaticTemplateRefsPublished packet);
 
@@ -133,7 +136,7 @@ namespace br::staticimport
 
 		void DrainRemovals( const StaticStreamBudget& budget, const StaticDesiredCellArea& currentDesiredCells, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans = nullptr);
 
-		void DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, const StaticDesiredCellArea& currentDesiredCells, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans = nullptr);
+		void DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans = nullptr);
 
 		void LogStaticStreamStatus(const br::staticimport::StaticStreamTarget& target);
 

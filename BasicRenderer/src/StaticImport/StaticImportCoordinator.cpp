@@ -47,13 +47,13 @@ namespace br::staticimport
 		_capacity = &capacity;
 		_pump = &pump;
 		_hooks = std::move(hooks);
-		_state.hostCellBlocks.resize(_extensions.size());
+		_state.hostKeyBlocks.resize(_extensions.size());
 	}
 
 	void StaticImportCoordinator::SetExtensions(std::span<br::staticimport::IStaticImportExtension* const> extensions)
 	{
 		_extensions = extensions;
-		_state.hostCellBlocks.resize(_extensions.size());
+		_state.hostKeyBlocks.resize(_extensions.size());
 	}
 
 	std::size_t StaticImportCoordinator::ExtensionIndex(const br::staticimport::IStaticImportExtension& extension) const
@@ -64,81 +64,58 @@ namespace br::staticimport
 		return _extensions.size();
 	}
 
-	bool StaticImportCoordinator::HasHostCellWaiters(const StaticImportDependencyKey& key) const
+	bool StaticImportCoordinator::HasHostKeyWaiters(const StaticImportDependencyKey& key) const
 	{
-		return std::ranges::any_of(_state.hostCellBlocks, [&](const HostCellBlocks& blocks) {
+		return std::ranges::any_of(_state.hostKeyBlocks, [&](const HostKeyBlocks& blocks) {
 			return blocks.dependencyWaiters.contains(key);
 		});
 	}
 
-	std::size_t StaticImportCoordinator::BlockedHostCellCount() const
+	std::size_t StaticImportCoordinator::BlockedHostKeyCount() const
 	{
 		std::size_t count = 0;
-		for (const auto& blocks : _state.hostCellBlocks) {
-			count += blocks.blockedCells.size();
+		for (const auto& blocks : _state.hostKeyBlocks) {
+			count += blocks.blockedKeys.size();
 		}
 		return count;
 	}
 
-	bool StaticImportCoordinator::IsHostCellBlocked(const br::staticimport::IStaticImportExtension& owner, const StaticCellKey& cell) const
+	bool StaticImportCoordinator::IsHostKeyBlocked(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey) const
 	{
 		const auto index = ExtensionIndex(owner);
-		return index < _state.hostCellBlocks.size() && _state.hostCellBlocks[index].blockedCells.contains(cell);
+		return index < _state.hostKeyBlocks.size() && _state.hostKeyBlocks[index].blockedKeys.contains(hostKey);
 	}
 
-	void StaticImportCoordinator::ClearHostCellBlock(HostCellBlocks& blocks, const StaticCellKey& cell)
+	void StaticImportCoordinator::UnblockHostKey(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey)
 	{
-		if (auto blockedIt = blocks.blockedCells.find(cell); blockedIt != blocks.blockedCells.end()) {
+		const auto index = ExtensionIndex(owner);
+		if (index < _state.hostKeyBlocks.size()) {
+			ClearHostKeyBlock(_state.hostKeyBlocks[index], hostKey);
+		}
+	}
+
+	void StaticImportCoordinator::ClearHostKeyBlock(HostKeyBlocks& blocks, std::uint64_t hostKey)
+	{
+		if (auto blockedIt = blocks.blockedKeys.find(hostKey); blockedIt != blocks.blockedKeys.end()) {
 			for (const auto& dependencyKey : blockedIt->second) {
 				if (auto waitersIt = blocks.dependencyWaiters.find(dependencyKey); waitersIt != blocks.dependencyWaiters.end()) {
-					waitersIt->second.erase(cell);
+					waitersIt->second.erase(hostKey);
 					if (waitersIt->second.empty()) {
 						blocks.dependencyWaiters.erase(waitersIt);
 					}
 				}
 			}
-			blocks.blockedCells.erase(blockedIt);
+			blocks.blockedKeys.erase(blockedIt);
 		}
 	}
 
-	void StaticImportCoordinator::DropHostCell(const StaticCellKey& cell)
-	{
-		for (std::size_t index = 0; index < _extensions.size(); ++index) {
-			ClearHostCellBlock(_state.hostCellBlocks[index], cell);
-			_extensions[index]->OnHostCellDropped(cell);
-		}
-	}
-
-	void StaticImportCoordinator::DropUnwantedHostCells(const StaticImportCameraTarget& target)
-	{
-		std::size_t dropped = 0;
-		for (std::size_t index = 0; index < _extensions.size(); ++index) {
-			auto& blocks = _state.hostCellBlocks[index];
-			auto* extension = _extensions[index];
-			std::vector<StaticCellKey> staleCells;
-			staleCells.reserve(blocks.blockedCells.size());
-			for (const auto& [cell, _] : blocks.blockedCells) {
-				if (!target.valid || !extension->IsHostCellWanted(target.stream, cell)) {
-					staleCells.push_back(cell);
-				}
-			}
-			for (const auto& cell : staleCells) {
-				ClearHostCellBlock(blocks, cell);
-				extension->OnHostCellDropped(cell);
-			}
-			dropped += staleCells.size();
-		}
-		BT_PLOT("SARP.StaticImportCoordinator.StaleBlockedHostCellsCleared",
-			static_cast<int64_t>(dropped));
-	}
-
-	StaticHostCellBlockResult StaticImportCoordinator::BlockHostCell(const br::staticimport::IStaticImportExtension& owner, const StaticCellKey& cell, std::vector<StaticImportDependencyRequest> dependencies)
+	StaticHostKeyBlockResult StaticImportCoordinator::BlockHostKey(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey, std::vector<StaticImportDependencyRequest> dependencies)
 	{
 		const auto index = ExtensionIndex(owner);
-		if (index >= _state.hostCellBlocks.size()) {
-			return StaticHostCellBlockResult::Failed;
+		if (index >= _state.hostKeyBlocks.size()) {
+			return StaticHostKeyBlockResult::Failed;
 		}
-		ClearHostCellBlock(_state.hostCellBlocks[index], cell);
+		ClearHostKeyBlock(_state.hostKeyBlocks[index], hostKey);
 
 		std::unordered_set<StaticImportDependencyKey, StaticImportDependencyKeyHash> remaining;
 		remaining.reserve(dependencies.size());
@@ -148,18 +125,18 @@ namespace br::staticimport
 			}
 			if (IsDependencyFailed(dependency)) {
 				FailDependency(dependency.key);
-				return StaticHostCellBlockResult::Failed;
+				return StaticHostKeyBlockResult::Failed;
 			}
 			remaining.insert(dependency.key);
-			_state.hostCellBlocks[index].dependencyWaiters[dependency.key].insert(cell);
+			_state.hostKeyBlocks[index].dependencyWaiters[dependency.key].insert(hostKey);
 			(void)SubmitDependencyRequest(std::move(dependency));
 		}
 
 		if (remaining.empty()) {
-			return StaticHostCellBlockResult::Ready;
+			return StaticHostKeyBlockResult::Ready;
 		}
-		_state.hostCellBlocks[index].blockedCells.insert_or_assign(cell, std::move(remaining));
-		return StaticHostCellBlockResult::Blocked;
+		_state.hostKeyBlocks[index].blockedKeys.insert_or_assign(hostKey, std::move(remaining));
+		return StaticHostKeyBlockResult::Blocked;
 	}
 
 	std::optional<StaticImportDependencyRequest> StaticImportCoordinator::TakePendingDependency(const StaticImportDependencyKey& key)
@@ -178,7 +155,7 @@ namespace br::staticimport
 			ResolveDependency(key);
 		} else if (status == StaticImportDependencyResultStatus::Failed) {
 			FailDependency(key);
-		} else if (HasHostCellWaiters(key) ||
+		} else if (HasHostKeyWaiters(key) ||
 			_state.graphDependencyWaiters.contains(key)) {
 			_state.delayedDependencyRequests.insert_or_assign(key, DelayedStaticImportDependencyRequest{
 				.request = std::move(request),
@@ -213,12 +190,17 @@ namespace br::staticimport
 				ProcessTarget(target);
 				didWork = true;
 			}
+			bool drainedExtensionWork = false;
 			for (auto* extension : _extensions) {
-				if (_state.latestTarget.valid && extension->HasPendingCoordinatorWork()) {
+				if (extension->HasPendingCoordinatorWork()) {
 					std::lock_guard publicationLock(_importState->staticImportPublicationWorkerMutex);
-					extension->DrainCoordinatorWork(_state.latestTarget.stream);
-					didWork = true;
+					extension->DrainCoordinatorWork();
+					drainedExtensionWork = true;
 				}
+			}
+			if (drainedExtensionWork) {
+				DropStaleHostGroups(false);
+				didWork = true;
 			}
 			didWork = DrainGroupAcks() || didWork;
 			didWork = DrainTemplateRefs() || didWork;
@@ -255,9 +237,9 @@ namespace br::staticimport
 				_state.readyGroups.empty() && _state.groupSuspensions.empty() &&
 				_state.pendingDependencyRequests.empty() && _state.delayedDependencyRequests.empty() &&
 				std::ranges::all_of(_extensions, [](const auto* extension) {
-					return extension->PendingHostCellCount() == 0;
+					return extension->PendingHostKeyCount() == 0;
 				}) &&
-				BlockedHostCellCount() == 0;
+				BlockedHostKeyCount() == 0;
 			PublishStats(_state.pendingGroups.empty() ||
 				(quiescent && !_importState->staticImportCoordinatorPublishedQuiescent));
 			_importState->staticImportCoordinatorPublishedQuiescent = quiescent;
@@ -344,20 +326,38 @@ namespace br::staticimport
 		return true;
 	}
 
-	bool StaticImportCoordinator::IsHostGroupCurrent(const StaticCellKey& cell, std::uint64_t residencyGeneration) const
+	bool StaticImportCoordinator::IsHostGroupCurrent(std::uint64_t groupID, std::uint64_t residencyGeneration) const
 	{
 		return std::ranges::all_of(_extensions, [&](const auto* extension) {
-			return extension->IsHostGroupCurrent(_state.latestTarget.stream, cell, residencyGeneration);
+			return extension->IsHostGroupCurrent(groupID, residencyGeneration);
 		});
+	}
+
+	void StaticImportCoordinator::DropStaleHostGroups(bool requeueLive)
+	{
+		std::vector<std::uint64_t> staleGroups;
+		for (const auto& [groupID, record] : _state.pendingGroups) {
+			if (!record) continue;
+			const auto& group = record->descriptor;
+			if (group.residencyClass == StaticImportResidencyClass::HostGroup) {
+				if (!IsGroupLive(*record)) {
+					staleGroups.push_back(groupID);
+				} else if (requeueLive) {
+					(void)QueueGroupIfRunnable(groupID);
+				}
+			}
+		}
+		for (const auto groupID : staleGroups) {
+			(void)RemoveGroup(groupID);
+			++_state.stats.staleGroupsDropped;
+		}
 	}
 
 	bool StaticImportCoordinator::IsGroupLive(const StaticGroupLifecycleRecord& record) const
 	{
 		const auto& group = record.descriptor;
 		if (group.residencyClass == StaticImportResidencyClass::HostGroup) {
-			return _state.latestTarget.valid &&
-				_state.latestTarget.stream.interiorCellFormID == 0 &&
-				IsHostGroupCurrent(group.cellKey, group.residencyGeneration);
+			return IsHostGroupCurrent(record.groupID, group.residencyGeneration);
 		}
 		// A cell-static group is live while its add is the desired one. The
 		// revision replaces the old cell-membership test: a group whose cell was
@@ -369,9 +369,7 @@ namespace br::staticimport
 	bool StaticImportCoordinator::IsPreparedLive(const PreparedDirectStaticImport& prepared) const
 	{
 		if (prepared.residencyClass == StaticImportResidencyClass::HostGroup) {
-			return _state.latestTarget.valid &&
-				_state.latestTarget.stream.interiorCellFormID == 0 &&
-				IsHostGroupCurrent(prepared.cellKey, prepared.residencyGeneration);
+			return IsHostGroupCurrent(prepared.groupID, prepared.residencyGeneration);
 		}
 		const auto desired = _state.desiredGroups.find(prepared.groupID);
 		return desired != _state.desiredGroups.end() && desired->second.revision == prepared.groupRevision;
@@ -583,13 +581,13 @@ namespace br::staticimport
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::ResolveDependency");
 		_state.pendingDependencyRequests.erase(key);
 		_state.delayedDependencyRequests.erase(key);
-		std::vector<std::vector<StaticCellKey>> hostWaiters(_state.hostCellBlocks.size());
-		for (std::size_t index = 0; index < _state.hostCellBlocks.size(); ++index) {
-			auto& blocks = _state.hostCellBlocks[index];
+		std::vector<std::vector<std::uint64_t>> hostWaiters(_state.hostKeyBlocks.size());
+		for (std::size_t index = 0; index < _state.hostKeyBlocks.size(); ++index) {
+			auto& blocks = _state.hostKeyBlocks[index];
 			if (auto waitersIt = blocks.dependencyWaiters.find(key); waitersIt != blocks.dependencyWaiters.end()) {
 				hostWaiters[index].reserve(waitersIt->second.size());
-				for (const auto& cellKey : waitersIt->second) {
-					hostWaiters[index].push_back(cellKey);
+				for (const auto hostKey : waitersIt->second) {
+					hostWaiters[index].push_back(hostKey);
 				}
 				blocks.dependencyWaiters.erase(waitersIt);
 			}
@@ -614,22 +612,22 @@ namespace br::staticimport
 			}
 		}
 
-		for (std::size_t index = 0; index < _state.hostCellBlocks.size(); ++index) {
-			auto& blocks = _state.hostCellBlocks[index];
-			std::vector<StaticCellKey> unblocked;
-			for (const auto& cellKey : hostWaiters[index]) {
-				auto blockedIt = blocks.blockedCells.find(cellKey);
-				if (blockedIt == blocks.blockedCells.end()) {
+		for (std::size_t index = 0; index < _state.hostKeyBlocks.size(); ++index) {
+			auto& blocks = _state.hostKeyBlocks[index];
+			std::vector<std::uint64_t> unblocked;
+			for (const auto hostKey : hostWaiters[index]) {
+				auto blockedIt = blocks.blockedKeys.find(hostKey);
+				if (blockedIt == blocks.blockedKeys.end()) {
 					continue;
 				}
 				blockedIt->second.erase(key);
 				if (!blockedIt->second.empty()) {
 					continue;
 				}
-				blocks.blockedCells.erase(blockedIt);
-				unblocked.push_back(cellKey);
+				blocks.blockedKeys.erase(blockedIt);
+				unblocked.push_back(hostKey);
 			}
-			_extensions[index]->OnHostCellsUnblocked(unblocked);
+			_extensions[index]->OnHostKeysUnblocked(unblocked);
 		}
 	}
 
@@ -638,12 +636,12 @@ namespace br::staticimport
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::FailDependency");
 		_state.pendingDependencyRequests.erase(key);
 		_state.delayedDependencyRequests.erase(key);
-		for (std::size_t index = 0; index < _state.hostCellBlocks.size(); ++index) {
-			auto& blocks = _state.hostCellBlocks[index];
+		for (std::size_t index = 0; index < _state.hostKeyBlocks.size(); ++index) {
+			auto& blocks = _state.hostKeyBlocks[index];
 			if (auto waitersIt = blocks.dependencyWaiters.find(key); waitersIt != blocks.dependencyWaiters.end()) {
-				for (const auto& cellKey : waitersIt->second) {
-					blocks.blockedCells.erase(cellKey);
-					_extensions[index]->OnHostCellDropped(cellKey);
+				for (const auto hostKey : waitersIt->second) {
+					blocks.blockedKeys.erase(hostKey);
+					_extensions[index]->OnHostKeyDropped(hostKey);
 				}
 				blocks.dependencyWaiters.erase(waitersIt);
 			}
@@ -697,7 +695,7 @@ namespace br::staticimport
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::PumpDueDependencyRequests");
 		std::size_t submitted = 0;
 		for (auto& request : dueRequests) {
-			if (!HasHostCellWaiters(request.key) &&
+			if (!HasHostKeyWaiters(request.key) &&
 				!_state.graphDependencyWaiters.contains(request.key)) {
 				continue;
 			}
@@ -807,8 +805,8 @@ namespace br::staticimport
 			blockedTemplates += hasTemplate ? 1 : 0;
 			blockedShaderVariants += hasShaderVariant ? 1 : 0;
 		}
-		const auto blockedHostCells = BlockedHostCellCount();
-		blockedAssets += blockedHostCells;
+		const auto blockedHostKeys = BlockedHostKeyCount();
+		blockedAssets += blockedHostKeys;
 		_state.stats.groupsWaitingAssets = blockedAssets;
 		_state.stats.groupsWaitingVariants = blockedVariants;
 		_state.stats.groupsWaitingTemplates = blockedTemplates;
@@ -819,11 +817,11 @@ namespace br::staticimport
 		BT_PLOT("SARP.StaticImportCoordinator.BlockedShaderVariantGroups", static_cast<int64_t>(blockedShaderVariants));
 		BT_PLOT("SARP.StaticImportCoordinator.GraphDependencyWaiterKeys", static_cast<int64_t>(_state.graphDependencyWaiters.size()));
 		std::size_t hostDependencyWaiterKeys = 0;
-		for (const auto& blocks : _state.hostCellBlocks) {
+		for (const auto& blocks : _state.hostKeyBlocks) {
 			hostDependencyWaiterKeys += blocks.dependencyWaiters.size();
 		}
 		BT_PLOT("SARP.StaticImportCoordinator.HostDependencyWaiterKeys", static_cast<int64_t>(hostDependencyWaiterKeys));
-		BT_PLOT("SARP.StaticImportCoordinator.BlockedHostCells", static_cast<int64_t>(blockedHostCells));
+		BT_PLOT("SARP.StaticImportCoordinator.BlockedHostKeys", static_cast<int64_t>(blockedHostKeys));
 		BT_PLOT("SARP.StaticImportCoordinator.PendingDependencyRequests", static_cast<int64_t>(_state.pendingDependencyRequests.size()));
 		BT_PLOT("SARP.StaticImportCoordinator.DelayedDependencyRequests", static_cast<int64_t>(_state.delayedDependencyRequests.size()));
 	}
@@ -837,20 +835,20 @@ namespace br::staticimport
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::PublishStats");
 		RefreshBlockedStats();
 		// Not on `force`: stats are forced on every drain once no group is pending,
-		// and blocked host cells can outlive the load, so forcing this dump wrote
+		// and blocked host keys can outlive the load, so forcing this dump wrote
 		// thousands of lines a second for the rest of the run.
-		if (_importState->benchmarkDiagnosticsEnabled && BlockedHostCellCount() != 0 &&
-			(_state.lastBlockedHostCellDiagnostic == std::chrono::steady_clock::time_point{} ||
-			 now - _state.lastBlockedHostCellDiagnostic >= std::chrono::seconds(10))) {
-			_state.lastBlockedHostCellDiagnostic = now;
+		if (_importState->benchmarkDiagnosticsEnabled && BlockedHostKeyCount() != 0 &&
+			(_state.lastBlockedHostKeyDiagnostic == std::chrono::steady_clock::time_point{} ||
+			 now - _state.lastBlockedHostKeyDiagnostic >= std::chrono::seconds(10))) {
+			_state.lastBlockedHostKeyDiagnostic = now;
 			std::size_t emitted = 0;
-			for (std::size_t index = 0; index < _state.hostCellBlocks.size() && emitted < 32; ++index) {
-				const auto& blocks = _state.hostCellBlocks[index];
-				for (const auto& [cell, dependencies] : blocks.blockedCells) {
+			for (std::size_t index = 0; index < _state.hostKeyBlocks.size() && emitted < 32; ++index) {
+				const auto& blocks = _state.hostKeyBlocks[index];
+				for (const auto& [hostKey, dependencies] : blocks.blockedKeys) {
 					for (const auto& dependency : dependencies) {
 						spdlog::info(
-							"SARP blocked host cell dependency: extension={} world={:08X} cell=({}, {}) kind={} key='{}' pending={} delayed={} waiter_cells={}",
-							index, cell.worldFormID, cell.cellX, cell.cellY,
+							"SARP blocked host key dependency: extension={} host_key=0x{:016X} kind={} key='{}' pending={} delayed={} waiter_keys={}",
+							index, hostKey,
 							static_cast<unsigned>(dependency.kind), dependency.stringKey,
 							_state.pendingDependencyRequests.contains(dependency),
 							_state.delayedDependencyRequests.contains(dependency),
@@ -949,9 +947,9 @@ namespace br::staticimport
 			stats.retirementsAwaitingPublication = _importState->staticRetirementsAwaitingPublication.size();
 		}
 		stats.retirementCompletionsQueued = _bus->staticRetirementCompletions.Size();
-		stats.pendingHostCells = BlockedHostCellCount();
+		stats.pendingHostKeys = BlockedHostKeyCount();
 		for (const auto* extension : _extensions) {
-			stats.pendingHostCells += extension->PendingHostCellCount();
+			stats.pendingHostKeys += extension->PendingHostKeyCount();
 		}
 		stats.pendingGroupDiagnostics.clear();
 		// A single failed variant can fan out to hundreds of placement groups at
@@ -1096,21 +1094,6 @@ namespace br::staticimport
 			return;
 		}
 		_state.latestTarget = target;
-		{
-			// Extension target reconciliation (e.g. host-group fallbacks) belongs to
-			// the same serialized ownership lane as static-scene membership.  Camera
-			// publication is the only main-thread input; repeated coordinator ticks
-			// do not rescan host groups.
-			std::lock_guard publicationLock(_importState->staticImportPublicationWorkerMutex);
-			for (auto* extension : _extensions) {
-				extension->ProcessStreamTarget(target.stream);
-			}
-		}
-		// Host-only cells (e.g. grass) are not necessarily present in
-		// activeCellGroups, and camera updates within one static cell take the fast
-		// path below. Retire obsolete host dependency waiters before that fast path
-		// so requests captured along the benchmark flight cannot strand quiescence.
-		DropUnwantedHostCells(target);
 
 		std::vector<StaticCellKey> enteredCells;
 		std::vector<StaticCellKey> leftCells;
@@ -1159,22 +1142,7 @@ namespace br::staticimport
 				_state.lastKey = target.key;
 			}
 		}
-		std::vector<std::uint64_t> staleWorldLodGroups;
-		for (const auto& [groupID, record] : _state.pendingGroups) {
-			if (!record) continue;
-			const auto& group = record->descriptor;
-			if (group.residencyClass == StaticImportResidencyClass::HostGroup) {
-				if (IsGroupLive(*record)) {
-					(void)QueueGroupIfRunnable(groupID);
-				} else {
-					staleWorldLodGroups.push_back(groupID);
-				}
-			}
-		}
-		for (const auto groupID : staleWorldLodGroups) {
-			(void)RemoveGroup(groupID);
-			++_state.stats.staleGroupsDropped;
-		}
+		DropStaleHostGroups(true);
 
 		if (!enteredCells.empty() || !leftCells.empty() || !target.valid) {
 			MarkStaticImportCoordinatorLivenessChanged();
@@ -1236,7 +1204,6 @@ namespace br::staticimport
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::QueueLeftCellRemovals");
 			// A left cell removes its groups through the flat intake, farthest cell first.
 			for (const auto& cell : leftCells) {
-				DropHostCell(cell);
 				if (auto groupsIt = _state.activeCellGroups.find(cell); groupsIt != _state.activeCellGroups.end()) {
 					const auto groupIDs = std::move(groupsIt->second);
 					_state.activeCellGroups.erase(groupsIt);
@@ -1875,7 +1842,7 @@ namespace br::staticimport
 				for (const auto& ownership : ownershipDelta.added) {
 					if (ownership && ownership->residencyClass == StaticImportResidencyClass::CellStatic) {
 						for (std::size_t extensionIndex = 0; extensionIndex < _extensions.size(); ++extensionIndex) {
-							_extensions[extensionIndex]->OnGroupOwnershipAdded(ownership->groupID, ownership->cellKey,
+							_extensions[extensionIndex]->OnGroupOwnershipAdded(ownership->groupID,
 								br::staticimport::StaticGroupHoldAt(ownership->extensionHolds, extensionIndex));
 						}
 					}
@@ -2333,18 +2300,6 @@ namespace br::staticimport
 				}
 				continue;
 			}
-			if (!prepared.worldspaceResident) {
-				for (auto* extension : _extensions) {
-					extension->OnCellPrepared(prepared.key, prepared.generation,
-						static_cast<std::uint32_t>(prepared.lifecycleGroups.size()));
-				}
-			}
-			for (const auto& hostPrepare : prepared.hostCellPrepares) {
-				if (hostPrepare.extension < _extensions.size()) {
-					_extensions[hostPrepare.extension]->OnCellHostPrepared(
-						prepared.key, prepared.generation, hostPrepare.value);
-				}
-			}
 			// The cell layer keeps which groups each active cell added, so leaving the
 			// cell can remove them. A group id the cell already added keeps its first
 			// record.
@@ -2398,20 +2353,6 @@ namespace br::staticimport
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainGroupChanges");
 		bool added = false;
 		for (const auto& change : changes) {
-			if (change.cellChange == StaticHostCellChange::Prepared) {
-				for (auto* extension : _extensions) {
-					extension->OnCellPrepared(change.cell, change.cellGeneration,
-						static_cast<std::uint32_t>(change.adds.size()));
-				}
-				for (const auto& hostPrepare : change.hostCellPrepares) {
-					if (hostPrepare.extension < _extensions.size()) {
-						_extensions[hostPrepare.extension]->OnCellHostPrepared(
-							change.cell, change.cellGeneration, hostPrepare.value);
-					}
-				}
-			} else if (change.cellChange == StaticHostCellChange::Left) {
-				DropHostCell(change.cell);
-			}
 			ApplyGroupChanges(change.adds, change.removes);
 			added = added || !change.adds.empty();
 		}
@@ -2589,7 +2530,7 @@ namespace br::staticimport
 				FailDependency(key);
 			} else if (IsDependencyResolved(dependency)) {
 				ResolveDependency(key);
-			} else if (HasHostCellWaiters(key) ||
+			} else if (HasHostKeyWaiters(key) ||
 				_state.graphDependencyWaiters.contains(key)) {
 				_state.delayedDependencyRequests.insert_or_assign(key, DelayedStaticImportDependencyRequest{
 					.request = std::move(dependency),
@@ -2620,7 +2561,7 @@ namespace br::staticimport
 				FailDependency(key);
 			} else if (IsDependencyResolved(dependency)) {
 				ResolveDependency(key);
-			} else if (HasHostCellWaiters(key) ||
+			} else if (HasHostKeyWaiters(key) ||
 				_state.graphDependencyWaiters.contains(key)) {
 				_state.delayedDependencyRequests.insert_or_assign(key, DelayedStaticImportDependencyRequest{
 					.request = std::move(dependency),
@@ -2649,7 +2590,7 @@ namespace br::staticimport
 				ResolveDependency(key);
 			} else if (result.status == StaticImportDependencyResultStatus::Failed) {
 				FailDependency(key);
-			} else if (HasHostCellWaiters(key) ||
+			} else if (HasHostKeyWaiters(key) ||
 				_state.graphDependencyWaiters.contains(key)) {
 				_state.delayedDependencyRequests.insert_or_assign(key, DelayedStaticImportDependencyRequest{
 					.request = std::move(dependency),
@@ -2990,8 +2931,7 @@ namespace br::staticimport
 				bool ready = false;
 				bool ticketMatches = false;
 				if (prepared.hostOwner) {
-					groupValid = _state.latestTarget.valid &&
-						prepared.hostOwner->IsHostImportCurrent(_state.latestTarget.stream, prepared.cellKey, prepared.hostPayload);
+					groupValid = prepared.hostOwner->IsHostImportCurrent(prepared.hostPayload);
 				} else {
 					const auto pendingIt = _state.pendingGroups.find(prepared.groupID);
 					const bool pending = pendingIt != _state.pendingGroups.end();

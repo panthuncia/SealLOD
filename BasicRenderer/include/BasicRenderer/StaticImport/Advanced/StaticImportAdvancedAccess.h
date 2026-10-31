@@ -3,14 +3,14 @@
 // The wider pipeline surface for extensions that run import work of their own.
 //
 // IStaticImportPipelineAccess covers what any extension needs. An extension that
-// blocks its cells on pipeline dependencies and submits prepared imports also needs
+// blocks host keys of its own on pipeline dependencies and submits prepared imports also needs
 // the pipeline's own dependency requests and prepared batches (the Advanced/ message
 // vocabulary), so it takes this wider surface. Each operation is still a single,
 // explicit pipeline step; nothing here exposes the work bus or the coordinator state.
 //
 // The coordinator operations are valid only on the coordinator thread, i.e. inside an
-// extension's coordinator hooks (host dependency and host cell hooks, coordinator
-// drains, OnCellHostPrepared).
+// extension's coordinator hooks (host dependency and host key hooks, coordinator
+// drains).
 
 #include <chrono>
 #include <optional>
@@ -22,31 +22,31 @@
 
 namespace br::staticimport
 {
-	enum class StaticHostCellBlockResult : std::uint8_t
+	enum class StaticHostKeyBlockResult : std::uint8_t
 	{
-		Failed,  // A dependency failed; its waiters were failed with it and the cell is not blocked.
-		Ready,   // Every dependency is already resolved; the cell is not blocked.
-		Blocked  // The cell waits on the remaining dependencies (see OnHostCellsUnblocked).
+		Failed,  // A dependency failed; its waiters were failed with it and the key is not blocked.
+		Ready,   // Every dependency is already resolved; the key is not blocked.
+		Blocked  // The key waits on the remaining dependencies (see OnHostKeysUnblocked).
 	};
 
 	class IStaticImportAdvancedAccess : public br::staticimport::IStaticImportPipelineAccess
 	{
 	public:
-		// The coordinator's latest accepted target.
-		[[nodiscard]] virtual const StaticImportCameraTarget& LatestTarget() const = 0;
-
 		// The coordinator's current template snapshot, for jobs that look templates up
 		// on workers.
 		[[nodiscard]] virtual StaticTemplateRefSnapshot TemplateSnapshot() const = 0;
 
-		// Blocks `owner`'s `cell` on the unresolved ones among `dependencies`,
+		// Blocks `owner`'s `hostKey` on the unresolved ones among `dependencies`,
 		// replacing any block it had. Resolved dependencies are skipped and the others
 		// requested. The first failed one is failed for all of its waiters and ends the
 		// call with Failed.
-		virtual StaticHostCellBlockResult BlockHostCell(
+		virtual StaticHostKeyBlockResult BlockHostKey(
 			br::staticimport::IStaticImportExtension& owner,
-			const StaticCellKey& cell,
+			std::uint64_t hostKey,
 			std::vector<StaticImportDependencyRequest> dependencies) = 0;
+
+		// Drops `owner`'s block on `hostKey`, if it has one; no hook runs for it.
+		virtual void UnblockHostKey(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey) = 0;
 
 		// Removes a dependency from the pending set and returns it; empty when it is
 		// not pending.
@@ -60,8 +60,8 @@ namespace br::staticimport
 			StaticImportDependencyResultStatus status,
 			std::chrono::steady_clock::duration retryDelay) = 0;
 
-		// Queues a batch of host imports for publication under the latest target's
-		// generation and a fresh publish ticket.
+		// Queues a batch of host imports for publication under the coordinator's
+		// current generation and a fresh publish ticket.
 		virtual void SubmitHostImportBatch(PreparedDirectStaticImportBatch batch) = 0;
 
 		// Whether the host asked for extra benchmark diagnostics.

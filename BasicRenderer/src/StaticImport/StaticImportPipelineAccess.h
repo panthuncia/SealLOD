@@ -20,7 +20,6 @@
 #include "StaticImport/StaticImportCoordinator.h"
 #include "StaticImport/StaticImportDrainScheduler.h"
 #include "StaticImport/StaticImportPipelineState.h"
-#include "StaticImport/StaticImportStreamingPump.h"
 #include "StaticImport/StaticImportWorkBus.h"
 
 namespace br::staticimport
@@ -28,15 +27,14 @@ namespace br::staticimport
 	class StaticImportPipelineAccess final : public IStaticImportAdvancedAccess
 	{
 	public:
-		// The coordinator and the pump are only used once extensions run, so they may
-		// still be under construction when this object is built.
-		StaticImportPipelineAccess(StaticImportShared& shared, StaticImportWorkBus& bus, StaticImportPipelineState& importState, StaticImportDrainScheduler& drains, StaticImportCoordinator& coordinator, StaticImportStreamingPump& pump)
+		// The coordinator is only used once extensions run, so it may still be under
+		// construction when this object is built.
+		StaticImportPipelineAccess(StaticImportShared& shared, StaticImportWorkBus& bus, StaticImportPipelineState& importState, StaticImportDrainScheduler& drains, StaticImportCoordinator& coordinator)
 			: _shared(std::addressof(shared))
 			, _bus(std::addressof(bus))
 			, _importState(std::addressof(importState))
 			, _drains(std::addressof(drains))
 			, _coordinator(std::addressof(coordinator))
-			, _pump(std::addressof(pump))
 		{
 		}
 
@@ -64,8 +62,6 @@ namespace br::staticimport
 		void SubmitHostGroup(br::staticimport::StaticHostGroupRequest request) override
 		{
 			PreparedStaticCell prepared;
-			prepared.key = request.cell;
-			prepared.generation = _importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire);
 			prepared.worldspaceResident = true;
 			PreparedStaticGroup group;
 			group.groupID = request.groupID;
@@ -77,7 +73,7 @@ namespace br::staticimport
 			group.residencyGeneration = request.residencyGeneration;
 			prepared.groups.push_back(std::move(group));
 			// The coordinator seals and integrates the record, as it does for prepared cells.
-			BuildPreparedStaticCellLifecycle(prepared);
+			BuildPreparedStaticCellLifecycle(prepared, request.batchKey != 0 ? request.batchKey : request.groupID);
 			// Host groups also produce coordinator work. A direct queue push can
 			// strand these results once ordinary cell preparation has gone idle.
 			(void)_drains->PushBlocking(_bus->staticImportPreparedCellResults, std::move(prepared));
@@ -86,11 +82,6 @@ namespace br::staticimport
 		void WakeCoordinator() override
 		{
 			_drains->ScheduleCoordinatorDrain();
-		}
-
-		[[nodiscard]] br::staticimport::StaticDesiredCellArea DesiredCellArea(const br::staticimport::StaticStreamTarget& target) const override
-		{
-			return _pump->BuildDesiredStaticCells(target);
 		}
 
 		void RecordWorkloadCount(const DrawWorkloadKey& workload, std::uint32_t span) override
@@ -122,11 +113,6 @@ namespace br::staticimport
 			return _shared->staticImportServiceStop.load(std::memory_order_acquire);
 		}
 
-		[[nodiscard]] std::uint64_t StreamTargetGeneration() const override
-		{
-			return _importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire);
-		}
-
 		void ClaimHostWorkSource(br::staticimport::IStaticImportExtension& owner, br::staticimport::StaticHostWorkSource source, const char* taskName) override
 		{
 			_hostWorkOwners[static_cast<std::size_t>(source)] = std::addressof(owner);
@@ -139,14 +125,9 @@ namespace br::staticimport
 			_drains->ScheduleWorkerDrains();
 		}
 
-		[[nodiscard]] bool IsHostCellBlocked(const br::staticimport::IStaticImportExtension& owner, const StaticCellKey& cell) const override
+		[[nodiscard]] bool IsHostKeyBlocked(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey) const override
 		{
-			return _coordinator->IsHostCellBlocked(owner, cell);
-		}
-
-		[[nodiscard]] const StaticImportCameraTarget& LatestTarget() const override
-		{
-			return _coordinator->LatestTarget();
+			return _coordinator->IsHostKeyBlocked(owner, hostKey);
 		}
 
 		[[nodiscard]] StaticTemplateRefSnapshot TemplateSnapshot() const override
@@ -154,12 +135,17 @@ namespace br::staticimport
 			return _coordinator->TemplateSnapshot();
 		}
 
-		StaticHostCellBlockResult BlockHostCell(
+		StaticHostKeyBlockResult BlockHostKey(
 			br::staticimport::IStaticImportExtension& owner,
-			const StaticCellKey& cell,
+			std::uint64_t hostKey,
 			std::vector<StaticImportDependencyRequest> dependencies) override
 		{
-			return _coordinator->BlockHostCell(owner, cell, std::move(dependencies));
+			return _coordinator->BlockHostKey(owner, hostKey, std::move(dependencies));
+		}
+
+		void UnblockHostKey(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey) override
+		{
+			_coordinator->UnblockHostKey(owner, hostKey);
 		}
 
 		std::optional<StaticImportDependencyRequest> TakePendingDependency(const StaticImportDependencyKey& key) override
@@ -191,7 +177,6 @@ namespace br::staticimport
 		StaticImportPipelineState* _importState;
 		StaticImportDrainScheduler* _drains;
 		StaticImportCoordinator* _coordinator;
-		StaticImportStreamingPump* _pump;
 		std::array<br::staticimport::IStaticImportExtension*, static_cast<std::size_t>(br::staticimport::StaticHostWorkSource::Count)> _hostWorkOwners{};
 	};
 }

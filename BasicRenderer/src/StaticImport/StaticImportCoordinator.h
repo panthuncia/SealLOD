@@ -59,13 +59,13 @@ namespace br::staticimport
 
 		// ---- Extension operations (coordinator thread; see IStaticImportAdvancedAccess) ----
 
-		[[nodiscard]] const StaticImportCameraTarget& LatestTarget() const { return _state.latestTarget; }
-
 		[[nodiscard]] StaticTemplateRefSnapshot TemplateSnapshot() const { return _state.templateSnapshot; }
 
-		StaticHostCellBlockResult BlockHostCell(const br::staticimport::IStaticImportExtension& owner, const StaticCellKey& cell, std::vector<StaticImportDependencyRequest> dependencies);
+		StaticHostKeyBlockResult BlockHostKey(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey, std::vector<StaticImportDependencyRequest> dependencies);
 
-		[[nodiscard]] bool IsHostCellBlocked(const br::staticimport::IStaticImportExtension& owner, const StaticCellKey& cell) const;
+		void UnblockHostKey(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey);
+
+		[[nodiscard]] bool IsHostKeyBlocked(const br::staticimport::IStaticImportExtension& owner, std::uint64_t hostKey) const;
 
 		std::optional<StaticImportDependencyRequest> TakePendingDependency(const StaticImportDependencyKey& key);
 
@@ -78,22 +78,17 @@ namespace br::staticimport
 		void SetExtensions(std::span<br::staticimport::IStaticImportExtension* const> extensions);
 
 	private:
-		using HostCellBlocks = StaticImportCoordinatorState::HostCellBlocks;
+		using HostKeyBlocks = StaticImportCoordinatorState::HostKeyBlocks;
 
 		[[nodiscard]] std::size_t ExtensionIndex(const br::staticimport::IStaticImportExtension& extension) const;
 
-		static void ClearHostCellBlock(HostCellBlocks& blocks, const StaticCellKey& cell);
+		static void ClearHostKeyBlock(HostKeyBlocks& blocks, std::uint64_t hostKey);
 
-		// Whether any extension's blocked cell waits on `key`.
-		[[nodiscard]] bool HasHostCellWaiters(const StaticImportDependencyKey& key) const;
+		// Whether any extension's blocked host key waits on `key`.
+		[[nodiscard]] bool HasHostKeyWaiters(const StaticImportDependencyKey& key) const;
 
-		[[nodiscard]] std::size_t BlockedHostCellCount() const;
+		[[nodiscard]] std::size_t BlockedHostKeyCount() const;
 
-		// Drops every extension's coordinator state for `cell` (left the desired area).
-		void DropHostCell(const StaticCellKey& cell);
-
-		// Drops blocked host cells their extensions no longer want for `target`.
-		void DropUnwantedHostCells(const StaticImportCameraTarget& target);
 		template <class Fn> void ForEachRealStaticCellInAreaDifference( const StaticDesiredCellArea& area, const StaticDesiredCellArea& excluded, Fn&& fn) const
 		{
 			if (StaticDesiredCellAreaEquals(area, excluded)) {
@@ -127,8 +122,12 @@ namespace br::staticimport
 			_importState->staticImportCoordinatorLivenessEpoch.store(epoch, std::memory_order_release);
 		}
 
-		// Every extension's IsHostGroupCurrent for the latest target.
-		bool IsHostGroupCurrent(const StaticCellKey& cell, std::uint64_t residencyGeneration) const;
+		// Every extension's IsHostGroupCurrent.
+		bool IsHostGroupCurrent(std::uint64_t groupID, std::uint64_t residencyGeneration) const;
+
+		// Removes pending host-resident groups that are no longer current, and with
+		// `requeueLive` queues the current ones again.
+		void DropStaleHostGroups(bool requeueLive);
 
 		bool IsGroupLive(const StaticGroupLifecycleRecord& record) const;
 
@@ -188,11 +187,9 @@ namespace br::staticimport
 
 		bool DrainPreparedCells();
 
-		// Host group changes (StaticImportRuntime::AddOrUpdateGroups / RemoveGroups and
-		// the host cell operations), through ApplyGroupChanges in submission order. A
-		// host cell change first runs the extension cell hooks the coordinator's own
-		// cell path runs (OnCellPrepared / OnCellHostPrepared, DropHostCell). Taken
-		// only once the workers started.
+		// Host group changes (StaticImportRuntime::AddOrUpdateGroups / RemoveGroups /
+		// AddPreparedCell), through ApplyGroupChanges in submission order. Taken only
+		// once the workers started.
 		bool DrainGroupChanges();
 
 		[[nodiscard]] bool HasPendingGroupChanges() const
