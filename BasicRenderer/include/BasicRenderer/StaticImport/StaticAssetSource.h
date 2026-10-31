@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <BasicRenderer/Assets/RenderableAsset.h>
+#include <BasicRenderer/StaticImport/StaticSceneRecipe.h>
 
 namespace br::staticimport
 {
@@ -87,5 +88,43 @@ namespace br::staticimport
 
 		// The reason the asset can never be imported as static geometry, if known.
 		virtual std::optional<std::string> KnownUnsupportedStaticImportReason(std::string_view assetKey) const = 0;
+
+		// ---- Material variants ----
+		//
+		// The pipeline makes material variants from the material overrides of static
+		// scene recipes; the host stores the overrides in its own form. The defaults
+		// carry no overrides, for a host without material variants.
+
+		// The variant of `hash` with `overrides` (moved from an owning recipe group).
+		[[nodiscard]] virtual StaticMaterialVariant MakeMaterialVariant(
+			std::uint64_t hash,
+			std::vector<recipe::MaterialOverride>&& overrides) const
+		{
+			(void)overrides;
+			return StaticMaterialVariant{ .hash = hash };
+		}
+
+		// The variant of a mapped recipe group; its overrides are copied out of `recipe`.
+		[[nodiscard]] virtual StaticMaterialVariant MakeMaterialVariant(
+			const recipe::CellRecipeView& recipe,
+			const recipe::MappedGroup& group) const
+		{
+			(void)recipe;
+			return StaticMaterialVariant{ .hash = group.materialOverrideHash };
+		}
+
+		// The host's content hash of a variant's overrides, which keys the variant's
+		// material-variant dependency.
+		[[nodiscard]] virtual std::uint64_t MaterialVariantContentHash(const StaticMaterialVariant& variant) const
+		{
+			return variant.hash;
+		}
+
+		// How many overrides a variant carries (telemetry).
+		[[nodiscard]] virtual std::size_t MaterialVariantOverrideCount(const StaticMaterialVariant& variant) const
+		{
+			(void)variant;
+			return 0;
+		}
 	};
 }
