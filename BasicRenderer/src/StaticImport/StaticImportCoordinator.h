@@ -188,9 +188,11 @@ namespace br::staticimport
 
 		bool DrainPreparedCells();
 
-		// Host group changes (StaticImportRuntime::AddOrUpdateGroups / RemoveGroups),
-		// through ApplyGroupChanges in submission order. Taken only once the workers
-		// started.
+		// Host group changes (StaticImportRuntime::AddOrUpdateGroups / RemoveGroups and
+		// the host cell operations), through ApplyGroupChanges in submission order. A
+		// host cell change first runs the extension cell hooks the coordinator's own
+		// cell path runs (OnCellPrepared / OnCellHostPrepared, DropHostCell). Taken
+		// only once the workers started.
 		bool DrainGroupChanges();
 
 		[[nodiscard]] bool HasPendingGroupChanges() const

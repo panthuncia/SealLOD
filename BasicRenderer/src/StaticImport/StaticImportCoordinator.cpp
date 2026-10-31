@@ -2395,6 +2395,20 @@ namespace br::staticimport
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainGroupChanges");
 		bool added = false;
 		for (const auto& change : changes) {
+			if (change.cellChange == StaticHostCellChange::Prepared) {
+				for (auto* extension : _extensions) {
+					extension->OnCellPrepared(change.cell, change.cellGeneration,
+						static_cast<std::uint32_t>(change.adds.size()));
+				}
+				for (const auto& hostPrepare : change.hostCellPrepares) {
+					if (hostPrepare.extension < _extensions.size()) {
+						_extensions[hostPrepare.extension]->OnCellHostPrepared(
+							change.cell, change.cellGeneration, hostPrepare.value);
+					}
+				}
+			} else if (change.cellChange == StaticHostCellChange::Left) {
+				DropHostCell(change.cell);
+			}
 			ApplyGroupChanges(change.adds, change.removes);
 			added = added || !change.adds.empty();
 		}

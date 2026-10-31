@@ -114,12 +114,14 @@ namespace br::staticimport
 		return record;
 	}
 
-	// Turns a prepared cell's groups into unsealed lifecycle records, batched by the
-	// cell's StaticCellKeyHash.
-	inline void BuildPreparedStaticCellLifecycle(PreparedStaticCell& prepared)
+	// Turns a prepared cell's groups into unsealed lifecycle records under `batchKey`
+	// (0: the cell's StaticCellKeyHash).
+	inline void BuildPreparedStaticCellLifecycle(PreparedStaticCell& prepared, std::uint64_t batchKey = 0)
 	{
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportServiceWorker::BuildCellLifecycle");
-		const auto batchKey = static_cast<std::uint64_t>(StaticCellKeyHash{}(prepared.key));
+		if (batchKey == 0) {
+			batchKey = static_cast<std::uint64_t>(StaticCellKeyHash{}(prepared.key));
+		}
 		prepared.lifecycleGroups.reserve(prepared.groups.size());
 		for (auto& group : prepared.groups) {
 			prepared.lifecycleGroups.push_back(MakeStaticGroupLifecycleRecord(group, prepared.key, batchKey));

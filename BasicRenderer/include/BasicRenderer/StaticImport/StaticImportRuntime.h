@@ -23,8 +23,10 @@
 //    they are replaced).
 // 3. UpdateStreaming with the current target, every frame. Hosts that place their
 //    own groups add, update and remove them with AddOrUpdateGroups / RemoveGroups at
-//    any time; they are taken once the first UpdateStreaming with a valid target
-//    started the pipeline.
+//    any time, and hosts that stream cells themselves add and remove cells' groups
+//    with PrepareRecipeCell / AddPreparedCell / RemoveCellGroups (their placement
+//    source then reports no cells); changes are taken once the first UpdateStreaming
+//    with a valid target started the pipeline.
 // 4. Shutdown (or destroy it) before the shared state, the sources, the extensions and
 //    whatever the hooks reach. Shutdown stops every worker and coordinator task and
 //    flushes at most one bounded batch of pending recipe persistence.
@@ -93,6 +95,33 @@ namespace br::staticimport
 		std::vector<recipe::MaterialOverride> materialOverrides;
 		// One world matrix per placement; at least one.
 		std::vector<DirectX::XMFLOAT4X4> instanceWorldMatrices;
+	};
+
+	// A host cell's groups from one recipe (StaticImportRuntime::PrepareRecipeCell),
+	// for a host that streams cells itself and adds their groups through the flat
+	// intake.
+	struct StaticImportRecipeCell
+	{
+		// The cell the groups are filed under: the extension cell hooks the runtime
+		// runs for it (PrepareCell, OnCellPrepared, OnCellHostPrepared,
+		// CollectGroupHold, OnGroupOwnershipAdded, OnCellGroupPublished, OnCellRetired)
+		// see this cell.
+		StaticCellKey cell;
+		// The stream target generation the cell entered under
+		// (IStaticImportPipelineAccess::StreamTargetGeneration), echoed to
+		// OnCellPrepared and OnCellHostPrepared.
+		std::uint64_t generation{ 0 };
+		// Host batch key of the groups (see StaticImportGroup::batchKey); 0 uses the
+		// cell's StaticCellKeyHash.
+		std::uint64_t batchKey{ 0 };
+		// The recipe: a cache entry (LookupRecipe), or else the host's own grouping of
+		// the cell's placements for a cache miss, which the runtime queues for
+		// compilation into the cache (StaticRecipeCacheMode::ReadWrite).
+		std::shared_ptr<recipe::CellRecipeView> cached;
+		std::shared_ptr<recipe::CellRecipe> grouped;
+		// Variant bindings shared by the recipes a host prepares together, e.g. the
+		// cells one target change entered; null binds each group on its own.
+		std::shared_ptr<StaticRecipeSceneBinding> scene;
 	};
 
 	class StaticImportRuntime
@@ -172,6 +201,31 @@ namespace br::staticimport
 		// Removes the groups with `groupIDs`, retiring what of them was published.
 		// Unknown ids are ignored.
 		void RemoveGroups(std::span<const std::uint64_t> groupIDs);
+
+		// ---- Host cells (any thread) ----
+		//
+		// For a host that streams cells itself: it looks a cell's recipe up, groups the
+		// cell's placements on a miss, prepares the cell's groups and adds them, and
+		// removes them when the cell leaves. The runtime runs the extension cell hooks
+		// for these cells as it does for the cells it streams. Changes apply in call
+		// order with the group changes above.
+
+		// The recipe cache's entry for `key`; null on a miss, or before the first
+		// UpdateStreaming opened the cache (or with StaticRecipeCacheMode::Off).
+		[[nodiscard]] std::shared_ptr<recipe::CellRecipeView> LookupRecipe(const recipe::CellKey& key) const;
+
+		// Prepares a cell's groups from its recipe on the caller's thread, running the
+		// extensions' PrepareCell. The groups of the result (lifecycleGroups, one
+		// record per group id) are added by AddPreparedCell, or dropped with it.
+		[[nodiscard]] PreparedStaticCell PrepareRecipeCell(StaticImportRecipeCell source);
+
+		// Adds a prepared cell's groups (replacing groups with their ids) after the
+		// extensions' OnCellPrepared and OnCellHostPrepared for the cell.
+		void AddPreparedCell(PreparedStaticCell prepared);
+
+		// Removes a cell's groups, as RemoveGroups, after dropping the extensions'
+		// host cell state for the cell (OnHostCellDropped).
+		void RemoveCellGroups(const StaticCellKey& cell, std::span<const std::uint64_t> groupIDs);
 
 		// Stops the pipeline. Idempotent; the destructor calls it.
 		void Shutdown();

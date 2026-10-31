@@ -360,6 +360,29 @@ namespace br::staticimport
 			(void)_drains.PushBlocking(_workBus.staticImportGroupChanges, std::move(change));
 		}
 
+		void AddPreparedCell(PreparedStaticCell prepared)
+		{
+			StaticGroupChanges change;
+			change.adds = std::move(prepared.lifecycleGroups);
+			change.cellChange = StaticHostCellChange::Prepared;
+			change.cell = prepared.key;
+			change.cellGeneration = prepared.generation;
+			change.hostCellPrepares = std::move(prepared.hostCellPrepares);
+			(void)_drains.PushBlocking(_workBus.staticImportGroupChanges, std::move(change));
+		}
+
+		void RemoveCellGroups(const StaticCellKey& cell, std::span<const std::uint64_t> groupIDs)
+		{
+			StaticGroupChanges change;
+			change.removes.reserve(groupIDs.size());
+			for (const auto groupID : groupIDs) {
+				if (groupID != 0) change.removes.push_back(groupID);
+			}
+			change.cellChange = StaticHostCellChange::Left;
+			change.cell = cell;
+			(void)_drains.PushBlocking(_workBus.staticImportGroupChanges, std::move(change));
+		}
+
 		// The pump's readiness gate: loads the placement source and, once it is
 		// available, opens the recipe cache for its environment.
 		bool EnsurePlacementsReady()
@@ -2620,22 +2643,11 @@ namespace br::staticimport
 			ScheduleStaticSceneRecipePersistence();
 		}
 
-		PreparedStaticCell PrepareStaticCellData(const StaticImportCellPrepareJob& job)
+		// The extensions' per-cell data for a cell about to be prepared (PrepareCell).
+		void CollectHostCellPrepares(PreparedStaticCell& prepared) const
 		{
-			BT_ZONE_SCOPE("SARP::StaticImportWorker::PrepareStaticCellData");
-			const auto prepareBegin = std::chrono::steady_clock::now();
-			const auto& cellKey = job.key;
-			PreparedStaticCell prepared;
-			prepared.key = cellKey;
-			prepared.generation = job.generation;
-			prepared.recipeSceneBinding = job.recipeSceneBinding;
-			if (!_placements.IsRealCell(cellKey)) {
-				BT_PLOT("SARP.StaticSceneRecipe.NonexistentCellSkipped", int64_t{ 1 });
-				prepared.prepareUs = ElapsedUs(prepareBegin);
-				return prepared;
-			}
 			for (std::size_t extensionIndex = 0; extensionIndex < _staticExtensions.size(); ++extensionIndex) {
-				const auto request = _staticExtensions[extensionIndex]->PrepareCell(cellKey);
+				const auto request = _staticExtensions[extensionIndex]->PrepareCell(prepared.key);
 				if (request.requested) {
 					prepared.hostCellPrepares.push_back(PreparedStaticCell::HostCellPrepare{
 						.extension = extensionIndex,
@@ -2643,49 +2655,67 @@ namespace br::staticimport
 					});
 				}
 			}
+		}
 
-			const br::staticimport::recipe::CellKey recipeKey{
-				cellKey.worldFormID, cellKey.interiorCellFormID, cellKey.cellX, cellKey.cellY };
-			std::shared_ptr<br::staticimport::recipe::CellRecipe> cellRecipe;
-			std::shared_ptr<br::staticimport::recipe::CellRecipeView> mappedRecipe = job.mappedRecipe;
-			if (_importState.staticSceneRecipeStore && !mappedRecipe) {
-				BT_ZONE_SCOPE("SARP::StaticSceneRecipe::LoadCell");
-				auto pack = job.mappedRecipePack;
-				if (!pack) pack = _importState.staticSceneRecipeStore->OpenNamespace(recipeKey).pack;
-				if (pack) {
-					auto scene = pack->LookupCells(std::span{ &recipeKey, 1 });
-					BT_PLOT("SARP.StaticSceneRecipe.MappedBytes", static_cast<int64_t>(scene.mappedBytes));
-					if (!scene.cells.empty() && scene.cells.front().status == br::staticimport::recipe::LoadStatus::Hit) {
-						mappedRecipe = std::make_shared<br::staticimport::recipe::CellRecipeView>(std::move(scene.cells.front().view));
-					}
+		// The recipe cache's entry for `recipeKey`, or null on a miss or without a
+		// cache. `pack` is the key's namespace when the caller already opened it.
+		std::shared_ptr<br::staticimport::recipe::CellRecipeView> LookupStaticSceneRecipe(
+			const br::staticimport::recipe::CellKey& recipeKey,
+			std::shared_ptr<br::staticimport::recipe::MappedRecipePack> pack = {}) const
+		{
+			if (!_importState.staticSceneRecipeStore) return {};
+			BT_ZONE_SCOPE("SARP::StaticSceneRecipe::LoadCell");
+			std::shared_ptr<br::staticimport::recipe::CellRecipeView> mappedRecipe;
+			if (!pack) pack = _importState.staticSceneRecipeStore->OpenNamespace(recipeKey).pack;
+			if (pack) {
+				auto scene = pack->LookupCells(std::span{ &recipeKey, 1 });
+				BT_PLOT("SARP.StaticSceneRecipe.MappedBytes", static_cast<int64_t>(scene.mappedBytes));
+				if (!scene.cells.empty() && scene.cells.front().status == br::staticimport::recipe::LoadStatus::Hit) {
+					mappedRecipe = std::make_shared<br::staticimport::recipe::CellRecipeView>(std::move(scene.cells.front().view));
 				}
-				BT_PLOT("SARP.StaticSceneRecipe.CacheHit", mappedRecipe ? int64_t{ 1 } : int64_t{ 0 });
 			}
+			BT_PLOT("SARP.StaticSceneRecipe.CacheHit", mappedRecipe ? int64_t{ 1 } : int64_t{ 0 });
+			return mappedRecipe;
+		}
 
-			if (!cellRecipe && !mappedRecipe) {
-				BT_ZONE_SCOPE("SARP::StaticImportWorker::BuildMissGroups");
-				cellRecipe = std::make_shared<br::staticimport::recipe::CellRecipe>(
-					_placements.BuildCellRecipe(recipeKey));
-				if (_importState.staticSceneRecipeStore &&
-					_staticImportSettings.recipeCacheMode == br::staticimport::StaticRecipeCacheMode::ReadWrite) {
-					// Live ingestion moves strings and placement arrays out of its owning
-					// recipe below.  The fallback compiler therefore receives an independent
-					// owning copy and can wait for assets without racing scene ingestion.
-					auto compileRecipe = std::make_shared<br::staticimport::recipe::CellRecipe>(*cellRecipe);
-					const StaticSceneRecipeCompileKey compileKey{
-						compileRecipe->key, compileRecipe->sourceFingerprint };
-					bool inserted = false;
-					{
-						std::lock_guard lock(_importState.staticSceneRecipeCompileMutex);
-						inserted = _importState.staticSceneRecipeCompiles.insert(compileKey).second;
-					}
-					if (inserted) {
-						(void)_workBus.staticSceneRecipeCompileJobs.TryPush({ std::move(compileRecipe),
-							static_cast<std::uint64_t>(StaticCellKeyHash{}(cellKey)) });
-						_shared.staticImportWorkScheduler.Publish(StaticImportWorkSource::RecipeCompile);
-						_drains.ScheduleWorkerDrains();
-					}
-				}
+		// Queues an owning recipe grouped on a cache miss for compilation into the
+		// cache, once per recipe key and source fingerprint.
+		void QueueStaticSceneRecipeCompile(const br::staticimport::recipe::CellRecipe& cellRecipe, std::uint64_t batchKey)
+		{
+			if (!_importState.staticSceneRecipeStore ||
+				_staticImportSettings.recipeCacheMode != br::staticimport::StaticRecipeCacheMode::ReadWrite) {
+				return;
+			}
+			// Live ingestion moves strings and placement arrays out of its owning
+			// recipe.  The fallback compiler therefore receives an independent
+			// owning copy and can wait for assets without racing scene ingestion.
+			auto compileRecipe = std::make_shared<br::staticimport::recipe::CellRecipe>(cellRecipe);
+			const StaticSceneRecipeCompileKey compileKey{
+				compileRecipe->key, compileRecipe->sourceFingerprint };
+			bool inserted = false;
+			{
+				std::lock_guard lock(_importState.staticSceneRecipeCompileMutex);
+				inserted = _importState.staticSceneRecipeCompiles.insert(compileKey).second;
+			}
+			if (inserted) {
+				(void)_workBus.staticSceneRecipeCompileJobs.TryPush({ std::move(compileRecipe), batchKey });
+				_shared.staticImportWorkScheduler.Publish(StaticImportWorkSource::RecipeCompile);
+				_drains.ScheduleWorkerDrains();
+			}
+		}
+
+		// Fills `prepared`'s groups from a cached recipe (`mappedRecipe`) or, on a
+		// miss, from an owning recipe grouped from the cell's placements, whose
+		// strings and placements it moves out. The miss is queued for compilation
+		// under `batchKey`.
+		void FillPreparedStaticCellGroups(
+			PreparedStaticCell& prepared,
+			const std::shared_ptr<br::staticimport::recipe::CellRecipeView>& mappedRecipe,
+			const std::shared_ptr<br::staticimport::recipe::CellRecipe>& cellRecipe,
+			std::uint64_t batchKey)
+		{
+			if (!mappedRecipe && cellRecipe) {
+				QueueStaticSceneRecipeCompile(*cellRecipe, batchKey);
 			}
 
 			if (mappedRecipe) {
@@ -2704,13 +2734,13 @@ namespace br::staticimport
 					group.recipePreparedAuthoritative = (source.flags & 1u) != 0;
 					group.recipeImportCost = source.importCost;
 					group.mappedRecipe = mappedRecipe;
-					group.recipeSceneBinding = job.recipeSceneBinding;
-					if (job.recipeSceneBinding) {
+					group.recipeSceneBinding = prepared.recipeSceneBinding;
+					if (prepared.recipeSceneBinding) {
 						const StaticRecipeVariantLookupKey lookupKey{
 							group.mappedModelPath, source.materialOverrideHash };
-						std::lock_guard variantsLock(job.recipeSceneBinding->variantsMutex);
-						if (const auto found = job.recipeSceneBinding->variantByKey.find(lookupKey);
-							found != job.recipeSceneBinding->variantByKey.end()) {
+						std::lock_guard variantsLock(prepared.recipeSceneBinding->variantsMutex);
+						if (const auto found = prepared.recipeSceneBinding->variantByKey.find(lookupKey);
+							found != prepared.recipeSceneBinding->variantByKey.end()) {
 							group.recipeVariantSlot = found->second;
 						} else {
 							auto slot = std::make_shared<StaticRecipeSceneVariantSlot>();
@@ -2724,9 +2754,9 @@ namespace br::staticimport
 									slot->readyBinding.store(slot->binding.get(), std::memory_order_relaxed);
 								}
 							}
-							group.recipeVariantIndex = static_cast<std::uint32_t>(job.recipeSceneBinding->variants.size());
-							job.recipeSceneBinding->variants.push_back(slot);
-							job.recipeSceneBinding->variantByKey.emplace(
+							group.recipeVariantIndex = static_cast<std::uint32_t>(prepared.recipeSceneBinding->variants.size());
+							prepared.recipeSceneBinding->variants.push_back(slot);
+							prepared.recipeSceneBinding->variantByKey.emplace(
 								StaticRecipeVariantKey{ slot->modelPath, slot->materialVariant.hash }, slot);
 							group.recipeVariantSlot = std::move(slot);
 						}
@@ -2767,10 +2797,12 @@ namespace br::staticimport
 				BT_PLOT("SARP.StaticSceneRecipe.OwningPreparedRowBytes", int64_t{ 0 });
 				BT_PLOT("SARP.StaticImportWorker.CellGroups", static_cast<int64_t>(prepared.groups.size()));
 				BT_PLOT("SARP.StaticImportWorker.CellSkippedPlacements", static_cast<int64_t>(prepared.skippedCount));
-				prepared.prepareUs = ElapsedUs(prepareBegin);
-				return prepared;
+				return;
 			}
 
+			if (!cellRecipe) {
+				return;
+			}
 			prepared.skippedCount = static_cast<std::size_t>(cellRecipe->skippedPlacements);
 			prepared.placementCount = prepared.skippedCount;
 			prepared.groups.reserve(cellRecipe->groups.size());
@@ -2801,6 +2833,65 @@ namespace br::staticimport
 			}
 			BT_PLOT("SARP.StaticImportWorker.CellGroups", static_cast<int64_t>(prepared.groups.size()));
 			BT_PLOT("SARP.StaticImportWorker.CellSkippedPlacements", static_cast<int64_t>(prepared.skippedCount));
+		}
+
+		PreparedStaticCell PrepareStaticCellData(const StaticImportCellPrepareJob& job)
+		{
+			BT_ZONE_SCOPE("SARP::StaticImportWorker::PrepareStaticCellData");
+			const auto prepareBegin = std::chrono::steady_clock::now();
+			const auto& cellKey = job.key;
+			PreparedStaticCell prepared;
+			prepared.key = cellKey;
+			prepared.generation = job.generation;
+			prepared.recipeSceneBinding = job.recipeSceneBinding;
+			if (!_placements.IsRealCell(cellKey)) {
+				BT_PLOT("SARP.StaticSceneRecipe.NonexistentCellSkipped", int64_t{ 1 });
+				prepared.prepareUs = ElapsedUs(prepareBegin);
+				return prepared;
+			}
+			CollectHostCellPrepares(prepared);
+
+			const br::staticimport::recipe::CellKey recipeKey{
+				cellKey.worldFormID, cellKey.interiorCellFormID, cellKey.cellX, cellKey.cellY };
+			auto mappedRecipe = job.mappedRecipe;
+			if (!mappedRecipe) {
+				mappedRecipe = LookupStaticSceneRecipe(recipeKey, job.mappedRecipePack);
+			}
+			std::shared_ptr<br::staticimport::recipe::CellRecipe> cellRecipe;
+			if (!mappedRecipe) {
+				BT_ZONE_SCOPE("SARP::StaticImportWorker::BuildMissGroups");
+				cellRecipe = std::make_shared<br::staticimport::recipe::CellRecipe>(
+					_placements.BuildCellRecipe(recipeKey));
+			}
+			FillPreparedStaticCellGroups(prepared, mappedRecipe, cellRecipe,
+				static_cast<std::uint64_t>(StaticCellKeyHash{}(cellKey)));
+			prepared.prepareUs = ElapsedUs(prepareBegin);
+			return prepared;
+		}
+
+		// StaticImportRuntime::PrepareRecipeCell.
+		PreparedStaticCell PrepareRecipeCell(StaticImportRecipeCell source)
+		{
+			BT_ZONE_SCOPE("SARP::StaticImportWorker::PrepareRecipeCell");
+			const auto prepareBegin = std::chrono::steady_clock::now();
+			PreparedStaticCell prepared;
+			prepared.key = source.cell;
+			prepared.generation = source.generation;
+			prepared.recipeSceneBinding = std::move(source.scene);
+			CollectHostCellPrepares(prepared);
+			const auto batchKey = source.batchKey != 0
+				? source.batchKey
+				: static_cast<std::uint64_t>(StaticCellKeyHash{}(source.cell));
+			FillPreparedStaticCellGroups(prepared, source.cached, source.grouped, batchKey);
+			BuildPreparedStaticCellLifecycle(prepared, batchKey);
+			// A group id the cell already added keeps its first record.
+			std::unordered_set<std::uint64_t> groupIDs;
+			groupIDs.reserve(prepared.lifecycleGroups.size());
+			std::erase_if(prepared.lifecycleGroups, [&](const std::shared_ptr<StaticGroupLifecycleRecord>& record) {
+				if (record && groupIDs.insert(record->groupID).second) return false;
+				if (record) record->stage.store(StaticGroupLifecycleStage::Cancelled, std::memory_order_release);
+				return true;
+			});
 			prepared.prepareUs = ElapsedUs(prepareBegin);
 			return prepared;
 		}
@@ -2897,6 +2988,26 @@ namespace br::staticimport
 	void StaticImportRuntime::RemoveGroups(std::span<const std::uint64_t> groupIDs)
 	{
 		_impl->RemoveGroups(groupIDs);
+	}
+
+	std::shared_ptr<recipe::CellRecipeView> StaticImportRuntime::LookupRecipe(const recipe::CellKey& key) const
+	{
+		return _impl->LookupStaticSceneRecipe(key);
+	}
+
+	PreparedStaticCell StaticImportRuntime::PrepareRecipeCell(StaticImportRecipeCell source)
+	{
+		return _impl->PrepareRecipeCell(std::move(source));
+	}
+
+	void StaticImportRuntime::AddPreparedCell(PreparedStaticCell prepared)
+	{
+		_impl->AddPreparedCell(std::move(prepared));
+	}
+
+	void StaticImportRuntime::RemoveCellGroups(const StaticCellKey& cell, std::span<const std::uint64_t> groupIDs)
+	{
+		_impl->RemoveCellGroups(cell, groupIDs);
 	}
 
 	void StaticImportRuntime::Shutdown()

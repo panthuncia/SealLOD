@@ -234,15 +234,6 @@ namespace br::staticimport
 		std::optional<StaticImportCapacityBroker::Reservation> capacityReservation;
 	};
 
-	// One host change to the flat group intake (StaticImportRuntime::AddOrUpdateGroups
-	// / RemoveGroups), applied by the coordinator in submission order: `removes`, then
-	// `adds` (unsealed records built on the caller's thread).
-	struct StaticGroupChanges
-	{
-		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> adds;
-		std::vector<std::uint64_t> removes;
-	};
-
 	struct PreparedStaticCell
 	{
 		StaticCellKey key;
@@ -261,6 +252,29 @@ namespace br::staticimport
 		std::uint64_t prepareUs{ 0 };
 		std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding;
 		bool worldspaceResident{ false };
+	};
+
+	// What a host cell layer did to the cell a group change belongs to
+	// (StaticImportRuntime::AddPreparedCell / RemoveCellGroups).
+	enum class StaticHostCellChange : std::uint8_t
+	{
+		None,     // A plain group change.
+		Prepared, // The cell's groups are added: OnCellPrepared / OnCellHostPrepared.
+		Left      // The cell's groups are removed: its host cell state is dropped.
+	};
+
+	// One host change to the flat group intake (StaticImportRuntime::AddOrUpdateGroups
+	// / RemoveGroups and the host cell operations), applied by the coordinator in
+	// submission order: the cell's extension hooks, then `removes`, then `adds`
+	// (unsealed records built on the caller's thread).
+	struct StaticGroupChanges
+	{
+		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> adds;
+		std::vector<std::uint64_t> removes;
+		StaticHostCellChange cellChange{ StaticHostCellChange::None };
+		StaticCellKey cell;
+		std::uint64_t cellGeneration{ 0 };
+		std::vector<PreparedStaticCell::HostCellPrepare> hostCellPrepares;
 	};
 
 	struct StaticGroupIntentToken
