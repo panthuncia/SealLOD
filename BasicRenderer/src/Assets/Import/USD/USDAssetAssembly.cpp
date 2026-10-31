@@ -65,7 +65,6 @@
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/plug/registry.h>
 
-#include <flecs.h>
 
 #include "BasicRenderer/Assets/Material.h"
 #include "Utilities/Utilities.h"
@@ -74,14 +73,12 @@
 #include "BasicRenderer/Assets/Texture.h"
 #include "Resources/Sampler.h"
 #include "BasicRenderer/Assets/Import/Filetypes.h"
-#include "BasicRenderer/Scene/Scene.h"
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include "BasicRenderer/Assets/Geometry/MeshInstance.h"
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
 #include "Assets/Cache/Skeleton/SkeletonArtifactCache.h"
 #include "BasicRenderer/Scene/Components.h"
-#include "BasicRenderer/Scene/Animation/AnimationController.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "Assets/Textures/Processing/TextureProcessingManager.h"
@@ -826,7 +823,7 @@ namespace USDLoader {
 		const std::vector<AssetAssemblyBucketInfo>& buckets,
 		std::vector<std::shared_ptr<Mesh>>& meshes)
 	{
-		ZoneScopedN("USDLoader::LoadModelFromStage::TryLoadAssetAssemblyCache");
+		ZoneScopedN("USDLoader::AssetAssembly::TryLoadCache");
 		meshes.clear();
 		meshes.reserve(buckets.size());
 		for (const AssetAssemblyBucketInfo& bucket : buckets) {
@@ -877,7 +874,7 @@ namespace USDLoader {
 		std::vector<std::shared_ptr<Mesh>>& meshes,
 		std::string* outFailureReason)
 	{
-		ZoneScopedN("USDLoader::LoadModelFromStage::BuildAssetAssemblyCache");
+		ZoneScopedN("USDLoader::AssetAssembly::BuildCache");
 		meshes.clear();
 		meshes.reserve(buckets.size());
 		if (outFailureReason) outFailureReason->clear();
@@ -1348,50 +1345,6 @@ namespace USDLoader {
 		}
 
 		return !meshes.empty();
-	}
-
-	std::shared_ptr<Scene> CreateCollapsedAssetAssemblyScene(
-		const std::vector<std::shared_ptr<Mesh>>& meshes,
-		const std::vector<AssetAssemblyBucketInfo>& buckets,
-		const GfRotation& upAxisCorrection)
-	{
-		ZoneScopedN("USDLoader::LoadModelFromStage::CreateCollapsedAssemblyScene");
-		auto scene = std::make_shared<Scene>();
-		std::vector<std::shared_ptr<Mesh>> entityMeshes;
-		entityMeshes.reserve(meshes.size());
-		for (const auto& mesh : meshes) {
-			if (mesh) {
-				entityMeshes.push_back(mesh);
-			}
-		}
-		if (!entityMeshes.empty()) {
-			flecs::entity entity = scene->CreateRenderableEntityECS(std::move(entityMeshes), L"__CLodAssetAssembly");
-			(void)upAxisCorrection;
-			if (auto* meshInstances = entity.try_get_mut<Components::MeshInstances>()) {
-				std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> runtimeSkeletonByBase;
-				for (const auto& meshInstance : meshInstances->meshInstances) {
-					if (!meshInstance || !meshInstance->HasSkin()) {
-						continue;
-					}
-					auto runtimeSkeleton = meshInstance->GetSkin();
-					auto baseSkeleton = runtimeSkeleton ? runtimeSkeleton->GetBaseSkeletonShared() : nullptr;
-					if (!baseSkeleton) {
-						continue;
-					}
-					auto& sharedRuntimeSkeleton = runtimeSkeletonByBase[baseSkeleton.get()];
-					if (!sharedRuntimeSkeleton) {
-						sharedRuntimeSkeleton = runtimeSkeleton;
-						continue;
-					}
-					meshInstance->SetSkeleton(sharedRuntimeSkeleton);
-					meshInstance->SyncSkinningStateFromSkeleton();
-				}
-				if (!runtimeSkeletonByBase.empty()) {
-					meshInstances->BumpGeneration();
-				}
-			}
-		}
-		return scene;
 	}
 
 }

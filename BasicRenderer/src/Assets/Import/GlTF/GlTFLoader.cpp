@@ -23,16 +23,13 @@
 #include "Assets/Textures/Processing/TextureProcessingManager.h"
 #include <BasicRenderer/Assets/TexturePipeline.h>
 #include "BasicRenderer/Scene/Animation/Animation.h"
-#include "BasicRenderer/Scene/Animation/AnimationController.h"
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
 #include <BasicRenderer/Assets/Import/GlTFGeometryExtractor.h>
 #include "BasicRenderer/Assets/Material.h"
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
-#include "BasicRenderer/Assets/Geometry/MeshInstance.h"
 #include <BasicRenderer/Scene/VertexFlags.h>
 #include "Resources/Sampler.h"
 #include "BasicRenderer/Scene/Components.h"
-#include "BasicRenderer/Scene/Scene.h"
 #include "Utilities/Utilities.h"
 
 using nlohmann::json;
@@ -63,11 +60,6 @@ struct AccessorInfo {
     int componentType = 0;
     std::string type;
     bool normalized = false;
-};
-
-struct NodeHierarchyBuildResult {
-    std::vector<flecs::entity> entities;
-    std::vector<int32_t> meshIndices;
 };
 
 struct MeshBindingKey {
@@ -1208,13 +1200,6 @@ XMMATRIX ComposeNodeMatrix(const Components::Transform& transform) {
         XMMatrixTranslationFromVector(transform.pos.pos);
 }
 
-void ApplyNodeTransform(const json& gltfNode, flecs::entity entity) {
-    const auto transform = ReadNodeTransform(gltfNode);
-    entity.set<Components::Position>(transform.pos);
-    entity.set<Components::Rotation>(transform.rot);
-    entity.set<Components::Scale>(transform.scale);
-}
-
 // The glTF node tree without entities: each node's parent and the default scene's roots.
 struct NodeTree {
     std::vector<int32_t> parents;
@@ -1252,138 +1237,6 @@ NodeTree BuildNodeTree(const json& gltf) {
         }
     }
     return tree;
-}
-
-void SetEntityMeshes(flecs::entity entity, const std::vector<std::shared_ptr<Mesh>>& meshes) {
-    const auto* oldMeshInstances = entity.try_get<Components::MeshInstances>();
-
-    Components::MeshInstances meshInstances;
-    if (oldMeshInstances != nullptr) {
-        meshInstances.generation = oldMeshInstances->generation + 1;
-    }
-
-    bool isSkinned = false;
-    for (const auto& mesh : meshes) {
-        if (mesh == nullptr) {
-            continue;
-        }
-
-        auto meshInstance = MeshInstance::CreateUnique(mesh);
-        if (meshInstance->HasSkin()) {
-            isSkinned = true;
-        }
-        meshInstances.meshInstances.push_back(std::move(meshInstance));
-    }
-
-    if (!meshInstances.meshInstances.empty()) {
-        entity.set<Components::MeshInstances>(meshInstances);
-    }
-    else if (oldMeshInstances != nullptr) {
-        entity.remove<Components::MeshInstances>();
-    }
-
-    if (isSkinned) {
-        entity.add<Components::Skinned>();
-    }
-    else if (entity.has<Components::Skinned>()) {
-        entity.remove<Components::Skinned>();
-    }
-}
-
-NodeHierarchyBuildResult BuildNodeHierarchy(
-    std::shared_ptr<Scene> scene,
-    const json& gltf,
-    const std::vector<std::vector<PrimitiveData>>& meshes)
-{
-    NodeHierarchyBuildResult result;
-    if (!gltf.contains("nodes")) {
-        return result;
-    }
-
-    const auto& nodeArray = gltf["nodes"];
-    result.entities.resize(nodeArray.size());
-    result.meshIndices.assign(nodeArray.size(), -1);
-    std::vector<bool> hasParent(nodeArray.size(), false);
-
-    for (size_t nodeIndex = 0; nodeIndex < nodeArray.size(); ++nodeIndex) {
-        const auto& gltfNode = nodeArray[nodeIndex];
-        std::string nodeName = gltfNode.value("name", "glTF_Node_" + std::to_string(nodeIndex));
-
-        if (gltfNode.contains("mesh")) {
-            const size_t meshIndex = gltfNode["mesh"].get<size_t>();
-            if (meshIndex >= meshes.size()) {
-                throw std::runtime_error("Node mesh index out of range");
-            }
-
-            std::vector<std::shared_ptr<Mesh>> nodeMeshes;
-            nodeMeshes.reserve(meshes[meshIndex].size());
-            for (const auto& primitive : meshes[meshIndex]) {
-                if (primitive.mesh != nullptr) {
-                    nodeMeshes.push_back(primitive.mesh);
-                }
-            }
-
-            result.entities[nodeIndex] = scene->CreateRenderableEntityECS(nodeMeshes, s2ws(nodeName));
-            result.meshIndices[nodeIndex] = static_cast<int32_t>(meshIndex);
-        }
-        else {
-            result.entities[nodeIndex] = scene->CreateNodeECS(s2ws(nodeName));
-        }
-
-        ApplyNodeTransform(gltfNode, result.entities[nodeIndex]);
-    }
-
-    for (size_t nodeIndex = 0; nodeIndex < nodeArray.size(); ++nodeIndex) {
-        const auto& gltfNode = nodeArray[nodeIndex];
-        if (!gltfNode.contains("children")) {
-            continue;
-        }
-
-        for (const auto& childIndexValue : gltfNode["children"]) {
-            const size_t childIndex = childIndexValue.get<size_t>();
-            if (childIndex >= result.entities.size()) {
-                throw std::runtime_error("Node child index out of range");
-            }
-
-            result.entities[childIndex].child_of(result.entities[nodeIndex]);
-            hasParent[childIndex] = true;
-        }
-    }
-
-    std::vector<size_t> rootNodes;
-    if (gltf.contains("scenes") && gltf["scenes"].is_array() && !gltf["scenes"].empty()) {
-        size_t sceneIndex = gltf.value<size_t>("scene", static_cast<size_t>(0));
-        if (sceneIndex >= gltf["scenes"].size()) {
-            throw std::runtime_error("Default scene index out of range");
-        }
-
-        const auto& selectedScene = gltf["scenes"][sceneIndex];
-        if (selectedScene.contains("nodes") && selectedScene["nodes"].is_array()) {
-            rootNodes.reserve(selectedScene["nodes"].size());
-            for (const auto& nodeValue : selectedScene["nodes"]) {
-                const size_t rootIndex = nodeValue.get<size_t>();
-                if (rootIndex >= result.entities.size()) {
-                    throw std::runtime_error("Scene root node index out of range");
-                }
-                rootNodes.push_back(rootIndex);
-            }
-        }
-    }
-
-    if (rootNodes.empty()) {
-        for (size_t nodeIndex = 0; nodeIndex < result.entities.size(); ++nodeIndex) {
-            if (!hasParent[nodeIndex]) {
-                rootNodes.push_back(nodeIndex);
-            }
-        }
-    }
-
-    flecs::entity sceneRoot = scene->GetRoot();
-    for (const size_t rootIndex : rootNodes) {
-        result.entities[rootIndex].child_of(sceneRoot);
-    }
-
-    return result;
 }
 
 std::vector<std::shared_ptr<Animation>> ParseAnimations(
@@ -1502,89 +1355,7 @@ std::vector<std::shared_ptr<Animation>> ParseAnimations(
     return animations;
 }
 
-std::vector<std::shared_ptr<Skeleton>> BuildSkins(
-    const json& gltf,
-    const std::vector<BufferSource>& bufferSources,
-    const std::vector<flecs::entity>& nodeEntities,
-    const std::vector<std::string>& nodeAnimationKeys,
-    const std::vector<std::shared_ptr<Animation>>& animations)
-{
-    std::vector<std::shared_ptr<Skeleton>> skeletons;
-    if (!gltf.contains("skins") || !gltf["skins"].is_array()) {
-        return skeletons;
-    }
-
-    const auto& skins = gltf["skins"];
-    skeletons.resize(skins.size());
-    for (size_t skinIndex = 0; skinIndex < skins.size(); ++skinIndex) {
-        const auto& skinNode = skins[skinIndex];
-        if (!skinNode.contains("joints") || !skinNode["joints"].is_array() || skinNode["joints"].empty()) {
-            spdlog::warn("glTF skin {} has no joints; skipping skin", skinIndex);
-            continue;
-        }
-
-        std::vector<flecs::entity> jointNodes;
-        jointNodes.reserve(skinNode["joints"].size());
-        std::vector<XMMATRIX> inverseBindMatrices(skinNode["joints"].size(), XMMatrixIdentity());
-        std::vector<std::string> jointAnimationKeys;
-        jointAnimationKeys.reserve(skinNode["joints"].size());
-
-        if (skinNode.contains("inverseBindMatrices")) {
-            auto loadedMatrices = ReadAccessorMat4AsMatrices(gltf, bufferSources, skinNode["inverseBindMatrices"].get<size_t>());
-            if (loadedMatrices.size() != inverseBindMatrices.size()) {
-                spdlog::warn("glTF skin {} inverse bind matrix count ({}) does not match joint count ({}); missing entries default to identity",
-                    skinIndex,
-                    loadedMatrices.size(),
-                    inverseBindMatrices.size());
-            }
-
-            const size_t matrixCount = std::min(loadedMatrices.size(), inverseBindMatrices.size());
-            for (size_t matrixIndex = 0; matrixIndex < matrixCount; ++matrixIndex) {
-                inverseBindMatrices[matrixIndex] = loadedMatrices[matrixIndex];
-            }
-        }
-
-        for (const auto& jointValue : skinNode["joints"]) {
-            const size_t jointNodeIndex = jointValue.get<size_t>();
-            if (jointNodeIndex >= nodeEntities.size()) {
-                throw std::runtime_error("glTF skin joint node index out of range");
-            }
-
-            flecs::entity jointEntity = nodeEntities[jointNodeIndex];
-            if (!jointEntity.is_alive()) {
-                throw std::runtime_error("glTF skin references an invalid joint entity");
-            }
-
-            if (!jointEntity.has<AnimationController>()) {
-                jointEntity.add<AnimationController>();
-            }
-            jointEntity.set<Components::AnimationName>({ nodeAnimationKeys[jointNodeIndex] });
-            jointNodes.push_back(jointEntity);
-            jointAnimationKeys.push_back(nodeAnimationKeys[jointNodeIndex]);
-        }
-
-        auto skeleton = std::make_shared<Skeleton>(jointNodes, inverseBindMatrices);
-        for (const auto& animation : animations) {
-            bool usesSkeleton = false;
-            for (const auto& jointKey : jointAnimationKeys) {
-                if (animation->nodesMap.contains(jointKey)) {
-                    usesSkeleton = true;
-                    break;
-                }
-            }
-
-            if (usesSkeleton) {
-                skeleton->AddAnimation(animation);
-            }
-        }
-
-        skeletons[skinIndex] = skeleton;
-    }
-
-    return skeletons;
-}
-
-// Base skeletons for the payload path, named by the nodes' animation keys like the entity path. A joint's parent is its
+// Base skeletons named by the nodes' animation keys. A joint's parent is its
 // parent node when that is a joint; otherwise it is a root whose parent global is its non-joint ancestors' (within the file).
 std::vector<std::shared_ptr<Skeleton>> BuildPayloadSkins(
     const json& gltf,
@@ -1669,7 +1440,7 @@ std::vector<std::shared_ptr<Skeleton>> BuildPayloadSkins(
     return skeletons;
 }
 
-// A file's GPU meshes, shared by the scene and payload paths, and their bindings to skins.
+// A file's GPU meshes and their bindings to skins.
 struct GltfMeshes {
     GlTFGeometryExtractor::ExtractionResult extraction;
     GlTFMaterialCache materialCache;
@@ -1846,61 +1617,6 @@ std::optional<br::import::ImportedAssetPayload> LoadImportedAssetFromFile(const 
     catch (const std::exception& e) {
         spdlog::error("GlTFLoader payload import failed for {}: {}", filePath, e.what());
         return std::nullopt;
-    }
-}
-
-
-std::shared_ptr<Scene> LoadModel(std::string filePath) {
-    try {
-        auto meshes = BuildGltfMeshes(filePath);
-        auto& extraction = meshes.extraction;
-        auto& materialCache = meshes.materialCache;
-        auto& allMeshes = meshes.allMeshes;
-
-        auto scene = std::make_shared<Scene>();
-
-        const auto nodeAnimationKeys = BuildNodeAnimationKeys(extraction.gltf);
-        const auto hierarchy = BuildNodeHierarchy(scene, extraction.gltf, allMeshes);
-        const auto animations = ParseAnimations(extraction.gltf, materialCache.bufferSources, nodeAnimationKeys);
-        const auto skeletons = BuildSkins(extraction.gltf, materialCache.bufferSources, hierarchy.entities, nodeAnimationKeys, animations);
-
-        bool importedSkins = false;
-        if (extraction.gltf.contains("nodes") && extraction.gltf["nodes"].is_array()) {
-            const auto& nodes = extraction.gltf["nodes"];
-            for (size_t nodeIndex = 0; nodeIndex < nodes.size(); ++nodeIndex) {
-                const auto& node = nodes[nodeIndex];
-                if (!node.contains("skin") || !node.contains("mesh")) {
-                    continue;
-                }
-
-                if (nodeIndex >= hierarchy.entities.size() || !hierarchy.entities[nodeIndex].is_alive()) {
-                    continue;
-                }
-
-                const size_t skinIndex = node["skin"].get<size_t>();
-                if (skinIndex >= skeletons.size()) {
-                    throw std::runtime_error("glTF node skin index out of range");
-                }
-
-                const int32_t meshIndex = hierarchy.meshIndices[nodeIndex];
-                if (meshIndex < 0) {
-                    continue;
-                }
-
-                SetEntityMeshes(hierarchy.entities[nodeIndex], meshes.Binding(static_cast<size_t>(meshIndex), static_cast<int>(skinIndex), skeletons));
-                importedSkins = true;
-            }
-        }
-
-        if (importedSkins) {
-            scene->ProcessEntitySkins(true);
-        }
-
-        return scene;
-    }
-    catch (const std::exception& e) {
-        spdlog::error("GlTFLoader failed for {}: {}", filePath, e.what());
-        return nullptr;
     }
 }
 

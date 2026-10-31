@@ -62,57 +62,6 @@ void Renderer::SetCurrentScene(std::shared_ptr<Scene> newScene) {
 	rebuildRenderGraph = true;
 }
 
-std::shared_ptr<Scene> Renderer::AppendScene(std::shared_ptr<Scene> scene) {
-	if (!scene) {
-        spdlog::warn("Renderer: attempted to append a null scene. Ignoring append request.");
-        return nullptr;
-    }
-
-	if (m_sceneTaskInFlight.load()) {
-        spdlog::warn("Renderer: attempted to append a scene while async scene overlap work is running. Ignoring append request for v1 overlap safety.");
-        return nullptr;
-    }
-
-	if (!currentScene) {
-        spdlog::warn("Renderer: attempted to append a scene while no current scene exists. Ignoring append request.");
-        return nullptr;
-    }
-
-	auto appendedScene = GetCurrentScene()->AppendScene(scene);
-	if (!appendedScene) {
-		return nullptr;
-	}
-
-	currentScene->PropagateTransforms();
-	InvalidateSceneOverlapState();
-	if (m_sceneRenderOverlapEnabled) {
-		BootstrapCommittedSceneSnapshot();
-	} else {
-		RunSceneBridgeSyncStage();
-	}
-
-	{
-		org::BufferBase::ScopedBackingMutation appendBackingMutation;
-		(void)org::PublishReadyDeferredBackingResizes(true);
-	}
-	org::runtime::FlushUploadPolicies();
-	if (m_pMaterialManager) {
-		m_pMaterialManager->CommitGpuVisibleSnapshot();
-	}
-	if (m_pIndirectCommandBufferManager && m_pObjectManager) {
-		m_pIndirectCommandBufferManager->PublishDesiredState(
-			m_pObjectManager->DesiredBufferStateRequirement(),
-			m_pObjectManager->GetResidentInstanceDrawRecordCount(),
-			m_context.publishedRendererState);
-	}
-
-	m_warnedNullScene = false;
-	m_warnedMissingPrimaryCamera = false;
-	rebuildRenderGraph = true;
-
-	return appendedScene;
-}
-
 InputManager& Renderer::GetInputManager() {
     return inputManager;
 }

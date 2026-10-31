@@ -24,7 +24,6 @@
 #include "BasicRenderer/Assets/Geometry/MeshInstance.h"
 #include <BasicRenderer/Scene/VertexFlags.h>
 #include "BasicRenderer/Scene/RendererComponents.h"
-#include "BasicRenderer/Scene/Animation/AnimationController.h"
 #include "Utilities/MathUtils.h"
 #include "Resources/Sampler.h"
 #include <BasicRenderer/Extensions/ResourceComponent.h>
@@ -207,17 +206,6 @@ namespace {
 		entity.set<Components::StableSceneID>(MakeStableSceneID());
 	}
 
-	void ReassignStableSceneIDsRecursive(flecs::entity entity) {
-		if (!entity.is_alive()) {
-			return;
-		}
-
-		AssignStableSceneID(entity);
-		entity.children([](flecs::entity child) {
-			ReassignStableSceneIDsRecursive(child);
-		});
-	}
-
 	void PropagateTransformDirtyToChildren(flecs::entity parent, std::unordered_set<uint64_t>& visited) {
 		parent.children([&](flecs::entity child) {
 			if (child.has<Components::Active>() && visited.insert(child.id()).second) {
@@ -258,40 +246,6 @@ namespace {
 }
 
 std::atomic<uint64_t> Scene::globalSceneCount = 0;
-
-SkeletonVariantSet::SkeletonVariantSet(std::uint32_t variantCount)
-	: m_variantCount((std::max)(1u, variantCount))
-{
-}
-
-std::shared_ptr<Skeleton> SkeletonVariantSet::GetVariant(const std::shared_ptr<Skeleton>& skeleton, std::uint32_t variantIndex)
-{
-	if (!skeleton) {
-		return nullptr;
-	}
-
-	auto baseSkeleton = skeleton->GetBaseSkeletonShared();
-	if (!baseSkeleton) {
-		return nullptr;
-	}
-
-	variantIndex %= m_variantCount;
-	auto& record = m_variantsByBase[baseSkeleton.get()];
-	if (!record.baseSkeleton) {
-		record.baseSkeleton = baseSkeleton;
-		record.variants.resize(m_variantCount);
-	}
-	else if (record.variants.size() < m_variantCount) {
-		record.variants.resize(m_variantCount);
-	}
-
-	auto& variant = record.variants[variantIndex];
-	if (!variant) {
-		variant = baseSkeleton->CopySkeleton();
-	}
-
-	return variant;
-}
 
 Scene::Scene(){
 	m_sceneID = globalSceneCount.fetch_add(1, std::memory_order_relaxed);
@@ -586,47 +540,6 @@ void Scene::ActivateCamera(flecs::entity& entity) {
 	entity.add<Components::PrimaryCamera>();
 }
 
-void Scene::ProcessEntitySkins(bool overrideExistingSkins) {
-	auto& world = GetSceneWorld();
-	std::vector<flecs::entity> renderables;
-	VisitSceneDescendants(ECSSceneRoot, [&](flecs::entity entity) {
-		if (entity.has<Components::MeshInstances>()) {
-			renderables.push_back(entity);
-		}
-	});
-	world.defer_begin();
-	for (auto entity : renderables) {
-		auto oldMeshInstances = entity.try_get<Components::MeshInstances>();
-		if (!oldMeshInstances) {
-			continue;
-		}
-
-		Components::MeshInstances meshInstances;
-		meshInstances.generation = oldMeshInstances->generation + 1;
-
-		bool addSkin = false;
-		for (const auto& meshInstance : oldMeshInstances->meshInstances) {
-			auto rebuiltInstance = MeshInstance::CreateUnique(meshInstance->GetMesh());
-			if (meshInstance->HasMaterialOverride()) {
-				rebuiltInstance->SetMaterialOverride(meshInstance->GetMaterialOverride());
-			}
-			if (rebuiltInstance->HasSkin()) {
-				addSkin = true;
-			}
-			meshInstances.meshInstances.push_back(std::move(rebuiltInstance));
-		}
-
-		entity.set<Components::MeshInstances>(meshInstances);
-		if (addSkin) {
-			entity.add<Components::Skinned>();
-		}
-		else if (overrideExistingSkins || entity.has<Components::Skinned>()) {
-			entity.remove<Components::Skinned>();
-		}
-	}
-	world.defer_end();
-}
-
 void Scene::ReserveRenderableEntityPool(std::size_t count) {
 	m_renderableEntityPool.Reserve(count);
 }
@@ -849,25 +762,6 @@ void Scene::ReleaseRenderableEntityECS(flecs::entity entity) {
 	m_renderableEntityReleaseUs += ElapsedUs(releaseBegin);
 }
 
-flecs::entity Scene::CreateNodeECS(std::wstring name) {
-	auto& world = GetSceneWorld();
-	flecs::entity entity = world.entity();
-	entity.child_of(ECSSceneRoot)
-		.set_name((ws2s(name) + "_" + std::to_string(entity.id())).c_str())
-		.add<Components::SceneNode>()
-		.set<Components::Rotation>({ 0, 0, 0, 1 })
-		.set<Components::Position>({ 0, 0, 0 })
-		.set<Components::Scale>({ 1, 1, 1 })
-		.set<Components::Matrix>(DirectX::XMMatrixIdentity())
-		.set<Components::Name>(ws2s(name));
-	AssignStableSceneID(entity);
-	return entity;
-
-	if (ECSSceneRoot.has<Components::ActiveScene>()) {
-		entity.add<Components::Active>();
-	}
-}
-
 bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t meshInstanceIndex, std::shared_ptr<Material> material) {
 	if (!entity.is_alive() || !material) {
 		return false;
@@ -975,107 +869,12 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 	return true;
 }
 
-bool Scene::AssignSkeletonVariant(flecs::entity entity, SkeletonVariantSet& variantSet, std::uint32_t variantIndex) {
-	if (!entity.is_alive()) {
-		return false;
-	}
-
-	auto* meshInstances = entity.try_get_mut<Components::MeshInstances>();
-	if (!meshInstances) {
-		return false;
-	}
-
-	bool assigned = false;
-	std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> variantsByBase;
-	for (const auto& meshInstance : meshInstances->meshInstances) {
-		if (!meshInstance || !meshInstance->HasSkin()) {
-			continue;
-		}
-
-		auto currentSkeleton = meshInstance->GetSkin();
-		auto baseSkeleton = currentSkeleton ? currentSkeleton->GetBaseSkeletonShared() : nullptr;
-		if (!baseSkeleton) {
-			continue;
-		}
-
-		auto& variant = variantsByBase[baseSkeleton.get()];
-		if (!variant) {
-			variant = variantSet.GetVariant(baseSkeleton, variantIndex);
-		}
-		if (!variant) {
-			continue;
-		}
-
-		meshInstance->SetSkeleton(variant);
-		if (variant->GetAnimationCount() > 0u && variant->GetActiveAnimationIndex() == size_t(-1)) {
-			variant->SetAnimation(0);
-			meshInstance->SyncSkinningStateFromSkeleton();
-		}
-		assigned = true;
-	}
-
-	if (!assigned) {
-		return false;
-	}
-
-	meshInstances->BumpGeneration();
-	entity.add<Components::Skinned>();
-	entity.add<Components::RenderBridgeContentDirty>();
-	return true;
-}
-
-void Scene::AssignSkeletonVariants(SkeletonVariantSet& variantSet, const SkeletonVariantAssignmentOptions& options) {
-	const std::uint32_t variantCount = variantSet.GetVariantCount();
-	VisitSceneDescendants(ECSSceneRoot, [&](flecs::entity entity) {
-		if (!entity.has<Components::MeshInstances>()) {
-			return;
-		}
-
-		std::uint64_t stableValue = entity.id();
-		if (const auto* stableSceneID = entity.try_get<Components::StableSceneID>()) {
-			stableValue = stableSceneID->value;
-		}
-
-		const std::uint64_t hashInput = stableValue ^ (static_cast<std::uint64_t>(options.seed) << 32u);
-		const auto variantIndex = static_cast<std::uint32_t>(std::hash<std::uint64_t>{}(hashInput) % variantCount);
-		AssignSkeletonVariant(entity, variantSet, variantIndex);
-	});
-}
-
 flecs::entity Scene::GetRoot() const {
     return ECSSceneRoot;
 }
 
 uint64_t Scene::GetSceneID() const {
 	return m_sceneID;
-}
-
-void Scene::Update(float elapsedSeconds) {
-	ZoneScopedN("Scene::Update");
-
-	{
-		ZoneScopedN("Scene::Update::AnimatedEntities");
-		for (auto& node : animatedEntitiesByID) {
-			auto& entity = node.second;
-			AnimationController* animationController = entity.try_get_mut<AnimationController>();
-#if defined(_DEBUG)
-			if (animationController == nullptr) {
-				spdlog::error("AnimationController is null for entity with ID: {}", node.first);
-				return;
-			}
-#endif
-			auto& transform = animationController->GetUpdatedTransform(elapsedSeconds);
-			entity.set<Components::Rotation>(transform.rot);
-			entity.set<Components::Position>(transform.pos);
-			entity.set<Components::Scale>(transform.scale);
-		}
-	}
-	{
-		ZoneScopedN("Scene::Update::ChildScenes");
-		for (auto& child : m_childScenes) {
-			child->Update(elapsedSeconds);
-		}
-	}
 }
 
 void Scene::SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, XMFLOAT3 up, float fov, float aspect, float zNear, float zFar) {
@@ -1216,29 +1015,6 @@ void Scene::PropagateTransforms() {
 	}
 }
 
-void Scene::PostUpdate() {
-	ZoneScopedN("Scene::PostUpdate");
-	for (auto& child : m_childScenes) {
-		child->PostUpdate();
-	}
-}
-
-std::shared_ptr<Scene> Scene::AppendScene(std::shared_ptr<Scene> scene) {
-	ZoneScopedN("Scene::AppendScene");
-	if (!scene) {
-		return nullptr;
-	}
-	auto root = scene->GetRoot();
-
-	root.child_of(ECSSceneRoot);
-	if (ECSSceneRoot.has<Components::ActiveScene>()) { // If this scene is active, activate the new scene
-		scene->Activate(m_sceneIngestionServices);
-	}
-	m_childScenes.push_back(scene);
-
-	return scene;
-}
-
 void Scene::MakeResident() {
 	ZoneScopedN("Scene::MakeResident");
 	auto& world = GetSceneWorld();
@@ -1313,12 +1089,6 @@ void Scene::MakeNonResident() {
 }
 
 void Scene::Deactivate() {
-	for (auto& child : m_childScenes) {
-		if (child) {
-			child->Deactivate();
-		}
-	}
-
 	if (!ECSSceneRoot.is_alive()) {
 		m_sceneIngestionServices = {};
 		return;
@@ -1356,24 +1126,10 @@ void ActivateHierarchy(flecs::entity src) {
 	src.world().defer_end();
 }
 
-void Scene::ActivateAllAnimatedEntities() {
-	auto& world = GetSceneWorld();
-	world.defer_begin();
-	for (auto& e : animatedEntitiesByID) {
-		auto& entity = e.second;
-		entity.add<Components::Active>();
-	}
-	world.defer_end();
-	for (auto & child : m_childScenes) {
-		child->ActivateAllAnimatedEntities();
-	}
-}
-
 void Scene::Activate(br::render::SceneIngestionServices managerInterface) {
 	m_sceneIngestionServices = managerInterface;
 
 	ActivateHierarchy(ECSSceneRoot);
-	ActivateAllAnimatedEntities();
 
 	ECSSceneRoot.add<Components::ActiveScene>();
 	ECSSceneRoot.add<Components::Active>();
@@ -1383,43 +1139,6 @@ void Scene::Activate(br::render::SceneIngestionServices managerInterface) {
 
 bool Scene::IsActive() const {
 	return ECSSceneRoot.is_alive() && ECSSceneRoot.has<Components::ActiveScene>();
-}
-
-void recurse_hierarchy(flecs::entity src, flecs::entity dst_parent = {}) {
-	if (src.has<Components::SkeletonRoot>()) {
-		return; // Skip skeleton roots, they are handled separately
-	}
-	flecs::entity cloned = src.clone();
-	AssignStableSceneID(cloned);
-
-	if (dst_parent.is_alive()) {
-		cloned.child_of(dst_parent);
-	}
-
-	src.children([&](flecs::entity e) {
-		recurse_hierarchy(e, cloned);
-		});
-}
-
-void CloneHierarchy(flecs::entity src, flecs::entity dst_parent) {
-	src.world().defer_begin();
-	src.children([&](flecs::entity e) {
-		recurse_hierarchy(e, dst_parent);
-		});
-	src.world().defer_end();
-}
-
-std::shared_ptr<Scene> Scene::Clone() const {
-	ZoneScopedN("Scene::Clone");
-	auto newScene = std::make_shared<Scene>();
-	newScene->ECSSceneRoot = ECSSceneRoot.clone();
-	ReassignStableSceneIDsRecursive(newScene->ECSSceneRoot);
-	CloneHierarchy(ECSSceneRoot, newScene->ECSSceneRoot);
-	for (auto& childScene : m_childScenes) {
-		newScene->m_childScenes.push_back(childScene->Clone());
-	}
-	newScene->ProcessEntitySkins(true);
-	return newScene;
 }
 
 void Scene::DisableShadows() {

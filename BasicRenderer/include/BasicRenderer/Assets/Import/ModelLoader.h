@@ -1,14 +1,10 @@
 #pragma once
 
-#include <memory>
 #include <optional>
 #include <string>
 
 #include <BasicRenderer/Assets/ImportedAsset.h>
 #include <BasicRenderer/Assets/ImportSettings.h>
-
-class Scene;
-std::shared_ptr<Scene> LoadModel(std::string file);
 
 namespace br::import {
 // A model file as a payload, by extension: glTF/GLB, USD (.usd/.usda/.usdc/.usdz) or NIF. The file's own path is its

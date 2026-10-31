@@ -14,11 +14,6 @@
 
 class Mesh;
 class MeshInstance;
-class Scene;
-
-namespace Components {
-	struct MeshInstances;
-}
 
 namespace br::import {
 
@@ -35,7 +30,6 @@ struct RenderableAsset
 {
 	using RenderablePart = RenderableAssetPart;
 
-	std::shared_ptr<Scene> scene;
 	std::vector<std::shared_ptr<Mesh>> meshes;
 	std::vector<std::uint64_t> meshMaterialHashes;
 	std::vector<RenderableAssetPart> parts;
@@ -47,7 +41,5 @@ bool IsUsableMeshInstance(const std::shared_ptr<MeshInstance>& instance);
 bool IsSkinnedMesh(const std::shared_ptr<Mesh>& mesh);
 
 RenderableAsset RenderableAssetFromPayload(ImportedAssetPayload&& payload);
-RenderableAsset CollectRenderableAssetFromScene(std::shared_ptr<Scene> scene);
-RenderableAsset CollectRenderableAssetFromScene(Scene& scene);
 
 } // namespace br::import

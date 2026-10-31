@@ -11,8 +11,6 @@
 #include <BasicRenderer/Assets/ImportedAsset.h>
 #include <BasicRenderer/Assets/MaterialDescription.h>
 
-class Scene;
-
 namespace NifLoader {
 
 struct LoadTimingStats {
@@ -93,7 +91,5 @@ bool FinalizeObjectReyesPayloadCache(
 	std::uint64_t clodAssetSettingsHash,
 	std::string* failureReason = nullptr,
 	std::string stagingContentHash = {});
-std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string cacheKey, const br::import::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
-std::shared_ptr<Scene> LoadModel(std::string filePath, const br::import::ImportSettings& settings = {});
 
 } // namespace NifLoader

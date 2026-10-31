@@ -62,7 +62,6 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(unofficial-tree-sitter CONFIG REQUIRED)
-find_package(assimp CONFIG REQUIRED)
 find_package(pxr CONFIG REQUIRED)
 if(TARGET TBB::tbb AND NOT TARGET TBB::tbbmalloc)
     add_library(TBB::tbbmalloc INTERFACE IMPORTED)
@@ -279,8 +278,6 @@ set(SOURCES
     "src/PostProcessing/FidelityFX/Backend/FfxBackendDX12.cpp"
     "src/PostProcessing/FidelityFX/Backend/FfxBackendVulkan.cpp"
     # src/Import
-    "src/Assets/Import/Assimp/AssimpGeometryExtractor.cpp"
-    "src/Assets/Import/Assimp/AssimpLoader.cpp"
     "src/Assets/Import/NIF/BRNiflyClient.cpp"
     "src/Assets/Cache/ClusterLOD/CLodCache.cpp"
     "src/Assets/Cache/ClusterLOD/CLodCacheLoader.cpp"
@@ -1581,17 +1578,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       set_property(TARGET Microsoft::DirectXTex PROPERTY IMPORTED_LOCATION_DEBUG "${_basicrenderer_directxtex_release_lib}")
     endif()
   endif()
-  if(TARGET assimp::assimp)
-    get_target_property(_basicrenderer_assimp_debug_lib assimp::assimp IMPORTED_LOCATION_DEBUG)
-    get_target_property(_basicrenderer_assimp_release_lib assimp::assimp IMPORTED_LOCATION_RELEASE)
-    if(_basicrenderer_assimp_release_lib
-        AND _basicrenderer_assimp_debug_lib
-        AND NOT "${_basicrenderer_assimp_debug_lib}" STREQUAL "${_basicrenderer_assimp_release_lib}")
-      set_property(TARGET assimp::assimp PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
-      set_property(TARGET assimp::assimp PROPERTY MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
-      set_property(TARGET assimp::assimp PROPERTY IMPORTED_LOCATION_DEBUG "${_basicrenderer_assimp_release_lib}")
-    endif()
-  endif()
 endif()
 
 target_link_libraries(${PROJECT_NAME} 
@@ -1608,7 +1594,6 @@ PRIVATE
     meshoptimizer
     Eigen3::Eigen
     embree
-    assimp::assimp 
     flecs::flecs 
     flecs::flecs_static 
     unofficial::tree-sitter::tree-sitter

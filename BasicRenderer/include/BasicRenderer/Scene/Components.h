@@ -116,7 +116,6 @@ namespace Components {
         std::vector<std::array<ClippingPlane, 6>> frustumPlanes;
     };
 
-    struct SceneNode {};
     struct GlobalMeshLibrary {
         std::unordered_map<uint64_t, std::weak_ptr<Mesh>> meshes;
         uint64_t generation = 0;
@@ -129,7 +128,6 @@ namespace Components {
 
     struct Skinned {};
     struct SkinningPassEligible {};
-    struct SkeletonRoot {};
 
     struct Active {};
     struct Animated {};
@@ -164,12 +162,6 @@ namespace Components {
         Name() = default;
         Name(std::string name) : name(std::move(name)) {}
         Name(const char* name) : name(name) {}
-        std::string name;
-    };
-
-    struct AnimationName {
-        AnimationName() = default;
-        AnimationName(std::string name) : name(std::move(name)) {}
         std::string name;
     };
 

@@ -65,7 +65,6 @@
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/plug/registry.h>
 
-#include <flecs.h>
 
 #include "BasicRenderer/Assets/Material.h"
 #include "Utilities/Utilities.h"
@@ -74,14 +73,12 @@
 #include "BasicRenderer/Assets/Texture.h"
 #include "Resources/Sampler.h"
 #include "BasicRenderer/Assets/Import/Filetypes.h"
-#include "BasicRenderer/Scene/Scene.h"
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include "BasicRenderer/Assets/Geometry/MeshInstance.h"
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
 #include "Assets/Cache/Skeleton/SkeletonArtifactCache.h"
 #include "BasicRenderer/Scene/Components.h"
-#include "BasicRenderer/Scene/Animation/AnimationController.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "Assets/Textures/Processing/TextureProcessingManager.h"
@@ -98,36 +95,6 @@
 namespace USDLoader {
 	using namespace pxr;
 	std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin);
-
-	std::shared_ptr<Scene> LoadModel(std::string filePath, const ImportSettings& importSettings) {
-
-		UsdStageRefPtr stage = UsdStage::Open(filePath);
-		if (!stage) {
-			spdlog::error("USD stage open failed for {}", filePath);
-			return nullptr;
-		}
-
-		InMemoryStageOptions options{};
-		options.sourceIdentifier = filePath;
-		options.sourceDirectory = std::filesystem::path(filePath).parent_path().string();
-		options.layerIdentifierHint = std::filesystem::path(filePath).filename().string();
-		options.isUsdPackage = std::filesystem::path(filePath).extension() == ".usdz";
-
-		return LoadModelFromStage(stage, options, importSettings);
-	}
-
-	std::shared_ptr<Scene> LoadModelFromFile(
-		const std::string& filePath,
-		const InMemoryStageOptions& options,
-		const ImportSettings& importSettings) {
-		UsdStageRefPtr stage = UsdStage::Open(filePath);
-		if (!stage) {
-			spdlog::error("USD stage open failed for {}", filePath);
-			return nullptr;
-		}
-
-		return LoadModelFromStage(stage, options, importSettings);
-	}
 
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromUsdBytes(
 		const std::string& usdText,
@@ -169,30 +136,6 @@ namespace USDLoader {
 		}
 
 		return LoadImportedAssetFromStage(stage, options, importSettings, timingStats);
-	}
-
-	std::shared_ptr<Scene> LoadModelFromUsdBytes(
-		const std::string& usdText,
-		const InMemoryStageOptions& options,
-		const ImportSettings& importSettings) {
-		const std::string identifierHint = options.layerIdentifierHint.empty() ? std::string("in_memory.usda") : options.layerIdentifierHint;
-		SdfLayerRefPtr rootLayer = SdfLayer::CreateAnonymous(identifierHint);
-		if (!rootLayer || !rootLayer->ImportFromString(usdText)) {
-			spdlog::error("Failed to import in-memory USD layer '{}'.", identifierHint);
-			return nullptr;
-		}
-
-		UsdStageRefPtr stage = UsdStage::Open(rootLayer);
-		if (!stage) {
-			spdlog::error("Failed to open in-memory USD stage '{}'.", identifierHint);
-			return nullptr;
-		}
-
-		return LoadModelFromStage(stage, options, importSettings);
-	}
-
-	std::shared_ptr<Scene> LoadModel(std::string filePath) {
-		return LoadModel(std::move(filePath), ImportSettings{});
 	}
 
 }

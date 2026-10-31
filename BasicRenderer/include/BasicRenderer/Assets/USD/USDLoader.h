@@ -19,7 +19,6 @@
 #include <BasicRenderer/Assets/Import/ObjectReyesAtlasCache.h>
 #include "BasicRenderer/Assets/MaterialDescription.h"
 
-class Scene;
 class Mesh;
 
 namespace USDLoader {
@@ -74,21 +73,6 @@ namespace USDLoader {
 		std::uint64_t meshPreprocessMs = 0;
 		std::uint64_t payloadParseMs = 0;
 	};
-
-	std::shared_ptr<Scene> LoadModel(std::string file, const ImportSettings& settings);
-	std::shared_ptr<Scene> LoadModel(std::string file);
-	std::shared_ptr<Scene> LoadModelFromFile(
-		const std::string& filePath,
-		const InMemoryStageOptions& options,
-		const ImportSettings& settings = {});
-	std::shared_ptr<Scene> LoadModelFromStage(
-		const pxr::UsdStageRefPtr& stage,
-		const InMemoryStageOptions& options,
-		const ImportSettings& settings = {});
-	std::shared_ptr<Scene> LoadModelFromUsdBytes(
-		const std::string& usdText,
-		const InMemoryStageOptions& options,
-		const ImportSettings& settings = {});
 
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromFile(
 		const std::string& filePath,

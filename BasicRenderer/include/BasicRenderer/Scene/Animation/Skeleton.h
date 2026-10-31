@@ -8,7 +8,6 @@
 #include <span>
 #include <cstdint>
 
-#include <flecs.h>
 #include <DirectXMath.h>
 
 #include "BasicRenderer/Scene/Animation/Animation.h"
@@ -23,11 +22,6 @@
 class Skeleton : public std::enable_shared_from_this<Skeleton> {
 public:
     using Matrix = DirectX::XMMATRIX;
-
-    // Creates a BASE skeleton from imported bone entities + inverse bind matrices.
-    // This constructor extracts the CPU-only skeleton topology and rest pose and does NOT allocate GPU buffers.
-    Skeleton(const std::vector<flecs::entity>& nodes,
-        const std::vector<Matrix>& inverseBindMatrices);
 
     Skeleton(std::vector<std::string> boneNames,
         std::vector<int32_t> parentIndices,
@@ -151,7 +145,6 @@ private:
 
 private:
     // Helpers
-    void BuildBaseFromNodes_(const std::vector<flecs::entity>& nodes);
     void BuildEvalOrder_();
     void EnsureInstanceBuffersSized_();
 

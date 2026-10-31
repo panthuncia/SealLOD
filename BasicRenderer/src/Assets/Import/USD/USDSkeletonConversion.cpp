@@ -65,7 +65,6 @@
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/plug/registry.h>
 
-#include <flecs.h>
 
 #include "BasicRenderer/Assets/Material.h"
 #include "Utilities/Utilities.h"
@@ -74,14 +73,12 @@
 #include "BasicRenderer/Assets/Texture.h"
 #include "Resources/Sampler.h"
 #include "BasicRenderer/Assets/Import/Filetypes.h"
-#include "BasicRenderer/Scene/Scene.h"
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include "BasicRenderer/Assets/Geometry/MeshInstance.h"
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
 #include "Assets/Cache/Skeleton/SkeletonArtifactCache.h"
 #include "BasicRenderer/Scene/Components.h"
-#include "BasicRenderer/Scene/Animation/AnimationController.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "Assets/Textures/Processing/TextureProcessingManager.h"
@@ -279,77 +276,6 @@ namespace USDLoader {
 		spdlog::info(
 			"NIF TREE procedural-wind bridge: source='{}' renderableMeshes={} skinMetadataMeshes={} attachedWindMeshes={} layouts={}.",
 			sourceIdentifier, payload.meshes.size(), metadataMeshes, attachedMeshes, skeletonsByLayout.size());
-	}
-
-	std::shared_ptr<Skeleton> ProcessSkeleton(const UsdSkelSkeleton& skel, const VtTokenArray rawJointOrder, const UsdSkelSkeletonQuery& skelQuery, const std::shared_ptr<Scene>& scene, double metersPerUnit) {
-		if (loadingCache.skeletonMap.contains(skel.GetPrim().GetPath().GetString())) {
-			spdlog::info("Skeleton {} already processed, skipping.", skel.GetPrim().GetPath().GetString());
-			return loadingCache.skeletonMap[skel.GetPrim().GetPath().GetString()];
-		}
-
-		const auto& topo = skelQuery.GetTopology();
-		pxr::VtArray<pxr::GfMatrix4d> bindXforms;
-		skel.GetBindTransformsAttr().Get(&bindXforms);
-		if (bindXforms.size() < rawJointOrder.size()) {
-			spdlog::warn(
-				"Skeleton '{}' bind transform count ({}) is smaller than joint count ({}); missing joints will use identity rest transforms.",
-				skel.GetPrim().GetPath().GetString(),
-				bindXforms.size(),
-				rawJointOrder.size());
-		}
-
-		std::vector<XMMATRIX>        invBindMats;
-		std::vector<flecs::entity>   jointNodes;
-		invBindMats.reserve(rawJointOrder.size());
-		jointNodes.reserve(rawJointOrder.size());
-
-		for (size_t i = 0; i < rawJointOrder.size(); ++i) {
-			const GfMatrix4d bindMatrix = i < bindXforms.size() ? bindXforms[i] : GfMatrix4d(1.0);
-			GfMatrix4d localBindMatrix = bindMatrix;
-			auto parentIdx = topo.GetParent(i);
-			if (parentIdx > -1 && static_cast<size_t>(parentIdx) < bindXforms.size()) {
-				localBindMatrix = bindMatrix * bindXforms[parentIdx].GetInverse();
-			}
-			// Convert GfMatrix4d to XMMATRIX
-
-			// Extract translation and scale from the matrix
-			auto transform = GfTransform(bindMatrix);
-			auto translation = transform.GetTranslation() * metersPerUnit;
-			auto rotation = transform.GetRotation().GetQuaternion();
-			auto& scale = transform.GetScale();
-
-			// Create an XMMATRIX from the translation, rotation, and scale
-			XMMATRIX xm = XMMatrixScaling(static_cast<float>(scale[0]), static_cast<float>(scale[1]), static_cast<float>(scale[2])) *
-				XMMatrixRotationQuaternion(XMVectorSet(static_cast<float>(rotation.GetImaginary()[0]), static_cast<float>(rotation.GetImaginary()[1]), static_cast<float>(rotation.GetImaginary()[2]), static_cast<float>(rotation.GetReal()))) *
-				XMMatrixTranslation(static_cast<float>(translation[0]), static_cast<float>(translation[1]), static_cast<float>(translation[2]));
-			xm = XMMatrixInverse(nullptr, xm); // Invert the matrix for the inverse bind pose
-
-			invBindMats.push_back(xm);
-
-			// Lookup the node by name
-			std::string jn = rawJointOrder[i].GetString();
-			auto it = loadingCache.nodeMap.find(jn);
-			if (it != loadingCache.nodeMap.end()) {
-				throw std::runtime_error("Not implemented. Does the USD spec allow this?");
-			}
-
-			auto boneNode = scene->CreateNodeECS(s2ws(jn));
-			if (!boneNode.has<AnimationController>()) {
-				// Create a new AnimationController for this bone
-				boneNode.add<AnimationController>();
-				boneNode.set<Components::AnimationName>({ jn });
-			}
-			SetEntityTransformFromUsdMatrix(boneNode, localBindMatrix, metersPerUnit);
-			jointNodes.push_back(boneNode);
-			if (parentIdx > -1) {
-				boneNode.child_of(jointNodes[parentIdx]);
-			}
-		}
-
-		auto skeleton = std::make_shared<Skeleton>(jointNodes, invBindMats);
-
-		loadingCache.skeletonMap[skel.GetPrim().GetPath().GetString()] = skeleton;
-		return skeleton;
 	}
 
 	std::shared_ptr<Animation> ProcessAnimQuery(const UsdSkelAnimQuery& animQuery, const UsdStageRefPtr& stage, double metersPerUnit, const VtTokenArray& jointOrder) {

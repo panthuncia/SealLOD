@@ -10,37 +10,6 @@
 namespace USDLoader {
     using namespace pxr;
 
-static inline void SetEntityTransformFromUsdMatrix(
-		flecs::entity entity,
-		const GfMatrix4d& matrix,
-		double metersPerUnit)
-	{
-		const GfTransform transform(matrix);
-		const GfVec3d translation = transform.GetTranslation();
-		const GfQuaternion rotation = transform.GetRotation().GetQuaternion();
-		const GfVec3d scale = transform.GetScale();
-
-		entity.set<Components::Position>({
-			DirectX::XMFLOAT3(
-				static_cast<float>(translation[0] * metersPerUnit),
-				static_cast<float>(translation[1] * metersPerUnit),
-				static_cast<float>(translation[2] * metersPerUnit))
-			});
-		entity.set<Components::Rotation>({
-			DirectX::XMFLOAT4(
-				static_cast<float>(rotation.GetImaginary()[0]),
-				static_cast<float>(rotation.GetImaginary()[1]),
-				static_cast<float>(rotation.GetImaginary()[2]),
-				static_cast<float>(rotation.GetReal()))
-			});
-		entity.set<Components::Scale>({
-			DirectX::XMFLOAT3(
-				static_cast<float>(scale[0]),
-				static_cast<float>(scale[1]),
-				static_cast<float>(scale[2]))
-		});
-	}
-
 static inline Components::Transform ComponentsTransformFromUsdMatrix(
 		const GfMatrix4d& matrix,
 		double metersPerUnit)
@@ -113,9 +82,6 @@ std::shared_ptr<Skeleton> BuildBrNiflyTreeWindSkeleton(
     const pxr::UsdStageRefPtr& stage, const Mesh& mesh, std::string_view sourceIdentifier);
 void AttachBrNiflyTreeWindSkeletons(
     const pxr::UsdStageRefPtr& stage, ImportedAssetPayload& payload, std::string_view sourceIdentifier);
-std::shared_ptr<Skeleton> ProcessSkeleton(
-    const pxr::UsdSkelSkeleton& skel, const pxr::VtTokenArray rawJointOrder,
-    const pxr::UsdSkelSkeletonQuery& skelQuery, const std::shared_ptr<Scene>& scene, double metersPerUnit);
 std::shared_ptr<Animation> ProcessAnimQuery(
     const pxr::UsdSkelAnimQuery& animQuery, const pxr::UsdStageRefPtr& stage,
     double metersPerUnit, const pxr::VtTokenArray& jointOrder);

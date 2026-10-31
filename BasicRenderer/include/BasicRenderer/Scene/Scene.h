@@ -20,27 +20,6 @@
 namespace org { class DynamicGloballyIndexedResource; }
 class Material;
 
-class SkeletonVariantSet {
-public:
-    explicit SkeletonVariantSet(std::uint32_t variantCount = 1);
-
-    std::uint32_t GetVariantCount() const noexcept { return m_variantCount; }
-    std::shared_ptr<Skeleton> GetVariant(const std::shared_ptr<Skeleton>& skeleton, std::uint32_t variantIndex);
-
-private:
-    struct VariantRecord {
-        std::shared_ptr<Skeleton> baseSkeleton;
-        std::vector<std::shared_ptr<Skeleton>> variants;
-    };
-
-    std::uint32_t m_variantCount = 1;
-    std::unordered_map<const Skeleton*, VariantRecord> m_variantsByBase;
-};
-
-struct SkeletonVariantAssignmentOptions {
-    std::uint32_t seed = 1337;
-};
-
 class Scene {
 public:
     Scene();
@@ -48,7 +27,6 @@ public:
     flecs::entity CreateDirectionalLightECS(std::wstring name, DirectX::XMFLOAT3 color, float intensity, DirectX::XMFLOAT3 direction, bool shadowCasting = true);
     flecs::entity CreatePointLightECS(std::wstring name, DirectX::XMFLOAT3 position, DirectX::XMFLOAT3 color, float intensity, float constantAttenuation = 0, float linearAttenuation = 0, float quadraticAttenuation = 0, bool shadowCasting = true);
     flecs::entity CreateSpotLightECS(std::wstring name, DirectX::XMFLOAT3 position, DirectX::XMFLOAT3 color, float intensity, DirectX::XMFLOAT3 direction, float innerConeAngle, float outerConeAngle, float constantAttenuation = 0, float linearAttenuation = 0, float quadraticAttenuation = 0, bool shadowCasting = true);
-    flecs::entity CreateNodeECS(std::wstring name = L"");
     flecs::entity CreateRenderableEntityECS(const std::vector<std::shared_ptr<Mesh>>& meshes, std::wstring name);
     flecs::entity CreateRenderableEntityECS(
         const std::vector<std::shared_ptr<Mesh>>& meshes,
@@ -83,32 +61,22 @@ public:
     RenderableEntityPoolStats GetRenderableEntityPoolStats() const;
     flecs::entity GetRoot() const;
     uint64_t GetSceneID() const;
-    void Update(float elapsedSeconds);
     void SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, DirectX::XMFLOAT3 up, float fov, float aspect, float zNear, float zFar);
     flecs::entity& GetPrimaryCamera();
     bool HasUsablePrimaryCamera() const;
     Components::Position& GetPrimaryCameraPosition();
     Components::Rotation& GetPrimaryCameraRotation();
     void PropagateTransforms();
-    void PostUpdate();
-    std::shared_ptr<Scene> AppendScene(std::shared_ptr<Scene> scene);
     void Activate(br::render::SceneIngestionServices services);
     void Deactivate();
     bool SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t meshInstanceIndex, std::shared_ptr<Material> material);
-    void AssignSkeletonVariants(SkeletonVariantSet& variantSet, const SkeletonVariantAssignmentOptions& options = {});
-    bool AssignSkeletonVariant(flecs::entity entity, SkeletonVariantSet& variantSet, std::uint32_t variantIndex);
-
-    void ProcessEntitySkins(bool overrideExistingSkins = false);
-    std::shared_ptr<Scene> Clone() const;
     void DisableShadows();
 
 private:
     static std::atomic<uint64_t> globalSceneCount;
     uint64_t m_sceneID = 0;
-    std::vector<std::shared_ptr<Scene>> m_childScenes;
     flecs::entity m_primaryCamera;
 
-    std::unordered_map<uint64_t, flecs::entity> animatedEntitiesByID;
     unsigned int numObjects = 0;
 
     flecs::entity ECSSceneRoot;
@@ -166,6 +134,5 @@ private:
     flecs::query<> m_dirtyQuery;
     bool m_propagateQueriesBuilt = false;
 
-    void ActivateAllAnimatedEntities();
     bool IsActive() const;
 };

@@ -200,7 +200,6 @@ void Renderer::Update(float elapsedSeconds) {
             runCapturedStage("BootstrapSceneSnapshot", [&]() {
                 BT_ZONE_SCOPE("Renderer::Update::BootstrapSceneSnapshot");
                 ApplyPrimaryCameraInput(elapsedSeconds);
-                RunGameUpdateStage(elapsedSeconds);
                 RunTransformPropagationStage();
                 BootstrapCommittedSceneSnapshot();
             });
@@ -214,7 +213,6 @@ void Renderer::Update(float elapsedSeconds) {
         runCapturedStage("SynchronousSceneUpdate", [&]() {
             BT_ZONE_SCOPE("Renderer::Update::SynchronousSceneUpdate");
             ApplyPrimaryCameraInput(elapsedSeconds);
-            RunGameUpdateStage(elapsedSeconds);
             RunTransformPropagationStage();
             RunSceneBridgeSyncStage();
         });

@@ -39,7 +39,6 @@
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Runtime/Settings/SettingsManager.h"
-#include "BasicRenderer/Assets/Import/ModelLoader.h"
 #include <BasicRenderer/StaticImport/ImportedAssetLibrary.h>
 #include <BasicRenderer/StaticImport/StaticImportRuntime.h>
 #include <rhi_interop_dx12.h>
@@ -1226,204 +1225,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     }
     renderer.SetInputMode(InputMode::wasd);
-    // --legacy-scene: load the models through the legacy ModelLoader/AppendScene path.
-    const bool useLegacyScene = commandLine.find("--legacy-scene") != std::string_view::npos;
     std::unique_ptr<DemoStaticScene> staticScene;
 
     {
         org::BufferBase::ScopedBackingMutation startupSceneBackingMutation;
 
-        auto baseScene = std::make_shared<Scene>();
-
-        // The default load streams the models' static parts through the static import
-        // runtime, like SARP does; --legacy-scene loads them as ECS scenes instead.
-        std::vector<std::shared_ptr<Scene>> modelScenes;
-        if (useLegacyScene) {
-            for (const auto& model : FindDemoModels(commandLine)) {
-                auto modelScene = LoadModel(model.path);
-                modelScene->GetRoot().set<Components::Scale>({ model.scale, model.scale, model.scale });
-                modelScenes.push_back(std::move(modelScene));
-            }
-        } else {
-            staticScene = std::make_unique<DemoStaticScene>();
-            for (const auto& model : FindDemoModels(commandLine)) {
-                staticScene->AddModel(model.path, XMMatrixScaling(model.scale, model.scale, model.scale));
-            }
-            // Scene Explorer's Load Model adds to the running static scene. The menu calls it on this thread.
-            SettingsManager::GetInstance().getSettingSetter<std::function<void(const std::string&)>>("loadModel")(
-                [scene = staticScene.get()](const std::string& path) { scene->AddModel(path, XMMatrixIdentity()); });
+        // The models' static parts stream through the static import runtime, like SARP does.
+        renderer.SetCurrentScene(std::make_shared<Scene>());
+        staticScene = std::make_unique<DemoStaticScene>();
+        for (const auto& model : FindDemoModels(commandLine)) {
+            staticScene->AddModel(model.path, XMMatrixScaling(model.scale, model.scale, model.scale));
         }
-
-    //auto carScene = LoadModel("models/porche.glb");
-    //carScene->GetRoot().set<Components::Scale>({ 0.6, 0.6, 0.6 });
-    //carScene->GetRoot().set<Components::Position>({ 1.0, 0.0, 1.0 });
-    //auto sphereScene = LoadModel("models/sphere.glb");
-
-	//auto mountainScene = LoadModel("models/terrain.glb");
-	//mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });
-	//mountainScene->GetRoot().set<Components::Position>({ 0.0, -2.0, 0.0 });
-
-
-	//auto shiba = LoadModel("models/shiba.glb");
-
-    //auto usdScene = LoadModel("models/sponza.usdz");
-    
-    //auto bistro = LoadModel("models/bistroExteriorNoMats.usdz");
-    //auto bistro = LoadModel("models/bistroExterior.glb");
-    //auto wine = LoadModel("models/bistroInterior.usdz");
-    //bistro->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
-
-    //auto robot = LoadModel("models/robot.usdz");
-
-	//auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
-
-	//auto zorah = LoadModel("models/zorah_materials/zorah.usdc");
-
-	//auto island = LoadModel("models/island/usd/elements/isMountainB/instance.usda");
-
-	//auto quad = LoadModel("models/quad.usdz");
-	
-	    //auto cubes = LoadModel("models/cubes/suspicious_cubes.usda");
-
-    //auto cherry = LoadModel("models/Trees/CherryTree.usd");
-
-    //auto pine = LoadModel("models/Trees/branch.usdz");
-	//pine->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
-
-    //auto needles = LoadModel("models/Trees/Tree_Baltic_Pine_01_A.usd");
-
-	//auto farmhouse = LoadModel("models/iceberglarge.nif");
-
-        renderer.SetCurrentScene(baseScene);
-    	//renderer.GetCurrentScene()->AppendScene(needles->Clone());
-
-	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
-
-    constexpr int NeedleCloneCount = 0;
-    constexpr float NeedleDistributionRadius = 50.0f;
-    constexpr float NeedleMinSpacing = 5.0f;
-    constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
-    constexpr int MaxNeedleFailedPlacementAttempts = 200000;
-    constexpr uint32_t NeedleSkeletonVariantCount = 1;
-
-    std::mt19937 needleRng{ 1337 };
-    std::uniform_real_distribution<float> needleUnitDist(0.0f, 1.0f);
-    std::uniform_real_distribution<float> needleAngleDist(0.0f, DirectX::XM_2PI);
-    std::vector<point> needlePositions;
-    needlePositions.reserve(NeedleCloneCount);
-    std::unordered_map<std::int64_t, std::vector<std::size_t>> needlePlacementGrid;
-    needlePlacementGrid.reserve(static_cast<std::size_t>(NeedleCloneCount));
-
-    const auto gridCoord = [](float value) -> int {
-        return static_cast<int>(std::floor(value / NeedleMinSpacing));
-    };
-    const auto gridKey = [](int x, int z) -> std::int64_t {
-        return (static_cast<std::int64_t>(x) << 32) ^ static_cast<std::uint32_t>(z);
-    };
-
-    int failedPlacementAttempts = 0;
-    std::uint64_t totalPlacementAttempts = 0;
-    while (needlePositions.size() < NeedleCloneCount &&
-        failedPlacementAttempts < MaxNeedleFailedPlacementAttempts) {
-        ++totalPlacementAttempts;
-        const float radius = NeedleDistributionRadius * std::sqrt(needleUnitDist(needleRng));
-        const float angle = needleAngleDist(needleRng);
-        const point candidate{
-            radius * std::cos(angle),
-            0.0f,
-            radius * std::sin(angle)
-        };
-
-        bool hasEnoughSpacing = true;
-        const int candidateCellX = gridCoord(candidate.x);
-        const int candidateCellZ = gridCoord(candidate.z);
-        for (int dzCell = -1; dzCell <= 1 && hasEnoughSpacing; ++dzCell) {
-            for (int dxCell = -1; dxCell <= 1 && hasEnoughSpacing; ++dxCell) {
-                const auto it = needlePlacementGrid.find(gridKey(candidateCellX + dxCell, candidateCellZ + dzCell));
-                if (it == needlePlacementGrid.end()) {
-                    continue;
-                }
-
-                for (const std::size_t existingIndex : it->second) {
-                    const point& existing = needlePositions[existingIndex];
-                    const float dx = candidate.x - existing.x;
-                    const float dz = candidate.z - existing.z;
-                    if (dx * dx + dz * dz < NeedleMinSpacingSq) {
-                        hasEnoughSpacing = false;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (hasEnoughSpacing) {
-            const std::size_t insertedIndex = needlePositions.size();
-            needlePositions.push_back(candidate);
-            needlePlacementGrid[gridKey(candidateCellX, candidateCellZ)].push_back(insertedIndex);
-            failedPlacementAttempts = 0;
-        }
-        else {
-            ++failedPlacementAttempts;
-        }
-    }
-
-    spdlog::info(
-        "Needle placement generated {} / {} requested positions (radius={} minSpacing={} attempts={} failedTailLimit={} failedTail={})",
-        needlePositions.size(),
-        NeedleCloneCount,
-        NeedleDistributionRadius,
-        NeedleMinSpacing,
-        totalPlacementAttempts,
-        MaxNeedleFailedPlacementAttempts,
-        failedPlacementAttempts);
-
-    SkeletonVariantSet needleSkeletonVariants(NeedleSkeletonVariantCount);
-    std::size_t appendedNeedleScenes = 0;
-    for (const point& position : needlePositions) {
-        //needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
-        //auto needleClone = needles->Clone();
-        //needleClone->AssignSkeletonVariants(needleSkeletonVariants);
-        //renderer.GetCurrentScene()->AppendScene(needleClone);
-        ++appendedNeedleScenes;
-    }
-    spdlog::info("Needle append completed: appended {} cloned scenes", appendedNeedleScenes);
-	//renderer.GetCurrentScene()->AppendScene(pine->Clone());
-
-    //renderer.GetCurrentScene()->AppendScene(cherry->Clone());
-    	//renderer.AppendScene(cubes->Clone());
-    
-	//renderer.GetCurrentScene()->AppendScene(carScene->Clone());
-
-	//renderer.GetCurrentScene()->AppendScene(quad->Clone());
-	//quad->GetRoot().set<Components::Position>({ 0.0, -2.0, 0.0 });
-	//renderer.GetCurrentScene()->AppendScene(quad->Clone());
-
-	//renderer.GetCurrentScene()->AppendScene(island->Clone());
-
-	//renderer.GetCurrentScene()->AppendScene(zorah->Clone());
-
-    //mountainScene = LoadModel("models/terrain.glb");
- //   mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });
- //   mountainScene->GetRoot().set<Components::Position>({ 0.0, -10.0, 0.0 });
-	//renderer.GetCurrentScene()->AppendScene(mountainScene->Clone());
-
-        for (const auto& modelScene : modelScenes) renderer.GetCurrentScene()->AppendScene(modelScene->Clone());
-    
-	//renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
-
-	//renderer.GetCurrentScene()->AppendScene(robot->Clone());
-
-    //renderer.GetCurrentScene()->AppendScene(bistro->Clone());
-
-	//sphereScene->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
-    //renderer.GetCurrentScene()->AppendScene(sphereScene->Clone());
-
-    //for (int i = 0; i < 5; i++) {
-    //    auto sphereInstance = renderer.GetCurrentScene()->AppendScene(sphereScene->Clone());
-    //    auto point = getRandomPointInVolume(-2, 2, -2, 2, -2, 2);
-    //    sphereInstance->GetRoot().set<Components::Position>({ point.x, point.y, point.z });
-    //}
-
+        // Scene Explorer's Load Model adds to the running static scene. The menu calls it on this thread.
+        SettingsManager::GetInstance().getSettingSetter<std::function<void(const std::string&)>>("loadModel")(
+            [scene = staticScene.get()](const std::string& path) { scene->AddModel(path, XMMatrixIdentity()); });
 
         renderer.SetEnvironment("sky");
 
@@ -1746,7 +1561,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
             if (staticScene) staticScene->Tick(renderer, frameIndex);
             renderer.Update(elapsedSeconds.count());
-            renderer.PostUpdate();
             if (frameIndex % 100 == 0) {
                 spdlog::info("FPS: {}", 1 / elapsedSeconds.count());
             }

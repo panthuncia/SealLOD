@@ -45,11 +45,6 @@ flecs::entity FindSceneEntityByStableSceneID(flecs::entity node, uint64_t stable
 }
 }
 
-void Renderer::RunGameUpdateStage(float elapsedSeconds) {
-    BT_ZONE_SCOPE("Renderer::Update::GameUpdate");
-    currentScene->Update(elapsedSeconds);
-}
-
 void Renderer::RunAnimationUpdateStage(float elapsedSeconds) {
     BT_ZONE_SCOPE("Renderer::Update::AnimationUpdate");
     m_pSkeletonManager->TickAnimations(elapsedSeconds);
@@ -421,10 +416,6 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
         }
 
         {
-            ZoneScopedN("Renderer::SceneUpdateOverlap::SceneUpdate");
-            scene->Update(elapsedSeconds);
-        }
-        {
             ZoneScopedN("Renderer::SceneUpdateOverlap::PropagateTransforms");
             scene->PropagateTransforms();
         }
@@ -583,12 +574,4 @@ flecs::entity Renderer::GetValidatedPrimaryRenderCamera(bool attemptResync) {
     return primaryCamera;
 }
 
-
-void Renderer::PostUpdate() {
-    BT_ZONE_SCOPE("Renderer::PostUpdate");
-	if (!currentScene) {
-        return;
-    }
-	currentScene->PostUpdate();
-}
 

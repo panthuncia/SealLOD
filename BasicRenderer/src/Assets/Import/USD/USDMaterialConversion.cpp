@@ -66,7 +66,6 @@
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/plug/registry.h>
 
-#include <flecs.h>
 
 #include "BasicRenderer/Assets/Material.h"
 #include "Utilities/Utilities.h"
@@ -75,14 +74,12 @@
 #include "BasicRenderer/Assets/Texture.h"
 #include "Resources/Sampler.h"
 #include "BasicRenderer/Assets/Import/Filetypes.h"
-#include "BasicRenderer/Scene/Scene.h"
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include "BasicRenderer/Assets/Geometry/MeshInstance.h"
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
 #include "Assets/Cache/Skeleton/SkeletonArtifactCache.h"
 #include "BasicRenderer/Scene/Components.h"
-#include "BasicRenderer/Scene/Animation/AnimationController.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "Assets/Textures/Processing/TextureProcessingManager.h"

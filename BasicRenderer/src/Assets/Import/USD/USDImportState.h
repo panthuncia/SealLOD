@@ -5,7 +5,6 @@
 #include <BasicRenderer/Assets/Import/MeshPreprocessData.h>
 #include <BasicRenderer/Scene/Animation/DynamicWindMetadata.h>
 #include <BasicRenderer/Assets/Texture.h>
-#include <flecs.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdSkel/skinningQuery.h>
@@ -91,13 +90,10 @@ namespace USDLoader {
 		std::vector<std::string> textureSearchRoots;
 		std::function<std::optional<std::string>(std::string_view)> resolveResourcePath;
 		//std::unordered_map<std::string, std::shared_ptr<UsdSkelSkeleton>> unprocessedSkeletons;
-		std::unordered_map<std::string, UsdPrim> primsWithSkeletons;
 		std::unordered_map<std::string, std::shared_ptr<Skeleton>> skeletonMap;
 		std::unordered_map<const Skeleton*, PayloadSkeletonBuildMetadata> payloadSkeletonMetadata;
 		std::unordered_map<std::string, AssemblySkeletonTopologyHints> assemblySkeletonTopologyHintsByStage;
 		std::unordered_map<std::string, std::shared_ptr<Animation>> animationMap;
-		// For storing nodes in the USD shader graph
-		std::unordered_map<std::string, flecs::entity> nodeMap;
 
 		void Clear() {
 			materialTemplateCache.clear();
@@ -110,12 +106,10 @@ namespace USDLoader {
 			unresolvedTextureCache.clear();
 			textureSearchRoots.clear();
 			resolveResourcePath = {};
-			primsWithSkeletons.clear();
 			skeletonMap.clear();
 			payloadSkeletonMetadata.clear();
 			assemblySkeletonTopologyHintsByStage.clear();
 			animationMap.clear();
-			nodeMap.clear();
 		}
 	};
 

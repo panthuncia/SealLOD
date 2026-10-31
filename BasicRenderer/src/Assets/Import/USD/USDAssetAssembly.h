@@ -75,9 +75,5 @@ bool BuildAssetAssemblyMeshesFromPreprocessedData(
     const std::string& sourceIdentifier, UsdTimeCode geomTimeCode,
     const std::vector<AssetAssemblyBucketInfo>& buckets,
     std::vector<std::shared_ptr<Mesh>>& meshes, std::string* outFailureReason = nullptr);
-std::shared_ptr<Scene> CreateCollapsedAssetAssemblyScene(
-    const std::vector<std::shared_ptr<Mesh>>& meshes,
-    const std::vector<AssetAssemblyBucketInfo>& buckets,
-    const GfRotation& upAxisCorrection);
 
 }

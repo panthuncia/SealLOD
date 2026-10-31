@@ -58,7 +58,6 @@ enum class SceneFiletype {
 enum class SceneLoader {
 	UNKNOWN,
 	GlTF,
-	Assimp,
 	OpenUSD,
 	Nif
 };
@@ -67,7 +66,6 @@ static std::unordered_map<SceneFiletype, SceneLoader> sceneFiletypeToLoader = {
 	{SceneFiletype::GLTF, SceneLoader::GlTF},
 	{SceneFiletype::USD, SceneLoader::OpenUSD},
 	{SceneFiletype::NIF, SceneLoader::Nif},
-	{SceneFiletype::OTHER, SceneLoader::Assimp} // default loader
 };
 
 static std::unordered_set<std::string> gltfFileExtensions = {
@@ -115,5 +113,5 @@ inline SceneLoader GetSceneLoader(const std::string& ext) {
 	if (sceneFiletypeToLoader.contains(filetype)) {
 		return sceneFiletypeToLoader[filetype];
 	}
-	return SceneLoader::Assimp; // default
+	return SceneLoader::UNKNOWN;
 }

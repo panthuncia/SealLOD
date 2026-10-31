@@ -30,10 +30,10 @@ struct ExtractionResult {
 	std::vector<ExtractedMesh> meshes;
 };
 
-// Extract from an already-loaded aiScene (for renderer use).
+// Extract from an already-loaded aiScene.
 ExtractionResult ExtractAll(const aiScene* scene, const std::string& sourceFilePath);
 
-// Convenience: load file via Assimp + extract (for CLI tool).
+// Convenience: load file via Assimp + extract.
 ExtractionResult ExtractAll(const std::string& filePath);
 
 } // namespace AssimpGeometryExtractor

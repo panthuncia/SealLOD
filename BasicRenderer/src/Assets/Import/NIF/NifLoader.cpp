@@ -44,7 +44,6 @@
 #include "BasicRenderer/Assets/Material.h"
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include "BasicRenderer/Assets/Texture.h"
-#include "BasicRenderer/Scene/Scene.h"
 #include <BasicRenderer/Assets/CachePaths.h>
 #include "Utilities/Utilities.h"
 
@@ -2906,75 +2905,6 @@ bool FinalizeObjectReyesPayloadCache(
 		}
 	}
 	return true;
-}
-
-std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
-{
-    const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey.empty() ? filePath : cacheKey);
-    if (IsKnownNonRenderableNif(normalizedCacheKey)) {
-        spdlog::info("Skipping known non-renderable NIF '{}'", normalizedCacheKey);
-        return nullptr;
-    }
-
-    std::string errorMessage;
-    const auto brniflyBegin = std::chrono::steady_clock::now();
-    BRNiflyClient::TimingStats brniflyTiming{};
-    std::optional<BRNiflyClient::UsdAssetPackage> package;
-    {
-        ZoneScopedN("NifLoader::LoadModelWithCacheKey::BRNiflyConvertNifToUsd");
-        ZoneText(normalizedCacheKey.data(), normalizedCacheKey.size());
-        package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage, std::addressof(brniflyTiming));
-    }
-    if (stats) {
-        stats->brniflyMs += ElapsedMs(brniflyBegin, std::chrono::steady_clock::now());
-        stats->brniflyDescribeMs += brniflyTiming.describeServicesMs;
-        stats->brniflyConvertMs += brniflyTiming.convertProcessMs;
-        AccumulateBRNiflyChildTimingStats(*stats, brniflyTiming);
-    }
-    if (!package) {
-        spdlog::error("NIF import failed for '{}': {}", filePath, errorMessage);
-        return nullptr;
-    }
-
-    for (const auto& diagnostic : package->diagnostics) {
-        if (diagnostic.level == "warning") {
-            spdlog::warn("BRNifly: {}", diagnostic.message);
-        }
-        else if (diagnostic.level == "error") {
-            spdlog::error("BRNifly: {}", diagnostic.message);
-        }
-        else {
-            spdlog::info("BRNifly: {}", diagnostic.message);
-        }
-    }
-
-    const ObjectReyesConfig& objectReyesConfig = GetObjectReyesConfig();
-    const std::vector<std::string> textureSearchRoots =
-        MergeTextureSearchRoots(package->textureSearchRoots, settings.additionalTextureSearchRoots);
-    const std::string effectiveContentHash = package->contentHash + "_object_reyes_" +
-        std::string(kObjectReyesConfigVersion) + "_" + objectReyesConfig.contentHash +
-        "_texroots_" + TextureSearchRootsHash(textureSearchRoots) +
-        NifTreeWindContentHashMarker(settings);
-    const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, effectiveContentHash);
-    const std::string sourceDirectory = fs::path(filePath).parent_path().string();
-    auto options = MakeStageOptions(
-        stableSourceIdentifier,
-        sourceDirectory,
-        textureSearchRoots,
-        "brnifly_" + package->contentHash + ".usda",
-        objectReyesConfig,
-        normalizedCacheKey);
-    const auto usdLoadBegin = std::chrono::steady_clock::now();
-    auto scene = USDLoader::LoadModelFromUsdBytes(package->rootLayerText, options, settings);
-    if (stats) {
-        stats->usdLoadMs += ElapsedMs(usdLoadBegin, std::chrono::steady_clock::now());
-    }
-    return scene;
-}
-
-std::shared_ptr<Scene> LoadModel(std::string filePath, const USDLoader::ImportSettings& settings)
-{
-    return LoadModelWithCacheKey(filePath, filePath, settings, nullptr);
 }
 
 } // namespace NifLoader

@@ -125,7 +125,6 @@ public:
     void Initialize(HWND hwnd, UINT x_res, UINT y_res, br::pipeline::PipelineRecipe recipe);
     void OnResize(UINT newWidth, UINT newHeight);
     void Update(float elapsedSeconds);
-	void PostUpdate();
     void Render();
     void Cleanup();
     std::shared_ptr<Scene>& GetCurrentScene();
@@ -135,7 +134,6 @@ public:
     void SetInputMode(InputMode mode);
     void SetCameraSpeed(float speed);
     void SetEnvironment(std::string name);
-    std::shared_ptr<Scene> AppendScene(std::shared_ptr<Scene> scene);
 	bool IsInitialized() const { return m_isInitialized; }
     void SetExternalSceneMode(bool enabled);
     void SetSceneRenderOverlapEnabled(bool enabled);
@@ -310,7 +308,6 @@ private:
     void AdvanceFrameIndex();
     void CheckDebugMessages();
     void CreateRTVs();
-    void RunGameUpdateStage(float elapsedSeconds);
     void RunAnimationUpdateStage(float elapsedSeconds);
     void RunTransformPropagationStage();
     void RunSceneBridgeSyncStage();
