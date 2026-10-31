@@ -5,12 +5,12 @@
 
 #include "BasicRenderer/Extensions/EnvironmentWorkService.h"
 
-namespace org { class CompiledGraph; class Resource; class Runtime; }
+namespace org { class JobGraph; class Resource; class Runtime; }
 
 namespace br::render {
 
 // The graph environment processing runs in: HDRI conversion to a cubemap, prefiltering, and spherical harmonics. It
-// is a graph of its own on the runtime (an org::CompiledGraph), so a new environment changes its declarations instead
+// is a graph of its own on the runtime (an org::JobGraph), so a new environment changes its declarations instead
 // of the frame graph's. The frame graph reads its results through its own declarations of the same resources, and the
 // runtime orders those reads after these writes.
 //
@@ -29,7 +29,7 @@ public:
 
 private:
     EnvironmentWorkServices m_work;
-    std::shared_ptr<org::CompiledGraph> m_graph;
+    std::shared_ptr<org::JobGraph> m_graph;
     uint64_t m_executions = 0;  // logged when it goes
 };
 

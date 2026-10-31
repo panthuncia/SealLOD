@@ -224,6 +224,11 @@ TextureBC7CompressionFrame TextureFactory::BC7CompressionPass::Prepare(
         if (!job || !job->workingTexture || !job->blockBuffer) continue;
         const auto stage = job->stage.load(std::memory_order_acquire);
         if (stage == BC7CompressionJob::Stage::WaitingForSourceUpload) {
+            // Its mips' completion moves it on (TextureFactory::WhenMipsReady).
+            if (job->waitsForMips.load(std::memory_order_acquire)) {
+                waiting.push_back(job);
+                continue;
+            }
             const uint32_t remaining =
                 job->sourceUploadWaitExecutions.fetch_sub(1u, std::memory_order_acq_rel);
             if (remaining <= 1u) {

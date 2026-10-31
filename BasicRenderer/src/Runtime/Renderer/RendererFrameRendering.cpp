@@ -223,10 +223,10 @@ void Renderer::Render() {
     {
         BT_ZONE_SCOPE("Renderer::Render::PrepareRenderContext");
         runCapturedStage("PrepareRenderContext", [&]() {
-			if (!currentRenderGraph || !currentRenderGraph->GetDescriptorService()) {
+			if (!currentRenderGraph || !m_orgRuntime->Descriptors().get()) {
 				throw std::runtime_error("Renderer: descriptor service unavailable while preparing render context");
 			}
-			auto* descriptorService = currentRenderGraph->GetDescriptorService();
+			auto* descriptorService = m_orgRuntime->Descriptors().get();
             m_context.hasPrimaryCamera = false;
             m_context.primaryViewID = 0;
 			m_context.textureDescriptorHeap = descriptorService->GetSRVDescriptorHeap();
@@ -420,69 +420,54 @@ void Renderer::Render() {
         || !currentBackbufferResource->HasHandle()) {
         throw std::runtime_error("Presentation tail has invalid resource bindings");
     }
-    auto& presentationAllocator = m_commandAllocators[renderedFrameIndex];
-    auto& presentationList = m_commandLists[renderedFrameIndex];
-    auto recordPresentationTail = std::make_shared<std::packaged_task<void()>>(
-        [presentationSource, currentBackbufferResource,
-         &presentationAllocator, &presentationList]() {
-    presentationAllocator->Recycle();
-    presentationList->Recycle(presentationAllocator.Get());
-    rhi::TextureSubresourceRange presentationRange{};
-    presentationRange.mipCount = 1;
-    presentationRange.layerCount = 1;
-    rhi::TextureBarrier backbufferToCopy{};
-    backbufferToCopy.texture = currentBackbufferResource->GetHandle();
-    backbufferToCopy.range = presentationRange;
-    backbufferToCopy.beforeSync = rhi::ResourceSyncState::All;
-    backbufferToCopy.afterSync = rhi::ResourceSyncState::Copy;
-    backbufferToCopy.beforeAccess = rhi::ResourceAccessType::Present;
-    backbufferToCopy.afterAccess = rhi::ResourceAccessType::CopyDest;
-    backbufferToCopy.beforeLayout = rhi::ResourceLayout::Present;
-    backbufferToCopy.afterLayout = rhi::ResourceLayout::CopyDest;
-    rhi::BarrierBatch beforePresentationCopy{};
-    beforePresentationCopy.textures = {&backbufferToCopy, 1};
-    presentationList->Barriers(beforePresentationCopy);
+    // The copy into the backbuffer goes through the frame graph's external client: the runtime orders it after the
+    // frame's write of PresentationColor (its wait and transition), and keeps PresentationColor from its next writer
+    // until the copy is done. The backbuffer is not a graph resource; its own barriers leave it ready to present, on
+    // the queue Present uses.
+    {
+        BT_ZONE_SCOPE("Renderer::Render::PresentationTail");
+        const auto graphicsSlot = static_cast<uint32_t>(
+            static_cast<uint8_t>(currentRenderGraph->GetQueueRegistry().FindGraphicsSlot()));
+        const org::ResourceState copySource{rhi::ResourceAccessType::CopySource,
+            rhi::AccessToLayout(rhi::ResourceAccessType::CopySource, true),
+            rhi::RenderSyncFromAccess(rhi::ResourceAccessType::CopySource)};
+        const std::array<org::ExternalClient::Access, 1> accesses{{{presentationSource.get(), {}, copySource}}};
+        currentRenderGraph->GetExternalClient().Submit(graphicsSlot, accesses,
+            [&](rhi::CommandList& list) {
+                rhi::TextureSubresourceRange presentationRange{};
+                presentationRange.mipCount = 1;
+                presentationRange.layerCount = 1;
+                rhi::TextureBarrier backbufferToCopy{};
+                backbufferToCopy.texture = currentBackbufferResource->GetHandle();
+                backbufferToCopy.range = presentationRange;
+                backbufferToCopy.beforeSync = rhi::ResourceSyncState::All;
+                backbufferToCopy.afterSync = rhi::ResourceSyncState::Copy;
+                backbufferToCopy.beforeAccess = rhi::ResourceAccessType::Present;
+                backbufferToCopy.afterAccess = rhi::ResourceAccessType::CopyDest;
+                backbufferToCopy.beforeLayout = rhi::ResourceLayout::Present;
+                backbufferToCopy.afterLayout = rhi::ResourceLayout::CopyDest;
+                rhi::BarrierBatch beforePresentationCopy{};
+                beforePresentationCopy.textures = {&backbufferToCopy, 1};
+                list.Barriers(beforePresentationCopy);
 
-    rhi::TextureCopyRegion sourceRegion{};
-    sourceRegion.texture = presentationSource->GetAPIResource().GetHandle();
-    rhi::TextureCopyRegion destinationRegion{};
-    destinationRegion.texture = currentBackbufferResource->GetHandle();
-    presentationList->CopyTextureRegion(destinationRegion, sourceRegion);
+                rhi::TextureCopyRegion sourceRegion{};
+                sourceRegion.texture = presentationSource->GetAPIResource().GetHandle();
+                rhi::TextureCopyRegion destinationRegion{};
+                destinationRegion.texture = currentBackbufferResource->GetHandle();
+                list.CopyTextureRegion(destinationRegion, sourceRegion);
 
-    auto backbufferToPresent = backbufferToCopy;
-    backbufferToPresent.beforeSync = rhi::ResourceSyncState::Copy;
-    backbufferToPresent.afterSync = rhi::ResourceSyncState::All;
-    backbufferToPresent.beforeAccess = rhi::ResourceAccessType::CopyDest;
-    backbufferToPresent.afterAccess = rhi::ResourceAccessType::Present;
-    backbufferToPresent.beforeLayout = rhi::ResourceLayout::CopyDest;
-    backbufferToPresent.afterLayout = rhi::ResourceLayout::Present;
-    rhi::BarrierBatch afterPresentationCopy{};
-    afterPresentationCopy.textures = {&backbufferToPresent, 1};
-    presentationList->Barriers(afterPresentationCopy);
-    presentationList->End();
-        });
-    auto presentationTailReady = recordPresentationTail->get_future();
-    const bool presentationTailSubmitted = m_presentationTailScope.Valid()
-        && TaskSchedulerManager::GetInstance().SubmitCpu(
-            m_presentationTailScope, TaskLane::FrameCritical, TaskDomain::General,
-            "Renderer::RecordPresentationTail",
-            [recordPresentationTail](const br::TaskContext&) { (*recordPresentationTail)(); });
-    if (!presentationTailSubmitted)
-        throw std::runtime_error("Presentation tail recording task was rejected");
-    recordPresentationTail.reset();
-    presentationTailReady.get();
-    basic_telemetry::AddCounter("ORG.PresentationTail.WorkerRecorded");
-
-    if (const auto dependency = currentRenderGraph->GetLastPresentDependency();
-        dependency && dependency->valid
-        && graphicsQueue.Wait(dependency->wait) != rhi::Result::Ok) {
-        throw std::runtime_error("Presentation tail failed to wait for scene output");
+                auto backbufferToPresent = backbufferToCopy;
+                backbufferToPresent.beforeSync = rhi::ResourceSyncState::Copy;
+                backbufferToPresent.afterSync = rhi::ResourceSyncState::All;
+                backbufferToPresent.beforeAccess = rhi::ResourceAccessType::CopyDest;
+                backbufferToPresent.afterAccess = rhi::ResourceAccessType::Present;
+                backbufferToPresent.beforeLayout = rhi::ResourceLayout::CopyDest;
+                backbufferToPresent.afterLayout = rhi::ResourceLayout::Present;
+                rhi::BarrierBatch afterPresentationCopy{};
+                afterPresentationCopy.textures = {&backbufferToPresent, 1};
+                list.Barriers(afterPresentationCopy);
+            }, {}, presentationSource);
     }
-    auto presentationCommandList = presentationList.Get();
-    if (graphicsQueue.Submit({&presentationCommandList, 1}) != rhi::Result::Ok) {
-        throw std::runtime_error("Presentation tail submission failed");
-    }
-    org::GraphHost::ConfirmPresentation(*currentRenderGraph);
     basic_telemetry::AddCounter("ORG.PresentationTail.Submitted");
 
     // Present the frame
@@ -531,7 +516,7 @@ void Renderer::Render() {
     runCapturedStage("ReadbackRequests", [&]() {
         if (currentRenderGraph) {
             BT_ZONE_SCOPE("Renderer::Render::ReadbackRequests");
-            if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+            if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
                 readbackService->ProcessReadbackRequests(); // Process readback captures
             }
         }

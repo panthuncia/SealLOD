@@ -291,7 +291,7 @@ void Renderer::Update(float elapsedSeconds) {
 		// recycled current-frame staging pages before RenderGraph::Execute had
 		// submitted their copies.
 		if (currentRenderGraph) {
-			if (auto* uploadService = currentRenderGraph->GetUploadService()) {
+			if (auto* uploadService = m_orgRuntime->Uploads().get()) {
 				uploadService->ProcessDeferredReleases(m_preparationFrameIndex);
 			}
 		}
@@ -761,7 +761,7 @@ void Renderer::Update(float elapsedSeconds) {
                 desiredLights->retainedResources.push_back(std::move(resource));
         }
         std::vector<br::render::ArtifactRequirement> lightRequirements;
-        if (auto uploads = currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr) {
+        if (auto uploads = currentRenderGraph ? m_orgRuntime->Uploads() : nullptr) {
             const std::array<std::uint32_t, 5> strides{
                 sizeof(LightInfo), sizeof(std::uint32_t), sizeof(std::uint32_t), sizeof(std::uint32_t),
                 sizeof(std::uint32_t) };
@@ -806,7 +806,7 @@ void Renderer::Update(float elapsedSeconds) {
         // consumer; it is captured from the buffer's journal (no CPU copy, no
         // hash) and posted. The frame-written palettes are graph resources.
         std::vector<br::render::ArtifactRequirement> poseRequirements;
-        if (auto uploads = currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr) {
+        if (auto uploads = currentRenderGraph ? m_orgRuntime->Uploads() : nullptr) {
             auto capture = m_pSkeletonManager->CaptureInverseBindGraphState();
             const auto revision = capture.writeSequence;
             const auto version = m_poseTableFamilies[0]->PostCapture(
@@ -926,7 +926,7 @@ void Renderer::Update(float elapsedSeconds) {
                 [](const auto& view) { return view.primary; }) : decltype(views->views.begin()){};
             const auto cameraResource = m_pViewManager ? m_pViewManager->GetCameraBuffer() : nullptr;
             if (cameraResource && views && primary != views->views.end()) {
-                if (auto* service = currentRenderGraph->GetReadbackService()) {
+                if (auto* service = m_orgRuntime->Readbacks().get()) {
                     const auto requestFrame = m_totalFramesRendered;
                     const auto cameraRevision = m_frameInputs->PrimaryCameraUpload().revision;
                     const auto expected = primary->cameraInfo;
@@ -1000,7 +1000,7 @@ void Renderer::Update(float elapsedSeconds) {
             if (value && value[0]) {
                 const std::filesystem::path directory(value);
                 std::filesystem::create_directories(directory);
-                if (auto* service = currentRenderGraph->GetReadbackService()) {
+                if (auto* service = m_orgRuntime->Readbacks().get()) {
                     gpuWorkReadbackRequested = true;
                     const auto captureResource = [&](const char* label, const char* anchor,
                         std::shared_ptr<org::Resource> resource,
@@ -1159,7 +1159,7 @@ void Renderer::Update(float elapsedSeconds) {
                 const std::filesystem::path path(outputPath);
                 std::free(outputPath);
                 outputPath = nullptr;
-                if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+                if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
                     colorOutputReadbackRequested = true;
                     readbackService->RequestReadbackCaptureAfterGraph(
                         m_dynamicPresentationColor.get(),
@@ -1259,7 +1259,7 @@ void Renderer::Update(float elapsedSeconds) {
                 const std::filesystem::path path(outputPath);
                 std::free(outputPath);
                 outputPath = nullptr;
-                if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+                if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
                     const auto lease = m_context.publishedManifestLease;
                     const auto published = lease ? lease->state : nullptr;
                     const auto materialState = published
@@ -1525,7 +1525,7 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("FrameMaintenance", [&]() {
         if (currentRenderGraph) {
             BT_ZONE_SCOPE("Renderer::Update::FrameStatistics");
-            if (auto* statisticsService = currentRenderGraph->GetStatisticsService()) {
+            if (auto* statisticsService = m_orgRuntime->Statistics().get()) {
                 statisticsService->OnFrameComplete(m_frameIndex, computeQueue); // Gather statistics for the last iteration of the frame
                 statisticsService->OnFrameComplete(m_frameIndex, graphicsQueue); // Gather statistics for the last iteration of the frame
             }

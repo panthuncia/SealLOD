@@ -239,6 +239,7 @@ private:
     std::shared_ptr<org::PixelBuffer> m_defaultEnvironmentCubemap = nullptr;
     std::shared_ptr<org::PixelBuffer> m_defaultEnvironmentPrefilteredCubemap = nullptr;
     std::shared_ptr<org::PixelBuffer> m_blueNoiseTexture = nullptr;
+    std::shared_ptr<org::PixelBuffer> m_brdfLut;
     OpenPBRLookupResources m_openPBRLookupResources;
     bool m_warnedUsingFallbackEnvironment = false;
     bool m_warnedNullScene = false;
@@ -289,6 +290,8 @@ private:
     void SetupInputHandlers();
     void CreateGlobalResources();
     void CreateDefaultEnvironmentResources();
+    // The BRDF integration LUT, rendered on first use by a one-shot job graph.
+    std::shared_ptr<org::PixelBuffer> EnsureBrdfLut();
     void CreateRenderGraph();
     void ApplyPendingPipelineReplacement();
     br::pipeline::PipelineRecipe GetPipelineRecipeForMutation() const;

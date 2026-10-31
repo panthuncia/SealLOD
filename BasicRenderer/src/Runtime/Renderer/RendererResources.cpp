@@ -17,6 +17,8 @@
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Resources/ExternalTextureResource.h"
 #include "../../../generated/BuiltinResources.h"
+#include "OpenRenderGraph/GraphDesc.h"
+#include "Lighting/Environment/RenderPasses/brdfIntegrationPass.h"
 
 void Renderer::CreateGlobalResources() {
     // Needed by the first frame's passes: the one texture load renderer initialization waits on.
@@ -34,6 +36,33 @@ void Renderer::CreateGlobalResources() {
     }
 
     m_openPBRLookupResources = CreateOpenPBRLookupResources(*m_pTextureFactory);
+}
+
+std::shared_ptr<org::PixelBuffer> Renderer::EnsureBrdfLut() {
+    if (m_brdfLut) return m_brdfLut;
+    org::TextureDescription desc;
+    desc.arraySize = 1;
+    desc.channels = 2;
+    desc.isCubemap = false;
+    desc.hasRTV = true;
+    desc.format = rhi::Format::R16G16_Float;
+    desc.generateMipMaps = false;
+    desc.hasSRV = true;
+    desc.srvFormat = rhi::Format::R16G16_Float;
+    desc.imageDimensions.push_back({512, 512, 0, 0});
+    // Materialized and kept: it is written once, so it must never be dematerialized.
+    auto lut = org::PixelBuffer::CreateShared(desc);
+    lut->SetName("BRDF Integration Texture");
+    org::memory::SetResourceUsageHint(*lut, "Environment lighting");
+    {
+        // One execution. The frame graph's reads of the LUT are ordered after it by the runtime; the graph waits for the
+        // GPU when it goes, which happens once, while the renderer builds its first graph.
+        org::GraphDesc job("BRDFIntegration");
+        job.Add(org::ExternalPassDesc::Render("BRDF Integration Pass", std::make_shared<BRDFIntegrationPass>(lut)));
+        org::JobGraph::Create(m_orgRuntime, std::move(job))->Execute();
+    }
+    m_brdfLut = std::move(lut);
+    return m_brdfLut;
 }
 
 void Renderer::CreateDefaultEnvironmentResources() {

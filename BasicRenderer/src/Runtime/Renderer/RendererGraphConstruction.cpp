@@ -183,23 +183,23 @@ void Renderer::CreateRenderGraph() {
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}
-        if (auto* uploadService = currentRenderGraph->GetUploadService()) {
+        if (auto* uploadService = m_orgRuntime->Uploads().get()) {
             uploadService->Initialize();
         }
         if (m_uploadPolicyService) {
-            m_uploadPolicyService->SetUploadService(currentRenderGraph->RetainUploadService());
+            m_uploadPolicyService->SetUploadService(m_orgRuntime->Uploads());
             org::runtime::SetActiveUploadPolicyService(m_uploadPolicyService.get());
         }
-        if (auto* descriptorService = currentRenderGraph->GetDescriptorService()) {
+        if (auto* descriptorService = m_orgRuntime->Descriptors().get()) {
             descriptorService->Initialize();
         }
         }
         if (m_clodRayTracingSystem && currentRenderGraph)
-            m_clodRayTracingSystem->SetUploadService(currentRenderGraph->RetainUploadService());
+            m_clodRayTracingSystem->SetUploadService(m_orgRuntime->Uploads());
         if (m_pSkeletonManager && currentRenderGraph)
-            m_pSkeletonManager->SetUploadService(currentRenderGraph->RetainUploadService());
+            m_pSkeletonManager->SetUploadService(m_orgRuntime->Uploads());
         if (currentRenderGraph)
-            ::ResourceManager::GetInstance().SetUploadService(currentRenderGraph->RetainUploadService());
+            ::ResourceManager::GetInstance().SetUploadService(m_orgRuntime->Uploads());
 
         if (!m_renderGraphRuntimeInitialized) {
         currentRenderGraph->GetMemorySnapshotProvider().SetProvider(
@@ -207,37 +207,37 @@ void Renderer::CreateRenderGraph() {
         Menu::GetInstance().SetRenderGraph(currentRenderGraph.get());
 
         if (auto* textureFactory = m_pTextureFactory.get()) {
-            textureFactory->SetUploadService(currentRenderGraph->RetainUploadService());
-            textureFactory->SetReadbackService(currentRenderGraph->GetReadbackServiceOwner());
+            textureFactory->SetUploadService(m_orgRuntime->Uploads());
+            textureFactory->SetReadbackService(m_orgRuntime->Readbacks());
         }
         if (m_pEnvironmentManager)
-            m_pEnvironmentManager->SetUploadService(currentRenderGraph->RetainUploadService());
+            m_pEnvironmentManager->SetUploadService(m_orgRuntime->Uploads());
         if (m_pMaterialManager) {
 			m_pMaterialManager->SetRendererStateServices(
-				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService());
-			m_pMaterialManager->SetDescriptorService(currentRenderGraph->RetainDescriptorService());
+				m_rendererStateRequests.get(), m_orgRuntime->Uploads());
+			m_pMaterialManager->SetDescriptorService(m_orgRuntime->Descriptors());
 		}
 		if (m_pObjectManager)
 			m_pObjectManager->SetRendererStateServices(
-				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService(),
+				m_rendererStateRequests.get(), m_orgRuntime->Uploads(),
 				m_numFramesInFlight);
 		if (m_pMeshManager)
 			m_pMeshManager->SetRendererStateServices(
-				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService(),
+				m_rendererStateRequests.get(), m_orgRuntime->Uploads(),
 				m_numFramesInFlight);
 		if (m_pIndirectCommandBufferManager)
 			m_pIndirectCommandBufferManager->SetRendererStateServices(
-				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService());
+				m_rendererStateRequests.get(), m_orgRuntime->Uploads());
 		if (m_sceneIngestionServices.execution.generation) {
 			m_sceneIngestionServices.execution.generation->uploads.store(
-				currentRenderGraph->RetainUploadService(), std::memory_order_release);
+				m_orgRuntime->Uploads(), std::memory_order_release);
 			m_sceneIngestionServices.execution.generation->descriptors.store(
-				currentRenderGraph->RetainDescriptorService(), std::memory_order_release);
+				m_orgRuntime->Descriptors(), std::memory_order_release);
 		}
 		if (m_pTerrainManager)
 			m_pTerrainManager->SetRendererStateServices(
-				m_rendererStateRequests.get(), currentRenderGraph->RetainUploadService(),
-				currentRenderGraph->RetainDescriptorService());
+				m_rendererStateRequests.get(), m_orgRuntime->Uploads(),
+				m_orgRuntime->Descriptors());
 
 
         RendererECSManager::GetInstance().CreateRenderPhaseEntity(Engine::Primary::CLodTransparentPass);
@@ -370,7 +370,7 @@ void Renderer::CreateRenderGraph() {
                 newGraph->RegisterResource(Builtin::PerFrameBuffer, ::ResourceManager::GetInstance().GetPerFrameBuffer());
                 break;
             case BrdfIntegration:
-                BuildBRDFIntegrationPass(newGraph.get());
+                RegisterBRDFLUT(newGraph.get(), EnsureBrdfLut());
                 break;
             case Environment: {
                 if (m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap)) m_defaultEnvironmentCubemap.reset();
@@ -738,7 +738,7 @@ void Renderer::RegisterPipelineExtensions() {
     currentRenderGraph->RegisterExtension(std::make_unique<RenderGraphIOExtension>(
         std::make_shared<br::render::RenderGraphIOService>(
             *m_pTextureFactory,
-            currentRenderGraph->RetainUploadService(),
+            m_orgRuntime->Uploads(),
             *m_pMaterialManager)),
         "BuiltinIO");
     // Readback captures (IReadbackService) are placed by the graph itself: in the anchor pass's recording, or as an

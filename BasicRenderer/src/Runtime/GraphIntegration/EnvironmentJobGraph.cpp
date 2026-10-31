@@ -22,11 +22,11 @@ EnvironmentJobGraph::EnvironmentJobGraph(std::shared_ptr<org::Runtime> runtime, 
         std::make_shared<EnvironmentSHPass>(work.sphericalHarmonics, std::move(environmentInfo))));
     desc.Add(org::ExternalPassDesc::Compute("Environment Prefilter Pass",
         std::make_shared<EnvironmentFilterPass>(work.prefilter)));
-    m_graph = org::CompiledGraph::Compile(std::move(runtime), std::move(desc));
+    m_graph = org::JobGraph::Create(std::move(runtime), std::move(desc));
 }
 
 EnvironmentJobGraph::~EnvironmentJobGraph() {
-    // The compiled graph's host waits for its work when it goes.
+    // The job graph's instance waits for its work when it goes.
     m_graph.reset();
     spdlog::info("EnvironmentJobGraph: {} executions", m_executions);
 }

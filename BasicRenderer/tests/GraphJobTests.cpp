@@ -1,4 +1,4 @@
-// Graph jobs in a StateGraph (ORG job graphs, Phase 4): three artifacts, each produced by a compiled graph, chained
+// Graph jobs in a StateGraph (ORG job graphs, Phase 4): three artifacts, each produced by a job graph, chained
 // across two queues. Each dependent requires only UploadSubmitted of its input, so it starts and submits its own graph
 // while the GPU may still run the one before; the runtime's sequencer makes the GPU wait instead of the CPU.
 #include <ORGModuleServices/Async/StateGraph.h>
@@ -81,7 +81,7 @@ private:
 };
 
 // A graph that copies its "in" parameter to its "out" parameter on one queue.
-std::shared_ptr<org::CompiledGraph> CopyGraph(org::GraphCache& cache, const char* name, uint64_t key, org::QueueKind queue,
+std::shared_ptr<org::JobGraph> CopyGraph(org::GraphCache& cache, const char* name, uint64_t key, org::QueueKind queue,
     std::shared_ptr<org::Resource> in, std::shared_ptr<org::Resource> out) {
     org::GraphDesc desc(name, key);
     auto source = desc.Parameter("in", std::move(in));
@@ -140,7 +140,7 @@ int RunChain(rhi::Device device, const std::shared_ptr<org::Runtime>& runtime) {
     produceFirst.producer = [&](const Context&) {
         auto out = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, kBytes);
         out->SetName("job.a");
-        const org::CompiledGraph::Binding bindings[] = {{"out", out}};
+        const org::JobGraph::Binding bindings[] = {{"out", out}};
         return org::services::RunGraphJob<Result>(first, bindings,
             org::async::ArtifactPayload::Make(std::make_shared<const Stage>(Stage{out})));
     };
@@ -151,7 +151,7 @@ int RunChain(rhi::Device device, const std::shared_ptr<org::Runtime>& runtime) {
         firstWhenSecondStarted = graph.Snapshot(firstKey).readiness;
         auto out = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, kBytes);
         out->SetName("job.b");
-        const org::CompiledGraph::Binding bindings[] = {{"in", input.payload->buffer}, {"out", out}};
+        const org::JobGraph::Binding bindings[] = {{"in", input.payload->buffer}, {"out", out}};
         return org::services::RunGraphJob<Result>(second, bindings,
             org::async::ArtifactPayload::Make(std::make_shared<const Stage>(Stage{out})));
     };
@@ -160,7 +160,7 @@ int RunChain(rhi::Device device, const std::shared_ptr<org::Runtime>& runtime) {
         const auto input = context.Dependency<Stage>(secondKey);
         if (!input.payload) return Result::Failure("no second stage");
         secondWhenThirdStarted = graph.Snapshot(secondKey).readiness;
-        const org::CompiledGraph::Binding bindings[] = {{"in", input.payload->buffer}};
+        const org::JobGraph::Binding bindings[] = {{"in", input.payload->buffer}};
         return org::services::RunGraphJob<Result>(third, bindings,
             org::async::ArtifactPayload::Make(std::make_shared<const Stage>(Stage{readback})));
     };

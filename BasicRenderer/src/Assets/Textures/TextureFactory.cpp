@@ -984,6 +984,12 @@ bool TextureFactory::SubmitBC7CompressionJob(
         job->subresources.push_back(subresource);
     }
     job->outputByteSize = outputByteSize;
+    // Compression reads the working texture's mips: when the GPU generates them, it starts once they are done.
+    if (WhenMipsReady(*job->workingTexture, [weak = std::weak_ptr<BC7CompressionJob>(job)] {
+            if (const auto ready = weak.lock())
+                ready->stage.store(BC7CompressionJob::Stage::ReadyForCompression, std::memory_order_release);
+        }))
+        job->waitsForMips.store(true, std::memory_order_release);
 
     std::static_pointer_cast<BC7CompressionPass>(m_bc7CompressionPass)->EnqueueJob(job);
     std::static_pointer_cast<BC7CompressionCopyPass>(m_bc7CompressionCopyPass)->EnqueueJob(job);

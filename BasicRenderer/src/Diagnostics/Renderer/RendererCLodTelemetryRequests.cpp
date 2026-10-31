@@ -1,4 +1,5 @@
 #include <BasicRenderer/Renderer.h>
+#include "OpenRenderGraph/Runtime.h"
 
 #include <algorithm>
 #include <array>
@@ -104,7 +105,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         return;
     }
 
-    auto* readbackService = currentRenderGraph->GetReadbackService();
+    auto* readbackService = m_orgRuntime->Readbacks().get();
     if (!readbackService) {
         return;
     }
@@ -770,7 +771,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
         return;
     }
 
-    auto* readbackService = currentRenderGraph->GetReadbackService();
+    auto* readbackService = m_orgRuntime->Readbacks().get();
     if (!readbackService) {
         return;
     }

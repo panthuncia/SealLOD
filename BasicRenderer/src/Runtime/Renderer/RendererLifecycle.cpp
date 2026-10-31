@@ -105,7 +105,7 @@ void Renderer::StallPipeline() {
 
 void Renderer::Cleanup() {
     spdlog::info("In cleanup");
-    auto retiringDescriptors = currentRenderGraph ? currentRenderGraph->RetainDescriptorService() : nullptr;
+    auto retiringDescriptors = currentRenderGraph ? m_orgRuntime->Descriptors() : nullptr;
 	auto retiringIngestionGeneration = m_sceneIngestionServices.execution.generation;
     if (currentRenderGraph) currentRenderGraph->StopFrameProduction();
     // Wait for all GPU frames to complete
@@ -185,13 +185,13 @@ void Renderer::Cleanup() {
         // Publication and texture-streaming producers have now stopped. Cover
         // submissions made after the first wait before cleaning their services.
         StallPipeline();
-        if (auto* uploadService = currentRenderGraph->GetUploadService()) {
+        if (auto* uploadService = m_orgRuntime->Uploads().get()) {
             uploadService->Cleanup();
         }
         if (m_uploadPolicyService) {
             m_uploadPolicyService->Cleanup();
         }
-        if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+        if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
             readbackService->Cleanup();
         }
     }
@@ -245,6 +245,7 @@ void Renderer::Cleanup() {
     m_materialEvaluationInputs = {};
     m_openPBRLookupResources = {};
     m_blueNoiseTexture.reset();
+    m_brdfLut.reset();
     m_dynamicBackbuffer.reset();
     m_dynamicPresentationColor.reset();
     m_presentationColorResources.clear();
@@ -515,21 +516,21 @@ void Renderer::Initialize(
 		}
     }
 
-    if (auto* uploadService = currentRenderGraph->GetUploadService()) {
+    if (auto* uploadService = m_orgRuntime->Uploads().get()) {
             uploadService->Initialize();
             uploadService->SetOwnerThread();
     }
     if (!m_uploadPolicyService) {
-        m_uploadPolicyService = org::runtime::CreateDefaultUploadPolicyService(currentRenderGraph->RetainUploadService());
+        m_uploadPolicyService = org::runtime::CreateDefaultUploadPolicyService(m_orgRuntime->Uploads());
     }
     if (m_uploadPolicyService) {
         m_uploadPolicyService->Initialize();
         org::runtime::SetActiveUploadPolicyService(m_uploadPolicyService.get());
     }
-    if (auto* descriptorService = currentRenderGraph->GetDescriptorService()) {
+    if (auto* descriptorService = m_orgRuntime->Descriptors().get()) {
         descriptorService->Initialize();
     }
-    ::ResourceManager::GetInstance().Initialize(currentRenderGraph->RetainUploadService());
+    ::ResourceManager::GetInstance().Initialize(m_orgRuntime->Uploads());
     TaskSchedulerManager::GetInstance().Initialize();
     m_rendererStateCommitScope = TaskSchedulerManager::GetInstance().CreateScope(
         "RendererStateCommitCleanup");
@@ -595,13 +596,13 @@ void Renderer::Initialize(
     spdlog::info("Renderer initialization: initializing menu");
     Menu::GetInstance().Initialize(hwnd, m_swapChain.Get());
     spdlog::info("Renderer initialization: menu initialized");
-    if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+    if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
         readbackService->Initialize(m_readbackFence.Get(), m_copyReadbackFence.Get());
     }
     m_pReadbackManager = std::make_unique<br::ReadbackManager>();
     
     m_pReadbackManager->Initialize(m_legacyReadbackFence.Get());
-    if (auto* statisticsService = currentRenderGraph->GetStatisticsService()) {
+    if (auto* statisticsService = m_orgRuntime->Statistics().get()) {
         statisticsService->Initialize();
     }
 
@@ -619,12 +620,12 @@ void Renderer::Initialize(
     m_pMeshManager = MeshManager::CreateUnique();
 	m_pMeshManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
-		currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
+		currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,
 		m_numFramesInFlight);
 	m_pObjectManager = ObjectManager::CreateUnique();
 	m_pObjectManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
-		currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
+		currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,
 		m_numFramesInFlight);
 	// Static draw-record roots publish only with a Geometry root covering the
 	// mesh templates they reference (see ObjectManager::SetGeometryCoverageSource).
@@ -633,7 +634,7 @@ void Renderer::Initialize(
 	});
 	m_pIndirectCommandBufferManager = IndirectCommandBufferManager::CreateUnique();
 	m_pViewManager = ViewManager::CreateUnique();
-	m_pEnvironmentManager = EnvironmentManager::CreateUnique(currentRenderGraph->RetainUploadService());
+	m_pEnvironmentManager = EnvironmentManager::CreateUnique(m_orgRuntime->Uploads());
 	m_pEnvironmentManager->SetWorkServices(m_environmentWorkServices);
 	m_environmentJobs = std::make_unique<br::render::EnvironmentJobGraph>(m_orgRuntime, m_environmentWorkServices,
 		m_pEnvironmentManager->ProvideResource(Builtin::Environment::InfoBuffer), m_numFramesInFlight);
@@ -650,8 +651,8 @@ void Renderer::Initialize(
 	br::render::RegisterMaterialUsageBatchProducer(*m_asyncStateGraph);
     m_pMaterialManager->SetRendererStateServices(
         m_rendererStateRequests.get(),
-        currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
-    m_pMaterialManager->SetDescriptorService(currentRenderGraph->RetainDescriptorService());
+        currentRenderGraph ? m_orgRuntime->Uploads() : nullptr);
+    m_pMaterialManager->SetDescriptorService(m_orgRuntime->Descriptors());
     m_pMaterialManager->SetRequestTextureReadbackFn(
         [this](std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
             if (m_pMaterialManager &&
@@ -671,8 +672,8 @@ void Renderer::Initialize(
     m_pTerrainManager = TerrainManager::CreateUnique();
 	m_pTerrainManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
-		currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
-		currentRenderGraph ? currentRenderGraph->RetainDescriptorService() : nullptr);
+		currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,
+		currentRenderGraph ? m_orgRuntime->Descriptors() : nullptr);
 	//ResourceManager::GetInstance().SetEnvironmentBufferDescriptorIndex(m_pEnvironmentManager->GetEnvironmentBufferSRVDescriptorIndex());
 	m_pLightManager->SetShadowViewService(m_pViewManager.get());
 	m_pViewManager->SetEvents({
@@ -691,7 +692,7 @@ void Renderer::Initialize(
 			ProceduralWindTransientBoneCapacitySettingName)(),
 		1024u, 1048576u);
 	m_pSkeletonManager = SkeletonManager::CreateShared(
-		currentRenderGraph->RetainUploadService(), transientWindMatrixCapacity);
+		m_orgRuntime->Uploads(), transientWindMatrixCapacity);
 	m_pMeshManager->SetSkeletonManager(m_pSkeletonManager.get());
 	m_poseInstanceRegistrationService.Configure(m_pSkeletonManager.get());
 	m_sceneRenderableResidencyService.Configure(m_pMeshManager.get(), m_pMaterialManager.get());
@@ -727,14 +728,14 @@ void Renderer::Initialize(
     m_poseTableFamilies[0] = makeFrameTableFamily(120, "PoseInverseBindTable", poseStrides[0],
         br::render::PublishedFragmentKind::Poses, poseVariants[0]);
     m_pSkeletonManager->SetInverseBindBackingPool(m_poseTableFamilies[0]->Configuration().pool);
-    m_pTextureFactory = TextureFactory::CreateUnique(currentRenderGraph->RetainUploadService());
+    m_pTextureFactory = TextureFactory::CreateUnique(m_orgRuntime->Uploads());
     m_textureJobs = std::make_unique<br::render::TextureJobGraph>(m_orgRuntime, *m_pTextureFactory, m_numFramesInFlight);
     m_pTextureFactory->SetJobUploadService(m_textureJobs->Uploads());
     m_textureJobs->StartSelfTestIfRequested();
     m_clodRayTracingSystem = std::make_shared<br::render::CLodRayTracingSystem>(
-        currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
+        currentRenderGraph ? m_orgRuntime->Uploads() : nullptr);
     if (currentRenderGraph) {
-        m_pTextureFactory->SetReadbackService(currentRenderGraph->GetReadbackServiceOwner());
+        m_pTextureFactory->SetReadbackService(m_orgRuntime->Readbacks());
     }
 	if (m_pMaterialManager) {
 		m_pMaterialManager->InitializeTextureStreaming(*m_pTextureFactory, m_numFramesInFlight);
@@ -764,8 +765,8 @@ void Renderer::Initialize(
         .execution = {
             .stateRequests = m_rendererStateRequests.get(),
 			.generation = std::make_shared<br::render::ArtifactExecutionAccess::Generation>(
-				currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr,
-				currentRenderGraph ? currentRenderGraph->RetainDescriptorService() : nullptr) },
+				currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,
+				currentRenderGraph ? m_orgRuntime->Descriptors() : nullptr) },
 		.sceneAssetRequests = std::addressof(m_sceneAssetRequestService),
 		.geometryRequests = std::addressof(m_staticGeometryRequestService),
 		.materialRequests = std::addressof(m_staticMaterialRequestService),
@@ -774,7 +775,7 @@ void Renderer::Initialize(
     };
     m_pIndirectCommandBufferManager->SetRendererStateServices(
         m_rendererStateRequests.get(),
-        currentRenderGraph ? currentRenderGraph->RetainUploadService() : nullptr);
+        currentRenderGraph ? m_orgRuntime->Uploads() : nullptr);
 
     m_warnedNullScene = false;
     m_warnedMissingPrimaryCamera = false;

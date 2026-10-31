@@ -136,7 +136,10 @@ private:
         std::atomic_bool budgetReleased = false;
         std::atomic<Stage> stage = Stage::WaitingForSourceUpload;
         std::atomic<uint32_t> stageFrameIndex = UINT32_MAX;
+        // Executions to wait for the source upload when nothing reports it: a working texture without GPU mips. One with
+        // GPU mips waits for them instead (waitsForMips), which the GPU finishes after the upload.
         std::atomic<uint32_t> sourceUploadWaitExecutions = 4u;
+        std::atomic_bool waitsForMips = false;
         uint64_t outputByteSize = 0;
         bool outputHasFullMipChain = true;
     };

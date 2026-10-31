@@ -1,4 +1,5 @@
 #include <BasicRenderer/Renderer.h>
+#include "OpenRenderGraph/Runtime.h"
 
 #include <algorithm>
 #include <array>
@@ -160,7 +161,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         return;
     }
 
-    auto* readbackService = currentRenderGraph->GetReadbackService();
+    auto* readbackService = m_orgRuntime->Readbacks().get();
     if (!readbackService) {
         return;
     }
@@ -345,7 +346,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
         return;
     }
 
-    auto* readbackService = currentRenderGraph->GetReadbackService();
+    auto* readbackService = m_orgRuntime->Readbacks().get();
     if (!readbackService) {
         return;
     }

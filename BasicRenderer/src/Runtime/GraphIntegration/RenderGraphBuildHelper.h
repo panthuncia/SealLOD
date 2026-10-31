@@ -60,27 +60,9 @@ inline void CreateDebugVisualizationResources(org::RenderGraph* graph) {
     graph->RegisterResource(Builtin::DebugVisualization, debugVisTex);
 }
 
-inline void BuildBRDFIntegrationPass(org::RenderGraph* graph) {
-	org::TextureDescription brdfDesc;
-    brdfDesc.arraySize = 1;
-    brdfDesc.channels = 2;
-    brdfDesc.isCubemap = false;
-    brdfDesc.hasRTV = true;
-    brdfDesc.format = rhi::Format::R16G16_Float;
-    brdfDesc.generateMipMaps = false;
-    brdfDesc.hasSRV = true;
-    brdfDesc.srvFormat = rhi::Format::R16G16_Float;
-	brdfDesc.hasUAV = true;
-	brdfDesc.uavFormat = rhi::Format::R16G16_Float;
-    org::ImageDimensions dims = { 512, 512, 0, 0 };
-    brdfDesc.imageDimensions.push_back(dims);
-    auto brdfIntegrationTexture = org::PixelBuffer::CreateSharedUnmaterialized(brdfDesc);
-    brdfIntegrationTexture->SetName("BRDF Integration Texture");
-    org::memory::SetResourceUsageHint(*brdfIntegrationTexture, "Environment lighting");
-    brdfIntegrationTexture->EnableIdleDematerialization(120);
-	graph->RegisterResource(Builtin::BRDFLUT, brdfIntegrationTexture);
-	graph->BuildPass<BRDFIntegrationPass>("BRDF Integration Pass");
-    TagPassTechnique(graph, "BRDF Integration Pass", "Environment Lighting::BRDF Integration");
+// The BRDF LUT is rendered once, in a graph of its own (Renderer::EnsureBrdfLut); the frame graph only reads it.
+inline void RegisterBRDFLUT(org::RenderGraph* graph, std::shared_ptr<org::PixelBuffer> lut) {
+	graph->RegisterResource(Builtin::BRDFLUT, std::move(lut));
 }
 
 inline void RegisterVisUtilResources(

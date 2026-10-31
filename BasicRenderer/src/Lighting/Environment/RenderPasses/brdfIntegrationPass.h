@@ -21,12 +21,13 @@ class BRDFIntegrationPass
     : public org::TypedRenderGraphPass<BRDFIntegrationPass,
           BRDFIntegrationFrame, BRDFIntegrationBindings> {
 public:
-    BRDFIntegrationPass() {
+    // Renders the LUT into `target` once, in a graph of its own (Renderer::EnsureBrdfLut).
+    explicit BRDFIntegrationPass(std::shared_ptr<org::PixelBuffer> target) : m_target(std::move(target)) {
         CreatePSO();
     }
 
     BRDFIntegrationBindings Declare(org::PassBuilder& builder) {
-        return {PSO, builder.RenderTarget(org::ResourceIdentifier{Builtin::BRDFLUT}).View()};
+        return {PSO, builder.RenderTarget(m_target).View()};
     }
 
     BRDFIntegrationFrame Prepare(const BRDFIntegrationBindings& bindings,
@@ -47,6 +48,7 @@ public:
     }
 
 private:
+    std::shared_ptr<org::PixelBuffer> m_target;
     org::PipelineState PSO;
 
     void CreatePSO() {
