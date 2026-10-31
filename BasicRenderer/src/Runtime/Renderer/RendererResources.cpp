@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <rhi_debug.h>
 #include "Utilities/Utilities.h"
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Runtime/Resources/ResourceManager.h"
@@ -18,9 +19,13 @@
 #include "../../../generated/BuiltinResources.h"
 
 void Renderer::CreateGlobalResources() {
-    auto blueNoiseAsset = LoadTextureFromFile(L"BuiltinTextures/BlueNoise470.png", nullptr, false);
-    if (blueNoiseAsset) {
-        blueNoiseAsset->EnsureUploaded(*m_pTextureFactory);
+    // Needed by the first frame's passes: the one texture load renderer initialization waits on.
+    br::textures::TextureRequest blueNoiseRequest;
+    blueNoiseRequest.source = br::textures::MakeFileTextureSource("BuiltinTextures/BlueNoise470.png");
+    blueNoiseRequest.preparation = br::textures::TexturePreparation::LoadOnly;
+    blueNoiseRequest.debugName = "Blue Noise 2D";
+    auto blueNoiseAsset = br::textures::RequestTexture(std::move(blueNoiseRequest));
+    if (br::textures::WaitForTexture(blueNoiseAsset, std::chrono::seconds(10))) {
         m_blueNoiseTexture = blueNoiseAsset->ImagePtr();
         if (m_blueNoiseTexture) {
             m_blueNoiseTexture->SetName("Blue Noise 2D");

@@ -34,6 +34,7 @@ struct TextureTransferArtifact;
 namespace org { class CopyPass; }
 namespace org { class Buffer; }
 class MaterialTextureTransferService;
+namespace br::render { struct TexturePipelineServices; }
 class PublishedStateResourceResolver;
 
 namespace org::runtime {
@@ -117,7 +118,7 @@ private:
 		TextureStreamingBindingOptions options{};
 	};
 	struct WorkerCommand {
-		enum class Kind : uint8_t { Register, Unregister, MarkDirty, FrameTick } kind = Kind::FrameTick;
+		enum class Kind : uint8_t { Register, Unregister, MarkDirty, FrameTick, Load } kind = Kind::FrameTick;
 		uint64_t bindingID = 0;
 		uint64_t frameIndex = 0;
 		std::shared_ptr<TextureAsset> texture;
@@ -151,6 +152,15 @@ private:
 	void FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture);
 	void MarkTextureStreamingMetadataDirty(const std::shared_ptr<TextureAsset>& texture, bool needsUploadAdvance = false, const char* reason = "unknown");
 	void ProcessPendingTextureUpdates(uint64_t frameIndex, TextureFactory& textureFactory);
+	// Starts the residency job of a texture pipeline texture (and, for the first texture of
+	// its cache key, its processed texture) unless one is in flight; false when the graph
+	// refused it. Its completion advances the texture (AdvanceCompletedPipelineResidencies).
+	bool RequestPipelineResidency(const std::shared_ptr<TextureAsset>& texture);
+	void AdvanceCompletedPipelineResidencies(TextureFactory& textureFactory);
+	// br::textures::LoadTexture: loads a texture no binding tracks, then runs ready.
+	void LoadPipelineTexture(const std::shared_ptr<TextureAsset>& texture, std::function<void(bool)> ready);
+	void ApplyLoadCommand(const std::shared_ptr<TextureAsset>& texture);
+	void FinishPipelineLoad(uint32_t streamingTextureID, bool loaded);
 
 	void BeginTextureStreamingFeedbackFrame(uint64_t frameIndex);
 	bool UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture);
@@ -162,7 +172,7 @@ private:
 	void AppendTextureDisplayGates(const TextureAsset& texture,
 		const TextureAsset::PublishedBindingSnapshot& published,
 		std::vector<br::render::ArtifactIntent>& intents);
-	void ReleaseTextureDisplayGates(std::vector<br::render::ArtifactIntent> gates);
+	void SubmitTextureDisplayGates(std::vector<br::render::ArtifactIntent> gates);
 	void PublishTextureImageTable();
 	MaterialTextureStreamingStats BuildTextureStreamingStats() const;
 
@@ -181,14 +191,6 @@ private:
 	static constexpr std::uint8_t kAllTextureDisplayGates = 0b11u;
 	std::unordered_map<std::uint32_t, std::uint8_t> m_textureDisplayGatesRequested;
 	std::uint64_t m_textureDisplayGateRevision = 0;
-	// Gates satisfied by image-table rows up to tableEpoch, waiting for a ready
-	// root that contains those rows.
-	struct PendingTextureDisplayGate {
-		std::uint64_t tableEpoch = 0;
-		br::render::ArtifactIntent intent;
-	};
-	std::mutex m_pendingTextureDisplayGatesMutex;
-	std::vector<PendingTextureDisplayGate> m_pendingTextureDisplayGates;
 	std::uint64_t m_textureImageTableLogicalExtent = 1;
 	bool m_textureImageTableDirty = false;
 	br::render::ArtifactVersionHandle m_textureImageTableHandle;
@@ -225,6 +227,18 @@ private:
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	std::shared_ptr<org::runtime::IUploadService> m_uploadService;
 	std::shared_ptr<org::runtime::IDescriptorService> m_descriptorService;
+	std::shared_ptr<br::render::TexturePipelineServices> m_pipelineServices;
+	std::mutex m_pipelineMutex;
+	std::unordered_set<uint32_t> m_pipelineResidenciesInFlight;
+	struct CompletedPipelineResidency {
+		uint32_t streamingTextureID = 0;
+		std::string failure;  // empty when the image was made resident
+	};
+	std::vector<CompletedPipelineResidency> m_completedPipelineResidencies;
+	std::unordered_map<uint32_t, br::render::ArtifactAwaiter> m_pipelineResidencyAwaiters;
+	std::unordered_map<uint64_t, br::render::ArtifactAwaiter> m_pipelineProcessedAwaiters;
+	std::unordered_map<uint32_t, uint64_t> m_pipelineResidencyRevisions;  // worker drain only
+	std::unordered_map<uint32_t, std::vector<std::function<void(bool)>>> m_pipelineLoadCallbacks;  // m_pipelineMutex
 	std::mutex m_graphBindingAwaiterMutex;
 	std::unordered_map<uint32_t, br::render::ArtifactAwaiter> m_graphBindingAwaiters;
 	std::mutex m_bindingMailboxMutex;

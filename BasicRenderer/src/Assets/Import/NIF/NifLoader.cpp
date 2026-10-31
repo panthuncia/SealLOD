@@ -1,3 +1,4 @@
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include "BasicRenderer/Assets/Import/NifLoader.h"
 
 #include <algorithm>
@@ -1601,45 +1602,13 @@ bool ReadTextureBinding(
     }
     if (resolvedTexturePath) {
         try {
-            const bool texturePreferSRGB = processing.isParticipatingMaterialTexture
-                ? processing.preferSRGB
-                : preferSRGB;
-            TextureFileMeta cacheProbeMeta{};
-            cacheProbeMeta.filePath = resolvedTexturePath->string();
-            cacheProbeMeta.preferSRGB = texturePreferSRGB;
-            cacheProbeMeta.processing = processing;
-
-            std::wstring conditionedCachePath;
-            {
-                ZoneScopedN("NifLoader::ReadTextureBinding::GetExistingTextureCachePath");
-                conditionedCachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
-            }
-            if (!conditionedCachePath.empty()) {
-                TextureFileMeta deferredMeta = cacheProbeMeta;
-                deferredMeta.filePath = ws2s(conditionedCachePath);
-                deferredMeta.isProcessingCacheArtifact = true;
-                {
-                    ZoneScopedN("NifLoader::ReadTextureBinding::LoadDeferredConditionedTexture");
-                    binding.texture = LoadTextureFromFileDeferred(conditionedCachePath, nullptr, texturePreferSRGB, std::addressof(deferredMeta));
-                }
-                if (binding.texture) {
-                    binding.texture->Meta().filePath = texturePath;
-                    binding.texture->Meta().isProcessingCacheArtifact = true;
-                }
-            } else {
-                TextureFileMeta deferredMeta = cacheProbeMeta;
-                deferredMeta.filePath = resolvedTexturePath->string();
-                {
-                    ZoneScopedN("NifLoader::ReadTextureBinding::LoadDeferredSourceTexture");
-                    binding.texture = LoadTextureFromFileDeferred(resolvedTexturePath->wstring(), nullptr, texturePreferSRGB, std::addressof(deferredMeta));
-                }
-                if (binding.texture) {
-                    binding.texture->Meta().filePath = texturePath;
-                }
-            }
+            br::textures::TextureRequest request;
+            request.source = br::textures::MakeFileTextureSource(*resolvedTexturePath);
+            request.processing = processing;
+            request.preferSRGB = processing.isParticipatingMaterialTexture ? processing.preferSRGB : preferSRGB;
+            request.debugName = texturePath;
+            binding.texture = br::textures::RequestTexture(std::move(request));
             if (binding.texture) {
-                binding.texture->Meta().preferSRGB = texturePreferSRGB;
-                binding.texture->SetProcessingSettings(processing);
                 if (semantic == TextureSemantic::Normal &&
                     NormalTextureNeedsReconstructedZ(binding.texture->Format())) {
                     binding.channels = { 0u, 1u, 4u };

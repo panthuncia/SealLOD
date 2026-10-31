@@ -13,7 +13,6 @@
 
 #include <BasicRenderer/Assets/CachePaths.h>
 #include <BasicRenderer/Assets/MeshData.h>
-#include <BasicRenderer/Assets/TextureLoading.h>
 #include <BasicRenderer/Scene/FrustumUtilities.h>
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include "Render/DescriptorHeap.h"

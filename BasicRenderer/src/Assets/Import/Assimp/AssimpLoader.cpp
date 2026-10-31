@@ -1,3 +1,4 @@
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -128,100 +129,65 @@ namespace AssimpLoader {
         bool preferSRGB
     )
     {
-        TextureFileMeta cacheProbeMeta{};
-        cacheProbeMeta.filePath = BuildAssimpCacheProbePath(sourceFilePath, texPath);
-        cacheProbeMeta.preferSRGB = preferSRGB;
-        cacheProbeMeta.processing = processingSettings;
+        br::textures::TextureRequest request;
+        request.processing = processingSettings;
+        request.preferSRGB = preferSRGB;
+        request.sampler = std::move(sampler);
+        const std::string identity = BuildAssimpCacheProbePath(sourceFilePath, texPath);
+        request.debugName = identity;
 
-        const std::wstring cachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
-        if (!cachePath.empty()) {
-            auto cachedTexture = LoadTextureFromFile(cachePath, sampler, preferSRGB);
-            cachedTexture->Meta().filePath = cacheProbeMeta.filePath;
-            cachedTexture->Meta().isProcessingCacheArtifact = true;
-            cachedTexture->Meta().preferSRGB = preferSRGB;
-            cachedTexture->SetProcessingSettings(processingSettings);
-            spdlog::info("AssimpLoader: texture processing cache hit for '{}' -> '{}'", cacheProbeMeta.filePath, ws2s(cachePath));
-            return cachedTexture;
+        if (texPath.empty() || texPath[0] != '*') {
+            request.source = br::textures::MakeFileTextureSource(identity);
+            return br::textures::RequestTexture(std::move(request));
         }
 
-        // Embedded?
-        if (!texPath.empty() && texPath[0] == '*') {
-            unsigned int textureIndex = std::atoi(texPath.c_str() + 1);
-            if (textureIndex >= scene->mNumTextures) {
-                throw std::runtime_error("Embedded texture index out of range: " + texPath);
-            }
+        // An embedded texture, versioned by the file it is embedded in.
+        const unsigned int textureIndex = std::atoi(texPath.c_str() + 1);
+        if (textureIndex >= scene->mNumTextures) {
+            throw std::runtime_error("Embedded texture index out of range: " + texPath);
+        }
+        const aiTexture* aiTex = scene->mTextures[textureIndex];
+        if (!aiTex) {
+            throw std::runtime_error("Null embedded texture at index: " + std::to_string(textureIndex));
+        }
+        request.source.identity = identity;
+        std::error_code error;
+        const auto writeTime = std::filesystem::last_write_time(sourceFilePath, error);
+        request.source.version = error ? std::string("unversioned") : std::to_string(writeTime.time_since_epoch().count());
 
-            aiTexture* aiTex = scene->mTextures[textureIndex];
-            if (!aiTex) {
-                throw std::runtime_error("Null embedded texture at index: " + std::to_string(textureIndex));
-            }
-
-            // Compressed (mHeight==0): directly feed container bytes to LoadTextureFromMemory
-            if (aiTex->mHeight == 0) {
-                const void* bytes = reinterpret_cast<const void*>(aiTex->pcData);
-                const size_t byteCount = static_cast<size_t>(aiTex->mWidth);
-                LoadFlags lf{};
-                // WIC decode is most common; FORCE_* handles PNG/JPG without relying on file metadata.
-                lf.wic = preferSRGB ? DirectX::WIC_FLAGS_FORCE_SRGB : DirectX::WIC_FLAGS_FORCE_LINEAR;
-                auto texture = LoadTextureFromMemory(bytes, byteCount, sampler, lf, preferSRGB);
-                texture->Meta().filePath = cacheProbeMeta.filePath;
-                texture->Meta().preferSRGB = preferSRGB;
-                texture->SetProcessingSettings(processingSettings);
-                return texture;
-            }
-
-            // Raw BGRA (mHeight != 0): create PixelBuffer directly; choose sRGB format when requested
-            {
-                const unsigned int width = aiTex->mWidth;
-                const unsigned int height = aiTex->mHeight;
-                const unsigned int channels = 4;
-
-                org::TextureDescription desc;
-                org::ImageDimensions dims;
-                dims.width = width;
-                dims.height = height;
-                dims.rowPitch = width * 4;
-                dims.slicePitch = width * height * 4;
-                desc.imageDimensions.push_back(dims);
-                desc.channels = static_cast<unsigned short>(channels);
-                desc.format = preferSRGB ? rhi::Format::R8G8B8A8_UNorm_sRGB : rhi::Format::R8G8B8A8_UNorm;
-
-                // aiTex->pcData is BGRA
-                auto rawData = std::make_shared<std::vector<uint8_t>>(
-                    static_cast<size_t>(width) * static_cast<size_t>(height) * channels
-                );
-
-                const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
-                for (size_t i = 0; i < pixelCount; ++i) {
-                    const auto& p = aiTex->pcData[i]; // aiTex->pcData is aiTexel*
-
-                    (*rawData)[i * 4 + 0] = p.b;
-                    (*rawData)[i * 4 + 1] = p.g;
-                    (*rawData)[i * 4 + 2] = p.r;
-                    (*rawData)[i * 4 + 3] = p.a;
-                }
-
-				std::vector vec = { rawData };
-
-				desc.generateMipMaps = true;
-            	
-            	TextureFileMeta meta;
-				meta.filePath = cacheProbeMeta.filePath;
-				meta.preferSRGB = preferSRGB;
-
-                auto texture = TextureAsset::CreateShared(desc, vec, sampler, meta);
-                texture->SetProcessingSettings(processingSettings);
-                return texture;
-            }
+        if (aiTex->mHeight == 0) {
+            // Compressed: the container bytes (mWidth of them).
+            const auto* first = reinterpret_cast<const std::uint8_t*>(aiTex->pcData);
+            request.source.formatHint = aiTex->achFormatHint;
+            request.source.data = br::textures::MemoryTextureSource{
+                std::make_shared<const std::vector<std::uint8_t>>(first, first + aiTex->mWidth) };
+            return br::textures::RequestTexture(std::move(request));
         }
 
-        // External file: load from disk
-        {
-            auto texture = LoadTextureFromFile(s2ws(cacheProbeMeta.filePath), sampler, preferSRGB);
-            texture->Meta().preferSRGB = preferSRGB;
-            texture->SetProcessingSettings(processingSettings);
-            return texture;
+        // Raw texels (aiTexel is BGRA).
+        const unsigned int width = aiTex->mWidth;
+        const unsigned int height = aiTex->mHeight;
+        auto decoded = std::make_shared<TextureSourceData>();
+        org::ImageDimensions dims;
+        dims.width = width;
+        dims.height = height;
+        dims.rowPitch = width * 4;
+        dims.slicePitch = width * height * 4;
+        decoded->desc.imageDimensions.push_back(dims);
+        decoded->desc.channels = 4;
+        decoded->desc.format = preferSRGB ? rhi::Format::R8G8B8A8_UNorm_sRGB : rhi::Format::R8G8B8A8_UNorm;
+        auto texels = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(width) * height * 4);
+        const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+        for (size_t i = 0; i < pixelCount; ++i) {
+            const auto& texel = aiTex->pcData[i];
+            (*texels)[i * 4 + 0] = texel.b;
+            (*texels)[i * 4 + 1] = texel.g;
+            (*texels)[i * 4 + 2] = texel.r;
+            (*texels)[i * 4 + 3] = texel.a;
         }
+        decoded->subresources.push_back(std::move(texels));
+        request.source.data = br::textures::DecodedTextureSource{ std::move(decoded) };
+        return br::textures::RequestTexture(std::move(request));
     }
 
     std::vector<std::shared_ptr<Material>> LoadMaterialsFromAssimpScene(

@@ -68,9 +68,12 @@ enum class ArtifactKind : std::uint16_t {
     TextureDisplayGate,
     CLodResidencyStorage,
     CLodResidencyCapacityGate,
+    TextureProcessed,
+    TextureCacheWrite,
+    TextureResidency,
 };
 inline constexpr std::size_t kArtifactKindCount =
-    static_cast<std::size_t>(ArtifactKind::CLodResidencyCapacityGate) + 1u;
+    static_cast<std::size_t>(ArtifactKind::TextureResidency) + 1u;
 
 using ArtifactAddress = org::async::ArtifactAddress<ArtifactKind>;
 using ArtifactVersionID = org::async::ArtifactVersionID<ArtifactKind>;
@@ -127,6 +130,13 @@ using org::async::DependencyInvalidationPolicy;
 [[nodiscard]] inline ArtifactRequirement ReadyGate(ArtifactAddress address,
     ArtifactReadiness readiness = ArtifactReadiness::CpuReady) {
     return org::async::ReadyGate(address, readiness);
+}
+
+// Address-level readiness latch to the first version at or above minimumRevision
+// (org::async::ReadyGateAtLeast).
+[[nodiscard]] inline ArtifactRequirement ReadyGateAtLeast(ArtifactAddress address,
+    std::uint64_t minimumRevision, ArtifactReadiness readiness = ArtifactReadiness::CpuReady) {
+    return org::async::ReadyGateAtLeast(address, minimumRevision, readiness);
 }
 
 [[nodiscard]] inline ArtifactRequirement LifetimeHold(ArtifactVersionID version) {

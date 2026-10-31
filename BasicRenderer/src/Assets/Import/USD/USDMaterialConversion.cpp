@@ -1,3 +1,4 @@
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include <spdlog/spdlog.h>
 #include <DirectXMath.h>
 #include <algorithm>
@@ -1164,58 +1165,29 @@ namespace USDLoader {
 			return nullptr;
 		}
 
-		TextureFileMeta cacheProbeMeta{};
-		cacheProbeMeta.filePath = resolvedPath;
-		cacheProbeMeta.preferSRGB = preferSRGB;
-		cacheProbeMeta.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, false, normalConvention);
-
-		std::shared_ptr<TextureAsset> tex;
-		const std::wstring cachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
-		if (!cachePath.empty()) {
-			TextureFileMeta deferredMeta = cacheProbeMeta;
-			deferredMeta.filePath = ws2s(cachePath);
-			deferredMeta.isProcessingCacheArtifact = true;
-			tex = LoadTextureFromFileDeferred(cachePath, nullptr, preferSRGB, std::addressof(deferredMeta));
-			if (tex) {
-				tex->Meta().isProcessingCacheArtifact = true;
-				spdlog::debug("USDLoader: texture processing cache hit for '{}' -> '{}'", resolvedPath, ws2s(cachePath));
-			}
-		}
-		else if (std::error_code ec; std::filesystem::is_regular_file(resolvedPath, ec)) {
-			TextureFileMeta deferredMeta = cacheProbeMeta;
-			tex = LoadTextureFromFileDeferred(s2ws(resolvedPath), nullptr, preferSRGB, std::addressof(deferredMeta));
+		br::textures::TextureRequest request;
+		request.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, {}, false, normalConvention);
+		request.preferSRGB = preferSRGB;
+		request.debugName = logicalPath;
+		if (std::error_code ec; std::filesystem::is_regular_file(resolvedPath, ec)) {
+			request.source = br::textures::MakeFileTextureSource(resolvedPath);
 		}
 		else if (std::shared_ptr<ArAsset> arAsset = resolver.OpenAsset(resolved)) {
-			try {
-				tex = LoadTextureFromMemory(
-					static_cast<const void*>(arAsset->GetBuffer().get()),
-					arAsset->GetSize(),
-					nullptr,
-					{},
-					preferSRGB);
-			}
-			catch (const std::exception& ex) {
-				spdlog::debug(
-					"USDLoader: unable to decode texture '{}' from resolver asset memory ({}); falling back to deferred file load '{}'",
-					logicalPath,
-					ex.what(),
-					resolvedPath);
-				TextureFileMeta deferredMeta = cacheProbeMeta;
-				tex = LoadTextureFromFileDeferred(s2ws(resolvedPath), nullptr, preferSRGB, std::addressof(deferredMeta));
-			}
+			// An image inside a package (usdz): its bytes, versioned by their content.
+			const auto* first = reinterpret_cast<const std::uint8_t*>(arAsset->GetBuffer().get());
+			auto bytes = std::make_shared<const std::vector<std::uint8_t>>(first, first + arAsset->GetSize());
+			std::uint64_t hash = 1469598103934665603ull;
+			for (const auto byte : *bytes) hash = (hash ^ byte) * 1099511628211ull;
+			request.source.identity = resolvedPath;
+			request.source.version = std::to_string(hash);
+			request.source.formatHint = std::filesystem::path(resolvedPath).extension().string();
+			request.source.data = br::textures::MemoryTextureSource{ std::move(bytes) };
 		}
 		else {
-			TextureFileMeta deferredMeta = cacheProbeMeta;
-			tex = LoadTextureFromFileDeferred(s2ws(resolvedPath), nullptr, preferSRGB, std::addressof(deferredMeta));
+			request.source = br::textures::MakeFileTextureSource(resolvedPath);
 		}
-
-		if (tex) {
-			tex->Meta().filePath = logicalPath;
-			tex->Meta().preferSRGB = preferSRGB;
-			tex->SetProcessingSettings(cacheProbeMeta.processing);
-			tex->SetGenerateMipmaps(true);
-			loadingCache.textureCache[cacheKey] = tex;
-		}
+		auto tex = br::textures::RequestTexture(std::move(request));
+		loadingCache.textureCache[cacheKey] = tex;
 		return tex;
 	}
 

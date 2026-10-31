@@ -460,6 +460,8 @@ set(SOURCES
     "src/Scene/Scene.cpp"
     "src/Scene/Views/ViewManager.cpp"
     # src/StaticImport
+    "src/Assets/Textures/Pipeline/TexturePipeline.cpp"
+    "src/Assets/Textures/Pipeline/TexturePipelineArtifacts.cpp"
     "src/StaticImport/ImportedAssetLibrary.cpp"
     "src/StaticImport/ScenePlacementSource.cpp"
     "src/StaticImport/StaticImportCoordinator.cpp"
@@ -673,7 +675,6 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Assets_RenderableAsset.cpp"
     "tests/PublicHeaders/Assets_TextureTypes.cpp"
     "tests/PublicHeaders/Assets_Texture.cpp"
-    "tests/PublicHeaders/Assets_TextureLoading.cpp"
     "tests/PublicHeaders/Assets_CpuTextureSampler.cpp"
     "tests/PublicHeaders/Assets_Material.cpp"
     "tests/PublicHeaders/Assets_TextureProcessingRequests.cpp"

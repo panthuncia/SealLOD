@@ -106,7 +106,7 @@ bool TextureFactory::BC7CompressionPass::DeclaredResourcesChanged() const
 {
     if (m_declaredResourcesChanged.load(std::memory_order_acquire)) return true;
     std::scoped_lock lock(m_pendingMutex);
-    return DeclarableJobsDiffer(m_pending, m_declaredJobs, [](const BC7CompressionJob& job) {
+    return DeclarableJobsDiffer(m_pending, *m_declaredJobs, [](const BC7CompressionJob& job) {
         const auto stage = job.stage.load(std::memory_order_acquire);
         return job.workingTexture && job.blockBuffer &&
             (stage == BC7CompressionJob::Stage::WaitingForSourceUpload || stage == BC7CompressionJob::Stage::ReadyForCompression);
@@ -117,7 +117,7 @@ bool TextureFactory::BC7CompressionCopyPass::DeclaredResourcesChanged() const
 {
     if (m_declaredResourcesChanged.load(std::memory_order_acquire)) return true;
     std::scoped_lock lock(m_pendingMutex);
-    return DeclarableJobsDiffer(m_pending, m_declaredJobs, [](const BC7CompressionJob& job) {
+    return DeclarableJobsDiffer(m_pending, *m_declaredJobs, [](const BC7CompressionJob& job) {
         return job.blockBuffer && job.compressedTexture &&
             job.stage.load(std::memory_order_acquire) == BC7CompressionJob::Stage::CompressionRecorded;
     });
@@ -127,7 +127,7 @@ bool TextureFactory::BC7CompressionReadbackPass::DeclaredResourcesChanged() cons
 {
     if (m_declaredResourcesChanged.load(std::memory_order_acquire)) return true;
     std::scoped_lock lock(m_pendingMutex);
-    return DeclarableJobsDiffer(m_pending, m_declaredJobs, [](const BC7CompressionJob& job) {
+    return DeclarableJobsDiffer(m_pending, *m_declaredJobs, [](const BC7CompressionJob& job) {
         return job.compressedTexture && job.stage.load(std::memory_order_acquire) == BC7CompressionJob::Stage::CopyRecorded;
     });
 }
@@ -173,8 +173,10 @@ TextureBC7CompressionBindings TextureFactory::BC7CompressionPass::Declare(org::P
 {
     std::scoped_lock lock(m_pendingMutex);
     m_declaredResourcesChanged.store(false, std::memory_order_release);
-    m_declaredJobs.clear();
+    auto declaredJobs = std::make_shared<std::vector<DeclaredJob>>();
+    m_declaredJobs = declaredJobs;
     TextureBC7CompressionBindings bindings;
+    bindings.declaredJobs = declaredJobs;
     if (m_pending.empty()) {
         return bindings;
     }
@@ -189,7 +191,7 @@ TextureBC7CompressionBindings TextureFactory::BC7CompressionPass::Declare(org::P
             continue;
         }
 
-        m_declaredJobs.push_back({job});
+        declaredJobs->push_back({job});
         auto& declared = bindings.jobs.emplace_back();
         declared.subresources.reserve(job->subresources.size());
         for (const auto& subresource : job->subresources) {
@@ -206,9 +208,12 @@ TextureBC7CompressionBindings TextureFactory::BC7CompressionPass::Declare(org::P
 }
 
 TextureBC7CompressionFrame TextureFactory::BC7CompressionPass::Prepare(
-    const TextureBC7CompressionBindings&, const org::PassPrepareContext& preparation)
+    const TextureBC7CompressionBindings& bindings, const org::PassPrepareContext& preparation)
 {
     TextureBC7CompressionFrame frame{};
+    // The jobs this build declared: a later structural build declares again while this one's executions still prepare.
+    const auto declaredJobs = std::static_pointer_cast<const std::vector<DeclaredJob>>(bindings.declaredJobs);
+    if (!declaredJobs) return frame;
     std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) return frame;
 
@@ -234,13 +239,13 @@ TextureBC7CompressionFrame TextureFactory::BC7CompressionPass::Prepare(
             waiting.push_back(job);
             continue;
         }
-        const auto declared = std::find_if(m_declaredJobs.begin(), m_declaredJobs.end(),
+        const auto declared = std::find_if(declaredJobs->begin(), declaredJobs->end(),
             [&](const DeclaredJob& entry) { return entry.job == job; });
-        if (declared == m_declaredJobs.end()) {
+        if (declared == declaredJobs->end()) {
             waiting.push_back(job);
             continue;
         }
-        frame.jobs.push_back(static_cast<uint32_t>(declared - m_declaredJobs.begin()));
+        frame.jobs.push_back(static_cast<uint32_t>(declared - declaredJobs->begin()));
         preparation.Retain(job);
         preparation.Reserve(std::make_shared<Transition>(Transition{job, preparation.frameIndex}),
             +[](Transition& transition, org::SubmissionContext) {
@@ -289,13 +294,15 @@ void TextureFactory::BC7CompressionCopyPass::Update(const org::UpdateExecutionCo
     (void)context;
 }
 
-void TextureFactory::BC7CompressionCopyPass::Declare(org::PassBuilder& builder)
+TextureFactory::BC7CompressionCopyBindings TextureFactory::BC7CompressionCopyPass::Declare(org::PassBuilder& builder)
 {
     std::scoped_lock lock(m_pendingMutex);
     m_declaredResourcesChanged.store(false, std::memory_order_release);
-    m_declaredJobs.clear();
+    auto declaredJobs = std::make_shared<std::vector<DeclaredJob>>();
+    m_declaredJobs = declaredJobs;
+    BC7CompressionCopyBindings bindings{declaredJobs};
     if (m_pending.empty()) {
-        return;
+        return bindings;
     }
 
     for (const auto& job : m_pending) {
@@ -306,15 +313,19 @@ void TextureFactory::BC7CompressionCopyPass::Declare(org::PassBuilder& builder)
             continue;
         }
 
-        m_declaredJobs.push_back({job, builder.CopySource(job->blockBuffer),
+        declaredJobs->push_back({job, builder.CopySource(job->blockBuffer),
             builder.CopyDestination(job->compressedTexture)});
     }
+    return bindings;
 }
 
 TextureFactory::BC7CompressionCopyFrameData TextureFactory::BC7CompressionCopyPass::Prepare(
-    const org::PassPrepareContext& preparation)
+    const BC7CompressionCopyBindings& bindings, const org::PassPrepareContext& preparation)
 {
     BC7CompressionCopyFrameData frame;
+    // The jobs this build declared (see BC7CompressionPass::Prepare).
+    const auto declaredJobs = std::static_pointer_cast<const std::vector<DeclaredJob>>(bindings.declaredJobs);
+    if (!declaredJobs) return frame;
     std::scoped_lock lock(m_pendingMutex);
     struct Transition { std::shared_ptr<BC7CompressionJob> job; uint32_t frameIndex = 0; };
     std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
@@ -326,9 +337,9 @@ TextureFactory::BC7CompressionCopyFrameData TextureFactory::BC7CompressionCopyPa
             waiting.push_back(job);
             continue;
         }
-        const auto declared = std::find_if(m_declaredJobs.begin(), m_declaredJobs.end(),
+        const auto declared = std::find_if(declaredJobs->begin(), declaredJobs->end(),
             [&](const DeclaredJob& entry) { return entry.job == job; });
-        if (declared == m_declaredJobs.end()) {
+        if (declared == declaredJobs->end()) {
             waiting.push_back(job);
             continue;
         }
@@ -348,7 +359,7 @@ TextureFactory::BC7CompressionCopyFrameData TextureFactory::BC7CompressionCopyPa
     return frame;
 }
 
-void TextureFactory::BC7CompressionCopyPass::Record(
+void TextureFactory::BC7CompressionCopyPass::Record(const BC7CompressionCopyBindings&,
     const BC7CompressionCopyFrameData& frame, org::PassRecordContext& recording)
 {
     for (const auto& copy : frame.copies) {
@@ -384,13 +395,15 @@ void TextureFactory::BC7CompressionReadbackPass::Update(const org::UpdateExecuti
     (void)context;
 }
 
-void TextureFactory::BC7CompressionReadbackPass::Declare(org::PassBuilder& builder)
+TextureFactory::BC7CompressionReadbackBindings TextureFactory::BC7CompressionReadbackPass::Declare(org::PassBuilder& builder)
 {
     std::scoped_lock lock(m_pendingMutex);
     m_declaredResourcesChanged.store(false, std::memory_order_release);
-    m_declaredJobs.clear();
+    auto declaredJobs = std::make_shared<std::vector<DeclaredJob>>();
+    m_declaredJobs = declaredJobs;
+    BC7CompressionReadbackBindings bindings{declaredJobs};
     if (m_pending.empty()) {
-        return;
+        return bindings;
     }
 
     builder.PreferQueue(org::QueueKind::Copy);
@@ -402,20 +415,29 @@ void TextureFactory::BC7CompressionReadbackPass::Declare(org::PassBuilder& build
             continue;
         }
 
-        m_declaredJobs.push_back({job, builder.CopySource(job->compressedTexture)});
+        declaredJobs->push_back({job, builder.CopySource(job->compressedTexture)});
     }
+    return bindings;
 }
 
 TextureFactory::BC7CompressionReadbackFrameData
-TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContext& preparation)
+TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadbackBindings& bindings,
+    const org::PassPrepareContext& preparation)
 {
     BC7CompressionReadbackFrameData frame;
+    // The jobs this build declared (see BC7CompressionPass::Prepare). Without them the pending jobs still fail when the
+    // readback service is missing.
+    static const std::vector<DeclaredJob> kNone;
+    const auto declaredBindings = std::static_pointer_cast<const std::vector<DeclaredJob>>(bindings.declaredJobs);
+    const auto& declaredJobs = declaredBindings ? *declaredBindings : kNone;
     std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) return frame;
     if (!m_readbackService) {
-        for (const auto& job : m_pending) if (job && job->handle)
+        for (const auto& job : m_pending) if (job && job->handle) {
             TextureProcessingManager::GetInstance().FailProcessing(
                 job->handle, "TextureFactory: BC7 readback service is unavailable");
+            job->ReleaseBudget();
+        }
         m_pending.clear();
         m_declaredResourcesChanged = true;
         return frame;
@@ -479,9 +501,9 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
             waiting.push_back(job);
             continue;
         }
-        const auto declared = std::find_if(m_declaredJobs.begin(), m_declaredJobs.end(),
+        const auto declared = std::find_if(declaredJobs.begin(), declaredJobs.end(),
             [&](const DeclaredJob& entry) { return entry.job == job; });
-        if (declared == m_declaredJobs.end()) {
+        if (declared == declaredJobs.end()) {
             waiting.push_back(job);
             continue;
         }
@@ -517,9 +539,11 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
                 TextureProcessingManager::GetInstance().CompleteGpuProcessing(
                     job->handle, std::move(data), job->compressedTexture, true);
                 job->stage.store(BC7CompressionJob::Stage::Completed, std::memory_order_release);
+                job->ReleaseBudget();
             } catch (const std::exception& ex) {
                 TextureProcessingManager::GetInstance().FailProcessing(job->handle, ex.what());
                 job->stage.store(BC7CompressionJob::Stage::Completed, std::memory_order_release);
+                job->ReleaseBudget();
             }
         };
         requests.push_back(std::move(request));
@@ -534,7 +558,7 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const org::PassPrepareContex
     return frame;
 }
 
-void TextureFactory::BC7CompressionReadbackPass::Record(
+void TextureFactory::BC7CompressionReadbackPass::Record(const BC7CompressionReadbackBindings&,
     const BC7CompressionReadbackFrameData& frame, org::PassRecordContext& recording)
 {
     for (const auto& copy : frame.copies) {
@@ -547,3 +571,4 @@ void TextureFactory::BC7CompressionReadbackPass::Record(
         recording.Commands().CopyTextureToBuffer(region);
     }
 }
+

@@ -21,6 +21,7 @@
 #include <spdlog/spdlog.h>
 
 #include "Assets/Textures/Processing/TextureProcessingManager.h"
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include "BasicRenderer/Scene/Animation/Animation.h"
 #include "BasicRenderer/Scene/Animation/AnimationController.h"
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
@@ -112,16 +113,11 @@ struct GlTFMaterialCache {
     std::string sourceKey;
 };
 
-struct SharedTextureCacheEntry {
-    std::weak_ptr<TextureAsset> texture;
-};
-
 struct SharedMaterialCacheEntry {
     std::weak_ptr<Material> material;
 };
 
 std::mutex g_gltfMaterialCacheMutex;
-std::unordered_map<std::string, SharedTextureCacheEntry> g_sharedTextureCache;
 std::unordered_map<std::string, SharedMaterialCacheEntry> g_sharedMaterialCache;
 
 constexpr uint32_t kGlbMagic = 0x46546C67;
@@ -921,6 +917,43 @@ std::shared_ptr<org::Sampler> CreateTextureSampler(const json& gltf, const json&
     return org::Sampler::CreateSampler(samplerDesc);
 }
 
+// Where a glTF image's encoded bytes are: its own file, a range of the .glb (a bufferView),
+// or memory (a data URI or an inline buffer). An image inside the glTF is versioned by it.
+br::textures::TextureSource GltfImageSource(
+    const json& gltf,
+    const std::filesystem::path& sourcePath,
+    const GlTFMaterialCache& cache,
+    size_t imageIndex)
+{
+    const auto& image = gltf.at("images").at(imageIndex);
+    if (image.contains("uri")) {
+        const std::string uri = image["uri"].get<std::string>();
+        if (uri.rfind("data:", 0) != 0) {
+            return br::textures::MakeFileTextureSource(sourcePath.parent_path() / std::filesystem::path(uri));
+        }
+    }
+    br::textures::TextureSource source;
+    source.identity = BuildGlTFImageIdentity(gltf, sourcePath, cache.sourceKey, imageIndex);
+    std::error_code error;
+    const auto writeTime = std::filesystem::last_write_time(sourcePath, error);
+    source.version = error ? std::string("unversioned") : std::to_string(writeTime.time_since_epoch().count());
+    source.formatHint = image.value("mimeType", std::string());
+    if (image.contains("bufferView")) {
+        const auto& bufferView = gltf.at("bufferViews").at(image["bufferView"].get<size_t>());
+        const auto& buffer = cache.bufferSources.at(bufferView.at("buffer").get<size_t>());
+        const uint64_t offset = bufferView.value<uint64_t>("byteOffset", 0);
+        const uint64_t length = bufferView.at("byteLength").get<uint64_t>();
+        if (buffer.backing == BufferBacking::FileSpan) {
+            if (offset + length > buffer.fileLength) throw std::runtime_error("glTF image bufferView exceeds its buffer");
+            source.data = br::textures::FileTextureSource{ buffer.filePath, buffer.fileOffset + offset, length };
+            return source;
+        }
+    }
+    source.data = br::textures::MemoryTextureSource{ std::make_shared<const std::vector<uint8_t>>(
+        ReadImageBytes(gltf, sourcePath, cache.bufferSources, imageIndex)) };
+    return source;
+}
+
 std::shared_ptr<TextureAsset> LoadTexture(
     const json& gltf,
     const std::filesystem::path& sourcePath,
@@ -947,73 +980,14 @@ std::shared_ptr<TextureAsset> LoadTexture(
 
     auto sampler = CreateTextureSampler(gltf, textureNode);
 
-    const auto& imageNode = gltf.at("images").at(imageIndex);
-    std::filesystem::path cacheProbePath = sourcePath;
-    std::string cacheProbeDetail = sourcePath.string();
-    if (imageNode.contains("uri")) {
-        const std::string uri = imageNode["uri"].get<std::string>();
-        if (uri.rfind("data:", 0) != 0) {
-            cacheProbePath = sourcePath.parent_path() / std::filesystem::path(uri);
-            cacheProbeDetail = cacheProbePath.string();
-        }
-        else {
-            cacheProbeDetail = cache.sourceKey + "#image-data-uri:" + std::to_string(imageIndex);
-        }
-    }
-    else if (imageNode.contains("bufferView")) {
-        cacheProbeDetail = BuildGlTFImageIdentity(gltf, sourcePath, cache.sourceKey, imageIndex);
-    }
-
-    TextureFileMeta cacheProbeMeta{};
-    cacheProbeMeta.filePath = cacheProbePath.string();
-    cacheProbeMeta.preferSRGB = preferSRGB;
-    cacheProbeMeta.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, preservePackedChannels, normalConvention);
-
-    const std::string sharedCacheKey = cacheKey;
-
-    const std::wstring cachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
-    if (!cachePath.empty()) {
-        auto cachedTexture = LoadTextureFromFile(cachePath, sampler, preferSRGB);
-        cachedTexture->Meta().isProcessingCacheArtifact = true;
-        cachedTexture->Meta().filePath = cacheProbeMeta.filePath;
-        cachedTexture->Meta().preferSRGB = preferSRGB;
-        cachedTexture->SetProcessingSettings(cacheProbeMeta.processing);
-        cache.textureCache[cacheKey] = cachedTexture;
-
-        {
-            std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
-            g_sharedTextureCache[sharedCacheKey] = SharedTextureCacheEntry{ cachedTexture };
-        }
-
-        spdlog::info("GlTFLoader: texture processing cache hit for '{}' -> '{}'", cacheProbeDetail, ws2s(cachePath));
-        return cachedTexture;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
-        auto sharedIt = g_sharedTextureCache.find(sharedCacheKey);
-        if (sharedIt != g_sharedTextureCache.end()) {
-            if (auto texture = sharedIt->second.texture.lock()) {
-                cache.textureCache[cacheKey] = texture;
-                return texture;
-            }
-
-            g_sharedTextureCache.erase(sharedIt);
-        }
-    }
-
-    auto textureBytes = ReadImageBytes(gltf, sourcePath, cache.bufferSources, imageIndex);
-    auto texture = LoadTextureFromMemory(textureBytes.data(), textureBytes.size(), sampler, {}, preferSRGB);
-    texture->Meta().filePath = cacheProbeMeta.filePath;
-    texture->SetProcessingSettings(cacheProbeMeta.processing);
-    texture->SetGenerateMipmaps(true);
+    br::textures::TextureRequest request;
+    request.source = GltfImageSource(gltf, sourcePath, cache, imageIndex);
+    request.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, {}, preservePackedChannels, normalConvention);
+    request.preferSRGB = preferSRGB;
+    request.sampler = std::move(sampler);
+    request.debugName = request.source.identity;
+    auto texture = br::textures::RequestTexture(std::move(request));
     cache.textureCache[cacheKey] = texture;
-
-    {
-        std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
-        g_sharedTextureCache[sharedCacheKey] = SharedTextureCacheEntry{ texture };
-    }
-
     return texture;
 }
 

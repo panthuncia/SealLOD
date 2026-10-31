@@ -1,5 +1,6 @@
 #pragma once
 
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include "BasicRenderer/Assets/Texture.h"
 
 #include <algorithm>
@@ -67,7 +68,9 @@ namespace SARP::Resources
 
 			std::shared_ptr<TextureSourceData> source;
 			try {
-				source = texture->BuildSourceData(reason);
+				// A texture keeps no pixels; decode its pipeline source.
+				if (!texture->PipelineRequest()) return std::nullopt;
+				source = br::textures::DecodeTextureSource(*texture->PipelineRequest());
 			} catch (...) {
 				return std::nullopt;
 			}

@@ -44,7 +44,6 @@ struct StochasticTextureArtifactResult {
 
 namespace br::assets {
 
-std::wstring GetExistingCachePathForFile(const TextureFileMeta& meta);
 StochasticTextureArtifactResult RequestStochasticArtifactsBlocking(
         const std::shared_ptr<TextureSourceData>& sourceData,
         const TextureFileMeta& meta,

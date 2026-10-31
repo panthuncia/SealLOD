@@ -379,12 +379,11 @@ public:
         return m_materialData.objectSurfaceSamplingMode == static_cast<uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
     }
     std::shared_ptr<TextureAsset> GetHeightMapTexture() const { return m_heightMap; }
-    void EnsureTexturesUploaded(const TextureFactory& factory);
-    void EnsureTexturesUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode);
     void RefreshTextureBindings(org::runtime::IDescriptorService* descriptorService = nullptr);
     void ForEachReferencedTexture(const std::function<void(const std::shared_ptr<TextureAsset>&)>& visitor) const;
 private:
-	inline static std::atomic<uint32_t> globalMaterialCount;
+	// Starts at 1: material ID 0 means "no material" (MaterialManager::ReserveMaterialUsage rejects it).
+	inline static std::atomic<uint32_t> globalMaterialCount{ 1 };
 	const uint32_t m_materialID = globalMaterialCount.fetch_add(1, std::memory_order_relaxed);
     uint32_t m_diagnosticReason = 0;
 

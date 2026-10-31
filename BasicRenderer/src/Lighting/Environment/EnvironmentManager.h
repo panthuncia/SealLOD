@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <optional>
 #include <mutex>
 #include <vector>
@@ -45,7 +47,10 @@ public:
 		m_environmentInfoBuffer->UpdateView(environment.GetEnvironmentBufferView(), &environment.m_environmentInfo);
 	}
 
+	// Loads the environment's cached cubemap, or its HDRI, through the texture pipeline;
+	// conversion, prefiltering and SH run once it is resident.
 	void SetFromHDRI(Environment* e, std::string hdriPath);
+	~EnvironmentManager();
 
 	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
 	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
@@ -68,6 +73,16 @@ private:
 	// artifact producer only submits owned work requests into that service.
 	br::render::EnvironmentWorkServices m_workServices;
 	std::shared_ptr<std::mutex> m_environmentUpdateMutex = std::make_shared<std::mutex>(); // Mutex for thread safety
+	// The latest SetFromHDRI of each environment, guarded by *m_environmentUpdateMutex: a load
+	// that finishes after its environment was removed, set again or the manager destroyed
+	// is dropped.
+	struct PendingSourceLoads {
+		bool alive = true;
+		std::uint64_t nextGeneration = 0;
+		std::unordered_map<const Environment*, std::uint64_t> generations;
+	};
+	std::shared_ptr<PendingSourceLoads> m_pendingSourceLoads = std::make_shared<PendingSourceLoads>();
+	void ApplyEnvironmentSource(Environment* e, const std::shared_ptr<TextureAsset>& source, bool cachedCubemap);
 
 	std::shared_ptr<org::ResourceGroup> m_workingEnvironmentCubemapGroup; // Temporary group for prefiltered cubemap generation
 	std::shared_ptr<org::ResourceGroup> m_workingHDRIGroup; // Temporary group for prefiltered cubemap generation

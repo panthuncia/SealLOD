@@ -295,10 +295,11 @@ TextureMipmappingBindings TextureFactory::MipmappingPass::Declare(org::PassBuild
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     m_declaredResourcesChanged = false;
-    m_declaredJobs = m_jobs.Pending();
+    const auto declaredJobs = std::make_shared<const org::runtime::FrameWorkQueue<Job>::Snapshot>(m_jobs.Pending());
     TextureMipmappingBindings bindings;
-    bindings.jobs.reserve(m_declaredJobs.size());
-    for (const auto& entry : m_declaredJobs) {
+    bindings.declaredJobs = declaredJobs;
+    bindings.jobs.reserve(declaredJobs->size());
+    for (const auto& entry : *declaredJobs) {
         const auto& j = entry->work;
         auto& views = bindings.jobs.emplace_back();
         views.constants = builder->ShaderResource(j.constantsBuffer).View();
@@ -354,32 +355,42 @@ TextureMipmappingBindings TextureFactory::MipmappingPass::Declare(org::PassBuild
     return bindings;
 }
 
-org::EmptyPassFrameData TextureFactory::MipmappingPass::Prepare(const TextureMipmappingBindings& bindings,
+TextureMipmappingFrame TextureFactory::MipmappingPass::Prepare(const TextureMipmappingBindings& bindings,
     const org::PassPrepareContext& preparation)
 {
-    // Publications arriving after declaration belong to the next frame.
-    const auto jobs = m_declaredJobs;
-    if (jobs.empty()) return {};
-    // Each job's SPD constants carry the bindless indices of its mip UAVs.
-    for (size_t jobIndex = 0; jobIndex < jobs.size(); ++jobIndex) {
-        const auto& j = jobs[jobIndex]->work;
+    // Publications arriving after declaration belong to a later build.
+    const auto declaredJobs = std::static_pointer_cast<const org::runtime::FrameWorkQueue<Job>::Snapshot>(bindings.declaredJobs);
+    if (!declaredJobs || declaredJobs->empty()) return {};
+    const auto& jobs = *declaredJobs;
+    // An earlier execution of this build may have taken some (or all) of the declared jobs already.
+    const auto taken = m_jobs.ReserveAvailable(jobs, preparation);
+    if (taken.empty()) return {};
+    TextureMipmappingFrame frame;
+    frame.jobs.reserve(taken.size());
+    // Both are in queue order.
+    size_t jobIndex = 0;
+    for (const auto& entry : taken) {
+        while (jobs[jobIndex] != entry) ++jobIndex;
+        frame.jobs.push_back(static_cast<uint32_t>(jobIndex));
+        const auto& j = entry->work;
         const auto& views = bindings.jobs.at(jobIndex);
         if (!j.texture) continue;
+        // Each job's SPD constants carry the bindless indices of its mip UAVs.
         auto constants = j.cpuConstants;
         for (uint32_t mip = 0; mip < constants.mips; ++mip)
             constants.mipUavDescriptorIndices[mip] = preparation.Resolve(views.outputs.at(mip)).index;
         j.constantsBuffer->UpdateView(j.constantsView.get(), &constants);
     }
-
-    m_jobs.Reserve(jobs, preparation);
     m_declaredResourcesChanged = true;
-    return {};
+    return frame;
 }
 
-void TextureFactory::MipmappingPass::Record(const TextureMipmappingBindings& bindings, org::PassRecordContext& context)
+void TextureFactory::MipmappingPass::Record(const TextureMipmappingBindings& bindings, const TextureMipmappingFrame& frame,
+    org::PassRecordContext& context)
 {
-    // Process all jobs queued for this frame
-    for (const auto& views : bindings.jobs) {
+    // The jobs this execution took.
+    for (const auto jobIndex : frame.jobs) {
+        const auto& views = bindings.jobs.at(jobIndex);
         if (!views.hasTexture) continue;
 
         if (views.preserveAlphaCoverage) {
@@ -446,9 +457,10 @@ void TextureFactory::MipHandoffPass::EnqueueJob(std::shared_ptr<org::PixelBuffer
 TextureMipHandoffBindings TextureFactory::MipHandoffPass::Declare(org::PassBuilder& declaration) {
     declaration.PreferQueue(org::QueueKind::Graphics);
     m_declaredResourcesChanged = false;
-    m_declaredJobs = m_jobs.Pending();
+    const auto declaredJobs = std::make_shared<const org::runtime::FrameWorkQueue<Job>::Snapshot>(m_jobs.Pending());
     TextureMipHandoffBindings bindings;
-    for (const auto& entry : m_declaredJobs) {
+    bindings.declaredJobs = declaredJobs;
+    for (const auto& entry : *declaredJobs) {
         if (!entry->work.texture) continue;
         (void)declaration.ShaderResource(entry->work.texture);
         ++bindings.textures;
@@ -456,11 +468,11 @@ TextureMipHandoffBindings TextureFactory::MipHandoffPass::Declare(org::PassBuild
     return bindings;
 }
 
-org::EmptyPassFrameData TextureFactory::MipHandoffPass::Prepare(const TextureMipHandoffBindings&,
+org::EmptyPassFrameData TextureFactory::MipHandoffPass::Prepare(const TextureMipHandoffBindings& bindings,
     const org::PassPrepareContext& preparation) {
-    const auto jobs = m_declaredJobs;
-    if (jobs.empty()) return {};
-    m_jobs.Reserve(jobs, preparation);
-    m_declaredResourcesChanged = true;
+        const auto declaredJobs = std::static_pointer_cast<const org::runtime::FrameWorkQueue<Job>::Snapshot>(bindings.declaredJobs);
+    if (!declaredJobs || declaredJobs->empty()) return {};
+    // An earlier execution of this build may have taken some (or all) of the declared jobs already.
+    if (!m_jobs.ReserveAvailable(*declaredJobs, preparation).empty()) m_declaredResourcesChanged = true;
     return {};
 }

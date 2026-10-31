@@ -16,6 +16,7 @@
 #include "Render/Runtime/IDescriptorService.h"
 
 class TextureFactory;
+namespace br::textures { struct TextureRequest; }
 #include "Resources/Sampler.h"
 #include "BasicRenderer/Assets/TextureResidency.h"
 #include <BasicRenderer/Streaming/DirectStorageRequest.h>
@@ -103,6 +104,13 @@ std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromFilePath(
     const std::string& path,
     bool preferSRGB,
     const std::string& reason = {});
+// Decodes an encoded image (DDS, HDR, TGA, or anything WIC reads) held in memory.
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromImageBytes(
+    const std::uint8_t* bytes,
+    std::size_t byteCount,
+    bool preferSRGB,
+    std::string_view formatHint,
+    const std::string& label);
 
 //enum class ImageFiletype {
 //	UNKNOWN,
@@ -186,24 +194,6 @@ struct TexturePendingDebugInfo {
     const char* uploadPath = "unknown";
 };
 
-enum class TextureReloadJobState : uint8_t {
-    Queued = 0,
-    BuildingSourceData,
-    Ready,
-    Failed,
-};
-
-struct TextureReloadJobHandle {
-    std::atomic<TextureReloadJobState> state = TextureReloadJobState::Queued;
-    std::mutex mutex;
-    uint32_t targetTopMip = 0;
-    uint32_t sourceTotalMipCount = 1;
-    uint32_t sourceFullWidth = 0;
-    uint32_t sourceFullHeight = 0;
-    std::shared_ptr<TextureSourceData> sourceData;
-    std::string error;
-};
-
 enum class TextureDirectStorageReloadJobState : uint8_t {
     Queued = 0,
     CreatingResource,
@@ -222,60 +212,32 @@ struct TextureDirectStorageReloadJobHandle {
     std::string error;
 };
 
-// Helper for std::visit with multiple lambdas
-template<class... Ts>
-struct Overloaded : Ts... { using Ts::operator()...; };
-template<class... Ts>
-Overloaded(Ts...) -> Overloaded<Ts...>;
-
 class TextureAsset {
 public:
-    using BytesPtr = std::shared_ptr<std::vector<uint8_t>>;
-    using BytesList = std::vector<BytesPtr>;
-    // Variant for different ways an asset might be stored
-    // On-disk file, in-memory bytes, etc.
-    using StorageVariant = std::variant<
-        std::monostate,
-        BytesList,
-        std::string,
-        std::shared_ptr<org::PixelBuffer>>;
-    StorageVariant m_initialStorage;
-
-    static std::shared_ptr<TextureAsset> CreateShared(org::TextureDescription desc,
-        StorageVariant initialStorage,
-        std::shared_ptr<org::Sampler> defaultSampler,
-        TextureFileMeta meta) {
-	    return std::shared_ptr<TextureAsset>(new TextureAsset(
-            std::move(desc),
-            std::move(initialStorage),
-            std::move(defaultSampler),
-            std::move(meta)
-		));
+    // A texture loaded by the texture pipeline (br::textures::RequestTexture); its shape is
+    // unknown until the pipeline reports it (ApplyPipelineSourceShape).
+    static std::shared_ptr<TextureAsset> CreateForPipeline(
+        std::shared_ptr<const br::textures::TextureRequest> request, std::string cacheKey);
+    bool IsPipelineTexture() const { return m_pipelineRequest != nullptr; }
+    const std::shared_ptr<const br::textures::TextureRequest>& PipelineRequest() const { return m_pipelineRequest; }
+    const std::string& PipelineCacheKey() const { return m_pipelineCacheKey; }
+    // The full source shape (all mips) the pipeline found, which decides mip streaming.
+    void ApplyPipelineSourceShape(const org::TextureDescription& fullDesc);
+    // Whether the resident image is missing or is not the mip window streaming wants.
+    bool NeedsPipelineResidency() const;
+    // The top mip of the window streaming wants resident.
+    uint32_t DesiredResidentTopMip() const { std::scoped_lock lock(m_uploadAdvanceMutex); return GetDesiredResidentTopMip(); }
+    // Makes a pipeline residency job's image the texture's prepared image.
+    void AdoptPipelineImage(std::shared_ptr<org::PixelBuffer> image) {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        AdoptUploadedImage(std::move(image));
     }
+    // Ends the load after a terminal failure; the texture keeps its fallback.
+    void FailPipelineLoad(std::string_view reason) { MarkTerminalLoadFailure(reason); }
 
-	// Resolve to a vector of bytes
-    const BytesList& ResolveToBytes() const
-    {
-        // Something we can safely return by reference in "empty" cases.
-        static const BytesList kEmpty = {};
-
-        return std::visit(Overloaded{
-            [&](std::monostate) -> const BytesList& {
-                throw std::runtime_error("ResolveToBytes: no initial storage set");
-                return kEmpty;
-            },
-            [&](const BytesList& p) -> const BytesList& {
-                return p;
-            },
-            [&](const std::string& path) -> const BytesList& {
-				throw std::runtime_error("Not implemented");
-            },
-        [&](const std::shared_ptr<org::PixelBuffer>& pb) -> const BytesList& {
-	            throw std::runtime_error("ResolveToBytes: Not implemented for PixelBuffer");
-	            return kEmpty;
-			},
-            }, m_initialStorage);
-    }
+    // A texture over an image something else produced (a GPU-generated cubemap); not a load.
+    static std::shared_ptr<TextureAsset> CreateFromImage(std::shared_ptr<org::PixelBuffer> image,
+        std::shared_ptr<org::Sampler> sampler = nullptr, std::string name = {});
 
     struct PublishedBindingSnapshot {
         std::shared_ptr<org::PixelBuffer> image;
@@ -332,9 +294,6 @@ public:
     uint32_t GetStreamingTextureID() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.streamingTextureID; }
     bool IsMipStreamingEligible() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.eligible; }
     bool IsMipStreamingEnabled() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.enabled; }
-    // True for the shared processing placeholders (and uncached placeholder
-    // variants) that stand in for a texture before its own image exists.
-    static bool IsProcessingPlaceholderImage(const org::PixelBuffer* image);
     // Set once the texture's source could not be turned into an image; its
     // placeholder is then final and must not hold back the renderables using it.
     bool HasTerminalLoadFailure() const { return m_terminalLoadFailure.load(std::memory_order_acquire); }
@@ -348,23 +307,7 @@ public:
     uint64_t GetStreamingStateRevision() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.stateRevision; }
     bool HasPendingUploadWork() const {
         std::scoped_lock lock(m_uploadAdvanceMutex);
-        const bool needsStreamingReload =
-            m_hasUploadedFinalImage &&
-            HasStreamingSourceData() &&
-            ((m_streamingState.enabled &&
-              m_streamingState.pendingTopMip != m_streamingState.residency.residentTopMip) ||
-             (!m_streamingState.enabled && m_streamingState.residency.residentTopMip != 0u));
-        const bool hasAsyncHandle =
-            m_processingHandle != nullptr ||
-            m_reloadHandle != nullptr ||
-            m_directStorageReloadHandle != nullptr;
-        const bool hasOnlyPlaceholder =
-            m_hasUploadedPlaceholder &&
-            !m_hasUploadedFinalImage;
-        return !HasUsableImage() ||
-            needsStreamingReload ||
-            hasAsyncHandle ||
-            hasOnlyPlaceholder;
+        return m_pipelineRequest ? NeedsPipelineResidency() : !HasUsableImage();
     }
     TexturePendingDebugInfo GetPendingDebugInfo() const;
     const std::string& DebugName() const { return m_name; }
@@ -386,9 +329,6 @@ public:
     void RecordLoadPath(TextureLoadPathTelemetry path, std::string detail = {});
     void RecordUploadPath(TextureUploadPathTelemetry path, std::string detail = {});
 
-    std::shared_ptr<TextureSourceData> BuildSourceData(const char* reason = nullptr);
-    std::shared_ptr<TextureSourceData> BuildProcessingSourceData(const char* reason = nullptr);
-
     void SetName(const std::string& name)
     {
 		std::scoped_lock lock(m_uploadAdvanceMutex);
@@ -398,10 +338,8 @@ public:
         }
     }
 
-    DirectStorageAsyncRequestHandle QueueInitialDirectStorageUploadIfNeeded();
-    void EnsureUploaded(const TextureFactory& factory);
-    TextureUploadAdvanceResult EnsureUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode);
-    TextureUploadAdvanceResult RequestAllOrNothingUpload(const TextureFactory& factory, TextureUploadAdvanceMode mode);
+    // Drops the resident image of a streamed texture (height atlas eviction); a later load
+    // makes it resident again.
     bool DropResidentImageForStreaming();
 
     unsigned int GetWidth() const {
@@ -420,33 +358,19 @@ public:
 private:
     static uint32_t NextStreamingTextureID();
     TextureAsset(org::TextureDescription desc,
-        StorageVariant initialStorage,
+        std::shared_ptr<org::PixelBuffer> image,
         std::shared_ptr<org::Sampler> defaultSampler,
         TextureFileMeta meta)
-        : m_initialStorage(std::move(initialStorage))
-        , m_desc(std::move(desc))
+        : m_desc(std::move(desc))
         , m_sampler(defaultSampler ? std::move(defaultSampler) : org::Sampler::GetDefaultSampler())
         , m_meta(std::move(meta)) {
         m_streamingState.streamingTextureID = NextStreamingTextureID();
-        if (std::holds_alternative<std::shared_ptr<org::PixelBuffer>>(m_initialStorage)) { // Already initialized
-            m_image = std::get<std::shared_ptr<org::PixelBuffer>>(m_initialStorage);
-			m_publishedImage = m_image;
-			m_hasUploadedFinalImage = true;
-        }
-        if (std::holds_alternative<std::string>(m_initialStorage)) { // Store path for potential re-use
-            m_initialDataString = std::get<std::string>(m_initialStorage);
-            PrimeConditionedCacheResidentUploadMetadata();
-		}
-        if (std::holds_alternative<BytesList>(m_initialStorage)) {
-            m_originalSourceDesc = m_desc;
-            m_originalSourceBytes = std::get<BytesList>(m_initialStorage);
+        if (image) {
+            m_image = std::move(image);
+            m_publishedImage = m_image;
+            m_hasUploadedFinalImage = true;
         }
         RefreshStreamingStateFromDescription();
-        if (m_streamingState.eligible && !m_suppressMipStreaming && IsMaterialTextureStreamingEnabledSetting()) {
-            m_streamingState.enabled = true;
-			ApplyStreamingBootstrapTopMip();
-            InvalidateResidentImageForStreamingRequest();
-        }
     }
 	org::TextureDescription m_desc;
 	mutable std::recursive_mutex m_uploadAdvanceMutex;
@@ -456,22 +380,17 @@ private:
     TextureStreamingState m_publishedStreamingState{};
     std::shared_ptr<org::Sampler> m_sampler;
     TextureFileMeta m_meta;
-	std::shared_ptr<TextureProcessingJobHandle> m_processingHandle;
-    std::shared_ptr<TextureReloadJobHandle> m_reloadHandle;
-    std::shared_ptr<TextureDirectStorageReloadJobHandle> m_directStorageReloadHandle;
     TextureStreamingState m_streamingState;
+    std::shared_ptr<const br::textures::TextureRequest> m_pipelineRequest;
+    std::string m_pipelineCacheKey;
 	uint64_t m_streamingRequestChangedFrame = 0;
     bool m_suppressMipStreaming = false;
 	uint32_t m_sourceTotalMipCount = 0;
     uint32_t m_sourceFullWidth = 0;
     uint32_t m_sourceFullHeight = 0;
-    std::string m_initialDataString;
-    org::TextureDescription m_originalSourceDesc;
-    BytesList m_originalSourceBytes;
     std::string m_name;
 	bool m_hasUploadedPlaceholder = false;
 	bool m_hasUploadedFinalImage = false;
-	bool m_processingFallbackRequested = false;
 	std::atomic<bool> m_terminalLoadFailure{ false };
     TextureLoadPathTelemetry m_lastReportedLoadPath = TextureLoadPathTelemetry::Unknown;
     TextureUploadPathTelemetry m_lastReportedUploadPath = TextureUploadPathTelemetry::Unknown;
@@ -499,5 +418,4 @@ private:
     void BumpStreamingStateRevision();
     void BumpBindingRevision();
     void MarkTerminalLoadFailure(std::string_view reason);
-    void PrimeConditionedCacheResidentUploadMetadata() const;
 };

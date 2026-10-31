@@ -1,3 +1,4 @@
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include <BasicRenderer/Streaming/SceneAssetRequestService.h>
 
 #include <stdexcept>
@@ -19,16 +20,9 @@ bool SceneAssetRequestService::CanPublishTerrain() const noexcept {
     return m_terrain != nullptr && m_textures != nullptr;
 }
 
-void SceneAssetRequestService::AdvanceTextureUpload(
-    TextureAsset& texture, TextureUploadAdvanceMode mode) const {
-    if (!m_textures) throw std::runtime_error("scene texture service is unavailable");
-    (void)texture.EnsureUploaded(*m_textures, mode);
-}
-
-void SceneAssetRequestService::RequestTextureResidency(
-    TextureAsset& texture, TextureUploadAdvanceMode mode) const {
-    if (!m_textures) throw std::runtime_error("scene texture service is unavailable");
-    (void)texture.RequestAllOrNothingUpload(*m_textures, mode);
+void SceneAssetRequestService::LoadTexture(
+    const std::shared_ptr<TextureAsset>& texture, std::function<void(bool loaded)> ready) const {
+    br::textures::LoadTexture(texture, std::move(ready));
 }
 
 std::uint32_t SceneAssetRequestService::PublishTerrain(

@@ -4,11 +4,6 @@
 
 namespace br::assets {
 
-std::wstring GetExistingCachePathForFile(
-    const TextureFileMeta& meta) {
-    return TextureProcessingManager::GetInstance().GetExistingCachePathForFile(meta);
-}
-
 StochasticTextureArtifactResult RequestStochasticArtifactsBlocking(
     const std::shared_ptr<TextureSourceData>& sourceData,
     const TextureFileMeta& meta,

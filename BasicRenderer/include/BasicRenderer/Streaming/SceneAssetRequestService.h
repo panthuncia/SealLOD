@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <cstdint>
 #include <memory>
 
@@ -22,8 +23,8 @@ public:
 
     [[nodiscard]] bool CanUploadTextures() const noexcept;
     [[nodiscard]] bool CanPublishTerrain() const noexcept;
-    void AdvanceTextureUpload(TextureAsset& texture, TextureUploadAdvanceMode mode) const;
-    void RequestTextureResidency(TextureAsset& texture, TextureUploadAdvanceMode mode) const;
+    // Loads a texture through the texture pipeline (br::textures::LoadTexture).
+    void LoadTexture(const std::shared_ptr<TextureAsset>& texture, std::function<void(bool loaded)> ready = {}) const;
     [[nodiscard]] std::uint32_t PublishTerrain(const TerrainMaterialDesc& description) const;
     void ProcessPendingTerrainUpdates() const;
     [[nodiscard]] bool ActivatePublishedTerrainState(

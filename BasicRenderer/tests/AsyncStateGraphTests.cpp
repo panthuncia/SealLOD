@@ -1222,6 +1222,38 @@ int main() {
     Check(latchedGateResult.payload.Get<Value>() &&
         latchedGateResult.payload.Get<Value>()->value == 2);
 
+    // ReadyGateAtLeast waits past ready versions below its floor, latches to the
+    // first ready version at or above it, and later versions leave it alone.
+    const ArtifactKey floorGateDependency{ ArtifactKind::Generic, 1313, 0 };
+    const ArtifactKey floorGateConsumer{ ArtifactKind::Generic, 1314, 0 };
+    Check(graph.Request(floorGateDependency, 1));
+    graph.WaitIdle();
+    Check(graph.Request(floorGateConsumer, 1, {
+        ReadyGateAtLeast(floorGateDependency, 3, ArtifactReadiness::GpuReady)
+    }));
+    graph.WaitIdle();
+    Check(graph.Snapshot(floorGateConsumer).readiness == ArtifactReadiness::Blocked);
+    Check(graph.Request(floorGateDependency, 2));
+    graph.WaitIdle();
+    Check(graph.Snapshot(floorGateConsumer).readiness == ArtifactReadiness::Blocked);
+    Check(graph.Request(floorGateDependency, 3));
+    graph.WaitIdle();
+    const auto floorGateResult = graph.Snapshot(floorGateConsumer);
+    Check(floorGateResult.readiness == ArtifactReadiness::GpuReady);
+    Check(floorGateResult.payload.Get<Value>() && floorGateResult.payload.Get<Value>()->value == 4);
+    Check(graph.Request(floorGateDependency, 4));
+    graph.WaitIdle();
+    const auto floorGateAfterAdvance = graph.Snapshot(floorGateConsumer);
+    Check(floorGateAfterAdvance.revision == 1);
+    Check(floorGateAfterAdvance.generation == floorGateResult.generation);
+    // Already past the floor when requested: latches at once.
+    const ArtifactKey floorGatePastConsumer{ ArtifactKind::Generic, 1315, 0 };
+    Check(graph.Request(floorGatePastConsumer, 1, {
+        ReadyGateAtLeast(floorGateDependency, 2, ArtifactReadiness::GpuReady)
+    }));
+    graph.WaitIdle();
+    Check(graph.Snapshot(floorGatePastConsumer).readiness == ArtifactReadiness::GpuReady);
+
     // A completed Latest consumer advances by creating a new immutable version.
     // The old exact handle must retain its original dependency closure.
     const ArtifactKey latestDependency{ ArtifactKind::Generic, 311, 0 };

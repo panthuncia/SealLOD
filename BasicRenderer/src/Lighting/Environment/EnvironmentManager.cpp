@@ -14,6 +14,8 @@
 #include "Resources/ResourceGroup.h"
 #include "BasicRenderer/Assets/Texture.h"
 #include "Assets/Textures/TextureFactory.h"
+#include <BasicRenderer/Assets/TexturePipeline.h>
+#include <BasicRenderer/Assets/CachePaths.h>
 #include "../../../generated/BuiltinResources.h"
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
 #include "Render/MemoryIntrospectionAPI.h"
@@ -65,8 +67,7 @@ std::unique_ptr<Environment> EnvironmentManager::CreateEnvironment(std::wstring 
 	auto prefilteredEnvironmentCubemap = org::PixelBuffer::CreateShared(prefilteredDesc);
 	org::memory::SetResourceUsageHint(*prefilteredEnvironmentCubemap, "Environment lighting");
 	auto sampler = org::Sampler::GetDefaultSampler();
-	auto prefilteredEnvironment = TextureAsset::CreateShared(prefilteredDesc, prefilteredEnvironmentCubemap, sampler, TextureFileMeta());
-	prefilteredEnvironment->SetName("Environment prefiltered cubemap");
+	auto prefilteredEnvironment = TextureAsset::CreateFromImage(prefilteredEnvironmentCubemap, sampler, "Environment prefiltered cubemap");
 
 	env->SetEnvironmentPrefilteredCubemap(prefilteredEnvironment);
 	env->SetReflectionCubemapResolution(m_reflectionCubemapResolution);
@@ -76,19 +77,55 @@ std::unique_ptr<Environment> EnvironmentManager::CreateEnvironment(std::wstring 
 	return std::move(env);
 }
 
-void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
+EnvironmentManager::~EnvironmentManager() {
 	std::lock_guard<std::mutex> lock(*m_environmentUpdateMutex);
+	m_pendingSourceLoads->alive = false;
+}
 
-	// Check if this environment has been processed and cached. If it has, load the cache. If it hasn't, load the environment and process it.
+void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
+	// A processed environment is cached as its cubemap; otherwise its HDRI is converted.
+	const auto skyboxPath = GetCacheFilePath(e->GetName() + L"_environment.dds", L"environments");
+	const bool cachedCubemap = std::filesystem::exists(skyboxPath);
+	br::textures::TextureRequest request;
+	request.preparation = br::textures::TexturePreparation::LoadOnly;
+	if (cachedCubemap) {
+		request.source = br::textures::MakeFileTextureSource(skyboxPath);
+		request.allowRTV = true;
+		request.allowUAV = true;
+		request.debugName = "Skybox cubemap";
+	}
+	else {
+		request.source = br::textures::MakeFileTextureSource(hdriPath);
+		request.debugName = "Environment HDRI";
+	}
+	auto source = br::textures::RequestTexture(std::move(request));
+	std::uint64_t generation = 0;
+	{
+		std::lock_guard<std::mutex> lock(*m_environmentUpdateMutex);
+		generation = ++m_pendingSourceLoads->nextGeneration;
+		m_pendingSourceLoads->generations[e] = generation;
+	}
+	// The environment's own processing starts once its source is resident.
+	br::textures::LoadTexture(source, [this, e, generation, cachedCubemap, source,
+		pending = m_pendingSourceLoads, mutex = m_environmentUpdateMutex](bool loaded) {
+		std::lock_guard<std::mutex> lock(*mutex);
+		const auto it = pending->generations.find(e);
+		if (!pending->alive || it == pending->generations.end() || it->second != generation) return;
+		pending->generations.erase(it);
+		if (!loaded) {
+			spdlog::error("EnvironmentManager: environment source '{}' failed to load", source->Meta().filePath);
+			return;
+		}
+		ApplyEnvironmentSource(e, source, cachedCubemap);
+	});
+}
+
+void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::shared_ptr<TextureAsset>& source, bool cachedCubemap) {
 	auto& name = e->GetName();
-	auto skyboxPath = GetCacheFilePath(name + L"_environment.dds", L"environments");
-
 	std::shared_ptr<TextureAsset> skybox;
 	unsigned int res = m_reflectionCubemapResolution;
-	if (std::filesystem::exists(skyboxPath)) {
-		skybox = LoadCubemapFromFile(skyboxPath, true, true);
-		auto factory = TextureFactory::CreateUnique(m_uploadService);
-		skybox->EnsureUploaded(*factory);
+	if (cachedCubemap) {
+		skybox = source;
 		skybox->SetName("Skybox cubemap");
 		org::memory::SetResourceUsageHint(*skybox->ImagePtr(), "Environment lighting");
 		res = skybox->GetWidth();
@@ -96,9 +133,7 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 		e->SetEnvironmentCubemap(skybox);
 	}
 	else {
-		auto skyHDR = LoadTextureFromFile(s2ws(hdriPath));
-		auto factory = TextureFactory::CreateUnique(m_uploadService);
-		skyHDR->EnsureUploaded(*factory);
+		const auto& skyHDR = source;
 
 		org::TextureDescription skyboxDesc;
 		org::ImageDimensions dims;
@@ -118,8 +153,7 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 		auto envCubemap = org::PixelBuffer::CreateShared(skyboxDesc);
 		org::memory::SetResourceUsageHint(*envCubemap, "Environment lighting");
 		auto sampler = org::Sampler::GetDefaultSampler();
-		skybox = TextureAsset::CreateShared(skyboxDesc, envCubemap, sampler, TextureFileMeta());
-		skybox->SetName("Environment cubemap");
+		skybox = TextureAsset::CreateFromImage(envCubemap, sampler, "Environment cubemap");
 
 		e->SetHDRI(skyHDR);
 		e->SetEnvironmentCubemap(skybox);
@@ -165,8 +199,7 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 	auto prefilteredEnvironmentCubemap = org::PixelBuffer::CreateShared(prefilteredDesc);
 	org::memory::SetResourceUsageHint(*prefilteredEnvironmentCubemap, "Environment lighting");
 	auto sampler = org::Sampler::GetDefaultSampler();
-	auto prefilteredEnvironment = TextureAsset::CreateShared(prefilteredDesc, prefilteredEnvironmentCubemap, sampler, TextureFileMeta());
-	prefilteredEnvironment->SetName("Environment prefiltered cubemap");
+	auto prefilteredEnvironment = TextureAsset::CreateFromImage(prefilteredEnvironmentCubemap, sampler, "Environment prefiltered cubemap");
 	e->SetEnvironmentPrefilteredCubemap(prefilteredEnvironment);
 	m_environmentPrefilteredCubemapGroup->AddResource(prefilteredEnvironment->ImagePtr());
 
@@ -182,6 +215,7 @@ void EnvironmentManager::RemoveEnvironment(Environment* e) {
     m_workServices.prefilter.DiscardUnsubmitted([index = e->GetEnvironmentIndex()](const br::render::EnvironmentPrefilterWork& work) { return work.environmentIndex == index; });
     m_workServices.sphericalHarmonics.DiscardUnsubmitted([index = e->GetEnvironmentIndex()](const br::render::EnvironmentSHWork& work) { return work.environmentIndex == index; });
 	std::lock_guard<std::mutex> lock(*m_environmentUpdateMutex);
+	m_pendingSourceLoads->generations.erase(e);
 	m_environmentInfoBuffer->Remove(e->GetEnvironmentBufferView());
 	m_environmentPrefilteredCubemapGroup->RemoveResource(e->GetEnvironmentPrefilteredCubemap().get());
 	m_workingEnvironmentCubemapGroup->RemoveResource(e->GetEnvironmentCubemap()->ImagePtr().get());

@@ -1,3 +1,4 @@
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include "Terrain/Residency/TerrainManager.h"
 
 #include <algorithm>
@@ -350,7 +351,7 @@ namespace {
                 materialManager->RegisterStreamingTexture(texture, *textureFactory);
             }
             else {
-                texture->EnsureUploaded(*textureFactory);
+                br::textures::LoadTexture(texture, {});
             }
         }
         if (auto image = texture->ImagePtr()) {

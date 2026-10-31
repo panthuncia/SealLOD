@@ -56,7 +56,7 @@ TextureFactory::TextureFactory(std::shared_ptr<org::runtime::IUploadService> upl
 
 namespace {
     void UploadTextureData(
-        org::runtime::IUploadService& uploadService,
+        org::runtime::IUploadProducer& uploadService,
         const std::shared_ptr<org::Resource>& dstTexture,
         const org::TextureDescription& desc,
         const std::vector<std::shared_ptr<std::vector<uint8_t>>>& initialData,
@@ -749,7 +749,8 @@ std::shared_ptr<org::PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffe
     }
 
     // A texture the GPU mips uploads through the job graph, whose upload pass precedes its mip pass.
-    const auto& uploads = doMipmapping && pb->GetMipLevels() > 1 && m_jobUploadService ? m_jobUploadService : m_uploadService;
+    auto uploads = doMipmapping && pb->GetMipLevels() > 1 ? m_jobUploadService.load() : nullptr;
+    if (!uploads) uploads = m_uploadService.load();
     if (!uploads) throw std::runtime_error("TextureFactory upload service generation is unavailable");
     UploadTextureData(*uploads, pb, desc, initialData.subresources, pb->GetMipLevels());
 
@@ -771,8 +772,8 @@ std::shared_ptr<org::PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffe
 }
 
 void TextureFactory::SetJobUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService) {
-    m_jobUploadService = std::move(uploadService);
-    std::static_pointer_cast<MipmappingPass>(m_mipmappingPass)->SetUploadService(m_jobUploadService);
+    std::static_pointer_cast<MipmappingPass>(m_mipmappingPass)->SetUploadService(uploadService);
+    m_jobUploadService.store(std::move(uploadService));
 }
 
 bool TextureFactory::WhenMipsReady(const org::PixelBuffer& texture, std::function<void()> ready) const {
@@ -798,11 +799,30 @@ void TextureFactory::SetReadbackService(
         ->SetReadbackService(std::move(readbackService));
 }
 
+bool TextureFactory::CanRunBC7CompressionJobs() const
+{
+    auto* readbackPass = std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass).get();
+    return readbackPass && readbackPass->HasReadbackService();
+}
+
 bool TextureFactory::SubmitBC7CompressionJob(
     const std::shared_ptr<TextureProcessingJobHandle>& handle,
     std::string_view debugName) const
 {
-    constexpr uint32_t MaxBC7CompressionJobsInFlight = 4u;
+    // Concurrent BC7 jobs are bounded by the GPU memory they hold (source upload, working
+    // texture with its mip chain, compressed texture, block buffer and readback), not by
+    // count: a burst of large textures otherwise outgrows the VRAM budget and the driver
+    // stalls in heap creation. BR_BC7_VRAM_BUDGET_MB overrides the 512 MiB default.
+    static const uint64_t bc7VramBudgetBytes = [] {
+        uint64_t megabytes = 512u;
+        char* value = nullptr;
+        size_t length = 0;
+        if (_dupenv_s(&value, &length, "BR_BC7_VRAM_BUDGET_MB") == 0 && value) {
+            if (const auto parsed = std::strtoull(value, nullptr, 10); parsed != 0) megabytes = parsed;
+        }
+        std::free(value);
+        return megabytes * 1024u * 1024u;
+    }();
 
     if (!handle) {
         return false;
@@ -836,20 +856,34 @@ bool TextureFactory::SubmitBC7CompressionJob(
         return false;
     }
 
-    uint32_t inFlightJobs = m_bc7InFlightJobs->load(std::memory_order_acquire);
-    while (inFlightJobs < MaxBC7CompressionJobsInFlight &&
-        !m_bc7InFlightJobs->compare_exchange_weak(
-            inFlightJobs,
-            inFlightJobs + 1u,
-            std::memory_order_acq_rel,
-            std::memory_order_acquire)) {
+    uint64_t sourceBytes = 0;
+    for (const auto& subresource : preparedSourceData->subresources) {
+        if (subresource) sourceBytes += subresource->size();
     }
-    if (inFlightJobs >= MaxBC7CompressionJobsInFlight) {
-        return false;
+    const uint64_t baseTexels = uint64_t(preparedSourceData->desc.imageDimensions[0].width) *
+        preparedSourceData->desc.imageDimensions[0].height;
+    const uint64_t chainTexels = baseTexels + baseTexels / 3u;
+    const uint64_t workingBytes = chainTexels *
+        (std::max)(1u, rhi::FormatByteSize(preparedSourceData->desc.format));
+    // BC7 stores one byte per texel: the compressed texture, its block buffer and readback.
+    const uint64_t jobBytes = sourceBytes + workingBytes + 3u * chainTexels;
+
+    // Admit the job while it fits the budget; one job always runs, however large.
+    uint64_t inFlightBytes = m_bc7InFlightBytes->load(std::memory_order_acquire);
+    for (;;) {
+        if (inFlightBytes != 0 && inFlightBytes + jobBytes > bc7VramBudgetBytes) {
+            return false;
+        }
+        if (m_bc7InFlightBytes->compare_exchange_weak(
+                inFlightBytes, inFlightBytes + jobBytes,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+            break;
+        }
     }
 
     auto job = std::make_shared<BC7CompressionJob>();
-    job->inFlightCounter = m_bc7InFlightJobs;
+    job->inFlightBytes = m_bc7InFlightBytes;
+    job->budgetBytes = jobBytes;
 
     const bool preserveAlphaCoverage = ShouldPreserveAlphaCoverage(requestMeta, preparedSourceData->desc);
     const uint32_t preparedMipLevels = GetTextureMipLevelCount(preparedSourceData->desc);
@@ -975,7 +1009,7 @@ std::shared_ptr<org::PixelBuffer> TextureFactory::CreateMaterialResidentPixelBuf
 	const bool needsMips = desc.generateMipMaps && !rhi::helpers::IsBlockCompressed(desc.format) &&
 		slices == 1u && sourceMipLevels == 1u && initialData.subresources.size() == 1u &&
 		CalcMipCount(desc.imageDimensions[0].width, desc.imageDimensions[0].height) > 1u && maxMipLevels != 1u;
-	if (needsMips && m_jobUploadService) {
+	if (needsMips && m_jobUploadService.load()) {
 		// The texture job graph uploads it and builds its chain; the transfer service owns it once the mips are ready, which is
 		// when its binding becomes ready (TextureStreamingManager::QueueBindingChanged).
 		auto image = CreateAlwaysResidentPixelBuffer(std::move(desc), std::move(initialData), debugName, false, false, maxMipLevels);

@@ -21,11 +21,16 @@ struct TextureMipmappingBindings {
         };
         org::PipelineState alphaReset, alphaDownsample, alphaResolveScale, alphaApplyScale;
         std::vector<Job> jobs;
+        // The pass's queue entries these views were declared for (its private snapshot type).
+        // Kept with the bindings: a later structural build declares again while this build's
+        // executions still prepare.
+        std::shared_ptr<const void> declaredJobs;
     };
 
 // The textures whose mip chains were submitted since the last handoff.
 struct TextureMipHandoffBindings {
     size_t textures = 0;
+    std::shared_ptr<const void> declaredJobs;  // as TextureMipmappingBindings::declaredJobs
 };
 
 // Takes each texture whose mips the GPU generated (submitted in an earlier execution of the job graph) to shader-resource
@@ -55,11 +60,15 @@ class TextureFactory::MipHandoffPass : public org::TypedRenderGraphPass<MipHando
         std::shared_ptr<const std::function<void(const org::PixelBuffer&)>> m_completedShared;
         std::function<void(const org::PixelBuffer&)> m_completed;
         org::runtime::FrameWorkQueue<Job> m_jobs;
-        org::runtime::FrameWorkQueue<Job>::Snapshot m_declaredJobs;
         std::atomic_bool m_declaredResourcesChanged = true;
 };
 
-class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<MipmappingPass, org::EmptyPassFrameData, TextureMipmappingBindings>, public org::IDynamicDeclaredResources {
+// Indices into TextureMipmappingBindings::jobs of the jobs this execution took (FrameWorkQueue::ReserveAvailable).
+struct TextureMipmappingFrame {
+    std::vector<uint32_t> jobs;
+};
+
+class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<MipmappingPass, TextureMipmappingFrame, TextureMipmappingBindings>, public org::IDynamicDeclaredResources {
     public:
         // Each texture whose mips are submitted is handed to it (MipHandoffPass).
         void SetHandoff(std::shared_ptr<MipHandoffPass> handoff) { m_handoff = std::move(handoff); }
@@ -72,8 +81,9 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
 
         TextureMipmappingBindings Declare(org::PassBuilder& builder);
 
-        org::EmptyPassFrameData Prepare(const TextureMipmappingBindings& bindings, const org::PassPrepareContext& preparation);
-        static void Record(const TextureMipmappingBindings& bindings, org::PassRecordContext& context);
+        TextureMipmappingFrame Prepare(const TextureMipmappingBindings& bindings, const org::PassPrepareContext& preparation);
+        static void Record(const TextureMipmappingBindings& bindings, const TextureMipmappingFrame& frame,
+            org::PassRecordContext& context);
 
         bool DeclaredResourcesChanged() const override {
             return m_declaredResourcesChanged || m_jobs.ReadCounters().pending != 0;
@@ -132,7 +142,6 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
         std::shared_ptr<MipHandoffPass> m_handoff;
         std::shared_ptr<org::runtime::IUploadService> m_uploads;
         org::runtime::FrameWorkQueue<Job> m_jobs;
-        org::runtime::FrameWorkQueue<Job>::Snapshot m_declaredJobs;
 
         org::PipelineState m_psoFloat1_2D;
         org::PipelineState m_psoFloat1_Array;
@@ -176,6 +185,8 @@ struct TextureBC7CompressionBindings {
         };
         org::PipelineState pipeline;
         std::vector<Job> jobs;
+        // The pass's DeclaredJob list for `jobs` (its private type), as TextureMipmappingBindings::declaredJobs.
+        std::shared_ptr<const void> declaredJobs;
     };
 // Indices into TextureBC7CompressionBindings::jobs of the jobs compressed this frame.
 struct TextureBC7CompressionFrame {
@@ -209,7 +220,8 @@ class TextureFactory::BC7CompressionPass
         struct DeclaredJob {
             std::shared_ptr<BC7CompressionJob> job;
         };
-        std::vector<DeclaredJob> m_declaredJobs;
+        // The latest declaration's (what DeclaredResourcesChanged compares against); each build's own is in its bindings.
+        std::shared_ptr<const std::vector<DeclaredJob>> m_declaredJobs = std::make_shared<const std::vector<DeclaredJob>>();
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         mutable std::mutex m_pendingMutex;
         org::PipelineState m_psoMode6;
@@ -226,17 +238,24 @@ struct TextureFactory::BC7CompressionCopyFrameData {
         std::vector<Copy> copies;
     };
 
+// The pass's DeclaredJob list (its private type), as TextureMipmappingBindings::declaredJobs.
+struct TextureFactory::BC7CompressionCopyBindings {
+        std::shared_ptr<const void> declaredJobs;
+    };
+
 class TextureFactory::BC7CompressionCopyPass
-        : public org::TypedRenderGraphPass<BC7CompressionCopyPass, BC7CompressionCopyFrameData>,
+        : public org::TypedRenderGraphPass<BC7CompressionCopyPass, BC7CompressionCopyFrameData, BC7CompressionCopyBindings>,
           public org::IDynamicDeclaredResources {
     public:
         void EnqueueJob(const std::shared_ptr<BC7CompressionJob>& job);
 
         void Update(const org::UpdateExecutionContext& context) override;
 
-        void Declare(org::PassBuilder& builder);
-        BC7CompressionCopyFrameData Prepare(const org::PassPrepareContext& preparation);
-        static void Record(const BC7CompressionCopyFrameData& data, org::PassRecordContext& recording);
+        BC7CompressionCopyBindings Declare(org::PassBuilder& builder);
+        BC7CompressionCopyFrameData Prepare(const BC7CompressionCopyBindings& bindings,
+            const org::PassPrepareContext& preparation);
+        static void Record(const BC7CompressionCopyBindings& bindings, const BC7CompressionCopyFrameData& data,
+            org::PassRecordContext& recording);
 
         // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
         bool DeclaredResourcesChanged() const override;
@@ -247,7 +266,8 @@ class TextureFactory::BC7CompressionCopyPass
             std::shared_ptr<BC7CompressionJob> job;
             org::ResourceBindingToken source, destination;
         };
-        std::vector<DeclaredJob> m_declaredJobs;
+        // The latest declaration's (what DeclaredResourcesChanged compares against); each build's own is in its bindings.
+        std::shared_ptr<const std::vector<DeclaredJob>> m_declaredJobs = std::make_shared<const std::vector<DeclaredJob>>();
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         mutable std::mutex m_pendingMutex;
         std::atomic_bool m_declaredResourcesChanged = true;
@@ -263,9 +283,14 @@ struct TextureFactory::BC7CompressionReadbackFrameData {
         std::vector<Copy> copies;
     };
 
+// The pass's DeclaredJob list (its private type), as TextureMipmappingBindings::declaredJobs.
+struct TextureFactory::BC7CompressionReadbackBindings {
+        std::shared_ptr<const void> declaredJobs;
+    };
+
 class TextureFactory::BC7CompressionReadbackPass
         : public org::TypedRenderGraphPass<BC7CompressionReadbackPass,
-              BC7CompressionReadbackFrameData>,
+              BC7CompressionReadbackFrameData, BC7CompressionReadbackBindings>,
           public org::IDynamicDeclaredResources {
     public:
         void SetReadbackService(std::shared_ptr<org::runtime::IReadbackService> readbackService);
@@ -274,9 +299,10 @@ class TextureFactory::BC7CompressionReadbackPass
 
         void Update(const org::UpdateExecutionContext& context) override;
 
-        void Declare(org::PassBuilder& builder);
-        BC7CompressionReadbackFrameData Prepare(const org::PassPrepareContext& preparation);
-        static void Record(const BC7CompressionReadbackFrameData& data,
+        BC7CompressionReadbackBindings Declare(org::PassBuilder& builder);
+        BC7CompressionReadbackFrameData Prepare(const BC7CompressionReadbackBindings& bindings,
+            const org::PassPrepareContext& preparation);
+        static void Record(const BC7CompressionReadbackBindings& bindings, const BC7CompressionReadbackFrameData& data,
             org::PassRecordContext& recording);
 
         // A job enqueued or failed, or the jobs Declare would take now (by stage) differ from those it took.
@@ -288,7 +314,8 @@ class TextureFactory::BC7CompressionReadbackPass
             std::shared_ptr<BC7CompressionJob> job;
             org::ResourceBindingToken source;
         };
-        std::vector<DeclaredJob> m_declaredJobs;
+        // The latest declaration's (what DeclaredResourcesChanged compares against); each build's own is in its bindings.
+        std::shared_ptr<const std::vector<DeclaredJob>> m_declaredJobs = std::make_shared<const std::vector<DeclaredJob>>();
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         mutable std::mutex m_pendingMutex;
         std::shared_ptr<org::runtime::IReadbackService> m_readbackService;

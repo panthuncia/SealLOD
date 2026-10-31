@@ -2,6 +2,7 @@
 // Created by matth on 6/25/2024.
 //
 
+#include "Assets/Textures/Pipeline/TexturePipelineArtifacts.h"
 #include "Runtime/GraphIntegration/TextureJobGraph.h"
 #include <BasicRenderer/Renderer.h>
 #include "Render/RenderGraph/RenderGraph.h"
@@ -239,7 +240,6 @@ void Renderer::Cleanup() {
     m_materialEvaluationInputs = {};
     m_openPBRLookupResources = {};
     m_blueNoiseTexture.reset();
-	ReleaseSharedProcessingPlaceholderTextures();
     m_dynamicBackbuffer.reset();
     m_dynamicPresentationColor.reset();
     m_presentationColorResources.clear();
@@ -556,6 +556,7 @@ void Renderer::Initialize(
         *m_asyncStateGraph, *m_rendererStatePublisher);
     br::render::RegisterIndirectStateProducer(*m_asyncStateGraph);
     br::render::RegisterMaterialStateProducer(*m_asyncStateGraph);
+	br::render::RegisterTexturePipelineProducers(*m_asyncStateGraph);
 	br::render::RegisterTextureBindingProducer(*m_asyncStateGraph);
 	br::render::RegisterTextureDisplayGateProducer(*m_asyncStateGraph);
 	br::render::RegisterTerrainStateProducer(*m_asyncStateGraph);
