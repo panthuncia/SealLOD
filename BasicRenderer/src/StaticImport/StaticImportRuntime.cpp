@@ -2562,7 +2562,12 @@ namespace br::staticimport
 			}
 			// Decrement-before-recheck closes both sides of the enqueue/exit race:
 			// either this drain sees the published ticket, or its producer sees the slot.
-			if (_shared.staticImportWorkScheduler.HasPending(source)) _drains.ScheduleWorkerDrains();
+			// The released slot belongs to the whole domain, not to this source: a
+			// producer of another source that found every slot taken returned without
+			// submitting, and nothing but this exit can offer it the slot. Rechecking
+			// only this source stranded such work (asset publication behind a group
+			// assembly burst) until an unrelated push, which may never come.
+			_drains.ScheduleWorkerDrains();
 		}
 
 		void DrainStaticSceneRecipePersistence()
