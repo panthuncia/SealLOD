@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <system_error>
@@ -19,12 +20,14 @@ namespace br::staticimport
 	{
 		// The static import pipeline skips a part with any skinned mesh that is not
 		// wind-simulated (StaticImportPreparation.h); such parts belong to the dynamic scene.
-		bool IsSkinnedPart(const br::import::RenderableAssetPart& part)
+		bool IsSkinnedPart(const std::vector<std::shared_ptr<Mesh>>& meshes)
 		{
-			return std::ranges::any_of(part.meshes, [](const std::shared_ptr<Mesh>& mesh) {
+			return std::ranges::any_of(meshes, [](const std::shared_ptr<Mesh>& mesh) {
 				return mesh && mesh->HasBaseSkin() && !mesh->GetBaseSkin()->HasWindSimulationGroups();
 			});
 		}
+
+		constexpr std::string_view kPartSuffix = "#part=";
 	}
 
 	ImportedAssetLibrary::ImportedAssetLibrary(br::import::ImportSettings settings)
@@ -54,6 +57,7 @@ namespace br::staticimport
 	std::string ImportedAssetLibrary::MakeAssetKey(std::string_view filePath)
 	{
 		if (filePath.empty()) return {};
+		if (const auto part = PartIndexOf(filePath)) return MakePartAssetKey(FileKeyOf(filePath), *part);
 		std::error_code error;
 		auto path = std::filesystem::absolute(std::filesystem::path(filePath), error);
 		if (error) path = std::filesystem::path(filePath);
@@ -62,6 +66,32 @@ namespace br::staticimport
 			return static_cast<char>(std::tolower(c));
 		});
 		return key;
+	}
+
+	std::string ImportedAssetLibrary::MakePartAssetKey(std::string_view filePath, std::uint32_t partIndex)
+	{
+		auto key = MakeAssetKey(FileKeyOf(filePath));
+		if (key.empty()) return {};
+		key += kPartSuffix;
+		key += std::to_string(partIndex);
+		return key;
+	}
+
+	std::string_view ImportedAssetLibrary::FileKeyOf(std::string_view assetKey)
+	{
+		const auto suffix = assetKey.rfind(kPartSuffix);
+		return suffix == std::string_view::npos ? assetKey : assetKey.substr(0, suffix);
+	}
+
+	std::optional<std::uint32_t> ImportedAssetLibrary::PartIndexOf(std::string_view assetKey)
+	{
+		const auto suffix = assetKey.rfind(kPartSuffix);
+		if (suffix == std::string_view::npos) return std::nullopt;
+		const auto digits = assetKey.substr(suffix + kPartSuffix.size());
+		std::uint32_t index = 0;
+		const auto [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), index);
+		if (error != std::errc{} || end != digits.data() + digits.size()) return std::nullopt;
+		return index;
 	}
 
 	std::string ImportedAssetLibrary::CanonicalAssetKey(std::string_view assetKey) const
@@ -109,6 +139,14 @@ namespace br::staticimport
 		return StaticAssetStatus::Invalid;
 	}
 
+	StaticAssetStatus ImportedAssetLibrary::StatusOf(const Entry& entry, std::optional<std::uint32_t> partIndex)
+	{
+		if (!partIndex || entry.state != State::Ready) return ToStatus(entry.state);
+		return *partIndex < entry.partAssets.size() && !entry.partAssets[*partIndex].empty()
+			? StaticAssetStatus::Ready
+			: StaticAssetStatus::Unsupported;
+	}
+
 	ImportedAssetLibrary::Entry& ImportedAssetLibrary::FindOrQueueLocked(const std::string& key)
 	{
 		if (const auto it = _entries.find(key); it != _entries.end()) return *it->second;
@@ -136,6 +174,13 @@ namespace br::staticimport
 				{
 					std::lock_guard lock(_mutex);
 					if (payload) {
+						entryPtr->loadedParts.reserve(payload->parts.size());
+						for (std::uint32_t index = 0; index < payload->parts.size(); ++index) {
+							const auto& part = payload->parts[index];
+							LoadedPart loaded{ .index = index, .skinned = IsSkinnedPart(part.meshes), .name = part.name };
+							DirectX::XMStoreFloat4x4(&loaded.localMatrix, part.localMatrix);
+							entryPtr->loadedParts.push_back(std::move(loaded));
+						}
 						entryPtr->payload = std::move(payload);
 						entryPtr->state = State::ReadyToPublish;
 						_readyToPublish.fetch_add(1, std::memory_order_release);
@@ -159,7 +204,18 @@ namespace br::staticimport
 		const auto key = MakeAssetKey(assetKey);
 		if (key.empty()) return StaticAssetStatus::Invalid;
 		std::lock_guard lock(_mutex);
-		return ToStatus(FindOrQueueLocked(key).state);
+		return StatusOf(FindOrQueueLocked(std::string(FileKeyOf(key))), PartIndexOf(key));
+	}
+
+	std::optional<std::vector<ImportedAssetLibrary::LoadedPart>> ImportedAssetLibrary::TryGetLoadedParts(std::string_view filePath)
+	{
+		const auto key = MakeAssetKey(FileKeyOf(filePath));
+		if (key.empty()) return std::vector<LoadedPart>{};
+		std::lock_guard lock(_mutex);
+		const auto& entry = FindOrQueueLocked(key);
+		if (entry.state == State::Loading) return std::nullopt;
+		if (entry.state == State::Failed) return std::vector<LoadedPart>{};
+		return entry.loadedParts;
 	}
 
 	StaticAssetStatus ImportedAssetLibrary::TryPublish(const std::string& key)
@@ -179,9 +235,17 @@ namespace br::staticimport
 		auto asset = br::import::RenderableAssetFromPayload(std::move(*payload));
 		std::vector<br::import::RenderableAssetPart> staticParts;
 		std::vector<br::import::RenderableAssetPart> skinnedParts;
-		for (auto& part : asset.parts) {
+		std::vector<std::vector<br::import::RenderableAssetPart>> partAssets(asset.parts.size());
+		for (std::size_t index = 0; index < asset.parts.size(); ++index) {
+			const auto& part = asset.parts[index];
 			if (part.meshes.empty()) continue;
-			(IsSkinnedPart(part) ? skinnedParts : staticParts).push_back(part);
+			if (IsSkinnedPart(part.meshes)) {
+				skinnedParts.push_back(part);
+				continue;
+			}
+			staticParts.push_back(part);
+			auto& partAsset = partAssets[index].emplace_back(part);
+			partAsset.localMatrix = DirectX::XMMatrixIdentity();
 		}
 
 		State state = State::Ready;
@@ -199,6 +263,7 @@ namespace br::staticimport
 			entry->asset = std::move(asset);
 			entry->staticParts = std::move(staticParts);
 			entry->skinnedParts = std::move(skinnedParts);
+			entry->partAssets = std::move(partAssets);
 			entry->reason = std::move(reason);
 			// The parts are immutable from here on; readers take pointers to them.
 			entry->state = state;
@@ -219,7 +284,12 @@ namespace br::staticimport
 	{
 		const auto key = MakeAssetKey(assetKey);
 		if (key.empty()) return StaticAssetStatus::Invalid;
-		return TryPublish(key);
+		const auto fileKey = std::string(FileKeyOf(key));
+		const auto status = TryPublish(fileKey);
+		const auto part = PartIndexOf(key);
+		if (!part || status != StaticAssetStatus::Ready) return status;
+		std::lock_guard lock(_mutex);
+		return StatusOf(*_entries.at(fileKey), part);
 	}
 
 	std::size_t ImportedAssetLibrary::PublishReadyRenderableAssets(std::size_t maxCount)
@@ -256,15 +326,16 @@ namespace br::staticimport
 	{
 		(void)variant;
 		const auto key = MakeAssetKey(assetKey);
+		const auto part = PartIndexOf(key);
 		std::lock_guard lock(_mutex);
-		const auto it = _entries.find(key);
-		if (it == _entries.end() || it->second->state != State::Ready) return nullptr;
-		return &it->second->staticParts;
+		const auto it = _entries.find(std::string(FileKeyOf(key)));
+		if (it == _entries.end() || StatusOf(*it->second, part) != StaticAssetStatus::Ready) return nullptr;
+		return part ? &it->second->partAssets[*part] : &it->second->staticParts;
 	}
 
 	const std::vector<br::import::RenderableAssetPart>* ImportedAssetLibrary::TryGetSkinnedParts(std::string_view assetKey) const
 	{
-		const auto key = MakeAssetKey(assetKey);
+		const auto key = MakeAssetKey(FileKeyOf(assetKey));
 		std::lock_guard lock(_mutex);
 		const auto it = _entries.find(key);
 		if (it == _entries.end()) return nullptr;
@@ -283,7 +354,7 @@ namespace br::staticimport
 
 	bool ImportedAssetLibrary::HasKnownFailure(std::string_view assetKey) const
 	{
-		const auto key = MakeAssetKey(assetKey);
+		const auto key = MakeAssetKey(FileKeyOf(assetKey));
 		std::lock_guard lock(_mutex);
 		const auto it = _entries.find(key);
 		return it != _entries.end() && it->second->state == State::Failed;
@@ -292,9 +363,11 @@ namespace br::staticimport
 	std::optional<std::string> ImportedAssetLibrary::KnownUnsupportedStaticImportReason(std::string_view assetKey) const
 	{
 		const auto key = MakeAssetKey(assetKey);
+		const auto part = PartIndexOf(key);
 		std::lock_guard lock(_mutex);
-		const auto it = _entries.find(key);
-		if (it == _entries.end() || it->second->state != State::Unsupported) return std::nullopt;
-		return it->second->reason;
+		const auto it = _entries.find(std::string(FileKeyOf(key)));
+		if (it == _entries.end() || StatusOf(*it->second, part) != StaticAssetStatus::Unsupported) return std::nullopt;
+		if (it->second->state == State::Unsupported) return it->second->reason;
+		return std::string(*part < it->second->partAssets.size() ? "part is skinned" : "part does not exist");
 	}
 }

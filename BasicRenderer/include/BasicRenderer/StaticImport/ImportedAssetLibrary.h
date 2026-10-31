@@ -7,6 +7,11 @@
 // on the task scheduler the first time the pipeline asks for it, and the loaded payload
 // is published (turned into renderable parts) when the pipeline publishes it.
 //
+// A part key (MakePartAssetKey: "<file key>#part=<index>") names one part of a file as an
+// asset of its own, with the part's local transform left to its placement. Every part key of
+// a file reads the file's one parsed payload, and each publishes as soon as that file does, so
+// a host can place a scene node by node and each node streams in on its own.
+//
 // A published asset is split in two:
 // - its static parts (no skinned mesh, or only wind-simulated skins) are what the
 //   static import pipeline imports through TryGetReadyParts;
@@ -21,6 +26,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -29,6 +35,8 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+
+#include <DirectXMath.h>
 
 #include <BasicRenderer/Assets/ImportSettings.h>
 #include <BasicRenderer/Assets/RenderableAsset.h>
@@ -47,6 +55,16 @@ namespace br::staticimport
 			const std::string& assetKey,
 			const std::vector<br::import::RenderableAssetPart>& skinnedParts)>;
 
+		// A part of a loaded file, as listed before it publishes.
+		struct LoadedPart
+		{
+			std::uint32_t index{ 0 };
+			// The part's transform within the file; its part key's asset leaves it out.
+			DirectX::XMFLOAT4X4 localMatrix{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+			bool skinned{ false };
+			std::string name;
+		};
+
 		explicit ImportedAssetLibrary(br::import::ImportSettings settings = {});
 		~ImportedAssetLibrary() override;
 
@@ -56,7 +74,16 @@ namespace br::staticimport
 		// The canonical key of a model file: its absolute, normalized path with forward
 		// slashes, lower-cased (paths are case-insensitive on the platforms BR runs on).
 		// The key is itself a path to the file.
+		// A part key keeps its "#part=<index>" suffix.
 		[[nodiscard]] static std::string MakeAssetKey(std::string_view filePath);
+		// The key naming part `partIndex` of a file.
+		[[nodiscard]] static std::string MakePartAssetKey(std::string_view filePath, std::uint32_t partIndex);
+		// The file key of an asset key: the key itself, or a part key without its suffix.
+		[[nodiscard]] static std::string_view FileKeyOf(std::string_view assetKey);
+
+		// Starts loading a file if needed and lists its parts once the load finished:
+		// nullopt while it loads, empty when it failed.
+		[[nodiscard]] std::optional<std::vector<LoadedPart>> TryGetLoadedParts(std::string_view filePath);
 
 		void SetSkinnedPartsCallback(SkinnedPartsCallback callback);
 
@@ -98,14 +125,22 @@ namespace br::staticimport
 		{
 			State state{ State::Loading };
 			std::optional<br::import::ImportedAssetPayload> payload;
+			// Listed when the load finishes, in payload order.
+			std::vector<LoadedPart> loadedParts;
 			// Kept alive for the parts, which reference its meshes and materials.
 			br::import::RenderableAsset asset;
 			std::vector<br::import::RenderableAssetPart> staticParts;
 			std::vector<br::import::RenderableAssetPart> skinnedParts;
+			// Each part key's asset: one static part with an identity local transform, or
+			// empty for a skinned part. Indexed by part index.
+			std::vector<std::vector<br::import::RenderableAssetPart>> partAssets;
 			std::string reason;
 		};
 
 		[[nodiscard]] static StaticAssetStatus ToStatus(State state);
+		[[nodiscard]] static std::optional<std::uint32_t> PartIndexOf(std::string_view assetKey);
+		// The status of an asset key whose file entry is `entry`.
+		[[nodiscard]] static StaticAssetStatus StatusOf(const Entry& entry, std::optional<std::uint32_t> partIndex);
 		// Requires _mutex. Creates the entry and submits its load when it is unknown.
 		Entry& FindOrQueueLocked(const std::string& key);
 		// Publishes `key` if its load finished; returns the resulting status.

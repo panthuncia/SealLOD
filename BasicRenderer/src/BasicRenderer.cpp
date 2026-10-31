@@ -544,12 +544,21 @@ std::vector<DemoModel> FindDemoModels(std::string_view commandLine)
 
 // The demo's static scene: the --model placements streamed through the static import
 // runtime, which publishes their static parts into the renderer's scene the way SARP's
-// LiveSceneBridge does. Skinned parts are kept by the asset library for the dynamic scene.
+// LiveSceneBridge does. Each static part of a model is its own placement, so a scene
+// streams in node by node. Skinned parts are kept by the asset library for the dynamic scene.
 struct DemoStaticScene {
+    struct Model {
+        std::string path;
+        XMFLOAT4X4 world;
+    };
+
     br::staticimport::StaticImportShared shared;
     br::staticimport::ImportedAssetLibrary assets;
     br::staticimport::ScenePlacementSource placements{ { .sceneName = "BasicRendererDemo" } };
     std::unique_ptr<br::staticimport::StaticImportRuntime> runtime;
+    // Models whose parts are not listed yet. The runtime starts once every model is placed,
+    // since the placement list is fixed from then on.
+    std::vector<Model> unplacedModels;
 
     DemoStaticScene() {
         assets.SetSkinnedPartsCallback([](const std::string& key, const std::vector<br::import::RenderableAssetPart>& parts) {
@@ -563,6 +572,32 @@ struct DemoStaticScene {
         assets.Shutdown();
     }
 
+    void AddModel(const std::string& path, FXMMATRIX world) {
+        Model model{ path };
+        XMStoreFloat4x4(&model.world, world);
+        (void)assets.TryGetLoadedParts(path);
+        unplacedModels.push_back(std::move(model));
+    }
+
+    // Places every model whose parts are listed; true once none is left.
+    bool PlaceLoadedModels() {
+        std::erase_if(unplacedModels, [&](const Model& model) {
+            const auto parts = assets.TryGetLoadedParts(model.path);
+            if (!parts) return false;
+            std::size_t placed = 0;
+            for (const auto& part : *parts) {
+                if (part.skinned) continue;
+                placements.AddPlacement(
+                    br::staticimport::ImportedAssetLibrary::MakePartAssetKey(model.path, part.index),
+                    XMLoadFloat4x4(&part.localMatrix) * XMLoadFloat4x4(&model.world));
+                ++placed;
+            }
+            spdlog::info("Demo static scene: '{}' placed {} of {} parts", model.path, placed, parts->size());
+            return true;
+        });
+        return unplacedModels.empty();
+    }
+
     void Start(Renderer& renderer) {
         runtime = std::make_unique<br::staticimport::StaticImportRuntime>(
             shared, br::staticimport::StaticImportSettings{}, assets, placements,
@@ -571,8 +606,12 @@ struct DemoStaticScene {
     }
 
     void Tick(Renderer& renderer, unsigned int frameIndex) {
+        if (!runtime) {
+            if (!PlaceLoadedModels()) return;
+            Start(renderer);
+        }
         const auto& scene = renderer.GetCurrentScene();
-        if (!runtime || !scene || !scene->HasUsablePrimaryCamera()) return;
+        if (!scene || !scene->HasUsablePrimaryCamera()) return;
         XMFLOAT3 position;
         XMStoreFloat3(&position, scene->GetPrimaryCamera().get<Components::Position>().pos);
         runtime->UpdateStreaming(placements.MakeStreamTarget(position));
@@ -1205,10 +1244,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         } else {
             staticScene = std::make_unique<DemoStaticScene>();
             for (const auto& model : FindDemoModels(commandLine)) {
-                staticScene->placements.AddPlacement(
-                    model.path, XMMatrixScaling(model.scale, model.scale, model.scale));
+                staticScene->AddModel(model.path, XMMatrixScaling(model.scale, model.scale, model.scale));
             }
-            staticScene->Start(renderer);
         }
 
     //auto carScene = LoadModel("models/porche.glb");

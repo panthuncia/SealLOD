@@ -105,7 +105,7 @@ namespace br::staticimport
 		for (const auto& placement : _placements) {
 			fingerprint = recipe::HashString(placement.assetKey, fingerprint);
 			fingerprint = HashPod(placement.world, fingerprint);
-			assetFiles.emplace(placement.assetKey, true);
+			assetFiles.emplace(std::string(ImportedAssetLibrary::FileKeyOf(placement.assetKey)), true);
 		}
 		for (const auto& [file, unused] : assetFiles) {
 			(void)unused;
