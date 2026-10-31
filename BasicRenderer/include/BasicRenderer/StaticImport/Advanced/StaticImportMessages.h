@@ -149,6 +149,11 @@ namespace br::staticimport
 	struct PendingStaticGroup
 	{
 		StaticCellKey cellKey;
+		// Opaque host batch key: preparation packets never span two, and it is
+		// the group's allocation scope. Cell groups use the cell's StaticCellKeyHash.
+		std::uint64_t batchKey{ 0 };
+		// The group's revision; cell groups use the generation their cell was prepared at.
+		std::uint64_t groupRevision{ 0 };
 		// The group's material variant. A recipe-bound group keeps only the hash
 		// here and shares its overrides through MaterialVariant().
 		br::staticimport::StaticMaterialVariant materialVariant;
@@ -247,6 +252,8 @@ namespace br::staticimport
 	{
 		std::uint64_t groupID{ 0 };
 		StaticCellKey cellKey;
+		std::uint64_t batchKey{ 0 };
+		std::uint64_t groupRevision{ 0 };
 		std::uint64_t residencyEpoch{ 0 };
 		std::uint64_t revision{ 0 };
 		std::atomic_bool valid{ true };
@@ -258,6 +265,8 @@ namespace br::staticimport
 		std::uint64_t groupID{ 0 };
 		std::uint64_t admissionTicketID{ 0 };
 		StaticCellKey cellKey;
+		std::uint64_t batchKey{ 0 };
+		std::uint64_t groupRevision{ 0 };
 		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::CellStatic };
 		std::uint64_t residencyGeneration{ 0 };
 		std::shared_ptr<StaticGroupIntentToken> intentToken;
@@ -396,6 +405,8 @@ namespace br::staticimport
 		std::uint64_t groupID{ 0 };
 		StaticCellKey cellKey;
 		std::uint64_t generation{ 0 };
+		std::uint64_t batchKey{ 0 };
+		std::uint64_t groupRevision{ 0 };
 		std::size_t instanceCount{ 0 };
 		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::CellStatic };
 		std::vector<DrawWorkloadKey> workloadKeys;
@@ -499,6 +510,8 @@ namespace br::staticimport
 	struct StaticSceneRecipeCompileJob
 	{
 		std::shared_ptr<br::staticimport::recipe::CellRecipe> recipe;
+		// The recipe's groups' batch key (allocation scope).
+		std::uint64_t batchKey{ 0 };
 		std::size_t nextGroupIndex{ 0 };
 		std::vector<br::staticimport::recipe::PreparedPart> preparedParts;
 		std::vector<std::uint64_t> unsupportedGroupIDs;

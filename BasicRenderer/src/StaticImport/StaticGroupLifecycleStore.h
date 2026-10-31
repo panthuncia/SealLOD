@@ -91,6 +91,8 @@ namespace br::staticimport
 			record->groupID = group.groupID;
 			auto& pending = record->descriptor;
 			pending.cellKey = prepared.key;
+			pending.batchKey = static_cast<std::uint64_t>(StaticCellKeyHash{}(prepared.key));
+			pending.groupRevision = prepared.generation;
 			pending.materialVariant = std::move(group.materialVariant);
 			pending.modelPath = std::move(group.modelPath);
 			pending.mappedModelPath = group.mappedModelPath;

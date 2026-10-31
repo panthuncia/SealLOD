@@ -395,6 +395,8 @@ namespace br::staticimport
 			view.groupID = source.groupID;
 			view.admissionTicketID = source.admissionTicketID;
 			view.cellKey = source.cellKey;
+			view.batchKey = source.batchKey;
+			view.groupRevision = source.groupRevision;
 			view.residencyClass = source.residencyClass;
 			view.residencyGeneration = source.residencyGeneration;
 			view.intentToken = source.intentToken;
@@ -536,7 +538,7 @@ namespace br::staticimport
 
 			auto classifiedParts = ClassifyDirectStaticGroupFromReadyParts(
 				groupID,
-				static_cast<std::uint64_t>(StaticCellKeyHash{}(group.cellKey)),
+				group.batchKey,
 				group.instanceWorldMatrices,
 				*parts);
 			for (auto& classified : classifiedParts) {
@@ -1644,6 +1646,8 @@ namespace br::staticimport
 						preparedImport.generation = job.generation;
 						preparedImport.groupID = input.groupID;
 						preparedImport.cellKey = group.cellKey;
+						preparedImport.batchKey = group.batchKey;
+						preparedImport.groupRevision = group.groupRevision;
 						preparedImport.residencyClass = group.residencyClass;
 						preparedImport.residencyGeneration = group.residencyGeneration;
 						preparedImport.placementCount = group.placementCount;
@@ -2117,6 +2121,8 @@ namespace br::staticimport
 						ownership->groupID = prepared.groupID;
 						ownership->cellKey = prepared.cellKey;
 						ownership->generation = prepared.generation;
+						ownership->batchKey = prepared.batchKey;
+						ownership->groupRevision = prepared.groupRevision;
 						ownership->instanceCount = prepared.ready.sceneObject.instanceCount;
 						ownership->residencyClass = prepared.residencyClass;
 						ownership->workloadKeys = prepared.ready.sceneObject.directWorkloadKeys;
@@ -2204,16 +2210,10 @@ namespace br::staticimport
 					matrices.push_back(DirectX::XMLoadFloat4x4(std::addressof(value)));
 				}
 				auto cached = PrepareStaticRecipeGroupFromReadyParts(
-					source.stableGroupID,
-					static_cast<std::uint64_t>(StaticCellKeyHash{}({
-						job.recipe->key.worldFormID,
-						job.recipe->key.interiorCellFormID, job.recipe->key.cellX, job.recipe->key.cellY })),
-					matrices, *parts);
+					source.stableGroupID, job.batchKey, matrices, *parts);
 				if (cached.parts.empty()) {
-					if (!ClassifyDirectStaticGroupFromReadyParts(source.stableGroupID,
-							static_cast<std::uint64_t>(StaticCellKeyHash{}({
-								job.recipe->key.worldFormID, job.recipe->key.interiorCellFormID,
-								job.recipe->key.cellX, job.recipe->key.cellY })), matrices, *parts).empty()) {
+					if (!ClassifyDirectStaticGroupFromReadyParts(
+							source.stableGroupID, job.batchKey, matrices, *parts).empty()) {
 						spdlog::error("SARP runtime recipe preparation unexpectedly produced no parts for model='{}'", source.modelPath);
 						std::lock_guard lock(_importState.staticSceneRecipeCompileMutex);
 						_importState.staticSceneRecipeCompiles.erase({ job.recipe->key, job.recipe->sourceFingerprint });
@@ -2644,7 +2644,8 @@ namespace br::staticimport
 						inserted = _importState.staticSceneRecipeCompiles.insert(compileKey).second;
 					}
 					if (inserted) {
-						(void)_workBus.staticSceneRecipeCompileJobs.TryPush({ std::move(compileRecipe) });
+						(void)_workBus.staticSceneRecipeCompileJobs.TryPush({ std::move(compileRecipe),
+							static_cast<std::uint64_t>(StaticCellKeyHash{}(cellKey)) });
 						_shared.staticImportWorkScheduler.Publish(StaticImportWorkSource::RecipeCompile);
 						_drains.ScheduleWorkerDrains();
 					}

@@ -2776,7 +2776,7 @@ namespace br::staticimport
 				if (!token || !token->valid.load(std::memory_order_acquire) ||
 					pendingIt == _state.pendingGroups.end() ||
 					!pendingIt->second ||
-					!(pendingIt->second->descriptor.cellKey == ready.cellKey) ||
+					pendingIt->second->descriptor.batchKey != ready.batchKey ||
 					!IsPreparedLive(ready)) {
 					++_state.stats.staleGroupsDropped;
 					continue;
@@ -2905,7 +2905,7 @@ namespace br::staticimport
 						ready &&
 						ticketMatches &&
 						pendingIt->second &&
-						prepared.cellKey == pendingIt->second->descriptor.cellKey;
+						prepared.batchKey == pendingIt->second->descriptor.batchKey;
 				}
 				if (!groupValid) {
 					valid = false;
@@ -3066,7 +3066,7 @@ namespace br::staticimport
 			std::uint64_t packetPlacements = 0;
 			std::uint64_t packetBytes = 0;
 			std::uint64_t fingerprint = input->packetID ^ _state.latestTarget.generation;
-			std::optional<StaticCellKey> packetCell;
+			std::optional<std::uint64_t> packetBatchKey;
 
 			while (!_state.pendingGroupQueue.empty() &&
 				_state.pendingGroupSortedPrefix != 0 &&
@@ -3091,8 +3091,8 @@ namespace br::staticimport
 					continue;
 				}
 				auto& descriptor = groupIt->second->descriptor;
-				if (packetCell && *packetCell != descriptor.cellKey) break;
-				packetCell = descriptor.cellKey;
+				if (packetBatchKey && *packetBatchKey != descriptor.batchKey) break;
+				packetBatchKey = descriptor.batchKey;
 				const auto variantAddress = StaticVariantArtifactAddress(
 					descriptor, _shared->staticSceneRenderSettings);
 				const auto fallbackBytes = static_cast<std::uint64_t>(descriptor.placementCount) *
@@ -3168,6 +3168,8 @@ namespace br::staticimport
 				auto token = std::make_shared<StaticGroupIntentToken>();
 				token->groupID = groupID;
 				token->cellKey = descriptor.cellKey;
+				token->batchKey = descriptor.batchKey;
+				token->groupRevision = descriptor.groupRevision;
 				token->residencyEpoch = descriptor.residencyGeneration;
 				token->revision = revision;
 				_state.groupIntentTokens.insert_or_assign(groupID, token);
