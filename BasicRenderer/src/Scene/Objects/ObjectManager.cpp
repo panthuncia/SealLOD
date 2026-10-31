@@ -3052,6 +3052,11 @@ br::render::StaticImportBulkPublishResult ObjectManager::PublishStaticImportTran
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkPublishedDrawRecords", static_cast<int64_t>(result.drawRecords));
 	result.mutationCoverageGeneration =
 		m_objectBufferMutationGeneration.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+	// The issued generation is itself desired state: its publication cut waits
+	// until a sealed root covers it. A batch that staged no journal row (every
+	// transaction empty) would otherwise leave the mailbox clean, so no later
+	// seal ever captured this generation and the cut waited forever.
+	m_objectBufferGraphDirty.store(true, std::memory_order_release);
 	basic_telemetry::AddCounter("SARP.VersionedBuffer.Object.MutationCoverageIssued");
 	basic_telemetry::SetGauge("SARP.VersionedBuffer.Object.LatestMutationCoverage",
 		static_cast<std::int64_t>(result.mutationCoverageGeneration));
@@ -4043,6 +4048,9 @@ br::render::StaticObjectRemovalResult ObjectManager::RemoveStaticObjectsBulk(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - removeBegin).count());
 	const auto mutationCoverageGeneration =
 		m_objectBufferMutationGeneration.fetch_add(1, std::memory_order_acq_rel) + 1u;
+	// Seal the new generation even when no payload staged a row (see
+	// PublishStaticImportTransactionsBulk).
+	m_objectBufferGraphDirty.store(true, std::memory_order_release);
 	SealDesiredBufferStateLocked();
 	return { mutationCoverageGeneration };
 }
