@@ -758,6 +758,85 @@ int main() {
         posted.Shutdown();
     }
 
+    // A drain evaluates each woken consumer once per slice, which is sound only
+    // for transitions made before its wake loop. A consumer that the loop itself
+    // fails (a dependency observed terminal) is a transition made after earlier
+    // consumers were already evaluated: its wake must still reach them, or they
+    // stay Blocked on a Failed dependency forever.
+    //   consumer <- [Exact(published, Published), Exact(middle, CpuReady)]
+    //   middle   <- [Exact(gpu, GpuReady)]
+    // One slice publishes `published` (consumer evaluated first, middle still
+    // blocked) and observes `gpu` failing (middle fails inside the wake loop).
+    {
+        AsyncStateGraph wakes(scheduler, "WakeAfterInLoopFailure");
+        wakes.RegisterProducer(ArtifactKind::Generic, {
+            TaskLane::Streaming, TaskDomain::General, "WakeGenericProducer",
+            [](const ArtifactBuildContext& context) {
+                return ArtifactBuildResult::Ready(Payload(context.revision));
+            }
+        });
+        auto failGpu = std::make_shared<std::atomic_bool>(false);
+        wakes.RegisterProducer(ArtifactKind::TextureBinding, {
+            TaskLane::Streaming, TaskDomain::TextureProcessing, "WakeGpuProducer",
+            [failGpu](const ArtifactBuildContext& context) {
+                auto token = std::make_shared<GpuSubmissionSet>();
+                token->submissions.push_back({ {}, context.revision });
+                token->isComplete = [] { return false; };
+                token->isFailed = [failGpu] { return failGpu->load(std::memory_order_acquire); };
+                return ArtifactBuildResult::Ready(Payload(context.revision), std::move(token));
+            }
+        });
+        const ArtifactKey published{ ArtifactKind::Generic, 0xd101, 0 };
+        const ArtifactKey gpu{ ArtifactKind::TextureBinding, 0xd102, 0 };
+        const ArtifactKey middle{ ArtifactKind::Generic, 0xd103, 0 };
+        const ArtifactKey consumer{ ArtifactKind::Generic, 0xd104, 0 };
+        const ArtifactKey trigger{ ArtifactKind::Generic, 0xd105, 0 };
+        const auto publishedVersion = wakes.Request(published, 1, {}, Payload(1), 1);
+        const auto gpuVersion = wakes.Request(gpu, 1, {}, Payload(1), 1);
+        Check(publishedVersion && gpuVersion);
+        wakes.WaitIdle();
+        Check(wakes.Snapshot(published).readiness == ArtifactReadiness::GpuReady);
+        Check(wakes.Snapshot(gpu).readiness == ArtifactReadiness::UploadSubmitted);
+        const auto middleVersion = wakes.Request(middle, 1,
+            { Exact(gpuVersion.Handle(), ArtifactReadiness::GpuReady) }, Payload(1), 1);
+        Check(middleVersion);
+        const auto consumerVersion = wakes.Request(consumer, 1,
+            { Exact(publishedVersion.Handle(), ArtifactReadiness::Published),
+              Exact(middleVersion.Handle(), ArtifactReadiness::CpuReady) }, Payload(1), 1);
+        Check(consumerVersion);
+        wakes.WaitIdle();
+        Check(wakes.Snapshot(middle).readiness == ArtifactReadiness::Blocked);
+        Check(wakes.Snapshot(consumer).readiness == ArtifactReadiness::Blocked);
+
+        // Both transitions are issued from a ready callback, i.e. on the drain
+        // after its own GPU evaluation, so the next slice applies them together:
+        // the publication mutation queues its wake before the GPU failure does.
+        std::atomic_bool triggered{ false };
+        const auto subscription = wakes.AddReadyCallback(
+            [&wakes, &triggered, &trigger, &publishedVersion, failGpu](const ArtifactSnapshot& snapshot) {
+                if (snapshot.key != trigger || triggered.exchange(true)) return;
+                failGpu->store(true, std::memory_order_release);
+                wakes.MarkPublished(publishedVersion.version);
+            });
+        Check(wakes.Request(trigger, 1, {}, Payload(1), 1));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (wakes.Snapshot(consumer).readiness != ArtifactReadiness::Failed &&
+            std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        Check(triggered.load());
+        Check(wakes.Snapshot(gpu).readiness == ArtifactReadiness::Failed);
+        Check(wakes.Snapshot(middle).readiness == ArtifactReadiness::Failed);
+        Check(wakes.Snapshot(published).readiness == ArtifactReadiness::Published);
+        if (wakes.Snapshot(consumer).readiness != ArtifactReadiness::Failed) {
+            std::fprintf(stderr, "consumer stranded behind in-loop failure: %s%c",
+                wakes.Diagnose(consumer).blockerChain.c_str(), 10);
+        }
+        Check(wakes.Snapshot(consumer).readiness == ArtifactReadiness::Failed);
+        wakes.RemoveReadyCallback(subscription);
+        wakes.Shutdown();
+    }
+
     AsyncStateGraph graph(scheduler, "AsyncStateGraphTests");
     RegisterStaticStateProducers(graph);
     graph.RegisterProducer(ArtifactKind::Generic, {
