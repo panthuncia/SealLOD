@@ -832,7 +832,7 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_autoAliasPoolGrowthHeadroom = getAutoAliasPoolGrowthHeadroom();
     observerSetting(m_autoAliasPoolGrowthHeadroom, "autoAliasPoolGrowthHeadroom");
 
-	appendScene = settingsManager.getSettingGetter<std::function<std::shared_ptr<Scene>(std::shared_ptr<Scene>)>>("appendScene")();
+	getLoadModel = settingsManager.getSettingGetter<std::function<void(const std::string&)>>("loadModel");
 
     m_meshShadersSupported = DeviceManager::GetInstance().GetMeshShadersSupported();
 

@@ -703,7 +703,8 @@ private:
     std::function<float()> getAutoAliasPoolGrowthHeadroom;
     std::function<void(float)> setAutoAliasPoolGrowthHeadroom;
 
-	std::function<std::shared_ptr<Scene>(std::shared_ptr<Scene>)> appendScene;
+	// Read at each use: the host installs its loader after the menu starts.
+	std::function<std::function<void(const std::string&)>()> getLoadModel;
 	std::vector<SettingsManager::Subscription> m_settingSubscriptions;
 };
 

@@ -227,8 +227,9 @@ void Renderer::SetSettings() {
         CLodPureComputeReplayExpansionFactorDefault);
     settingsManager.registerSetting<bool>("enableBloom", m_bloom);
     settingsManager.registerSetting<bool>("enableJitter", m_jitter);
-    settingsManager.registerSetting<std::function<std::shared_ptr<Scene>(std::shared_ptr<Scene>)>>("appendScene", [this](std::shared_ptr<Scene> scene) -> std::shared_ptr<Scene> {
-        return AppendScene(scene);
+    // The host's model loader; the standalone demo installs one that streams the model's statics.
+    settingsManager.registerSetting<std::function<void(const std::string&)>>("loadModel", [](const std::string& path) {
+        spdlog::warn("Load Model: no model loader is installed; '{}' was not loaded", path);
         });
 	settingsManager.registerSetting<bool>("enableScreenSpaceReflections", m_screenSpaceReflections);
     settingsManager.registerSetting<bool>("enableRayTracedReflections", m_rayTracedReflections);

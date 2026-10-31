@@ -38,6 +38,7 @@
 #include <BasicRenderer/Diagnostics/StatisticalSampler.h>
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Render/RenderGraph/RenderGraph.h"
+#include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Assets/Import/ModelLoader.h"
 #include <BasicRenderer/StaticImport/ImportedAssetLibrary.h>
 #include <BasicRenderer/StaticImport/StaticImportRuntime.h>
@@ -1248,6 +1249,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             for (const auto& model : FindDemoModels(commandLine)) {
                 staticScene->AddModel(model.path, XMMatrixScaling(model.scale, model.scale, model.scale));
             }
+            // Scene Explorer's Load Model adds to the running static scene. The menu calls it on this thread.
+            SettingsManager::GetInstance().getSettingSetter<std::function<void(const std::string&)>>("loadModel")(
+                [scene = staticScene.get()](const std::string& path) { scene->AddModel(path, XMMatrixIdentity()); });
         }
 
     //auto carScene = LoadModel("models/porche.glb");
@@ -1758,6 +1762,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             br::extensions::MakeSettingGetter<bool>("rememberCameraPose")());
     }
     // The static import runtime stops before the renderer whose services it uses.
+    if (staticScene) {
+        SettingsManager::GetInstance().getSettingSetter<std::function<void(const std::string&)>>("loadModel")(
+            [](const std::string& path) { spdlog::warn("Load Model: the static scene has shut down; '{}' was not loaded", path); });
+    }
     staticScene.reset();
     renderer.Cleanup();
 
