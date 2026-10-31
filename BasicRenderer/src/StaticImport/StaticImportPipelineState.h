@@ -149,19 +149,18 @@ namespace br::staticimport
 		std::list<StaticImportMaterializedPublishDecision> staticImportMaterializedDecisionCleanupBacklog;
 		std::vector<br::render::StaticObjectRemovalPayload> staticImportRemovalPayloadCleanupBacklog;
 
-		// Import service: camera targets, worker scheduling and liveness.
+		// Import service: worker scheduling and liveness.
 		mutable std::mutex staticImportServiceMutex;
-		mutable std::mutex staticImportServiceCameraMutex;
 		mutable std::mutex staticImportServiceStatsMutex;
 		std::mutex staticImportSpeculativeAssetPublishMutex;
-		std::optional<StaticImportCameraTarget> staticImportServiceLastPublishedTarget;
-		StaticImportCameraTarget staticImportServicePendingTarget;
-		std::atomic_bool staticImportServiceHasPendingTarget{ false };
 		// Set once by the streaming pump; the coordinator reads it before it takes
 		// host group changes (the lifecycle store and capacity broker are configured
 		// by then).
 		std::atomic_bool staticImportServiceWorkersStarted{ false };
-		std::atomic<std::uint64_t> staticImportServiceTargetGeneration{ 0 };
+		// Advanced by StaticImportRuntime::NotifyHostLivenessChanged; the flag tells the
+		// coordinator to re-check its pending host groups.
+		std::atomic<std::uint64_t> staticImportHostLivenessGeneration{ 0 };
+		std::atomic_bool staticImportHostLivenessChanged{ false };
 		StaticImportServiceStats staticImportServicePublishedStats;
 		std::atomic<std::uint32_t> staticImportWorkerDrainsActive{ 0 };
 		std::array<std::atomic<std::uint32_t>, StaticImportWorkScheduler::SourceCount>
@@ -185,12 +184,11 @@ namespace br::staticimport
 		std::atomic<std::uint64_t> staticRemovalTelemetryLogCount{ 0 };
 
 		// Live streaming state shared by the pump and the host: applied placement
-		// and active-group counts, workload tallies, and the last stream key/log.
+		// and active-group counts, workload tallies, and the last status log.
 		std::size_t staticAppliedPlacementCount{ 0 };
 		std::size_t staticRuntimeGroupActiveCount{ 0 };
 		std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> directStaticWorkloadCounts;
 		std::chrono::steady_clock::time_point lastStaticStreamLog{};
-		std::optional<StaticStreamKey> lastStaticStreamKey;
 		std::unordered_map<std::uint64_t, std::uint32_t> directStaticPrepareRetries;
 	};
 }

@@ -463,7 +463,6 @@ set(SOURCES
     "src/Assets/Textures/Pipeline/TexturePipeline.cpp"
     "src/Assets/Textures/Pipeline/TexturePipelineArtifacts.cpp"
     "src/StaticImport/ImportedAssetLibrary.cpp"
-    "src/StaticImport/ScenePlacementSource.cpp"
     "src/StaticImport/StaticImportCoordinator.cpp"
     "src/StaticImport/StaticImportRuntime.cpp"
     "src/StaticImport/StaticImportStreamingPump.cpp"

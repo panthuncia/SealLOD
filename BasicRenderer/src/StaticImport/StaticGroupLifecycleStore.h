@@ -13,13 +13,12 @@
 #include <vector>
 #include <BasicTelemetry/Tracy.h>
 
-#include <BasicRenderer/StaticImport/StaticCellGeometry.h>
 #include <BasicRenderer/StaticImport/Advanced/StaticImportMessages.h>
 
 namespace br::staticimport
 {
 
-	// The descriptor is built on the cell-preparation worker; the coordinator
+	// The descriptor is built on the thread that adds the group; the coordinator
 	// seals it into its group's shard when it accepts the add and retains only a
 	// lightweight locator. Graph packets share this immutable record instead of
 	// copying strings, placement matrices, and recipe metadata into a global
@@ -83,17 +82,16 @@ namespace br::staticimport
 	};
 
 	// Turns a prepared group into an unsealed lifecycle record (no revision, not in
-	// the store), moving its payload out of `group`. `cell` is the cell that added
-	// it (default for a group with no cell); `batchKey` is the host batch key, which
-	// must be non-zero. StaticImportCoordinator::ApplyGroupChanges seals the record.
+	// the store), moving its payload out of `group`. `batchKey` is the host batch key;
+	// 0 batches the group on its own (its group id).
+	// StaticImportCoordinator::ApplyGroupChanges seals the record.
 	[[nodiscard]] inline std::shared_ptr<StaticGroupLifecycleRecord> MakeStaticGroupLifecycleRecord(
-		PreparedStaticGroup& group, const StaticCellKey& cell, std::uint64_t batchKey)
+		PreparedStaticGroup& group, std::uint64_t batchKey)
 	{
 		auto record = std::make_shared<StaticGroupLifecycleRecord>();
 		record->groupID = group.groupID;
 		auto& pending = record->descriptor;
-		pending.cellKey = cell;
-		pending.batchKey = batchKey;
+		pending.batchKey = batchKey != 0 ? batchKey : group.groupID;
 		pending.materialVariant = std::move(group.materialVariant);
 		pending.modelPath = std::move(group.modelPath);
 		pending.mappedModelPath = group.mappedModelPath;
@@ -112,23 +110,5 @@ namespace br::staticimport
 		pending.residencyClass = group.residencyClass;
 		pending.residencyGeneration = group.residencyGeneration;
 		return record;
-	}
-
-	// Turns a prepared cell's groups into unsealed lifecycle records under `batchKey`
-	// (0: the cell's StaticCellKeyHash).
-	inline void BuildPreparedStaticCellLifecycle(PreparedStaticCell& prepared, std::uint64_t batchKey = 0)
-	{
-		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportServiceWorker::BuildCellLifecycle");
-		if (batchKey == 0) {
-			batchKey = static_cast<std::uint64_t>(StaticCellKeyHash{}(prepared.key));
-		}
-		prepared.lifecycleGroups.reserve(prepared.groups.size());
-		for (auto& group : prepared.groups) {
-			prepared.lifecycleGroups.push_back(MakeStaticGroupLifecycleRecord(group, prepared.key, batchKey));
-		}
-		prepared.groups.clear();
-		prepared.groups.shrink_to_fit();
-		BT_PLOT("SARP.StaticImportLifecycle.CellRecords",
-			static_cast<int64_t>(prepared.lifecycleGroups.size()));
 	}
 }

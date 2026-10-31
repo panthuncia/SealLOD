@@ -2,13 +2,14 @@
 
 // Static scene recipes and their on-disk cache.
 //
-// A recipe is the import plan of one static cell: its placement groups (model, material
-// overrides, instance matrices, placement ids), the import batches the pipeline schedules
-// and, once compiled, the prepared per-object rows of each group. Recipes persist in
-// memory-mapped packs, one per cell namespace (a world or an interior), under a directory
-// named after the EnvironmentIdentity. The host builds recipes from its own scene data and
-// supplies the identity: `fingerprint` names the scene source (SARP hashes its plugin load
-// order), `settingsFingerprint` the import settings that shaped the recipes.
+// A recipe is the import plan of one batch of static groups: the groups (model,
+// material overrides, instance matrices, placement ids), the import batches the
+// pipeline schedules and, once compiled, the prepared per-object rows of each group.
+// Recipes persist in memory-mapped packs, one per batch key scope, under a directory
+// named after the EnvironmentIdentity. The host decides what a batch is (SARP: one
+// cell's placements), builds recipes from its own scene data and supplies the
+// identity: `fingerprint` names the scene source (SARP hashes its plugin load order),
+// `settingsFingerprint` the import settings that shaped the recipes.
 
 #include <algorithm>
 #include <array>
@@ -21,7 +22,6 @@
 #include <string_view>
 #include <vector>
 
-#include <BasicRenderer/StaticImport/StaticCellGeometry.h>
 #include <BasicRenderer/StaticImport/StaticImportSettings.h>
 
 namespace br::staticimport::recipe
@@ -30,9 +30,37 @@ namespace br::staticimport::recipe
 	inline constexpr std::uint32_t kSchemaVersion = 8;
 	inline constexpr std::uint32_t kMaterialTextureSlots = 14;
 
-	// Recipes are keyed by the pipeline's cell key; its layout is part of the on-disk index.
-	using CellKey = StaticCellKey;
-	static_assert(sizeof(CellKey) == 16);
+	// The host's key of a recipe batch, opaque to the store but for two rules: the
+	// batches of one `scope` persist in one pack, and a pack's index orders its
+	// batches by `id` read as two signed 32-bit halves, high half first
+	// (BatchKeyLess). Its 16 bytes are part of the on-disk index.
+	struct BatchKey
+	{
+		std::uint64_t scope{ 0 };
+		std::uint64_t id{ 0 };
+		bool operator==(const BatchKey&) const = default;
+	};
+	static_assert(sizeof(BatchKey) == 16);
+
+	// The index order of the batches of one scope.
+	[[nodiscard]] inline bool BatchKeyLess(const BatchKey& lhs, const BatchKey& rhs)
+	{
+		const auto high = [](std::uint64_t id) { return static_cast<std::int32_t>(static_cast<std::uint32_t>(id >> 32u)); };
+		const auto low = [](std::uint64_t id) { return static_cast<std::int32_t>(static_cast<std::uint32_t>(id)); };
+		if (lhs.scope != rhs.scope) return lhs.scope < rhs.scope;
+		if (high(lhs.id) != high(rhs.id)) return high(lhs.id) < high(rhs.id);
+		return low(lhs.id) < low(rhs.id);
+	}
+
+	struct BatchKeyHash
+	{
+		std::size_t operator()(const BatchKey& key) const noexcept
+		{
+			std::uint64_t value = key.scope;
+			value ^= key.id + 0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
+			return static_cast<std::size_t>(value);
+		}
+	};
 
 	struct Matrix4x4
 	{
@@ -98,7 +126,7 @@ namespace br::staticimport::recipe
 	};
 
 	// A scheduling unit owns a contiguous range of geometry/material entries in
-	// one cell. The renderer still prepares each entry's templates separately.
+	// one recipe. The renderer still prepares each entry's templates separately.
 	struct ImportBatch
 	{
 		std::uint64_t stableBatchID{ 0 };
@@ -110,9 +138,9 @@ namespace br::staticimport::recipe
 		friend bool operator==(const ImportBatch&, const ImportBatch&) = default;
 	};
 
-	struct CellRecipe
+	struct BatchRecipe
 	{
-		CellKey key;
+		BatchKey key;
 		bool authoritativeEmpty{ false };
 		std::uint64_t sourceFingerprint{ 0 };
 		std::uint64_t skippedPlacements{ 0 };
@@ -123,7 +151,7 @@ namespace br::staticimport::recipe
 		[[nodiscard]] std::uint64_t PlacementCount() const;
 	};
 
-	inline void DiscardUnsupportedStaticRecipeGroups(CellRecipe& recipe,
+	inline void DiscardUnsupportedStaticRecipeGroups(BatchRecipe& recipe,
 		std::span<const std::uint64_t> unsupportedGroupIDs)
 	{
 		if (unsupportedGroupIDs.empty()) return;
@@ -200,11 +228,11 @@ namespace br::staticimport::recipe
 		RecipeRange templates;
 	};
 
-	class CellRecipeView
+	class BatchRecipeView
 	{
 	public:
 		[[nodiscard]] bool Valid() const { return _valid; }
-		[[nodiscard]] const CellKey& Key() const { return _key; }
+		[[nodiscard]] const BatchKey& Key() const { return _key; }
 		[[nodiscard]] bool AuthoritativeEmpty() const { return _authoritativeEmpty; }
 		[[nodiscard]] std::uint64_t SourceFingerprint() const { return _sourceFingerprint; }
 		[[nodiscard]] std::uint64_t SkippedPlacements() const { return _skippedPlacements; }
@@ -224,7 +252,7 @@ namespace br::staticimport::recipe
 		friend class MappedRecipePack;
 		friend class Store;
 		std::shared_ptr<const void> _mappingOwner;
-		CellKey _key{};
+		BatchKey _key{};
 		bool _valid{ false };
 		bool _authoritativeEmpty{ false };
 		std::uint64_t _sourceFingerprint{ 0 };
@@ -254,7 +282,7 @@ namespace br::staticimport::recipe
 	// compilation call this before publication.
 	// The import batches honour the preparation packet and transaction limits of
 	// `settings` (zero means unbounded).
-	void FinalizeImportCosts(CellRecipe& recipe, std::uint64_t drawRecordStride, const StaticImportSettings& settings);
+	void FinalizeImportCosts(BatchRecipe& recipe, std::uint64_t drawRecordStride, const StaticImportSettings& settings);
 
 	enum class LoadStatus
 	{
@@ -268,21 +296,21 @@ namespace br::staticimport::recipe
 	struct LoadResult
 	{
 		LoadStatus status{ LoadStatus::Missing };
-		std::optional<CellRecipe> recipe;
+		std::optional<BatchRecipe> recipe;
 		std::string reason;
 		std::uint64_t mappedBytes{ 0 };
 	};
 
-	struct MappedCellResult
+	struct MappedBatchResult
 	{
 		LoadStatus status{ LoadStatus::Missing };
-		CellRecipeView view;
+		BatchRecipeView view;
 		std::string reason;
 	};
 
 	struct RecipeSceneView
 	{
-		std::vector<MappedCellResult> cells;
+		std::vector<MappedBatchResult> batches;
 		std::uint64_t mappedBytes{ 0 };
 		std::uint64_t hitCount{ 0 };
 		std::uint64_t missCount{ 0 };
@@ -291,7 +319,7 @@ namespace br::staticimport::recipe
 	class MappedRecipePack
 	{
 	public:
-		[[nodiscard]] RecipeSceneView LookupCells(std::span<const CellKey> keys) const;
+		[[nodiscard]] RecipeSceneView LookupBatches(std::span<const BatchKey> keys) const;
 		[[nodiscard]] std::uint64_t MappedBytes() const;
 
 	private:
@@ -341,16 +369,16 @@ namespace br::staticimport::recipe
 	public:
 		Store(std::filesystem::path cacheRoot, EnvironmentIdentity identity);
 
-		[[nodiscard]] LoadResult Load(const CellKey& key) const;
-		[[nodiscard]] OpenResult OpenNamespace(const CellKey& namespaceKey) const;
-		[[nodiscard]] PublishResult PublishBulk(std::span<const CellRecipe> recipes) const;
-		// Appends multiple runtime-generated cells while publishing one new index
+		[[nodiscard]] LoadResult Load(const BatchKey& key) const;
+		[[nodiscard]] OpenResult OpenNamespace(const BatchKey& namespaceKey) const;
+		[[nodiscard]] PublishResult PublishBulk(std::span<const BatchRecipe> recipes) const;
+		// Appends multiple runtime-generated batches while publishing one new index
 		// generation. Readers retaining an older mapping remain valid.
-		[[nodiscard]] PublishResult PublishCells(std::span<const CellRecipe> recipes) const;
-		[[nodiscard]] PublishResult PublishCells(std::span<const CellRecipe* const> recipes) const;
-		[[nodiscard]] PublishResult PublishCell(const CellRecipe& recipe) const;
-		[[nodiscard]] std::filesystem::path PackPath(const CellKey& key) const;
-		[[nodiscard]] std::filesystem::path IndexPath(const CellKey& key) const;
+		[[nodiscard]] PublishResult PublishBatches(std::span<const BatchRecipe> recipes) const;
+		[[nodiscard]] PublishResult PublishBatches(std::span<const BatchRecipe* const> recipes) const;
+		[[nodiscard]] PublishResult PublishBatch(const BatchRecipe& recipe) const;
+		[[nodiscard]] std::filesystem::path PackPath(const BatchKey& key) const;
+		[[nodiscard]] std::filesystem::path IndexPath(const BatchKey& key) const;
 
 	private:
 		std::filesystem::path _root;

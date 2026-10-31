@@ -16,7 +16,7 @@
 // drains of its own results.
 //
 // Host keys, batch keys and group ids are opaque to the pipeline; what they stand for
-// (cells, blocks) is the host's.
+// is the host's.
 //
 // Any number of extensions may be registered; every hook is called on each of them in
 // registration order. All hooks default to doing nothing, so an extension overrides

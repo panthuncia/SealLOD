@@ -33,7 +33,7 @@ namespace br::staticimport
 		}
 	}
 
-	StaticImportCoordinator::StaticImportCoordinator(const StaticStreamingContext& ctx, StaticGroupLifecycleStore& lifecycle, StaticImportCapacityBroker& capacity, br::SerializedTaskPump& pump, Hooks hooks)
+	StaticImportCoordinator::StaticImportCoordinator(const StaticStreamingContext& ctx, StaticGroupLifecycleStore& lifecycle, StaticImportCapacityBroker& capacity, br::SerializedTaskPump& pump)
 	{
 		_shared = &ctx.shared;
 		_bus = &ctx.bus;
@@ -41,12 +41,10 @@ namespace br::staticimport
 		_drains = &ctx.drains;
 		_settings = &ctx.settings;
 		_assets = &ctx.assets;
-		_placements = &ctx.placements;
 		_extensions = ctx.extensions;
 		_lifecycle = &lifecycle;
 		_capacity = &capacity;
 		_pump = &pump;
-		_hooks = std::move(hooks);
 		_state.hostKeyBlocks.resize(_extensions.size());
 	}
 
@@ -166,7 +164,7 @@ namespace br::staticimport
 
 	void StaticImportCoordinator::SubmitHostImportBatch(PreparedDirectStaticImportBatch batch)
 	{
-		batch.generation = _state.latestTarget.generation;
+		batch.generation = _state.hostLivenessGeneration;
 		batch.publishTicketID = _state.nextPublishTicketID++;
 		for (auto& import : batch.imports) {
 			import.generation = batch.generation;
@@ -185,11 +183,7 @@ namespace br::staticimport
 		do {
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::Tick");
 			bool didWork = false;
-			StaticImportCameraTarget target;
-			if (ConsumeCameraTarget(target)) {
-				ProcessTarget(target);
-				didWork = true;
-			}
+			didWork = ConsumeHostLivenessChange() || didWork;
 			bool drainedExtensionWork = false;
 			for (auto* extension : _extensions) {
 				if (extension->HasPendingCoordinatorWork()) {
@@ -204,7 +198,6 @@ namespace br::staticimport
 			}
 			didWork = DrainGroupAcks() || didWork;
 			didWork = DrainTemplateRefs() || didWork;
-			didWork = DrainPreparedCells() || didWork;
 			didWork = DrainGroupChanges() || didWork;
 			for (auto* extension : _extensions) {
 				didWork = extension->DrainPreparedResults() || didWork;
@@ -221,7 +214,6 @@ namespace br::staticimport
 			didWork = PromoteNotifiedAssetDependencies() || didWork;
 			didWork = ReconcileOrphanedAssetDependencies() || didWork;
 			didWork = PumpDueDependencyRequests() || didWork;
-			didWork = ScheduleCells() || didWork;
 			didWork = ScheduleGroups() || didWork;
 			bool retirementPending = !_bus->staticImportRemovalOutput.Empty() ||
 				!_bus->staticRetirementOwnershipRequests.Empty() || !_bus->staticRetirementPayloadRequests.Empty() ||
@@ -232,7 +224,6 @@ namespace br::staticimport
 			}
 			const bool quiescent = !didWork && !retirementPending &&
 				_bus->staticImportGroupChanges.Empty() &&
-				_state.pendingCellQueue.empty() && _state.pendingCellKeys.empty() &&
 				_state.pendingGroups.empty() && _state.pendingGroupQueue.empty() &&
 				_state.readyGroups.empty() && _state.groupSuspensions.empty() &&
 				_state.pendingDependencyRequests.empty() && _state.delayedDependencyRequests.empty() &&
@@ -264,18 +255,16 @@ namespace br::staticimport
 		_drains->ScheduleWorkerDrains();
 	}
 
-	bool StaticImportCoordinator::ConsumeCameraTarget(StaticImportCameraTarget& target)
+	bool StaticImportCoordinator::ConsumeHostLivenessChange()
 	{
-		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::ConsumeCameraTarget");
-		if (!_importState->staticImportServiceHasPendingTarget.load(std::memory_order_acquire)) {
+		if (!_importState->staticImportHostLivenessChanged.exchange(false, std::memory_order_acq_rel)) {
 			return false;
 		}
-		std::lock_guard lock(_importState->staticImportServiceCameraMutex);
-		if (!_importState->staticImportServiceHasPendingTarget.load(std::memory_order_acquire)) {
-			return false;
-		}
-		target = _importState->staticImportServicePendingTarget;
-		_importState->staticImportServiceHasPendingTarget.store(false, std::memory_order_release);
+		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::ConsumeHostLivenessChange");
+		_state.hostLivenessGeneration = _importState->staticImportHostLivenessGeneration.load(std::memory_order_acquire);
+		_state.stats.generation = _state.hostLivenessGeneration;
+		DropStaleHostGroups(true);
+		MarkStaticImportCoordinatorLivenessChanged();
 		return true;
 	}
 
@@ -359,9 +348,8 @@ namespace br::staticimport
 		if (group.residencyClass == StaticImportResidencyClass::HostGroup) {
 			return IsHostGroupCurrent(record.groupID, group.residencyGeneration);
 		}
-		// A cell-static group is live while its add is the desired one. The
-		// revision replaces the old cell-membership test: a group whose cell was
-		// left and re-entered is a new add, and the work of the earlier add is stale.
+		// A placed group is live while its add is the desired one: a group removed
+		// and added again is a new add, and the work of the earlier add is stale.
 		const auto desired = _state.desiredGroups.find(record.groupID);
 		return desired != _state.desiredGroups.end() && desired->second.revision == group.groupRevision;
 	}
@@ -489,7 +477,7 @@ namespace br::staticimport
 		if (!objectManager) return;
 
 		// Object-buffer capacity is a high-water request. Reconstructing it from
-		// every live group after each small prepared-cell batch makes discovery
+		// every live group after each small group-change batch makes discovery
 		// quadratic in total group count. Groups contribute once when discovered;
 		// removals intentionally do not force an eager buffer shrink.
 		objectManager->RequestStaticImportGraphCapacityHint(
@@ -861,9 +849,6 @@ namespace br::staticimport
 			}
 		}
 		auto stats = _state.stats;
-		stats.desiredCells = _state.desiredCells.size();
-		stats.activeCells = _state.activeCellGroups.size();
-		stats.pendingCellsQueued = _state.pendingCellQueue.size();
 		stats.pendingGroups = _state.pendingGroups.size();
 		stats.readyGroupsTracked = _state.readyGroups.size();
 		stats.readyGroupsQueued = _bus->staticImportGroupAssemblyJobs.Size() +
@@ -939,7 +924,7 @@ namespace br::staticimport
 		stats.templateRequestsQueued = _bus->staticImportTemplateRequestOutput.Size();
 		stats.materialVariantRequestsQueued = _bus->staticImportMaterialVariantJobs.Size();
 		stats.shaderVariantRequestsQueued = _bus->staticImportShaderVariantJobs.Size();
-		stats.removalDiffsQueued = _bus->staticImportRemovalOutput.Size();
+		stats.removalsQueued = _bus->staticImportRemovalOutput.Size();
 		stats.retirementRequestsQueued = _bus->staticRetirementOwnershipRequests.Size() +
 			_bus->staticRetirementPayloadRequests.Size();
 		{
@@ -993,14 +978,11 @@ namespace br::staticimport
 					}
 				}
 				stats.pendingGroupDiagnostics.push_back(fmt::format(
-					"group=0x{:016X} stage={} last_transition={} placements={} model='{}' cell=0x{:08X}/0x{:08X}/({},{}) residency={} residency_generation={} live={} target_valid={} target_world=0x{:08X} target_interior=0x{:08X} target_generation={} dependencies=[{}] pending_dependency_requests={} delayed_dependency_requests={} worker_drains_active={} group_jobs={} group_results={} asset_jobs={} asset_results={}",
+					"group=0x{:016X} stage={} last_transition={} placements={} model='{}' batch=0x{:016X} residency={} residency_generation={} live={} host_liveness_generation={} dependencies=[{}] pending_dependency_requests={} delayed_dependency_requests={} worker_drains_active={} group_jobs={} group_results={} asset_jobs={} asset_results={}",
 					groupID, stage, transition == _state.pendingGroupLastTransition.end() ? "none" : transition->second,
-					group.placementCount, group.ModelPath(), group.cellKey.worldFormID,
-					group.cellKey.interiorCellFormID, group.cellKey.cellX, group.cellKey.cellY,
+					group.placementCount, group.ModelPath(), group.batchKey,
 					static_cast<unsigned>(group.residencyClass), group.residencyGeneration,
-					IsGroupLive(*record), _state.latestTarget.valid,
-					_state.latestTarget.stream.worldFormID, _state.latestTarget.stream.interiorCellFormID,
-					_state.stats.generation,
+					IsGroupLive(*record), _state.hostLivenessGeneration,
 					dependencies, pendingDependencyCount, delayedDependencyCount,
 					_importState->staticImportWorkerDrainsActive.load(std::memory_order_acquire),
 					0, _shared->graphCompletions->StaticGroupCount(),
@@ -1014,10 +996,9 @@ namespace br::staticimport
 		BT_PLOT("SARP.StaticImportCoordinator.PendingGroups", static_cast<int64_t>(stats.pendingGroups));
 		BT_PLOT("SARP.StaticImportLifecycle.Shards",
 			static_cast<int64_t>(_lifecycle->ShardCount()));
-		BT_PLOT("SARP.StaticImportCoordinator.PendingCellsQueued", static_cast<int64_t>(stats.pendingCellsQueued));
 		BT_PLOT("SARP.StaticImportCoordinator.PendingPlacements", static_cast<int64_t>(stats.pendingPlacements));
 		BT_PLOT("SARP.StaticImportCoordinator.ReadyQueueDepth", static_cast<int64_t>(stats.readyGroupsQueued));
-		BT_PLOT("SARP.StaticImportCoordinator.RemovalQueueDepth", static_cast<int64_t>(stats.removalDiffsQueued));
+		BT_PLOT("SARP.StaticImportCoordinator.RemovalQueueDepth", static_cast<int64_t>(stats.removalsQueued));
 		BT_PLOT("SARP.StaticImportCoordinator.TemplateQueueDepth", static_cast<int64_t>(stats.templateRequestsQueued));
 		BT_PLOT("SARP.StaticImportCoordinator.ShaderVariantQueueDepth", static_cast<int64_t>(stats.shaderVariantRequestsQueued));
 		const auto wakeStats = _pump->GetStats();
@@ -1052,7 +1033,7 @@ namespace br::staticimport
 			"MaterializedDecisionCleanup", "RemovalCleanup",
 			"GroupArtifactRelease", "GroupAssembly", "TransactionMaterialize",
 			"AssetPublish", "MaterialVariant", "ShaderVariant", "HostDependency",
-			"HostPrepare", "CellPrepare", "RecipeCompile", "SpeculativeAssetPublish"
+			"HostPrepare", "RecipeCompile", "SpeculativeAssetPublish"
 		};
 		for (std::size_t sourceIndex = 0; sourceIndex < sourceNames.size(); ++sourceIndex) {
 			const auto snapshot = _shared->staticImportWorkScheduler.Snapshot(
@@ -1067,249 +1048,6 @@ namespace br::staticimport
 				sourceNames[sourceIndex]), static_cast<std::int64_t>(snapshot.staleClaims));
 			basic_telemetry::SetGauge(fmt::format("SARP.StaticImport.Scheduler.{}.MaxLatencyUs",
 				sourceNames[sourceIndex]), static_cast<std::int64_t>(snapshot.maxSchedulingLatencyUs));
-		}
-	}
-
-	bool StaticImportCoordinator::QueueCellJob(const StaticCellKey& cell, std::uint64_t generation, std::shared_ptr<br::staticimport::recipe::CellRecipeView> mappedRecipe, std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding, std::shared_ptr<br::staticimport::recipe::MappedRecipePack> mappedRecipePack)
-	{
-		if (!_state.desiredCells.contains(cell) ||
-			_state.activeCellGroups.contains(cell) ||
-			!_state.pendingCellKeys.insert(cell).second) {
-			return false;
-		}
-		_state.pendingCellQueue.push_back(StaticImportCellPrepareJob{
-			.key = cell,
-			.generation = generation,
-			.mappedRecipe = std::move(mappedRecipe),
-			.recipeSceneBinding = std::move(recipeSceneBinding),
-			.mappedRecipePack = std::move(mappedRecipePack)
-		});
-		return true;
-	}
-
-	void StaticImportCoordinator::ProcessTarget(StaticImportCameraTarget target)
-	{
-		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::ProcessCameraTarget");
-		if (target.generation != _importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire)) {
-			return;
-		}
-		_state.latestTarget = target;
-
-		std::vector<StaticCellKey> enteredCells;
-		std::vector<StaticCellKey> leftCells;
-		const auto previousDesiredCellCount = _state.desiredCells.size();
-		std::size_t desiredCellCount = 0;
-		std::size_t enteredAlreadyActiveCount = 0;
-		std::size_t leftStillDesiredCount = 0;
-		const auto diffBegin = std::chrono::steady_clock::now();
-		{
-			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DiffDesiredCells");
-			if (!target.valid) {
-				leftCells.reserve(_state.activeCellGroups.size());
-				for (const auto& [cell, _] : _state.activeCellGroups) leftCells.push_back(cell);
-				_state.desiredCells.clear();
-				_state.lastKey.reset();
-			} else if (_state.lastKey && *_state.lastKey == target.key) {
-				return;
-			} else if (_state.lastKey) {
-				const auto previousDesired = _state.desiredCells;
-				const auto desiredCells = _hooks.buildDesiredStaticCells(target.stream);
-				desiredCellCount = desiredCells.size();
-				ForEachRealStaticCellInAreaDifference(desiredCells, previousDesired, [&](const StaticCellKey& cell) {
-					if (!_state.activeCellGroups.contains(cell)) {
-						enteredCells.push_back(cell);
-					} else {
-						++enteredAlreadyActiveCount;
-					}
-				});
-				for (const auto& [cell, _] : _state.activeCellGroups) {
-					if (!desiredCells.contains(cell)) leftCells.push_back(cell);
-				}
-				leftStillDesiredCount = previousDesired.size() > leftCells.size()
-					? previousDesired.size() - leftCells.size()
-					: 0;
-				_state.desiredCells = desiredCells;
-				_state.lastKey = target.key;
-			} else {
-				auto desiredCells = _hooks.buildDesiredStaticCells(target.stream);
-				desiredCellCount = desiredCells.size();
-				const auto worldCells = _placements->ExteriorCellCount(target.stream.worldFormID);
-				enteredCells.reserve(worldCells != 0 ? worldCells : 1u);
-				ForEachRealStaticCellInAreaDifference(desiredCells, {}, [&](const StaticCellKey& cell) {
-					enteredCells.push_back(cell);
-				});
-				_state.desiredCells = std::move(desiredCells);
-				_state.lastKey = target.key;
-			}
-		}
-		DropStaleHostGroups(true);
-
-		if (!enteredCells.empty() || !leftCells.empty() || !target.valid) {
-			MarkStaticImportCoordinatorLivenessChanged();
-		}
-
-		_state.stats.generation = target.generation;
-		_state.stats.cellDiffUs += ElapsedUs(diffBegin);
-		_state.stats.cellsEntered += enteredCells.size();
-		_state.stats.cellsLeft += leftCells.size();
-		BT_PLOT("SARP.StaticImportCoordinator.EnteredCells", static_cast<int64_t>(enteredCells.size()));
-		BT_PLOT("SARP.StaticImportCoordinator.LeftCells", static_cast<int64_t>(leftCells.size()));
-		BT_PLOT("SARP.StaticImportCoordinator.PreviousDesiredCells", static_cast<int64_t>(previousDesiredCellCount));
-		BT_PLOT("SARP.StaticImportCoordinator.DesiredCells", static_cast<int64_t>(_state.desiredCells.size()));
-		BT_PLOT("SARP.StaticImportCoordinator.EnteredAlreadyActiveCells", static_cast<int64_t>(enteredAlreadyActiveCount));
-		BT_PLOT("SARP.StaticImportCoordinator.LeftStillDesiredCells", static_cast<int64_t>(leftStillDesiredCount));
-		const bool fullRadiusRemovalCandidate = target.valid &&
-			previousDesiredCellCount != 0 &&
-			leftCells.size() > (std::max<std::size_t>)(1, desiredCellCount / 2);
-		BT_PLOT("SARP.StaticImportCoordinator.FullRadiusRemovalCandidate", fullRadiusRemovalCandidate ? int64_t{ 1 } : int64_t{ 0 });
-		if (_importState->benchmarkDiagnosticsEnabled &&
-			fullRadiusRemovalCandidate &&
-			_importState->staticRemovalTelemetryLogCount.fetch_add(1, std::memory_order_relaxed) < 64) {
-			spdlog::warn(
-				"SARP static import telemetry: coordinator queued large left-cell diff prevDesired={} desired={} entered={} left={} target={}",
-				previousDesiredCellCount,
-				_state.desiredCells.size(),
-				enteredCells.size(),
-				leftCells.size(),
-				FormatStaticStreamKey(target.key));
-		}
-
-		{
-			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::SortCellDiffs");
-			std::sort(enteredCells.begin(), enteredCells.end(), [&target](const StaticCellKey& lhs, const StaticCellKey& rhs) {
-				const auto lhsDistance = StaticCellDistanceToTarget(target.stream, lhs);
-				const auto rhsDistance = StaticCellDistanceToTarget(target.stream, rhs);
-				if (lhsDistance != rhsDistance) {
-					return lhsDistance < rhsDistance;
-				}
-				if (lhs.cellY != rhs.cellY) {
-					return lhs.cellY < rhs.cellY;
-				}
-				return lhs.cellX < rhs.cellX;
-			});
-			std::sort(leftCells.begin(), leftCells.end(), [&target](const StaticCellKey& lhs, const StaticCellKey& rhs) {
-				const auto lhsDistance = StaticCellDistanceToTarget(target.stream, lhs);
-				const auto rhsDistance = StaticCellDistanceToTarget(target.stream, rhs);
-				if (lhsDistance != rhsDistance) {
-					return lhsDistance > rhsDistance;
-				}
-				if (lhs.cellY != rhs.cellY) {
-					return lhs.cellY < rhs.cellY;
-				}
-				return lhs.cellX < rhs.cellX;
-			});
-		}
-
-		{
-			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::QueueLeftCellRemovals");
-			// A left cell removes its groups through the flat intake, farthest cell first.
-			for (const auto& cell : leftCells) {
-				if (auto groupsIt = _state.activeCellGroups.find(cell); groupsIt != _state.activeCellGroups.end()) {
-					const auto groupIDs = std::move(groupsIt->second);
-					_state.activeCellGroups.erase(groupsIt);
-					ApplyGroupChanges({}, groupIDs);
-				}
-			}
-		}
-
-		{
-			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::QueueEnteredCellJobs");
-			// A full-radius batch contains thousands of cells and roughly one hundred
-			// thousand logical groups. Parsing every recipe, deduplicating every
-			// variant, and priming every asset here turns the serialized coordinator
-			// wake into a multi-second stop-the-world boundary. Share the immutable
-			// mapped pack and let independent cell tasks parse it in the TBB arena.
-			if (enteredCells.size() > 256) {
-				std::shared_ptr<br::staticimport::recipe::MappedRecipePack> mappedRecipePack;
-				auto recipeSceneBinding = std::make_shared<StaticRecipeSceneBinding>();
-				if (_importState->staticSceneRecipeStore && !enteredCells.empty()) {
-					const br::staticimport::recipe::CellKey recipeKey{
-						enteredCells.front().worldFormID, enteredCells.front().interiorCellFormID,
-						enteredCells.front().cellX, enteredCells.front().cellY };
-					mappedRecipePack = _importState->staticSceneRecipeStore->OpenNamespace(recipeKey).pack;
-				}
-				for (const auto& cell : enteredCells) {
-					(void)QueueCellJob(
-						cell, target.generation, {}, recipeSceneBinding, mappedRecipePack);
-				}
-				BT_PLOT("SARP.StaticSceneRecipe.SceneLookupDeferredCells",
-					static_cast<int64_t>(enteredCells.size()));
-			} else {
-			std::vector<std::shared_ptr<br::staticimport::recipe::CellRecipeView>> mappedCells(enteredCells.size());
-			std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding;
-			if (_importState->staticSceneRecipeStore && !enteredCells.empty()) {
-				BT_ZONE_SCOPE("SARP::StaticSceneRecipe::SceneBatchLookup");
-				std::vector<br::staticimport::recipe::CellKey> recipeKeys;
-				recipeKeys.reserve(enteredCells.size());
-				for (const auto& cell : enteredCells) {
-					recipeKeys.push_back({ cell.worldFormID, cell.interiorCellFormID, cell.cellX, cell.cellY });
-				}
-				auto opened = _importState->staticSceneRecipeStore->OpenNamespace(recipeKeys.front());
-				if (opened.pack) {
-					auto scene = opened.pack->LookupCells(recipeKeys);
-					recipeSceneBinding = std::make_shared<StaticRecipeSceneBinding>();
-					std::unordered_map<StaticRecipeVariantKey, std::uint32_t, StaticRecipeVariantKeyHash, StaticRecipeVariantKeyEqual> variantIndices;
-					std::unordered_set<std::string> uniqueAssets;
-					std::vector<std::string> orderedAssets;
-					std::array<std::uint64_t, 5> lookupStatusCounts{};
-					for (std::size_t index = 0; index < scene.cells.size(); ++index) {
-						auto& cell = scene.cells[index];
-						const auto statusIndex = static_cast<std::size_t>(cell.status);
-						if (statusIndex < lookupStatusCounts.size()) ++lookupStatusCounts[statusIndex];
-						if (cell.status != br::staticimport::recipe::LoadStatus::Hit) {
-							continue;
-						}
-						for (const auto& group : cell.view.Groups()) {
-							std::string asset{ cell.view.String(group.modelPath) };
-							if (uniqueAssets.emplace(asset).second) orderedAssets.push_back(std::move(asset));
-							const StaticRecipeVariantLookupKey lookupKey{ cell.view.String(group.modelPath), group.materialOverrideHash };
-							auto found = variantIndices.find(lookupKey);
-							std::uint32_t variantIndex = 0;
-							if (found == variantIndices.end()) {
-								variantIndex = static_cast<std::uint32_t>(recipeSceneBinding->variants.size());
-								auto slot = std::make_shared<StaticRecipeSceneVariantSlot>();
-								slot->modelPath = lookupKey.modelPath;
-								slot->materialVariant = _assets->MakeMaterialVariant(cell.view, group);
-								{
-									std::shared_lock lock(_importState->staticRecipeVariantBindingMutex);
-									if (const auto cached = _importState->staticRecipeVariantBindings.find(lookupKey);
-										cached != _importState->staticRecipeVariantBindings.end()) {
-										slot->binding = cached->second;
-										slot->readyBinding.store(slot->binding.get(), std::memory_order_relaxed);
-									}
-								}
-							recipeSceneBinding->variants.push_back(std::move(slot));
-							found = variantIndices.emplace(
-								StaticRecipeVariantKey{ std::string{ lookupKey.modelPath }, group.materialOverrideHash }, variantIndex).first;
-						} else {
-							variantIndex = found->second;
-						}
-						recipeSceneBinding->variantByKey.try_emplace(
-							StaticRecipeVariantKey{ std::string{ lookupKey.modelPath }, group.materialOverrideHash },
-							recipeSceneBinding->variants[variantIndex]);
-						recipeSceneBinding->variantByGroupID.insert_or_assign(group.stableGroupID, variantIndex);
-						}
-						mappedCells[index] = std::make_shared<br::staticimport::recipe::CellRecipeView>(std::move(cell.view));
-					}
-					// Prime the deduplicated scene assets cheaply. Idle import workers sweep
-					// completed speculative results so none remain stranded at shutdown.
-					for (const auto& asset : orderedAssets) {
-						(void)_assets->QueueOrPollRenderableAsset(asset);
-					}
-					BT_PLOT("SARP.StaticSceneRecipe.SceneLookupCells", static_cast<int64_t>(scene.cells.size()));
-					BT_PLOT("SARP.StaticSceneRecipe.SceneLookupHits", static_cast<int64_t>(scene.hitCount));
-					BT_PLOT("SARP.StaticSceneRecipe.SceneLookupMissing", static_cast<int64_t>(lookupStatusCounts[static_cast<std::size_t>(br::staticimport::recipe::LoadStatus::Missing)]));
-					BT_PLOT("SARP.StaticSceneRecipe.SceneLookupStale", static_cast<int64_t>(lookupStatusCounts[static_cast<std::size_t>(br::staticimport::recipe::LoadStatus::Stale)]));
-					BT_PLOT("SARP.StaticSceneRecipe.SceneLookupCorrupt", static_cast<int64_t>(lookupStatusCounts[static_cast<std::size_t>(br::staticimport::recipe::LoadStatus::Corrupt)]));
-					BT_PLOT("SARP.StaticSceneRecipe.SceneUniqueAssets", static_cast<int64_t>(orderedAssets.size()));
-					BT_PLOT("SARP.StaticSceneRecipe.SceneUniqueVariants", static_cast<int64_t>(recipeSceneBinding->variants.size()));
-				}
-			}
-			for (std::size_t index = 0; index < enteredCells.size(); ++index) {
-				(void)QueueCellJob(
-					enteredCells[index], target.generation, std::move(mappedCells[index]), recipeSceneBinding);
-			}
-			}
 		}
 	}
 
@@ -1840,7 +1578,7 @@ namespace br::staticimport
 				// coherently consumed by indirect publication. Its extension holds are
 				// released by RetirementCommit at that boundary.
 				for (const auto& ownership : ownershipDelta.added) {
-					if (ownership && ownership->residencyClass == StaticImportResidencyClass::CellStatic) {
+					if (ownership && ownership->residencyClass == StaticImportResidencyClass::Placed) {
 						for (std::size_t extensionIndex = 0; extensionIndex < _extensions.size(); ++extensionIndex) {
 							_extensions[extensionIndex]->OnGroupOwnershipAdded(ownership->groupID,
 								br::staticimport::StaticGroupHoldAt(ownership->extensionHolds, extensionIndex));
@@ -2031,7 +1769,7 @@ namespace br::staticimport
 					std::lock_guard lock(trace->mutex);
 					if (const auto skipped = trace->skipped.find(groupID); skipped != trace->skipped.end()) {
 						const auto& info = skipped->second;
-						trace->out << "unpublish_after_skip," << groupID << ',' << _state.latestTarget.generation
+						trace->out << "unpublish_after_skip," << groupID << ',' << _state.hostLivenessGeneration
 							<< ',' << unpublishedGroup.groupRevision << ',' << info.placements << '\n';
 						trace->out.flush();
 						trace->skipped.erase(skipped);
@@ -2155,7 +1893,7 @@ namespace br::staticimport
 		// graph-owned capacity; it cannot increase the high-water requirement.
 		// Unloads likewise do not require an eager shrink. Re-scanning every live
 		// group here made each readiness batch O(scene size). Capacity growth is
-		// refreshed when prepared cells introduce new desired work instead.
+		// refreshed when group changes introduce new desired work instead.
 		return true;
 	}
 
@@ -2206,8 +1944,8 @@ namespace br::staticimport
 					if (auto* trace = SceneMembershipTrace()) {
 						std::lock_guard lock(trace->mutex);
 						trace->skipped.insert_or_assign(groupID, SkippedRediscovery{
-							_state.latestTarget.generation, pending.placementCount});
-						trace->out << "skip_owned," << groupID << ',' << _state.latestTarget.generation
+							_state.hostLivenessGeneration, pending.placementCount});
+						trace->out << "skip_owned," << groupID << ',' << _state.hostLivenessGeneration
 							<< ',' << (_state.graphOwnedGroupRevisions.contains(groupID) ? _state.graphOwnedGroupRevisions.at(groupID) : 0)
 							<< ',' << pending.placementCount << '\n';
 					}
@@ -2264,9 +2002,7 @@ namespace br::staticimport
 				requests->TraceEvent(br::render::AsyncStateGraphTraceEventID::StaticGroupDiscovered,
 					{ br::render::ArtifactKind::StaticGroup, groupID, 0 },
 					pending.residencyGeneration, 0,
-					{ { pending.placementCount, pending.cellKey.worldFormID,
-						static_cast<std::uint64_t>(static_cast<std::int64_t>(pending.cellKey.cellX)),
-						static_cast<std::uint64_t>(static_cast<std::int64_t>(pending.cellKey.cellY)),
+					{ { pending.placementCount, pending.batchKey, 0, 0,
 						static_cast<unsigned>(pending.residencyClass) } });
 			}
 			(void)QueueGroupIfRunnable(groupID);
@@ -2276,68 +2012,6 @@ namespace br::staticimport
 		}
 	}
 
-	bool StaticImportCoordinator::DrainPreparedCells()
-	{
-		std::vector<PreparedStaticCell> preparedCells;
-		_bus->staticImportPreparedCellResults.Drain(preparedCells,
-			static_cast<std::size_t>(_settings->maxPreparedCellDrainPerPass));
-		if (preparedCells.empty()) {
-			return false;
-		}
-
-		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainPreparedCells");
-		BT_PLOT("SARP.StaticImportCoordinator.PreparedCellResults", static_cast<int64_t>(preparedCells.size()));
-		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> adds;
-		for (auto& prepared : preparedCells) {
-			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainPreparedCells::PreparedCell");
-			_state.pendingCellKeys.erase(prepared.key);
-			if (!prepared.worldspaceResident && !_state.desiredCells.contains(prepared.key)) {
-				_state.stats.staleGroupsDropped += prepared.lifecycleGroups.size();
-				for (const auto& record : prepared.lifecycleGroups) {
-					if (!record) continue;
-					record->stage.store(StaticGroupLifecycleStage::Cancelled,
-						std::memory_order_release);
-				}
-				continue;
-			}
-			// The cell layer keeps which groups each active cell added, so leaving the
-			// cell can remove them. A group id the cell already added keeps its first
-			// record.
-			adds.clear();
-			adds.reserve(prepared.lifecycleGroups.size());
-			if (prepared.worldspaceResident) {
-				adds.assign(prepared.lifecycleGroups.begin(), prepared.lifecycleGroups.end());
-			} else {
-				auto& cellGroups = _state.activeCellGroups[prepared.key];
-				cellGroups.reserve(cellGroups.size() + prepared.lifecycleGroups.size());
-				std::unordered_set<std::uint64_t> cellGroupMembership;
-				cellGroupMembership.reserve(cellGroups.size() + prepared.lifecycleGroups.size());
-				cellGroupMembership.insert(cellGroups.begin(), cellGroups.end());
-				for (auto& record : prepared.lifecycleGroups) {
-					if (!record) continue;
-					if (!cellGroupMembership.insert(record->groupID).second) {
-						record->stage.store(StaticGroupLifecycleStage::Cancelled,
-							std::memory_order_release);
-						continue;
-					}
-					cellGroups.push_back(record->groupID);
-					adds.push_back(record);
-				}
-			}
-			{
-				BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainPreparedCells::IntegrateGroups");
-				ApplyGroupChanges(adds, {});
-			}
-			_state.stats.cellPrepareUs += prepared.prepareUs;
-			_state.stats.cellsPrepared += 1;
-		}
-		{
-			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainPreparedCells::RefreshCapacityHint");
-			RefreshGraphCapacityHint();
-		}
-		return true;
-	}
-
 	bool StaticImportCoordinator::DrainGroupChanges()
 	{
 		if (!HasPendingGroupChanges()) {
@@ -2345,7 +2019,7 @@ namespace br::staticimport
 		}
 		std::vector<StaticGroupChanges> changes;
 		_bus->staticImportGroupChanges.Drain(changes,
-			static_cast<std::size_t>(_settings->maxPreparedCellDrainPerPass));
+			static_cast<std::size_t>(_settings->maxGroupChangesDrainPerPass));
 		if (changes.empty()) {
 			return false;
 		}
@@ -2360,52 +2034,6 @@ namespace br::staticimport
 			RefreshGraphCapacityHint();
 		}
 		return true;
-	}
-
-	bool StaticImportCoordinator::ScheduleCells()
-	{
-		if (_state.pendingCellQueue.empty()) {
-			return false;
-		}
-
-		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::ScheduleCells");
-		const auto maxJobsPerPass = static_cast<std::size_t>(
-			_settings->maxCellPrepareJobsPerPass);
-		const auto maxOutstandingCellJobs = static_cast<std::size_t>(
-			_settings->maxOutstandingCellPrepareJobs);
-		const auto outstandingCellJobs =
-			_bus->staticImportCellPrepareJobs.Size() + _bus->staticImportPreparedCellResults.Size();
-		if (maxOutstandingCellJobs != 0 && outstandingCellJobs >= maxOutstandingCellJobs) {
-			BT_PLOT("SARP.StaticImportCoordinator.CellJobsOutstanding", static_cast<int64_t>(outstandingCellJobs));
-			BT_PLOT("SARP.StaticImportCoordinator.PendingCellJobs", static_cast<int64_t>(_state.pendingCellQueue.size()));
-			return false;
-		}
-		std::size_t jobsSubmitted = 0;
-		while (!_shared->staticImportServiceStop.load(std::memory_order_acquire) &&
-			(maxJobsPerPass == 0 || jobsSubmitted < maxJobsPerPass) &&
-			(maxOutstandingCellJobs == 0 || outstandingCellJobs + jobsSubmitted < maxOutstandingCellJobs) &&
-			!_state.pendingCellQueue.empty()) {
-			auto job = std::move(_state.pendingCellQueue.front());
-			_state.pendingCellQueue.pop_front();
-			if (!_state.desiredCells.contains(job.key) ||
-				_state.activeCellGroups.contains(job.key)) {
-				_state.pendingCellKeys.erase(job.key);
-				continue;
-			}
-			if (!_bus->staticImportCellPrepareJobs.TryPush(std::move(job))) {
-				_state.pendingCellQueue.push_front(std::move(job));
-				break;
-			}
-			_shared->staticImportWorkScheduler.Publish(StaticImportWorkSource::CellPrepare);
-			++jobsSubmitted;
-		}
-		BT_PLOT("SARP.StaticImportCoordinator.CellJobsSubmitted", static_cast<int64_t>(jobsSubmitted));
-		BT_PLOT("SARP.StaticImportCoordinator.CellJobsOutstanding", static_cast<int64_t>(outstandingCellJobs + jobsSubmitted));
-		BT_PLOT("SARP.StaticImportCoordinator.PendingCellJobs", static_cast<int64_t>(_state.pendingCellQueue.size()));
-		if (jobsSubmitted != 0) {
-			_drains->ScheduleWorkerDrains();
-		}
-		return jobsSubmitted != 0;
 	}
 
 	bool StaticImportCoordinator::EnqueueRequest(StaticTemplateRequest request)
@@ -2716,7 +2344,7 @@ namespace br::staticimport
 		// hold ready members behind their dependency lifetime.
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::AdmitPreparedPackets");
 		const auto currentGeneration =
-			_importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire);
+			_importState->staticImportHostLivenessGeneration.load(std::memory_order_acquire);
 		std::vector<br::render::ArtifactKey> releasedGroupArtifacts;
 		std::uint64_t assemblyJobs = 0;
 		for (auto& snapshot : readySnapshots) {
@@ -2850,7 +2478,7 @@ namespace br::staticimport
 				BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::AdmitPreparedPackets::QueueAssembly");
 				StaticGroupAssemblyJob assemblyJob{
 					.snapshot = std::move(snapshot), .version = std::move(exactVersion),
-					.targetGeneration = currentGeneration,
+					.hostLivenessGeneration = currentGeneration,
 					.publishTickets = std::move(publishTickets) };
 				if (!_bus->staticImportGroupAssemblyJobs.TryPush(std::move(assemblyJob))) {
 					for (const auto& [groupID, _] : assemblyJob.publishTickets) {
@@ -2903,12 +2531,12 @@ namespace br::staticimport
 		std::size_t cancelDecisions = 0;
 		std::size_t validatedGroups = 0;
 		std::size_t rejectedGroups = 0;
-		const auto currentGeneration = _importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire);
+		const auto currentGeneration = _importState->staticImportHostLivenessGeneration.load(std::memory_order_acquire);
 
 		for (auto& item : requests) {
 			StaticImportMaterializedPublishDecision decision;
 			decision.item = std::move(item);
-			decision.targetGeneration = currentGeneration;
+			decision.hostLivenessGeneration = currentGeneration;
 			decision.livenessEpoch = _state.livenessEpoch;
 			decision.cost = decision.item.batch.transactionCost;
 
@@ -3093,8 +2721,7 @@ namespace br::staticimport
 			std::vector<br::render::ArtifactRequirement> variantRequirements;
 			variantRequirements.reserve(maxPacketGroups);
 			input->packetID = _state.nextPreparationPacketID++;
-			input->job.generation = _state.latestTarget.generation;
-			input->job.target = _state.latestTarget;
+			input->job.generation = _state.hostLivenessGeneration;
 			input->job.templateRefs = _state.templateSnapshot;
 			PendingSubmission submission;
 			submission.groupIDs.reserve(maxPacketGroups);
@@ -3104,7 +2731,7 @@ namespace br::staticimport
 			submission.packetID = input->packetID;
 			std::uint64_t packetPlacements = 0;
 			std::uint64_t packetBytes = 0;
-			std::uint64_t fingerprint = input->packetID ^ _state.latestTarget.generation;
+			std::uint64_t fingerprint = input->packetID ^ _state.hostLivenessGeneration;
 			std::optional<std::uint64_t> packetBatchKey;
 
 			while (!_state.pendingGroupQueue.empty() &&
@@ -3171,7 +2798,7 @@ namespace br::staticimport
 					variantInput->gateID = variantAddress.primaryID ^
 						std::rotl(variantAddress.variantID, 17) ^ 0x8000000000000000ull;
 					variantInput->fingerprint = variantFingerprint;
-					variantInput->target = _state.latestTarget;
+					variantInput->generation = _state.hostLivenessGeneration;
 					variantInput->representative = groupIt->second;
 					auto requested = requests->Request(variantAddress, 1, {},
 						br::render::ArtifactPayload::Make<StaticVariantArtifactInput>(
@@ -3206,7 +2833,6 @@ namespace br::staticimport
 					previous->second->valid.store(false, std::memory_order_release);
 				auto token = std::make_shared<StaticGroupIntentToken>();
 				token->groupID = groupID;
-				token->cellKey = descriptor.cellKey;
 				token->batchKey = descriptor.batchKey;
 				token->groupRevision = descriptor.groupRevision;
 				token->residencyEpoch = descriptor.residencyGeneration;
@@ -3358,13 +2984,11 @@ namespace br::staticimport
 		// producer notification. Omitting them made the next admission slice wait
 		// for an already-submitted worker job to finish, coupling discovery latency
 		// to preparation time for every four job packets.
-		return !_state.pendingCellQueue.empty() ||
-			!_state.pendingGroupQueue.empty() ||
-			_importState->staticImportServiceHasPendingTarget.load(std::memory_order_acquire) ||
+		return !_state.pendingGroupQueue.empty() ||
+			_importState->staticImportHostLivenessChanged.load(std::memory_order_acquire) ||
 			!_bus->staticImportGroupAcks.Empty() || !_bus->staticTransactionReadyEvents.Empty() ||
 			!_bus->staticScenePageReadyEvents.Empty() ||
 			!_bus->staticSceneRootPublishedEvents.Empty() ||
-			!_bus->staticImportPreparedCellResults.Empty() ||
 			HasPendingGroupChanges() ||
 			!_bus->staticGroupSuspensionRequests.Empty() ||
 			_shared->graphCompletions->StaticGroupCount() != 0 || !_bus->staticImportAssetPublishResults.Empty() ||
@@ -3426,13 +3050,12 @@ namespace br::staticimport
 		// Exclude coordinator-owned admission backlogs. Those can remain
 		// non-empty while bounded worker queues are saturated; treating them as
 		// an immediate wake source spins the serialized control domain until a
-		// worker frees capacity. Completion queues and camera updates are true
-		// readiness notifications and should still wake without delay.
-		return _importState->staticImportServiceHasPendingTarget.load(std::memory_order_acquire) ||
+		// worker frees capacity. Completion queues, group changes and host liveness
+		// changes are true readiness notifications and should still wake without delay.
+		return _importState->staticImportHostLivenessChanged.load(std::memory_order_acquire) ||
 			!_bus->staticImportGroupAcks.Empty() || !_bus->staticTransactionReadyEvents.Empty() ||
 			!_bus->staticScenePageReadyEvents.Empty() ||
 			!_bus->staticSceneRootPublishedEvents.Empty() ||
-			!_bus->staticImportPreparedCellResults.Empty() ||
 			HasPendingGroupChanges() ||
 			!_bus->staticGroupSuspensionRequests.Empty() ||
 			_shared->graphCompletions->StaticGroupCount() != 0 || !_bus->staticImportAssetPublishResults.Empty() ||

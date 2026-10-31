@@ -3,7 +3,7 @@
 // The static-import streaming pump.
 //
 // The publish side of static streaming: it drains the ready diffs, template requests
-// and removals that the worker pool produces, trims them against the cells still
+// and removals that the worker pool produces, trims them against the groups still
 // desired, and applies the result to the scene. UpdateStaticStreaming is the per-frame
 // entry point.
 
@@ -46,7 +46,6 @@ namespace br::staticimport
 	public:
 		struct Hooks
 		{
-			std::function<bool()> ensureStaticWorldSnapshot;
 			std::function<std::size_t()> liveStaticObjectCount;
 			// The host's object counters, reported in the periodic status log.
 			std::function<StaticHostObjectCounters()> hostObjectCounters;
@@ -67,14 +66,12 @@ namespace br::staticimport
 				_shared->sceneIngestionServices.assetRequests != nullptr;
 		}
 
-		StaticDesiredCellArea BuildDesiredStaticCells(const br::staticimport::StaticStreamTarget& target) const;
-
 		// Replaces the registered extensions. Only while the pipeline has not started.
 		void SetExtensions(std::span<br::staticimport::IStaticImportExtension* const> extensions);
 
 		void ScheduleStaticTemplatePublicationRetry();
 
-		void UpdateStaticStreaming(const br::staticimport::StaticStreamTarget& target);
+		void UpdateStaticStreaming();
 
 		void DrainTemplateRequests(const StaticStreamBudget& budget);
 
@@ -130,15 +127,11 @@ namespace br::staticimport
 
 		void EnsureWorkersStarted();
 
-		void UpdateCameraTarget(const br::staticimport::StaticStreamTarget& target);
+		void UpdateStaticStreamingDirectImportService(std::chrono::steady_clock::time_point updateBegin);
 
-		void UpdateStaticStreamingDirectImportService( const br::staticimport::StaticStreamTarget& target, std::chrono::steady_clock::time_point updateBegin);
+		void DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans = nullptr);
 
-		void DrainRemovals( const StaticStreamBudget& budget, const StaticDesiredCellArea& currentDesiredCells, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans = nullptr);
-
-		void DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans = nullptr);
-
-		void LogStaticStreamStatus(const br::staticimport::StaticStreamTarget& target);
+		void LogStaticStreamStatus();
 
 		StaticImportShared* _shared;
 		StaticImportWorkBus* _bus;

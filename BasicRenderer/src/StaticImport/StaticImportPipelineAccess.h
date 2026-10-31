@@ -61,8 +61,6 @@ namespace br::staticimport
 
 		void SubmitHostGroup(br::staticimport::StaticHostGroupRequest request) override
 		{
-			PreparedStaticCell prepared;
-			prepared.worldspaceResident = true;
 			PreparedStaticGroup group;
 			group.groupID = request.groupID;
 			group.modelPath = std::move(request.assetKey);
@@ -71,12 +69,10 @@ namespace br::staticimport
 			group.placementCount = group.instanceWorldMatrices.size();
 			group.residencyClass = StaticImportResidencyClass::HostGroup;
 			group.residencyGeneration = request.residencyGeneration;
-			prepared.groups.push_back(std::move(group));
-			// The coordinator seals and integrates the record, as it does for prepared cells.
-			BuildPreparedStaticCellLifecycle(prepared, request.batchKey != 0 ? request.batchKey : request.groupID);
-			// Host groups also produce coordinator work. A direct queue push can
-			// strand these results once ordinary cell preparation has gone idle.
-			(void)_drains->PushBlocking(_bus->staticImportPreparedCellResults, std::move(prepared));
+			// The coordinator seals and integrates the record like any other group add.
+			StaticGroupChanges change;
+			change.adds.push_back(MakeStaticGroupLifecycleRecord(group, request.batchKey));
+			(void)_drains->PushBlocking(_bus->staticImportGroupChanges, std::move(change));
 		}
 
 		void WakeCoordinator() override

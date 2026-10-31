@@ -10,9 +10,6 @@
 #include <chrono>
 #include <cstdint>
 
-#include <BasicRenderer/StaticImport/StaticCellGeometry.h>
-#include <BasicRenderer/StaticImport/StaticStreamTarget.h>
-
 namespace br::staticimport::support
 {
 	inline std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now())

@@ -19,35 +19,24 @@ namespace br::staticimport
 
 	struct StaticStreamCounters
 	{
-		std::size_t lastStaticActiveCells{ 0 };
 		std::size_t lastStaticVisitedPlacements{ 0 };
 		std::size_t lastStaticAppliedPlacements{ 0 };
 		std::size_t lastStaticPendingOrSkippedPlacements{ 0 };
 		std::size_t lastStaticUpsertsThisFrame{ 0 };
-		std::size_t lastStaticCellsEntered{ 0 };
-		std::size_t lastStaticCellsLeft{ 0 };
-		std::uint64_t lastStaticCellsPreparedThisFrame{ 0 };
 		std::uint64_t lastStaticGroupsImportedThisFrame{ 0 };
-		std::uint64_t lastStaticCellsRemovedThisFrame{ 0 };
+		std::uint64_t lastStaticGroupsRemovedThisFrame{ 0 };
 		std::uint64_t lastStaticStreamBudgetUsedUs{ 0 };
 		std::uint64_t lastStaticStreamBudgetOverrunUs{ 0 };
-		std::uint64_t staticIndexLoadMs{ 0 };
 		std::uint64_t staticStreamUpdateUs{ 0 };
 		std::uint64_t staticStreamVisitUs{ 0 };
 		std::uint64_t staticStreamRemoveUs{ 0 };
 		std::uint64_t staticStreamPruneUs{ 0 };
 		std::uint64_t staticStreamPumpUs{ 0 };
-		std::uint64_t staticSameCellFastPathUs{ 0 };
-		std::uint64_t staticCellDiffUs{ 0 };
-		std::uint64_t staticCellPrepareUs{ 0 };
-		std::uint64_t staticCellEnterUs{ 0 };
-		std::uint64_t staticCellLeaveUs{ 0 };
 		std::uint64_t staticPendingAssetRetryUs{ 0 };
 		std::uint64_t staticStreamBudgetExhaustedFrames{ 0 };
 		std::uint64_t staticStreamMaxImportQueueDepth{ 0 };
 		std::uint64_t staticStreamMaxRemovalQueueDepth{ 0 };
 		std::uint64_t staticStreamMaxBudgetOverrunUs{ 0 };
-		std::uint64_t staticStreamGeneration{ 0 };
 		std::uint64_t staticPlacementResolveUs{ 0 };
 		std::uint64_t staticPlacementMatrixUs{ 0 };
 		std::uint64_t staticObjectCreateUs{ 0 };

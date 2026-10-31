@@ -31,10 +31,10 @@ namespace br::staticimport::recipe
 	{
 		constexpr std::uint64_t kPackMagic = 0x4B43415052535353ull; // SSRPACK
 		constexpr std::uint64_t kIndexMagic = 0x58444E4952535353ull; // SSRINDX
-		constexpr std::uint64_t kCellMagic = 0x4C4C454352535353ull; // SSRCELL
+		constexpr std::uint64_t kBatchMagic = 0x4C4C454352535353ull; // SSRCELL
 		constexpr std::uint32_t kEndianMarker = 0x01020304u;
 		constexpr std::uint64_t kAlignment = 4096;
-		constexpr std::uint64_t kMaxCellBytes = 2ull * 1024ull * 1024ull * 1024ull;
+		constexpr std::uint64_t kMaxBatchBytes = 2ull * 1024ull * 1024ull * 1024ull;
 		constexpr std::uint64_t kMaxCollectionCount = 100'000'000ull;
 		constexpr std::uint64_t kMaxStringBytes = 16ull * 1024ull * 1024ull;
 
@@ -45,8 +45,8 @@ namespace br::staticimport::recipe
 			std::uint32_t schema{ kSchemaVersion };
 			std::uint32_t endian{ kEndianMarker };
 			EnvironmentIdentity identity;
-			std::uint32_t worldFormID{ 0 };
-			std::uint32_t interiorCellFormID{ 0 };
+			// The scope of the pack's batches (BatchKey::scope).
+			std::uint64_t scope{ 0 };
 			std::uint64_t headerChecksum{ 0 };
 		};
 
@@ -56,8 +56,8 @@ namespace br::staticimport::recipe
 			std::uint32_t schema{ kSchemaVersion };
 			std::uint32_t endian{ kEndianMarker };
 			EnvironmentIdentity identity;
-			std::uint32_t worldFormID{ 0 };
-			std::uint32_t interiorCellFormID{ 0 };
+			// The scope of the pack's batches (BatchKey::scope).
+			std::uint64_t scope{ 0 };
 			std::uint64_t committedPackBytes{ 0 };
 			std::uint64_t entryCount{ 0 };
 			std::uint64_t entriesChecksum{ 0 };
@@ -65,18 +65,18 @@ namespace br::staticimport::recipe
 
 		struct IndexEntry
 		{
-			CellKey key;
+			BatchKey key;
 			std::uint64_t offset{ 0 };
 			std::uint64_t size{ 0 };
 			std::uint64_t checksum{ 0 };
 		};
 
-		struct CellHeader
+		struct BatchHeader
 		{
-			std::uint64_t magic{ kCellMagic };
+			std::uint64_t magic{ kBatchMagic };
 			std::uint32_t schema{ kSchemaVersion };
 			std::uint32_t flags{ 0 };
-			CellKey key;
+			BatchKey key;
 			std::uint64_t sourceFingerprint{ 0 };
 			std::uint64_t skippedPlacements{ 0 };
 			// Retained so the v5 decoder remains available to reject/diagnose old packs.
@@ -96,7 +96,7 @@ namespace br::staticimport::recipe
 		};
 		#pragma pack(pop)
 
-		static_assert(std::is_trivially_copyable_v<CellKey>);
+		static_assert(std::is_trivially_copyable_v<BatchKey>);
 		static_assert(std::is_trivially_copyable_v<Matrix4x4>);
 		static_assert(std::is_trivially_copyable_v<IndexEntry>);
 
@@ -177,10 +177,10 @@ namespace br::staticimport::recipe
 			std::span<const std::byte> _remaining;
 		};
 
-		std::vector<std::byte> SerializeCell(const CellRecipe& recipe)
+		std::vector<std::byte> SerializeBatch(const BatchRecipe& recipe)
 		{
 			std::vector<std::byte> bytes;
-			CellHeader header;
+			BatchHeader header;
 			header.flags = recipe.authoritativeEmpty ? 1u : 0u;
 			header.key = recipe.key;
 			header.sourceFingerprint = recipe.sourceFingerprint;
@@ -247,15 +247,15 @@ namespace br::staticimport::recipe
 			return reader.Pod(count) && count <= kMaxCollectionCount;
 		}
 
-		std::optional<CellRecipe> DeserializeCell(std::span<const std::byte> bytes, std::string& reason)
+		std::optional<BatchRecipe> DeserializeBatch(std::span<const std::byte> bytes, std::string& reason)
 		{
 			Reader reader(bytes);
-			CellHeader header;
-			if (!reader.Pod(header) || header.magic != kCellMagic || header.schema != kSchemaVersion || header.groupCount > kMaxCollectionCount) {
-				reason = "invalid cell header";
+			BatchHeader header;
+			if (!reader.Pod(header) || header.magic != kBatchMagic || header.schema != kSchemaVersion || header.groupCount > kMaxCollectionCount) {
+				reason = "invalid batch header";
 				return std::nullopt;
 			}
-			CellRecipe recipe;
+			BatchRecipe recipe;
 			recipe.key = header.key;
 			recipe.authoritativeEmpty = (header.flags & 1u) != 0;
 			recipe.sourceFingerprint = header.sourceFingerprint;
@@ -299,7 +299,7 @@ namespace br::staticimport::recipe
 			for (auto& part : recipe.preparedParts) {
 				std::uint64_t byteCount = 0;
 				if (!reader.Pod(part.sourceGroupID) || !reader.Pod(part.stableGroupID) || !reader.Pod(part.allocationScopeID) || !reader.Pod(part.perObjectRowStride) ||
-					!reader.Pod(byteCount) || byteCount > kMaxCellBytes) {
+					!reader.Pod(byteCount) || byteCount > kMaxBatchBytes) {
 					reason = "invalid prepared rows"; return std::nullopt;
 				}
 				part.perObjectRows.resize(static_cast<std::size_t>(byteCount));
@@ -329,13 +329,13 @@ namespace br::staticimport::recipe
 				}
 			}
 			if (!reader.Empty()) {
-				reason = "unexpected trailing cell bytes";
+				reason = "unexpected trailing batch bytes";
 				return std::nullopt;
 			}
 			return recipe;
 		}
 
-		std::vector<std::byte> SerializeCellV6(const CellRecipe& recipe)
+		std::vector<std::byte> SerializeBatchV6(const BatchRecipe& recipe)
 		{
 			std::vector<MappedGroup> groups;
 			std::vector<MappedMaterialOverride> overrides;
@@ -408,7 +408,7 @@ namespace br::staticimport::recipe
 				parts.push_back(part);
 			}
 
-			CellHeader header;
+			BatchHeader header;
 			header.flags = recipe.authoritativeEmpty ? 1u : 0u;
 			header.key = recipe.key;
 			header.sourceFingerprint = recipe.sourceFingerprint;
@@ -442,9 +442,9 @@ namespace br::staticimport::recipe
 			return bytes;
 		}
 
-		struct ParsedCellV6
+		struct ParsedBatchV6
 		{
-			CellHeader header;
+			BatchHeader header;
 			std::span<const MappedGroup> groups;
 			std::span<const ImportBatch> importBatches;
 			std::span<const MappedMaterialOverride> overrides;
@@ -467,12 +467,12 @@ namespace br::staticimport::recipe
 			return true;
 		}
 
-		std::optional<ParsedCellV6> ParseCellV6(std::span<const std::byte> bytes, std::string& reason)
+		std::optional<ParsedBatchV6> ParseBatchV6(std::span<const std::byte> bytes, std::string& reason)
 		{
-			if (bytes.size() < sizeof(CellHeader)) { reason = "truncated v6 cell header"; return std::nullopt; }
-			ParsedCellV6 result;
-			std::memcpy(std::addressof(result.header), bytes.data(), sizeof(CellHeader));
-			if (result.header.magic != kCellMagic || result.header.schema != kSchemaVersion || result.header.byteSize != bytes.size() ||
+			if (bytes.size() < sizeof(BatchHeader)) { reason = "truncated v6 batch header"; return std::nullopt; }
+			ParsedBatchV6 result;
+			std::memcpy(std::addressof(result.header), bytes.data(), sizeof(BatchHeader));
+			if (result.header.magic != kBatchMagic || result.header.schema != kSchemaVersion || result.header.byteSize != bytes.size() ||
 				!ReadSection(bytes, result.header.groups, result.groups) ||
 				!ReadSection(bytes, result.header.importBatches, result.importBatches) ||
 				!ReadSection(bytes, result.header.materialOverrides, result.overrides) || !ReadSection(bytes, result.header.matrices, result.matrices) ||
@@ -480,7 +480,7 @@ namespace br::staticimport::recipe
 				!ReadSection(bytes, result.header.perObjectRows, result.rows) || !ReadSection(bytes, result.header.normalMatrices, result.normals) ||
 				!ReadSection(bytes, result.header.templates, result.templates) || !ReadSection(bytes, result.header.workloads, result.workloads) ||
 				!ReadSection(bytes, result.header.strings, result.strings)) {
-				reason = "invalid v6 cell section"; return std::nullopt;
+				reason = "invalid v6 batch section"; return std::nullopt;
 			}
 			auto rangeValid = [](RecipeRange range, std::size_t size) { return range.first <= size && range.count <= size - range.first; };
 			auto stringValid = [&](RecipeStringRef ref) { return rangeValid({ ref.offset, ref.size }, result.strings.size()); };
@@ -534,7 +534,7 @@ namespace br::staticimport::recipe
 		}
 
 		std::vector<IndexEntry> ReadIndex(const fs::path& path, const EnvironmentIdentity& identity,
-			const CellKey& key, IndexHeader& header, std::string& reason)
+			const BatchKey& key, IndexHeader& header, std::string& reason)
 		{
 			std::ifstream input(path, std::ios::binary);
 			if (!input) { reason = "index not found"; return {}; }
@@ -543,7 +543,7 @@ namespace br::staticimport::recipe
 				reason = "invalid index header"; return {};
 			}
 			if (std::memcmp(std::addressof(header.identity), std::addressof(identity), sizeof(identity)) != 0 ||
-				header.worldFormID != key.worldFormID || header.interiorCellFormID != key.interiorCellFormID) {
+				header.scope != key.scope) {
 				reason = "stale index identity"; return {};
 			}
 			if (header.entryCount > kMaxCollectionCount || header.entryCount > (std::numeric_limits<std::size_t>::max)() / sizeof(IndexEntry)) {
@@ -579,26 +579,25 @@ namespace br::staticimport::recipe
 			return name.str();
 		}
 
-		auto FindIndexEntry(std::vector<IndexEntry>& entries, const CellKey& key)
+		auto FindIndexEntry(std::vector<IndexEntry>& entries, const BatchKey& key)
 		{
-			return std::lower_bound(entries.begin(), entries.end(), key, [](const IndexEntry& lhs, const CellKey& rhs) {
-				return std::tie(lhs.key.interiorCellFormID, lhs.key.cellY, lhs.key.cellX) <
-					std::tie(rhs.interiorCellFormID, rhs.cellY, rhs.cellX);
+			return std::lower_bound(entries.begin(), entries.end(), key, [](const IndexEntry& lhs, const BatchKey& rhs) {
+				return BatchKeyLess(lhs.key, rhs);
 			});
 		}
 
 		struct HandleCloser { void operator()(HANDLE value) const { if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value); } };
 		using UniqueHandle = std::unique_ptr<std::remove_pointer_t<HANDLE>, HandleCloser>;
 
-		bool ValidateCommittedCell(
+		bool ValidateCommittedBatch(
 			const fs::path& packPath,
 			const IndexHeader& indexHeader,
 			const IndexEntry& entry,
 			std::string& reason)
 		{
-			if (entry.size > kMaxCellBytes || entry.offset > indexHeader.committedPackBytes ||
+			if (entry.size > kMaxBatchBytes || entry.offset > indexHeader.committedPackBytes ||
 				entry.size > indexHeader.committedPackBytes - entry.offset) {
-				reason = "cell range outside committed pack";
+				reason = "batch range outside committed pack";
 				return false;
 			}
 
@@ -626,7 +625,7 @@ namespace br::staticimport::recipe
 			LARGE_INTEGER offset{};
 			offset.QuadPart = static_cast<LONGLONG>(entry.offset);
 			if (!SetFilePointerEx(file.get(), offset, nullptr, FILE_BEGIN)) {
-				reason = "seek committed cell failed";
+				reason = "seek committed batch failed";
 				return false;
 			}
 			std::vector<std::byte> bytes(static_cast<std::size_t>(entry.size));
@@ -634,16 +633,16 @@ namespace br::staticimport::recipe
 			if (entry.size > (std::numeric_limits<DWORD>::max)() ||
 				!ReadFile(file.get(), bytes.data(), static_cast<DWORD>(bytes.size()), std::addressof(bytesRead), nullptr) ||
 				bytesRead != bytes.size()) {
-				reason = "read committed cell failed";
+				reason = "read committed batch failed";
 				return false;
 			}
 			if (HashBytes(bytes) != entry.checksum) {
-				reason = "committed cell checksum mismatch";
+				reason = "committed batch checksum mismatch";
 				return false;
 			}
-			auto parsed = ParseCellV6(bytes, reason);
+			auto parsed = ParseBatchV6(bytes, reason);
 			if (!parsed || parsed->header.key != entry.key) {
-				if (reason.empty()) reason = "committed cell key mismatch";
+				if (reason.empty()) reason = "committed batch key mismatch";
 				return false;
 			}
 			return true;
@@ -671,7 +670,7 @@ namespace br::staticimport::recipe
 		std::shared_ptr<StoreState::MappedPack> mapped;
 	};
 
-	std::string_view CellRecipeView::String(RecipeStringRef ref) const
+	std::string_view BatchRecipeView::String(RecipeStringRef ref) const
 	{
 		if (ref.offset > _strings.size() || ref.size > _strings.size() - ref.offset) return {};
 		return { _strings.data() + ref.offset, static_cast<std::size_t>(ref.size) };
@@ -682,41 +681,41 @@ namespace br::staticimport::recipe
 		return _impl && _impl->mapped ? _impl->mapped->header.committedPackBytes : 0;
 	}
 
-	RecipeSceneView MappedRecipePack::LookupCells(std::span<const CellKey> keys) const
+	RecipeSceneView MappedRecipePack::LookupBatches(std::span<const BatchKey> keys) const
 	{
 		RecipeSceneView scene;
 		if (!_impl || !_impl->mapped) return scene;
 		auto& pack = *_impl->mapped;
 		scene.mappedBytes = pack.header.committedPackBytes;
-		scene.cells.reserve(keys.size());
+		scene.batches.reserve(keys.size());
 		for (const auto& key : keys) {
-			MappedCellResult cell;
+			MappedBatchResult batch;
 			const auto entry = FindIndexEntry(pack.entries, key);
 			if (entry == pack.entries.end() || entry->key != key) {
-				cell.reason = "cell absent from index";
+				batch.reason = "batch absent from index";
 				++scene.missCount;
-				scene.cells.push_back(std::move(cell));
+				scene.batches.push_back(std::move(batch));
 				continue;
 			}
-			if (entry->size > kMaxCellBytes || entry->offset > pack.header.committedPackBytes ||
+			if (entry->size > kMaxBatchBytes || entry->offset > pack.header.committedPackBytes ||
 				entry->size > pack.header.committedPackBytes - entry->offset) {
-				cell.status = LoadStatus::Corrupt; cell.reason = "cell range outside committed pack";
-				++scene.missCount; scene.cells.push_back(std::move(cell)); continue;
+				batch.status = LoadStatus::Corrupt; batch.reason = "batch range outside committed pack";
+				++scene.missCount; scene.batches.push_back(std::move(batch)); continue;
 			}
 			const auto* begin = static_cast<const std::byte*>(pack.view) + entry->offset;
 			const std::span bytes(begin, static_cast<std::size_t>(entry->size));
 			if (HashBytes(bytes) != entry->checksum) {
-				cell.status = LoadStatus::Corrupt; cell.reason = "cell checksum mismatch";
-				++scene.missCount; scene.cells.push_back(std::move(cell)); continue;
+				batch.status = LoadStatus::Corrupt; batch.reason = "batch checksum mismatch";
+				++scene.missCount; scene.batches.push_back(std::move(batch)); continue;
 			}
-			auto parsed = ParseCellV6(bytes, cell.reason);
+			auto parsed = ParseBatchV6(bytes, batch.reason);
 			if (!parsed || parsed->header.key != key) {
-				cell.status = LoadStatus::Corrupt;
-				if (cell.reason.empty()) cell.reason = "cell key mismatch";
-				++scene.missCount; scene.cells.push_back(std::move(cell)); continue;
+				batch.status = LoadStatus::Corrupt;
+				if (batch.reason.empty()) batch.reason = "batch key mismatch";
+				++scene.missCount; scene.batches.push_back(std::move(batch)); continue;
 			}
-			cell.status = LoadStatus::Hit;
-			auto& view = cell.view;
+			batch.status = LoadStatus::Hit;
+			auto& view = batch.view;
 			view._mappingOwner = std::static_pointer_cast<const void>(_impl->mapped);
 			view._key = parsed->header.key;
 			view._valid = true;
@@ -729,19 +728,19 @@ namespace br::staticimport::recipe
 			view._normalMatrices = parsed->normals; view._templates = parsed->templates;
 			view._workloads = parsed->workloads; view._strings = parsed->strings;
 			++scene.hitCount;
-			scene.cells.push_back(std::move(cell));
+			scene.batches.push_back(std::move(batch));
 		}
 		return scene;
 	}
 
-	std::uint64_t CellRecipe::PlacementCount() const
+	std::uint64_t BatchRecipe::PlacementCount() const
 	{
 		std::uint64_t count = 0;
 		for (const auto& group : groups) count += group.placementFormIDs.size();
 		return count;
 	}
 
-	void FinalizeImportCosts(CellRecipe& recipe, std::uint64_t drawRecordStride, const StaticImportSettings& settings)
+	void FinalizeImportCosts(BatchRecipe& recipe, std::uint64_t drawRecordStride, const StaticImportSettings& settings)
 	{
 		for (auto& group : recipe.groups) group.importCost = {};
 		for (const auto& part : recipe.preparedParts) {
@@ -847,17 +846,21 @@ namespace br::staticimport::recipe
 		_root(std::move(cacheRoot) / "static_scene_recipes" / EnvironmentDirectoryName(identity)),
 		_identity(identity), _state(std::make_shared<StoreState>()) {}
 
-	fs::path Store::PackPath(const CellKey& key) const
+	fs::path Store::PackPath(const BatchKey& key) const
 	{
 		std::ostringstream name;
-		if (key.interiorCellFormID != 0) name << "interior_" << std::hex << std::setw(8) << std::setfill('0') << key.interiorCellFormID;
-		else name << "world_" << std::hex << std::setw(8) << std::setfill('0') << key.worldFormID;
+		// Pack names keep the format's original naming: a scope with a non-zero high
+		// half is named after it as "interior_", any other after its low half as "world_".
+		const auto high = static_cast<std::uint32_t>(key.scope >> 32u);
+		const auto low = static_cast<std::uint32_t>(key.scope);
+		if (high != 0) name << "interior_" << std::hex << std::setw(8) << std::setfill('0') << high;
+		else name << "world_" << std::hex << std::setw(8) << std::setfill('0') << low;
 		return _root / (name.str() + ".ssrpack");
 	}
 
-	fs::path Store::IndexPath(const CellKey& key) const { auto path = PackPath(key); path += ".index"; return path; }
+	fs::path Store::IndexPath(const BatchKey& key) const { auto path = PackPath(key); path += ".index"; return path; }
 
-	OpenResult Store::OpenNamespace(const CellKey& key) const
+	OpenResult Store::OpenNamespace(const BatchKey& key) const
 	{
 		OpenResult result;
 		std::shared_ptr<StoreState::MappedPack> pack;
@@ -886,7 +889,7 @@ namespace br::staticimport::recipe
 					header.magic != kPackMagic || header.schema != kSchemaVersion || header.endian != kEndianMarker ||
 					header.headerChecksum != HeaderChecksum(header) ||
 					std::memcmp(&header.identity, &_identity, sizeof(_identity)) != 0 ||
-					header.worldFormID != key.worldFormID || header.interiorCellFormID != key.interiorCellFormID) {
+					header.scope != key.scope) {
 					result.status = LoadStatus::Corrupt; result.reason = "pack header invalid"; return result;
 				}
 				candidate->mapping.reset(CreateFileMappingW(candidate->file.get(), nullptr, PAGE_READONLY, 0, 0, nullptr));
@@ -906,19 +909,19 @@ namespace br::staticimport::recipe
 		return result;
 	}
 
-	LoadResult Store::Load(const CellKey& key) const
+	LoadResult Store::Load(const BatchKey& key) const
 	{
 		const auto opened = OpenNamespace(key);
 		if (!opened.pack) return { opened.status, std::nullopt, opened.reason, 0 };
-		auto scene = opened.pack->LookupCells(std::span{ &key, 1 });
-		if (scene.cells.empty() || scene.cells.front().status != LoadStatus::Hit) {
-			const auto status = scene.cells.empty() ? LoadStatus::Missing : scene.cells.front().status;
-			const auto reason = scene.cells.empty() ? std::string{ "cell lookup returned no result" } : scene.cells.front().reason;
+		auto scene = opened.pack->LookupBatches(std::span{ &key, 1 });
+		if (scene.batches.empty() || scene.batches.front().status != LoadStatus::Hit) {
+			const auto status = scene.batches.empty() ? LoadStatus::Missing : scene.batches.front().status;
+			const auto reason = scene.batches.empty() ? std::string{ "batch lookup returned no result" } : scene.batches.front().reason;
 			return { status, std::nullopt, reason, scene.mappedBytes };
 		}
-		const auto& view = scene.cells.front().view;
+		const auto& view = scene.batches.front().view;
 		auto copyString = [&](RecipeStringRef ref) { return std::string(view.String(ref)); };
-		CellRecipe owned;
+		BatchRecipe owned;
 		owned.key = view.Key(); owned.authoritativeEmpty = view.AuthoritativeEmpty();
 		owned.sourceFingerprint = view.SourceFingerprint(); owned.skippedPlacements = view.SkippedPlacements();
 		owned.importBatches.assign(view.ImportBatches().begin(), view.ImportBatches().end());
@@ -997,32 +1000,31 @@ namespace br::staticimport::recipe
 			}
 		}
 		const auto entry = FindIndexEntry(pack->entries, key);
-		if (entry == pack->entries.end() || entry->key != key) { result.reason = "cell absent from index"; return result; }
-		if (entry->size > kMaxCellBytes || entry->offset > pack->header.committedPackBytes ||
+		if (entry == pack->entries.end() || entry->key != key) { result.reason = "batch absent from index"; return result; }
+		if (entry->size > kMaxBatchBytes || entry->offset > pack->header.committedPackBytes ||
 			entry->size > pack->header.committedPackBytes - entry->offset) {
-			result.status = LoadStatus::Corrupt; result.reason = "cell range outside committed pack"; return result;
+			result.status = LoadStatus::Corrupt; result.reason = "batch range outside committed pack"; return result;
 		}
 		result.mappedBytes = pack->header.committedPackBytes;
 		const auto* bytes = static_cast<const std::byte*>(pack->view) + entry->offset;
-		const auto cellBytes = std::span(bytes, static_cast<std::size_t>(entry->size));
-		if (HashBytes(cellBytes) != entry->checksum) { result.status = LoadStatus::Corrupt; result.reason = "cell checksum mismatch"; return result; }
+		const auto batchBytes = std::span(bytes, static_cast<std::size_t>(entry->size));
+		if (HashBytes(batchBytes) != entry->checksum) { result.status = LoadStatus::Corrupt; result.reason = "batch checksum mismatch"; return result; }
 		std::string reason;
-		auto recipe = DeserializeCell(cellBytes, reason);
-		if (!recipe || recipe->key != key) { result.status = LoadStatus::Corrupt; result.reason = reason.empty() ? "cell key mismatch" : reason; return result; }
+		auto recipe = DeserializeBatch(batchBytes, reason);
+		if (!recipe || recipe->key != key) { result.status = LoadStatus::Corrupt; result.reason = reason.empty() ? "batch key mismatch" : reason; return result; }
 		result.status = LoadStatus::Hit;
 		result.recipe = std::move(recipe);
 		return result;
 	}
 
-	PublishResult Store::PublishBulk(std::span<const CellRecipe> recipes) const
+	PublishResult Store::PublishBulk(std::span<const BatchRecipe> recipes) const
 	{
 		PublishResult result;
 		if (recipes.empty()) { result.success = true; return result; }
 		const auto namespaceKey = recipes.front().key;
 		result.packPath = PackPath(namespaceKey);
-		if (std::ranges::any_of(recipes, [&](const CellRecipe& recipe) {
-			return recipe.key.worldFormID != namespaceKey.worldFormID ||
-				recipe.key.interiorCellFormID != namespaceKey.interiorCellFormID;
+		if (std::ranges::any_of(recipes, [&](const BatchRecipe& recipe) {
+			return recipe.key.scope != namespaceKey.scope;
 		})) {
 			result.reason = "bulk recipes span multiple pack namespaces";
 			return result;
@@ -1047,8 +1049,7 @@ namespace br::staticimport::recipe
 		if (!file || file.get() == INVALID_HANDLE_VALUE) { result.reason = "create temporary bulk pack failed"; return result; }
 		PackHeader packHeader;
 		packHeader.identity = _identity;
-		packHeader.worldFormID = namespaceKey.worldFormID;
-		packHeader.interiorCellFormID = namespaceKey.interiorCellFormID;
+		packHeader.scope = namespaceKey.scope;
 		packHeader.headerChecksum = HeaderChecksum(packHeader);
 		if (!WriteAll(file.get(), &packHeader, sizeof(packHeader))) { result.reason = "write bulk pack header failed"; return result; }
 
@@ -1056,11 +1057,11 @@ namespace br::staticimport::recipe
 		entries.reserve(recipes.size());
 		std::uint64_t packSize = sizeof(packHeader);
 		for (const auto& recipe : recipes) {
-			auto cellBytes = SerializeCellV6(recipe);
+			auto batchBytes = SerializeBatchV6(recipe);
 			std::string validationReason;
-			const auto validated = ParseCellV6(cellBytes, validationReason);
+			const auto validated = ParseBatchV6(batchBytes, validationReason);
 			if (!validated || validated->header.key != recipe.key) {
-				result.reason = "bulk cell validation failed: " + validationReason;
+				result.reason = "bulk batch validation failed: " + validationReason;
 				file.reset(); fs::remove(temporaryPack, ec); return result;
 			}
 			const auto offset = AlignUp(packSize);
@@ -1068,21 +1069,19 @@ namespace br::staticimport::recipe
 				std::vector<std::byte> padding(static_cast<std::size_t>(offset - packSize));
 				if (!WriteAll(file.get(), padding.data(), padding.size())) { result.reason = "write bulk alignment failed"; return result; }
 			}
-			if (!WriteAll(file.get(), cellBytes.data(), cellBytes.size())) { result.reason = "write bulk cell failed"; return result; }
-			entries.push_back(IndexEntry{ recipe.key, offset, cellBytes.size(), HashBytes(cellBytes) });
-			packSize = offset + cellBytes.size();
-			result.bytesWritten += cellBytes.size();
+			if (!WriteAll(file.get(), batchBytes.data(), batchBytes.size())) { result.reason = "write bulk batch failed"; return result; }
+			entries.push_back(IndexEntry{ recipe.key, offset, batchBytes.size(), HashBytes(batchBytes) });
+			packSize = offset + batchBytes.size();
+			result.bytesWritten += batchBytes.size();
 		}
 		if (!FlushFileBuffers(file.get())) { result.reason = "flush bulk pack failed"; return result; }
 		file.reset();
 		std::ranges::sort(entries, [](const IndexEntry& lhs, const IndexEntry& rhs) {
-			return std::tie(lhs.key.interiorCellFormID, lhs.key.cellY, lhs.key.cellX) <
-				std::tie(rhs.key.interiorCellFormID, rhs.key.cellY, rhs.key.cellX);
+			return BatchKeyLess(lhs.key, rhs.key);
 		});
 		IndexHeader indexHeader;
 		indexHeader.identity = _identity;
-		indexHeader.worldFormID = namespaceKey.worldFormID;
-		indexHeader.interiorCellFormID = namespaceKey.interiorCellFormID;
+		indexHeader.scope = namespaceKey.scope;
 		indexHeader.committedPackBytes = packSize;
 		indexHeader.entryCount = entries.size();
 		indexHeader.entriesChecksum = HashBytes(std::as_bytes(std::span(entries)));
@@ -1107,24 +1106,23 @@ namespace br::staticimport::recipe
 		return result;
 	}
 
-	PublishResult Store::PublishCells(std::span<const CellRecipe* const> recipes) const
+	PublishResult Store::PublishBatches(std::span<const BatchRecipe* const> recipes) const
 	{
 		PublishResult result;
 		if (recipes.empty()) { result.success = true; return result; }
-		if (std::ranges::any_of(recipes, [](const CellRecipe* recipe) { return recipe == nullptr; })) {
-			result.reason = "runtime recipe list contains null cell"; return result;
+		if (std::ranges::any_of(recipes, [](const BatchRecipe* recipe) { return recipe == nullptr; })) {
+			result.reason = "runtime recipe list contains null batch"; return result;
 		}
 		const auto namespaceKey = recipes.front()->key;
 		result.packPath = PackPath(namespaceKey);
-		if (std::ranges::any_of(recipes, [&](const CellRecipe* recipe) {
-			return recipe->key.worldFormID != namespaceKey.worldFormID ||
-				recipe->key.interiorCellFormID != namespaceKey.interiorCellFormID;
+		if (std::ranges::any_of(recipes, [&](const BatchRecipe* recipe) {
+			return recipe->key.scope != namespaceKey.scope;
 		})) {
 			result.reason = "runtime recipes span multiple pack namespaces";
 			return result;
 		}
 		if (!fs::exists(IndexPath(namespaceKey)) || !fs::exists(result.packPath)) {
-			std::vector<CellRecipe> owning;
+			std::vector<BatchRecipe> owning;
 			owning.reserve(recipes.size());
 			for (const auto* recipe : recipes) owning.push_back(*recipe);
 			return PublishBulk(owning);
@@ -1155,7 +1153,7 @@ namespace br::staticimport::recipe
 		}
 		// Runtime recipe publication is an opportunistic cache fill. Closing the
 		// handle makes the appended bytes visible before the index is replaced;
-		// forcing both files to stable storage for every individual cell serialized
+		// forcing both files to stable storage for every individual batch serialized
 		// all import workers behind tens of milliseconds of disk latency. A process
 		// or power failure can only lose/corrupt cache data, which the checksums make
 		// detectable and rebuildable on the next load.
@@ -1163,13 +1161,13 @@ namespace br::staticimport::recipe
 			auto existing = FindIndexEntry(entries, recipe->key);
 			if (existing != entries.end() && existing->key == recipe->key) {
 				std::string committedReason;
-				if (ValidateCommittedCell(result.packPath, indexHeader, *existing, committedReason)) continue;
+				if (ValidateCommittedBatch(result.packPath, indexHeader, *existing, committedReason)) continue;
 			}
-			auto bytes = SerializeCellV6(*recipe);
+			auto bytes = SerializeBatchV6(*recipe);
 			std::string validationReason;
-			const auto validated = ParseCellV6(bytes, validationReason);
+			const auto validated = ParseBatchV6(bytes, validationReason);
 			if (!validated || validated->header.key != recipe->key) {
-				result.reason = "cell validation failed: " + validationReason; return result;
+				result.reason = "batch validation failed: " + validationReason; return result;
 			}
 			const auto offset = AlignUp(indexHeader.committedPackBytes);
 			if (offset != indexHeader.committedPackBytes) {
@@ -1177,23 +1175,21 @@ namespace br::staticimport::recipe
 				if (!WriteAll(file.get(), padding.data(), padding.size())) { result.reason = "write append alignment failed"; return result; }
 			}
 			if (!WriteAll(file.get(), bytes.data(), bytes.size())) {
-				result.reason = "write appended cell failed"; return result;
+				result.reason = "write appended batch failed"; return result;
 			}
 			const IndexEntry replacement{ recipe->key, offset, bytes.size(), HashBytes(bytes) };
 			if (existing != entries.end() && existing->key == recipe->key) *existing = replacement;
 			else entries.push_back(replacement);
 			std::ranges::sort(entries, [](const IndexEntry& lhs, const IndexEntry& rhs) {
-				return std::tie(lhs.key.interiorCellFormID, lhs.key.cellY, lhs.key.cellX) <
-					std::tie(rhs.key.interiorCellFormID, rhs.key.cellY, rhs.key.cellX);
+				return BatchKeyLess(lhs.key, rhs.key);
 			});
 			indexHeader.committedPackBytes = offset + bytes.size();
 			result.bytesWritten += bytes.size();
 		}
 		file.reset();
-		if (result.bytesWritten == 0) { result.success = true; result.reason = "cells already committed"; return result; }
+		if (result.bytesWritten == 0) { result.success = true; result.reason = "batches already committed"; return result; }
 		std::ranges::sort(entries, [](const IndexEntry& lhs, const IndexEntry& rhs) {
-			return std::tie(lhs.key.interiorCellFormID, lhs.key.cellY, lhs.key.cellX) <
-				std::tie(rhs.key.interiorCellFormID, rhs.key.cellY, rhs.key.cellX);
+			return BatchKeyLess(lhs.key, rhs.key);
 		});
 		indexHeader.entryCount = entries.size();
 		indexHeader.entriesChecksum = HashBytes(std::as_bytes(std::span(entries)));
@@ -1218,17 +1214,17 @@ namespace br::staticimport::recipe
 		return result;
 	}
 
-	PublishResult Store::PublishCells(std::span<const CellRecipe> recipes) const
+	PublishResult Store::PublishBatches(std::span<const BatchRecipe> recipes) const
 	{
-		std::vector<const CellRecipe*> views;
+		std::vector<const BatchRecipe*> views;
 		views.reserve(recipes.size());
 		for (const auto& recipe : recipes) views.push_back(std::addressof(recipe));
-		return PublishCells(views);
+		return PublishBatches(views);
 	}
 
-	PublishResult Store::PublishCell(const CellRecipe& recipe) const
+	PublishResult Store::PublishBatch(const BatchRecipe& recipe) const
 	{
-		const CellRecipe* view = std::addressof(recipe);
-		return PublishCells(std::span{ &view, 1 });
+		const BatchRecipe* view = std::addressof(recipe);
+		return PublishBatches(std::span{ &view, 1 });
 	}
 }

@@ -40,7 +40,6 @@
 #include "Render/RenderGraph/RenderGraph.h"
 #include "BasicRenderer/Assets/Import/ModelLoader.h"
 #include <BasicRenderer/StaticImport/ImportedAssetLibrary.h>
-#include <BasicRenderer/StaticImport/ScenePlacementSource.h>
 #include <BasicRenderer/StaticImport/StaticImportRuntime.h>
 #include <rhi_interop_dx12.h>
 #include <d3d12sdklayers.h>
@@ -558,9 +557,6 @@ struct DemoStaticScene {
 
     br::staticimport::StaticImportShared shared;
     br::staticimport::ImportedAssetLibrary assets;
-    // The runtime still requires a placement source; the demo's groups have no cells, so
-    // it stays empty.
-    br::staticimport::ScenePlacementSource placements{ { .sceneName = "BasicRendererDemo" } };
     std::unique_ptr<br::staticimport::StaticImportRuntime> runtime;
     // Models whose parts are not listed yet.
     std::vector<Model> unplacedModels;
@@ -612,7 +608,7 @@ struct DemoStaticScene {
 
     void Start(Renderer& renderer) {
         runtime = std::make_unique<br::staticimport::StaticImportRuntime>(
-            shared, br::staticimport::StaticImportSettings{}, assets, placements,
+            shared, br::staticimport::StaticImportSettings{}, assets,
             br::staticimport::StaticImportRuntime::Hooks{});
         runtime->AttachServices(renderer.GetSceneIngestionServices().StaticScene());
     }
@@ -620,15 +616,11 @@ struct DemoStaticScene {
     void Tick(Renderer& renderer, unsigned int frameIndex) {
         if (!runtime) Start(renderer);
         PlaceLoadedModels();
-        const auto& scene = renderer.GetCurrentScene();
-        if (!scene || !scene->HasUsablePrimaryCamera()) return;
-        XMFLOAT3 position;
-        XMStoreFloat3(&position, scene->GetPrimaryCamera().get<Components::Position>().pos);
-        runtime->UpdateStreaming(placements.MakeStreamTarget(position));
+        runtime->Tick();
         if (frameIndex % 100 == 0) {
             const auto stats = runtime->GetStatsSnapshot();
-            spdlog::info("Demo static scene: frame={} live_static_objects={} active_cells={} applied_placements={} groups_imported={} pending_groups={}",
-                frameIndex, runtime->LiveStaticObjectCount(), runtime->Counters().lastStaticActiveCells,
+            spdlog::info("Demo static scene: frame={} live_static_objects={} applied_placements={} groups_imported={} pending_groups={}",
+                frameIndex, runtime->LiveStaticObjectCount(),
                 runtime->Counters().lastStaticAppliedPlacements, runtime->Counters().staticDirectGroupsImported,
                 stats.pendingGroups);
             spdlog::info("Demo static scene: waiting(assets={} variants={} templates={} shader_variants={}) queued(templates={} shader_variants={} ready={}) dropped(unsupported={} stale={}) acks(published={} requeued={} dropped={})",

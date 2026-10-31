@@ -29,7 +29,6 @@ namespace br::staticimport
 		// extension that claimed them; mapped in StaticImportDrainScheduler.h.
 		HostDependency,
 		HostPrepare,
-		CellPrepare,
 		RecipeCompile,
 		SpeculativeAssetPublish,
 		Count
@@ -345,7 +344,6 @@ namespace br::staticimport
 			StaticImportWorkSource::GroupAssembly,
 			StaticImportWorkSource::TransactionMaterialize,
 			StaticImportWorkSource::HostPrepare,
-			StaticImportWorkSource::CellPrepare,
 			StaticImportWorkSource::Publication,
 			StaticImportWorkSource::TemplatePublication,
 			StaticImportWorkSource::GroupAssembly,
@@ -355,7 +353,6 @@ namespace br::staticimport
 			StaticImportWorkSource::ShaderVariant,
 			StaticImportWorkSource::HostDependency,
 			StaticImportWorkSource::HostPrepare,
-			StaticImportWorkSource::CellPrepare,
 			StaticImportWorkSource::RecipeCompile,
 			StaticImportWorkSource::MaterializedDecisionCleanup,
 			StaticImportWorkSource::RemovalCleanup,

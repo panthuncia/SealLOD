@@ -2,10 +2,10 @@
 
 // The static-import coordinator.
 //
-// Owns the admission side of static streaming: consumes camera targets, schedules
-// cells and groups, resolves asset/material/shader/host dependencies, and drains the
+// Owns the admission side of static streaming: applies the host's group changes,
+// schedules groups, resolves asset/material/shader/host dependencies, and drains the
 // results the worker pool publishes back. Drain is its single entry point; the public
-// host-cell, dependency and host-import operations below back the extension access
+// host-key, dependency and host-import operations below back the extension access
 // surface and run inside that tick (extension coordinator hooks).
 //
 // Serialization: the drain is serialized by the coordinator pump, not by a mutex.
@@ -46,14 +46,9 @@ namespace br::staticimport
 	class StaticImportCoordinator
 	{
 	public:
-		struct Hooks
-		{
-			std::function<StaticDesiredCellArea(const br::staticimport::StaticStreamTarget&)> buildDesiredStaticCells;
-		};
-
 		// Collaborators arrive at construction: there is no window in which this
 		// object exists unbound, and a missing one is a compile error.
-		StaticImportCoordinator(const StaticStreamingContext& ctx, StaticGroupLifecycleStore& lifecycle, StaticImportCapacityBroker& capacity, br::SerializedTaskPump& pump, Hooks hooks);
+		StaticImportCoordinator(const StaticStreamingContext& ctx, StaticGroupLifecycleStore& lifecycle, StaticImportCapacityBroker& capacity, br::SerializedTaskPump& pump);
 
 		void Drain();
 
@@ -89,28 +84,10 @@ namespace br::staticimport
 
 		[[nodiscard]] std::size_t BlockedHostKeyCount() const;
 
-		template <class Fn> void ForEachRealStaticCellInAreaDifference( const StaticDesiredCellArea& area, const StaticDesiredCellArea& excluded, Fn&& fn) const
-		{
-			if (StaticDesiredCellAreaEquals(area, excluded)) {
-				return;
-			}
-			if (area.kind == StaticDesiredCellAreaKind::Interior) {
-				if (!excluded.contains(area.interior) && _placements->IsRealCell(area.interior)) {
-					fn(area.interior);
-				}
-				return;
-			}
-			if (area.kind != StaticDesiredCellAreaKind::ExteriorRect) {
-				return;
-			}
-			_placements->ForEachExteriorCell(area.exterior.worldFormID, [&](const StaticCellKey& key) {
-				if (area.contains(key) && !excluded.contains(key)) {
-					fn(key);
-				}
-			});
-		}
-
-		bool ConsumeCameraTarget(StaticImportCameraTarget& target);
+		// Takes a host liveness change (StaticImportRuntime::NotifyHostLivenessChanged):
+		// adopts the new generation and re-checks the pending host groups. Returns
+		// whether there was one.
+		bool ConsumeHostLivenessChange();
 
 		bool IsDependencyResolved(const StaticImportDependencyRequest& request) const;
 
@@ -164,18 +141,12 @@ namespace br::staticimport
 
 		void PublishStats(bool force = false);
 
-		bool QueueCellJob(const StaticCellKey& cell, std::uint64_t generation, std::shared_ptr<br::staticimport::recipe::CellRecipeView> mappedRecipe = {}, std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding = {}, std::shared_ptr<br::staticimport::recipe::MappedRecipePack> mappedRecipePack = {});
-
 		// The flat group intake. Removes `removes` from the desired set, each under a
 		// new revision, and queues their retirement; then seals `adds` (records
-		// built by BuildPreparedStaticCellLifecycle) under new revisions, makes the
-		// cell-static ones desired and feeds them to pendingGroups. Adding a desired
-		// id replaces its current add. Removing an id that is not desired does
-		// nothing. Cell streaming is a client: prepared cells add their groups, left
-		// cells remove them.
+		// built by MakeStaticGroupLifecycleRecord) under new revisions, makes the
+		// placed ones desired and feeds them to pendingGroups. Adding a desired id
+		// replaces its current add. Removing an id that is not desired does nothing.
 		void ApplyGroupChanges(std::span<const std::shared_ptr<StaticGroupLifecycleRecord>> adds, std::span<const std::uint64_t> removes);
-
-		void ProcessTarget(StaticImportCameraTarget target);
 
 		bool DrainTemplateRefs();
 
@@ -185,11 +156,9 @@ namespace br::staticimport
 
 		bool DrainGroupAcks();
 
-		bool DrainPreparedCells();
-
-		// Host group changes (StaticImportRuntime::AddOrUpdateGroups / RemoveGroups /
-		// AddPreparedCell), through ApplyGroupChanges in submission order. Taken only
-		// once the workers started.
+		// Group changes (StaticImportRuntime::AddOrUpdateGroups / RemoveGroups /
+		// AddPreparedGroups, and host groups), through ApplyGroupChanges in submission
+		// order. Taken only once the workers started.
 		bool DrainGroupChanges();
 
 		[[nodiscard]] bool HasPendingGroupChanges() const
@@ -197,9 +166,6 @@ namespace br::staticimport
 			return _importState->staticImportServiceWorkersStarted.load(std::memory_order_acquire) &&
 				!_bus->staticImportGroupChanges.Empty();
 		}
-
-
-		bool ScheduleCells();
 
 		bool EnqueueRequest(StaticTemplateRequest request);
 
@@ -243,11 +209,9 @@ namespace br::staticimport
 		StaticImportDrainScheduler* _drains;
 		const br::staticimport::StaticImportSettings* _settings;
 		br::staticimport::IStaticAssetSource* _assets;
-		const br::staticimport::IStaticPlacementSource* _placements;
 		std::span<br::staticimport::IStaticImportExtension* const> _extensions;
 		StaticGroupLifecycleStore* _lifecycle;
 		StaticImportCapacityBroker* _capacity;
 		br::SerializedTaskPump* _pump;
-		Hooks _hooks;
 	};
 }

@@ -81,7 +81,6 @@ namespace br::staticimport
 				StaticImportWorkSource::TemplatePublication,
 				StaticImportWorkSource::RetirementApply,
 				StaticImportWorkSource::RetirementCommit,
-				StaticImportWorkSource::CellPrepare,
 				StaticImportWorkSource::HostDependency,
 				StaticImportWorkSource::AssetPublish,
 				StaticImportWorkSource::MaterialVariant,
@@ -221,7 +220,6 @@ namespace br::staticimport
 			case StaticImportWorkSource::ShaderVariant: return "SARP::StaticImport::ShaderVariantDrain";
 			case StaticImportWorkSource::HostDependency: return "SARP::StaticImport::HostDependencyDrain";
 			case StaticImportWorkSource::HostPrepare: return "SARP::StaticImport::HostPrepareDrain";
-			case StaticImportWorkSource::CellPrepare: return "SARP::StaticImport::CellPrepareDrain";
 			case StaticImportWorkSource::RecipeCompile: return "SARP::StaticImport::RecipeCompileDrain";
 			case StaticImportWorkSource::SpeculativeAssetPublish: return "SARP::StaticImport::SpeculativeAssetDrain";
 			case StaticImportWorkSource::Count: break;

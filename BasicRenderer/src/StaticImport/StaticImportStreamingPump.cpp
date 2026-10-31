@@ -64,26 +64,6 @@ namespace br::staticimport
 		return budget;
 	}
 
-	StaticDesiredCellArea StaticImportStreamingPump::BuildDesiredStaticCells(const br::staticimport::StaticStreamTarget& target) const
-	{
-		StaticDesiredCellArea cells;
-		if (target.interiorCellFormID != 0) {
-			cells.kind = StaticDesiredCellAreaKind::Interior;
-			cells.interior = StaticCellKey{ 0, target.interiorCellFormID, 0, 0 };
-			return cells;
-		}
-		if (target.worldFormID == 0) {
-			return cells;
-		}
-		cells.kind = StaticDesiredCellAreaKind::ExteriorRect;
-		cells.exterior = MakeStaticCellRect(
-			target.worldFormID,
-			target.cellX,
-			target.cellY,
-			_settings->cellRadius);
-		return cells;
-	}
-
 	void StaticImportStreamingPump::SetExtensions(std::span<br::staticimport::IStaticImportExtension* const> extensions)
 	{
 		_extensions = extensions;
@@ -111,15 +91,12 @@ namespace br::staticimport
 		}
 	}
 
-	void StaticImportStreamingPump::UpdateStaticStreaming(const br::staticimport::StaticStreamTarget& target)
+	void StaticImportStreamingPump::UpdateStaticStreaming()
 	{
-		const auto updateBegin = std::chrono::steady_clock::now();
-		if (!_settings->streamingEnabled || !target.valid || !_hooks.ensureStaticWorldSnapshot()) {
-			UpdateCameraTarget(target);
-			_counters->staticStreamUpdateUs += ElapsedUs(updateBegin);
+		if (!_settings->streamingEnabled) {
 			return;
 		}
-		UpdateStaticStreamingDirectImportService(target, updateBegin);
+		UpdateStaticStreamingDirectImportService(std::chrono::steady_clock::now());
 	}
 
 	void StaticImportStreamingPump::DrainTemplateRequests(const StaticStreamBudget& budget)
@@ -406,7 +383,7 @@ namespace br::staticimport
 		stats.templateRequestsQueued = _bus->staticImportTemplateRequestOutput.Size();
 		stats.materialVariantRequestsQueued = _bus->staticImportMaterialVariantJobs.Size();
 		stats.shaderVariantRequestsQueued = _bus->staticImportShaderVariantJobs.Size();
-		stats.removalDiffsQueued = _bus->staticImportRemovalOutput.Size();
+		stats.removalsQueued = _bus->staticImportRemovalOutput.Size();
 		stats.retirementRequestsQueued = _bus->staticRetirementOwnershipRequests.Size() +
 			_bus->staticRetirementPayloadRequests.Size();
 		{
@@ -424,9 +401,7 @@ namespace br::staticimport
 			extensionWork += extension->QueuedWorkCount();
 		}
 		return extensionWork + static_cast<std::uint64_t>(
-			_bus->staticImportCellPrepareJobs.Size()
-			+ _bus->staticImportPreparedCellResults.Size()
-			+ _bus->staticImportGroupChanges.Size()
+			_bus->staticImportGroupChanges.Size()
 			+ _shared->graphCompletions->StaticGroupCount()
 			+ _bus->staticImportGroupArtifactReleaseJobs.Size()
 			+ _bus->staticImportGroupAssemblyJobs.Size()
@@ -698,13 +673,6 @@ namespace br::staticimport
 		_shared->staticImportWorkScheduler.SetMaxParallelism(
 			StaticImportWorkSource::HostPrepare, (std::min)(2u, workerCount));
 		_shared->staticImportWorkScheduler.SetMaxParallelism(
-			// Cell discovery/classification is the feeder for every StaticGroup
-			// producer. Capping it at two made the producer pool input-bound on
-			// machines configured with more StaticImport workers. These jobs have
-			// immutable recipe/snapshot inputs and publish through an MPSC handoff,
-			// so their useful parallelism is the configured worker capacity.
-			StaticImportWorkSource::CellPrepare, workerCount);
-		_shared->staticImportWorkScheduler.SetMaxParallelism(
 			// Assembly cooperatively claims up to 32 source tickets and drains the
 			// matching queue entries as one transaction batch. Multiple consumers
 			// can otherwise pop entries covered by another consumer's additional
@@ -733,28 +701,7 @@ namespace br::staticimport
 		}
 	}
 
-	void StaticImportStreamingPump::UpdateCameraTarget(const br::staticimport::StaticStreamTarget& target)
-	{
-		StaticImportCameraTarget published;
-		published.key = MakeStaticStreamKey(target, _settings->cellRadius);
-		published.valid = target.valid;
-		{
-			std::lock_guard lock(_importState->staticImportServiceCameraMutex);
-			if (_importState->staticImportServiceLastPublishedTarget &&
-				_importState->staticImportServiceLastPublishedTarget->valid == published.valid &&
-				_importState->staticImportServiceLastPublishedTarget->key == published.key) {
-				return;
-			}
-			published.stream = target;
-			published.generation = _importState->staticImportServiceTargetGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
-			_importState->staticImportServicePendingTarget = published;
-			_importState->staticImportServiceLastPublishedTarget = published;
-			_importState->staticImportServiceHasPendingTarget.store(true, std::memory_order_release);
-		}
-		_drains->ScheduleCoordinatorDrain();
-	}
-
-	void StaticImportStreamingPump::UpdateStaticStreamingDirectImportService( const br::staticimport::StaticStreamTarget& target, std::chrono::steady_clock::time_point updateBegin)
+	void StaticImportStreamingPump::UpdateStaticStreamingDirectImportService(std::chrono::steady_clock::time_point updateBegin)
 	{
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::UpdateStaticStreamingDirectImportService");
 		EnsureWorkersStarted();
@@ -777,24 +724,11 @@ namespace br::staticimport
 		std::size_t pendingOrSkipped = 0;
 		std::size_t upsertsThisFrame = 0;
 		std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> dirtyWorkloadSpans;
-		_counters->lastStaticCellsEntered = 0;
-		_counters->lastStaticCellsLeft = 0;
-		_counters->lastStaticCellsPreparedThisFrame = 0;
 		_counters->lastStaticGroupsImportedThisFrame = 0;
-		_counters->lastStaticCellsRemovedThisFrame = 0;
+		_counters->lastStaticGroupsRemovedThisFrame = 0;
 		_counters->lastStaticStreamBudgetUsedUs = 0;
 		_counters->lastStaticStreamBudgetOverrunUs = 0;
 
-		if (target.valid && target.interiorCellFormID == 0 && target.worldFormID == 0) {
-			BT_PLOT("SARP.StaticImportService.Update.SkippedMissingWorld", int64_t{ 1 });
-			_counters->staticStreamUpdateUs += ElapsedUs(updateBegin);
-			return;
-		}
-
-		{
-			BT_ZONE_SCOPE("SARP::LiveSceneBridge::UpdateStaticStreamingDirectImportService::PublishCamera");
-			UpdateCameraTarget(target);
-		}
 		// Queued requests are level-triggered. A pending material batch is not:
 		// its exact-version awaiter owns the next wake. Re-signalling that passive
 		// wait every frame creates an endless TemplatePublication drain with no
@@ -815,7 +749,6 @@ namespace br::staticimport
 				pendingOrSkipped,
 				upsertsThisFrame,
 				queueBudget,
-				target,
 				std::addressof(dirtyWorkloadSpans));
 		}
 		// Keep the publication handoff observable even after it stops producing
@@ -845,16 +778,10 @@ namespace br::staticimport
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::UpdateStaticStreamingDirectImportService::StatsSnapshot");
 			stats = GetStatsSnapshot();
 		}
-		_counters->staticStreamGeneration = stats.generation;
-		_importState->lastStaticStreamKey = MakeStaticStreamKey(target, _settings->cellRadius);
-		_counters->lastStaticActiveCells = stats.desiredCells;
 		_counters->lastStaticVisitedPlacements = applied + stats.pendingPlacements;
 		_counters->lastStaticAppliedPlacements = _importState->staticAppliedPlacementCount;
 		_counters->lastStaticPendingOrSkippedPlacements = stats.pendingPlacements;
 		_counters->lastStaticUpsertsThisFrame = upsertsThisFrame;
-		_counters->lastStaticCellsEntered = stats.cellsEntered;
-		_counters->lastStaticCellsLeft = stats.cellsLeft;
-		_counters->lastStaticCellsPreparedThisFrame = stats.cellsPrepared;
 		_counters->lastStaticStreamBudgetUsedUs = queueBudget.ElapsedUs();
 		if (!queueBudget.Unlimited() && _counters->lastStaticStreamBudgetUsedUs >= queueBudget.totalUs) {
 			++_counters->staticStreamBudgetExhaustedFrames;
@@ -867,7 +794,7 @@ namespace br::staticimport
 				static_cast<std::uint64_t>(stats.pendingGroups));
 			_counters->staticStreamMaxRemovalQueueDepth = (std::max<std::uint64_t>)(
 				_counters->staticStreamMaxRemovalQueueDepth,
-				static_cast<std::uint64_t>(stats.removalDiffsQueued));
+				static_cast<std::uint64_t>(stats.removalsQueued));
 			BT_PLOT("SARP.StaticImportService.PendingGroups", static_cast<int64_t>(stats.pendingGroups));
 			BT_PLOT("SARP.StaticImportService.PendingPlacements", static_cast<int64_t>(stats.pendingPlacements));
 			BT_PLOT("SARP.StaticImportService.ReadyGroups", static_cast<int64_t>(stats.readyGroupsQueued));
@@ -876,29 +803,17 @@ namespace br::staticimport
 			BT_PLOT("SARP.StaticImportService.MaterialVariantRequests", static_cast<int64_t>(stats.materialVariantRequestsQueued));
 			BT_PLOT("SARP.StaticImportService.ShaderVariantRequests", static_cast<int64_t>(stats.shaderVariantRequestsQueued));
 			BT_PLOT("SARP.StaticRetirement.Queued", static_cast<int64_t>(
-				stats.removalDiffsQueued + stats.retirementRequestsQueued));
+				stats.removalsQueued + stats.retirementRequestsQueued));
 			BT_PLOT("SARP.StaticRetirement.AwaitingPublication", static_cast<int64_t>(
 				stats.retirementsAwaitingPublication));
 			BT_PLOT("SARP.StaticRetirement.CompletionBacklog", static_cast<int64_t>(
 				stats.retirementCompletionsQueued));
-			LogStaticStreamStatus(target);
+			LogStaticStreamStatus();
 		}
 		_counters->staticStreamUpdateUs += ElapsedUs(updateBegin);
 	}
 
-	void StaticImportStreamingPump::DrainRemovals( const StaticStreamBudget& budget, const StaticDesiredCellArea& currentDesiredCells, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans)
-	{
-		// Compatibility-only entry point for downstream branches. RetirementApply
-		// exclusively owns the queue; never drain or mutate ObjectManager here.
-		(void)budget;
-		(void)currentDesiredCells;
-		(void)target;
-		(void)dirtyWorkloadSpans;
-		_shared->staticImportWorkScheduler.Signal(StaticImportWorkSource::RetirementApply);
-		_drains->ScheduleWorkerDrains();
-	}
-
-	void StaticImportStreamingPump::DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, const br::staticimport::StaticStreamTarget& target, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans)
+	void StaticImportStreamingPump::DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans)
 	{
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainReadyDiffs");
 		if (!_shared->hasSceneIngestionServices || !_shared->sceneIngestionServices.objects) {
@@ -913,7 +828,7 @@ namespace br::staticimport
 				_importState->staticRuntimeGroupActiveCount -= (std::min)(
 					_importState->staticRuntimeGroupActiveCount, completion.groups);
 				_counters->staticDirectGroupsRemoved += completion.groups;
-				_counters->lastStaticCellsRemovedThisFrame += completion.groups;
+				_counters->lastStaticGroupsRemovedThisFrame += completion.groups;
 			}
 			BT_PLOT("SARP.StaticRetirement.CompletedBatches", static_cast<int64_t>(completions.size()));
 		}
@@ -935,12 +850,12 @@ namespace br::staticimport
 				++processedDeltas;
 				processedOwnerships += delta.removed.size() + delta.added.size() + delta.retireOnly.size();
 				for (const auto& ownership : delta.removed) {
-					if (!ownership || ownership->residencyClass != StaticImportResidencyClass::CellStatic) continue;
+					if (!ownership || ownership->residencyClass != StaticImportResidencyClass::Placed) continue;
 					retirements.push_back({ ownership, false });
 					++queuedRetirements;
 				}
 				for (const auto& ownership : delta.added) {
-					if (!ownership || ownership->residencyClass != StaticImportResidencyClass::CellStatic) continue;
+					if (!ownership || ownership->residencyClass != StaticImportResidencyClass::Placed) continue;
 					// Published from an add that is no longer the desired one (removed,
 					// or replaced by a re-add): retire it and unpublish that revision.
 					if (!_importState->staticDesiredGroupRevisions.IsDesired(
@@ -970,7 +885,7 @@ namespace br::staticimport
 					}
 				}
 				for (const auto& ownership : delta.retireOnly) {
-					if (!ownership || ownership->residencyClass != StaticImportResidencyClass::CellStatic ||
+					if (!ownership || ownership->residencyClass != StaticImportResidencyClass::Placed ||
 						!ownership->removalPayload) continue;
 					retirements.push_back({ ownership, false });
 					++queuedRetirements;
@@ -1076,7 +991,7 @@ namespace br::staticimport
 						const bool coordinatorLivenessUnchanged =
 							decision.livenessEpoch != 0 &&
 							decision.livenessEpoch == _importState->staticImportCoordinatorLivenessEpoch.load(std::memory_order_acquire) &&
-							decision.targetGeneration == _importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire);
+							decision.hostLivenessGeneration == _importState->staticImportHostLivenessGeneration.load(std::memory_order_acquire);
 						if (!coordinatorLivenessUnchanged) {
 							for (const auto& prepared : decision.item.batch.imports) {
 								if (prepared.hostOwner) {
@@ -1598,7 +1513,7 @@ namespace br::staticimport
 				{
 					BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainReadyDiffs::SelectReadyBatchesForReservation::TrimToDesiredGroups");
 					std::vector<StaticImportGroupAck> droppedAcks;
-					const auto currentGeneration = _importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire);
+					const auto currentGeneration = _importState->staticImportHostLivenessGeneration.load(std::memory_order_acquire);
 					staleBatch = !TrimPreparedBatchToDesiredGroups(
 						batch,
 						_importState->staticDesiredGroupRevisions,
@@ -1791,7 +1706,7 @@ namespace br::staticimport
 		BT_PLOT("SARP.StaticDirect.TransactionReservedThisFrame", static_cast<int64_t>(reservedThisFrame));
 	}
 
-	void StaticImportStreamingPump::LogStaticStreamStatus(const br::staticimport::StaticStreamTarget& target)
+	void StaticImportStreamingPump::LogStaticStreamStatus()
 	{
 		const auto now = std::chrono::steady_clock::now();
 		if ((now - _importState->lastStaticStreamLog) >= std::chrono::seconds(2)) {
@@ -1831,15 +1746,7 @@ namespace br::staticimport
 				publicationWork.claimed,
 				publicationWork.active);
 			spdlog::info(
-				"SARP static streamer: world={:08X} cell=({}, {}) interior={:08X} radius={} active_cells={} entered={} left={} placements={} applied={} pending_or_skipped={} live_static_objects={} pending_static={} queues(prep={} import={} remove={} max_import={} max_remove={}) svc(pending_groups={} pending_places={} ready_tracked={} ready_q={} materialize_q={} validation_q={} backlog={} acks={} prepared={} wait_asset={} wait_variant={} wait_template={} wait_shader={} requeued={} ack_pub={} ack_req={} ack_drop={} stale={} unsupported={}) budget(last_used={}us last_over={}us exhausted_frames={} max_over={}us) frame_work(prepared_cells={} imported_groups={} removed_cells={}) prep_cache(hit={} miss={}) bg(queued={} completed={} stale={} integrated={}) perf_ms(index={} update={} same_cell={} diff={} visit={} remove={} leave={} enter={} prepare={} prune={} pump={} retry={} resolve={} matrix={} object_create={} entity_create={} direct_build={} direct_import={} direct_template={} transform={} asset_lookup={} object_calls={} entity_calls={}) om_ms(transform={} page_upload={} workload={} draw_build={} draw_upload={} active_insert={} finalize={} remove_collect={} remove_pages={} active_remove={} bulk_remove={}) om_packet_ms(resize={} scope={} normal_patch={} packet_build={} packet_publish={}) om_counts(insert_calls={} insert_indices={} remove_calls={} remove_indices={} bulk_remove_calls={} bulk_remove_objects={}) om_compact(queued={} built={} published={} stale={} input={} output={} worker_ms={} publish_ms={}) om_retire(queue={} queued={} retired={} queued_mb={} retired_mb={} worker_ms={}) direct(groups_submitted={} groups_imported={} groups_removed={} templates_created={} templates_reused={} transforms={} draw_records={})",
-				target.worldFormID,
-				target.cellX,
-				target.cellY,
-				target.interiorCellFormID,
-				_settings->cellRadius,
-				_counters->lastStaticActiveCells,
-				_counters->lastStaticCellsEntered,
-				_counters->lastStaticCellsLeft,
+				"SARP static streamer: placements={} applied={} pending_or_skipped={} live_static_objects={} pending_static={} queues(prep={} import={} remove={} max_import={} max_remove={}) svc(pending_groups={} pending_places={} ready_tracked={} ready_q={} materialize_q={} validation_q={} backlog={} acks={} prepared={} wait_asset={} wait_variant={} wait_template={} wait_shader={} requeued={} ack_pub={} ack_req={} ack_drop={} stale={} unsupported={}) budget(last_used={}us last_over={}us exhausted_frames={} max_over={}us) frame_work(imported_groups={} removed_groups={}) perf_ms(update={} visit={} remove={} prune={} pump={} retry={} resolve={} matrix={} object_create={} entity_create={} direct_build={} direct_import={} direct_template={} transform={} asset_lookup={} object_calls={} entity_calls={}) om_ms(transform={} page_upload={} workload={} draw_build={} draw_upload={} active_insert={} finalize={} remove_collect={} remove_pages={} active_remove={} bulk_remove={}) om_packet_ms(resize={} scope={} normal_patch={} packet_build={} packet_publish={}) om_counts(insert_calls={} insert_indices={} remove_calls={} remove_indices={} bulk_remove_calls={} bulk_remove_objects={}) om_compact(queued={} built={} published={} stale={} input={} output={} worker_ms={} publish_ms={}) om_retire(queue={} queued={} retired={} queued_mb={} retired_mb={} worker_ms={}) direct(groups_submitted={} groups_imported={} groups_removed={} templates_created={} templates_reused={} transforms={} draw_records={})",
 				_counters->lastStaticVisitedPlacements,
 				_counters->lastStaticAppliedPlacements,
 				_counters->lastStaticPendingOrSkippedPlacements,
@@ -1847,7 +1754,7 @@ namespace br::staticimport
 				serviceStats.pendingPlacements,
 				StaticPreparationQueueDepth(),
 				serviceStats.pendingGroups,
-				serviceStats.removalDiffsQueued,
+				serviceStats.removalsQueued,
 				_counters->staticStreamMaxImportQueueDepth,
 				_counters->staticStreamMaxRemovalQueueDepth,
 				serviceStats.pendingGroups,
@@ -1873,24 +1780,11 @@ namespace br::staticimport
 				_counters->lastStaticStreamBudgetOverrunUs,
 				_counters->staticStreamBudgetExhaustedFrames,
 				_counters->staticStreamMaxBudgetOverrunUs,
-				_counters->lastStaticCellsPreparedThisFrame,
 				_counters->lastStaticGroupsImportedThisFrame,
-				_counters->lastStaticCellsRemovedThisFrame,
-				0,
-				0,
-				_bus->staticImportCellPrepareJobs.Size(),
-				_bus->staticImportPreparedCellResults.Size(),
-				serviceStats.staleGroupsDropped,
-				serviceStats.cellsPrepared,
-				_counters->staticIndexLoadMs,
+				_counters->lastStaticGroupsRemovedThisFrame,
 				UsToMs(_counters->staticStreamUpdateUs),
-				UsToMs(_counters->staticSameCellFastPathUs),
-				UsToMs(_counters->staticCellDiffUs),
 				UsToMs(_counters->staticStreamVisitUs),
 				UsToMs(_counters->staticStreamRemoveUs),
-				UsToMs(_counters->staticCellLeaveUs),
-				UsToMs(_counters->staticCellEnterUs),
-				UsToMs(_counters->staticCellPrepareUs),
 				UsToMs(_counters->staticStreamPruneUs),
 				UsToMs(_counters->staticStreamPumpUs),
 				UsToMs(_counters->staticPendingAssetRetryUs),

@@ -106,7 +106,7 @@ namespace br::staticimport
 
 		// The variant of a mapped recipe group; its overrides are copied out of `recipe`.
 		[[nodiscard]] virtual StaticMaterialVariant MakeMaterialVariant(
-			const recipe::CellRecipeView& recipe,
+			const recipe::BatchRecipeView& recipe,
 			const recipe::MappedGroup& group) const
 		{
 			(void)recipe;

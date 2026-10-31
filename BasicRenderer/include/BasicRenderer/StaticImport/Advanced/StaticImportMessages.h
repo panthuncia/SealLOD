@@ -3,8 +3,8 @@
 // Static-import message and payload types.
 //
 // These structs/enums are the vocabulary the static streaming pipeline passes
-// between its stages: cell prepare jobs, prepared cells and groups, transaction
-// batches, publication results, retirement and ownership deltas.
+// between its stages: group changes and prepared groups, transaction batches,
+// publication results, retirement and ownership deltas.
 //
 
 #include <array>
@@ -25,8 +25,6 @@
 #include <BasicRenderer/StaticImport/StaticAssetSource.h>
 #include <BasicRenderer/StaticImport/StaticImportExtension.h>
 #include <BasicRenderer/StaticImport/StaticSceneRecipe.h>
-#include <BasicRenderer/StaticImport/StaticStreamTarget.h>
-#include <BasicRenderer/StaticImport/StaticCellGeometry.h>
 #include <BasicRenderer/StaticImport/Advanced/StaticImportCapacityBroker.h>
 #include <BasicRenderer/StaticImport/Advanced/StaticImportRequests.h>
 #include <BasicRenderer/StaticImport/Advanced/StaticImportWorkScheduler.h>
@@ -148,12 +146,8 @@ namespace br::staticimport
 
 	struct PendingStaticGroup
 	{
-		// The cell whose streaming added the group; default (no cell) for groups a
-		// host adds through StaticImportRuntime::AddOrUpdateGroups. Only traces and
-		// diagnostics read it.
-		StaticCellKey cellKey;
 		// Opaque host batch key: preparation packets never span two, and it is
-		// the group's allocation scope. Cell groups use the cell's StaticCellKeyHash.
+		// the group's allocation scope (see StaticImportGroup::batchKey).
 		std::uint64_t batchKey{ 0 };
 		// The group's revision, stamped by the coordinator when it accepts the add
 		// (StaticImportCoordinator::ApplyGroupChanges). Every add and removal of a
@@ -169,7 +163,7 @@ namespace br::staticimport
 		std::vector<DirectX::XMMATRIX> instanceWorldMatrices;
 		std::vector<std::uint32_t> placementIDs;
 		std::vector<br::staticimport::recipe::PreparedPart> recipePreparedParts;
-		std::shared_ptr<const br::staticimport::recipe::CellRecipeView> mappedRecipe;
+		std::shared_ptr<const br::staticimport::recipe::BatchRecipeView> mappedRecipe;
 		std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding;
 		std::shared_ptr<StaticRecipeSceneVariantSlot> recipeVariantSlot;
 		br::staticimport::recipe::RecipeRange mappedPreparedParts;
@@ -177,7 +171,7 @@ namespace br::staticimport
 		bool recipePreparedAuthoritative{ false };
 		br::staticimport::recipe::Group::ImportCost recipeImportCost;
 		std::size_t placementCount{ 0 };
-		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::CellStatic };
+		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::Placed };
 		std::uint64_t residencyGeneration{ 0 };
 		[[nodiscard]] std::string_view ModelPath() const { return mappedModelPath.empty() ? std::string_view{ modelPath } : mappedModelPath; }
 		[[nodiscard]] const br::staticimport::StaticMaterialVariant& MaterialVariant() const
@@ -200,7 +194,7 @@ namespace br::staticimport
 		std::vector<DirectX::XMMATRIX> instanceWorldMatrices;
 		std::vector<std::uint32_t> placementIDs;
 		std::vector<br::staticimport::recipe::PreparedPart> recipePreparedParts;
-		std::shared_ptr<const br::staticimport::recipe::CellRecipeView> mappedRecipe;
+		std::shared_ptr<const br::staticimport::recipe::BatchRecipeView> mappedRecipe;
 		std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding;
 		std::shared_ptr<StaticRecipeSceneVariantSlot> recipeVariantSlot;
 		br::staticimport::recipe::RecipeRange mappedPreparedParts;
@@ -208,7 +202,7 @@ namespace br::staticimport
 		bool recipePreparedAuthoritative{ false };
 		br::staticimport::recipe::Group::ImportCost recipeImportCost;
 		std::size_t placementCount{ 0 };
-		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::CellStatic };
+		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::Placed };
 		std::uint64_t residencyGeneration{ 0 };
 		[[nodiscard]] std::string_view ModelPath() const { return mappedModelPath.empty() ? std::string_view{ modelPath } : mappedModelPath; }
 	};
@@ -234,22 +228,19 @@ namespace br::staticimport
 		std::optional<StaticImportCapacityBroker::Reservation> capacityReservation;
 	};
 
-	struct PreparedStaticCell
+	// A recipe batch's groups, prepared on the host's thread
+	// (StaticImportRuntime::PrepareRecipeBatch): one unsealed lifecycle record per
+	// group id. StaticImportRuntime::AddPreparedGroups adds them; a host that drops
+	// them instead marks the records Cancelled.
+	struct PreparedStaticGroups
 	{
-		StaticCellKey key;
-		std::uint64_t generation{ 0 };
-		std::vector<PreparedStaticGroup> groups;
-		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> lifecycleGroups;
-		std::size_t placementCount{ 0 };
-		std::size_t skippedCount{ 0 };
-		std::uint64_t prepareUs{ 0 };
-		std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding;
-		bool worldspaceResident{ false };
+		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> records;
 	};
 
-	// One host change to the flat group intake (StaticImportRuntime::AddOrUpdateGroups
-	// / RemoveGroups / AddPreparedCell), applied by the coordinator in submission
-	// order: `removes`, then `adds` (unsealed records built on the caller's thread).
+	// One change to the flat group intake (StaticImportRuntime::AddOrUpdateGroups /
+	// RemoveGroups / AddPreparedGroups, and host groups), applied by the coordinator in
+	// submission order: `removes`, then `adds` (unsealed records built on the caller's
+	// thread).
 	struct StaticGroupChanges
 	{
 		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> adds;
@@ -259,7 +250,6 @@ namespace br::staticimport
 	struct StaticGroupIntentToken
 	{
 		std::uint64_t groupID{ 0 };
-		StaticCellKey cellKey;
 		std::uint64_t batchKey{ 0 };
 		std::uint64_t groupRevision{ 0 };
 		std::uint64_t residencyEpoch{ 0 };
@@ -272,10 +262,9 @@ namespace br::staticimport
 		std::uint64_t generation{ 0 };
 		std::uint64_t groupID{ 0 };
 		std::uint64_t admissionTicketID{ 0 };
-		StaticCellKey cellKey;
 		std::uint64_t batchKey{ 0 };
 		std::uint64_t groupRevision{ 0 };
-		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::CellStatic };
+		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::Placed };
 		std::uint64_t residencyGeneration{ 0 };
 		std::shared_ptr<StaticGroupIntentToken> intentToken;
 		// Set on host imports (residency HostImport): the extension that submitted the
@@ -369,7 +358,7 @@ namespace br::staticimport
 		StaticImportMaterializedDecisionKind kind{ StaticImportMaterializedDecisionKind::Cancel };
 		MaterializedDirectStaticImportBatch item;
 		std::vector<StaticImportGroupAck> acks;
-		std::uint64_t targetGeneration{ 0 };
+		std::uint64_t hostLivenessGeneration{ 0 };
 		std::uint64_t livenessEpoch{ 0 };
 		StaticImportTransactionCost cost;
 	};
@@ -412,15 +401,14 @@ namespace br::staticimport
 		mutable std::atomic<RetirementState> retirementState{ RetirementState::Active };
 		mutable std::atomic<bool> appliedCounted{ false };
 		std::uint64_t groupID{ 0 };
-		StaticCellKey cellKey;
-		// The stream target generation the group's batch was published under. Only
-		// cell hooks and traces read it; liveness and retirement compare groupRevision.
+		// The host liveness generation the group's batch was published under. Only
+		// traces read it; liveness and retirement compare groupRevision.
 		std::uint64_t generation{ 0 };
 		std::uint64_t batchKey{ 0 };
 		// The revision of the add this ownership was published from.
 		std::uint64_t groupRevision{ 0 };
 		std::size_t instanceCount{ 0 };
-		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::CellStatic };
+		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::Placed };
 		std::vector<DrawWorkloadKey> workloadKeys;
 		std::shared_ptr<const StaticRecipeVariantBinding> recipeVariantBinding;
 		std::vector<br::staticimport::StaticGroupHold> extensionHolds;
@@ -512,18 +500,9 @@ namespace br::staticimport
 		mutable std::atomic_bool shadersReady{ false };
 	};
 
-	struct StaticImportCellPrepareJob
-	{
-		StaticCellKey key;
-		std::uint64_t generation{ 0 };
-		std::shared_ptr<br::staticimport::recipe::CellRecipeView> mappedRecipe;
-		std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding;
-		std::shared_ptr<br::staticimport::recipe::MappedRecipePack> mappedRecipePack;
-	};
-
 	struct StaticSceneRecipeCompileJob
 	{
-		std::shared_ptr<br::staticimport::recipe::CellRecipe> recipe;
+		std::shared_ptr<br::staticimport::recipe::BatchRecipe> recipe;
 		// The recipe's groups' batch key (allocation scope).
 		std::uint64_t batchKey{ 0 };
 		std::size_t nextGroupIndex{ 0 };
@@ -568,7 +547,7 @@ namespace br::staticimport
 	{
 		br::render::ArtifactSnapshot snapshot;
 		br::render::ArtifactVersionHandle version;
-		std::uint64_t targetGeneration{ 0 };
+		std::uint64_t hostLivenessGeneration{ 0 };
 		std::unordered_map<std::uint64_t, std::uint64_t> publishTickets;
 	};
 
@@ -614,20 +593,10 @@ namespace br::staticimport
 		bool requestQueued{ false };
 	};
 
-	struct StaticImportCameraTarget
-	{
-		br::staticimport::StaticStreamTarget stream;
-		StaticStreamKey key;
-		std::uint64_t generation{ 0 };
-		bool valid{ false };
-	};
-
 	struct StaticImportServiceStats
 	{
+		// The host liveness generation (StaticImportRuntime::NotifyHostLivenessChanged).
 		std::uint64_t generation{ 0 };
-		std::size_t desiredCells{ 0 };
-		std::size_t activeCells{ 0 };
-		std::size_t pendingCellsQueued{ 0 };
 		std::size_t pendingGroups{ 0 };
 		std::size_t readyGroupsTracked{ 0 };
 		std::size_t pendingPlacements{ 0 };
@@ -636,14 +605,11 @@ namespace br::staticimport
 		std::size_t templateRequestsQueued{ 0 };
 		std::size_t materialVariantRequestsQueued{ 0 };
 		std::size_t shaderVariantRequestsQueued{ 0 };
-		std::size_t removalDiffsQueued{ 0 };
+		std::size_t removalsQueued{ 0 };
 		std::size_t retirementRequestsQueued{ 0 };
 		std::size_t retirementsAwaitingPublication{ 0 };
 		std::size_t retirementCompletionsQueued{ 0 };
 		std::size_t pendingHostKeys{ 0 };
-		std::uint64_t cellsEntered{ 0 };
-		std::uint64_t cellsLeft{ 0 };
-		std::uint64_t cellsPrepared{ 0 };
 		std::uint64_t groupsPrepared{ 0 };
 		std::uint64_t groupsWaitingAssets{ 0 };
 		std::uint64_t groupsWaitingVariants{ 0 };
@@ -656,15 +622,13 @@ namespace br::staticimport
 		std::uint64_t groupsAckRequeued{ 0 };
 		std::uint64_t groupsAckDropped{ 0 };
 		std::vector<std::string> pendingGroupDiagnostics;
-		std::uint64_t cellDiffUs{ 0 };
-		std::uint64_t cellPrepareUs{ 0 };
 		std::uint64_t groupBuildUs{ 0 };
 		std::uint64_t objectPlanPrepareUs{ 0 };
 	};
 
 	struct StaticSceneRecipeCompileKey
 	{
-		br::staticimport::recipe::CellKey cell;
+		br::staticimport::recipe::BatchKey key;
 		std::uint64_t sourceFingerprint{ 0 };
 		friend bool operator==(const StaticSceneRecipeCompileKey&, const StaticSceneRecipeCompileKey&) = default;
 	};
@@ -673,13 +637,8 @@ namespace br::staticimport
 	{
 		std::size_t operator()(const StaticSceneRecipeCompileKey& key) const noexcept
 		{
-			std::uint64_t value = key.sourceFingerprint ^ key.cell.worldFormID;
-			const auto mix = [&value](std::uint64_t item) {
-				value ^= item + 0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
-			};
-			mix(key.cell.interiorCellFormID);
-			mix(static_cast<std::uint32_t>(key.cell.cellX));
-			mix(static_cast<std::uint32_t>(key.cell.cellY));
+			std::uint64_t value = key.sourceFingerprint;
+			value ^= br::staticimport::recipe::BatchKeyHash{}(key.key) + 0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
 			return static_cast<std::size_t>(value);
 		}
 	};
@@ -738,7 +697,6 @@ namespace br::staticimport
 	struct StaticImportGroupPrepareJob
 	{
 		std::uint64_t generation{ 0 };
-		StaticImportCameraTarget target;
 		std::vector<DirectStaticPrepareInput> inputs;
 		StaticTemplateRefSnapshot templateRefs;
 	};
@@ -766,7 +724,8 @@ namespace br::staticimport
 	{
 		std::uint64_t gateID{ 0 };
 		std::uint64_t fingerprint{ 0 };
-		StaticImportCameraTarget target;
+		// The host liveness generation the variant was requested under.
+		std::uint64_t generation{ 0 };
 		std::shared_ptr<StaticGroupLifecycleRecord> representative;
 	};
 
@@ -787,7 +746,6 @@ namespace br::staticimport
 	struct PreparedStaticGroupArtifact
 	{
 		std::uint64_t packetID{ 0 };
-		StaticCellKey cellKey;
 		std::uint64_t packetRevision{ 0 };
 		std::uint64_t placementCount{ 0 };
 		std::vector<std::shared_ptr<StaticGroupIntentToken>> intentTokens;

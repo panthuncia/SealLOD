@@ -1,6 +1,6 @@
 #pragma once
 
-// Static-import budgets, caps and streaming radius.
+// Static-import budgets and caps.
 //
 // The static import pipeline reads these once, when its runtime is constructed, and
 // keeps them for its lifetime. A host fills the struct from its own configuration
@@ -17,16 +17,15 @@ namespace br::staticimport
 	// How the pipeline uses the static scene recipe cache (StaticSceneRecipe.h).
 	enum class StaticRecipeCacheMode : std::uint8_t
 	{
-		Off,       // No cache: every cell is grouped from the placement source.
+		Off,       // No cache: lookups miss and the host groups every batch itself.
 		Read,      // Cached recipes are used; cache misses are not written back.
 		ReadWrite  // Cache misses are compiled once their assets are ready and persisted.
 	};
 
 	struct StaticImportSettings
 	{
-		// Streaming target.
+		// Whether the runtime imports at all; Tick does nothing while it is false.
 		bool streamingEnabled = true;
-		std::uint32_t cellRadius = 5;
 		std::uint32_t logFrameSpikeMs = 8;
 
 		// Recipe cache.
@@ -41,12 +40,13 @@ namespace br::staticimport
 		std::uint32_t burstHeadroomUs = 12000;
 		float removeBudgetFraction = 0.5F;
 
-		// Cell preparation.
-		std::uint32_t maxCellPrepareJobsPerPass = 0;
-		std::uint32_t maxOutstandingCellPrepareJobs = 0;
-		std::uint32_t maxPreparedCellDrainPerPass = 64;
+		// Group intake. maxGroupChangesDrainPerPass counts the queued group changes
+		// (one AddOrUpdateGroups / RemoveGroups / AddPreparedGroups call each) the
+		// coordinator takes per pass; maxRemoveGroupsPerFrame the removed groups one
+		// retirement pass applies.
+		std::uint32_t maxGroupChangesDrainPerPass = 64;
 		std::uint32_t maxTemplateRequestsPerFrame = 256;
-		std::uint32_t maxRemoveCellsPerFrame = 0;
+		std::uint32_t maxRemoveGroupsPerFrame = 0;
 
 		// Group preparation packets and credits.
 		std::uint32_t preparationPacketGroups = 256;

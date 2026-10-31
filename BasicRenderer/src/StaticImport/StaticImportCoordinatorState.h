@@ -1,6 +1,6 @@
 #pragma once
 
-// The coordinator's own state: the cells and groups it tracks, the graph ownership
+// The coordinator's own state: the groups it tracks, the graph ownership
 // it publishes from, its dependency waiters and template references. Only the
 // coordinator reads or writes it, on the coordinator thread.
 
@@ -37,12 +37,7 @@ namespace br::staticimport
 		}
 
 		StaticImportServiceStats stats;
-		std::optional<StaticStreamKey> lastKey;
-		StaticDesiredCellArea desiredCells;
-		std::unordered_map<StaticCellKey, std::vector<std::uint64_t>, StaticCellKeyHash> activeCellGroups;
-		std::deque<StaticImportCellPrepareJob> pendingCellQueue;
-		std::unordered_set<StaticCellKey, StaticCellKeyHash> pendingCellKeys;
-		// The flat group intake (ApplyGroupChanges): every cell-static group that is
+		// The flat group intake (ApplyGroupChanges): every placed group that is
 		// wanted, at its current revision. Host-resident groups keep their extension
 		// liveness and are not listed. Mirrored to staticDesiredGroupRevisions.
 		std::unordered_map<std::uint64_t, StaticDesiredGroup> desiredGroups;
@@ -52,7 +47,7 @@ namespace br::staticimport
 		std::unordered_map<std::uint64_t, std::shared_ptr<StaticGroupLifecycleRecord>> pendingGroups;
 		std::deque<std::uint64_t> pendingGroupQueue;
 		// The prefix is variant-sorted and can be consumed without repeatedly
-		// sorting groups appended by concurrently completing cell preparation.
+		// sorting groups appended by concurrently arriving group changes.
 		// Once it is exhausted, the accumulated tail becomes the next cohort.
 		std::size_t pendingGroupSortedPrefix{ 0 };
 		std::unordered_set<std::uint64_t> pendingQueued;
@@ -66,7 +61,7 @@ namespace br::staticimport
 		std::unordered_map<br::render::ArtifactAddress, br::render::ArtifactVersionHandle,
 			br::render::ArtifactAddress::Hasher> variantArtifactVersions;
 		// Terminal variant failures are durable for their source fingerprint. A
-		// radius load prepares cells concurrently, so additional groups using a
+		// large load adds groups concurrently, so additional groups using a
 		// failed variant can arrive after its one graph terminal notification.
 		std::unordered_set<br::render::ArtifactAddress,
 			br::render::ArtifactAddress::Hasher> failedVariantAddresses;
@@ -155,7 +150,10 @@ namespace br::staticimport
 		std::unordered_set<std::string> pendingAssetPublishKeys;
 		std::unordered_set<std::string> pendingMaterialVariantKeys;
 		std::unordered_set<std::string> pendingShaderVariantKeys;
-		StaticImportCameraTarget latestTarget;
+		// The host liveness generation the coordinator last took
+		// (StaticImportPipelineState::staticImportHostLivenessGeneration); stamped on
+		// the work it schedules.
+		std::uint64_t hostLivenessGeneration{ 0 };
 		std::chrono::steady_clock::time_point lastStatsPublish{};
 		std::chrono::steady_clock::time_point lastBlockedHostKeyDiagnostic{};
 		std::chrono::steady_clock::time_point lastPendingGroupDiagnostic{};

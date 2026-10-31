@@ -13,15 +13,15 @@
 #include <BasicRenderer/StaticImport/StaticImportExtension.h>
 #include <BasicRenderer/Pipeline/ShaderVariantRequestService.h>
 
-#include <BasicRenderer/StaticImport/StaticCellGeometry.h>
-
 namespace br::staticimport
 {
 
+	// Placed: a group the host added through the flat intake (AddOrUpdateGroups,
+	// AddPreparedGroups); it is live while that add is the desired one.
 	// HostGroup: a group whose residency an extension manages (see StaticHostGroupRequest).
 	// HostImport: a prepared import an extension submitted and takes back on publication
 	// (see br::staticimport::StaticHostImportPublication).
-	enum class StaticImportResidencyClass : std::uint8_t { CellStatic, HostGroup, HostImport };
+	enum class StaticImportResidencyClass : std::uint8_t { Placed, HostGroup, HostImport };
 
 	struct DirectStaticTemplateKey
 	{
