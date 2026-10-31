@@ -836,8 +836,11 @@ namespace br::staticimport
 		_state.lastStatsPublish = now;
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::PublishStats");
 		RefreshBlockedStats();
+		// Not on `force`: stats are forced on every drain once no group is pending,
+		// and blocked host cells can outlive the load, so forcing this dump wrote
+		// thousands of lines a second for the rest of the run.
 		if (_importState->benchmarkDiagnosticsEnabled && BlockedHostCellCount() != 0 &&
-			(force || _state.lastBlockedHostCellDiagnostic == std::chrono::steady_clock::time_point{} ||
+			(_state.lastBlockedHostCellDiagnostic == std::chrono::steady_clock::time_point{} ||
 			 now - _state.lastBlockedHostCellDiagnostic >= std::chrono::seconds(10))) {
 			_state.lastBlockedHostCellDiagnostic = now;
 			std::size_t emitted = 0;
