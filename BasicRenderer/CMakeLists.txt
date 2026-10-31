@@ -460,6 +460,9 @@ set(SOURCES
     "src/Scene/Scene.cpp"
     "src/Scene/Views/ViewManager.cpp"
     # src/StaticImport
+    "src/StaticImport/StaticImportCoordinator.cpp"
+    "src/StaticImport/StaticImportRuntime.cpp"
+    "src/StaticImport/StaticImportStreamingPump.cpp"
     "src/StaticImport/StaticSceneRecipe.cpp"
     # src/Telemetry
     "src/Diagnostics/Telemetry/FrameTaskGraphTelemetry.cpp"
