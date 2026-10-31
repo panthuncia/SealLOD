@@ -8,7 +8,6 @@ namespace org { class RenderGraph; }
 
 class TextureFactory;
 class ITextureStreamingFeedbackService;
-namespace br { class ReadbackManager; }
 namespace org::runtime { class IUploadService; }
 
 namespace br::render {
@@ -17,16 +16,16 @@ namespace br::render {
 class RenderGraphIOService final {
 public:
     RenderGraphIOService(TextureFactory&, std::shared_ptr<org::runtime::IUploadService>,
-        br::ReadbackManager&, ITextureStreamingFeedbackService&) noexcept;
+        ITextureStreamingFeedbackService&) noexcept;
 
     void SetRegistry(org::ResourceRegistry&);
     void GatherStructuralPasses(std::vector<org::ExternalPassDesc>&);
-    void GatherFramePasses(std::vector<org::ExternalPassDesc>&);
+    // After each frame graph execution: submits the texture-streaming feedback readback.
+    void AfterExecute(org::RenderGraph&);
 
 private:
     TextureFactory* m_textures;
     std::shared_ptr<org::runtime::IUploadService> m_uploads;
-    br::ReadbackManager* m_readbacks;
     ITextureStreamingFeedbackService* m_textureStreamingFeedback;
 };
 

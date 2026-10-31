@@ -1,6 +1,6 @@
 #include "Runtime/IO/ReadbackManager.h"
 #include "Resources/Buffers/Buffer.h"
-#include "Render/PassBuilders.h"
+#include "OpenRenderGraph/ExternalClient.h"
 
 #include <DirectXTex.h>
 #include <spdlog/spdlog.h>
@@ -142,15 +142,10 @@ void SaveTextureReadbackToDds(
 
 ReadbackManager::ReadbackManager() {
     m_state = std::make_shared<State>();
-    m_readbackPass = std::make_shared<ReadbackPass>(m_state);
 }
 
 void ReadbackManager::Initialize(rhi::Timeline readbackFence) {
     m_readbackFence = readbackFence;
-    if (m_readbackPass) {
-        m_readbackPass->Setup();
-        m_readbackPass->SetReadbackFence(readbackFence);
-    }
 }
 
 void ReadbackManager::RequestReadback(std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap) {
@@ -164,49 +159,35 @@ void ReadbackManager::RequestReadback(std::shared_ptr<org::PixelBuffer> texture,
         });
 }
 
-void ReadbackManager::ClearReadbacks() {
-    std::scoped_lock lock(m_state->mutex);
-    m_state->queuedReadbacks.clear();
-}
-
 void ReadbackManager::Cleanup() {
     std::scoped_lock lock(m_state->mutex);
     m_state->accepting = false;
     m_state->queuedReadbacks.clear();
     m_state->readbackRequests.clear();
-    m_readbackPass.reset();
 }
 
-bool ReadbackManager::ReadbackPass::DeclaredResourcesChanged() const
+void ReadbackManager::Submit(org::ExternalClient& client, uint32_t queueSlot)
 {
-    std::scoped_lock lock(m_state->mutex);
-    return m_state->accepting && !m_state->queuedReadbacks.empty();
-}
-
-void ReadbackManager::ReadbackPass::Declare(org::PassBuilder& builder)
-{
-    std::scoped_lock lock(m_state->mutex);
-    for (const auto& readback : m_state->queuedReadbacks)
-        if (readback.texture) builder.CopySource(readback.texture);
-    builder.PreferQueue(org::QueueKind::Graphics);
-}
-
-ReadbackManager::ReadbackFrameData ReadbackManager::ReadbackPass::Prepare(
-    const org::PassPrepareContext& preparation)
-{
-    ReadbackFrameData frame;
     std::vector<ReadbackInfo> inputs;
     {
         std::scoped_lock lock(m_state->mutex);
-        if (!m_state->accepting) return frame;
+        if (!m_state->accepting || m_state->queuedReadbacks.empty()) return;
         inputs = std::move(m_state->queuedReadbacks);
         m_state->queuedReadbacks.clear();
     }
-    if (inputs.empty()) return frame;
 
-    const uint64_t fenceValue =
-        m_state->nextFenceValue.fetch_add(1, std::memory_order_relaxed) + 1;
+    struct Copy {
+        rhi::ResourceHandle source{};
+        rhi::ResourceHandle destination{};
+        rhi::CopyableFootprint footprint{};
+        uint32_t mip = 0, slice = 0;
+    };
+    std::vector<Copy> copies;
+    std::vector<org::ExternalClient::Access> accesses;
     std::vector<ReadbackRequest> requests;
+    const uint64_t fenceValue = m_state->nextFenceValue.fetch_add(1, std::memory_order_relaxed) + 1;
+    const org::ResourceState copySource{rhi::ResourceAccessType::CopySource, rhi::ResourceLayout::CopySource,
+        rhi::ResourceSyncState::Copy};
     auto device = DeviceManager::GetInstance().GetDevice();
     for (const auto& input : inputs) {
         if (!input.texture) continue;
@@ -222,12 +203,11 @@ ReadbackManager::ReadbackFrameData ReadbackManager::ReadbackPass::Prepare(
             range, footprints.data(), static_cast<uint32_t>(footprints.size()));
         auto buffer = org::Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
         buffer->SetName("Readback");
-        preparation.Retain(buffer);
-        const auto source = preparation.CaptureResource(input.texture->GetGlobalResourceID());
+        accesses.push_back({input.texture.get(), {}, copySource});
         for (uint32_t slice = 0; slice < slices; ++slice) {
             for (uint32_t mip = 0; mip < mipCount; ++mip) {
                 const uint32_t index = CalcSubresource(mip, slice, 0, mipCount, slices);
-                frame.copies.push_back({source, buffer->GetAPIResource().GetHandle(),
+                copies.push_back({input.texture->GetAPIResource().GetHandle(), buffer->GetAPIResource().GetHandle(),
                     footprints[index], mip, slice});
             }
         }
@@ -257,51 +237,33 @@ ReadbackManager::ReadbackFrameData ReadbackManager::ReadbackPass::Prepare(
         };
         requests.push_back(std::move(request));
     }
+    if (requests.empty()) return;
 
-    struct Reservation final : org::PreparedLifecycleEffect {
-        std::shared_ptr<State> state;
-        std::vector<ReadbackInfo> inputs;
-        mutable std::vector<ReadbackRequest> requests;
-        org::ExternalTimelinePoint signal{};
-        mutable std::atomic<bool> resolved{false};
-        std::span<const org::ExternalTimelinePoint> SignalsAfterCompletion() const override {
-            return {&signal, 1u};
-        }
-        void Submitted(org::SubmissionContext) const override {
-            if (resolved.exchange(true)) return;
-            std::scoped_lock lock(state->mutex);
-            for (auto& request : requests)
-                state->readbackRequests.push_back(std::move(request));
-        }
-        void Abandoned(org::AbandonReason) const override {
-            if (resolved.exchange(true)) return;
-            std::scoped_lock lock(state->mutex);
-            if (!state->accepting) return;
-            for (auto& input : inputs)
-                state->queuedReadbacks.push_back(std::move(input));
-        }
-    };
-    auto reservation = std::make_shared<Reservation>();
-    reservation->state = m_state;
-    reservation->inputs = std::move(inputs);
-    reservation->requests = std::move(requests);
-    reservation->signal = {m_readbackFence, fenceValue};
-    preparation.Reserve(std::move(reservation));
-    return frame;
-}
-
-void ReadbackManager::ReadbackPass::Record(
-    const ReadbackFrameData& frame, org::PassRecordContext& recording)
-{
-    for (const auto& copy : frame.copies) {
-        rhi::BufferTextureCopyFootprint region{};
-        region.texture = recording.Resolve(copy.source).GetHandle();
-        region.buffer = copy.destination;
-        region.mip = copy.mip;
-        region.arraySlice = copy.slice;
-        region.footprint = copy.footprint;
-        recording.Commands().CopyTextureToBuffer(region);
+    // The textures stay alive through the copy because the requests and inputs hold them until it completes.
+    const rhi::TimelinePoint signal{m_readbackFence.GetHandle(), fenceValue};
+    try {
+        client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
+            for (const auto& copy : copies) {
+                rhi::BufferTextureCopyFootprint region{};
+                region.texture = copy.source;
+                region.buffer = copy.destination;
+                region.mip = copy.mip;
+                region.arraySlice = copy.slice;
+                region.footprint = copy.footprint;
+                list.CopyTextureToBuffer(region);
+            }
+        }, {&signal, 1}, std::make_shared<std::vector<ReadbackInfo>>(inputs));
+    } catch (const std::exception& error) {
+        // Nothing was submitted. Queue the requests again for the next frame.
+        spdlog::error("ReadbackManager: readback submission failed: {}", error.what());
+        std::scoped_lock lock(m_state->mutex);
+        if (m_state->accepting)
+            for (auto& input : inputs) m_state->queuedReadbacks.push_back(std::move(input));
+        return;
     }
+    std::scoped_lock lock(m_state->mutex);
+    for (auto& request : requests)
+        m_state->readbackRequests.push_back(std::move(request));
 }
 
 void ReadbackManager::ProcessReadbackRequests() {

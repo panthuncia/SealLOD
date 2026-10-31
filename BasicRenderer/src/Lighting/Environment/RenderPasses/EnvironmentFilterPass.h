@@ -11,6 +11,7 @@
 #include "Utilities/Utilities.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
 
+#include <algorithm>
 #include <vector>
 #include <span>
 #include <utility>
@@ -23,15 +24,19 @@ struct EnvironmentFilterBindings {
     };
     org::PipelineState pipeline;
     std::vector<Job> jobs;
+    // The work of each job, in the same order. Executions take work only from it (PreparesOnlyDeclaredWork).
+    br::render::EnvironmentPrefilterWorkQueue::Snapshot declared;
 };
+// Indices into EnvironmentFilterBindings::jobs of the jobs this execution took.
 struct EnvironmentFilterFrame {
-    bool active = false;
+    std::vector<uint32_t> jobs;
 };
 
 class EnvironmentFilterPass : public org::TypedRenderGraphPass<EnvironmentFilterPass,
     EnvironmentFilterFrame, EnvironmentFilterBindings>, public org::IDynamicDeclaredResources {
 public:
-    EnvironmentFilterPass() {
+    // Runs in the environment job graph (EnvironmentJobGraph): it takes its work queue directly.
+    explicit EnvironmentFilterPass(br::render::EnvironmentPrefilterWorkQueue work) : m_work(std::move(work)) {
         CreatePrefilterPSO();
     }
 
@@ -51,6 +56,7 @@ public:
             auto destination = builder.UnorderedAccess(j->work.dstPrefilteredCubemap, std::span<const org::UavView>(views));
             for (uint32_t view = 0; view < views.size(); ++view) job.destinationFaces.push_back(destination.View(view));
             bindings.jobs.push_back(std::move(job));
+            bindings.declared.push_back(j);
         }
 
         m_declaredResourcesChanged = false;
@@ -59,26 +65,28 @@ public:
 
 
 
-    void Update(const org::UpdateExecutionContext& context) override {
-        const auto* input = context.hostData->Get<UpdateContext>();
-        m_work = input->environmentWork.prefilter;
+    void Update(const org::UpdateExecutionContext&) override {
         auto pending = m_work.Pending();
         if (pending != m_pending) { m_pending = std::move(pending); m_declaredResourcesChanged = true; }
     }
 
-    EnvironmentFilterFrame Prepare(const EnvironmentFilterBindings&,
+    // Takes only jobs the bindings declare: while a new declaration builds, executions still get the old one. Taking a
+    // job leaves the queue's pending work smaller, so the next Update redeclares without it.
+    EnvironmentFilterFrame Prepare(const EnvironmentFilterBindings& bindings,
         const org::PassPrepareContext& preparation) {
-        if (m_pending.empty()) return {};
-        m_work.Reserve(m_pending, preparation);
-        m_pending.clear(); m_declaredResourcesChanged = true;
-        return {true};
+        EnvironmentFilterFrame frame;
+        const auto taken = m_work.ReserveAvailable(bindings.declared, preparation);
+        for (const auto& entry : taken)
+            frame.jobs.push_back(static_cast<uint32_t>(
+                std::find(bindings.declared.begin(), bindings.declared.end(), entry) - bindings.declared.begin()));
+        return frame;
     }
 
     static void Record(const EnvironmentFilterBindings& bindings, const EnvironmentFilterFrame& frame,
         org::PassRecordContext& context) {
-        if (!frame.active) return;
         bool bound = false;
-        for (const auto& job : bindings.jobs) {
+        for (const auto index : frame.jobs) {
+            const auto& job = bindings.jobs[index];
             const auto src = context.Index(job.source);
             const auto mipCount = job.mipCount;
             for (uint32_t mip = 0; mip < mipCount; ++mip) {
@@ -98,6 +106,7 @@ public:
     bool DeclaredResourcesChanged() const override {
         return m_declaredResourcesChanged;
     }
+    bool PreparesOnlyDeclaredWork() const noexcept override { return true; }
 
 
 

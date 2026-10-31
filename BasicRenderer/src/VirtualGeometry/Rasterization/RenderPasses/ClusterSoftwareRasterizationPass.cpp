@@ -310,7 +310,7 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
         builder->IndirectArguments(m_rasterBucketsIndirectArgsBuffer)};
 
     m_viewRasterInfoTable.Declare(*builder);
-    bindings.viewRasterInfoLayout = m_viewRasterInfoTable.Layout();
+    bindings.viewRasterInfoLayout = m_viewRasterInfoTable.Declaration();
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         bindings.virtualShadow = true;
         builder->ShaderResource(Builtin::Shadows::CLodDirectionalPageViewInfo);
@@ -370,7 +370,7 @@ ClusterSoftwareRasterFrame ClusterSoftwareRasterizationPass::Prepare(
     if (!context) throw std::logic_error("CLod software-raster preparation requires the owned render snapshot");
     frame.enabled = true;
     frame.viewRasterInfoTable =
-        bindings.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoPublisher, m_viewRasterInfoTable.Rows());
+        m_viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher, bindings.viewRasterInfoLayout);
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         frame.pageTableResolution = config.pageTableResolution;

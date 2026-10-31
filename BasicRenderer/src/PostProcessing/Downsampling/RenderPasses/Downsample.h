@@ -118,6 +118,9 @@ public:
         }
     }
 
+    // Its SPD constants (mip count, dispatch size) are made per declaration, and it redeclares on a resize or when a
+    // depth map comes or goes. Building that inline beats a frame or two of old constants on the new texture.
+    bool PreparesOnlyDeclaredWork() const noexcept override { return false; }
     bool DeclaredResourcesChanged() const override {
         return m_declaredResourcesChanged;
     }

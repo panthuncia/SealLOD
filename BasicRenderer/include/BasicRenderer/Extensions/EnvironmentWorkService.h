@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 
@@ -19,8 +20,11 @@ struct EnvironmentConversionWork {
     std::uint32_t environmentIndex = 0;
     std::shared_ptr<org::ResourceGroup> sourceGroup;
     std::shared_ptr<std::mutex> publicationMutex;
+    // Runs under publicationMutex once the conversion is submitted, not when it is discarded. It queues the work that
+    // reads the converted cubemap (SH and prefiltering), so that work never runs before the conversion.
+    std::function<void()> then;
     void Commit() const;
-    void Discard() const { Commit(); }
+    void Discard() const;
 };
 struct EnvironmentPrefilterWork {
     std::shared_ptr<org::PixelBuffer> srcCubemap, dstPrefilteredCubemap;

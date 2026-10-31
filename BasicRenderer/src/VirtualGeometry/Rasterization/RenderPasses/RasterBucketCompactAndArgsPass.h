@@ -5,7 +5,6 @@
 #include <rhi.h>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "Interfaces/IDynamicDeclaredResources.h"
 
 namespace org { class Buffer; }
 
@@ -31,8 +30,7 @@ struct RasterBucketCompactAndArgsFrame {
 };
 
 class RasterBucketCompactAndArgsPass : public org::TypedRenderGraphPass<RasterBucketCompactAndArgsPass,
-    RasterBucketCompactAndArgsFrame, RasterBucketCompactAndArgsBindings>,
-    public org::IDynamicDeclaredResources {
+    RasterBucketCompactAndArgsFrame, RasterBucketCompactAndArgsBindings> {
 public:
     RasterBucketCompactAndArgsPass(
         std::shared_ptr<org::Buffer> visibleClustersBuffer,
@@ -62,7 +60,6 @@ public:
     static void Record(const RasterBucketCompactAndArgsBindings&,
         const RasterBucketCompactAndArgsFrame&, org::PassRecordContext&);
     void Update(const org::UpdateExecutionContext& executionContext) override;
-    bool DeclaredResourcesChanged() const override;
 
 private:
     org::PipelineState m_pso;
@@ -92,5 +89,4 @@ private:
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     uint32_t m_numBuckets = 0;
     bool m_enabled = false;
-    bool m_declaredResourcesChanged = true;
 };

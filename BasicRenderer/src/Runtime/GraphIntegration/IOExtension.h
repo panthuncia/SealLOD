@@ -21,9 +21,8 @@ public:
         m_service->GatherStructuralPasses(passes);
     }
 
-    void GatherFramePasses(org::RenderGraph&,
-        std::vector<org::ExternalPassDesc>& passes) override {
-        m_service->GatherFramePasses(passes);
+    void AfterExecute(org::RenderGraph& graph) override {
+        m_service->AfterExecute(graph);
     }
 
 private:

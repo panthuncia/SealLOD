@@ -167,7 +167,7 @@ ReyesSplitFrameData ReyesSplitPass::Prepare(const ReyesSplitBindings& bindings,
 {
     ReyesSplitFrameData data{};
     if (bindings.hasViewDepth) {
-        data.viewDepthTableIndex = bindings.viewDepthLayout.Publish(preparation, m_viewDepthPublisher, m_viewDepthTable.Rows());
+        data.viewDepthTableIndex = m_viewDepthTable.Publish(preparation, m_viewDepthPublisher, bindings.viewDepthLayout);
     }
     return data;
 }

@@ -43,7 +43,7 @@ public:
     void Shutdown(org::RenderGraph& rg) override;
     void OnRegistryReset(org::ResourceRegistry* reg) override;
     void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) override;
-    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) override;
+    void AfterExecute(org::RenderGraph& rg) override;
     std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
     std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
 

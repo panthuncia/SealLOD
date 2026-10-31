@@ -198,7 +198,7 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
         builder->ShaderResource(m_visibleClustersBuffer).View(),
         builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         {}};
-    bindings.viewRasterInfoLayout = m_viewRasterInfoTable.Layout();
+    bindings.viewRasterInfoLayout = m_viewRasterInfoTable.Declaration();
     bindings.voxelWorkCapacity = m_voxelWorkCapacity;
     bindings.hasTelemetry = static_cast<bool>(m_telemetryBuffer);
     if (bindings.hasTelemetry) bindings.telemetry = builder->UnorderedAccess(m_telemetryBuffer).View();
@@ -236,7 +236,7 @@ VoxelRasterFrame VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBindin
     VoxelRasterFrame frame{};
     frame.telemetry = bindings.hasTelemetry && IsCLodWorkGraphTelemetryEnabled();
     frame.viewRasterInfoTable =
-        bindings.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoPublisher, m_viewRasterInfoTable.Rows());
+        m_viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher, bindings.viewRasterInfoLayout);
     if (bindings.virtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
         frame.pageTableResolution = config.pageTableResolution;

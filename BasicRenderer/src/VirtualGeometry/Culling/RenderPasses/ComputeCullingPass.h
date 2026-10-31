@@ -58,7 +58,6 @@ private:
     org::PreparedTablePublisher m_viewRasterInfoTable{"CLod Dispatch Culling View Raster Info"};
     org::PreparedTablePublisher m_viewDepthTable{"CLod Dispatch Culling View Depth SRV Indices"};
 
-    br::render::CullingDrawSetTracker m_drawSets;
     std::vector<uint32_t> m_zeroTelemetryScratch;
     bool m_declaredResourcesChanged = true;
 };

@@ -61,12 +61,6 @@ AVBOITIntegrateBindings AVBOITIntegratePass::Declare(org::PassBuilder& builder)
 void AVBOITIntegratePass::Update(const org::UpdateExecutionContext& executionContext)
 {
     (void)executionContext;
-    m_declaredResourcesChanged = false;
-}
-
-bool AVBOITIntegratePass::DeclaredResourcesChanged() const
-{
-    return m_declaredResourcesChanged;
 }
 
 AVBOITIntegrateFrame AVBOITIntegratePass::Prepare(

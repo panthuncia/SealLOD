@@ -43,7 +43,7 @@ struct WorkGraphReyesBindings {
 struct WorkGraphCullingBindings {
     org::PipelineState clearPipeline, createCommandPipeline;
     org::ResourceBindingToken scratch;
-    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;  // SW classification only.
+    CLodViewRasterDeclaration viewRasterInfoLayout;  // SW classification only.
     org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;    // Per-view depth occlusion only.
     org::DeclaredViewToken visible, transforms, visibleCounter, visibleCounterSrv, swCounter, histogram, telemetry;
     org::DeclaredViewToken replay, replayState, replayStateSrv, nodeInputs;
@@ -90,7 +90,7 @@ public:
     static void Record(const WorkGraphCullingBindings& bindings, const WorkGraphCullingFrame& frame,
         org::PassRecordContext& context);
     void Update(const org::UpdateExecutionContext& executionContext) override;
-    bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
+    bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged || m_scratchChanged; }
     std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
     std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
 
@@ -142,7 +142,7 @@ private:
     org::PreparedTablePublisher m_viewRasterInfoTable{"CLod Culling View Raster Info"};
     org::PreparedTablePublisher m_viewDepthTable{"CLod Culling View Depth SRV Indices"};
 
-    br::render::CullingDrawSetTracker m_drawSets;
     std::vector<uint32_t> m_zeroTelemetryScratch;
     bool m_declaredResourcesChanged = true;
+    bool m_scratchChanged = false; // A recompiled work graph needed a new scratch buffer (Declare clears it).
 };

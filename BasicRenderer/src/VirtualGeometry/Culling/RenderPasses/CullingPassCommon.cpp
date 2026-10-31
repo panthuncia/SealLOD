@@ -86,29 +86,6 @@ void DeclareCullingWorkloadInputs(org::RenderPassBuilder& builder, const Culling
         PublishedStateSource::ProcessSource(), visibilityGenerationQuery));
 }
 
-bool CullingDrawSetTracker::Update(const std::shared_ptr<const PublishedRendererState>& state,
-    const CullingPassConfig& config)
-{
-    ZoneScopedN("Culling::CheckDeclaredDrawSetRevision");
-    const uint64_t revision = state ? state->activeDrawLists.revision : 0u;
-    if (revision == m_revision) return false;
-    m_revision = revision;
-
-    std::vector<uint64_t> resourceIds;
-    {
-        ZoneScopedN("Culling::CollectDeclaredDrawSets");
-        const auto resources = state && state->resourceCatalog
-            ? state->resourceCatalog->FindAll(ActiveDrawListQuery(config))
-            : PublishedResourceCatalog::ResourceList{};
-        for (const auto& resource : resources) if (resource) resourceIds.push_back(resource->GetGlobalResourceID());
-        std::sort(resourceIds.begin(), resourceIds.end());
-        resourceIds.erase(std::unique(resourceIds.begin(), resourceIds.end()), resourceIds.end());
-    }
-    if (resourceIds == m_resourceIds) return false;
-    m_resourceIds = std::move(resourceIds);
-    return true;
-}
-
 void ResetCullingCounter(const std::shared_ptr<org::Buffer>& counter, const CullingUploader& upload)
 {
     const uint32_t zero = 0u;

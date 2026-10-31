@@ -858,6 +858,13 @@ org::DeclaredViewToken WindScalarView(org::DeclaredResourceUse use, const char* 
     return use.views.front();
 }
 
+// The inverse-bind table's view, declared by name: the skeleton resolver's table rotates in place as poses publish, which
+// is a binding edit. Before the resolver has a table, there is no view; the passes redeclare once it has one.
+org::DeclaredViewToken WindInverseBindView(org::PassBuilder& builder) {
+    const auto use = builder.ShaderResource(Builtin::SkeletonResources::InverseBindMatrices);
+    return use.views.size() == 1 ? use.views.front() : org::DeclaredViewToken{};
+}
+
 WindTransientViews DeclareWindTransientViews(org::PassBuilder& builder, const WindSharedResources& resources) {
     WindTransientViews views{};
     views.types = builder.ShaderResource(resources.windTypes).View();
@@ -873,9 +880,7 @@ WindTransientViews DeclareWindTransientViews(org::PassBuilder& builder, const Wi
     views.skinningInfo = WindScalarView(builder.UnorderedAccess(Builtin::SkeletonResources::SkinningInstanceInfo), "SkinningInstanceInfo");
     views.forwardSkin = WindScalarView(builder.UnorderedAccess(Builtin::SkeletonResources::BoneTransforms), "BoneTransforms");
     views.inverseSkin = WindScalarView(builder.UnorderedAccess(Builtin::SkeletonResources::InverseSkinMatrices), "InverseSkinMatrices");
-    if (resources.inverseBindResource)
-        views.inverseBind = builder.ShaderResource(resources.inverseBindResource).View();
-    else builder.ShaderResource(Builtin::SkeletonResources::InverseBindMatrices);
+    views.inverseBind = WindInverseBindView(builder);
     views.allocationRecords = builder.UnorderedAccess(resources.allocationRecords).View();
     views.fieldSlice0 = builder.ShaderResource(resources.fieldSlices[0]).View();
     views.fieldSlice1 = builder.ShaderResource(resources.fieldSlices[1]).View();
@@ -1013,7 +1018,7 @@ public:
         WindPassBindings bindings{};
         bindings.pipeline = m_pso;
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
-        m_declaredInverseBindResource = m_resources->inverseBindResource;
+        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.visibleViews = DeclareVisibleSkeletonViews(builder, *m_resources);
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
         bindings.processedCounts = builder.UnorderedAccess(m_resources->processedTypeCounts).View();
@@ -1025,7 +1030,7 @@ public:
     void Initialize() {}
     void Update(const org::UpdateExecutionContext& context) override { m_resources->UpdateTypes(context); }
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBindResource != m_resources->inverseBindResource;
+        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
     }
     WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
     {
@@ -1048,7 +1053,7 @@ public:
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
-    std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource;
+    bool m_declaredInverseBind = false;
     org::PipelineState m_pso;
 };
 
@@ -1066,7 +1071,7 @@ public:
         WindPassBindings bindings{};
         bindings.pipeline = m_pso;
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
-        m_declaredInverseBindResource = m_resources->inverseBindResource;
+        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
         bindings.deferredEntries = builder.UnorderedAccess(m_resources->deferredEntries).View();
         bindings.baseTypeLookup = builder.ShaderResource(m_resources->baseTypeLookup).View();
@@ -1074,38 +1079,19 @@ public:
             bindings.activeSkinnedPlacements = builder.ShaderResource(m_resources->activeSkinnedPlacements).View();
             bindings.hasActiveSkinnedPlacements = true;
         }
-        if (m_depthResource) {
-            bindings.depth = builder.ShaderResource(m_depthResource, org::SrvView{UINT32_MAX, 0, m_depthSlice}).View();
-            bindings.hasDepth = true;
-        }
+        // Both phases declare the primary view's linear depth, so the declaration never changes. The early phase
+        // reads it as last frame's depth (depth history is this same resource), and only once that history is
+        // valid (Prepare).
+        bindings.depth = builder.ShaderResource(Builtin::PrimaryCamera::LinearDepthMap, org::SrvView{UINT32_MAX, 0, 0}).View();
+        bindings.hasDepth = true;
         builder.ShaderResource(Builtin::SkinnedAssemblyPlacements, Builtin::ActiveSkinnedAssemblyPlacements,
             Builtin::PerInstanceTransformBuffer, Builtin::CameraBuffer);
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return bindings;
     }
     void Initialize() {}
-    void Update(const org::UpdateExecutionContext& execution) override {
-        const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
-        std::shared_ptr<org::PixelBuffer> depth;
-        uint32_t slice = 0;
-        if (context && context->proceduralWind.occlusionCullingEnabled) {
-            const auto view = std::ranges::find(context->Views(), context->primaryViewID, &PreparedViewFrameData::id);
-            if (view != context->Views().end()) {
-                depth = m_latePhase ? view->linearDepthMap
-                    : (view->depthHistory ? view->depthHistory.resource : nullptr);
-                if (depth && depth->GetNumSRVSlices()) {
-                    const auto requested = view->depthBufferArrayIndex >= 0
-                        ? static_cast<uint32_t>(view->depthBufferArrayIndex) : 0u;
-                    slice = (std::min)(requested, depth->GetNumSRVSlices() - 1u);
-                } else depth.reset();
-            }
-        }
-        m_declaredResourcesChanged = depth != m_depthResource || slice != m_depthSlice;
-        m_depthResource = std::move(depth);
-        m_depthSlice = slice;
-    }
     bool DeclaredResourcesChanged() const override {
-        return m_declaredResourcesChanged || m_declaredInverseBindResource != m_resources->inverseBindResource;
+        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
     }
     WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
     {
@@ -1114,17 +1100,21 @@ public:
         const auto* context = preparation.preparationData->Get<UpdateContext>();
         auto& constants = frame.constants;
         constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
+        bool depthReady = m_latePhase;
         if (context) {
             const auto view = std::ranges::find(context->Views(),
                 context->primaryViewID, &PreparedViewFrameData::id);
-            if (view != context->Views().end()) constants.cameraIndex = view->cameraBufferIndex;
+            if (view != context->Views().end()) {
+                constants.cameraIndex = view->cameraBufferIndex;
+                depthReady = depthReady || static_cast<bool>(view->depthHistory);
+            }
         }
         constants.capacityTarget = (std::max)(0.0f,
             context ? context->proceduralWind.innerRadius : 0.0f);
         constants.lateReserve = (std::max)(constants.capacityTarget,
             context ? context->proceduralWind.outerRadius : 0.0f);
         constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
-        frame.useDepth = bindings.hasDepth && context && context->proceduralWind.occlusionCullingEnabled;
+        frame.useDepth = bindings.hasDepth && depthReady && context && context->proceduralWind.occlusionCullingEnabled;
         constants.allocationRecords = m_resources->baseTypeLookup->Size();
         frame.groups = (constants.placementCount + 63u) / 64u;
         return frame;
@@ -1144,10 +1134,7 @@ public:
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
-    std::shared_ptr<org::PixelBuffer> m_depthResource;
-    std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource;
-    uint32_t m_depthSlice = 0;
-    bool m_declaredResourcesChanged = true;
+    bool m_declaredInverseBind = false;
     org::PipelineState m_pso;
     bool m_latePhase = false;
 };
@@ -1164,7 +1151,7 @@ public:
         WindPassBindings bindings{};
         bindings.pipeline = m_pso;
         bindings.views = DeclareWindTransientViews(b, *m_resources);
-        m_declaredInverseBindResource = m_resources->inverseBindResource;
+        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
         bindings.processedCounts = b.UnorderedAccess(m_resources->processedTypeCounts).View();
         b.PreferQueue(org::QueueKind::Compute);
@@ -1173,7 +1160,7 @@ public:
     void Initialize() {}
     void Update(const org::UpdateExecutionContext&) override {}
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBindResource != m_resources->inverseBindResource;
+        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
     }
     WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
         WindDispatchFrame frame{};
@@ -1191,7 +1178,7 @@ public:
         constants.fieldSlice0 = recording.Index(bindings.processedCounts);
         br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
-private: std::shared_ptr<WindSharedResources> m_resources; std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource; org::PipelineState m_pso; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; bool m_declaredInverseBind = false; org::PipelineState m_pso; bool m_latePhase = false;
 };
 
 class WindFinalizeAllocationsPass final : public org::TypedRenderGraphPass<WindFinalizeAllocationsPass, WindDispatchFrame, WindPassBindings>,
@@ -1208,7 +1195,7 @@ public:
         WindPassBindings bindings{};
         bindings.pipeline = m_pso;
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
-        m_declaredInverseBindResource = m_resources->inverseBindResource;
+        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.visibleViews = DeclareVisibleSkeletonViews(builder, *m_resources);
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
         bindings.boneRemaps = builder.ShaderResource(m_resources->boneRemaps).View();
@@ -1218,7 +1205,7 @@ public:
 	void Initialize() {}
 	void Update(const org::UpdateExecutionContext&) override {}
 	bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBindResource != m_resources->inverseBindResource;
+        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
     }
 	WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
 		WindDispatchFrame frame{};
@@ -1239,7 +1226,7 @@ public:
 	}
 private:
 	std::shared_ptr<WindSharedResources> m_resources;
-    std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource;
+    bool m_declaredInverseBind = false;
 	org::PipelineState m_pso;
 };
 
@@ -1259,7 +1246,7 @@ public:
         bindings.pipeline = m_pso;
         bindings.signature = m_signature;
         bindings.views = DeclareWindTransientViews(b, *m_resources);
-        m_declaredInverseBindResource = m_resources->inverseBindResource;
+        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
         b.ShaderResource(Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer);
         bindings.argumentsBinding = b.IndirectArguments(m_resources->indirectCommands);
@@ -1270,7 +1257,7 @@ public:
     void Initialize() {}
     void Update(const org::UpdateExecutionContext&) override {}
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBindResource != m_resources->inverseBindResource;
+        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
     }
     WindIndirectFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
         WindIndirectFrame frame{};
@@ -1289,7 +1276,7 @@ public:
         br::render::DispatchComputeIndirect(recording, bindings.pipeline, PackTransientConstants(constants),
             bindings.signature, bindings.argumentsBinding, 0, frame.maximumCount, bindings.countBinding, sizeof(uint32_t));
     }
-private: std::shared_ptr<WindSharedResources> m_resources; std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource; org::PipelineState m_pso; std::shared_ptr<const rhi::CommandSignaturePtr> m_signature; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; bool m_declaredInverseBind = false; org::PipelineState m_pso; std::shared_ptr<const rhi::CommandSignaturePtr> m_signature; bool m_latePhase = false;
 };
 
 struct WindSkeletonDebugFrameData {
@@ -1378,14 +1365,12 @@ public:
         bindings.skeletonPipeline = m_skeletonPipeline;
         bindings.spherePipeline = m_spherePipeline;
         bindings.signature = m_signature;
-        m_declaredInverseBindResource = m_resources->inverseBindResource;
+        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.types = declaration.ShaderResource(m_resources->windTypes).View();
         bindings.bones = declaration.ShaderResource(m_resources->boneEntries).View();
         bindings.activeInstances = declaration.ShaderResource(m_resources->activeInstances).View();
         bindings.forwardSkin = WindScalarView(declaration.ShaderResource(Builtin::SkeletonResources::BoneTransforms), "Debug.BoneTransforms");
-        if (m_resources->inverseBindResource)
-            bindings.inverseBind = declaration.ShaderResource(m_resources->inverseBindResource).View();
-        else declaration.ShaderResource(Builtin::SkeletonResources::InverseBindMatrices);
+        bindings.inverseBind = WindInverseBindView(declaration);
         bindings.skinningInfo = WindScalarView(declaration.ShaderResource(Builtin::SkeletonResources::SkinningInstanceInfo), "Debug.SkinningInstanceInfo");
         bindings.perFrame = WindScalarView(declaration.ConstantBuffer(Builtin::PerFrameBuffer), "Debug.PerFrameBuffer");
         bindings.camera = WindScalarView(declaration.ShaderResource(Builtin::CameraBuffer), "Debug.CameraBuffer");
@@ -1405,7 +1390,7 @@ public:
         return bindings;
     }
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBindResource != m_resources->inverseBindResource;
+        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
     }
     WindSkeletonDebugFrameData Prepare(const WindSkeletonDebugBindings& bindings,
         const org::PassPrepareContext& preparation) const
@@ -1462,7 +1447,7 @@ public:
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
-    std::shared_ptr<org::GloballyIndexedResource> m_declaredInverseBindResource;
+    bool m_declaredInverseBind = false;
     org::PipelineState m_skeletonPipeline;
     org::PipelineState m_spherePipeline;
     std::shared_ptr<const rhi::CommandSignaturePtr> m_signature;
@@ -1497,10 +1482,9 @@ void ProceduralWindExtension::GatherStructuralPasses(org::RenderGraph& rg, std::
 	out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase2", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(lateInsertion));
     out.push_back(org::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase2", std::make_shared<WindIndirectSimulatePass>(resources, true)).At(lateInsertion));
     auto debugInsertion = org::ExternalInsertPoint::After("TonemappingPass");
-    // Keep debug composition before the scene output becomes presentation-ready.
-    // final backbuffer access so the enhanced RENDER_TARGET -> PRESENT
-    // transition is not undone before IDXGISwapChain::Present.
-    debugInsertion.AlsoBefore("PresentationReadyPass");
+    // Draw the debug view before the present pass. That pass makes the last backbuffer access,
+    // so its transition to PRESENT is not undone before IDXGISwapChain::Present.
+    if (!rg.GetPresentPass().empty()) debugInsertion.AlsoBefore(rg.GetPresentPass());
     out.push_back(org::ExternalPassDesc::Render(
         "ProceduralWind::DebugActiveSkeletons",
         std::make_shared<WindSkeletonDebugPass>(resources))

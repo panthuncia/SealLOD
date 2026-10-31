@@ -138,7 +138,6 @@ public:
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
-            Builtin::Terrain::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CLod::Offsets,
 			Builtin::CLod::GroupChunks,

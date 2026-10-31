@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include <algorithm>
+#include <bit>
 #include <limits>
 #include <string_view>
 
@@ -104,7 +105,6 @@ ReyesDeepVisibilityRasterBindings ReyesDeepVisibilityRasterizationPass::Declare(
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
-            Builtin::Terrain::TextureGroup,
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
@@ -137,18 +137,20 @@ ReyesDeepVisibilityRasterBindings ReyesDeepVisibilityRasterizationPass::Declare(
         builder->UnorderedAccess(m_telemetryBuffer).View(),
         builder->UnorderedAccess(m_deepVisibilityNodesBuffer).View(), builder->UnorderedAccess(m_deepVisibilityCounterBuffer).View(),
         builder->UnorderedAccess(m_deepVisibilityOverflowCounterBuffer).View()};
-    bindings.viewRasterInfoTable = org::DeclaredTableLayout<CLodViewRasterInfo>(m_viewRasterInfos.size());
+    bindings.viewRasterInfoTable.layout = org::DeclaredTableLayout<CLodViewRasterInfo>(m_viewRasterInfos.size());
+    bindings.viewRasterInfoTable.rows = m_viewRasterInfos.size();
+    bindings.viewRasterInfoTable.routesVisibility = true;
+    bindings.viewRasterInfoTable.visibilityCameras = ViewInputCameras();
     for (const auto& input : m_viewInputs) {
         builder->ShaderResource(input.visibility, org::SrvView{},
-            bindings.viewRasterInfoTable.Field(input.cameraIndex, &CLodViewRasterInfo::opaqueVisibilitySRVDescriptorIndex));
+            bindings.viewRasterInfoTable.layout.Field(input.cameraIndex, &CLodViewRasterInfo::opaqueVisibilitySRVDescriptorIndex));
         builder->UnorderedAccess(input.headPointers, org::UavView{},
-            bindings.viewRasterInfoTable.Field(input.cameraIndex, &CLodViewRasterInfo::deepVisibilityHeadPointerUAVDescriptorIndex));
+            bindings.viewRasterInfoTable.layout.Field(input.cameraIndex, &CLodViewRasterInfo::deepVisibilityHeadPointerUAVDescriptorIndex));
     }
     if (m_slabResourceGroup) {
         builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
     bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
-    bindings.nodeCapacity = m_deepVisibilityNodeCapacity;
     return bindings;
 }
 
@@ -217,9 +219,20 @@ void ReyesDeepVisibilityRasterizationPass::Update(const org::UpdateExecutionCont
         m_deepVisibilityNodesBuffer->ResizeStructured(m_deepVisibilityNodeCapacity);
     }
 
-    m_declaredResourcesChanged = m_viewRasterInfos != rows || m_viewInputs != viewInputs;
+    // The row count is part of the declaration. It grows in powers of two, so a new camera only rarely redeclares.
+    rows.resize((std::max<size_t>)(16u, std::bit_ceil(rows.size())));
+    // Only what the declaration depends on: the inputs and the row count. Row values (scissor, viewport scale) are
+    // published each frame.
+    m_declaredResourcesChanged = m_viewRasterInfos.size() != rows.size() || m_viewInputs != viewInputs;
     m_viewRasterInfos = std::move(rows);
     m_viewInputs = std::move(viewInputs);
+}
+
+std::vector<uint32_t> ReyesDeepVisibilityRasterizationPass::ViewInputCameras() const {
+    std::vector<uint32_t> cameras;
+    for (const auto& input : m_viewInputs) cameras.push_back(input.cameraIndex);
+    std::sort(cameras.begin(), cameras.end());
+    return cameras;
 }
 
 bool ReyesDeepVisibilityRasterizationPass::DeclaredResourcesChanged() const
@@ -231,8 +244,10 @@ ReyesDeepVisibilityRasterFrame ReyesDeepVisibilityRasterizationPass::Prepare(
     const ReyesDeepVisibilityRasterBindings& bindings, const org::PassPrepareContext& preparation) const
 {
     ReyesDeepVisibilityRasterFrame frame{};
+    // Through the bindings' declaration: a newer one may still be building on a worker (PreparesOnlyDeclaredWork).
     frame.viewRasterInfoTableIndex = bindings.viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher,
-        std::span<const CLodViewRasterInfo>(m_viewRasterInfos));
+        std::span<const CLodViewRasterInfo>(m_viewRasterInfos), ViewInputCameras());
+    frame.nodeCapacity = m_deepVisibilityNodeCapacity;
     return frame;
 }
 
@@ -257,7 +272,7 @@ void ReyesDeepVisibilityRasterizationPass::Record(const ReyesDeepVisibilityRaste
     constants[CLOD_REYES_DEEP_VISIBILITY_RASTER_NODE_BUFFER_DESCRIPTOR_INDEX] = uav(bindings.nodes);
     constants[CLOD_REYES_DEEP_VISIBILITY_RASTER_NODE_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.nodeCounter);
     constants[CLOD_REYES_DEEP_VISIBILITY_RASTER_OVERFLOW_COUNTER_DESCRIPTOR_INDEX] = uav(bindings.overflowCounter);
-    constants[CLOD_REYES_DEEP_VISIBILITY_RASTER_NODE_CAPACITY] = bindings.nodeCapacity;
+    constants[CLOD_REYES_DEEP_VISIBILITY_RASTER_NODE_CAPACITY] = frame.nodeCapacity;
     br::render::DispatchComputeIndirect(recording, bindings.pipeline, constants, bindings.commandSignature,
         bindings.indirectArgs);
 }

@@ -7,6 +7,7 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
+#include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/DeclaredTableLayout.h"
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
@@ -25,13 +26,14 @@ struct ReyesDeepVisibilityRasterBindings {
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken telemetry;
     org::DeclaredViewToken nodes, nodeCounter, overflowCounter;
-    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoTable;
+    CLodViewRasterDeclaration viewRasterInfoTable;
     uint32_t patchVisibilityIndexBase = 0u;
-    uint32_t nodeCapacity = 1u;
 };
 
 struct ReyesDeepVisibilityRasterFrame {
     uint32_t viewRasterInfoTableIndex = 0xFFFFFFFFu;
+    // This frame's node buffer capacity: Update resizes the buffer every frame, and the declaration doesn't follow it.
+    uint32_t nodeCapacity = 1u;
 };
 
 class ReyesDeepVisibilityRasterizationPass final : public org::TypedRenderGraphPass<ReyesDeepVisibilityRasterizationPass,
@@ -93,6 +95,7 @@ private:
     };
     std::vector<CLodViewRasterInfo> m_viewRasterInfos;
     std::vector<ViewInput> m_viewInputs;
+    std::vector<uint32_t> ViewInputCameras() const;
     bool m_declaredResourcesChanged = true;
     org::PipelineState m_pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;

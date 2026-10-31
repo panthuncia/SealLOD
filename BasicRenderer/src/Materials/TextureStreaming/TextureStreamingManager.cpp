@@ -1,4 +1,5 @@
 #include "Materials/TextureStreaming/TextureStreamingManager.h"
+#include "OpenRenderGraph/ExternalClient.h"
 #include "Render/PassBuilders.h"
 
 #include "../generated/BuiltinResources.h"
@@ -151,80 +152,6 @@ namespace {
 		return info;
 	}
 
-	struct MaterialTextureStreamingReadbackInputs {
-		std::shared_ptr<org::Resource> source;
-		RG_DEFINE_PASS_INPUTS(MaterialTextureStreamingReadbackInputs, &MaterialTextureStreamingReadbackInputs::source);
-	};
-
-	struct MaterialTextureStreamingReadbackBindings {
-		org::ResourceBindingToken source, destination;
-	};
-
-	struct MaterialTextureStreamingReadbackFrameData {
-		uint64_t bytes = 0;
-	};
-
-	class MaterialReadbackReservation final : public org::PreparedLifecycleEffect {
-	public:
-		MaterialReadbackReservation(org::ExternalTimelinePoint signal,
-			std::function<void()> submitted, std::function<void()> cancelled)
-			: m_signal(signal), m_submitted(std::move(submitted)), m_cancelled(std::move(cancelled)) {}
-		std::span<const org::ExternalTimelinePoint> SignalsAfterCompletion() const override { return {&m_signal, 1u}; }
-		void Submitted(org::SubmissionContext) const override {
-			if (!m_resolved.exchange(true) && m_submitted) m_submitted();
-		}
-		void Abandoned(org::AbandonReason) const override {
-			if (!m_resolved.exchange(true) && m_cancelled) m_cancelled();
-		}
-	private:
-		org::ExternalTimelinePoint m_signal{};
-		std::function<void()> m_submitted, m_cancelled;
-		mutable std::atomic<bool> m_resolved{false};
-	};
-
-	class MaterialTextureStreamingReadbackPass final
-		: public org::TypedRenderGraphPass<MaterialTextureStreamingReadbackPass,
-			  MaterialTextureStreamingReadbackFrameData, MaterialTextureStreamingReadbackBindings> {
-	public:
-		MaterialTextureStreamingReadbackPass(
-			std::shared_ptr<org::Resource> source,
-			std::shared_ptr<org::Buffer> staging,
-			uint64_t bytes,
-			org::ExternalTimelinePoint signal,
-			std::function<void()> submitted,
-			std::function<void()> cancel)
-			: m_source(std::move(source)), m_staging(std::move(staging)), m_bytes(bytes),
-			  m_signal(signal), m_submitted(std::move(submitted)),
-			  m_cancel(std::move(cancel)) {
-		}
-
-		MaterialTextureStreamingReadbackBindings Declare(org::PassBuilder& builder) {
-			MaterialTextureStreamingReadbackBindings bindings{builder.CopySource(m_source),
-				builder.CopyDestination(m_staging)};
-			builder.PreferQueue(org::QueueKind::Copy);
-			return bindings;
-		}
-		MaterialTextureStreamingReadbackFrameData Prepare(const MaterialTextureStreamingReadbackBindings&,
-			const org::PassPrepareContext& preparation) const {
-			if (!m_source || !m_staging || m_bytes == 0) return {};
-			preparation.Reserve(std::make_shared<MaterialReadbackReservation>(
-				m_signal, m_submitted, m_cancel));
-			return {m_bytes};
-		}
-		static void Record(const MaterialTextureStreamingReadbackBindings& bindings,
-			const MaterialTextureStreamingReadbackFrameData& frame, org::PassRecordContext& context) {
-			if (frame.bytes) context.Commands().CopyBufferRegion(
-				context.Resolve(bindings.destination).GetHandle(), 0,
-				context.Resolve(bindings.source).GetHandle(), 0, frame.bytes);
-		}
-	private:
-		std::shared_ptr<org::Resource> m_source;
-		std::shared_ptr<org::Buffer> m_staging;
-		uint64_t m_bytes = 0;
-		org::ExternalTimelinePoint m_signal{};
-		std::function<void()> m_submitted;
-		std::function<void()> m_cancel;
-	};
 }
 
 TextureStreamingManager::TextureStreamingManager()
@@ -965,27 +892,27 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 	}
 }
 
-std::shared_ptr<org::RenderPass> TextureStreamingManager::CreateTextureStreamingFeedbackReadbackPass()
+void TextureStreamingManager::SubmitTextureStreamingFeedbackReadback(org::ExternalClient& client, uint32_t queueSlot)
 {
 	// Diagnostic escape hatch for isolating unrelated render-graph failures. It
 	// suppresses only the feedback copy/readback; texture publication and uploads
 	// continue normally.
 	if (const char* disabled = std::getenv("SARP_DISABLE_MATERIAL_TEXTURE_STREAMING_READBACK");
 		disabled && disabled[0] != '\0' && disabled[0] != '0') {
-		return {};
+		return;
 	}
 	if (!IsMaterialTextureStreamingEnabledSetting() || !m_readbackFence.IsValid() || !m_textureStreamingFeedbackBuffer) {
-		return {};
+		return;
 	}
 	std::vector<uint32_t> activeIDs;
 	{
 		std::lock_guard lock(m_activeFeedbackMutex);
 		activeIDs = m_activeTextureStreamingFeedbackIDs;
 	}
-	if (activeIDs.empty()) return {};
+	if (activeIDs.empty()) return;
 
 	uint64_t bytes = 0;
-	if (!m_textureStreamingFeedbackBuffer->TryGetBufferByteSize(bytes) || bytes == 0) return {};
+	if (!m_textureStreamingFeedbackBuffer->TryGetBufferByteSize(bytes) || bytes == 0) return;
 	uint32_t selectedSlot = UINT32_MAX;
 	std::shared_ptr<org::Buffer> staging;
 	{
@@ -999,7 +926,7 @@ std::shared_ptr<org::RenderPass> TextureStreamingManager::CreateTextureStreaming
 		}
 		if (selectedSlot == UINT32_MAX) {
 			TracyPlot("TextureStreaming.ReadbackRingFull", int64_t{1});
-			return {};
+			return;
 		}
 		auto& slot = m_readbackSlots[selectedSlot];
 		if (!slot.staging || slot.capacityBytes < bytes) {
@@ -1018,9 +945,8 @@ std::shared_ptr<org::RenderPass> TextureStreamingManager::CreateTextureStreaming
 
 	std::shared_ptr<org::Resource> source = m_textureStreamingFeedbackBuffer;
 	const uint64_t fenceValue = m_readbackFenceCounter.fetch_add(1u, std::memory_order_acq_rel) + 1u;
-	return std::make_shared<MaterialTextureStreamingReadbackPass>(
-		std::move(source), std::move(staging), bytes, org::ExternalTimelinePoint{m_readbackFence, fenceValue},
-		[state = m_readbackCallbackState, selectedSlot, fenceValue]() {
+	// After a successful submission: record the slot's fence value so the drain reads it once the copy finishes.
+	auto submitted = [state = m_readbackCallbackState, selectedSlot, fenceValue]() {
 			std::lock_guard stateLock(state->mutex);
 			auto* owner = state->owner;
 			if (!owner) return;
@@ -1031,8 +957,9 @@ std::shared_ptr<org::RenderPass> TextureStreamingManager::CreateTextureStreaming
 				owner->m_readbackSlots[selectedSlot].fenceValue = fenceValue;
 			}
 			owner->ScheduleDrain();
-		},
-		[state = m_readbackCallbackState, selectedSlot]() {
+		};
+	// After a failed submission: free the slot again.
+	auto cancel = [state = m_readbackCallbackState, selectedSlot]() {
 			std::lock_guard stateLock(state->mutex);
 			auto* owner = state->owner;
 			if (!owner) return;
@@ -1046,7 +973,23 @@ std::shared_ptr<org::RenderPass> TextureStreamingManager::CreateTextureStreaming
 				slot.inFlight = false;
 				slot.copyBytes = 0;
 			}
-		});
+		};
+	const org::ResourceState copySource{rhi::ResourceAccessType::CopySource,
+		rhi::AccessToLayout(rhi::ResourceAccessType::CopySource, true), rhi::RenderSyncFromAccess(rhi::ResourceAccessType::CopySource)};
+	const org::ResourceState copyDest{rhi::ResourceAccessType::CopyDest,
+		rhi::AccessToLayout(rhi::ResourceAccessType::CopyDest, true), rhi::RenderSyncFromAccess(rhi::ResourceAccessType::CopyDest)};
+	const std::array<org::ExternalClient::Access, 2> accesses{{{source.get(), {}, copySource}, {staging.get(), {}, copyDest}}};
+	const rhi::TimelinePoint signal{m_readbackFence.GetHandle(), fenceValue};
+	try {
+		client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
+			list.CopyBufferRegion(staging->GetAPIResource().GetHandle(), 0, source->GetAPIResource().GetHandle(), 0, bytes);
+		}, {&signal, 1});
+	} catch (const std::exception& error) {
+		spdlog::error("Texture streaming feedback readback submission failed: {}", error.what());
+		cancel();
+		return;
+	}
+	submitted();
 }
 
 void TextureStreamingManager::EnsureTextureUploadAdvanced(
@@ -1684,7 +1627,8 @@ void TextureStreamingManager::FlushPendingTextureImageTableMetadata()
 		org::BindingRecordBuilder recordBuilder(cleanup, sizeof(metadata));
 		recordBuilder.WriteBytes(0, std::as_bytes(std::span{ &metadata, std::size_t{ 1 } }));
 		if (metadata.imageDescriptorIndex != UINT32_MAX) {
-			auto binding = org::OwnedDescriptorBinding::CaptureResourceView(
+			// Shaders read the table's images without the graph knowing, so each must be externally immutable.
+			auto binding = org::OwnedDescriptorBinding::CaptureUndeclaredView(
 				org::PublicationBindingBundle::Capture(*published.image), {}, descriptors.DeviceGeneration(), cleanup);
 			if (binding.Index() != metadata.imageDescriptorIndex)
 				throw std::logic_error("Texture table bytes and captured image binding disagree");

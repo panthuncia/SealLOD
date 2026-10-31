@@ -91,6 +91,7 @@ void WorkGraphCullingPass::InstallWorkGraph(CompiledWorkGraph compiled)
         m_scratchBuffer = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, scratchSize, true);
         m_scratchBuffer->SetName("CLod Work Graph Scratch Buffer");
         m_scratchBuffer->SetMemoryUsageHint("Work graph scratch buffer");
+        m_scratchChanged = true; // The pass declares the scratch buffer.
     }
     m_workGraph = std::make_shared<rhi::WorkGraphPtr>(std::move(compiled.graph));
     // The graph is not a pipeline state, but its descriptor slots resolve from
@@ -259,7 +260,6 @@ org::ResourceBindingToken WorkGraphCullingPass::DeclareSceneInputs(org::PassBuil
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
-            Builtin::Terrain::TextureGroup,
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
@@ -330,6 +330,7 @@ std::optional<WorkGraphReyesBindings> WorkGraphCullingPass::DeclareReyes(org::Pa
 
 WorkGraphCullingBindings WorkGraphCullingPass::Declare(org::PassBuilder& builder)
 {
+    m_scratchChanged = false;
     const auto scratch = DeclareSceneInputs(builder);
 
     const auto& outputs = m_resources.outputs;
@@ -344,7 +345,7 @@ WorkGraphCullingBindings WorkGraphCullingPass::Declare(org::PassBuilder& builder
     bindings.swClassification = m_config.UsesSWClassification();
     bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();
     if (m_config.UsesPerViewDepthOcclusion()) bindings.viewDepthLayout = m_viewDepthLayout.Layout();
-    if (m_config.UsesSWClassification()) bindings.viewRasterInfoLayout = m_viewRasterInfoLayout.Layout();
+    if (m_config.UsesSWClassification()) bindings.viewRasterInfoLayout = m_viewRasterInfoLayout.Declaration();
     bindings.visible = builder.UnorderedAccess(outputs.visibleClusters).View();
     bindings.transforms = builder.UnorderedAccess(outputs.visibleClusterTransformIndices).View();
     bindings.visibleCounter = builder.UnorderedAccess(outputs.visibleClustersCounter).View();
@@ -474,9 +475,9 @@ WorkGraphCullingFrame WorkGraphCullingPass::Prepare(
     frame.cullingFlags = br::render::BuildCullingFlags(m_config, frame.settings);
     if (m_config.UsesSWClassification())
         frame.viewRasterInfoTable =
-            bindings.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoTable, m_viewRasterInfoLayout.Rows());
+            m_viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoTable, bindings.viewRasterInfoLayout);
     if (m_config.UsesPerViewDepthOcclusion())
-        frame.viewDepthTable = bindings.viewDepthLayout.Publish(preparation, m_viewDepthTable, m_viewDepthLayout.Rows());
+        frame.viewDepthTable = m_viewDepthLayout.Publish(preparation, m_viewDepthTable, bindings.viewDepthLayout);
     frame.rasterBucketCount = render->preparedRasterBucketCount;
 
     frame.initializeBacking = !m_workGraphInitialization->initialized.load(std::memory_order_acquire);
@@ -485,8 +486,14 @@ WorkGraphCullingFrame WorkGraphCullingPass::Prepare(
             state.initialized.store(true, std::memory_order_release);
         });
     if (m_config.isFirstPass) {
+        // With SW classification, only the views these bindings' declaration routes: a newer one may still be building.
+        std::vector<PreparedViewFrameData> admitted;
+        for (const auto& view : render->Views())
+            if (!m_config.UsesSWClassification()
+                || m_viewRasterInfoLayout.Admits(bindings.viewRasterInfoLayout, view.cameraBufferIndex))
+                admitted.push_back(view);
         const auto workloads = br::render::PrepareCullingWorkloads(
-            render->Views(), render->publishedRendererState, m_config.renderPhase,
+            std::span<const PreparedViewFrameData>{admitted}, render->publishedRendererState, m_config.renderPhase,
             m_config.clodOnlyWorkloads, m_config.useShadowCascadeViews, m_config.rasterOutputKind, 64u,
             "WorkGraphCullingPass");
         std::vector<ObjectCullRecord> records;
@@ -631,7 +638,6 @@ void WorkGraphCullingPass::Update(const org::UpdateExecutionContext& executionCo
             context.Views(), context.ViewCameraBufferSize(), m_config.rasterOutputKind);
     if (m_config.UsesPerViewDepthOcclusion())
         m_declaredResourcesChanged |= m_viewDepthLayout.Update(context.Views(), m_config.isFirstPass);
-    m_declaredResourcesChanged |= m_drawSets.Update(context.publishedRendererState, m_config);
 
     br::render::ResetCullingCounter(m_resources.outputs.visibleClustersCounter, upload);
     if (m_config.UsesSWClassification()) {

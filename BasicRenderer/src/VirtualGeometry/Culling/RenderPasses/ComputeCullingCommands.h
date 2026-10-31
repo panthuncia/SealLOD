@@ -16,6 +16,7 @@
 
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "Render/DeclaredTableLayout.h"
+#include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "VirtualGeometry/Culling/PreparedCullingWorkloads.h"
@@ -85,7 +86,7 @@ struct ComputeCullingBindings {
     ComputeCullingShadowViews shadow;
     // Rigid work, rigid counter, skinned work, skinned counter.
     std::optional<std::array<org::DeclaredViewToken, 4>> voxelQueues;
-    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;
+    CLodViewRasterDeclaration viewRasterInfoLayout;
     org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;  // Per-view depth occlusion only.
     uint32_t maxVisibleClusters = 0u;
     bool isFirstPass = true;

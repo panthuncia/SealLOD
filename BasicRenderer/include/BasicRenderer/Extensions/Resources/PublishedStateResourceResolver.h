@@ -12,6 +12,7 @@
 
 class PublishedStateResourceResolver final : public org::ClonableResolver<PublishedStateResourceResolver> {
 public:
+    static constexpr uint32_t kQueryCapacityHint = 32;
     PublishedStateResourceResolver() = default;
     PublishedStateResourceResolver(std::shared_ptr<br::render::PublishedStateSource> source,
         br::render::PublishedResourceKey key, std::shared_ptr<org::Resource> fallback = {},
@@ -92,6 +93,10 @@ public:
         }
         return hint;
     }
+
+    // A query matches a set that grows as content streams in (one draw-list buffer per workload key, say).
+    // An exact selection has one member that rotates in place.
+    uint32_t CapacityHint() const noexcept override { return m_exact ? 0u : kQueryCapacityHint; }
 
     std::shared_ptr<const org::ResolverDeclarationState> CaptureDeclarationState() const override {
         CaptureLatestLease();

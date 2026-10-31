@@ -106,6 +106,9 @@ public:
     }
 
     bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
+    // The ray-tracing service's buffers are reallocated as they grow; each new one takes the old one's place.
+    bool RebindsConcreteResources() const noexcept override { return true; }
+    bool PreparesOnlyDeclaredWork() const noexcept override { return false; } // Required with RebindsConcreteResources.
 
     RayTracedReflectionsFrameData Prepare(const RayTracedReflectionsBindings& bindings,
         const org::PassPrepareContext& preparation) const {

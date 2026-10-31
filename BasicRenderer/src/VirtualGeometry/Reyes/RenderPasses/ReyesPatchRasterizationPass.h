@@ -9,6 +9,7 @@
 #include "Render/DeclaredTableLayout.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
+#include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
@@ -25,7 +26,7 @@ struct ReyesPatchRasterBindings {
     org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken telemetry;
-    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoTable;
+    CLodViewRasterDeclaration viewRasterInfoTable;
     uint32_t phase = 0, patchIndexBase = 0;
     bool enabled = false;
 };
@@ -86,6 +87,7 @@ private:
     };
     std::vector<ViewInput> m_viewInputs;
     std::vector<CLodViewRasterInfo> m_viewRasterInfos;
+    std::vector<uint32_t> ViewInputCameras() const;
     bool m_declaredResourcesChanged = true;
     org::PipelineState m_pso;
     std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;

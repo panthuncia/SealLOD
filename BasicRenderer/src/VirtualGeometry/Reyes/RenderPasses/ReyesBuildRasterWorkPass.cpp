@@ -150,7 +150,7 @@ ReyesBuildRasterWorkFrame ReyesBuildRasterWorkPass::Prepare(
     const ReyesBuildRasterWorkBindings& bindings, const org::PassPrepareContext& preparation) const {
     ReyesBuildRasterWorkFrame frame{};
     if (bindings.hasViewDepthIndices) {
-        frame.viewDepthTableIndex = bindings.viewDepthLayout.Publish(preparation, m_viewDepthPublisher, m_viewDepthTable.Rows());
+        frame.viewDepthTableIndex = m_viewDepthTable.Publish(preparation, m_viewDepthPublisher, bindings.viewDepthLayout);
     }
     return frame;
 }

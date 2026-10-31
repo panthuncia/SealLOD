@@ -82,6 +82,9 @@ private:
 		std::unordered_map<const Environment*, std::uint64_t> generations;
 	};
 	std::shared_ptr<PendingSourceLoads> m_pendingSourceLoads = std::make_shared<PendingSourceLoads>();
+	// Per environment, false once it is removed, guarded by *m_environmentUpdateMutex: a conversion submitted after that
+	// queues no SH or prefiltering for it.
+	std::unordered_map<const Environment*, std::shared_ptr<bool>> m_environmentAlive;
 	void ApplyEnvironmentSource(Environment* e, const std::shared_ptr<TextureAsset>& source, bool cachedCubemap);
 
 	std::shared_ptr<org::ResourceGroup> m_workingEnvironmentCubemapGroup; // Temporary group for prefiltered cubemap generation

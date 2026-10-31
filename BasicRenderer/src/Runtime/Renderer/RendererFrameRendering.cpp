@@ -26,6 +26,7 @@
 #include "Runtime/Settings/RendererSettingsHelpers.h"
 #include "Resources/ExternalTextureResource.h"
 #include "Runtime/IO/ReadbackManager.h"
+#include "OpenRenderGraph/ExternalClient.h"
 #include "Runtime/Frame/RendererFrameInputs.h"
 #include "Diagnostics/Telemetry/FrameTaskGraphTelemetry.h"
 #include "Scene/ECS/RendererECSManager.h"
@@ -327,6 +328,11 @@ void Renderer::Render() {
             org::GraphHost::ExecuteFrame(*currentRenderGraph, passExecutionContext); // Main render graph execution
             passExecutionContext.beginGpuPassRange = {};
             passExecutionContext.endGpuPassRange = {};
+            // Texture readbacks copy what the frame wrote, so they are submitted right after the frame's execution.
+            if (m_pReadbackManager) {
+                const auto graphicsSlot = currentRenderGraph->GetQueueRegistry().FindGraphicsSlot();
+                m_pReadbackManager->Submit(currentRenderGraph->GetExternalClient(), org::ToUnderlying(graphicsSlot));
+            }
             static const std::filesystem::path submittedCameraTracePath = [] {
                 wchar_t* value = nullptr;
                 size_t length = 0;

@@ -43,7 +43,7 @@ struct ClusterRasterBindings {
     std::array<org::DeclaredViewToken, 3> colors{};
     org::DeclaredViewToken depth;
     std::vector<org::DeclaredViewToken> visibilityBuffers;
-    org::DeclaredTableLayout<CLodViewRasterInfo> viewTable;
+    CLodViewRasterDeclaration viewTable;
     bool hasTelemetry = false, hasMismatch = false, virtualShadow = false;
     bool deepVisibility = false, avboit = false, hasVisibleResolve = false, hasDepth = false;
     bool hasColors = false, avboitShading = false, singleViewVisibility = false;
@@ -119,6 +119,7 @@ private:
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
 
     std::vector<CLodViewRasterInfo> m_viewRasterInfos; // Rows without descriptors (change detection).
+    std::vector<uint32_t> ViewInputCameras() const;
     // Built by Update from the view snapshot; its descriptors are resolved and
     // the table published when the frame is prepared.
     struct ViewInput {

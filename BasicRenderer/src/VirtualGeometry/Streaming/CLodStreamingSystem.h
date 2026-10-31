@@ -17,7 +17,7 @@
 #include "VirtualGeometry/GeometryStorage/CLodGeometryStorage.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "Render/RenderGraph/RenderGraphExtension.h"
-namespace org { class RenderGraph; }
+namespace org { class RenderGraph; class ExternalClient; }
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "VirtualGeometry/Streaming/CLodPageLRU.h"
@@ -75,7 +75,9 @@ public:
     void OnRegistryReset(org::ResourceRegistry* reg);
     void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses);
     void GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses);
-    void GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses);
+    // Submits this frame's async uploads and streaming feedback readback through `client`, then takes the newest
+    // active-group snapshot for the next frame. Call it after the frame graph's execution (CLodExtension::AfterExecute).
+    void SubmitExternalWork(org::ExternalClient& client);
     std::shared_ptr<org::Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
     std::shared_ptr<org::Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
     void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<org::Buffer>> buffers);
@@ -552,6 +554,9 @@ private:
     uint64_t m_streamingNonResidentBitsUploadFenceValue = 0u;
     ICLodGeometryStorage* m_geometryStorage = nullptr;
     std::function<uint32_t()> m_getStreamingCpuUploadBudgetRequests;
+    // Set by GatherStructuralPasses: submit the async uploads and the streaming feedback readback.
+    std::function<void(org::ExternalClient&)> m_submitAsyncUploads;
+    std::function<void(org::ExternalClient&)> m_submitStreamingReadback;
 
     std::vector<PendingStreamingRequest> m_pendingStreamingRequests;
     std::vector<uint32_t> m_pendingStreamingRequestHeapIndexByGroup;

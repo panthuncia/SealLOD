@@ -143,17 +143,20 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
     bindings.transforms = builder.ShaderResource(m_compactedVisibleClusterTransformIndicesBuffer);
     bindings.mapping = builder.ShaderResource(m_sortedToUnsortedMappingBuffer);
     bindings.indirectArgs = builder.IndirectArguments(m_rasterBucketsIndirectArgsBuffer);
-    bindings.viewTable = org::DeclaredTableLayout<CLodViewRasterInfo>(m_viewRasterInfos.size());
+    bindings.viewTable.layout = org::DeclaredTableLayout<CLodViewRasterInfo>(m_viewRasterInfos.size());
+    bindings.viewTable.rows = m_viewRasterInfos.size();
+    bindings.viewTable.routesVisibility = m_outputKind != CLodRasterOutputKind::VirtualShadow;
+    bindings.viewTable.visibilityCameras = ViewInputCameras();
     for (const auto& view : m_viewInputs) {
         if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer) {
             bindings.visibilityBuffers.push_back(builder.UnorderedAccess(view.visibility, {},
-                bindings.viewTable.Field(view.camera, &CLodViewRasterInfo::visibilityUAVDescriptorIndex)));
+                bindings.viewTable.layout.Field(view.camera, &CLodViewRasterInfo::visibilityUAVDescriptorIndex)));
         } else {
             bindings.visibilityBuffers.push_back(builder.ShaderResource(view.visibility, {},
-                bindings.viewTable.Field(view.camera, &CLodViewRasterInfo::opaqueVisibilitySRVDescriptorIndex)));
+                bindings.viewTable.layout.Field(view.camera, &CLodViewRasterInfo::opaqueVisibilitySRVDescriptorIndex)));
             if (m_outputKind == CLodRasterOutputKind::DeepVisibility)
                 builder.UnorderedAccess(view.headPointers, {},
-                    bindings.viewTable.Field(view.camera, &CLodViewRasterInfo::deepVisibilityHeadPointerUAVDescriptorIndex));
+                    bindings.viewTable.layout.Field(view.camera, &CLodViewRasterInfo::deepVisibilityHeadPointerUAVDescriptorIndex));
         }
     }
     if (m_telemetryBuffer) {
@@ -359,9 +362,18 @@ void ClusterRasterizationPass::Update(const org::UpdateExecutionContext& executi
 
     // Rows carry no descriptors: those are resolved when Prepare publishes
     // the table, so a resource moving to a new backing needs no redeclaration.
+    // The row count is part of the declaration. It grows in powers of two, so a new camera only rarely redeclares.
+    table.resize((std::max<size_t>)(16u, std::bit_ceil(table.size())));
     m_declaredResourcesChanged = resourcesChanged || m_viewInputs != viewInputs || m_viewRasterInfos.size() != table.size();
     m_viewInputs = std::move(viewInputs);
     m_viewRasterInfos = std::move(table);
+}
+
+std::vector<uint32_t> ClusterRasterizationPass::ViewInputCameras() const {
+    std::vector<uint32_t> cameras;
+    for (const auto& view : m_viewInputs) cameras.push_back(view.camera);
+    std::sort(cameras.begin(), cameras.end());
+    return cameras;
 }
 
 bool ClusterRasterizationPass::DeclaredResourcesChanged() const {
@@ -404,12 +416,14 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
     }
     // The view table and the single-view visibility UAV are resolved against
     // this frame's bindings (see CLodViewTables.h).
-    frame.viewRasterInfoTable = bindings.viewTable.Publish(preparation, m_viewRasterInfoPublisher, m_viewRasterInfos);
+    // Through the bindings' declaration: a newer one may still be building on a worker (PreparesOnlyDeclaredWork).
+    frame.viewRasterInfoTable = bindings.viewTable.Publish(preparation, m_viewRasterInfoPublisher, m_viewRasterInfos,
+        ViewInputCameras());
     if (phase1) {
         const auto validView = std::ranges::find_if(m_viewRasterInfos,
             [](const CLodViewRasterInfo& info) { return info.scissorMaxX != 0u; });
         if (validView != m_viewRasterInfos.end()) {
-            if (!m_viewInputs.empty())
+            if (!bindings.visibilityBuffers.empty())
                 basic_telemetry::SetGauge("BasicRenderer.CLod.Phase1.PrimaryVisibilityDescriptorIndex",
                     static_cast<int64_t>(preparation.Resolve(bindings.visibilityBuffers.front()).index));
             basic_telemetry::SetGauge("BasicRenderer.CLod.Phase1.PrimaryVisibilityWidth",
@@ -446,7 +460,7 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
     for (uint32_t i = 0; i < numBuckets; ++i) {
         const auto flags = context->preparedRasterBucketFlags.at(i);
         const org::PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
-            ? PSOManager::GetInstance().TryGetClusterLODRasterPSO(flags, m_wireframe, m_viewInputs.size() == 1u)
+            ? PSOManager::GetInstance().TryGetClusterLODRasterPSO(flags, m_wireframe, bindings.singleViewVisibility)
             : m_outputKind == CLodRasterOutputKind::VirtualShadow
                 ? PSOManager::GetInstance().TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
             : m_outputKind == CLodRasterOutputKind::AVBOITOccupancy

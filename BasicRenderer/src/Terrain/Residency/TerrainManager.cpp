@@ -379,6 +379,9 @@ namespace {
                         info.directStorageState);
                 }
             }
+            // Passes read terrain textures bindlessly and don't declare them to the graph, like material textures.
+            // So each image must be one the texture transfer service already left in its shader-read state.
+            org::RequireUndeclaredShaderRead(*image);
             textureGroup->AddResource(image);
             retainedTextures.push_back(texture);
             return true;

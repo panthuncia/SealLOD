@@ -31,6 +31,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/ExternalSignalReservation.h"
 #include "Render/Runtime/UploadTypes.h"
+#include "OpenRenderGraph/ExternalClient.h"
 #include "Managers/UploadInstance.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "Render/MemoryIntrospectionAPI.h"
@@ -227,6 +228,11 @@ namespace {
         uint64_t completionValue = 0;
     };
 
+    // The state a copy pass declares for a resource (as PassBuilder::CopySource and CopyDestination do).
+    org::ResourceState CopyState(rhi::ResourceAccessType access) {
+        return {access, rhi::AccessToLayout(access, true), rhi::RenderSyncFromAccess(access)};
+    }
+
     struct CLodStructuralAsyncUploadFrameData {
         struct Copy {
             org::PreparedResourceReference destination{}, source{};
@@ -275,6 +281,9 @@ namespace {
             : m_tryAcquireSnapshot(std::move(tryAcquireSnapshot))
             , m_submitSnapshot(std::move(submitSnapshot)) {}
 
+        // Prepare copies the snapshot DeclaredResourcesChanged took last, not the declaration's, so a declaration
+        // must be in place before the frame that copies it.
+        bool PreparesOnlyDeclaredWork() const noexcept override { return false; }
         bool DeclaredResourcesChanged() const override {
             ZoneScopedN("CLodStructuralAsyncUploadPass::DeclaredResourcesChanged::SnapshotOnly");
 
@@ -358,6 +367,55 @@ namespace {
 
         void ShutdownPass() { CancelClaimedSnapshot(); }
 
+        // Takes the published upload batches and submits their copies through `client` on `queueSlot`.
+        // The copies signal the batches' completion timeline. If the submission fails, the batches are cancelled.
+        void SubmitTo(org::ExternalClient& client, uint32_t queueSlot) {
+            ZoneScopedN("CLodAsyncUpload::SubmitTo");
+            CLodAsyncUploadSnapshot snapshot{};
+            if (!m_tryAcquireSnapshot || !m_tryAcquireSnapshot(snapshot)) return;
+            struct Copy { rhi::ResourceHandle destination, source; uint64_t destinationOffset, sourceOffset, size; };
+            std::vector<Copy> copies;
+            std::vector<org::ExternalClient::Access> accesses;
+            const auto copySource = CopyState(rhi::ResourceAccessType::CopySource);
+            const auto copyDest = CopyState(rhi::ResourceAccessType::CopyDest);
+            for (const auto& batch : snapshot.batches) {
+                if (!batch) continue;
+                for (const auto& copy : batch->copies) {
+                    if (!copy.destination || !copy.staging || !copy.size) continue;
+                    accesses.push_back({copy.staging.get(), {}, copySource});
+                    accesses.push_back({copy.destination.get(), {}, copyDest});
+                    copies.push_back({copy.destination->GetAPIResource().GetHandle(), copy.staging->GetAPIResource().GetHandle(),
+                        copy.destinationOffset, copy.stagingOffset, copy.size});
+                }
+            }
+            auto cancel = [&] {
+                for (const auto& batch : snapshot.batches) {
+                    if (!batch || !batch->ticket) continue;
+                    for (auto state : {CLodUploadTicketState::Claimed, CLodUploadTicketState::Submitted}) {
+                        auto expected = state;
+                        if (batch->ticket->state.compare_exchange_strong(expected, CLodUploadTicketState::Cancelled,
+                                std::memory_order_acq_rel, std::memory_order_acquire)) break;
+                    }
+                }
+            };
+            if (copies.empty() || !m_submitSnapshot) { cancel(); return; }
+            const auto submission = m_submitSnapshot(snapshot);
+            if (submission.fence || submission.fenceValue || submission.externalSignalsAfterCompletion.size() != 1u) {
+                cancel();
+                return;
+            }
+            const rhi::TimelinePoint signal{snapshot.completionTimeline.GetHandle(), snapshot.completionValue};
+            try {
+                client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
+                    for (const auto& copy : copies)
+                        list.CopyBufferRegion(copy.destination, copy.destinationOffset, copy.source, copy.sourceOffset, copy.size);
+                }, {&signal, 1}, std::make_shared<CLodAsyncUploadSnapshot>(std::move(snapshot)));
+            } catch (const std::exception& error) {
+                spdlog::error("CLod async upload submission failed: {}", error.what());
+                cancel();
+            }
+        }
+
     private:
         TryAcquireSnapshotFn m_tryAcquireSnapshot;
         SubmitSnapshotFn m_submitSnapshot;
@@ -439,6 +497,9 @@ namespace {
             , m_completeSnapshot(std::move(completeSnapshot))
             , m_cancelSnapshot(std::move(cancelSnapshot)) {}
 
+        // Prepare copies the snapshot DeclaredResourcesChanged took last, not the declaration's, so a declaration
+        // must be in place before the frame that copies it.
+        bool PreparesOnlyDeclaredWork() const noexcept override { return false; }
         bool DeclaredResourcesChanged() const override {
             ZoneScopedN("CLodStructuralStreamingReadbackCopyPass::DeclaredResourcesChanged::SnapshotOnly");
 
@@ -521,6 +582,49 @@ namespace {
         }
 
         void ShutdownPass() { CancelArmedSnapshot(); }
+
+        // Takes the next readback staging slot and submits copies of the streaming feedback buffers into it, through
+        // `client` on `queueSlot`. The copies signal the slot's readback fence. If the submission fails, the slot is freed.
+        void SubmitTo(org::ExternalClient& client, uint32_t queueSlot) {
+            ZoneScopedN("CLodStreamingReadback::SubmitTo");
+            CLodStreamingReadbackSnapshot snapshot{};
+            if (!m_tryAcquireSnapshot || !m_tryAcquireSnapshot(snapshot) || !m_completeSnapshot) return;
+            struct Copy { rhi::ResourceHandle destination, source; uint64_t bytes; };
+            std::vector<Copy> copies;
+            std::vector<org::ExternalClient::Access> accesses;
+            const auto copySource = CopyState(rhi::ResourceAccessType::CopySource);
+            const auto copyDest = CopyState(rhi::ResourceAccessType::CopyDest);
+            auto add = [&](const std::shared_ptr<org::Buffer>& staging, const std::shared_ptr<org::Buffer>& source) {
+                uint64_t bytes = 0;
+                if (!source || !staging || !source->TryGetBufferByteSize(bytes) || !bytes) return;
+                accesses.push_back({source.get(), {}, copySource});
+                accesses.push_back({staging.get(), {}, copyDest});
+                copies.push_back({staging->GetAPIResource().GetHandle(), source->GetAPIResource().GetHandle(), bytes});
+            };
+            add(snapshot.counterStaging, snapshot.inputs.counterSource);
+            add(snapshot.requestsStaging, snapshot.inputs.requestsSource);
+            add(snapshot.usedGroupsCounterStaging, snapshot.inputs.usedGroupsCounterSource);
+            add(snapshot.usedGroupsBufferStaging, snapshot.inputs.usedGroupsBufferSource);
+            add(snapshot.sourceGroupMismatchCounterStaging, snapshot.inputs.sourceGroupMismatchCounterSource);
+            add(snapshot.sourceGroupMismatchDetailsStaging, snapshot.inputs.sourceGroupMismatchDetailsSource);
+            add(snapshot.virtualShadowDependencyCountStaging, snapshot.inputs.virtualShadowDependencyCountSource);
+            add(snapshot.virtualShadowDependenciesStaging, snapshot.inputs.virtualShadowDependenciesSource);
+            const auto selectedSlot = snapshot.selectedSlot;
+            const auto completed = m_completeSnapshot(selectedSlot);
+            if (!completed.fence || !completed.fenceValue) {
+                if (m_cancelSnapshot) m_cancelSnapshot(selectedSlot);
+                return;
+            }
+            const rhi::TimelinePoint signal{completed.fence->GetHandle(), completed.fenceValue};
+            try {
+                client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
+                    for (const auto& copy : copies) list.CopyBufferRegion(copy.destination, 0u, copy.source, 0u, copy.bytes);
+                }, {&signal, 1}, std::make_shared<CLodStreamingReadbackSnapshot>(std::move(snapshot)));
+            } catch (const std::exception& error) {
+                spdlog::error("CLod streaming readback submission failed: {}", error.what());
+                if (m_cancelSnapshot) m_cancelSnapshot(selectedSlot);
+            }
+        }
 
     private:
         static void DeclareCopy(org::PassBuilder& builder,
@@ -1387,15 +1491,8 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsCounter, m_usedGroupsCounter);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, m_usedGroupsBuffer);
 
-    auto asyncUploadInsertPoint =
-        org::ExternalInsertPoint::After("EvaluateMaterialGroupsPass");
-    asyncUploadInsertPoint.AlsoBefore("GTAOFilterPass");
-    asyncUploadInsertPoint.AlsoBefore("DeferredShadingPass");
-    asyncUploadInsertPoint.keepExtensionOrder = false;
-    outPasses.push_back(
-        org::ExternalPassDesc::Copy(
-            "CLod::AsyncUpload",
-            std::make_shared<CLodStructuralAsyncUploadPass>(
+    // The async uploads are submitted through the graph's external client after each frame (SubmitExternalWork).
+    auto asyncUpload = std::make_shared<CLodStructuralAsyncUploadPass>(
                 [this](CLodAsyncUploadSnapshot& outSnapshot) -> bool {
                     ZoneScopedN("CLodAsyncUpload::AcquireSnapshot");
                     if (!m_uploadStream || !m_streamingUploadCompletionFenceHandle.IsValid()) {
@@ -1440,10 +1537,10 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
                     result.externalSignalsAfterCompletion.push_back({snapshot.completionTimeline, completionValue});
                     RequestStreamingFrameWork();
                     return result;
-                }))
-            .At(std::move(asyncUploadInsertPoint))
-            .PreferQueue(org::QueueKind::Copy)
-            .PinToQueue(m_uploadQueueSlot));
+                });
+    m_submitAsyncUploads = [asyncUpload, slot = org::ToUnderlying(m_uploadQueueSlot)](org::ExternalClient& client) {
+        asyncUpload->SubmitTo(client, slot);
+    };
 
 	auto streamingBeginPass = std::make_shared<CLodStreamingBeginFramePass>(
 		[]() -> org::UploadInstance* { return nullptr; },
@@ -1484,7 +1581,6 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
 }
 
 void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) {
-    (void)rg;
     const bool hasStreamingFeedbackSort = EnsureParallelSortResources();
     if (hasStreamingFeedbackSort) {
         auto feedbackSortPass = std::make_shared<CLodStreamingFeedbackSortPass>(
@@ -1503,7 +1599,7 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
             org::ExternalPassDesc::Compute(
                 "CLod::StreamingFeedbackSort",
                 feedbackSortPass)
-                .At(org::ExternalInsertPoint::After("PresentationReadyPass"))
+                .At(org::ExternalInsertPoint::After(rg.GetPresentPass()))
                 .PreferQueue(org::QueueKind::Graphics));
     }
 
@@ -1605,13 +1701,10 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
                 std::memory_order_acq_rel, std::memory_order_acquire);
         });
 
-    outPasses.push_back(
-        org::ExternalPassDesc::Copy(
-            "CLod::StreamingReadbackCopy",
-            readbackPass)
-            .At(org::ExternalInsertPoint::After(
-                hasStreamingFeedbackSort ? "CLod::StreamingFeedbackSort" : "PresentationReadyPass"))
-            .PreferQueue(org::QueueKind::Graphics));
+    // The streaming feedback readback is submitted through the graph's external client after each frame, so it copies
+    // what the frame wrote (SubmitExternalWork).
+    m_submitStreamingReadback = [readbackPass, slot = org::ToUnderlying(rg.GetQueueRegistry().FindGraphicsSlot())](
+        org::ExternalClient& client) { readbackPass->SubmitTo(client, slot); };
 
     CLodDirectStorageLaunchInputs launchInputs{};
     if (m_geometryStorage) {
@@ -1656,14 +1749,14 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
         org::ExternalPassDesc::Copy(
             "CLod::DirectStorageLaunch",
             std::make_shared<CLodDirectStorageLaunchPass>(std::move(launchInputs)))
-            .At(org::ExternalInsertPoint::After("PresentationReadyPass"))
+            .At(org::ExternalInsertPoint::After(rg.GetPresentPass()))
             .PreferQueue(org::QueueKind::Graphics));
 }
 
-void CLodStreamingSystem::GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) {
-    (void)rg;
+void CLodStreamingSystem::SubmitExternalWork(org::ExternalClient& client) {
+    if (m_submitAsyncUploads) m_submitAsyncUploads(client);
+    if (m_submitStreamingReadback) m_submitStreamingReadback(client);
     PublishStreamingFrameWorkForFrame();
-
 }
 
 uint32_t CLodStreamingSystem::BitWordAddress(uint32_t key) {

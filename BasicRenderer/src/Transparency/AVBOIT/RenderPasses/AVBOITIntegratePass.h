@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <memory>
 
-#include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -19,7 +18,7 @@ struct AVBOITIntegrateFrame {
 };
 
 class AVBOITIntegratePass final : public org::TypedRenderGraphPass<AVBOITIntegratePass,
-    AVBOITIntegrateFrame, AVBOITIntegrateBindings>, public org::IDynamicDeclaredResources {
+    AVBOITIntegrateFrame, AVBOITIntegrateBindings> {
 public:
     AVBOITIntegratePass(
         std::shared_ptr<org::Buffer> configBuffer,
@@ -34,7 +33,6 @@ public:
 
     AVBOITIntegrateBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
-    bool DeclaredResourcesChanged() const override;
     AVBOITIntegrateFrame Prepare(const AVBOITIntegrateBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const AVBOITIntegrateBindings&, const AVBOITIntegrateFrame&, org::PassRecordContext&);
@@ -49,6 +47,5 @@ private:
     std::shared_ptr<org::PixelBuffer> m_chromaticExtinctionTexture;
     std::shared_ptr<org::PixelBuffer> m_integratedTransmittanceTexture;
     std::shared_ptr<org::PixelBuffer> m_zeroTransmittanceSliceTexture;
-    bool m_declaredResourcesChanged = true;
     org::PipelineState m_pso;
 };

@@ -365,6 +365,7 @@ void Renderer::CreateRenderGraph() {
                     Builtin::PrimaryCamera::ProjectedDepthTexture,
                     m_visibilityRendering ? depth.projectedDepthMap : depthTexture);
                 newGraph->RegisterResource(Builtin::Backbuffer, m_dynamicBackbuffer);
+                newGraph->SetSwapchainResource(m_dynamicBackbuffer);
                 newGraph->RegisterResource(Builtin::PresentationColor, m_dynamicPresentationColor);
                 newGraph->RegisterResource(Builtin::PerFrameBuffer, ::ResourceManager::GetInstance().GetPerFrameBuffer());
                 break;
@@ -378,7 +379,6 @@ void Renderer::CreateRenderGraph() {
                     (!m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentPrefilteredCubemap) && !m_defaultEnvironmentPrefilteredCubemap)) {
                     CreateDefaultEnvironmentResources();
                 }
-                BuildEnvironmentPipeline(newGraph.get());
                 auto currentCubemap = m_defaultEnvironmentCubemap;
                 auto currentPrefiltered = m_defaultEnvironmentPrefilteredCubemap;
                 if (m_currentEnvironment && m_currentEnvironment->GetEnvironmentCubemap() &&
@@ -547,6 +547,7 @@ void Renderer::CreateRenderGraph() {
             case Present:
                 newGraph->BuildPass<PresentationReadyPass>("PresentationReadyPass");
                 newGraph->SetPassTechnique("PresentationReadyPass", "Frame::Present");
+                newGraph->SetPresentPass("PresentationReadyPass");
                 break;
             }
         });
@@ -585,12 +586,6 @@ void Renderer::CreateRenderGraph() {
 
     //newGraph->SetMinimumAutomaticSchedulingQueues(QueueKind::Compute, 3);
 
-    // Segment placement is explicit: passes whose touched-resource set is
-    // only known per frame cannot live in the persistent main executable.
-    newGraph->SetPersistentSegment("Builtin::Uploads", org::RenderGraph::PersistentSegmentKind::Pre);
-    newGraph->SetPersistentSegment("CLod::AsyncUpload", org::RenderGraph::PersistentSegmentKind::Tail);
-    newGraph->SetPersistentSegment("Builtin::Readbacks", org::RenderGraph::PersistentSegmentKind::Tail);
-    newGraph->SetPersistentSegment("CLod::StreamingReadbackCopy", org::RenderGraph::PersistentSegmentKind::Tail);
 	spdlog::info("Renderer::CreateRenderGraph entering the structural build and Setup");
     });
 	spdlog::info("Renderer::CreateRenderGraph leaving the structural build and Setup");
@@ -744,7 +739,6 @@ void Renderer::RegisterPipelineExtensions() {
         std::make_shared<br::render::RenderGraphIOService>(
             *m_pTextureFactory,
             currentRenderGraph->RetainUploadService(),
-            *m_pReadbackManager,
             *m_pMaterialManager)),
         "BuiltinIO");
     // Readback captures (IReadbackService) are placed by the graph itself: in the anchor pass's recording, or as an

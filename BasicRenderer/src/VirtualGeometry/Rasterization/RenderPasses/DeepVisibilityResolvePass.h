@@ -44,6 +44,9 @@ public:
     void Initialize();
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
+    // A head-pointer texture recreated on resize takes the old one's place: a rebind, not a new declaration.
+    bool RebindsConcreteResources() const noexcept override { return true; }
+    bool PreparesOnlyDeclaredWork() const noexcept override { return false; } // Required with RebindsConcreteResources.
     DeepVisibilityResolveFrame Prepare(const DeepVisibilityResolveBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const DeepVisibilityResolveBindings& bindings, const DeepVisibilityResolveFrame& frame,

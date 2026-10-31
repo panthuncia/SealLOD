@@ -11,9 +11,8 @@ namespace org { class PixelBuffer; }
 
 struct PerViewLinearDepthCopyBindingView {
     org::DeclaredViewToken visibility, linearDepth;
-    uint32_t width = 0, height = 0;
+    std::shared_ptr<org::PixelBuffer> source; // The view's visibility buffer: Prepare finds the view's size by it.
     bool primary = false;
-    std::array<uint32_t, 2> projection{};
 };
 
 struct PerViewLinearDepthCopyBindings {
@@ -23,8 +22,15 @@ struct PerViewLinearDepthCopyBindings {
     bool hasProjectedDepth = false, hasCanonicalDeviceDepth = false;
 };
 
+// Per declared view, this frame's size and projection: they change without the declared resources changing (a
+// resize keeps the buffer, a new projection keeps everything). A declared view that's gone has width 0.
+struct PerViewLinearDepthCopyFrame {
+    struct View { uint32_t width = 0, height = 0; std::array<uint32_t, 2> projection{}; };
+    std::vector<View> views;
+};
+
 class PerViewLinearDepthCopyPass : public org::TypedRenderGraphPass<PerViewLinearDepthCopyPass,
-    org::EmptyPassFrameData, PerViewLinearDepthCopyBindings>, public org::IDynamicDeclaredResources {
+    PerViewLinearDepthCopyFrame, PerViewLinearDepthCopyBindings>, public org::IDynamicDeclaredResources {
 public:
     explicit PerViewLinearDepthCopyPass(bool writeProjectedDepth = true);
 
@@ -32,7 +38,10 @@ public:
     void Initialize();
     void Update(const org::UpdateExecutionContext&) override;
     bool DeclaredResourcesChanged() const override;
-    static void Record(const PerViewLinearDepthCopyBindings& bindings, org::PassRecordContext& context);
+    PerViewLinearDepthCopyFrame Prepare(const PerViewLinearDepthCopyBindings& bindings,
+        const org::PassPrepareContext& preparation) const;
+    static void Record(const PerViewLinearDepthCopyBindings& bindings, const PerViewLinearDepthCopyFrame& frame,
+        org::PassRecordContext& context);
 
 private:
     org::PipelineState m_pso;

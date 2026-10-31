@@ -8,21 +8,30 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "Render/Runtime/IDescriptorService.h"
 #include "Utilities/Utilities.h"
+#include "../../../../generated/BuiltinResources.h"
 
+#include <algorithm>
 #include <vector>
 
 struct EnvironmentSHBindings {
 	org::PipelineState pipeline;
 	uint32_t samplerIndex = 0;
+	// The jobs this declaration declares, and each one's source cubemap view, in the same order. Executions take work
+	// only from them (PreparesOnlyDeclaredWork).
+	std::shared_ptr<const br::render::EnvironmentSHWorkQueue::Snapshot> declared;
+	std::vector<org::DeclaredViewToken> sources;
 };
 struct EnvironmentSHFrame {
-	struct Job { uint32_t cubemapResolution = 0, environmentIndex = 0; };
+	struct Job { uint32_t cubemapResolution = 0, environmentIndex = 0, declared = 0; };
 	std::vector<Job> jobs;
 };
 
 class EnvironmentSHPass : public org::TypedRenderGraphPass<EnvironmentSHPass, EnvironmentSHFrame, EnvironmentSHBindings>, public org::IDynamicDeclaredResources {
 public:
-	EnvironmentSHPass() = default;
+	// Runs in the environment job graph (EnvironmentJobGraph), which has no resource providers: it takes its work
+	// queue and the environment info buffer directly.
+	EnvironmentSHPass(br::render::EnvironmentSHWorkQueue work, std::shared_ptr<org::Resource> environmentInfo)
+		: m_work(std::move(work)), m_environmentInfo(std::move(environmentInfo)) {}
 
 	void Initialize() {
 		rhi::SamplerDesc shSamplerDesc = {};
@@ -48,23 +57,24 @@ public:
 
 	EnvironmentSHBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+		EnvironmentSHBindings bindings{m_PSO, m_samplerIndex};
+		br::render::EnvironmentSHWorkQueue::Snapshot declared;
 		for (const auto& j : m_pending) {
 			if (!j->work.srcCubemap) continue;
-			builder.ShaderResource(j->work.srcCubemap);
+			bindings.sources.push_back(builder.ShaderResource(j->work.srcCubemap).View());
+			declared.push_back(j);
 		}
-
-		builder.UnorderedAccess(Builtin::Environment::InfoBuffer);
-		builder.ConstantBuffer(Builtin::PerFrameBuffer);
+		// The shader finds the buffer by its builtin name.
+		builder.NameUse(Builtin::Environment::InfoBuffer, builder.UnorderedAccess(m_environmentInfo));
 
 		m_declaredResourcesChanged = false;
-		return {m_PSO, m_samplerIndex};
+		bindings.declared = std::make_shared<const br::render::EnvironmentSHWorkQueue::Snapshot>(std::move(declared));
+		return bindings;
 	}
 
 
 
-    void Update(const org::UpdateExecutionContext& context) override {
-        const auto* input = context.hostData->Get<UpdateContext>();
-        m_work = input->environmentWork.sphericalHarmonics;
+    void Update(const org::UpdateExecutionContext&) override {
         auto pending = m_work.Pending();
         if (pending != m_pending) {
             m_pending = std::move(pending);
@@ -72,14 +82,14 @@ public:
         }
     }
 
-    EnvironmentSHFrame Prepare(const EnvironmentSHBindings&, const org::PassPrepareContext& preparation) {
+    // Takes only jobs the bindings declare: while a new declaration builds, executions still get the old one. Taking a
+    // job leaves the queue's pending work smaller, so the next Update redeclares without it.
+    EnvironmentSHFrame Prepare(const EnvironmentSHBindings& bindings, const org::PassPrepareContext& preparation) {
         EnvironmentSHFrame frame;
-        if (m_pending.empty()) return frame;
-        for (const auto& entry : m_pending)
-            frame.jobs.push_back({entry->work.cubemapResolution, entry->work.environmentIndex});
-        m_work.Reserve(m_pending, preparation);
-        m_pending.clear();
-        m_declaredResourcesChanged = true;
+        if (!bindings.declared) return frame;
+        for (const auto& entry : m_work.ReserveAvailable(*bindings.declared, preparation))
+            frame.jobs.push_back({entry->work.cubemapResolution, entry->work.environmentIndex, static_cast<uint32_t>(
+                std::find(bindings.declared->begin(), bindings.declared->end(), entry) - bindings.declared->begin())});
         return frame;
     }
 
@@ -91,6 +101,7 @@ public:
             constants[UintRootConstant0] = job.cubemapResolution;
             constants[UintRootConstant1] = bindings.samplerIndex;
             constants[UintRootConstant2] = job.environmentIndex;
+            constants[UintRootConstant3] = context.Index(bindings.sources[job.declared]);
             br::render::PushMiscConstants(context, constants);
             const uint32_t groups = (job.cubemapResolution + 15) / 16;
             context.Commands().Dispatch(groups, groups, 6);
@@ -100,11 +111,13 @@ public:
 	bool DeclaredResourcesChanged() const override {
 		return m_declaredResourcesChanged;
 	}
+	bool PreparesOnlyDeclaredWork() const noexcept override { return true; }
 
 
 
 private:
     br::render::EnvironmentSHWorkQueue m_work;
+    std::shared_ptr<org::Resource> m_environmentInfo;
     br::render::EnvironmentSHWorkQueue::Snapshot m_pending;
 	bool m_declaredResourcesChanged = true;
 

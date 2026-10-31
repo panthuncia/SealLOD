@@ -1,6 +1,9 @@
 #include "VirtualGeometry/Reyes/RenderPasses/ReyesPatchRasterizationPass.h"
 #include "Render/PassBuilders.h"
 
+#include <algorithm>
+#include <bit>
+
 #include "Scene/Views/ViewManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
@@ -101,7 +104,6 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
-            Builtin::Terrain::TextureGroup,
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
@@ -132,10 +134,13 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
         builder.ShaderResource(m_tessTableTrianglesBuffer).View(),
         builder.IndirectArguments(m_indirectArgsBuffer), builder.UnorderedAccess(m_telemetryBuffer).View()};
 
-    bindings.viewRasterInfoTable = org::DeclaredTableLayout<CLodViewRasterInfo>(m_viewRasterInfos.size());
+    bindings.viewRasterInfoTable.layout = org::DeclaredTableLayout<CLodViewRasterInfo>(m_viewRasterInfos.size());
+    bindings.viewRasterInfoTable.rows = m_viewRasterInfos.size();
+    bindings.viewRasterInfoTable.routesVisibility = true;
+    bindings.viewRasterInfoTable.visibilityCameras = ViewInputCameras();
     for (const auto& input : m_viewInputs) {
         builder.UnorderedAccess(input.visibility, org::UavView{},
-            bindings.viewRasterInfoTable.Field(input.cameraIndex, &CLodViewRasterInfo::visibilityUAVDescriptorIndex));
+            bindings.viewRasterInfoTable.layout.Field(input.cameraIndex, &CLodViewRasterInfo::visibilityUAVDescriptorIndex));
     }
     if (m_slabResourceGroup) {
         builder.ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
@@ -163,9 +168,18 @@ void ReyesPatchRasterizationPass::Update(const org::UpdateExecutionContext& exec
         info.viewportScaleY = 1.0f;
         viewInputs.push_back({camera, view.visibilityBuffer});
     }
+    // The row count is part of the declaration. It grows in powers of two, so a new camera only rarely redeclares.
+    rows.resize((std::max<size_t>)(16u, std::bit_ceil(rows.size())));
     m_declaredResourcesChanged = viewInputs != m_viewInputs || rows.size() != m_viewRasterInfos.size();
     m_viewInputs = std::move(viewInputs);
     m_viewRasterInfos = std::move(rows);
+}
+
+std::vector<uint32_t> ReyesPatchRasterizationPass::ViewInputCameras() const {
+    std::vector<uint32_t> cameras;
+    for (const auto& input : m_viewInputs) cameras.push_back(input.cameraIndex);
+    std::sort(cameras.begin(), cameras.end());
+    return cameras;
 }
 
 bool ReyesPatchRasterizationPass::DeclaredResourcesChanged() const
@@ -176,8 +190,9 @@ bool ReyesPatchRasterizationPass::DeclaredResourcesChanged() const
 ReyesPatchRasterFrame ReyesPatchRasterizationPass::Prepare(
     const ReyesPatchRasterBindings& bindings, const org::PassPrepareContext& preparation) const {
     ReyesPatchRasterFrame frame{};
+    // Through the bindings' declaration: a newer one may still be building on a worker (PreparesOnlyDeclaredWork).
     frame.viewRasterInfoTableIndex = bindings.viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher,
-        std::span<const CLodViewRasterInfo>(m_viewRasterInfos));
+        std::span<const CLodViewRasterInfo>(m_viewRasterInfos), ViewInputCameras());
     {
         // The value baked here must equal the base the material passes use to
         // recognise a Reyes patch pixel; a mismatch makes patch pixels read as

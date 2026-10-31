@@ -40,20 +40,9 @@ CullingSettings ReadCullingSettings(const CullingPassConfig& config, bool hasRec
 uint32_t BuildCullingFlags(const CullingPassConfig& config, const CullingSettings& settings);
 
 // Declares the published active draw lists and draw-record visibility
-// generations that object culling reads.
+// generations that object culling reads. They are resolvers, so a change in the
+// draw lists rebinds them without redeclaring the pass.
 void DeclareCullingWorkloadInputs(org::RenderPassBuilder& builder, const CullingPassConfig& config);
-
-// Tracks the draw-set resources the pass declares, so it can ask for a
-// redeclaration when the published draw lists change.
-class CullingDrawSetTracker {
-public:
-    // True when the declared draw-set resources changed.
-    bool Update(const std::shared_ptr<const PublishedRendererState>& state, const CullingPassConfig& config);
-
-private:
-    uint64_t m_revision = 0u;
-    std::vector<uint64_t> m_resourceIds;
-};
 
 void ResetCullingCounter(const std::shared_ptr<org::Buffer>& counter, const CullingUploader& upload);
 void ResetOcclusionReplayState(const std::shared_ptr<org::Buffer>& state, const CullingUploader& upload);

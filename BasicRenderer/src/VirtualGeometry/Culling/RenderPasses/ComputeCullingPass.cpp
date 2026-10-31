@@ -295,19 +295,16 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
         builder.ShaderResource(m_voxelQueueTable.Id().c_str());
     }
 
-    // Where the frame leaves the traversal buffers depends on how many levels ran.
-    const uint32_t traversalLevels = std::min(m_traversalDepth, kComputeCullingMaxTraversalLevels);
-    if (!m_config.isFirstPass || traversalLevels > 0u) {
-        builder.InternalTransition(f.nodeDispatchArgs, indirectState)
-            .InternalTransition(f.leafDispatchArgs, indirectState)
-            .InternalTransition(f.clusterDispatchArgs, indirectState);
-    }
-    if (traversalLevels > 0u) {
-        builder.InternalTransition(f.nextNodes, computeReadState)
-            .InternalTransition(f.nextNodeCounter, computeReadState)
-            .InternalTransition(f.nextLeaves, computeReadState)
-            .InternalTransition(f.nextLeafCounter, computeReadState);
-    }
+    // The traversal buffers leave in the states a traversal frame leaves them in, whether or not any level ran. These
+    // are end states only: the graph moves the buffers there either way. So the declaration doesn't change when
+    // streamed geometry first has traversal levels.
+    builder.InternalTransition(f.nodeDispatchArgs, indirectState)
+        .InternalTransition(f.leafDispatchArgs, indirectState)
+        .InternalTransition(f.clusterDispatchArgs, indirectState);
+    builder.InternalTransition(f.nextNodes, computeReadState)
+        .InternalTransition(f.nextNodeCounter, computeReadState)
+        .InternalTransition(f.nextLeaves, computeReadState)
+        .InternalTransition(f.nextLeafCounter, computeReadState);
 
     if (m_config.UsesSWClassification() && outputs.swVisibleClustersCounter) {
         bindings.swVisibleClustersCounter = uav(outputs.swVisibleClustersCounter);
@@ -329,7 +326,7 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
         bindings.viewDepthLayout = m_viewDepthLayout.Layout();
     }
     m_viewRasterInfoLayout.Declare(builder);
-    bindings.viewRasterInfoLayout = m_viewRasterInfoLayout.Layout();
+    bindings.viewRasterInfoLayout = m_viewRasterInfoLayout.Declaration();
     if (!m_config.isFirstPass) {
         if (m_resources.phase1Counters.visibleClustersCounter)
             bindings.phase1VisibleClustersCounter =
@@ -373,10 +370,10 @@ ComputeCullingFrame ComputeCullingPass::Prepare(
                              : CLodPureComputeReplayExpansionFactorSettingName)());
     frame.rasterBucketCount = renderContext->preparedRasterBucketCount;
     frame.viewRasterInfoTable =
-        declared.viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoTable, m_viewRasterInfoLayout.Rows());
+        m_viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoTable, declared.viewRasterInfoLayout);
     if (m_config.UsesPerViewDepthOcclusion())
         frame.viewDepthTable =
-            declared.viewDepthLayout.Publish(preparation, m_viewDepthTable, m_viewDepthLayout.Rows());
+            m_viewDepthLayout.Publish(preparation, m_viewDepthTable, declared.viewDepthLayout);
     frame.windEntryCount = m_windCache.entryCount;
     frame.windGeneration = m_windCache.generation;
     if (m_windCache.bounds && m_windCache.generation == 1u) {
@@ -387,7 +384,11 @@ ComputeCullingFrame ComputeCullingPass::Prepare(
     }
     frame.publication = renderContext->publishedRendererState;
     if (m_config.isFirstPass) {
-        const auto views = std::span<const PreparedViewFrameData>{renderContext->Views()};
+        // Only the views these bindings' declaration can serve: a newer one may still be building on a worker.
+        std::vector<PreparedViewFrameData> admitted;
+        for (const auto& view : renderContext->Views())
+            if (m_viewRasterInfoLayout.Admits(declared.viewRasterInfoLayout, view.cameraBufferIndex)) admitted.push_back(view);
+        const auto views = std::span<const PreparedViewFrameData>{admitted};
         frame.workloads = br::render::PrepareCullingWorkloads(views, frame.publication,
             m_config.renderPhase, m_config.clodOnlyWorkloads, m_config.useShadowCascadeViews,
             m_config.rasterOutputKind, kComputeCullingObjectThreadsPerGroup, "ComputeCullingPass");
@@ -407,8 +408,6 @@ void ComputeCullingPass::UpdateTraversalDepth(const UpdateContext& context)
     const uint32_t depth = residency ? residency->maxTraversalDepth : 0u;
     basic_telemetry::SetGauge("BasicRenderer.GeometryResidency.PublishedDepth", static_cast<std::int64_t>(depth));
     basic_telemetry::SetGauge("BasicRenderer.GeometryResidency.SelectedDepth", static_cast<std::int64_t>(depth));
-    // The traversal depth decides how Declare leaves the frontier buffers.
-    if (depth != m_traversalDepth) m_declaredResourcesChanged = true;
     m_traversalDepth = depth;
 }
 
@@ -436,7 +435,6 @@ void ComputeCullingPass::Update(const org::UpdateExecutionContext& executionCont
         context.Views(), context.ViewCameraBufferSize(), m_config.rasterOutputKind, false);
     if (m_config.UsesPerViewDepthOcclusion())
         m_declaredResourcesChanged |= m_viewDepthLayout.Update(context.Views(), m_config.isFirstPass);
-    m_declaredResourcesChanged |= m_drawSets.Update(context.publishedRendererState, m_config);
     UpdateTraversalDepth(context);
 
     br::render::ResetCullingCounter(m_resources.outputs.visibleClustersCounter, upload);

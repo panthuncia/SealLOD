@@ -124,6 +124,8 @@ void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::share
 	auto& name = e->GetName();
 	std::shared_ptr<TextureAsset> skybox;
 	unsigned int res = m_reflectionCubemapResolution;
+	// An HDRI environment is converted to a cubemap first.
+	std::optional<br::render::EnvironmentConversionWork> conversion;
 	if (cachedCubemap) {
 		skybox = source;
 		skybox->SetName("Skybox cubemap");
@@ -159,7 +161,8 @@ void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::share
 		e->SetEnvironmentCubemap(skybox);
 		e->SetReflectionCubemapResolution(m_skyboxResolution); // For HDRI environments, use the same resolution as the skybox
 
-		m_workServices.conversion.Enqueue({skyHDR->ImagePtr(), envCubemap, e->GetEnvironmentIndex(), m_workingHDRIGroup, m_environmentUpdateMutex});
+		conversion = br::render::EnvironmentConversionWork{skyHDR->ImagePtr(), envCubemap, e->GetEnvironmentIndex(),
+			m_workingHDRIGroup, m_environmentUpdateMutex};
 		m_workingHDRIGroup->AddResource(skyHDR->ImagePtr());
 		auto path = GetCacheFilePath(name+L"_environment.dds", L"environments");
 		if (m_requestReadback) {
@@ -204,13 +207,34 @@ void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::share
 	m_environmentPrefilteredCubemapGroup->AddResource(prefilteredEnvironment->ImagePtr());
 
 
-	m_workServices.sphericalHarmonics.Enqueue({skybox->ImagePtr(), e->GetEnvironmentIndex(), e->GetReflectionCubemapResolution()});
-	m_workServices.prefilter.Enqueue({skybox->ImagePtr(), prefilteredEnvironmentCubemap,
-        e->GetReflectionCubemapResolution(), e->GetEnvironmentIndex(), m_workingEnvironmentCubemapGroup, m_environmentUpdateMutex});
 	m_workingEnvironmentCubemapGroup->AddResource(skybox->ImagePtr());
+	// SH and prefiltering read the environment's cubemap: queued now for a cached one, after its conversion otherwise.
+	auto& alive = m_environmentAlive[e];
+	if (!alive) alive = std::make_shared<bool>(true);
+	auto filter = [work = m_workServices, alive,
+		sh = br::render::EnvironmentSHWork{skybox->ImagePtr(), e->GetEnvironmentIndex(), e->GetReflectionCubemapResolution()},
+		prefilter = br::render::EnvironmentPrefilterWork{skybox->ImagePtr(), prefilteredEnvironmentCubemap,
+			e->GetReflectionCubemapResolution(), e->GetEnvironmentIndex(), m_workingEnvironmentCubemapGroup, m_environmentUpdateMutex}]() mutable {
+		if (!*alive) return;
+		work.sphericalHarmonics.Enqueue(sh);
+		work.prefilter.Enqueue(prefilter);
+	};
+	if (conversion) {
+		conversion->then = std::move(filter);
+		m_workServices.conversion.Enqueue(std::move(*conversion));
+	}
+	else filter();
 }
 
 void EnvironmentManager::RemoveEnvironment(Environment* e) {
+	{
+		// A conversion submitted from here on queues nothing for it (EnvironmentConversionWork::then).
+		std::lock_guard<std::mutex> lock(*m_environmentUpdateMutex);
+		if (const auto found = m_environmentAlive.find(e); found != m_environmentAlive.end()) {
+			*found->second = false;
+			m_environmentAlive.erase(found);
+		}
+	}
     m_workServices.conversion.DiscardUnsubmitted([index = e->GetEnvironmentIndex()](const br::render::EnvironmentConversionWork& work) { return work.environmentIndex == index; });
     m_workServices.prefilter.DiscardUnsubmitted([index = e->GetEnvironmentIndex()](const br::render::EnvironmentPrefilterWork& work) { return work.environmentIndex == index; });
     m_workServices.sphericalHarmonics.DiscardUnsubmitted([index = e->GetEnvironmentIndex()](const br::render::EnvironmentSHWork& work) { return work.environmentIndex == index; });
@@ -271,6 +295,12 @@ void br::render::EnvironmentWorkServices::PublishTelemetry() const {
     BT_PLOT("Environment.SH.DiscardedJobs", static_cast<int64_t>(sh.discarded));
 }
 void br::render::EnvironmentConversionWork::Commit() const {
+    std::lock_guard lock(*publicationMutex);
+    sourceGroup->RemoveResource(srcTexture.get());
+    if (then) then();
+}
+
+void br::render::EnvironmentConversionWork::Discard() const {
     std::lock_guard lock(*publicationMutex);
     sourceGroup->RemoveResource(srcTexture.get());
 }

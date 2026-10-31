@@ -388,6 +388,7 @@ set(SOURCES
     "src/Runtime/Publication/PublishedRendererState.cpp"
     "src/Runtime/GraphIntegration/RenderGraphIOService.cpp"
     "src/Runtime/GraphIntegration/TextureJobGraph.cpp"
+    "src/Runtime/GraphIntegration/EnvironmentJobGraph.cpp"
     "src/Runtime/Publication/RendererStateRequestService.cpp"
     "src/Scene/Ingestion/SceneAssetRequestService.cpp"
     "src/Scene/Ingestion/SceneEntityMaterializationService.cpp"
@@ -792,6 +793,13 @@ add_executable(AsyncStateGraphTests "tests/AsyncStateGraphTests.cpp")
 target_link_libraries(AsyncStateGraphTests PRIVATE ${PROJECT_NAME})
 target_compile_features(AsyncStateGraphTests PRIVATE cxx_std_23)
 target_include_directories(AsyncStateGraphTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
+if(WIN32)
+    add_executable(GraphJobTests "tests/GraphJobTests.cpp")
+    target_link_libraries(GraphJobTests PRIVATE ${PROJECT_NAME} ORGModuleServices::AsyncStateGraph
+        ORGModuleServices::ORGModuleServices dxgi)
+    target_compile_features(GraphJobTests PRIVATE cxx_std_23)
+    target_compile_definitions(GraphJobTests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 target_include_directories(BoundedSpscQueueTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 target_compile_features(BoundedSpscQueueTests PRIVATE cxx_std_23)
 add_executable(CLodCoordinatorTests "tests/CLodCoordinatorTests.cpp")
@@ -1855,6 +1863,9 @@ add_test(NAME VirtualShadowBudgetTests COMMAND VirtualShadowBudgetTests)
 add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
 add_test(NAME TaskSchedulerManagerTests COMMAND TaskSchedulerManagerTests)
 add_test(NAME AsyncStateGraphTests COMMAND AsyncStateGraphTests)
+if(WIN32)
+    add_test(NAME GraphJobTests COMMAND GraphJobTests)
+endif()
 add_test(NAME CLodCoordinatorTests COMMAND CLodCoordinatorTests)
 add_test(NAME StatisticalSamplerTests COMMAND StatisticalSamplerTests)
 
@@ -1870,6 +1881,7 @@ if(WIN32)
         BoundedSpscQueueTests
         TaskSchedulerManagerTests
         AsyncStateGraphTests
+        GraphJobTests
         CLodCoordinatorTests
         StatisticalSamplerTests)
     if(BASICRENDERER_TEST_RUNTIME_DIR)

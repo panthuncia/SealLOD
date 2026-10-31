@@ -2237,9 +2237,10 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
     appendStreamingTailPasses();
 }
 
-void CLodExtension::GatherFramePasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses)
+void CLodExtension::AfterExecute(org::RenderGraph& rg)
 {
     if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
-        m_streamingSystem->GatherFramePasses(rg, outPasses);
+        m_streamingSystem->SubmitExternalWork(rg.GetExternalClient());
     }
 }
+

@@ -8,6 +8,7 @@
 #include "BasicRenderer/Assets/Texture.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
 
+#include <algorithm>
 #include <vector>
 #include <array>
 #include <span>
@@ -17,15 +18,19 @@ struct EnvironmentConversionBindings {
     struct Job { org::DeclaredViewToken source; std::array<org::DeclaredViewToken, 6> faces; uint32_t size = 0; };
     org::PipelineState pipeline;
     std::vector<Job> jobs;
+    // The work of each job, in the same order. Executions take work only from it (PreparesOnlyDeclaredWork).
+    br::render::EnvironmentConversionWorkQueue::Snapshot declared;
 };
+// Indices into EnvironmentConversionBindings::jobs of the jobs this execution took.
 struct EnvironmentConversionFrame {
-    bool active = false;
+    std::vector<uint32_t> jobs;
 };
 
 class EnvironmentConversionPass : public org::TypedRenderGraphPass<EnvironmentConversionPass,
     EnvironmentConversionFrame, EnvironmentConversionBindings>, public org::IDynamicDeclaredResources {
 public:
-    EnvironmentConversionPass() {
+    // Runs in the environment job graph (EnvironmentJobGraph): it takes its work queue directly.
+    explicit EnvironmentConversionPass(br::render::EnvironmentConversionWorkQueue work) : m_work(std::move(work)) {
 
         CreateEnvironmentConversionPSO();
     }
@@ -44,6 +49,7 @@ public:
             for (uint32_t face = 0; face < job.faces.size(); ++face) job.faces[face] = destination.View(face);
             job.size = j->work.dstCubemap->GetWidth();
             bindings.jobs.push_back(std::move(job));
+            bindings.declared.push_back(j);
         }
 
         m_declaredResourcesChanged = false;
@@ -52,26 +58,29 @@ public:
 
 
 
-    void Update(const org::UpdateExecutionContext& context) override {
-        const auto* input = context.hostData->Get<UpdateContext>();
-        m_work = input->environmentWork.conversion;
+    void Update(const org::UpdateExecutionContext&) override {
         auto pending = m_work.Pending();
         if (pending != m_pending) { m_pending = std::move(pending); m_declaredResourcesChanged = true; }
     }
 
-    EnvironmentConversionFrame Prepare(const EnvironmentConversionBindings&,
+    // Takes only jobs the bindings declare: while a new declaration builds, executions still get the old one. Taking a
+    // job leaves the queue's pending work smaller, so the next Update redeclares without it.
+    EnvironmentConversionFrame Prepare(const EnvironmentConversionBindings& bindings,
         const org::PassPrepareContext& preparation) {
-        if (m_pending.empty()) return {};
-        m_work.Reserve(m_pending, preparation);
-        m_pending.clear(); m_declaredResourcesChanged = true;
-        return {true};
+        EnvironmentConversionFrame frame;
+        const auto taken = m_work.ReserveAvailable(bindings.declared, preparation);
+        for (const auto& entry : taken)
+            frame.jobs.push_back(static_cast<uint32_t>(
+                std::find(bindings.declared.begin(), bindings.declared.end(), entry) - bindings.declared.begin()));
+        return frame;
     }
 
     static void Record(const EnvironmentConversionBindings& bindings, const EnvironmentConversionFrame& frame,
         org::PassRecordContext& context) {
-        if (!frame.active || bindings.jobs.empty()) return;
+        if (frame.jobs.empty()) return;
         context.BindComputePipeline(bindings.pipeline);
-        for (const auto& job : bindings.jobs) {
+        for (const auto index : frame.jobs) {
+            const auto& job = bindings.jobs[index];
             const auto size = job.size;
             const auto src = context.Index(job.source);
             for (uint32_t face = 0; face < 6; ++face) {
@@ -85,6 +94,7 @@ public:
     bool DeclaredResourcesChanged() const override {
         return m_declaredResourcesChanged;
     }
+    bool PreparesOnlyDeclaredWork() const noexcept override { return true; }
 
 
 

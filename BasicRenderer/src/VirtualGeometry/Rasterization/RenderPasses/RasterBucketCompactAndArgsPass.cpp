@@ -202,7 +202,6 @@ void RasterBucketCompactAndArgsPass::Record(const RasterBucketCompactAndArgsBind
 void RasterBucketCompactAndArgsPass::Update(const org::UpdateExecutionContext& executionContext) {
     const bool nextEnabled = !m_runWhenComputeSWRasterEnabledOnly ||
         CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)());
-    m_declaredResourcesChanged = nextEnabled != m_enabled;
     m_enabled = nextEnabled;
     if (!m_enabled) {
         return;
@@ -211,23 +210,18 @@ void RasterBucketCompactAndArgsPass::Update(const org::UpdateExecutionContext& e
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     const uint32_t nextBucketCount = context.preparedRasterBucketCount;
-    m_declaredResourcesChanged |= nextBucketCount != m_numBuckets;
     m_numBuckets = nextBucketCount;
 
+    // A resize swaps the buffers' backings. The declaration is unchanged, so the graph rebinds them without a rebuild.
     if (m_writeCursorBuffer->GetSize() < static_cast<size_t>(m_numBuckets) * sizeof(uint32_t)) {
         m_writeCursorBuffer->ResizeStructured(m_numBuckets);
-        m_declaredResourcesChanged = true;
     }
     if (m_indirectArgsBuffer->GetSize() < static_cast<size_t>(m_numBuckets) * sizeof(RasterizeClustersCommand)) {
         m_indirectArgsBuffer->ResizeStructured(m_numBuckets);
-        m_declaredResourcesChanged = true;
     }
     BT_PLOT("CLod.RasterArgs.UpdateBucketCount", static_cast<int64_t>(m_numBuckets));
     BT_PLOT("CLod.RasterArgs.UpdateBackingBytes", static_cast<int64_t>(m_indirectArgsBuffer->GetSize()));
 
 }
 
-bool RasterBucketCompactAndArgsPass::DeclaredResourcesChanged() const {
-    return m_declaredResourcesChanged;
-}
 

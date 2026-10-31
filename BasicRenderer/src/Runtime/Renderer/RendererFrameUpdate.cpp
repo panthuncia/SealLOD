@@ -3,6 +3,7 @@
 //
 
 #include "Runtime/GraphIntegration/TextureJobGraph.h"
+#include "Runtime/GraphIntegration/EnvironmentJobGraph.h"
 #include "OpenRenderGraph/Runtime.h"
 #include <BasicRenderer/Renderer.h>
 #include "OpenRenderGraph/GraphHost.h"
@@ -1476,6 +1477,8 @@ void Renderer::Update(float elapsedSeconds) {
             m_textureJobs->Execute(m_preparationFrameIndex, m_currentFrameFenceValue, deviceManager.GetDevice());
         });
     }
+    // Environment conversion, prefiltering and SH likewise.
+    if (m_environmentJobs) runCapturedStage("EnvironmentJobs", [&]() { m_environmentJobs->Execute(); });
     runCapturedStage("RenderGraphUpdate", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::RenderGraphUpdate");
         if (m_dynamicPresentationColor &&

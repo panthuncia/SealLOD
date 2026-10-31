@@ -25,7 +25,7 @@ struct VoxelRasterBindings {
     org::DeclaredViewToken visible, transforms, telemetry;
     std::array<org::DeclaredViewToken, 2> workRecords, workCounters, indirectArgs;
     org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages;
-    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;
+    CLodViewRasterDeclaration viewRasterInfoLayout;
     uint32_t voxelWorkCapacity = 0;
     bool hasTelemetry = false, virtualShadow = false;
 };

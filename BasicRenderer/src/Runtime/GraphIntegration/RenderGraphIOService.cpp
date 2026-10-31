@@ -1,17 +1,15 @@
 #include "Runtime/GraphIntegration/RenderGraphIOService.h"
 
 #include "Assets/Textures/TextureFactory.h"
-#include "Runtime/IO/ReadbackManager.h"
 #include "Materials/TextureStreaming/ITextureStreamingFeedbackService.h"
 #include "Render/Runtime/IUploadService.h"
+#include "Render/RenderGraph/RenderGraph.h"
 
 namespace br::render {
 
 RenderGraphIOService::RenderGraphIOService(TextureFactory& textures,
-    std::shared_ptr<org::runtime::IUploadService> uploads, br::ReadbackManager& readbacks,
-    ITextureStreamingFeedbackService& feedback) noexcept
-    : m_textures(&textures), m_uploads(std::move(uploads)), m_readbacks(&readbacks),
-      m_textureStreamingFeedback(&feedback) {}
+    std::shared_ptr<org::runtime::IUploadService> uploads, ITextureStreamingFeedbackService& feedback) noexcept
+    : m_textures(&textures), m_uploads(std::move(uploads)), m_textureStreamingFeedback(&feedback) {}
 
 void RenderGraphIOService::SetRegistry(org::ResourceRegistry& registry) {
     org::runtime::UploadResolveContext context;
@@ -26,18 +24,15 @@ void RenderGraphIOService::GatherStructuralPasses(
         out.push_back(org::ExternalPassDesc::Render("Builtin::Uploads", pass)
             .At(org::ExternalInsertPoint::Begin(0)));
     // Mip generation and BC7 compression run in the texture job graph (TextureJobGraph), not here.
-    if (auto pass = m_readbacks->GetReadbackPass())
-        out.push_back(org::ExternalPassDesc::Render("Builtin::Readbacks", pass)
-            .At(org::ExternalInsertPoint::End(0))
-            .PinToQueue(static_cast<org::QueueSlotIndex>(0)));
+    // Texture readbacks (ReadbackManager) are submitted through the graph's external client after each frame.
 }
 
-void RenderGraphIOService::GatherFramePasses(
-    std::vector<org::ExternalPassDesc>& out) {
-    if (auto pass = m_textureStreamingFeedback->CreateTextureStreamingFeedbackReadbackPass())
-        out.push_back(org::ExternalPassDesc::Copy("Material::TextureStreamingReadback", pass)
-            .At(org::ExternalInsertPoint::After("MenuRenderPass"))
-            .PreferQueue(org::QueueKind::Copy));
+void RenderGraphIOService::AfterExecute(org::RenderGraph& graph) {
+    // The feedback copy runs on the copy queue when there is one.
+    const auto& queues = graph.GetQueueRegistry();
+    auto slot = queues.FindSlot({org::QueueKind::Copy, 0});
+    if (org::ToUnderlying(slot) == 0xFF) slot = queues.FindGraphicsSlot();
+    m_textureStreamingFeedback->SubmitTextureStreamingFeedbackReadback(graph.GetExternalClient(), org::ToUnderlying(slot));
 }
 
 } // namespace br::render

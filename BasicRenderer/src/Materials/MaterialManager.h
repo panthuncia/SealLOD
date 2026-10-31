@@ -71,7 +71,7 @@ public:
 	void ProcessPendingMaterialUpdates(uint64_t frameIndex);
 	void AcknowledgePublishedTextureImageTable(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
-	std::shared_ptr<org::RenderPass> CreateTextureStreamingFeedbackReadbackPass() override;
+	void SubmitTextureStreamingFeedbackReadback(org::ExternalClient& client, uint32_t queueSlot) override;
 	void SetTextureStreamingFeedbackSuppressed(bool suppressed) { m_textureStreamingFeedbackSuppressed = suppressed; }
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
 	MaterialTextureStreamingReadinessStats GetMaterialTextureStreamingReadinessStats() const;

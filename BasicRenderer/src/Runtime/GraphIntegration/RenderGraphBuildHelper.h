@@ -22,8 +22,6 @@
 #include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOMainPass.h"
 #include "Lighting/Clustered/RenderPasses/LightCullingPass.h"
 #include "Lighting/Clustered/RenderPasses/ClusterGenerationPass.h"
-#include "Lighting/Environment/RenderPasses/EnvironmentConversionPass.h"
-#include "Lighting/Environment/RenderPasses/EnvironmentSHPass.h"
 #include "Lighting/Shading/RenderPasses/DeferredShadingPass.h"
 #include "Lighting/Environment/RenderPasses/SkyboxRenderPass.h"
 #include "PostProcessing/Reflections/RenderPasses/ScreenSpaceReflectionsPass.h"
@@ -903,17 +901,6 @@ inline void BuildLightClusteringPipeline(org::RenderGraph* graph) {
 
     graph->BuildPass<LightCullingPass>("LightCullingPass");
     TagPassTechnique(graph, "LightCullingPass", "Lighting::Clustered Lighting");
-}
-
-inline void BuildEnvironmentPipeline(org::RenderGraph* graph) {
-    graph->BuildPass<EnvironmentConversionPass>("Environment Conversion Pass");
-    TagPassTechnique(graph, "Environment Conversion Pass", "Environment Lighting::Capture & Filtering");
-
-    graph->BuildPass<EnvironmentSHPass>("Environment Spherical Harmonics Pass");
-    TagPassTechnique(graph, "Environment Spherical Harmonics Pass", "Environment Lighting::Capture & Filtering");
-
-    graph->BuildPass<EnvironmentFilterPass>("Environment Prefilter Pass");
-    TagPassTechnique(graph, "Environment Prefilter Pass", "Environment Lighting::Capture & Filtering");
 }
 
 inline void BuildLinearDepthDownsamplePass(org::RenderGraph* graph) {

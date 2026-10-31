@@ -539,7 +539,6 @@ public:
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
-            Builtin::Terrain::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer);
         b.UnorderedAccess(
                 Builtin::Terrain::RvtHeightAtlas,

@@ -105,7 +105,6 @@ ReyesVirtualShadowRasterBindings ReyesVirtualShadowRasterizationPass::Declare(or
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
-            Builtin::Terrain::TextureGroup,
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
@@ -155,6 +154,7 @@ void ReyesVirtualShadowRasterizationPass::Update(const org::UpdateExecutionConte
 
     for (const auto& viewInfo : context.Views()) {
         const auto cameraIndex = viewInfo.cameraBufferIndex;
+        if (cameraIndex >= nextViewRasterInfos.size()) continue;
         CLodViewRasterInfo info{};
         if (viewInfo.shadow && viewInfo.lightType == Components::LightType::Directional) {
             info.scissorMinX = 0u;
@@ -175,11 +175,10 @@ void ReyesVirtualShadowRasterizationPass::Update(const org::UpdateExecutionConte
             static_cast<uint32_t>(m_viewRasterInfos.size() * sizeof(CLodViewRasterInfo)),
             org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
             0);
-        m_declaredResourcesChanged = true;
     }
-    else {
-        m_declaredResourcesChanged = false;
-    }
+    // The rows are uploaded into a buffer declared by pointer; resizing it is a new backing, which the graph rebinds.
+    // Nothing the pass declares depends on the row values.
+    m_declaredResourcesChanged = false;
 }
 
 bool ReyesVirtualShadowRasterizationPass::DeclaredResourcesChanged() const

@@ -527,11 +527,9 @@ void MaterialManager::ShutdownTextureStreaming() {
 		m_textureStreamingManager->Shutdown();
 	}
 }
-std::shared_ptr<org::RenderPass> MaterialManager::CreateTextureStreamingFeedbackReadbackPass() {
-	if (!m_textureStreamingManager || m_textureStreamingFeedbackSuppressed) {
-		return {};
-	}
-	return m_textureStreamingManager->CreateTextureStreamingFeedbackReadbackPass();
+void MaterialManager::SubmitTextureStreamingFeedbackReadback(org::ExternalClient& client, uint32_t queueSlot) {
+	if (!m_textureStreamingManager || m_textureStreamingFeedbackSuppressed) return;
+	m_textureStreamingManager->SubmitTextureStreamingFeedbackReadback(client, queueSlot);
 }
 
 MaterialTextureStreamingStats MaterialManager::GetMaterialTextureStreamingStats() const {

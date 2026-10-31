@@ -23,7 +23,7 @@ struct ClusterSoftwareRasterBindings {
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages, telemetry;
     org::DeclaredViewToken skinMapping, skinHash, skinPositions, skinAllocator, skinWork, skinArgs, skinMembership;
-    org::DeclaredTableLayout<CLodViewRasterInfo> viewRasterInfoLayout;
+    CLodViewRasterDeclaration viewRasterInfoLayout;
     uint32_t skinCacheHashEntries = 0, skinCachePositionCapacity = 0;
     bool virtualShadow = false, hasTelemetry = false, hasSkinCache = false;
 };

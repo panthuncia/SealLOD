@@ -4,6 +4,8 @@
 
 #include "Assets/Textures/Pipeline/TexturePipelineArtifacts.h"
 #include "Runtime/GraphIntegration/TextureJobGraph.h"
+#include "Runtime/GraphIntegration/EnvironmentJobGraph.h"
+#include "../../../generated/BuiltinResources.h"
 #include <BasicRenderer/Renderer.h>
 #include "Render/RenderGraph/RenderGraph.h"
 #include "OpenRenderGraph/Runtime.h"
@@ -176,6 +178,9 @@ void Renderer::Cleanup() {
     // allocator teardown rather than waiting for Renderer destruction.
     for (auto& family : m_lightTableFamilies) family.reset();
     for (auto& family : m_poseTableFamilies) family.reset();
+    // The environment job graph goes before the upload services: its host retires the runtime's deferred work against
+    // the runtime's queues, and cleaning the upload service destroys the dedicated upload queue without unregistering it.
+    m_environmentJobs.reset();
     if (currentRenderGraph) {
         // Publication and texture-streaming producers have now stopped. Cover
         // submissions made after the first wait before cleaning their services.
@@ -630,6 +635,8 @@ void Renderer::Initialize(
 	m_pViewManager = ViewManager::CreateUnique();
 	m_pEnvironmentManager = EnvironmentManager::CreateUnique(currentRenderGraph->RetainUploadService());
 	m_pEnvironmentManager->SetWorkServices(m_environmentWorkServices);
+	m_environmentJobs = std::make_unique<br::render::EnvironmentJobGraph>(m_orgRuntime, m_environmentWorkServices,
+		m_pEnvironmentManager->ProvideResource(Builtin::Environment::InfoBuffer), m_numFramesInFlight);
     CreateDefaultEnvironmentResources();
     m_pEnvironmentManager->SetRequestReadbackFn([this](std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback, bool cubemap) {
         if (!m_pReadbackManager) {

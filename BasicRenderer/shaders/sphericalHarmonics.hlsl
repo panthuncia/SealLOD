@@ -11,12 +11,12 @@ void CSMain(uint3 DTid : SV_DispatchThreadID) {
 
     uint faceSize = UintRootConstant0;
     uint samplerIndex = UintRootConstant1;
-    uint environmentBufferDescriptorIndex = UintRootConstant2;
     uint environmentIndex = UintRootConstant2;
-	
-	ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    // The source cubemap's view, from the pass: the environment's own entry may not be uploaded yet.
+    uint cubemapDescriptorIndex = UintRootConstant3;
+
     RWStructuredBuffer<EnvironmentInfo> environments = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Environment::InfoBuffer)];
-    TextureCube<float4> g_envMap = ResourceDescriptorHeap[environments[environmentIndex].cubeMapDescriptorIndex];
+    TextureCube<float4> g_envMap = ResourceDescriptorHeap[cubemapDescriptorIndex];
 	
     // out-of-bounds guard
         if (x >= faceSize || y >= faceSize)
