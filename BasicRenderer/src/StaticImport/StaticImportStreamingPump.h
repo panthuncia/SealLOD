@@ -94,8 +94,6 @@ namespace br::staticimport
 		// Every extension's IsMaterialReadyForTemplatePublication.
 		bool IsMaterialReadyForTemplatePublication(const Material& material) const;
 
-		void ApplyDirectStaticWorkloadDeltas( const std::unordered_map<DrawWorkloadKey, std::int64_t, DrawWorkloadKey::Hasher>& deltas, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans = nullptr);
-
 		void FlushDirectStaticWorkloadCountUpdates( const std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>& dirtyWorkloadSpans);
 
 		static bool TrimPreparedBatchToDesiredCells( PreparedDirectStaticImportBatch& batch, const StaticDesiredCellArea& desiredCells, const br::staticimport::StaticStreamTarget& target, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks);
@@ -103,8 +101,6 @@ namespace br::staticimport
 		void CompleteStaticTemplateArtifacts(StaticTemplateRefsPublished packet);
 
 		void QueueMaterializedDecisionCleanup(std::list<StaticImportMaterializedPublishDecision>& decisions);
-
-		void QueueRemovalCleanup( std::vector<StaticRemovalDiff>& removals, std::vector<br::render::StaticObjectRemovalPayload>& removalPayloads);
 
 		bool FlushGroupAckBacklog();
 

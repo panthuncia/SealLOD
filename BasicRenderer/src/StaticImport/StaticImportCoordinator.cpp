@@ -15,13 +15,13 @@
 namespace br::staticimport
 {
 	namespace {
-		struct SkippedRediscovery { StaticCellKey cell; std::uint64_t generation, placements; };
+		struct SkippedRediscovery { std::uint64_t generation, placements; };
 		struct MembershipTrace {
 			std::mutex mutex;
 			std::ofstream out;
 			std::unordered_map<std::uint64_t, SkippedRediscovery> skipped;
 			MembershipTrace(const char* path) : out(std::string(path) + ".lifecycle.csv") {
-				out << "event,group_id,world,cell_x,cell_y,target_generation,owner_generation,placements,desired,active_member\n";
+				out << "event,group_id,target_generation,owner_generation,placements\n";
 			}
 		};
 		MembershipTrace* SceneMembershipTrace() {
@@ -467,8 +467,7 @@ namespace br::staticimport
 			retiredRecord->descriptor.placementCount);
 		retiredRecord->stage.store(terminalStage,
 			std::memory_order_release);
-		_lifecycle->Erase(
-			retiredRecord->descriptor.cellKey, groupID, retiredRecord.get());
+		_lifecycle->Erase(groupID, retiredRecord.get());
 		_state.pendingGroups.erase(pendingIt);
 		if (!_state.graphOwnedGroupPlacementCounts.contains(groupID)) {
 			_state.capacityHintDrawRecordsByGroup.erase(groupID);
@@ -1226,7 +1225,7 @@ namespace br::staticimport
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::QueueLeftCellRemovals");
 			for (const auto& cell : leftCells) {
 				DropHostCell(cell);
-				auto removal = MakeStaticRemovalDiff(cell, target, _state.desiredCells.size(), leftCells.size());
+				auto removal = MakeStaticRemovalDiff(cell, target);
 				if (auto groupsIt = _state.activeCellGroups.find(cell); groupsIt != _state.activeCellGroups.end()) {
 					removal.groupIDs = groupsIt->second;
 					for (const auto groupID : removal.groupIDs) {
@@ -2056,13 +2055,8 @@ namespace br::staticimport
 					std::lock_guard lock(trace->mutex);
 					if (const auto skipped = trace->skipped.find(groupID); skipped != trace->skipped.end()) {
 						const auto& info = skipped->second;
-						const auto cell = _state.activeCellGroups.find(info.cell);
-						const bool activeMember = cell != _state.activeCellGroups.end() &&
-							std::ranges::find(cell->second, groupID) != cell->second.end();
-						trace->out << "unpublish_after_skip," << groupID << ',' << info.cell.worldFormID << ','
-							<< info.cell.cellX << ',' << info.cell.cellY << ',' << _state.latestTarget.generation
-							<< ',' << unpublishedGroup.generation << ',' << info.placements << ','
-							<< _state.desiredCells.contains(info.cell) << ',' << activeMember << '\n';
+						trace->out << "unpublish_after_skip," << groupID << ',' << _state.latestTarget.generation
+							<< ',' << unpublishedGroup.generation << ',' << info.placements << '\n';
 						trace->out.flush();
 						trace->skipped.erase(skipped);
 					}
@@ -2209,8 +2203,7 @@ namespace br::staticimport
 					if (!record) continue;
 					record->stage.store(StaticGroupLifecycleStage::Cancelled,
 						std::memory_order_release);
-					_lifecycle->Erase(
-						record->descriptor.cellKey, record->groupID, record.get());
+					_lifecycle->Erase(record->groupID, record.get());
 				}
 				continue;
 			}
@@ -2244,8 +2237,7 @@ namespace br::staticimport
 				if (_state.failedVariantAddresses.contains(variantAddress)) {
 					record->stage.store(StaticGroupLifecycleStage::Cancelled,
 						std::memory_order_release);
-					_lifecycle->Erase(
-						pending.cellKey, groupID, record.get());
+					_lifecycle->Erase(groupID, record.get());
 					++_state.stats.unsupportedGroupsDropped;
 					continue;
 				}
@@ -2261,26 +2253,22 @@ namespace br::staticimport
 					if (auto* trace = SceneMembershipTrace()) {
 						std::lock_guard lock(trace->mutex);
 						trace->skipped.insert_or_assign(groupID, SkippedRediscovery{
-							pending.cellKey, _state.latestTarget.generation, pending.placementCount});
-						trace->out << "skip_owned," << groupID << ',' << pending.cellKey.worldFormID << ','
-							<< pending.cellKey.cellX << ',' << pending.cellKey.cellY << ',' << _state.latestTarget.generation
-							<< ',' << (_state.graphOwnedGroupGenerations.contains(groupID) ? _state.graphOwnedGroupGenerations.at(groupID) : 0) << ',' << pending.placementCount
-							<< ',' << _state.desiredCells.contains(pending.cellKey) << ','
-							<< (cellGroups && cellGroupMembership.contains(groupID)) << '\n';
+							_state.latestTarget.generation, pending.placementCount});
+						trace->out << "skip_owned," << groupID << ',' << _state.latestTarget.generation
+							<< ',' << (_state.graphOwnedGroupGenerations.contains(groupID) ? _state.graphOwnedGroupGenerations.at(groupID) : 0)
+							<< ',' << pending.placementCount << '\n';
 					}
 
 					record->stage.store(StaticGroupLifecycleStage::Published,
 						std::memory_order_release);
-					_lifecycle->Erase(
-						pending.cellKey, groupID, record.get());
+					_lifecycle->Erase(groupID, record.get());
 					continue;
 				}
 				const bool alreadyActive = cellGroups && !cellGroupMembership.insert(groupID).second;
 				if (alreadyActive && !_state.pendingGroups.contains(groupID)) {
 					record->stage.store(StaticGroupLifecycleStage::Cancelled,
 						std::memory_order_release);
-					_lifecycle->Erase(
-						pending.cellKey, groupID, record.get());
+					_lifecycle->Erase(groupID, record.get());
 					continue;
 				}
 				if (!alreadyActive) {

@@ -20,7 +20,7 @@ namespace br::staticimport
 {
 
 	// The descriptor is built on the cell-preparation worker and remains owned
-	// by its cell shard. The coordinator retains only a lightweight locator;
+	// by its group's shard. The coordinator retains only a lightweight locator;
 	// graph packets share this immutable record instead of copying strings,
 	// placement matrices, and recipe metadata into a global pending map.
 	class StaticGroupLifecycleStore
@@ -42,26 +42,22 @@ namespace br::staticimport
 		void Insert(const std::shared_ptr<StaticGroupLifecycleRecord>& record)
 		{
 			if (!record || _shards.empty()) return;
-			auto& shard = Select(record->descriptor.cellKey);
+			auto& shard = Select(record->groupID);
 			std::lock_guard lock(shard.mutex);
-			shard.cells[record->descriptor.cellKey].insert_or_assign(record->groupID, record);
+			shard.records.insert_or_assign(record->groupID, record);
 		}
 
 		void Erase(
-			const StaticCellKey& cellKey,
 			std::uint64_t groupID,
 			const StaticGroupLifecycleRecord* expected = nullptr)
 		{
 			if (_shards.empty()) return;
-			auto& shard = Select(cellKey);
+			auto& shard = Select(groupID);
 			std::lock_guard lock(shard.mutex);
-			const auto cell = shard.cells.find(cellKey);
-			if (cell == shard.cells.end()) return;
-			const auto record = cell->second.find(groupID);
-			if (record == cell->second.end() ||
+			const auto record = shard.records.find(groupID);
+			if (record == shard.records.end() ||
 				(expected && record->second.get() != expected)) return;
-			cell->second.erase(record);
-			if (cell->second.empty()) shard.cells.erase(cell);
+			shard.records.erase(record);
 		}
 
 		[[nodiscard]] std::size_t ShardCount() const noexcept { return _shards.size(); }
@@ -70,14 +66,14 @@ namespace br::staticimport
 		struct Shard
 		{
 			std::mutex mutex;
-			std::unordered_map<StaticCellKey,
-				std::unordered_map<std::uint64_t, std::shared_ptr<StaticGroupLifecycleRecord>>,
-				StaticCellKeyHash> cells;
+			std::unordered_map<std::uint64_t, std::shared_ptr<StaticGroupLifecycleRecord>> records;
 		};
 
-		[[nodiscard]] Shard& Select(const StaticCellKey& key)
+		// Group ids are already well-mixed hashes; fold the high half in so the
+		// low bits the mask keeps still see all of them.
+		[[nodiscard]] Shard& Select(std::uint64_t groupID)
 		{
-			return *_shards[StaticCellKeyHash{}(key) & _mask];
+			return *_shards[static_cast<std::size_t>(groupID ^ (groupID >> 32)) & _mask];
 		}
 
 		std::mutex _configureMutex;

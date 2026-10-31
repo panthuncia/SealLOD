@@ -251,13 +251,6 @@ namespace br::staticimport
 			(void)groupID;
 		}
 
-		// A removal of `cell`'s groups was applied to the published scene.
-		virtual void OnCellRemovalApplied(const StaticCellKey& cell, std::uint64_t generation)
-		{
-			(void)cell;
-			(void)generation;
-		}
-
 		// The renderer finished retiring removed groups of `cell`.
 		virtual void OnCellRetired(const StaticCellKey& cell) { (void)cell; }
 
@@ -285,13 +278,6 @@ namespace br::staticimport
 		{
 			(void)groupID;
 			(void)cell;
-			(void)hold;
-		}
-
-		// A removal of the group was applied to the published scene (any residency).
-		virtual void OnGroupRemovalApplied(std::uint64_t groupID, const StaticGroupHold& hold)
-		{
-			(void)groupID;
 			(void)hold;
 		}
 

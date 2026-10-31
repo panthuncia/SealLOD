@@ -98,17 +98,11 @@ namespace br::staticimport
 
 	inline StaticRemovalDiff MakeStaticRemovalDiff(
 		const StaticCellKey& cellKey,
-		const StaticImportCameraTarget& target,
-		std::size_t desiredCellsAtQueue,
-		std::size_t leftCellsAtQueue)
+		const StaticImportCameraTarget& target)
 	{
 		StaticRemovalDiff removal;
 		removal.cellKey = cellKey;
 		removal.generation = target.generation;
-		removal.targetKey = target.key;
-		removal.desiredCellsAtQueue = desiredCellsAtQueue;
-		removal.leftCellsAtQueue = leftCellsAtQueue;
-		removal.distanceToTarget = StaticCellDistanceToTarget(target.stream, cellKey);
 		return removal;
 	}
 

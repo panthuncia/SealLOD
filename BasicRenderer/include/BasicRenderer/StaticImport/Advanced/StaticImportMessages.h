@@ -468,10 +468,6 @@ namespace br::staticimport
 	{
 		StaticCellKey cellKey;
 		std::uint64_t generation{ 0 };
-		StaticStreamKey targetKey;
-		std::size_t desiredCellsAtQueue{ 0 };
-		std::size_t leftCellsAtQueue{ 0 };
-		unsigned int distanceToTarget{ std::numeric_limits<unsigned int>::max() };
 		std::vector<std::uint64_t> groupIDs;
 	};
 
