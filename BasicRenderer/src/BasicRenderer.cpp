@@ -39,6 +39,9 @@
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Render/RenderGraph/RenderGraph.h"
 #include "BasicRenderer/Assets/Import/ModelLoader.h"
+#include <BasicRenderer/StaticImport/ImportedAssetLibrary.h>
+#include <BasicRenderer/StaticImport/ScenePlacementSource.h>
+#include <BasicRenderer/StaticImport/StaticImportRuntime.h>
 #include <rhi_interop_dx12.h>
 #include <d3d12sdklayers.h>
 #include <BasicRenderer/Extensions/RenderDeviceAccess.h>
@@ -538,6 +541,56 @@ std::vector<DemoModel> FindDemoModels(std::string_view commandLine)
     if (models.empty()) models.push_back({"models/bistroExterior.glb"});
     return models;
 }
+
+// The demo's static scene: the --model placements streamed through the static import
+// runtime, which publishes their static parts into the renderer's scene the way SARP's
+// LiveSceneBridge does. Skinned parts are kept by the asset library for the dynamic scene.
+struct DemoStaticScene {
+    br::staticimport::StaticImportShared shared;
+    br::staticimport::ImportedAssetLibrary assets;
+    br::staticimport::ScenePlacementSource placements{ { .sceneName = "BasicRendererDemo" } };
+    std::unique_ptr<br::staticimport::StaticImportRuntime> runtime;
+
+    DemoStaticScene() {
+        assets.SetSkinnedPartsCallback([](const std::string& key, const std::vector<br::import::RenderableAssetPart>& parts) {
+            spdlog::info("Demo static scene: '{}' has {} skinned parts; they are not imported as statics", key, parts.size());
+        });
+    }
+
+    ~DemoStaticScene() {
+        if (runtime) runtime->Shutdown();
+        runtime.reset();
+        assets.Shutdown();
+    }
+
+    void Start(Renderer& renderer) {
+        runtime = std::make_unique<br::staticimport::StaticImportRuntime>(
+            shared, br::staticimport::StaticImportSettings{}, assets, placements,
+            br::staticimport::StaticImportRuntime::Hooks{});
+        runtime->AttachServices(renderer.GetSceneIngestionServices().StaticScene());
+    }
+
+    void Tick(Renderer& renderer, unsigned int frameIndex) {
+        const auto& scene = renderer.GetCurrentScene();
+        if (!runtime || !scene || !scene->HasUsablePrimaryCamera()) return;
+        XMFLOAT3 position;
+        XMStoreFloat3(&position, scene->GetPrimaryCamera().get<Components::Position>().pos);
+        runtime->UpdateStreaming(placements.MakeStreamTarget(position));
+        if (frameIndex % 100 == 0) {
+            const auto stats = runtime->GetStatsSnapshot();
+            spdlog::info("Demo static scene: frame={} live_static_objects={} active_cells={} applied_placements={} groups_imported={} pending_groups={}",
+                frameIndex, runtime->LiveStaticObjectCount(), runtime->Counters().lastStaticActiveCells,
+                runtime->Counters().lastStaticAppliedPlacements, runtime->Counters().staticDirectGroupsImported,
+                stats.pendingGroups);
+            spdlog::info("Demo static scene: waiting(assets={} variants={} templates={} shader_variants={}) queued(templates={} shader_variants={} ready={}) dropped(unsupported={} stale={}) acks(published={} requeued={} dropped={})",
+                stats.groupsWaitingAssets, stats.groupsWaitingVariants, stats.groupsWaitingTemplates, stats.groupsWaitingShaderVariants,
+                stats.templateRequestsQueued, stats.shaderVariantRequestsQueued, stats.readyGroupsQueued,
+                stats.unsupportedGroupsDropped, stats.staleGroupsDropped,
+                stats.groupsAckPublished, stats.groupsAckRequeued, stats.groupsAckDropped);
+            for (const auto& diagnostic : stats.pendingGroupDiagnostics) spdlog::info("Demo static scene: pending {}", diagnostic);
+        }
+    }
+};
 
 std::optional<std::string> FindCommandLineValue(std::string_view commandLine, std::string_view option)
 {
@@ -1131,17 +1184,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     }
     renderer.SetInputMode(InputMode::wasd);
+    // --legacy-scene: load the models through the legacy ModelLoader/AppendScene path.
+    const bool useLegacyScene = commandLine.find("--legacy-scene") != std::string_view::npos;
+    std::unique_ptr<DemoStaticScene> staticScene;
 
     {
         org::BufferBase::ScopedBackingMutation startupSceneBackingMutation;
 
         auto baseScene = std::make_shared<Scene>();
 
+        // The default load streams the models' static parts through the static import
+        // runtime, like SARP does; --legacy-scene loads them as ECS scenes instead.
         std::vector<std::shared_ptr<Scene>> modelScenes;
-        for (const auto& model : FindDemoModels(commandLine)) {
-            auto modelScene = LoadModel(model.path);
-            modelScene->GetRoot().set<Components::Scale>({ model.scale, model.scale, model.scale });
-            modelScenes.push_back(std::move(modelScene));
+        if (useLegacyScene) {
+            for (const auto& model : FindDemoModels(commandLine)) {
+                auto modelScene = LoadModel(model.path);
+                modelScene->GetRoot().set<Components::Scale>({ model.scale, model.scale, model.scale });
+                modelScenes.push_back(std::move(modelScene));
+            }
+        } else {
+            staticScene = std::make_unique<DemoStaticScene>();
+            for (const auto& model : FindDemoModels(commandLine)) {
+                staticScene->placements.AddPlacement(
+                    model.path, XMMatrixScaling(model.scale, model.scale, model.scale));
+            }
+            staticScene->Start(renderer);
         }
 
     //auto carScene = LoadModel("models/porche.glb");
@@ -1634,6 +1701,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 spdlog::info("CLod streaming cleanup test reached frame {} after graph replacement; closing.", frameIndex);
                 PostMessage(hwnd, WM_CLOSE, 0, 0);
             }
+            if (staticScene) staticScene->Tick(renderer, frameIndex);
             renderer.Update(elapsedSeconds.count());
             renderer.PostUpdate();
             if (frameIndex % 100 == 0) {
@@ -1650,6 +1718,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             *scene,
             br::extensions::MakeSettingGetter<bool>("rememberCameraPose")());
     }
+    // The static import runtime stops before the renderer whose services it uses.
+    staticScene.reset();
     renderer.Cleanup();
 
     if (statisticalSampling.ExitCode() != 0) return statisticalSampling.ExitCode();

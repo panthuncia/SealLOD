@@ -460,6 +460,8 @@ set(SOURCES
     "src/Scene/Scene.cpp"
     "src/Scene/Views/ViewManager.cpp"
     # src/StaticImport
+    "src/StaticImport/ImportedAssetLibrary.cpp"
+    "src/StaticImport/ScenePlacementSource.cpp"
     "src/StaticImport/StaticImportCoordinator.cpp"
     "src/StaticImport/StaticImportRuntime.cpp"
     "src/StaticImport/StaticImportStreamingPump.cpp"
