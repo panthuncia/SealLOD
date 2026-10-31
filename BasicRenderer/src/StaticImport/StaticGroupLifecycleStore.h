@@ -82,36 +82,47 @@ namespace br::staticimport
 		std::size_t _mask{ 0 };
 	};
 
-	// Turns a prepared cell's groups into unsealed lifecycle records (no revision,
-	// not in the store). StaticImportCoordinator::ApplyGroupChanges seals them.
+	// Turns a prepared group into an unsealed lifecycle record (no revision, not in
+	// the store), moving its payload out of `group`. `cell` is the cell that added
+	// it (default for a group with no cell); `batchKey` is the host batch key, which
+	// must be non-zero. StaticImportCoordinator::ApplyGroupChanges seals the record.
+	[[nodiscard]] inline std::shared_ptr<StaticGroupLifecycleRecord> MakeStaticGroupLifecycleRecord(
+		PreparedStaticGroup& group, const StaticCellKey& cell, std::uint64_t batchKey)
+	{
+		auto record = std::make_shared<StaticGroupLifecycleRecord>();
+		record->groupID = group.groupID;
+		auto& pending = record->descriptor;
+		pending.cellKey = cell;
+		pending.batchKey = batchKey;
+		pending.materialVariant = std::move(group.materialVariant);
+		pending.modelPath = std::move(group.modelPath);
+		pending.mappedModelPath = group.mappedModelPath;
+		pending.name = std::move(group.name);
+		pending.instanceWorldMatrices = std::move(group.instanceWorldMatrices);
+		pending.placementIDs = std::move(group.placementIDs);
+		pending.recipePreparedParts = std::move(group.recipePreparedParts);
+		pending.mappedRecipe = std::move(group.mappedRecipe);
+		pending.recipeSceneBinding = std::move(group.recipeSceneBinding);
+		pending.recipeVariantSlot = std::move(group.recipeVariantSlot);
+		pending.mappedPreparedParts = group.mappedPreparedParts;
+		pending.recipeVariantIndex = group.recipeVariantIndex;
+		pending.recipePreparedAuthoritative = group.recipePreparedAuthoritative;
+		pending.recipeImportCost = group.recipeImportCost;
+		pending.placementCount = group.placementCount;
+		pending.residencyClass = group.residencyClass;
+		pending.residencyGeneration = group.residencyGeneration;
+		return record;
+	}
+
+	// Turns a prepared cell's groups into unsealed lifecycle records, batched by the
+	// cell's StaticCellKeyHash.
 	inline void BuildPreparedStaticCellLifecycle(PreparedStaticCell& prepared)
 	{
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportServiceWorker::BuildCellLifecycle");
+		const auto batchKey = static_cast<std::uint64_t>(StaticCellKeyHash{}(prepared.key));
 		prepared.lifecycleGroups.reserve(prepared.groups.size());
 		for (auto& group : prepared.groups) {
-			auto record = std::make_shared<StaticGroupLifecycleRecord>();
-			record->groupID = group.groupID;
-			auto& pending = record->descriptor;
-			pending.cellKey = prepared.key;
-			pending.batchKey = static_cast<std::uint64_t>(StaticCellKeyHash{}(prepared.key));
-			pending.materialVariant = std::move(group.materialVariant);
-			pending.modelPath = std::move(group.modelPath);
-			pending.mappedModelPath = group.mappedModelPath;
-			pending.name = std::move(group.name);
-			pending.instanceWorldMatrices = std::move(group.instanceWorldMatrices);
-			pending.placementIDs = std::move(group.placementIDs);
-			pending.recipePreparedParts = std::move(group.recipePreparedParts);
-			pending.mappedRecipe = std::move(group.mappedRecipe);
-			pending.recipeSceneBinding = std::move(group.recipeSceneBinding);
-			pending.recipeVariantSlot = std::move(group.recipeVariantSlot);
-			pending.mappedPreparedParts = group.mappedPreparedParts;
-			pending.recipeVariantIndex = group.recipeVariantIndex;
-			pending.recipePreparedAuthoritative = group.recipePreparedAuthoritative;
-			pending.recipeImportCost = group.recipeImportCost;
-			pending.placementCount = group.placementCount;
-			pending.residencyClass = group.residencyClass;
-			pending.residencyGeneration = group.residencyGeneration;
-			prepared.lifecycleGroups.push_back(std::move(record));
+			prepared.lifecycleGroups.push_back(MakeStaticGroupLifecycleRecord(group, prepared.key, batchKey));
 		}
 		prepared.groups.clear();
 		prepared.groups.shrink_to_fit();

@@ -544,21 +544,27 @@ std::vector<DemoModel> FindDemoModels(std::string_view commandLine)
 
 // The demo's static scene: the --model placements streamed through the static import
 // runtime, which publishes their static parts into the renderer's scene the way SARP's
-// LiveSceneBridge does. Each static part of a model is its own placement, so a scene
-// streams in node by node. Skinned parts are kept by the asset library for the dynamic scene.
+// LiveSceneBridge does. Each static part of a model is its own group, so a scene
+// streams in node by node; models can be added while the runtime runs. Skinned parts are
+// kept by the asset library for the dynamic scene.
 struct DemoStaticScene {
     struct Model {
         std::string path;
         XMFLOAT4X4 world;
+        // Seeds the model's group ids and is its batch key, so a model added twice places
+        // two copies.
+        std::uint64_t key = 0;
     };
 
     br::staticimport::StaticImportShared shared;
     br::staticimport::ImportedAssetLibrary assets;
+    // The runtime still requires a placement source; the demo's groups have no cells, so
+    // it stays empty.
     br::staticimport::ScenePlacementSource placements{ { .sceneName = "BasicRendererDemo" } };
     std::unique_ptr<br::staticimport::StaticImportRuntime> runtime;
-    // Models whose parts are not listed yet. The runtime starts once every model is placed,
-    // since the placement list is fixed from then on.
+    // Models whose parts are not listed yet.
     std::vector<Model> unplacedModels;
+    std::uint32_t modelsAdded = 0;
 
     DemoStaticScene() {
         assets.SetSkinnedPartsCallback([](const std::string& key, const std::vector<br::import::RenderableAssetPart>& parts) {
@@ -575,27 +581,33 @@ struct DemoStaticScene {
     void AddModel(const std::string& path, FXMMATRIX world) {
         Model model{ path };
         XMStoreFloat4x4(&model.world, world);
+        model.key = br::staticimport::recipe::HashString(std::to_string(++modelsAdded),
+            br::staticimport::recipe::HashString("br-demo-model"));
         (void)assets.TryGetLoadedParts(path);
         unplacedModels.push_back(std::move(model));
     }
 
-    // Places every model whose parts are listed; true once none is left.
-    bool PlaceLoadedModels() {
+    // Adds a group per static part of every model whose parts are listed.
+    void PlaceLoadedModels() {
         std::erase_if(unplacedModels, [&](const Model& model) {
             const auto parts = assets.TryGetLoadedParts(model.path);
             if (!parts) return false;
-            std::size_t placed = 0;
+            std::vector<br::staticimport::StaticImportGroup> groups;
+            groups.reserve(parts->size());
             for (const auto& part : *parts) {
                 if (part.skinned) continue;
-                placements.AddPlacement(
-                    br::staticimport::ImportedAssetLibrary::MakePartAssetKey(model.path, part.index),
+                auto& group = groups.emplace_back();
+                group.assetKey = br::staticimport::ImportedAssetLibrary::MakePartAssetKey(model.path, part.index);
+                group.groupID = br::staticimport::recipe::HashString(group.assetKey, model.key);
+                group.batchKey = model.key;
+                group.name = part.name.empty() ? std::filesystem::path(model.path).filename().string() : part.name;
+                XMStoreFloat4x4(&group.instanceWorldMatrices.emplace_back(),
                     XMLoadFloat4x4(&part.localMatrix) * XMLoadFloat4x4(&model.world));
-                ++placed;
             }
-            spdlog::info("Demo static scene: '{}' placed {} of {} parts", model.path, placed, parts->size());
+            spdlog::info("Demo static scene: '{}' placed {} of {} parts", model.path, groups.size(), parts->size());
+            runtime->AddOrUpdateGroups(std::move(groups));
             return true;
         });
-        return unplacedModels.empty();
     }
 
     void Start(Renderer& renderer) {
@@ -606,10 +618,8 @@ struct DemoStaticScene {
     }
 
     void Tick(Renderer& renderer, unsigned int frameIndex) {
-        if (!runtime) {
-            if (!PlaceLoadedModels()) return;
-            Start(renderer);
-        }
+        if (!runtime) Start(renderer);
+        PlaceLoadedModels();
         const auto& scene = renderer.GetCurrentScene();
         if (!scene || !scene->HasUsablePrimaryCamera()) return;
         XMFLOAT3 position;

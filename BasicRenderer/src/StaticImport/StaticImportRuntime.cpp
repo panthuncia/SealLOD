@@ -321,6 +321,45 @@ namespace br::staticimport
 			_pump.UpdateStaticStreaming(target);
 		}
 
+		// Builds the groups' records on the caller's thread; the coordinator seals
+		// them (ApplyGroupChanges) once the workers started.
+		void AddOrUpdateGroups(std::vector<StaticImportGroup> groups)
+		{
+			StaticGroupChanges change;
+			change.adds.reserve(groups.size());
+			for (auto& source : groups) {
+				if (source.groupID == 0 || source.assetKey.empty() || source.instanceWorldMatrices.empty()) {
+					continue;
+				}
+				PreparedStaticGroup group;
+				group.groupID = source.groupID;
+				group.modelPath = std::move(source.assetKey);
+				group.name = std::move(source.name);
+				group.placementCount = source.instanceWorldMatrices.size();
+				group.instanceWorldMatrices.reserve(source.instanceWorldMatrices.size());
+				for (const auto& world : source.instanceWorldMatrices) {
+					group.instanceWorldMatrices.push_back(DirectX::XMLoadFloat4x4(&world));
+				}
+				group.materialVariant = _staticAssets.MakeMaterialVariant(
+					source.materialOverrideHash, std::move(source.materialOverrides));
+				change.adds.push_back(MakeStaticGroupLifecycleRecord(
+					group, StaticCellKey{}, source.batchKey != 0 ? source.batchKey : source.groupID));
+			}
+			if (change.adds.empty()) return;
+			(void)_drains.PushBlocking(_workBus.staticImportGroupChanges, std::move(change));
+		}
+
+		void RemoveGroups(std::span<const std::uint64_t> groupIDs)
+		{
+			StaticGroupChanges change;
+			change.removes.reserve(groupIDs.size());
+			for (const auto groupID : groupIDs) {
+				if (groupID != 0) change.removes.push_back(groupID);
+			}
+			if (change.removes.empty()) return;
+			(void)_drains.PushBlocking(_workBus.staticImportGroupChanges, std::move(change));
+		}
+
 		// The pump's readiness gate: loads the placement source and, once it is
 		// available, opens the recipe cache for its environment.
 		bool EnsurePlacementsReady()
@@ -2287,6 +2326,7 @@ namespace br::staticimport
 					? std::static_pointer_cast<const StaticGraphGroupOwnership>(group->ownership) : nullptr;
 				if (!ownership || ownership->groupRevision > removal.groupRevision) continue;
 				if (ownership->residencyClass == StaticImportResidencyClass::CellStatic &&
+					ownership->cellKey != StaticCellKey{} &&
 					std::ranges::none_of(pending.invalidatedCells, [&](const StaticCellKey& cell) {
 						return cell == ownership->cellKey;
 					})) {
@@ -2849,6 +2889,16 @@ namespace br::staticimport
 		_impl->UpdateStreaming(target);
 	}
 
+	void StaticImportRuntime::AddOrUpdateGroups(std::vector<StaticImportGroup> groups)
+	{
+		_impl->AddOrUpdateGroups(std::move(groups));
+	}
+
+	void StaticImportRuntime::RemoveGroups(std::span<const std::uint64_t> groupIDs)
+	{
+		_impl->RemoveGroups(groupIDs);
+	}
+
 	void StaticImportRuntime::Shutdown()
 	{
 		_impl->Shutdown();
@@ -2926,6 +2976,7 @@ namespace br::staticimport
 		return StaticImportQueueDepths{
 			.cellPrepareJobs = bus.staticImportCellPrepareJobs.Size(),
 			.preparedCellResults = bus.staticImportPreparedCellResults.Size(),
+			.groupChanges = bus.staticImportGroupChanges.Size(),
 			.transactionMaterializeJobs = bus.staticImportTransactionMaterializeJobs.Size(),
 			.transactionMaterializeBacklog = state.staticImportTransactionMaterializeBacklog.size(),
 			.materializedValidationRequests = bus.staticImportMaterializedValidationRequests.Size(),

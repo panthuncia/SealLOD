@@ -148,6 +148,9 @@ namespace br::staticimport
 
 	struct PendingStaticGroup
 	{
+		// The cell whose streaming added the group; default (no cell) for groups a
+		// host adds through StaticImportRuntime::AddOrUpdateGroups. Only cell-level
+		// hooks, holds and traces read it.
 		StaticCellKey cellKey;
 		// Opaque host batch key: preparation packets never span two, and it is
 		// the group's allocation scope. Cell groups use the cell's StaticCellKeyHash.
@@ -229,6 +232,15 @@ namespace br::staticimport
 			StaticGroupLifecycleStage::Discovered };
 		std::atomic<std::uint64_t> intentRevision{ 0 };
 		std::optional<StaticImportCapacityBroker::Reservation> capacityReservation;
+	};
+
+	// One host change to the flat group intake (StaticImportRuntime::AddOrUpdateGroups
+	// / RemoveGroups), applied by the coordinator in submission order: `removes`, then
+	// `adds` (unsealed records built on the caller's thread).
+	struct StaticGroupChanges
+	{
+		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> adds;
+		std::vector<std::uint64_t> removes;
 	};
 
 	struct PreparedStaticCell

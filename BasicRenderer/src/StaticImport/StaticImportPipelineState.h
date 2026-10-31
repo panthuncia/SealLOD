@@ -157,7 +157,10 @@ namespace br::staticimport
 		std::optional<StaticImportCameraTarget> staticImportServiceLastPublishedTarget;
 		StaticImportCameraTarget staticImportServicePendingTarget;
 		std::atomic_bool staticImportServiceHasPendingTarget{ false };
-		bool staticImportServiceWorkersStarted{ false };
+		// Set once by the streaming pump; the coordinator reads it before it takes
+		// host group changes (the lifecycle store and capacity broker are configured
+		// by then).
+		std::atomic_bool staticImportServiceWorkersStarted{ false };
 		std::atomic<std::uint64_t> staticImportServiceTargetGeneration{ 0 };
 		StaticImportServiceStats staticImportServicePublishedStats;
 		std::atomic<std::uint32_t> staticImportWorkerDrainsActive{ 0 };

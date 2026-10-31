@@ -223,6 +223,7 @@ namespace br::staticimport
 			didWork = DrainGroupAcks() || didWork;
 			didWork = DrainTemplateRefs() || didWork;
 			didWork = DrainPreparedCells() || didWork;
+			didWork = DrainGroupChanges() || didWork;
 			for (auto* extension : _extensions) {
 				didWork = extension->DrainPreparedResults() || didWork;
 			}
@@ -248,6 +249,7 @@ namespace br::staticimport
 				retirementPending = retirementPending || !_importState->staticRetirementsAwaitingPublication.empty();
 			}
 			const bool quiescent = !didWork && !retirementPending &&
+				_bus->staticImportGroupChanges.Empty() &&
 				_state.pendingCellQueue.empty() && _state.pendingCellKeys.empty() &&
 				_state.pendingGroups.empty() && _state.pendingGroupQueue.empty() &&
 				_state.readyGroups.empty() && _state.groupSuspensions.empty() &&
@@ -2378,6 +2380,30 @@ namespace br::staticimport
 		return true;
 	}
 
+	bool StaticImportCoordinator::DrainGroupChanges()
+	{
+		if (!HasPendingGroupChanges()) {
+			return false;
+		}
+		std::vector<StaticGroupChanges> changes;
+		_bus->staticImportGroupChanges.Drain(changes,
+			static_cast<std::size_t>(_settings->maxPreparedCellDrainPerPass));
+		if (changes.empty()) {
+			return false;
+		}
+
+		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainGroupChanges");
+		bool added = false;
+		for (const auto& change : changes) {
+			ApplyGroupChanges(change.adds, change.removes);
+			added = added || !change.adds.empty();
+		}
+		if (added) {
+			RefreshGraphCapacityHint();
+		}
+		return true;
+	}
+
 	bool StaticImportCoordinator::ScheduleCells()
 	{
 		if (_state.pendingCellQueue.empty()) {
@@ -3382,6 +3408,7 @@ namespace br::staticimport
 			!_bus->staticScenePageReadyEvents.Empty() ||
 			!_bus->staticSceneRootPublishedEvents.Empty() ||
 			!_bus->staticImportPreparedCellResults.Empty() ||
+			HasPendingGroupChanges() ||
 			!_bus->staticGroupSuspensionRequests.Empty() ||
 			_shared->graphCompletions->StaticGroupCount() != 0 || !_bus->staticImportAssetPublishResults.Empty() ||
 			!_bus->staticImportMaterialVariantResults.Empty() || !_bus->staticImportShaderVariantResults.Empty() ||
@@ -3449,6 +3476,7 @@ namespace br::staticimport
 			!_bus->staticScenePageReadyEvents.Empty() ||
 			!_bus->staticSceneRootPublishedEvents.Empty() ||
 			!_bus->staticImportPreparedCellResults.Empty() ||
+			HasPendingGroupChanges() ||
 			!_bus->staticGroupSuspensionRequests.Empty() ||
 			_shared->graphCompletions->StaticGroupCount() != 0 || !_bus->staticImportAssetPublishResults.Empty() ||
 			!_bus->staticImportMaterialVariantResults.Empty() || !_bus->staticImportShaderVariantResults.Empty() ||

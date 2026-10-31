@@ -435,6 +435,7 @@ namespace br::staticimport
 		return extensionWork + static_cast<std::uint64_t>(
 			_bus->staticImportCellPrepareJobs.Size()
 			+ _bus->staticImportPreparedCellResults.Size()
+			+ _bus->staticImportGroupChanges.Size()
 			+ _shared->graphCompletions->StaticGroupCount()
 			+ _bus->staticImportGroupArtifactReleaseJobs.Size()
 			+ _bus->staticImportGroupAssemblyJobs.Size()
@@ -957,8 +958,11 @@ namespace br::staticimport
 					ownership->MarkApplied();
 					_importState->staticAppliedPlacementCount += ownership->instanceCount;
 					++_importState->staticRuntimeGroupActiveCount;
-					for (auto* extension : _extensions) {
-						extension->OnCellGroupPublished(ownership->cellKey, ownership->generation, ownership->groupID);
+					// Groups a host added without a cell have no cell to report.
+					if (ownership->cellKey != StaticCellKey{}) {
+						for (auto* extension : _extensions) {
+							extension->OnCellGroupPublished(ownership->cellKey, ownership->generation, ownership->groupID);
+						}
 					}
 					applied += ownership->instanceCount;
 					++upsertsThisFrame;

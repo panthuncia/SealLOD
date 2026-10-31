@@ -30,6 +30,7 @@ namespace br::staticimport
 		BoundedMpscQueue<StaticImportCellPrepareJob> staticImportCellPrepareJobs{ 4096 };
 		BoundedMpscQueue<StaticSceneRecipeCompileJob> staticSceneRecipeCompileJobs{ 0 };
 		BoundedMpscQueue<PreparedStaticCell> staticImportPreparedCellResults{ 0 };
+		BoundedMpscQueue<StaticGroupChanges> staticImportGroupChanges{ 0 };
 
 		BoundedMpscQueue<StaticGroupSuspensionRequest> staticGroupSuspensionRequests{ 0 };
 		BoundedMpscQueue<br::render::ArtifactKey> staticImportGroupArtifactReleaseJobs{ 0 };

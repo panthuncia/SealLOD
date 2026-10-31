@@ -188,6 +188,17 @@ namespace br::staticimport
 
 		bool DrainPreparedCells();
 
+		// Host group changes (StaticImportRuntime::AddOrUpdateGroups / RemoveGroups),
+		// through ApplyGroupChanges in submission order. Taken only once the workers
+		// started.
+		bool DrainGroupChanges();
+
+		[[nodiscard]] bool HasPendingGroupChanges() const
+		{
+			return _importState->staticImportServiceWorkersStarted.load(std::memory_order_acquire) &&
+				!_bus->staticImportGroupChanges.Empty();
+		}
+
 
 		bool ScheduleCells();
 

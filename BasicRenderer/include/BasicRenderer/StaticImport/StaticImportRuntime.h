@@ -21,7 +21,10 @@
 // 1. Construct it, then register extensions with AddExtension.
 // 2. AttachServices once the renderer's scene ingestion services exist (again whenever
 //    they are replaced).
-// 3. UpdateStreaming with the current target, every frame.
+// 3. UpdateStreaming with the current target, every frame. Hosts that place their
+//    own groups add, update and remove them with AddOrUpdateGroups / RemoveGroups at
+//    any time; they are taken once the first UpdateStreaming with a valid target
+//    started the pipeline.
 // 4. Shutdown (or destroy it) before the shared state, the sources, the extensions and
 //    whatever the hooks reach. Shutdown stops every worker and coordinator task and
 //    flushes at most one bounded batch of pending recipe persistence.
@@ -31,7 +34,11 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
+#include <string>
 #include <vector>
+
+#include <DirectXMath.h>
 
 #include <BasicRenderer/Scene/SceneIngestionServices.h>
 #include <BasicRenderer/StaticImport/Advanced/StaticImportAdvancedAccess.h>
@@ -58,12 +65,34 @@ namespace br::staticimport
 	{
 		std::size_t cellPrepareJobs{ 0 };
 		std::size_t preparedCellResults{ 0 };
+		std::size_t groupChanges{ 0 };
 		std::size_t transactionMaterializeJobs{ 0 };
 		std::size_t transactionMaterializeBacklog{ 0 };
 		std::size_t materializedValidationRequests{ 0 };
 		std::size_t resourcePendingBatchBacklog{ 0 };
 		std::size_t groupAcks{ 0 };
 		std::size_t groupAckBacklog{ 0 };
+	};
+
+	// A static group a host places itself (StaticImportRuntime::AddOrUpdateGroups): one
+	// renderable asset with one material variant, at one or more world placements.
+	struct StaticImportGroup
+	{
+		// Stable, non-zero id; adding it again replaces the group.
+		std::uint64_t groupID{ 0 };
+		// Opaque host batch key: preparation packets never span two, and it is the
+		// group's transform allocation scope. 0 batches the group on its own.
+		std::uint64_t batchKey{ 0 };
+		// The IStaticAssetSource asset key.
+		std::string assetKey;
+		std::string name;
+		// The material variant, as a recipe group expresses it (0 and no overrides for
+		// the asset's own materials); IStaticAssetSource::MakeMaterialVariant turns it
+		// into the group's variant.
+		std::uint64_t materialOverrideHash{ 0 };
+		std::vector<recipe::MaterialOverride> materialOverrides;
+		// One world matrix per placement; at least one.
+		std::vector<DirectX::XMFLOAT4X4> instanceWorldMatrices;
 	};
 
 	class StaticImportRuntime
@@ -130,6 +159,19 @@ namespace br::staticimport
 
 		// Streams static cells around `target`; the per-frame entry point.
 		void UpdateStreaming(const br::staticimport::StaticStreamTarget& target);
+
+		// ---- Host groups (any thread) ----
+		//
+		// The flat group intake, beside the cells the runtime streams: groups need no
+		// cell and no placement source data. Changes apply in call order. Groups with
+		// a zero id, no asset key or no placements are ignored.
+
+		// Adds `groups`, or replaces the groups with their ids.
+		void AddOrUpdateGroups(std::vector<StaticImportGroup> groups);
+
+		// Removes the groups with `groupIDs`, retiring what of them was published.
+		// Unknown ids are ignored.
+		void RemoveGroups(std::span<const std::uint64_t> groupIDs);
 
 		// Stops the pipeline. Idempotent; the destructor calls it.
 		void Shutdown();
