@@ -96,7 +96,9 @@ namespace br::staticimport
 
 		void FlushDirectStaticWorkloadCountUpdates( const std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>& dirtyWorkloadSpans);
 
-		static bool TrimPreparedBatchToDesiredCells( PreparedDirectStaticImportBatch& batch, const StaticDesiredCellArea& desiredCells, const br::staticimport::StaticStreamTarget& target, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks);
+		// Drops the batch's imports whose group is no longer desired at their revision
+		// (host imports and host groups ask their owners). Returns whether any remain.
+		static bool TrimPreparedBatchToDesiredGroups( PreparedDirectStaticImportBatch& batch, const StaticDesiredGroupRevisions& desiredGroups, const br::staticimport::StaticStreamTarget& target, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks);
 
 		void CompleteStaticTemplateArtifacts(StaticTemplateRefsPublished packet);
 

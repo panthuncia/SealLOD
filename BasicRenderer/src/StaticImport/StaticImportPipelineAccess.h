@@ -30,12 +30,11 @@ namespace br::staticimport
 	public:
 		// The coordinator and the pump are only used once extensions run, so they may
 		// still be under construction when this object is built.
-		StaticImportPipelineAccess(StaticImportShared& shared, StaticImportWorkBus& bus, StaticImportPipelineState& importState, StaticImportDrainScheduler& drains, StaticGroupLifecycleStore& lifecycle, StaticImportCoordinator& coordinator, StaticImportStreamingPump& pump)
+		StaticImportPipelineAccess(StaticImportShared& shared, StaticImportWorkBus& bus, StaticImportPipelineState& importState, StaticImportDrainScheduler& drains, StaticImportCoordinator& coordinator, StaticImportStreamingPump& pump)
 			: _shared(std::addressof(shared))
 			, _bus(std::addressof(bus))
 			, _importState(std::addressof(importState))
 			, _drains(std::addressof(drains))
-			, _lifecycle(std::addressof(lifecycle))
 			, _coordinator(std::addressof(coordinator))
 			, _pump(std::addressof(pump))
 		{
@@ -77,8 +76,8 @@ namespace br::staticimport
 			group.residencyClass = StaticImportResidencyClass::HostGroup;
 			group.residencyGeneration = request.residencyGeneration;
 			prepared.groups.push_back(std::move(group));
-			// The coordinator integrates lifecycle records, as cell preparation seals them.
-			SealPreparedStaticCellLifecycle(*_lifecycle, prepared);
+			// The coordinator seals and integrates the record, as it does for prepared cells.
+			BuildPreparedStaticCellLifecycle(prepared);
 			// Host groups also produce coordinator work. A direct queue push can
 			// strand these results once ordinary cell preparation has gone idle.
 			(void)_drains->PushBlocking(_bus->staticImportPreparedCellResults, std::move(prepared));
@@ -191,7 +190,6 @@ namespace br::staticimport
 		StaticImportWorkBus* _bus;
 		StaticImportPipelineState* _importState;
 		StaticImportDrainScheduler* _drains;
-		StaticGroupLifecycleStore* _lifecycle;
 		StaticImportCoordinator* _coordinator;
 		StaticImportStreamingPump* _pump;
 		std::array<br::staticimport::IStaticImportExtension*, static_cast<std::size_t>(br::staticimport::StaticHostWorkSource::Count)> _hostWorkOwners{};

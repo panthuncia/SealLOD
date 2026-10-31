@@ -32,6 +32,60 @@
 namespace br::staticimport
 {
 
+	// The coordinator's desired groups and their current revisions, mirrored for
+	// the stages that check liveness off the coordinator thread (batch trimming,
+	// materialized decisions, ownership applied on the streaming pump). The
+	// coordinator is the only writer and updates it before it acts on a change, so
+	// a revision is listed here before any of its work can be published and is gone
+	// before its removal is queued. Sharded by group id like the lifecycle store.
+	class StaticDesiredGroupRevisions
+	{
+	public:
+		void Set(std::uint64_t groupID, std::uint64_t revision)
+		{
+			auto& shard = Select(groupID);
+			std::lock_guard lock(shard.mutex);
+			shard.revisions.insert_or_assign(groupID, revision);
+		}
+
+		void Erase(std::uint64_t groupID)
+		{
+			auto& shard = Select(groupID);
+			std::lock_guard lock(shard.mutex);
+			shard.revisions.erase(groupID);
+		}
+
+		// Whether `groupID` is desired at exactly `revision`.
+		[[nodiscard]] bool IsDesired(std::uint64_t groupID, std::uint64_t revision) const
+		{
+			const auto& shard = Select(groupID);
+			std::lock_guard lock(shard.mutex);
+			const auto found = shard.revisions.find(groupID);
+			return found != shard.revisions.end() && found->second == revision;
+		}
+
+	private:
+		static constexpr std::size_t kShardCount = 64;
+
+		struct Shard
+		{
+			mutable std::mutex mutex;
+			std::unordered_map<std::uint64_t, std::uint64_t> revisions;
+		};
+
+		[[nodiscard]] Shard& Select(std::uint64_t groupID)
+		{
+			return _shards[static_cast<std::size_t>(groupID ^ (groupID >> 32)) & (kShardCount - 1u)];
+		}
+
+		[[nodiscard]] const Shard& Select(std::uint64_t groupID) const
+		{
+			return _shards[static_cast<std::size_t>(groupID ^ (groupID >> 32)) & (kShardCount - 1u)];
+		}
+
+		std::array<Shard, kShardCount> _shards;
+	};
+
 	struct StaticImportPipelineState
 	{
 		// Async template graph: identities and fingerprints resolved under one lock.
@@ -93,7 +147,6 @@ namespace br::staticimport
 		std::list<StaticImportMaterializedPublishDecision> staticImportMaterializedDecisionBacklog;
 		std::list<StaticImportMaterializedPublishDecision> staticImportMaterialGraphPendingDecisions;
 		std::list<StaticImportMaterializedPublishDecision> staticImportMaterializedDecisionCleanupBacklog;
-		std::vector<StaticRemovalDiff> staticImportRemovalDiffCleanupBacklog;
 		std::vector<br::render::StaticObjectRemovalPayload> staticImportRemovalPayloadCleanupBacklog;
 
 		// Import service: camera targets, worker scheduling and liveness.
@@ -114,6 +167,7 @@ namespace br::staticimport
 		std::uint32_t staticImportWorkerConcurrency{ 1 };
 		bool staticImportCoordinatorPublishedQuiescent{ false };
 		std::atomic<std::uint64_t> staticImportCoordinatorLivenessEpoch{ 0 };
+		StaticDesiredGroupRevisions staticDesiredGroupRevisions;
 		std::atomic<std::uint64_t> staticImportAssetReadinessGeneration{ 0 };
 		std::atomic<std::uint64_t> graphDesiredPlacementSetDigest{ 0 };
 		std::shared_ptr<StaticImportCallbackHandoff> staticImportCallbackHandoff{

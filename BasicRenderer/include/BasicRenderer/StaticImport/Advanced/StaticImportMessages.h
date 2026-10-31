@@ -152,7 +152,10 @@ namespace br::staticimport
 		// Opaque host batch key: preparation packets never span two, and it is
 		// the group's allocation scope. Cell groups use the cell's StaticCellKeyHash.
 		std::uint64_t batchKey{ 0 };
-		// The group's revision; cell groups use the generation their cell was prepared at.
+		// The group's revision, stamped by the coordinator when it accepts the add
+		// (StaticImportCoordinator::ApplyGroupChanges). Every add and removal of a
+		// group id draws a new, larger revision, so a re-added group never shares
+		// a revision with the add a pending removal retires.
 		std::uint64_t groupRevision{ 0 };
 		// The group's material variant. A recipe-bound group keeps only the hash
 		// here and shares its overrides through MaterialVariant().
@@ -311,7 +314,8 @@ namespace br::staticimport
 		struct UnpublishedGroup
 		{
 			std::uint64_t groupID{ 0 };
-			std::uint64_t generation{ 0 };
+			// The retired ownership's group revision; zero retires any owner.
+			std::uint64_t groupRevision{ 0 };
 		};
 
 		std::uint64_t ticketID{ 0 };
@@ -404,8 +408,11 @@ namespace br::staticimport
 		mutable std::atomic<bool> appliedCounted{ false };
 		std::uint64_t groupID{ 0 };
 		StaticCellKey cellKey;
+		// The stream target generation the group's batch was published under. Only
+		// cell hooks and traces read it; liveness and retirement compare groupRevision.
 		std::uint64_t generation{ 0 };
 		std::uint64_t batchKey{ 0 };
+		// The revision of the add this ownership was published from.
 		std::uint64_t groupRevision{ 0 };
 		std::size_t instanceCount{ 0 };
 		StaticImportResidencyClass residencyClass{ StaticImportResidencyClass::CellStatic };
@@ -475,11 +482,13 @@ namespace br::staticimport
 		Failed
 	};
 
-	struct StaticRemovalDiff
+	// A group removed from the desired set. It retires the group's published
+	// ownership only when that ownership's revision is not newer than this one,
+	// so a re-add of the same id (a larger revision) survives the removal.
+	struct StaticGroupRemoval
 	{
-		StaticCellKey cellKey;
-		std::uint64_t generation{ 0 };
-		std::vector<std::uint64_t> groupIDs;
+		std::uint64_t groupID{ 0 };
+		std::uint64_t groupRevision{ 0 };
 	};
 
 	struct StaticRecipeVariantBinding
@@ -581,6 +590,7 @@ namespace br::staticimport
 		std::uint64_t requiredMutationGeneration{ 0 };
 		std::vector<std::shared_ptr<const StaticGraphGroupOwnership>> ownerships;
 		std::vector<StaticImportGroupAck::UnpublishedGroup> unpublished;
+		// Cells of the ownerships removals retired, for IStaticImportExtension::OnCellRetired.
 		std::vector<StaticCellKey> invalidatedCells;
 	};
 

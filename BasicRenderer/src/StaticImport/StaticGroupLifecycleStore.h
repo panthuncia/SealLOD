@@ -19,10 +19,11 @@
 namespace br::staticimport
 {
 
-	// The descriptor is built on the cell-preparation worker and remains owned
-	// by its group's shard. The coordinator retains only a lightweight locator;
-	// graph packets share this immutable record instead of copying strings,
-	// placement matrices, and recipe metadata into a global pending map.
+	// The descriptor is built on the cell-preparation worker; the coordinator
+	// seals it into its group's shard when it accepts the add and retains only a
+	// lightweight locator. Graph packets share this immutable record instead of
+	// copying strings, placement matrices, and recipe metadata into a global
+	// pending map.
 	class StaticGroupLifecycleStore
 	{
 	public:
@@ -81,10 +82,11 @@ namespace br::staticimport
 		std::size_t _mask{ 0 };
 	};
 
-	// Turns a prepared cell's groups into lifecycle records in the store, as the coordinator integrates them.
-	inline void SealPreparedStaticCellLifecycle(StaticGroupLifecycleStore& store, PreparedStaticCell& prepared)
+	// Turns a prepared cell's groups into unsealed lifecycle records (no revision,
+	// not in the store). StaticImportCoordinator::ApplyGroupChanges seals them.
+	inline void BuildPreparedStaticCellLifecycle(PreparedStaticCell& prepared)
 	{
-		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportServiceWorker::SealCellLifecycle");
+		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportServiceWorker::BuildCellLifecycle");
 		prepared.lifecycleGroups.reserve(prepared.groups.size());
 		for (auto& group : prepared.groups) {
 			auto record = std::make_shared<StaticGroupLifecycleRecord>();
@@ -92,7 +94,6 @@ namespace br::staticimport
 			auto& pending = record->descriptor;
 			pending.cellKey = prepared.key;
 			pending.batchKey = static_cast<std::uint64_t>(StaticCellKeyHash{}(prepared.key));
-			pending.groupRevision = prepared.generation;
 			pending.materialVariant = std::move(group.materialVariant);
 			pending.modelPath = std::move(group.modelPath);
 			pending.mappedModelPath = group.mappedModelPath;
@@ -110,7 +111,6 @@ namespace br::staticimport
 			pending.placementCount = group.placementCount;
 			pending.residencyClass = group.residencyClass;
 			pending.residencyGeneration = group.residencyGeneration;
-			store.Insert(record);
 			prepared.lifecycleGroups.push_back(std::move(record));
 		}
 		prepared.groups.clear();

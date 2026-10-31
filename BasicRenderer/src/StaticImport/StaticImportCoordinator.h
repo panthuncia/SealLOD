@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -129,7 +130,7 @@ namespace br::staticimport
 		// Every extension's IsHostGroupCurrent for the latest target.
 		bool IsHostGroupCurrent(const StaticCellKey& cell, std::uint64_t residencyGeneration) const;
 
-		bool IsGroupLive(const PendingStaticGroup& group) const;
+		bool IsGroupLive(const StaticGroupLifecycleRecord& record) const;
 
 		bool IsPreparedLive(const PreparedDirectStaticImport& prepared) const;
 
@@ -166,13 +167,14 @@ namespace br::staticimport
 
 		bool QueueCellJob(const StaticCellKey& cell, std::uint64_t generation, std::shared_ptr<br::staticimport::recipe::CellRecipeView> mappedRecipe = {}, std::shared_ptr<StaticRecipeSceneBinding> recipeSceneBinding = {}, std::shared_ptr<br::staticimport::recipe::MappedRecipePack> mappedRecipePack = {});
 
-		bool PushCoordinatorRemoval(StaticRemovalDiff removal)
-		{
-			if (!_drains->PushBlocking(_bus->staticImportRemovalOutput, std::move(removal), false)) return false;
-			_shared->staticImportWorkScheduler.Signal(StaticImportWorkSource::RetirementApply);
-			_drains->ScheduleWorkerDrains();
-			return true;
-		}
+		// The flat group intake. Removes `removes` from the desired set, each under a
+		// new revision, and queues their retirement; then seals `adds` (records
+		// built by BuildPreparedStaticCellLifecycle) under new revisions, makes the
+		// cell-static ones desired and feeds them to pendingGroups. Adding a desired
+		// id replaces its current add. Removing an id that is not desired does
+		// nothing. Cell streaming is a client: prepared cells add their groups, left
+		// cells remove them.
+		void ApplyGroupChanges(std::span<const std::shared_ptr<StaticGroupLifecycleRecord>> adds, std::span<const std::uint64_t> removes);
 
 		void ProcessTarget(StaticImportCameraTarget target);
 

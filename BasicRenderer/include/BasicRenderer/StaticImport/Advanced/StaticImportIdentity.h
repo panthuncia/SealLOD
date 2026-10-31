@@ -96,16 +96,6 @@ namespace br::staticimport
 			group.materialVariant.hash ^ (fingerprint >> 32u) };
 	}
 
-	inline StaticRemovalDiff MakeStaticRemovalDiff(
-		const StaticCellKey& cellKey,
-		const StaticImportCameraTarget& target)
-	{
-		StaticRemovalDiff removal;
-		removal.cellKey = cellKey;
-		removal.generation = target.generation;
-		return removal;
-	}
-
 	inline StaticImportTransactionCost StaticImportPreparedBatchCost(const PreparedDirectStaticImportBatch& batch)
 	{
 		StaticImportTransactionCost cost;

@@ -349,14 +349,19 @@ namespace br::staticimport
 		});
 	}
 
-	bool StaticImportCoordinator::IsGroupLive(const PendingStaticGroup& group) const
+	bool StaticImportCoordinator::IsGroupLive(const StaticGroupLifecycleRecord& record) const
 	{
+		const auto& group = record.descriptor;
 		if (group.residencyClass == StaticImportResidencyClass::HostGroup) {
 			return _state.latestTarget.valid &&
 				_state.latestTarget.stream.interiorCellFormID == 0 &&
 				IsHostGroupCurrent(group.cellKey, group.residencyGeneration);
 		}
-		return _state.desiredCells.contains(group.cellKey);
+		// A cell-static group is live while its add is the desired one. The
+		// revision replaces the old cell-membership test: a group whose cell was
+		// left and re-entered is a new add, and the work of the earlier add is stale.
+		const auto desired = _state.desiredGroups.find(record.groupID);
+		return desired != _state.desiredGroups.end() && desired->second.revision == group.groupRevision;
 	}
 
 	bool StaticImportCoordinator::IsPreparedLive(const PreparedDirectStaticImport& prepared) const
@@ -366,7 +371,8 @@ namespace br::staticimport
 				_state.latestTarget.stream.interiorCellFormID == 0 &&
 				IsHostGroupCurrent(prepared.cellKey, prepared.residencyGeneration);
 		}
-		return _state.desiredCells.contains(prepared.cellKey);
+		const auto desired = _state.desiredGroups.find(prepared.groupID);
+		return desired != _state.desiredGroups.end() && desired->second.revision == prepared.groupRevision;
 	}
 
 	void StaticImportCoordinator::ClearGroupBlockers(std::uint64_t groupID)
@@ -501,7 +507,7 @@ namespace br::staticimport
 			return false;
 		}
 		if (!pendingIt->second ||
-			!IsGroupLive(pendingIt->second->descriptor)) {
+			!IsGroupLive(*pendingIt->second)) {
 			_state.pendingGroupLastTransition[groupID] = "queue_rejected_not_live";
 			return false;
 		}
@@ -989,7 +995,7 @@ namespace br::staticimport
 					group.placementCount, group.ModelPath(), group.cellKey.worldFormID,
 					group.cellKey.interiorCellFormID, group.cellKey.cellX, group.cellKey.cellY,
 					static_cast<unsigned>(group.residencyClass), group.residencyGeneration,
-					IsGroupLive(group), _state.latestTarget.valid,
+					IsGroupLive(*record), _state.latestTarget.valid,
 					_state.latestTarget.stream.worldFormID, _state.latestTarget.stream.interiorCellFormID,
 					_state.stats.generation,
 					dependencies, pendingDependencyCount, delayedDependencyCount,
@@ -1153,7 +1159,7 @@ namespace br::staticimport
 			if (!record) continue;
 			const auto& group = record->descriptor;
 			if (group.residencyClass == StaticImportResidencyClass::HostGroup) {
-				if (IsGroupLive(group)) {
+				if (IsGroupLive(*record)) {
 					(void)QueueGroupIfRunnable(groupID);
 				} else {
 					staleWorldLodGroups.push_back(groupID);
@@ -1223,18 +1229,13 @@ namespace br::staticimport
 
 		{
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::QueueLeftCellRemovals");
+			// A left cell removes its groups through the flat intake, farthest cell first.
 			for (const auto& cell : leftCells) {
 				DropHostCell(cell);
-				auto removal = MakeStaticRemovalDiff(cell, target);
 				if (auto groupsIt = _state.activeCellGroups.find(cell); groupsIt != _state.activeCellGroups.end()) {
-					removal.groupIDs = groupsIt->second;
-					for (const auto groupID : removal.groupIDs) {
-						(void)RemoveGroup(groupID);
-					}
+					const auto groupIDs = std::move(groupsIt->second);
 					_state.activeCellGroups.erase(groupsIt);
-				}
-				if (!removal.groupIDs.empty()) {
-					(void)PushCoordinatorRemoval(std::move(removal));
+					ApplyGroupChanges({}, groupIDs);
 				}
 			}
 		}
@@ -2003,8 +2004,9 @@ namespace br::staticimport
 				_state.graphOwnedGroupPlacementCounts.insert_or_assign(
 					group.groupID, group.placementCount);
 				_state.graphOwnedDesiredPlacementCount += group.placementCount;
-				_state.graphOwnedGroupGenerations.insert_or_assign(
-					group.groupID, ready.input->streamGeneration);
+				const auto* ownership = static_cast<const StaticGraphGroupOwnership*>(group.ownership.get());
+				_state.graphOwnedGroupRevisions.insert_or_assign(
+					group.groupID, ownership ? ownership->groupRevision : 0);
 				_state.graphOwnedPageOwners[pageIndex].insert_or_assign(
 					group.groupID, ready.version);
 				_state.graphOwnedPendingPageOwners[pageIndex].insert_or_assign(
@@ -2045,10 +2047,12 @@ namespace br::staticimport
 			unpublished += ack.unpublished.size();
 			for (const auto& unpublishedGroup : ack.unpublished) {
 				const auto groupID = unpublishedGroup.groupID;
-				const auto ownerGeneration = _state.graphOwnedGroupGenerations.find(groupID);
-				if (ownerGeneration != _state.graphOwnedGroupGenerations.end() &&
-					unpublishedGroup.generation != 0 &&
-					ownerGeneration->second > unpublishedGroup.generation) {
+				// A retirement unpublishes only the add it retired: when a re-add of
+				// the same id has already been accepted, the graph keeps the newer one.
+				const auto ownerRevision = _state.graphOwnedGroupRevisions.find(groupID);
+				if (ownerRevision != _state.graphOwnedGroupRevisions.end() &&
+					unpublishedGroup.groupRevision != 0 &&
+					ownerRevision->second > unpublishedGroup.groupRevision) {
 					continue;
 				}
 				if (auto* trace = SceneMembershipTrace()) {
@@ -2056,7 +2060,7 @@ namespace br::staticimport
 					if (const auto skipped = trace->skipped.find(groupID); skipped != trace->skipped.end()) {
 						const auto& info = skipped->second;
 						trace->out << "unpublish_after_skip," << groupID << ',' << _state.latestTarget.generation
-							<< ',' << unpublishedGroup.generation << ',' << info.placements << '\n';
+							<< ',' << unpublishedGroup.groupRevision << ',' << info.placements << '\n';
 						trace->out.flush();
 						trace->skipped.erase(skipped);
 					}
@@ -2068,7 +2072,7 @@ namespace br::staticimport
 					_state.graphOwnedGroupPlacementCounts.erase(oldCount);
 				}
 				_state.capacityHintDrawRecordsByGroup.erase(groupID);
-				_state.graphOwnedGroupGenerations.erase(groupID);
+				_state.graphOwnedGroupRevisions.erase(groupID);
 				const bool removedOwner = _state.graphOwnedGroupVersions.erase(groupID) != 0;
 				if (removedOwner) {
 					_state.graphOwnedDesiredGroupDigest ^=
@@ -2105,7 +2109,7 @@ namespace br::staticimport
 					continue;
 				}
 				if (!pendingIt->second ||
-					!IsGroupLive(pendingIt->second->descriptor)) {
+					!IsGroupLive(*pendingIt->second)) {
 					erasePending(groupID, StaticGroupLifecycleStage::Cancelled, retiredRecords);
 					++dropped;
 					++_state.stats.groupsAckDropped;
@@ -2183,6 +2187,123 @@ namespace br::staticimport
 		return true;
 	}
 
+	void StaticImportCoordinator::ApplyGroupChanges(std::span<const std::shared_ptr<StaticGroupLifecycleRecord>> adds, std::span<const std::uint64_t> removes)
+	{
+		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::ApplyGroupChanges");
+		bool livenessChanged = false;
+		if (!removes.empty()) {
+			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::ApplyGroupChanges::Remove");
+			std::vector<StaticGroupRemoval> removals;
+			removals.reserve(removes.size());
+			for (const auto groupID : removes) {
+				const auto desired = _state.desiredGroups.find(groupID);
+				if (desired == _state.desiredGroups.end()) continue;
+				_state.desiredGroups.erase(desired);
+				_importState->staticDesiredGroupRevisions.Erase(groupID);
+				(void)RemoveGroup(groupID);
+				removals.push_back({ .groupID = groupID, .groupRevision = _state.nextGroupRevision++ });
+			}
+			if (!removals.empty()) {
+				livenessChanged = true;
+				_bus->staticImportRemovalOutput.PushDeferredRange(removals.begin(), removals.end());
+				_shared->staticImportWorkScheduler.Signal(StaticImportWorkSource::RetirementApply);
+				_drains->ScheduleWorkerDrains();
+			}
+		}
+		for (const auto& record : adds) {
+			if (!record) continue;
+			const auto groupID = record->groupID;
+			auto& pending = record->descriptor;
+			const auto variantAddress = StaticVariantArtifactAddress(
+				pending, _shared->staticSceneRenderSettings);
+			if (_state.failedVariantAddresses.contains(variantAddress)) {
+				record->stage.store(StaticGroupLifecycleStage::Cancelled,
+					std::memory_order_release);
+				++_state.stats.unsupportedGroupsDropped;
+				continue;
+			}
+			if (pending.residencyClass == StaticImportResidencyClass::HostGroup) {
+				// Host-resident groups are not desired by id: their extension decides
+				// liveness (IsHostGroupCurrent), and overlapping host submissions can
+				// rediscover a group whose first transaction already published. Graph
+				// ownership is the authoritative membership guard for that case, and a
+				// group still pending keeps its first record.
+				const bool owned = _state.graphOwnedActiveGroups.contains(groupID);
+				const bool alreadyPending = _state.pendingGroups.contains(groupID);
+				if (owned && !alreadyPending) {
+					if (auto* trace = SceneMembershipTrace()) {
+						std::lock_guard lock(trace->mutex);
+						trace->skipped.insert_or_assign(groupID, SkippedRediscovery{
+							_state.latestTarget.generation, pending.placementCount});
+						trace->out << "skip_owned," << groupID << ',' << _state.latestTarget.generation
+							<< ',' << (_state.graphOwnedGroupRevisions.contains(groupID) ? _state.graphOwnedGroupRevisions.at(groupID) : 0)
+							<< ',' << pending.placementCount << '\n';
+					}
+					record->stage.store(StaticGroupLifecycleStage::Published,
+						std::memory_order_release);
+					continue;
+				}
+				if (alreadyPending) {
+					record->stage.store(StaticGroupLifecycleStage::Cancelled,
+						std::memory_order_release);
+					(void)QueueGroupIfRunnable(groupID);
+					continue;
+				}
+				pending.groupRevision = _state.nextGroupRevision++;
+			} else {
+				// Adding a desired id replaces its current add: the earlier revision's
+				// pending work is dropped here, and its published ownership (if any)
+				// is replaced when this revision publishes.
+				if (_state.desiredGroups.contains(groupID)) {
+					(void)RemoveGroup(groupID);
+					livenessChanged = true;
+				}
+				pending.groupRevision = _state.nextGroupRevision++;
+				_state.desiredGroups.insert_or_assign(groupID, StaticDesiredGroup{
+					.revision = pending.groupRevision, .batchKey = pending.batchKey });
+				_importState->staticDesiredGroupRevisions.Set(groupID, pending.groupRevision);
+			}
+			_lifecycle->Insert(record);
+			const auto preparedParts = pending.mappedPreparedParts.count != 0
+				? pending.mappedPreparedParts.count
+				: pending.recipePreparedParts.size();
+			std::uint64_t estimatedDrawRecords = 0;
+			if (preparedParts != 0 && pending.placementCount <=
+				(std::numeric_limits<std::uint64_t>::max)() / preparedParts) {
+				estimatedDrawRecords = pending.placementCount * preparedParts;
+				_state.capacityHintDrawRecordsByGroup.insert_or_assign(
+					groupID, estimatedDrawRecords);
+			}
+			if (_state.capacityHintCountedGroups.insert(groupID).second) {
+				const auto addSaturated = [](std::uint64_t& target, std::uint64_t value) {
+					target = value > (std::numeric_limits<std::uint64_t>::max)() - target
+						? (std::numeric_limits<std::uint64_t>::max)()
+						: target + value;
+				};
+				addSaturated(_state.capacityHintTransformRows, pending.placementCount);
+				addSaturated(_state.capacityHintDrawRecords, estimatedDrawRecords);
+			}
+			_state.pendingGroups.emplace(groupID, record);
+			_state.pendingGroupLastTransition[groupID] = "group_add";
+			_state.stats.pendingPlacements += pending.placementCount;
+			if (auto* requests = _shared->hasSceneIngestionServices
+				? _shared->sceneIngestionServices.execution.stateRequests : nullptr;
+				requests && requests->TraceActive()) {
+				requests->TraceEvent(br::render::AsyncStateGraphTraceEventID::StaticGroupDiscovered,
+					{ br::render::ArtifactKind::StaticGroup, groupID, 0 },
+					pending.residencyGeneration, 0,
+					{ { pending.placementCount, pending.cellKey.worldFormID,
+						static_cast<std::uint64_t>(static_cast<std::int64_t>(pending.cellKey.cellX)),
+						static_cast<std::uint64_t>(static_cast<std::int64_t>(pending.cellKey.cellY)),
+						static_cast<unsigned>(pending.residencyClass) } });
+			}
+			(void)QueueGroupIfRunnable(groupID);
+		}
+		if (livenessChanged) {
+			MarkStaticImportCoordinatorLivenessChanged();
+		}
+	}
+
 	bool StaticImportCoordinator::DrainPreparedCells()
 	{
 		std::vector<PreparedStaticCell> preparedCells;
@@ -2194,6 +2315,7 @@ namespace br::staticimport
 
 		BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainPreparedCells");
 		BT_PLOT("SARP.StaticImportCoordinator.PreparedCellResults", static_cast<int64_t>(preparedCells.size()));
+		std::vector<std::shared_ptr<StaticGroupLifecycleRecord>> adds;
 		for (auto& prepared : preparedCells) {
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainPreparedCells::PreparedCell");
 			_state.pendingCellKeys.erase(prepared.key);
@@ -2203,7 +2325,6 @@ namespace br::staticimport
 					if (!record) continue;
 					record->stage.store(StaticGroupLifecycleStage::Cancelled,
 						std::memory_order_release);
-					_lifecycle->Erase(record->groupID, record.get());
 				}
 				continue;
 			}
@@ -2219,98 +2340,33 @@ namespace br::staticimport
 						prepared.key, prepared.generation, hostPrepare.value);
 				}
 			}
-			auto* cellGroups = prepared.worldspaceResident ? nullptr : std::addressof(_state.activeCellGroups[prepared.key]);
-			if (cellGroups) cellGroups->reserve(cellGroups->size() + prepared.lifecycleGroups.size());
-			std::unordered_set<std::uint64_t> cellGroupMembership;
-			if (cellGroups) {
-				cellGroupMembership.reserve(cellGroups->size() + prepared.lifecycleGroups.size());
-				cellGroupMembership.insert(cellGroups->begin(), cellGroups->end());
+			// The cell layer keeps which groups each active cell added, so leaving the
+			// cell can remove them. A group id the cell already added keeps its first
+			// record.
+			adds.clear();
+			adds.reserve(prepared.lifecycleGroups.size());
+			if (prepared.worldspaceResident) {
+				adds.assign(prepared.lifecycleGroups.begin(), prepared.lifecycleGroups.end());
+			} else {
+				auto& cellGroups = _state.activeCellGroups[prepared.key];
+				cellGroups.reserve(cellGroups.size() + prepared.lifecycleGroups.size());
+				std::unordered_set<std::uint64_t> cellGroupMembership;
+				cellGroupMembership.reserve(cellGroups.size() + prepared.lifecycleGroups.size());
+				cellGroupMembership.insert(cellGroups.begin(), cellGroups.end());
+				for (auto& record : prepared.lifecycleGroups) {
+					if (!record) continue;
+					if (!cellGroupMembership.insert(record->groupID).second) {
+						record->stage.store(StaticGroupLifecycleStage::Cancelled,
+							std::memory_order_release);
+						continue;
+					}
+					cellGroups.push_back(record->groupID);
+					adds.push_back(record);
+				}
 			}
 			{
-			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainPreparedCells::IntegrateGroups");
-			for (auto& record : prepared.lifecycleGroups) {
-				if (!record) continue;
-				const auto groupID = record->groupID;
-				auto& pending = record->descriptor;
-				const auto variantAddress = StaticVariantArtifactAddress(
-					pending, _shared->staticSceneRenderSettings);
-				if (_state.failedVariantAddresses.contains(variantAddress)) {
-					record->stage.store(StaticGroupLifecycleStage::Cancelled,
-						std::memory_order_release);
-					_lifecycle->Erase(groupID, record.get());
-					++_state.stats.unsupportedGroupsDropped;
-					continue;
-				}
-				// Worldspace-resident records are intentionally not attached to
-				// one cell's active-group list, so overlapping prepared cells can
-				// rediscover the same stable group after its first transaction has
-				// already published. Graph ownership is the authoritative global
-				// membership guard for that case.
-				// Ordinary cell re-entry must retain its new residency even while
-				// an old publication is awaiting removal acknowledgement.
-				if (prepared.worldspaceResident && _state.graphOwnedActiveGroups.contains(groupID) &&
-					!_state.pendingGroups.contains(groupID)) {
-					if (auto* trace = SceneMembershipTrace()) {
-						std::lock_guard lock(trace->mutex);
-						trace->skipped.insert_or_assign(groupID, SkippedRediscovery{
-							_state.latestTarget.generation, pending.placementCount});
-						trace->out << "skip_owned," << groupID << ',' << _state.latestTarget.generation
-							<< ',' << (_state.graphOwnedGroupGenerations.contains(groupID) ? _state.graphOwnedGroupGenerations.at(groupID) : 0)
-							<< ',' << pending.placementCount << '\n';
-					}
-
-					record->stage.store(StaticGroupLifecycleStage::Published,
-						std::memory_order_release);
-					_lifecycle->Erase(groupID, record.get());
-					continue;
-				}
-				const bool alreadyActive = cellGroups && !cellGroupMembership.insert(groupID).second;
-				if (alreadyActive && !_state.pendingGroups.contains(groupID)) {
-					record->stage.store(StaticGroupLifecycleStage::Cancelled,
-						std::memory_order_release);
-					_lifecycle->Erase(groupID, record.get());
-					continue;
-				}
-				if (!alreadyActive) {
-					if (cellGroups) cellGroups->push_back(groupID);
-				}
-				if (!_state.pendingGroups.contains(groupID)) {
-					const auto preparedParts = pending.mappedPreparedParts.count != 0
-						? pending.mappedPreparedParts.count
-						: pending.recipePreparedParts.size();
-					std::uint64_t estimatedDrawRecords = 0;
-					if (preparedParts != 0 && pending.placementCount <=
-						(std::numeric_limits<std::uint64_t>::max)() / preparedParts) {
-						estimatedDrawRecords = pending.placementCount * preparedParts;
-						_state.capacityHintDrawRecordsByGroup.insert_or_assign(
-							groupID, estimatedDrawRecords);
-					}
-					if (_state.capacityHintCountedGroups.insert(groupID).second) {
-						const auto addSaturated = [](std::uint64_t& target, std::uint64_t value) {
-							target = value > (std::numeric_limits<std::uint64_t>::max)() - target
-								? (std::numeric_limits<std::uint64_t>::max)()
-								: target + value;
-						};
-						addSaturated(_state.capacityHintTransformRows, pending.placementCount);
-						addSaturated(_state.capacityHintDrawRecords, estimatedDrawRecords);
-					}
-					_state.pendingGroups.emplace(groupID, record);
-					_state.pendingGroupLastTransition[groupID] = "prepared_cell_insert";
-					_state.stats.pendingPlacements += pending.placementCount;
-					if (auto* requests = _shared->hasSceneIngestionServices
-						? _shared->sceneIngestionServices.execution.stateRequests : nullptr;
-						requests && requests->TraceActive()) {
-						requests->TraceEvent(br::render::AsyncStateGraphTraceEventID::StaticGroupDiscovered,
-							{ br::render::ArtifactKind::StaticGroup, groupID, 0 },
-							pending.residencyGeneration, 0,
-							{ { pending.placementCount, prepared.key.worldFormID,
-								static_cast<std::uint64_t>(static_cast<std::int64_t>(prepared.key.cellX)),
-								static_cast<std::uint64_t>(static_cast<std::int64_t>(prepared.key.cellY)),
-								static_cast<unsigned>(pending.residencyClass) } });
-					}
-				}
-				(void)QueueGroupIfRunnable(groupID);
-			}
+				BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::DrainPreparedCells::IntegrateGroups");
+				ApplyGroupChanges(adds, {});
 			}
 			_state.stats.cellPrepareUs += prepared.prepareUs;
 			_state.stats.cellsPrepared += 1;
@@ -2455,7 +2511,7 @@ namespace br::staticimport
 		if (_state.readyGroups.contains(input.groupID)) {
 			return;
 		}
-		if (!input.record || !IsGroupLive(input.Group())) {
+		if (!input.record || !IsGroupLive(*input.record)) {
 			return;
 		}
 		if (_state.pendingQueued.insert(input.groupID).second) {
@@ -2737,7 +2793,7 @@ namespace br::staticimport
 				auto pendingIt = _state.pendingGroups.find(blocked.groupID);
 				if (!token || !token->valid.load(std::memory_order_acquire) ||
 					pendingIt == _state.pendingGroups.end() || !pendingIt->second ||
-					!IsGroupLive(pendingIt->second->descriptor)) {
+					!IsGroupLive(*pendingIt->second)) {
 					++_state.stats.staleGroupsDropped;
 					continue;
 				}
@@ -2776,7 +2832,7 @@ namespace br::staticimport
 				if (!token || !token->valid.load(std::memory_order_acquire) ||
 					pendingIt == _state.pendingGroups.end() ||
 					!pendingIt->second ||
-					pendingIt->second->descriptor.batchKey != ready.batchKey ||
+					pendingIt->second->descriptor.groupRevision != ready.groupRevision ||
 					!IsPreparedLive(ready)) {
 					++_state.stats.staleGroupsDropped;
 					continue;
@@ -2905,7 +2961,7 @@ namespace br::staticimport
 						ready &&
 						ticketMatches &&
 						pendingIt->second &&
-						prepared.batchKey == pendingIt->second->descriptor.batchKey;
+						prepared.groupRevision == pendingIt->second->descriptor.groupRevision;
 				}
 				if (!groupValid) {
 					valid = false;
@@ -3081,7 +3137,7 @@ namespace br::staticimport
 					continue;
 				}
 				if (!groupIt->second ||
-					!IsGroupLive(groupIt->second->descriptor)) {
+					!IsGroupLive(*groupIt->second)) {
 					_state.pendingGroupQueue.pop_front();
 					_state.pendingGroupSortedPrefix -= (std::min<std::size_t>)(
 						_state.pendingGroupSortedPrefix, 1u);
@@ -3346,7 +3402,7 @@ namespace br::staticimport
 				revisionIt == _state.groupArtifactRevisions.end() ||
 				revisionIt->second != request.revision ||
 				(!pendingIt->second ||
-				 !IsGroupLive(pendingIt->second->descriptor)))) {
+				 !IsGroupLive(*pendingIt->second)))) {
 				if (_importState->staticGroupSuspensionNotifier) _importState->staticGroupSuspensionNotifier(request.identity);
 				continue;
 			}

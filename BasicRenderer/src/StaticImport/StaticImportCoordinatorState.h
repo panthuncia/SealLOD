@@ -20,6 +20,14 @@
 
 namespace br::staticimport
 {
+	// A group in the coordinator's desired set: the revision of its current add
+	// and the batch key it was added under.
+	struct StaticDesiredGroup
+	{
+		std::uint64_t revision{ 0 };
+		std::uint64_t batchKey{ 0 };
+	};
+
 	struct StaticImportCoordinatorState
 	{
 		StaticImportCoordinatorState()
@@ -34,6 +42,13 @@ namespace br::staticimport
 		std::unordered_map<StaticCellKey, std::vector<std::uint64_t>, StaticCellKeyHash> activeCellGroups;
 		std::deque<StaticImportCellPrepareJob> pendingCellQueue;
 		std::unordered_set<StaticCellKey, StaticCellKeyHash> pendingCellKeys;
+		// The flat group intake (ApplyGroupChanges): every cell-static group that is
+		// wanted, at its current revision. Host-resident groups keep their extension
+		// liveness and are not listed. Mirrored to staticDesiredGroupRevisions.
+		std::unordered_map<std::uint64_t, StaticDesiredGroup> desiredGroups;
+		// The next group revision. One counter for every id keeps each id's revisions
+		// strictly increasing across adds and removals without remembering removed ids.
+		std::uint64_t nextGroupRevision{ 1 };
 		std::unordered_map<std::uint64_t, std::shared_ptr<StaticGroupLifecycleRecord>> pendingGroups;
 		std::deque<std::uint64_t> pendingGroupQueue;
 		// The prefix is variant-sorted and can be consumed without repeatedly
@@ -77,7 +92,8 @@ namespace br::staticimport
 		std::unordered_set<std::uint64_t> graphOwnedActiveGroups;
 		std::unordered_map<std::uint64_t, br::render::ArtifactVersionID> graphOwnedGroupVersions;
 		std::unordered_map<std::uint64_t, std::uint64_t> graphOwnedGroupPlacementCounts;
-		std::unordered_map<std::uint64_t, std::uint64_t> graphOwnedGroupGenerations;
+		// The group revision each accepted group was published from.
+		std::unordered_map<std::uint64_t, std::uint64_t> graphOwnedGroupRevisions;
 		std::array<std::unordered_map<std::uint64_t, br::render::ArtifactVersionID>,
 			br::render::kStaticScenePageCount> graphOwnedPageOwners;
 		std::array<std::unordered_map<std::uint64_t, br::render::ArtifactVersionID>,

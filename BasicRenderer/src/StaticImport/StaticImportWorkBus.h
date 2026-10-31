@@ -45,7 +45,7 @@ namespace br::staticimport
 
 		BoundedMpscQueue<StaticTemplateRequest> staticImportTemplateRequestOutput{ 0 };
 		BoundedMpscQueue<StaticTemplateRefsPublished> staticImportTemplateRefsPublished{ 0 };
-		BoundedMpscQueue<StaticRemovalDiff> staticImportRemovalOutput{ 0 };
+		BoundedMpscQueue<StaticGroupRemoval> staticImportRemovalOutput{ 0 };
 		BoundedMpscQueue<StaticRetirementOwnershipRequest>
 			staticRetirementOwnershipRequests{ 0 };
 		BoundedMpscQueue<br::render::StaticObjectRemovalPayload>

@@ -490,7 +490,7 @@ namespace br::staticimport
 		BT_PLOT("SARP.StaticImportService.WorkloadCountFlushes", static_cast<int64_t>(updates.size()));
 	}
 
-	bool StaticImportStreamingPump::TrimPreparedBatchToDesiredCells( PreparedDirectStaticImportBatch& batch, const StaticDesiredCellArea& desiredCells, const br::staticimport::StaticStreamTarget& target, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks)
+	bool StaticImportStreamingPump::TrimPreparedBatchToDesiredGroups( PreparedDirectStaticImportBatch& batch, const StaticDesiredGroupRevisions& desiredGroups, const br::staticimport::StaticStreamTarget& target, std::uint64_t generation, std::vector<StaticImportGroupAck>* droppedAcks)
 	{
 		const auto shouldKeep = [&](const PreparedDirectStaticImport& prepared) {
 			if (prepared.residencyClass == StaticImportResidencyClass::HostGroup) {
@@ -500,7 +500,7 @@ namespace br::staticimport
 				return target.valid &&
 					prepared.hostOwner->IsHostImportCurrent(target, prepared.cellKey, prepared.hostPayload);
 			}
-			return desiredCells.contains(prepared.cellKey);
+			return desiredGroups.IsDesired(prepared.groupID, prepared.groupRevision);
 		};
 		bool removedAny = false;
 		bool keptAll = true;
@@ -945,7 +945,10 @@ namespace br::staticimport
 				}
 				for (const auto& ownership : delta.added) {
 					if (!ownership || ownership->residencyClass != StaticImportResidencyClass::CellStatic) continue;
-					if (!currentDesiredCells.contains(ownership->cellKey)) {
+					// Published from an add that is no longer the desired one (removed,
+					// or replaced by a re-add): retire it and unpublish that revision.
+					if (!_importState->staticDesiredGroupRevisions.IsDesired(
+							ownership->groupID, ownership->groupRevision)) {
 						retirements.push_back({ ownership, true });
 						++queuedRetirements;
 						continue;
@@ -1079,8 +1082,6 @@ namespace br::staticimport
 							decision.livenessEpoch == _importState->staticImportCoordinatorLivenessEpoch.load(std::memory_order_acquire) &&
 							decision.targetGeneration == _importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire);
 						if (!coordinatorLivenessUnchanged) {
-							std::optional<StaticCellKey> lastCell;
-							bool lastCellDesired = false;
 							for (const auto& prepared : decision.item.batch.imports) {
 								if (prepared.hostOwner) {
 									if (!prepared.hostOwner->IsHostImportCurrent(target, prepared.cellKey, prepared.hostPayload)) {
@@ -1094,15 +1095,10 @@ namespace br::staticimport
 										})) {
 										++staleDecisionGroups;
 									}
-								} else {
-									if (!lastCell || !(*lastCell == prepared.cellKey)) {
-										lastCell = prepared.cellKey;
-										lastCellDesired = currentDesiredCells.contains(prepared.cellKey);
-									}
-									if (!lastCellDesired) {
-										++staleDecisionGroups;
-										continue;
-									}
+								} else if (!_importState->staticDesiredGroupRevisions.IsDesired(
+										prepared.groupID, prepared.groupRevision)) {
+									++staleDecisionGroups;
+									continue;
 								}
 							}
 						}
@@ -1607,12 +1603,12 @@ namespace br::staticimport
 				}();
 				bool staleBatch = false;
 				{
-					BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainReadyDiffs::SelectReadyBatchesForReservation::TrimToDesiredCells");
+					BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainReadyDiffs::SelectReadyBatchesForReservation::TrimToDesiredGroups");
 					std::vector<StaticImportGroupAck> droppedAcks;
 					const auto currentGeneration = _importState->staticImportServiceTargetGeneration.load(std::memory_order_acquire);
-					staleBatch = !TrimPreparedBatchToDesiredCells(
+					staleBatch = !TrimPreparedBatchToDesiredGroups(
 						batch,
-						currentDesiredCells,
+						_importState->staticDesiredGroupRevisions,
 						target,
 						currentGeneration,
 						std::addressof(droppedAcks));

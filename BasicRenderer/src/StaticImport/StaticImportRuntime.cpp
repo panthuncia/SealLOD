@@ -80,7 +80,7 @@ namespace br::staticimport
 				[this](StaticImportWorkSource source, const br::TaskContext& context) {
 					StaticImportServiceWorkerDrain(source, context);
 				})
-			, _staticImportAccess(_shared, _workBus, _importState, _drains, _staticImportLifecycleStore, _coordinator, _pump)
+			, _staticImportAccess(_shared, _workBus, _importState, _drains, _coordinator, _pump)
 			, _coordinator(
 				StaticStreamingContext{ _shared, _workBus, _importState, _drains, _counters, _staticImportSettings, _staticAssets, _placements, _staticExtensions },
 				_staticImportLifecycleStore, _staticImportCapacityBroker,
@@ -1251,7 +1251,7 @@ namespace br::staticimport
 			BT_ZONE_VALUE(job.generation);
 			auto prepared = PrepareStaticCellData(job);
 			BT_PLOT("SARP.StaticImportService.Worker.PreparedCellGroups", static_cast<int64_t>(prepared.groups.size()));
-			SealPreparedStaticCellLifecycle(_staticImportLifecycleStore, prepared);
+			BuildPreparedStaticCellLifecycle(prepared);
 			(void)_drains.PushBlocking(_workBus.staticImportPreparedCellResults, std::move(prepared));
 			return true;
 		}
@@ -1834,24 +1834,19 @@ namespace br::staticimport
 
 		bool ProcessStaticImportRemovalCleanupForWorker()
 		{
-			std::vector<StaticRemovalDiff> removals;
 			std::vector<br::render::StaticObjectRemovalPayload> removalPayloads;
 			{
 				std::lock_guard lock(_importState.staticImportServiceMutex);
-				if (_importState.staticImportRemovalDiffCleanupBacklog.empty() &&
-					_importState.staticImportRemovalPayloadCleanupBacklog.empty()) {
+				if (_importState.staticImportRemovalPayloadCleanupBacklog.empty()) {
 					return false;
 				}
-				removals.swap(_importState.staticImportRemovalDiffCleanupBacklog);
 				removalPayloads.swap(_importState.staticImportRemovalPayloadCleanupBacklog);
 			}
 
 			{
 				BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportServiceWorker::RemovalCleanup");
-				BT_ZONE_VALUE(static_cast<int64_t>(removals.size() + removalPayloads.size()));
-				BT_PLOT("SARP.StaticDirect.RemovalDiffCleanup", static_cast<int64_t>(removals.size()));
+				BT_ZONE_VALUE(static_cast<int64_t>(removalPayloads.size()));
 				BT_PLOT("SARP.StaticDirect.RemovalPayloadCleanup", static_cast<int64_t>(removalPayloads.size()));
-				removals.clear();
 				removalPayloads.clear();
 			}
 			return true;
@@ -2255,10 +2250,11 @@ namespace br::staticimport
 			}
 			if (!_shared.hasSceneIngestionServices || !_shared.sceneIngestionServices.objects) return false;
 
+			// Removals are per group now; the cell-named setting caps groups per pass.
 			const auto configuredCap = _staticImportSettings.maxRemoveCellsPerFrame;
 			const auto batchCap = configuredCap == 0
 				? std::size_t{ 4096 } : (std::min<std::size_t>)(4096, configuredCap);
-			std::vector<StaticRemovalDiff> removals;
+			std::vector<StaticGroupRemoval> removals;
 			_workBus.staticImportRemovalOutput.Drain(removals, batchCap);
 			std::vector<StaticRetirementOwnershipRequest> requestedOwnerships;
 			_workBus.staticRetirementOwnershipRequests.Drain(requestedOwnerships, 4096);
@@ -2266,12 +2262,6 @@ namespace br::staticimport
 			_workBus.staticRetirementPayloadRequests.Drain(requestedPayloads, 4096);
 			if (removals.empty() && requestedOwnerships.empty() && requestedPayloads.empty()) return false;
 
-			br::staticimport::StaticStreamTarget target;
-			{
-				std::lock_guard lock(_importState.staticImportServiceCameraMutex);
-				target = _importState.staticImportServicePendingTarget.stream;
-			}
-			const auto desiredCells = _pump.BuildDesiredStaticCells(target);
 			const auto source = br::render::PublishedStateSource::ProcessSource();
 			const auto manifest = source ? source->Load() : nullptr;
 			const auto scene = manifest
@@ -2284,19 +2274,25 @@ namespace br::staticimport
 				if (!ownership || !ownership->TryClaimRetirement()) return;
 				pending.ownerships.push_back(ownership);
 				if (ownership->removalPayload) payloads.push_back(*ownership->removalPayload);
-				if (acknowledge) pending.unpublished.push_back({ ownership->groupID, ownership->generation });
+				if (acknowledge) pending.unpublished.push_back({ ownership->groupID, ownership->groupRevision });
 			};
 			for (const auto& removal : removals) {
-				if (desiredCells.contains(removal.cellKey)) continue;
-				for (const auto groupID : removal.groupIDs) {
-					const auto* group = scene ? scene->FindGroup(groupID) : nullptr;
-					auto ownership = group && group->ownership
-						? std::static_pointer_cast<const StaticGraphGroupOwnership>(group->ownership) : nullptr;
-					if (!ownership || !(ownership->cellKey == removal.cellKey)) continue;
-					if (removal.generation != 0 && ownership->generation > removal.generation) continue;
-					claim(ownership, true);
+				// A removal claims the published ownership of its group only when that
+				// ownership comes from an add the removal follows. A re-add of the same
+				// id after the removal carries a larger revision and is left alone: its
+				// publication replaces (and so retires) whatever older ownership the
+				// scene still holds.
+				const auto* group = scene ? scene->FindGroup(removal.groupID) : nullptr;
+				auto ownership = group && group->ownership
+					? std::static_pointer_cast<const StaticGraphGroupOwnership>(group->ownership) : nullptr;
+				if (!ownership || ownership->groupRevision > removal.groupRevision) continue;
+				if (ownership->residencyClass == StaticImportResidencyClass::CellStatic &&
+					std::ranges::none_of(pending.invalidatedCells, [&](const StaticCellKey& cell) {
+						return cell == ownership->cellKey;
+					})) {
+					pending.invalidatedCells.push_back(ownership->cellKey);
 				}
-				pending.invalidatedCells.push_back(removal.cellKey);
+				claim(ownership, true);
 			}
 			for (const auto& request : requestedOwnerships)
 				claim(request.ownership, request.unpublish);
