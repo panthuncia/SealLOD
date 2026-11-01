@@ -4,7 +4,7 @@
 
 #include <BasicRenderer/Renderer.h>
 #include "Runtime/Publication/PersistentRendererPublication.h"
-#include "OpenRenderGraph/GraphHost.h"
+#include "OpenRenderGraph/GraphInstance.h"
 
 #define _USE_MATH_DEFINES
 #include <optional>
@@ -179,7 +179,8 @@ void Renderer::CreateRenderGraph() {
 
         if (!currentRenderGraph)
         {
-		currentRenderGraph = std::make_unique<org::RenderGraph>(m_orgRuntime);
+		m_frameGraph = org::GraphInstance::Adopt(m_orgRuntime, std::make_unique<org::RenderGraph>(m_orgRuntime));
+		currentRenderGraph = m_frameGraph->Graph();
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}
@@ -204,7 +205,7 @@ void Renderer::CreateRenderGraph() {
         if (!m_renderGraphRuntimeInitialized) {
         currentRenderGraph->GetMemorySnapshotProvider().SetProvider(
             org::memory::CreateECSMemorySnapshotProvider(RendererECSManager::GetInstance().GetWorld()));
-        Menu::GetInstance().SetRenderGraph(currentRenderGraph.get());
+        Menu::GetInstance().SetRenderGraph(currentRenderGraph);
 
         if (auto* textureFactory = m_pTextureFactory.get()) {
             textureFactory->SetUploadService(m_orgRuntime->Uploads());
@@ -257,9 +258,9 @@ void Renderer::CreateRenderGraph() {
         ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), phase);
     };
 
-    // GraphHost::Build resets the graph (every queue is stalled above), runs this declaration, then the structural build
-    // and Setup.
-    org::GraphHost::Build(*newGraph, [&](org::RenderGraph&) {
+    // Rebuild resets the graph (every queue is stalled above), runs this declaration, then the structural build and Setup.
+    m_preparedFrame.reset();
+    m_frameGraph->Rebuild([&](org::RenderGraph&) {
     {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph::AfterReset");
     // CreateRenderGraph stalls every queue before teardown. ResetForRebuild
@@ -370,7 +371,7 @@ void Renderer::CreateRenderGraph() {
                 newGraph->RegisterResource(Builtin::PerFrameBuffer, ::ResourceManager::GetInstance().GetPerFrameBuffer());
                 break;
             case BrdfIntegration:
-                RegisterBRDFLUT(newGraph.get(), EnsureBrdfLut());
+                RegisterBRDFLUT(newGraph, EnsureBrdfLut());
                 break;
             case Environment: {
                 if (m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap)) m_defaultEnvironmentCubemap.reset();
@@ -439,8 +440,8 @@ void Renderer::CreateRenderGraph() {
                 org::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
                 newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
                 m_pViewManager->AttachVisibilityBuffer(primaryViewID, visibilityBuffer);
-                CreateCanonicalSurfaceResources(newGraph.get());
-                CreateDebugVisualizationResources(newGraph.get());
+                CreateCanonicalSurfaceResources(newGraph);
+                CreateDebugVisualizationResources(newGraph);
                 if (m_visibilityRendering) {
                     newGraph->BuildPass<ClearVisibilityBufferPass>("ClearVisibilityBufferPass");
                     newGraph->SetPassTechnique("ClearVisibilityBufferPass", "Primary Visibility::Canonical Surface Construction");
@@ -448,36 +449,36 @@ void Renderer::CreateRenderGraph() {
                 break;
             }
             case VisibilityMaterialBinning:
-                RegisterVisUtilResources(newGraph.get(), false);
-                BuildVisibilityMaterialBinningPipeline(newGraph.get(), m_materialEvaluationInputs);
+                RegisterVisUtilResources(newGraph, false);
+                BuildVisibilityMaterialBinningPipeline(newGraph, m_materialEvaluationInputs);
                 break;
             case TerrainRvt:
                 RegisterVisUtilResources(
-                    newGraph.get(), true, false,
+                    newGraph, true, false,
                     &m_producerPersistentState->terrainRvtResources);
-                BuildTerrainRvtPipeline(newGraph.get());
+                BuildTerrainRvtPipeline(newGraph);
                 break;
             case TerrainRegionMaterialEvaluation:
-                BuildTerrainRegionMaterialEvaluationPipeline(newGraph.get(), m_materialEvaluationInputs);
+                BuildTerrainRegionMaterialEvaluationPipeline(newGraph, m_materialEvaluationInputs);
                 break;
             case MaterialEvaluation:
-                BuildMaterialEvaluationPipeline(newGraph.get(), m_materialEvaluationInputs, terrainRvtEnabled);
+                BuildMaterialEvaluationPipeline(newGraph, m_materialEvaluationInputs, terrainRvtEnabled);
                 break;
             case Gtao:
-                RegisterGTAOResources(newGraph.get());
-                BuildGTAOPipeline(newGraph.get(), primaryCameraEntity.try_get<Components::Camera>());
+                RegisterGTAOResources(newGraph);
+                BuildGTAOPipeline(newGraph, primaryCameraEntity.try_get<Components::Camera>());
                 break;
             case ClusteredLighting:
-                BuildLightClusteringPipeline(newGraph.get());
+                BuildLightClusteringPipeline(newGraph);
                 break;
             case PrimaryLighting:
-                BuildPrimaryPass(newGraph.get(), m_currentEnvironment.get(),
+                BuildPrimaryPass(newGraph, m_currentEnvironment.get(),
                     m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap));
                 break;
             case Reflections: {
                 const bool rayTraced = m_rayTracedReflections && DeviceManager::GetInstance().GetCLodRayTracingSupported();
-                if (rayTraced) BuildRayTracedReflectionPasses(newGraph.get());
-                else if (m_screenSpaceReflections) BuildSSRPasses(newGraph.get());
+                if (rayTraced) BuildRayTracedReflectionPasses(newGraph);
+                else if (m_screenSpaceReflections) BuildSSRPasses(newGraph);
                 break;
             }
             case Exposure: {
@@ -510,7 +511,7 @@ void Renderer::CreateRenderGraph() {
                 newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
                 break;
             case Bloom:
-				BuildBloomPipeline(newGraph.get());
+				BuildBloomPipeline(newGraph);
                 break;
             case Tonemapping:
                 newGraph->BuildPass<TonemappingPass>(
@@ -542,7 +543,7 @@ void Renderer::CreateRenderGraph() {
                 newGraph->SetPassTechnique("MenuRenderPass", "Debug::UI");
                 break;
             case DepthHistory:
-                BuildLinearDepthHistoryCopyPass(newGraph.get(), &m_depthHistory);
+                BuildLinearDepthHistoryCopyPass(newGraph, &m_depthHistory);
                 break;
             case Present:
                 newGraph->BuildPass<PresentationReadyPass>("PresentationReadyPass");

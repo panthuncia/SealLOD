@@ -8,46 +8,43 @@
 #include <rhi.h>
 
 class TextureFactory;
-namespace org { class Runtime; class RenderGraph; class PixelBuffer; }
+namespace org { class Runtime; class GraphInstance; class PixelBuffer; }
 namespace org::runtime { class IUploadService; }
 
 namespace br::render {
 
 // The graph BasicRenderer's texture jobs run in: GPU mip generation (and the handoff of each mipped texture to bindless
-// sampling) and BC7 compression. It is a graph of its own on the runtime, next to the frame graph, so that new work changes
-// its declarations instead of the frame graph's (ORG docs/job-graphs.md). It has its own upload queue, which the textures it
-// mips upload their sources through, and leaves the runtime's frame services (statistics, captures, readback polling) to the
-// frame graph.
+// sampling) and BC7 compression. It is a graph instance of its own on the runtime (org::GraphInstance), next to the frame
+// graph, so that new work changes its declarations instead of the frame graph's (ORG docs/job-graphs.md). It has its own
+// upload queue, which the textures it mips upload their sources through, and leaves the runtime's frame services
+// (statistics, captures, readback polling) to the frame graph.
 //
-// For now it executes once per frame on the render thread, ahead of the frame graph. Its results are not yet gated: a
-// texture is published before its mips are generated, as it was when the passes ran in the frame graph.
+// It executes on the render thread, ahead of the frame graph, while a texture job has work. Its results are not yet
+// gated: a texture is published before its mips are generated, as it was when the passes ran in the frame graph.
 class TextureJobGraph {
 public:
-    TextureJobGraph(std::shared_ptr<org::Runtime> runtime, TextureFactory& textures, uint32_t slots);
+    // framesInFlight: executions that may run on the GPU at once. One more waits on the CPU for the oldest.
+    TextureJobGraph(std::shared_ptr<org::Runtime> runtime, TextureFactory& textures, uint32_t framesInFlight);
     ~TextureJobGraph();
     TextureJobGraph(const TextureJobGraph&) = delete;
     TextureJobGraph& operator=(const TextureJobGraph&) = delete;
 
     // The graph's upload queue (TextureFactory::SetJobUploadService).
-    const std::shared_ptr<org::runtime::IUploadService>& Uploads() const noexcept { return m_uploads; }
+    const std::shared_ptr<org::runtime::IUploadService>& Uploads() const noexcept;
 
     // BR_TEXTURE_JOB_SELF_TEST=1: mips a 64x64 checkerboard on the GPU through TextureFactory, and once its mips are ready
     // (TextureFactory::WhenMipsReady) reads back its 1x1 mip, which must be mid-grey. Logs the result. Call once the factory
     // uploads through this graph (TextureFactory::SetJobUploadService).
     void StartSelfTestIfRequested();
 
-    // One execution in a slot, when a texture job has work left: the slot's previous one has completed first (its upload pages
-    // are reused). Otherwise only the completed executions retire (their jobs learn of completion).
-    void Execute(uint32_t slot, uint64_t frameFenceValue, rhi::Device device);
+    // One execution when a texture job has work left. Otherwise only the completed executions retire (their jobs learn of
+    // completion).
+    void Execute();
 
 private:
-    class Extension;
     TextureFactory* m_textures;
     std::shared_ptr<org::Runtime> m_runtime;
-    std::shared_ptr<org::runtime::IUploadService> m_uploads;
-    std::unique_ptr<org::RenderGraph> m_graph;
-    // Per slot: each queue's timeline and the value its last execution in the slot submitted up to.
-    std::vector<std::vector<std::pair<std::shared_ptr<rhi::TimelinePtr>, uint64_t>>> m_slotPoints;
+    std::unique_ptr<org::GraphInstance> m_instance;
     uint64_t m_executionsWithWork = 0, m_batches = 0;  // logged when it goes
     std::shared_ptr<org::PixelBuffer> m_selfTestTexture;
 };

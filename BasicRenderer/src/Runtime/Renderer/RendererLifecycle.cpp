@@ -4,6 +4,7 @@
 
 #include "Assets/Textures/Pipeline/TexturePipelineArtifacts.h"
 #include "Runtime/GraphIntegration/TextureJobGraph.h"
+#include "OpenRenderGraph/GraphInstance.h"
 #include "Runtime/GraphIntegration/EnvironmentJobGraph.h"
 #include "../../../generated/BuiltinResources.h"
 #include <BasicRenderer/Renderer.h>
@@ -178,8 +179,7 @@ void Renderer::Cleanup() {
     // allocator teardown rather than waiting for Renderer destruction.
     for (auto& family : m_lightTableFamilies) family.reset();
     for (auto& family : m_poseTableFamilies) family.reset();
-    // The environment job graph goes before the upload services: its host retires the runtime's deferred work against
-    // the runtime's queues, and cleaning the upload service destroys the dedicated upload queue without unregistering it.
+    // The environment job graph goes before the upload services, while every queue it may have waited on still exists.
     m_environmentJobs.reset();
     if (currentRenderGraph) {
         // Publication and texture-streaming producers have now stopped. Cover
@@ -207,7 +207,9 @@ void Renderer::Cleanup() {
     TaskSchedulerManager::GetInstance().Cleanup();
     ::ResourceManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
-    currentRenderGraph.reset();
+    m_preparedFrame.reset();
+    m_frameGraph.reset();
+    currentRenderGraph = nullptr;
     // Cleanup tears down the device. Preserve the state container so a module
     // owner can replay CPU scene metadata, but discard all device-bound state.
     m_producerPersistentState->InvalidateTerrainRvt();
@@ -510,7 +512,8 @@ void Renderer::Initialize(
     org::Resource::SetEntityHooks(std::move(resourceEntityHooks));
 
     if (!currentRenderGraph) {
-		currentRenderGraph = std::make_unique<org::RenderGraph>(m_orgRuntime);
+		m_frameGraph = org::GraphInstance::Adopt(m_orgRuntime, std::make_unique<org::RenderGraph>(m_orgRuntime));
+		currentRenderGraph = m_frameGraph->Graph();
 		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
 			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
 		}

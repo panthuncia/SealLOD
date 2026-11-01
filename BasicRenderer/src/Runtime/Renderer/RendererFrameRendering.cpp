@@ -1,5 +1,5 @@
 #include <BasicRenderer/Renderer.h>
-#include "OpenRenderGraph/GraphHost.h"
+#include "OpenRenderGraph/GraphInstance.h"
 #include "Resources/DynamicResource.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <BasicRenderer/Diagnostics/NvPerfIntegration.h>
@@ -325,7 +325,10 @@ void Renderer::Render() {
             passExecutionContext.endGpuPassRange = [activeBackend](rhi::CommandList commandList, rhi::Queue queue) {
                 br::telemetry::nvperf::EndPassRange(activeBackend, commandList, queue);
             };
-            org::GraphHost::ExecuteFrame(*currentRenderGraph, passExecutionContext); // Main render graph execution
+            // Main render graph execution: the one Update prepared.
+            if (!m_preparedFrame) throw std::logic_error("Renderer: no frame was prepared for execution");
+            const auto prepared = std::move(m_preparedFrame);
+            prepared->Submit(passExecutionContext);
             passExecutionContext.beginGpuPassRange = {};
             passExecutionContext.endGpuPassRange = {};
             // Texture readbacks copy what the frame wrote, so they are submitted right after the frame's execution.

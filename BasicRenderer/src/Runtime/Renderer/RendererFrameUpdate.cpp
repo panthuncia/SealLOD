@@ -6,7 +6,7 @@
 #include "Runtime/GraphIntegration/EnvironmentJobGraph.h"
 #include "OpenRenderGraph/Runtime.h"
 #include <BasicRenderer/Renderer.h>
-#include "OpenRenderGraph/GraphHost.h"
+#include "OpenRenderGraph/GraphInstance.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 #include "Runtime/Publication/PersistentRendererPublication.h"
 
@@ -1474,7 +1474,7 @@ void Renderer::Update(float elapsedSeconds) {
     // Texture jobs (mips, BC7) execute in their own graph, ahead of the frame graph.
     if (m_textureJobs) {
         runCapturedStage("TextureJobs", [&]() {
-            m_textureJobs->Execute(m_preparationFrameIndex, m_currentFrameFenceValue, deviceManager.GetDevice());
+            m_textureJobs->Execute();
         });
     }
     // Environment conversion, prefiltering and SH likewise.
@@ -1486,7 +1486,7 @@ void Renderer::Update(float elapsedSeconds) {
             m_dynamicPresentationColor->SetResource(
                 m_presentationColorResources[m_preparationFrameIndex]);
         }
-        org::GraphHost::PrepareFrame(*currentRenderGraph, context, deviceManager.GetDevice());
+        m_preparedFrame = std::make_unique<org::Execution>(m_frameGraph->Prepare(context));
     });
     ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "after RenderGraphUpdate");
 

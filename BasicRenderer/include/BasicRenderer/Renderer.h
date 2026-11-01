@@ -63,6 +63,8 @@ class DynamicResource;
 class ExternalTextureResource;
 class PixelBuffer;
 class RenderGraph;
+class GraphInstance;
+class Execution;
 class Runtime;
 }
 namespace br::render {
@@ -146,8 +148,8 @@ public:
     br::render::SceneIngestionServices& GetSceneIngestionServices() { return m_sceneIngestionServices; }
     const br::render::SceneIngestionServices& GetSceneIngestionServices() const { return m_sceneIngestionServices; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
-    org::RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
-    const org::RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
+    org::RenderGraph* GetRenderGraph() { return currentRenderGraph; }
+    const org::RenderGraph* GetRenderGraph() const { return currentRenderGraph; }
     bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
     void StartAsyncStateGraphTrace(br::render::AsyncStateGraphTraceConfig config = {});
     [[nodiscard]] bool AsyncStateGraphTraceActive() const;
@@ -209,7 +211,10 @@ private:
     // GPU mip generation and BC7 compression, in a graph of their own next to the frame graph.
     std::unique_ptr<br::render::TextureJobGraph> m_textureJobs;
     std::unique_ptr<br::render::EnvironmentJobGraph> m_environmentJobs;
-    std::unique_ptr<org::RenderGraph> currentRenderGraph;
+    // The frame graph, adopted by an instance that BR declares (Rebuild) and drives (Prepare, then Execution::Submit).
+    std::unique_ptr<org::GraphInstance> m_frameGraph;
+    org::RenderGraph* currentRenderGraph = nullptr;  // m_frameGraph's
+    std::unique_ptr<org::Execution> m_preparedFrame;  // prepared by Update, submitted by Render
     bool m_renderGraphRuntimeInitialized = false;
     br::pipeline::PipelineRecipe m_pipelineRecipe;
     std::optional<br::pipeline::PipelineRecipe> m_pendingPipelineRecipe;
