@@ -71,7 +71,6 @@ struct VisBufferPSInput
 #endif
 #endif
 #endif
-    nointerpolation uint drawRecordIndex : TEXCOORD12;
 };
 
 struct VisibilityPerPrimitive

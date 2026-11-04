@@ -174,7 +174,6 @@ VisBufferPSInput MSBuildVertex(CLodRasterCluster cluster, MSVertexContext contex
     result.uvSet67.xy = CLodDecodeUv(slab, CLodRasterLoadUvStream(cluster, 6u), vertexIndex);
     result.uvSet67.zw = CLodDecodeUv(slab, CLodRasterLoadUvStream(cluster, 7u), vertexIndex);
 #endif
-    result.drawRecordIndex = cluster.drawRecordIndex;
     return result;
 }
 #else
@@ -200,7 +199,6 @@ VisBufferPSInput MSBuildVertex(CLodRasterCluster cluster, MSVertexContext contex
 #if !defined(CLOD_RASTER_SINGLE_VIEW)
     result.viewID = cluster.viewID;
 #endif
-    result.drawRecordIndex = cluster.drawRecordIndex;
     return result;
 }
 #endif

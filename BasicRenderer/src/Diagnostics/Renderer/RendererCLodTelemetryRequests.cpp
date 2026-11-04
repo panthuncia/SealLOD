@@ -883,6 +883,12 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedNoValidBoneFallbacks),
 				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedFallbackFrustumRejected));
             spdlog::info(
+                "SARP CLOD HW raster telemetry: frame={} out_tris={} pixel_invocations={} visibility_writes={}",
+                requestedFrame,
+                counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
+                counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
+                counter(CLodWorkGraphCounterIndex::RasterPixelVisibilityWrites));
+            spdlog::info(
                 "SARP CLOD SW raster telemetry: frame={} clusters={} input_tris={} backface_culled={} degenerate_or_offscreen={} "
                 "no_sample_covered={} covered_px={} alpha_rejected_px={} vis_writes={}",
                 requestedFrame,
