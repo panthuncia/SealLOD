@@ -493,11 +493,11 @@ SaveLab, world 0x3C, radius 100, saved camera, RTX 5070 Laptop. 150K clusters, 8
 | Change | Hardware raster | Decision |
 |---|---|---|
 | Shared cluster loader and precomputed projection rows (across sessions) | 2.74 -> 2.69 ms | Kept. Software raster also went 12.39 -> 11.65 ms |
-| Source group validation off (runtime skip in the A-B-A) | 2.70 -> 2.14 ms, -20.5% | Kept, now opt-in. Compiled out it reaches 1.87 ms across sessions |
+| Source group validation off (runtime skip in the A-B-A) | 2.70 -> 2.14 ms, -20.5% | Kept, now opt-in. Compiled out it measures 2.08 ms across sessions |
 | Remove the unused `drawRecordIndex` interpolant | +0.1%, flat | Kept as cleanup |
 | Compile out pixel telemetry | +0.05%, flat | Not changed |
 | Read before `InterlockedMin` in the pixel shader | +1.3% | Rejected |
-| Depth from `SV_Position.w` | -0.02%, flat | Rejected. Showed -8.5% in a slow session, see below |
+| Depth from `SV_Position.w` | See the correction below | Kept, -6.4% on the ground camera |
 | Cluster setup on lane 0 through groupshared | +12.6% | Rejected. Per-lane loading is cheaper in the mesh shader |
 | `SV_CullPrimitive` for no-sample and back-facing triangles | +48.7% | Rejected. The groupshared positions and barrier cost more than the rasterizer does |
 
@@ -520,3 +520,47 @@ is overdraw to remove, but it needs multi-view C++ work and the no-pixel-work bo
 
 **Trap.** Reject sessions with slow culling (see `docs/open-defects.md` in SARP). A-B-A deltas from such a session are
 not reliable.
+
+**Correction.** Live recompiles used to write their candidate to the shader cache, under a key that does not depend on
+the edited source. A later launch with an unchanged source tree loaded the last candidate as the real shader. So the
+1.87 ms hardware raster figure quoted for "validation off", also in the commit message of 8725b7b7, was really the
+`SV_Position.w` candidate, and the flat result for that candidate compared it with itself. Live recompiles no longer
+touch the cache. Results above that a session could have inherited this way were remeasured or are marked here; the
+rejected lane 0 and primitive culling probes ran against the `SV_Position.w` control, which does not change their
+decisions.
+
+### Material evaluation on a ground camera (2026-11-04)
+
+SaveLab, world 0x3C, radius 100, RTX 5070 Laptop, with the saved camera moved down into a forest: 1.72M covered pixels,
+about 51 pixels per visible cluster, 570K clusters. Earlier sections used a high camera with about one pixel per
+cluster, which this view replaces as the reference. A-B-A in one session.
+
+Cost split of 2.77 ms, from probes that skip work:
+
+| Part | Cost |
+|---|---|
+| Dispatch only | 0.07 ms |
+| Geometry resolve (dispatch to surface) | 0.55 ms |
+| Terrain bins, all of it | 1.53 ms |
+| All other bins | 1.16 ms |
+| Surface output, in all bins | 0.39 ms, of which identity and record 0.16 ms, emissive and payload writes 0.06 ms |
+| Terrain parallax | 0.65 ms |
+| Terrain glint | 0.31 ms |
+| RVT page mark | 0.04 ms |
+
+| Change | Material evaluation | Decision |
+|---|---|---|
+| Read a terrain layer's glint flag before interpolating its weight | 2.73 -> 2.55 ms, -6.9% | Kept. Same image |
+| Split the resolve into headers and steps | 2.55 -> 2.54 ms | Kept. Depth and surface records identical |
+| Remove the temporary streaming info load | -0.2%, flat | Kept as cleanup |
+| Use the camera's view projection instead of a per-pixel multiply | -0.7%, flat | Kept as simpler |
+| No per-wave cluster coalescing | -1.4% raw, flat once normalized | Not changed |
+
+Hardware raster on this camera: `SV_Position.w` depth 2.04 -> 1.91 ms, -6.4%.
+
+Final, fresh launch: hardware raster 1.84 ms, software raster 3.30 ms, material evaluation 2.55 ms, from 2.05, 3.23 and
+2.77 ms. Software raster did not change in this work, so its difference is variation between sessions.
+
+**Not changed.** Parallax is a quality setting, not waste: the loop already reuses its page cursor. Skipping emissive and
+payload writes would need those targets cleared each frame, for 0.06 ms. The identity target stores a record index that
+can be derived from the pixel, which could save part of the 0.16 ms, but it changes what consumers read.
