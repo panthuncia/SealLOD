@@ -5,6 +5,7 @@
 #include "include/skinningCommon.hlsli"
 #include "include/visibleClusterPacking.hlsli"
 #include "include/clodPageAccess.hlsli"
+#include "include/clodClusterFormat.hlsli"
 #include "include/clodStructs.hlsli"
 #include "include/reyesPatchCommon.hlsli"
 #include "include/visibilityPacking.hlsli"
@@ -29,25 +30,6 @@ static const float REYES_PATCH_RASTER_TINY_TRIANGLE_AREA_EPSILON = 1e-8f;
 static const float REYES_PATCH_RASTER_TINY_TRIANGLE_MAX_EXTENT = 1.5f;
 #endif
 
-#ifndef CLOD_READ_PACKED_BITS32_DEFINED
-#define CLOD_READ_PACKED_BITS32_DEFINED 1
-uint ReadPackedBits32(ByteAddressBuffer buf, uint startBit, uint bitCount)
-{
-    if (bitCount == 0u) return 0u;
-
-    uint wordIndex = startBit >> 5;
-    uint bitOffset = startBit & 31u;
-    uint packed = buf.Load(wordIndex * 4u) >> bitOffset;
-    if (bitOffset + bitCount > 32u)
-    {
-        packed |= buf.Load((wordIndex + 1u) * 4u) << (32u - bitOffset);
-    }
-
-    uint mask = (bitCount >= 32u) ? 0xffffffffu : ((1u << bitCount) - 1u);
-    return packed & mask;
-}
-#endif
-
 float3 DecodeCompressedPosition(
     uint meshletLocalVertex,
     uint positionBitstreamBase,
@@ -65,34 +47,7 @@ float3 DecodeCompressedPosition(
 
 uint3 DecodeTriangle(ByteAddressBuffer slab, uint triStreamBase, uint triByteOffset, uint triLocalIndex)
 {
-    uint triOffset = triStreamBase + triByteOffset + triLocalIndex * 3u;
-    uint alignedOffset = (triOffset / 4u) * 4u;
-    uint firstWord = slab.Load(alignedOffset);
-    uint byteOffset = triOffset % 4u;
-
-    uint b0 = (firstWord >> (byteOffset * 8u)) & 0xFFu;
-    uint b1;
-    uint b2;
-
-    if (byteOffset <= 1u)
-    {
-        b1 = (firstWord >> ((byteOffset + 1u) * 8u)) & 0xFFu;
-        b2 = (firstWord >> ((byteOffset + 2u) * 8u)) & 0xFFu;
-    }
-    else if (byteOffset == 2u)
-    {
-        b1 = (firstWord >> 24u) & 0xFFu;
-        uint secondWord = slab.Load(alignedOffset + 4u);
-        b2 = secondWord & 0xFFu;
-    }
-    else
-    {
-        uint secondWord = slab.Load(alignedOffset + 4u);
-        b1 = secondWord & 0xFFu;
-        b2 = (secondWord >> 8u) & 0xFFu;
-    }
-
-    return uint3(b0, b1, b2);
+    return CLodDecodeTriangle(slab, triStreamBase + triByteOffset, triLocalIndex);
 }
 
 SkinningInfluences DecodePackedJoints(
@@ -238,32 +193,16 @@ float2 DecodeCompressedUV(
     uint pageByteOffset,
     uint pagePoolSlabDescriptorIndex)
 {
-    CLodMeshletUvDescriptor uvDesc = LoadMeshletUvDescriptor(
+    const CLodUvStream stream = CLodLoadUvStream(
         pagePoolSlabDescriptorIndex,
         pageByteOffset,
-        hdr.uvDescriptorOffset,
         hdr.uvSetCount,
+        hdr.uvDescriptorOffset,
+        hdr.uvBitstreamDirectoryOffset,
         localMeshletIndex,
         uvSetIndex);
-
-    uint uvBitstreamBase = pageByteOffset + LoadPageUvBitstreamOffset(
-        pagePoolSlabDescriptorIndex,
-        pageByteOffset,
-        hdr.uvBitstreamDirectoryOffset,
-        uvSetIndex);
-
-    uint bitsU = CLodUvDescBitsU(uvDesc);
-    uint bitsV = CLodUvDescBitsV(uvDesc);
-    uint bitsPerVertex = bitsU + bitsV;
-    uint bitCursor = uvBitstreamBase * 8u + uvDesc.uvBitOffset + meshletLocalVertex * bitsPerVertex;
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pagePoolSlabDescriptorIndex)];
-    uint encodedU = ReadPackedBits32(slab, bitCursor, bitsU);
-    bitCursor += bitsU;
-    uint encodedV = ReadPackedBits32(slab, bitCursor, bitsV);
-
-    return float2(
-        uvDesc.uvMinU + float(encodedU) * uvDesc.uvScaleU,
-        uvDesc.uvMinV + float(encodedV) * uvDesc.uvScaleV);
+    return CLodDecodeUv(slab, stream, meshletLocalVertex);
 }
 
 #if REYES_PATCH_RASTER_ENABLE_NEAR_PLANE_CLIPPING
