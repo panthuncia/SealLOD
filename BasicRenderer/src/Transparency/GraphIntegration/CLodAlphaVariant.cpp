@@ -188,7 +188,6 @@ org::ExternalInsertPoint MakeTransparentCompositeInsertPoint()
 {
     auto insertPoint = org::ExternalInsertPoint::After("Specular IBL & SSR Composite Pass");
     insertPoint.after.push_back("SkyboxPass");
-    insertPoint.after.push_back("Forward render pass");
     insertPoint.after.push_back("Screen-Space Reflections Pass");
     insertPoint.before.push_back("DebugGridPass");
     insertPoint.before.push_back("UpscalingPass");

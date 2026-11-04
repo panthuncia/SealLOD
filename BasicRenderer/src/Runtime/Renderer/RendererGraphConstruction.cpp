@@ -48,7 +48,6 @@
 #include "Render/PassBuilders.h"
 #include "BasicRenderer/Extensions/Buffers/DynamicBuffer.h"
 #include "RenderPasses/Base/RenderPass.h"
-#include "Lighting/Shading/RenderPasses/ForwardRenderPass.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Assets/MaterialTextureStreaming.h"
 #include "Lighting/Environment/RenderPasses/SkyboxRenderPass.h"

@@ -106,17 +106,12 @@ public:
     const org::PipelineState& GetPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
     const org::PipelineState& GetPrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
-    const org::PipelineState& GetMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    const org::PipelineState& GetMeshPrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     const org::PipelineState& GetPPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    const org::PipelineState& GetMeshPPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     const org::PipelineState& GetShadowPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    const org::PipelineState& GetShadowMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     const org::PipelineState& GetVisibilityBufferPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-	const org::PipelineState& GetVisibilityBufferMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     const org::PipelineState& GetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState& GetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
@@ -268,17 +263,12 @@ private:
 
     std::unordered_map<PSOKey, org::PipelineState> m_psoCache;
     std::unordered_map<PSOKey, org::PipelineState> m_PPLLPSOCache;
-    std::unordered_map<PSOKey, org::PipelineState> m_meshPSOCache;
-    std::unordered_map<PSOKey, org::PipelineState> m_meshPPLLPSOCache;
 
     std::unordered_map<PSOKey, org::PipelineState> m_prePassPSOCache;
-    std::unordered_map<PSOKey, org::PipelineState> m_meshPrePassPSOCache;
 
     std::unordered_map<PSOKey, org::PipelineState> m_shadowPSOCache;
-	std::unordered_map<PSOKey, org::PipelineState> m_shadowMeshPSOCache;
 
     std::unordered_map<PSOKey, org::PipelineState> m_visibilityBufferPSOCache;
-    std::unordered_map<PSOKey, org::PipelineState> m_visibilityBufferMeshPSOCache;
 
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODRasterPSOCache;
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODVirtualShadowRasterPSOCache;
@@ -318,17 +308,12 @@ private:
 
     org::PipelineState CreatePSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
     org::PipelineState CreatePPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    org::PipelineState CreateMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    org::PipelineState CreateMeshPPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     org::PipelineState CreatePrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    org::PipelineState CreateMeshPrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     org::PipelineState CreateShadowPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    org::PipelineState CreateShadowMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
 	org::PipelineState CreateVisibilityBufferPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-	org::PipelineState CreateVisibilityBufferMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     org::PipelineState CreateClusterLODRasterPSO(
         MaterialRasterFlags materialRasterFlags,

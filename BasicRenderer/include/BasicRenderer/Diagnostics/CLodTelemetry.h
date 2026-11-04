@@ -220,7 +220,7 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     DynamicWindBoundsCacheInsertions,
     DynamicWindBoundsCacheRaces,
     DynamicWindBoundsCacheProbeFailures,
-    // mesh.hlsl has historically published these two hardware-raster counters
+    // clusterRasterMesh.hlsl publishes these two hardware-raster counters
     // at ABI slots 264 and 266.  Keep them explicit so newly appended telemetry
     // cannot silently alias the mesh path again.
     RasterMeshShaderSkinnedGroups,

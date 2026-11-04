@@ -36,7 +36,6 @@
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "Runtime/Resources/ResourceManager.h"
-#include "Lighting/Shading/RenderPasses/ForwardRenderPass.h"
 #include "Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"
 #include "ThirdParty/XeGTAO.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>

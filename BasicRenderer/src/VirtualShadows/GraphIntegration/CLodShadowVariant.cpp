@@ -61,9 +61,8 @@ org::ExternalInsertPoint MakeShadowTailInsertPoint(const std::string& afterPassN
     auto insertPoint = org::ExternalInsertPoint::After(afterPassName);
     // The dynamic atlas contains current-pose skinned depth. Keep the complete
     // shadow producer chain ahead of every lighting consumer instead of
-    // allowing deferred/forward shading to sample the previous frame.
+    // allowing deferred shading to sample the previous frame.
     insertPoint.before.push_back("DeferredShadingPass");
-    insertPoint.before.push_back("Forward render pass");
     insertPoint.before.push_back("Screen-Space Reflections Pass");
     insertPoint.before.push_back("luminanceHistogramPass");
     return insertPoint;

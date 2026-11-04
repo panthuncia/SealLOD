@@ -898,10 +898,6 @@ inline void BuildLinearDepthHistoryCopyPass(org::RenderGraph* graph, br::render:
 inline void BuildPrimaryPass(org::RenderGraph* graph, Environment* currentEnvironment, bool hasBoundEnvironment = false) {
 
 	bool gtaoEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")();
-	bool meshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
-	bool indirect = SettingsManager::GetInstance().getSettingGetter<bool>("enableIndirectDraws")();
-	bool wireframe = SettingsManager::GetInstance().getSettingGetter<bool>("enableWireframe")();
-
 	// Uses existing GBuffer resources
     const bool renderSkybox = currentEnvironment != nullptr || hasBoundEnvironment;
     graph->BuildPass<DeferredShadingPass>("DeferredShadingPass", renderSkybox);
@@ -909,13 +905,6 @@ inline void BuildPrimaryPass(org::RenderGraph* graph, Environment* currentEnviro
 
     // DeferredShading's background branch renders the skybox using the same
     // final opaque-depth classification, avoiding a second full-screen pass.
-
-	// Forward pass for materials incompatible with deferred rendering
-    graph->BuildPass<ForwardRenderPass>("Forward render pass", ForwardRenderPassInputs{
-        wireframe,
-        meshShaders,
-        indirect});
-    TagPassTechnique(graph, "Forward render pass", "Lighting::Primary Shading");
 }
 
 inline void BuildPPLLPipeline(org::RenderGraph* graph) {

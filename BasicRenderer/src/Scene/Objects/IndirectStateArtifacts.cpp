@@ -130,7 +130,7 @@ ArtifactBuildResult BuildIndirectState(const ArtifactBuildContext& context) {
             const auto argument = std::ranges::find_if(workload.argumentArtifacts,
                 [viewID](const auto& candidate) { return candidate.viewID == viewID; });
             // Shadow/reflection/probe views participate in culling, but do
-            // not execute ForwardRenderPass' indirect command buffers.
+            // not execute indirect command buffers.
             // Their workload rows intentionally carry no argument artifact.
             if (argument != workload.argumentArtifacts.end()) {
                 const auto argumentDependency = std::ranges::find_if(context.dependencies, [&](const auto& candidate) {

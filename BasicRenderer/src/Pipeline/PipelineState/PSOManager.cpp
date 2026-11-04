@@ -32,7 +32,7 @@ namespace {
     // Live optimization jobs must observe source edits immediately. The ordinary
     // runtime path still uses the artifact cache; only the worker servicing an
     // explicit pso.recompile request bypasses cache reads.
-    thread_local bool g_bypassShaderArtifactCacheReads = false;
+    thread_local bool g_bypassShaderArtifactCache = false;
 
     bool ShaderCacheDiagnosticsEnabled()
     {
@@ -85,15 +85,18 @@ namespace {
         normalize(resources.optionalResourceDescriptorSlots);
     }
 
-    class ScopedShaderArtifactCacheReadBypass {
+    // Live recompiles neither read nor write the shader cache. Its key is the source tree hash taken
+    // at process start, so a candidate compiled from edited source would otherwise be saved under that
+    // key and load as the real shader on the next launch if the tree is unchanged by then.
+    class ScopedShaderArtifactCacheBypass {
     public:
-        ScopedShaderArtifactCacheReadBypass()
-            : m_previous(g_bypassShaderArtifactCacheReads) {
-            g_bypassShaderArtifactCacheReads = true;
+        ScopedShaderArtifactCacheBypass()
+            : m_previous(g_bypassShaderArtifactCache) {
+            g_bypassShaderArtifactCache = true;
         }
 
-        ~ScopedShaderArtifactCacheReadBypass() {
-            g_bypassShaderArtifactCacheReads = m_previous;
+        ~ScopedShaderArtifactCacheBypass() {
+            g_bypassShaderArtifactCache = m_previous;
         }
 
     private:
@@ -644,14 +647,9 @@ void PSOManager::Cleanup() {
     m_asyncPSOGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_psoCache.clear();
     m_PPLLPSOCache.clear();
-    m_meshPSOCache.clear();
-    m_meshPPLLPSOCache.clear();
     m_prePassPSOCache.clear();
-    m_meshPrePassPSOCache.clear();
     m_shadowPSOCache.clear();
-    m_shadowMeshPSOCache.clear();
     m_visibilityBufferPSOCache.clear();
-    m_visibilityBufferMeshPSOCache.clear();
     m_deferredPSOCache.clear();
     m_clusterLODRasterPSOCache.clear();
     m_clusterLODVirtualShadowRasterPSOCache.clear();
@@ -711,20 +709,6 @@ const org::PipelineState& PSOManager::GetShadowPSO(UINT psoFlags, MaterialCompil
     });
 }
 
-const org::PipelineState& PSOManager::GetShadowMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
-    PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    return FindOrCreatePipelineState(m_cacheMutex, m_shadowMeshPSOCache, key, [&]() {
-        return RegisterPipeline(
-            CreateShadowMeshPSO(psoFlags, materialCompileFlags, wireframe),
-            MakePSOKeyId("Material.ShadowMesh", key),
-            "Material.ShadowMesh",
-            br::extensions::PipelineKind::Mesh,
-            [this, psoFlags, materialCompileFlags, wireframe] {
-                return CreateShadowMeshPSO(psoFlags, materialCompileFlags, wireframe);
-            });
-    });
-}
-
 const org::PipelineState& PSOManager::GetPrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     return FindOrCreatePipelineState(m_cacheMutex, m_prePassPSOCache, key, [&]() {
@@ -735,20 +719,6 @@ const org::PipelineState& PSOManager::GetPrePassPSO(UINT psoFlags, MaterialCompi
             br::extensions::PipelineKind::Graphics,
             [this, psoFlags, materialCompileFlags, wireframe] {
                 return CreatePrePassPSO(psoFlags, materialCompileFlags, wireframe);
-            });
-    });
-}
-
-const org::PipelineState& PSOManager::GetMeshPrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
-    PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    return FindOrCreatePipelineState(m_cacheMutex, m_meshPrePassPSOCache, key, [&]() {
-        return RegisterPipeline(
-            CreateMeshPrePassPSO(psoFlags, materialCompileFlags, wireframe),
-            MakePSOKeyId("Material.MeshPrePass", key),
-            "Material.MeshPrePass",
-            br::extensions::PipelineKind::Mesh,
-            [this, psoFlags, materialCompileFlags, wireframe] {
-                return CreateMeshPrePassPSO(psoFlags, materialCompileFlags, wireframe);
             });
     });
 }
@@ -767,34 +737,6 @@ const org::PipelineState& PSOManager::GetPPLLPSO(UINT psoFlags, MaterialCompileF
     });
 }
 
-const org::PipelineState& PSOManager::GetMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
-    PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    return FindOrCreatePipelineState(m_cacheMutex, m_meshPSOCache, key, [&]() {
-        return RegisterPipeline(
-            CreateMeshPSO(psoFlags, materialCompileFlags, wireframe),
-            MakePSOKeyId("Material.Mesh", key),
-            "Material.Mesh",
-            br::extensions::PipelineKind::Mesh,
-            [this, psoFlags, materialCompileFlags, wireframe] {
-                return CreateMeshPSO(psoFlags, materialCompileFlags, wireframe);
-            });
-    });
-}
-
-const org::PipelineState& PSOManager::GetMeshPPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
-    PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    return FindOrCreatePipelineState(m_cacheMutex, m_meshPPLLPSOCache, key, [&]() {
-        return RegisterPipeline(
-            CreateMeshPPLLPSO(psoFlags, materialCompileFlags, wireframe),
-            MakePSOKeyId("Material.MeshPPLL", key),
-            "Material.MeshPPLL",
-            br::extensions::PipelineKind::Mesh,
-            [this, psoFlags, materialCompileFlags, wireframe] {
-                return CreateMeshPPLLPSO(psoFlags, materialCompileFlags, wireframe);
-            });
-    });
-}
-
 const org::PipelineState& PSOManager::GetVisibilityBufferPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     return FindOrCreatePipelineState(m_cacheMutex, m_visibilityBufferPSOCache, key, [&]() {
@@ -805,20 +747,6 @@ const org::PipelineState& PSOManager::GetVisibilityBufferPSO(UINT psoFlags, Mate
             br::extensions::PipelineKind::Graphics,
             [this, psoFlags, materialCompileFlags, wireframe] {
                 return CreateVisibilityBufferPSO(psoFlags, materialCompileFlags, wireframe);
-            });
-    });
-}
-
-const org::PipelineState& PSOManager::GetVisibilityBufferMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
-    PSOKey key(psoFlags, materialCompileFlags, wireframe);
-    return FindOrCreatePipelineState(m_cacheMutex, m_visibilityBufferMeshPSOCache, key, [&]() {
-        return RegisterPipeline(
-            CreateVisibilityBufferMeshPSO(psoFlags, materialCompileFlags, wireframe),
-            MakePSOKeyId("Material.VisibilityMesh", key),
-            "Material.VisibilityMesh",
-            br::extensions::PipelineKind::Mesh,
-            [this, psoFlags, materialCompileFlags, wireframe] {
-                return CreateVisibilityBufferMeshPSO(psoFlags, materialCompileFlags, wireframe);
             });
     });
 }
@@ -1309,76 +1237,6 @@ org::PipelineState PSOManager::CreateVisibilityBufferPSO(UINT psoFlags, Material
     return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
 }
 
-org::PipelineState PSOManager::CreateVisibilityBufferMeshPSO(
-    UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
-    auto defines = GetShaderDefines(psoFlags, materialCompileFlags);
-
-    Microsoft::WRL::ComPtr<ID3DBlob> asBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
-
-    ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.amplificationShader = { L"shaders/amplification.hlsl", L"ASMain", L"as_6_6" };
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl",          L"VisibilityBufferMSMain", L"ms_6_6" };
-    shaderInfoBundle.pixelShader = { L"shaders/shaders.hlsl",       L"VisibilityBufferPSMain", L"ps_6_6" };
-    shaderInfoBundle.defines = defines;
-
-    auto compiledBundle = CompileShaders(shaderInfoBundle);
-    asBlob = compiledBundle.amplificationShader;
-    msBlob = compiledBundle.meshShader;
-    psBlob = compiledBundle.pixelShader;
-
-    auto& layout = GetRootSignature();
-    rhi::SubobjLayout soLayout{ layout.GetHandle() };
-    rhi::SubobjShader soTask{ rhi::ShaderStage::Task, rhi::DXIL(asBlob.Get()), "ASMain" };
-    rhi::SubobjShader soMesh{ rhi::ShaderStage::Mesh, rhi::DXIL(msBlob.Get()), "VisibilityBufferMSMain" };
-    rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(psBlob.Get()), "VisibilityBufferPSMain" };
-
-    rhi::RasterState rs{};
-    rs.fill = wireframe ? rhi::FillMode::Wireframe : rhi::FillMode::Solid;
-    rs.cull = (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) ? rhi::CullMode::None : rhi::CullMode::Back;
-    rs.frontCCW = true;
-    rhi::SubobjRaster soRaster{ rs };
-
-    rhi::BlendState rhiBlend = GetBlendDesc(materialCompileFlags);
-    rhi::SubobjBlend soBlend{ rhiBlend };
-
-    rhi::DepthStencilState ds{};
-    rhi::SubobjDepth soDepth{ ds };
-
-    rhi::RenderTargets rts{};
-    
-    rts.count = 1;
-    rts.formats[0] = rhi::Format::R32G32_UInt; // packed visibility
-
-    rhi::SubobjRTVs soRTV{ rts };
-
-    rhi::SubobjDSV   soDSV{ rhi::Format::D32_Float };
-    rhi::SubobjSample soSmp{ rhi::SampleDesc{1,0} };
-
-    const rhi::PipelineStreamItem items[] = {
-        rhi::Make(soLayout),
-        rhi::Make(soTask),
-        rhi::Make(soMesh),
-        rhi::Make(soPS),
-        rhi::Make(soRaster),
-        rhi::Make(soBlend),
-        rhi::Make(soDepth),
-        rhi::Make(soRTV),
-        rhi::Make(soDSV),
-        rhi::Make(soSmp),
-    };
-
-    auto dev = DeviceManager::GetInstance().GetDevice();
-    rhi::PipelinePtr pso;
-    auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
-    if (Failed(result)) {
-        throw std::runtime_error("Failed to create Mesh PrePass PSO");
-    }
-
-    return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
-}
-
 org::PipelineState PSOManager::CreateClusterLODRasterPSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe, bool singleView) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
@@ -1797,303 +1655,6 @@ org::PipelineState PSOManager::CreatePPLLPSO(UINT psoFlags, MaterialCompileFlags
     }
 
     return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
-}
-
-org::PipelineState PSOManager::CreateMeshPSO(
-    UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe)
-{
-    auto defines = GetShaderDefines(psoFlags, materialCompileFlags);
-
-    Microsoft::WRL::ComPtr<ID3DBlob> asBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
-
-    ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.amplificationShader = { L"shaders/amplification.hlsl", L"ASMain", L"as_6_6" };
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl",          L"MSMain", L"ms_6_6" };
-    shaderInfoBundle.pixelShader = { L"shaders/shaders.hlsl",       L"PSMain", L"ps_6_6" };
-    shaderInfoBundle.defines = defines;
-
-    auto compiledBundle = CompileShaders(shaderInfoBundle);
-    asBlob = compiledBundle.amplificationShader;
-    msBlob = compiledBundle.meshShader;
-    psBlob = compiledBundle.pixelShader;
-
-    auto& layout = GetRootSignature(); // your PipelineLayoutHandle
-    rhi::SubobjLayout soLayout{ layout.GetHandle() };
-
-    rhi::SubobjShader soTask{ rhi::ShaderStage::Task,  rhi::DXIL(asBlob.Get()), "ASMain" };
-    rhi::SubobjShader soMesh{ rhi::ShaderStage::Mesh,  rhi::DXIL(msBlob.Get()), "MSMain" };
-    rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(psBlob.Get()), "PSMain" };
-
-    rhi::RasterState rs{};
-    rs.fill = wireframe ? rhi::FillMode::Wireframe : rhi::FillMode::Solid;
-    rs.cull = (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) ? rhi::CullMode::None : rhi::CullMode::Back;
-    rs.frontCCW = true;
-    rhi::SubobjRaster soRaster{ rs };
-
-    rhi::BlendState rhiBlend = GetBlendDesc(materialCompileFlags);
-    rhi::SubobjBlend soBlend{ rhiBlend };
-
-    rhi::DepthStencilState ds{};
-    ds.depthEnable = true;
-    ds.depthWrite = false;                   // D3D12_DEPTH_WRITE_MASK_ZERO
-    ds.depthFunc = rhi::CompareOp::Equal;   // D3D12_COMPARISON_FUNC_EQUAL
-    rhi::SubobjDepth soDepth{ ds };
-
-    rhi::RenderTargets rts{};
-    if (psoFlags & PSOFlags::PSO_SHADOW) {
-        rts.count = 0;
-    }
-    else {
-        rts.count = 1;
-        rts.formats[0] = rhi::Format::R16G16B16A16_Float; // DXGI_FORMAT_R16G16B16A16_FLOAT
-    }
-    rhi::SubobjRTVs soRTV{ rts };
-
-    rhi::SubobjDSV    soDSV{ rhi::Format::D32_Float };
-    rhi::SubobjSample soSmp{ rhi::SampleDesc{1,0} };
-
-    const rhi::PipelineStreamItem items[] = {
-        rhi::Make(soLayout),
-        rhi::Make(soTask),
-        rhi::Make(soMesh),
-        rhi::Make(soPS),
-        rhi::Make(soRaster),
-        rhi::Make(soBlend),
-        rhi::Make(soDepth),
-        rhi::Make(soRTV),
-        rhi::Make(soDSV),
-        rhi::Make(soSmp),
-    };
-
-    auto dev = DeviceManager::GetInstance().GetDevice();
-    rhi::PipelinePtr pso;
-    auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
-    if (Failed(result)) {
-        throw std::runtime_error("Failed to create Mesh PSO");
-    }
-
-    return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
-}
-
-org::PipelineState PSOManager::CreateShadowMeshPSO(
-    UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe)
-{
-    auto defines = GetShaderDefines(psoFlags, materialCompileFlags);
-
-    Microsoft::WRL::ComPtr<ID3DBlob> asBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
-
-    ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.amplificationShader = { L"shaders/amplification.hlsl", L"ASMain", L"as_6_6" };
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl",          L"MSMain", L"ms_6_6" };
-    shaderInfoBundle.pixelShader = { L"shaders/shaders.hlsl",       L"PSMain", L"ps_6_6" };
-    shaderInfoBundle.defines = defines;
-
-    auto compiledBundle = CompileShaders(shaderInfoBundle);
-    asBlob = compiledBundle.amplificationShader;
-    msBlob = compiledBundle.meshShader;
-    psBlob = compiledBundle.pixelShader;
-
-    auto& layout = GetRootSignature();
-    rhi::SubobjLayout soLayout{ layout.GetHandle() };
-
-    rhi::SubobjShader soTask{ rhi::ShaderStage::Task,  rhi::DXIL(asBlob.Get()), "ASMain" };
-    rhi::SubobjShader soMesh{ rhi::ShaderStage::Mesh,  rhi::DXIL(msBlob.Get()), "MSMain" };
-    rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(psBlob.Get()), "PSMain" };
-
-    rhi::RasterState rs{};
-    rs.fill = wireframe ? rhi::FillMode::Wireframe : rhi::FillMode::Solid;
-    rs.cull = (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) ? rhi::CullMode::None : rhi::CullMode::Back;
-    rs.frontCCW = true;
-    rhi::SubobjRaster soRaster{ rs };
-
-    rhi::BlendState rhiBlend = GetBlendDesc(materialCompileFlags);
-    rhi::SubobjBlend soBlend{ rhiBlend };
-
-
-    rhi::DepthStencilState ds{};
-    rhi::SubobjDepth soDepth{ ds };
-
-    // Render target formats
-    rhi::RenderTargets rts{};
-    rts.count = 1;
-    rts.formats[0] = rhi::Format::R32_Float;
-    rhi::SubobjRTVs soRTV{ rts };
-
-    rhi::SubobjDSV    soDSV{ rhi::Format::D32_Float }; // DXGI_FORMAT_D32_FLOAT
-    rhi::SubobjSample soSmp{ rhi::SampleDesc{1,0} };
-
-    const rhi::PipelineStreamItem items[] = {
-        rhi::Make(soLayout),
-        rhi::Make(soTask),
-        rhi::Make(soMesh),
-        rhi::Make(soPS),
-        rhi::Make(soRaster),
-        rhi::Make(soBlend),
-        rhi::Make(soDepth),
-        rhi::Make(soRTV),
-        rhi::Make(soDSV),
-        rhi::Make(soSmp),
-    };
-
-    auto dev = DeviceManager::GetInstance().GetDevice();
-    rhi::PipelinePtr pso;
-    auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
-    if (Failed(result)) {
-        throw std::runtime_error("Failed to create Shadow Mesh PSO");
-    }
-
-    return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
-}
-
-org::PipelineState PSOManager::CreateMeshPrePassPSO(
-    UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
-    auto defines = GetShaderDefines(psoFlags | PSO_PREPASS, materialCompileFlags);
-
-    Microsoft::WRL::ComPtr<ID3DBlob> asBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
-
-    ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.amplificationShader = { L"shaders/amplification.hlsl", L"ASMain", L"as_6_6" };
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl",          L"MSMain", L"ms_6_6" };
-    shaderInfoBundle.pixelShader = { L"shaders/shaders.hlsl",       L"PrepassPSMain", L"ps_6_6" };
-    shaderInfoBundle.defines = defines;
-
-    auto compiledBundle = CompileShaders(shaderInfoBundle);
-    asBlob = compiledBundle.amplificationShader;
-    msBlob = compiledBundle.meshShader;
-    psBlob = compiledBundle.pixelShader;
-
-	auto& layout = GetRootSignature();
-    rhi::SubobjLayout soLayout{ layout.GetHandle() };
-    rhi::SubobjShader soTask{ rhi::ShaderStage::Task, rhi::DXIL(asBlob.Get()), "ASMain" };
-    rhi::SubobjShader soMesh{ rhi::ShaderStage::Mesh, rhi::DXIL(msBlob.Get()), "MSMain" };
-    rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(psBlob.Get()), "PrepassPSMain" };
-
-    rhi::RasterState rs{};
-    rs.fill = wireframe ? rhi::FillMode::Wireframe : rhi::FillMode::Solid;
-    rs.cull = (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) ? rhi::CullMode::None : rhi::CullMode::Back;
-    rs.frontCCW = true;
-    rhi::SubobjRaster soRaster{ rs };
-
-    rhi::BlendState rhiBlend = GetBlendDesc(materialCompileFlags);
-    rhi::SubobjBlend soBlend{ rhiBlend };
-
-    rhi::DepthStencilState ds{};
-    rhi::SubobjDepth soDepth{ ds };
-
-    rhi::RenderTargets rts{};
-    rts.count = 6;
-    rts.formats[0] = rhi::Format::R32G32B32A32_Float;   // Normals
-    rts.formats[1] = rhi::Format::R16G16_Float;         // Motion vector
-    rts.formats[2] = rhi::Format::R32_Float;            // Depth
-    rts.formats[3] = rhi::Format::R8G8B8A8_UNorm;       // Albedo
-    rts.formats[4] = rhi::Format::R8G8_UNorm;           // Metallic+Roughness
-    rts.formats[5] = rhi::Format::R16G16B16A16_Float;   // Emissive
-
-    rhi::SubobjRTVs soRTV{ rts };
-
-    rhi::SubobjDSV   soDSV{ rhi::Format::D32_Float };
-    rhi::SubobjSample soSmp{ rhi::SampleDesc{1,0} };
-
-    const rhi::PipelineStreamItem items[] = {
-        rhi::Make(soLayout),
-        rhi::Make(soTask),
-        rhi::Make(soMesh),
-        rhi::Make(soPS),
-        rhi::Make(soRaster),
-        rhi::Make(soBlend),
-        rhi::Make(soDepth),
-        rhi::Make(soRTV),
-        rhi::Make(soDSV),
-        rhi::Make(soSmp),
-    };
-
-	auto dev = DeviceManager::GetInstance().GetDevice();
-    rhi::PipelinePtr pso;
-    auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
-    if (Failed(result)) {
-        throw std::runtime_error("Failed to create Mesh PrePass PSO");
-    }
-
-    return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
-}
-
-org::PipelineState PSOManager::CreateMeshPPLLPSO(
-    UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe) {
-    // Define shader macros
-    auto defines = GetShaderDefines(psoFlags, materialCompileFlags);
-
-    // Compile shaders
-	Microsoft::WRL::ComPtr<ID3DBlob> amplificationShader;
-    Microsoft::WRL::ComPtr<ID3DBlob> meshShader;
-    Microsoft::WRL::ComPtr<ID3DBlob> pixelShader;
-    
-    ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.amplificationShader = { L"shaders/amplification.hlsl", L"ASMain", L"as_6_6" };
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl", L"MSMain", L"ms_6_6" };
-    shaderInfoBundle.pixelShader = { L"shaders/PPLL.hlsl", L"PPLLFillPS", L"ps_6_6" };
-    shaderInfoBundle.defines = defines;
-    auto compiledBundle = CompileShaders(shaderInfoBundle);
-    amplificationShader = compiledBundle.amplificationShader;
-    meshShader = compiledBundle.meshShader;
-	pixelShader = compiledBundle.pixelShader;
-
-    auto& layout = GetRootSignature();
-    rhi::SubobjLayout    soLayout{ layout.GetHandle() };
-
-    rhi::SubobjShader    soAS{ rhi::ShaderStage::Task, { amplificationShader->GetBufferPointer(), (uint32_t)amplificationShader->GetBufferSize() }, "ASMain" };
-    rhi::SubobjShader    soMS{ rhi::ShaderStage::Mesh, { meshShader->GetBufferPointer(),          (uint32_t)meshShader->GetBufferSize() }, "MSMain" };
-    rhi::SubobjShader    soPS{ rhi::ShaderStage::Pixel, { pixelShader->GetBufferPointer(),         (uint32_t)pixelShader->GetBufferSize() }, "PPLLFillPS" };
-
-    rhi::RasterState     rs{};
-    rs.fill = wireframe ? rhi::FillMode::Wireframe : rhi::FillMode::Solid;
-    rs.cull = (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) ? rhi::CullMode::None : rhi::CullMode::Back;
-    rs.frontCCW = true;
-    rhi::SubobjRaster    soRaster{ rs };
-
-    rhi::BlendState      bs = GetBlendDesc(materialCompileFlags);
-    rhi::SubobjBlend     soBlend{ bs };
-
-    rhi::DepthStencilState ds{};
-    ds.depthEnable = true;
-    ds.depthWrite = true;
-    ds.depthFunc = rhi::CompareOp::LessEqual; // default
-    rhi::SubobjDepth     soDepth{ ds };
-
-    rhi::RenderTargets   rts{};
-    rts.count = 6;
-    rts.formats[0] = rhi::Format::R32G32B32A32_Float;
-    rts.formats[1] = rhi::Format::R16G16_Float;
-    rts.formats[2] = rhi::Format::R32_Float;
-    rts.formats[3] = rhi::Format::R8G8B8A8_UNorm;
-    rts.formats[4] = rhi::Format::R8G8_UNorm;
-    rts.formats[5] = rhi::Format::R16G16B16A16_Float;
-
-    rhi::SubobjRTVs      soRTV{ rts };
-
-    rhi::SubobjDSV       soDSV{ rhi::Format::D32_Float };
-    rhi::SubobjSample    soSmp{ rhi::SampleDesc{1,0} };
-
-    rhi::PipelineStreamItem items[] = {
-      rhi::Make(soLayout),
-      rhi::Make(soAS), rhi::Make(soMS), rhi::Make(soPS),
-      rhi::Make(soRaster), rhi::Make(soBlend), rhi::Make(soDepth),
-      rhi::Make(soRTV), rhi::Make(soDSV), rhi::Make(soSmp),
-    };
-	auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::PipelinePtr psoPrepass;
-
-    auto result = device.CreatePipeline(items, (uint32_t)std::size(items), psoPrepass);
-    if (Failed(result)) {
-        throw std::runtime_error("Failed to create Mesh PrePass PSO");
-    }
-
-    return { std::move(psoPrepass), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
 }
 
 org::PipelineState PSOManager::CreateDeferredPSO(UINT psoFlags)
@@ -2831,14 +2392,14 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
         .identityHash = cacheKey.identityHash,
         .buildConfigHash = buildConfigHash,
     };
-    if (g_bypassShaderArtifactCacheReads) {
+    if (g_bypassShaderArtifactCache) {
         spdlog::info(
             "Shader live reload: bypassing library artifact cache identity=0x{:X}",
             cacheKey.identityHash);
     }
     bool cacheLookupLogged = false;
     for (;;) {
-        if (!g_bypassShaderArtifactCacheReads) {
+        if (!g_bypassShaderArtifactCache) {
             std::optional<ShaderLibraryBundle> cachedBundle =
                 TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get());
             if (ShaderCacheDiagnosticsEnabled() && !cacheLookupLogged) {
@@ -2910,7 +2471,9 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
 	bundle.resourceIDsHash = libPP.resourceIDsHash;
 
     const shadercache::CacheData cacheData = BuildLibraryCacheData(libraryInfo, bundle, buildConfigHash, binaryFormat);
-    shadercache::Save(cacheKey, cacheData);
+    if (!g_bypassShaderArtifactCache) {
+        shadercache::Save(cacheKey, cacheData);
+    }
 	return bundle;
 
 }
@@ -2944,14 +2507,14 @@ ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, 
         .identityHash = cacheKey.identityHash,
         .buildConfigHash = buildConfigHash,
     };
-    if (g_bypassShaderArtifactCacheReads) {
+    if (g_bypassShaderArtifactCache) {
         spdlog::info(
             "Shader live reload: bypassing bundle artifact cache identity=0x{:X}",
             cacheKey.identityHash);
     }
     bool cacheLookupLogged = false;
     for (;;) {
-        if (!g_bypassShaderArtifactCacheReads) {
+        if (!g_bypassShaderArtifactCache) {
             std::optional<ShaderBundle> cachedBundle =
                 TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get());
             if (ShaderCacheDiagnosticsEnabled() && !cacheLookupLogged) {
@@ -3118,7 +2681,9 @@ ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, 
 	bundle.resourceIDsHash = hash_list(combinedIds);
 
     const shadercache::CacheData cacheData = BuildBundleCacheData(info, bundle, buildConfigHash, binaryFormat);
-    shadercache::Save(cacheKey, cacheData);
+    if (!g_bypassShaderArtifactCache) {
+        shadercache::Save(cacheKey, cacheData);
+    }
 
 	return bundle;
 }
@@ -3810,7 +3375,7 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, br::diagnos
                 }
             }
             try {
-                ScopedShaderArtifactCacheReadBypass bypassCacheReads;
+                ScopedShaderArtifactCacheBypass bypassCache;
                 org::PipelineState candidate = supportsDefineOverrides
                     ? BuildComputePipeline(recipe, &options)
                     : rebuild();
