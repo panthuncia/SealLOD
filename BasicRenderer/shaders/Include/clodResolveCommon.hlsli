@@ -1863,8 +1863,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         materialFlags &= ~MATERIAL_NORMAL_MAP;
         materialInfo.materialFlags = materialFlags;
     }
-    float4x4 viewProj = mul(cam.view, cam.projection);
-    float4x4 objectToClip = mul(obj.model, viewProj);
+    float4x4 objectToClip = mul(obj.model, cam.viewProjection);
     float4 clip0 = mul(float4(p0, 1.0f), objectToClip);
     float4 clip1 = mul(float4(p1, 1.0f), objectToClip);
     float4 clip2 = mul(float4(p2, 1.0f), objectToClip);
@@ -2289,14 +2288,6 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     materialInputs.semanticFamily = materialInfo.semanticFamily;
     materialInputs.surfaceFlags = materialInfo.surfaceFlags;
     materialInputs.diagnosticReason = materialInfo.diagnosticReason;
-    // Temporary GPU correlation: record the image descriptor obtained by the
-    // shader's stable-ID table lookup.  The surface record already retains the
-    // exact material row, which supplies the corresponding stable texture ID.
-    if (materialInfo.baseColorStreamingTextureID != 0u)
-    {
-        materialInputs.diagnosticReason =
-            LoadTextureStreamingInfo(materialInfo.baseColorStreamingTextureID).imageDescriptorIndex;
-    }
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     sample.materialInfo = (MaterialInfo)0;
 #else

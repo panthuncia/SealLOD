@@ -60,8 +60,10 @@ void VisibilityBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFron
     TestAlpha(input.texcoord, input.materialDataIndex);
 #endif
 
-    // High 32 bits = depth
-    uint64_t output = PackVisKey(input.linearDepth, input.visibleClusterIndex, primID);
+    // Perspective clip W is linear depth, and reading it costs less than interpolating an attribute.
+    // Orthographic views have a W of exactly 1. If a perspective pixel does too, both values agree.
+    const float linearDepth = input.position.w == 1.0f ? input.linearDepth : input.position.w;
+    uint64_t output = PackVisKey(linearDepth, input.visibleClusterIndex, primID);
 
     InterlockedMin(visBuffer[pixel], output);
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VISIBILITY_WRITES, 1u);
