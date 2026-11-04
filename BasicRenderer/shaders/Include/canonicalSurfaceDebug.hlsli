@@ -1,0 +1,360 @@
+#ifndef CANONICAL_SURFACE_DEBUG_HLSLI
+#define CANONICAL_SURFACE_DEBUG_HLSLI
+
+// The debug views of material evaluation. Only compiled into variants that can show them.
+// Requires clodResolveCommon.hlsli.
+
+bool CLodAssemblyPartDebugColorFromVisKey(uint64_t vis, out float3 debugColor)
+{
+    debugColor = 0.0f.xxx;
+
+    if (vis == 0xFFFFFFFFFFFFFFFF ||
+        VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return false;
+    }
+
+    float visDepth;
+    uint visClusterIndex;
+    uint visPrimitiveIndex;
+    UnpackVisKey(vis, visDepth, visClusterIndex, visPrimitiveIndex);
+
+    if (visClusterIndex >= VISBUF_SARP_GRASS_INDEX_BASE)
+    {
+        return false;
+    }
+
+    if (visClusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE)
+    {
+        if (VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+        {
+            return false;
+        }
+
+        StructuredBuffer<CLodReyesDiceQueueEntry> diceQueue =
+            ResourceDescriptorHeap[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX];
+        visClusterIndex = diceQueue[visClusterIndex - VISBUF_REYES_PATCH_INDEX_BASE].visibleClusterIndex;
+    }
+
+    StructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[visClusterIndex];
+
+    ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, visClusterIndex);
+    const uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
+    const uint localGroupId = CLodVisibleClusterGroupID(packedCluster);
+
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+
+    if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
+    {
+        // Parent assembly LOD selected: this voxel payload represents collapsed child instances.
+        debugColor = float3(1.0f, 0.58f, 0.08f);
+    }
+    else if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        // Traversal crossed an instance root and is rendering the child part.
+        debugColor = max(HashToColor(assemblyTransformIndex + 17u), 0.18f.xxx);
+    }
+    else if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u)
+    {
+        debugColor = float3(0.82f, 0.18f, 1.0f);
+    }
+    else
+    {
+        // Ordinary/root-space CLod, kept deliberately muted.
+        debugColor = float3(0.08f, 0.10f, 0.12f);
+    }
+
+    return true;
+}
+
+bool CLodAssemblyDirectPartIdFromVisKey(uint64_t vis, out uint directPartId)
+{
+    directPartId = 0u;
+
+    if (vis == 0xFFFFFFFFFFFFFFFF ||
+        VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return false;
+    }
+
+    float visDepth;
+    uint visClusterIndex;
+    uint visPrimitiveIndex;
+    UnpackVisKey(vis, visDepth, visClusterIndex, visPrimitiveIndex);
+
+    if (visClusterIndex >= VISBUF_SARP_GRASS_INDEX_BASE)
+    {
+        return false;
+    }
+
+    if (visClusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE)
+    {
+        if (VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+        {
+            return false;
+        }
+
+        StructuredBuffer<CLodReyesDiceQueueEntry> diceQueue =
+            ResourceDescriptorHeap[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX];
+        visClusterIndex = diceQueue[visClusterIndex - VISBUF_REYES_PATCH_INDEX_BASE].visibleClusterIndex;
+    }
+
+    ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, visClusterIndex);
+    const uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
+    const uint localGroupId = CLodVisibleClusterGroupID(packedCluster);
+
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+
+    if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
+    {
+        directPartId = 0x40000000u ^ localGroupId;
+        return true;
+    }
+
+    StructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[visClusterIndex];
+    directPartId = assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
+        ? 1u
+        : (0x80000000u + assemblyTransformIndex);
+    return true;
+}
+
+void WriteCanonicalSurfaceDebugPixel(uint2 pixel, uint64_t vis, uint outputType, ClodGBufferDebugSample sample)
+{
+    bool isReyesPatch = false;
+    if (outputType == OUTPUT_REYES_GEOMETRY_PATH && vis != 0xFFFFFFFFFFFFFFFF)
+    {
+        float visDepth;
+        uint visClusterIndex;
+        uint visPrimitiveIndex;
+        UnpackVisKey(vis, visDepth, visClusterIndex, visPrimitiveIndex);
+        isReyesPatch =
+            visClusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE &&
+            VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX != 0xFFFFFFFFu;
+    }
+
+    RWTexture2D<uint2> debugVisTex = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::DebugVisualization)];
+    uint2 payload = uint2(DEBUG_SENTINEL, DEBUG_SENTINEL);
+    switch (outputType) {
+        case OUTPUT_NORMAL:
+            payload = PackDebugFloat3(sample.materialInputs.normalWS * 0.5 + 0.5);
+            break;
+        case OUTPUT_ALBEDO:
+        case OUTPUT_METALLIC:
+            payload = PackDebugFloat3(sample.materialInputs.metallic.xxx);
+            break;
+        case OUTPUT_ROUGHNESS:
+            payload = PackDebugFloat3(sample.materialInputs.roughness.xxx);
+            break;
+        case OUTPUT_EMISSIVE:
+            payload = PackDebugFloat3(sample.materialInputs.emissive);
+            break;
+        case OUTPUT_AO:
+            payload = PackDebugFloat3(sample.materialInputs.ambientOcclusion.xxx);
+            break;
+        case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT:
+            payload = PackDebugFloat3(sample.materialInputs.geometricHeightDebug.xxx);
+            break;
+        case OUTPUT_MESHLETS:
+            payload = PackDebugUint(sample.meshletIndex);
+            break;
+        case OUTPUT_GEOMETRY_GROUP:
+            payload = PackDebugUint(sample.geometryGroupIndex);
+            break;
+        case OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE:
+        {
+            float3 assemblyPartDebugColor;
+            if (CLodAssemblyPartDebugColorFromVisKey(vis, assemblyPartDebugColor))
+            {
+                payload = PackDebugFloat3(assemblyPartDebugColor);
+            }
+            break;
+        }
+        case OUTPUT_CLOD_ASSEMBLY_PARTS:
+        {
+            uint directPartId;
+            if (CLodAssemblyDirectPartIdFromVisKey(vis, directPartId))
+            {
+                payload = PackDebugUint(directPartId);
+            }
+            break;
+        }
+        case OUTPUT_MODEL_NORMALS:
+            payload = PackDebugFloat3(sample.normalOS * 0.5 + 0.5);
+            break;
+        case OUTPUT_MOTION_VECTORS:
+            payload = PackDebugFloat3(float3(sample.motionVector * 0.5 + 0.5, 0.5));
+            break;
+        case OUTPUT_MATERIAL_UV:
+            payload = PackDebugFloat3(float3(frac(sample.materialDebugUv), sample.materialDebugUvValid));
+            break;
+        case OUTPUT_MATERIAL_UV_DERIVATIVE:
+        {
+            const float2 derivativeDebug = saturate(log2(sample.materialDebugUvDerivative * 4096.0f + 1.0f) / 12.0f);
+            payload = PackDebugFloat3(float3(derivativeDebug, sample.materialDebugUvValid));
+            break;
+        }
+        case OUTPUT_VOXEL_UV_DENSITY:
+        {
+            const float2 densityDebug = saturate(0.5f.xx + log2(max(sample.voxelDebugUvDensity, 1.0e-12f.xx)) / 24.0f);
+            payload = PackDebugFloat3(sample.isVoxelPath ? float3(densityDebug, 1.0f) : 0.0f.xxx);
+            break;
+        }
+        case OUTPUT_REYES_SOURCE_BARYCENTRICS:
+            payload = PackDebugFloat3(saturate(sample.reyesDebugSourceBarycentrics));
+            break;
+        case OUTPUT_MATERIAL_EVAL_FEATURES:
+        {
+            const float runtimeBaseColorTexture = (sample.materialDebugFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u ? 1.0f : 0.0f;
+#if defined(PSO_BASE_COLOR_TEXTURE)
+            const float compiledBaseColorTexture = 1.0f;
+#else
+            const float compiledBaseColorTexture = 0.0f;
+#endif
+#if defined(PSO_CLOD_REYES_PATCH)
+            const float reyesPatchVariant = 1.0f;
+#else
+            const float reyesPatchVariant = 0.0f;
+#endif
+            payload = PackDebugFloat3(float3(runtimeBaseColorTexture, compiledBaseColorTexture, reyesPatchVariant));
+            break;
+        }
+        case OUTPUT_REYES_GEOMETRY_PATH:
+            payload = PackDebugFloat3(isReyesPatch ? float3(0.10, 0.95, 0.20) : float3(0.95, 0.15, 0.15));
+            break;
+        case OUTPUT_VOXEL_GEOMETRY_PATH:
+            payload = PackDebugFloat3(sample.isVoxelPath ? float3(0.95, 0.15, 0.15) : float3(0.10, 0.95, 0.20));
+            break;
+        case OUTPUT_MATERIAL_SELECTED_MIP:
+            if (sample.materialInputs.selectedMaterialMipLevel != MATERIAL_DEBUG_INVALID_MIP_LEVEL)
+            {
+                payload = PackDebugUint2(sample.materialInputs.selectedMaterialMipLevel, sample.materialInputs.selectedMaterialMipMaxLevel);
+            }
+            break;
+        case OUTPUT_PARALLAX_PIXELS:
+            payload = PackDebugFloat3(sample.materialInputs.parallaxApplied != 0u ? 1.0f.xxx : 0.0f.xxx);
+            break;
+        case OUTPUT_TERRAIN_RVT_HIT:
+            payload = PackDebugFloat3(
+                (sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u ? float3(0.10f, 0.95f, 0.20f) :
+                ((sample.materialInputs.terrainRvtDebugFlags & 0x1u) != 0u ? float3(0.95f, 0.15f, 0.10f) : 0.0f.xxx));
+            break;
+        case OUTPUT_TERRAIN_RVT_REQUESTED_MIP:
+            if (sample.materialInputs.terrainRvtRequestedMip != MATERIAL_DEBUG_INVALID_MIP_LEVEL)
+            {
+                payload = PackDebugUint2(sample.materialInputs.terrainRvtRequestedMip, 15u);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_RESIDENT_MIP:
+            if (sample.materialInputs.terrainRvtResidentMip != MATERIAL_DEBUG_INVALID_MIP_LEVEL)
+            {
+                payload = PackDebugUint2(sample.materialInputs.terrainRvtResidentMip, 15u);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_VIRTUAL_PAGE:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtPageTableIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PHYSICAL_PAGE:
+            if (sample.materialInputs.terrainRvtPhysicalPageIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtPhysicalPageIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PAGE_UV:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugFloat3(float3(sample.materialInputs.terrainRvtPageUv, 0.0f));
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_ATLAS_POOL:
+            if (sample.materialInputs.terrainRvtAtlasPoolIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtAtlasPoolIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_ATLAS_UV:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtAtlasUv);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleAlbedo);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_FALLBACK_REASON:
+            payload = PackDebugUint(sample.materialInputs.terrainRvtFallbackReason);
+            break;
+        case OUTPUT_TERRAIN_RVT_OWNER_PAGE:
+            if (sample.materialInputs.terrainRvtOwnerPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtOwnerPageTableIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PAGE_DELTA:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtPageTableIndex ^ sample.materialInputs.terrainRvtOwnerPageTableIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PHYSICAL_TILE_UV:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugFloat3(float3(sample.materialInputs.terrainRvtPhysicalTileUv, 0.0f));
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_SAMPLED_NORMAL:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleNormal * 0.5f + 0.5f);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_SAMPLED_MATERIAL:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleMaterial);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO_POINT:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleAlbedoPoint);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_HEIGHT_SCALE:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtHeightScale.xxx);
+            }
+            break;
+    }
+    if (payload.x != DEBUG_SENTINEL) {
+        WriteDebugPixel(debugVisTex, pixel, payload);
+    }
+}
+
+#endif // CANONICAL_SURFACE_DEBUG_HLSLI
