@@ -191,6 +191,41 @@ failure mode.
   improvement.
 - Decision: rejected as inconclusive; retain the simpler original output loops.
 
+## Software raster on a foliage-heavy scene
+
+Skyrim saved camera, SaveLab load order, radius 100, RTX 5070 Laptop, compute
+software raster, 1711x1048. Unlike the Zorah results above, this scene sends
+about 1.6M clusters to software raster per frame, 89% of them alpha-tested and
+double-sided, against 150K clusters and 8.2M triangles in hardware raster.
+Timings are the pass `CLodOpaque::SoftwareRasterizeClustersPass1`, A-B-A in one
+process.
+
+Work counters from one telemetry run, taken at partial residency (820K clusters,
+so use the ratios): 36.7M input triangles, 44.5% back-face culled, 50.5% covering
+no sample, 1.9M covered pixels, 90% of those rejected by alpha, 197K written.
+
+| Change | Before | After | Change | Kept |
+|---|---:|---:|---:|---|
+| Load UV descriptor per lane, not per vertex | 15.57 ms | 14.84 ms | -4.7% | Yes |
+| Bounds cover pixel centers; reject before the division | 15.59 ms | 13.85 ms | -11.2% (includes the row above) | Yes |
+| Load alpha material per lane, uniform descriptor indexing | 13.83 ms | 13.29 ms | -4.0% | Yes |
+| Load depth and 1/W only for surviving triangles | 13.33 ms | 13.30 ms | Flat | Yes, simpler |
+| Decode UVs for covered pixels, not every vertex | 13.32 ms | 11.54 ms | -13.4% | Yes |
+| Minimal transform loader in cluster setup | 11.48 ms | 11.41 ms | Flat | Yes, simpler |
+
+Stage cost, measured at 13.3 ms by stopping early: setup 4.55 ms, vertices 6.0 ms,
+triangles and pixels 2.8 ms.
+
+Probes on the 15.7 ms version, not retained: skipping alpha buckets gave 3.2 ms;
+skipping all alpha sampling gave 11.5 ms; sampling mip 5 instead of mip 0 gave
+only -2.5%, so texture cache misses at mip 0 are not the main cost; skipping
+skinning evaluation gave -8%, and those clusters are in non-skinned buckets,
+because the runtime `VERTEX_SKINNED` branch serves them. Disabling
+`SARP_LOD_OBJECT_BLOCKS` did not change the cost once streaming settled.
+
+Compare sessions only after streaming settles: a sampler that froze streaming
+when the scene quiesced measured anywhere from 500K to 1.6M clusters.
+
 ## Retesting guidance
 
 Useful reasons to revisit an experiment include:

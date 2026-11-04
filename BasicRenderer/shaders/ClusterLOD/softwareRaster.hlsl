@@ -126,7 +126,6 @@ groupshared SWClusterSetup gs_setup;
 groupshared float2 gs_screenPos[SW_RASTER_MAX_VERTS];
 groupshared float gs_linearDepth[SW_RASTER_MAX_VERTS];
 groupshared float gs_invClipW[SW_RASTER_MAX_VERTS];
-groupshared float2 gs_texcoord[SW_RASTER_MAX_VERTS];
 
 // ---------------------------------------------------------------------------------------------
 // Skinning
@@ -301,7 +300,8 @@ void SWLoadClusterSetup(SWClusterWork work, uint viewID)
     gs_setup.uvBitstreamDirectoryOffset = pageHeader.uvBitstreamDirectoryOffset;
 
     // Mesh and material.
-    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(instanceID);
+    const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(instanceID);
+    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDrawRecord(drawRecord);
     ConstantBuffer<PerFrameBuffer> perFrameBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     gs_setup.debugOutputType = perFrameBuffer.outputType;
@@ -341,19 +341,21 @@ void SWLoadClusterSetup(SWClusterWork work, uint viewID)
     SWLoadAssemblyState(work, meshData);
 
     // Transform. Only the matrix rows the vertex stage needs.
-    const PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, work.assemblyTransformIndex);
+    row_major float4x4 model;
+    uint objectFlags;
+    LoadClodRasterTransformForDrawRecord(drawRecord, work.assemblyTransformIndex, model, objectFlags);
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     const CullingCameraInfo camera = cullingCameras[viewID];
-    const row_major float4x4 modelViewProjection = mul(objData.model, camera.viewProjection);
+    const row_major float4x4 modelViewProjection = mul(model, camera.viewProjection);
     gs_setup.modelViewProjectionX = float4(
         modelViewProjection[0][0], modelViewProjection[1][0], modelViewProjection[2][0], modelViewProjection[3][0]);
     gs_setup.modelViewProjectionY = float4(
         modelViewProjection[0][1], modelViewProjection[1][1], modelViewProjection[2][1], modelViewProjection[3][1]);
     gs_setup.modelViewProjectionW = float4(
         modelViewProjection[0][3], modelViewProjection[1][3], modelViewProjection[2][3], modelViewProjection[3][3]);
-    gs_setup.modelViewZ = mul(objData.model, camera.viewZ);
-    gs_setup.reverseWinding = (objData.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u ? 1u : 0u;
+    gs_setup.modelViewZ = mul(model, camera.viewZ);
+    gs_setup.reverseWinding = (objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u ? 1u : 0u;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -410,28 +412,13 @@ float3 SWLoadVertexPosition(SWClusterWork work, ByteAddressBuffer slab, uint pag
 
 void SWTransformVertices(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint GI)
 {
-    const uint slabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(work.packedCluster);
     const uint pageByteOffset = CLodVisibleClusterPageSlabByteOffset(work.packedCluster);
-    ByteAddressBuffer slab = ResourceDescriptorHeap[slabDescriptorIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[CLodVisibleClusterPageSlabDescriptorIndex(work.packedCluster)];
 
     const float visWidth = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
     const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
     const float scissorMinX = float(rasterInfo.scissorMinX);
     const float scissorMinY = float(rasterInfo.scissorMinY);
-
-    const bool needsTexcoords = gs_setup.alphaTestEnabled != 0u;
-    CLodUvStream uvStream = (CLodUvStream)0;
-    if (needsTexcoords)
-    {
-        uvStream = CLodLoadUvStream(
-            slabDescriptorIndex,
-            pageByteOffset,
-            gs_setup.uvSetCount,
-            gs_setup.uvDescriptorOffset,
-            gs_setup.uvBitstreamDirectoryOffset,
-            CLodVisibleClusterLocalMeshletIndex(work.packedCluster),
-            0u);
-    }
 
     for (uint v = GI; v < gs_setup.vertexCount; v += SW_CLUSTER_RASTER_THREADS)
     {
@@ -447,10 +434,6 @@ void SWTransformVertices(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint
             (1.0f - ndc.y) * 0.5f * visHeight + scissorMinY);
         gs_linearDepth[v] = -dot(position, gs_setup.modelViewZ);
         gs_invClipW[v] = invW;
-        if (needsTexcoords)
-        {
-            gs_texcoord[v] = CLodDecodeUv(slab, uvStream, v);
-        }
     }
 }
 
@@ -521,41 +504,55 @@ SWRasterDebug SWBuildRasterDebug(SWClusterWork work)
 }
 
 #if CLOD_SW_RASTER_MAY_ALPHA_TEST
-bool SWAlphaTestFailed(float2 texcoords, uint materialDataIndex)
+// Loaded once per lane. A thread group is one cluster, so its material and therefore these
+// descriptor indices are uniform across the wave.
+struct SWAlphaMaterial
+{
+    uint materialFlags;
+    float baseAlpha;
+    float alphaCutoff;
+    uint baseColorTextureIndex;
+    uint baseColorSamplerIndex;
+    uint opacityTextureIndex;
+    uint opacitySamplerIndex;
+};
+
+SWAlphaMaterial SWLoadAlphaMaterial(uint materialDataIndex)
 {
     StructuredBuffer<MaterialInfo> materialDataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
     const MaterialInfo materialInfo = materialDataBuffer[materialDataIndex];
-    const uint materialFlags = materialInfo.materialFlags;
 
-#if defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST) && !defined(PSO_ALPHA_TEST)
-    if ((materialFlags & MATERIAL_ALPHA_TEST) == 0u)
+    SWAlphaMaterial material;
+    material.materialFlags = materialInfo.materialFlags;
+    material.baseAlpha = materialInfo.baseColorFactor.a;
+    material.alphaCutoff = materialInfo.alphaCutoff;
+    material.baseColorTextureIndex = materialInfo.baseColorTextureIndex;
+    material.baseColorSamplerIndex = materialInfo.baseColorSamplerIndex;
+    material.opacityTextureIndex = materialInfo.opacityTextureIndex;
+    material.opacitySamplerIndex = materialInfo.opacitySamplerIndex;
+    return material;
+}
+
+bool SWAlphaTestFailed(SWAlphaMaterial material, float2 texcoords)
+{
+    float alpha = material.baseAlpha;
+
+    if ((material.materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u)
     {
-        return false;
-    }
-#endif
-
-    float alpha = materialInfo.baseColorFactor.a;
-
-    if ((materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u)
-    {
-        Texture2D<float4> baseColorTexture =
-            ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
-        SamplerState baseColorSamplerState =
-            SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+        Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[material.baseColorTextureIndex];
+        SamplerState baseColorSamplerState = SamplerDescriptorHeap[material.baseColorSamplerIndex];
         alpha *= baseColorTexture.SampleLevel(baseColorSamplerState, texcoords, 0.0f).a;
     }
 
-    if ((materialFlags & MATERIAL_OPACITY_TEXTURE) != 0u)
+    if ((material.materialFlags & MATERIAL_OPACITY_TEXTURE) != 0u)
     {
-        Texture2D<float4> opacityTexture =
-            ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.opacityTextureIndex)];
-        SamplerState opacitySamplerState =
-            SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.opacitySamplerIndex)];
+        Texture2D<float4> opacityTexture = ResourceDescriptorHeap[material.opacityTextureIndex];
+        SamplerState opacitySamplerState = SamplerDescriptorHeap[material.opacitySamplerIndex];
         alpha *= opacityTexture.SampleLevel(opacitySamplerState, texcoords, 0.0f).a;
     }
 
-    return alpha < materialInfo.alphaCutoff;
+    return alpha < material.alphaCutoff;
 }
 #endif
 
@@ -565,6 +562,10 @@ struct SWRasterOutput
     uint viewID;
     uint visibleClusterIndex;
     SWRasterDebug debug;
+#if CLOD_SW_RASTER_MAY_ALPHA_TEST
+    SWAlphaMaterial alphaMaterial;
+    CLodUvStream uvStream;
+#endif
 };
 
 void SWRasterPixel(
@@ -574,6 +575,7 @@ void SWRasterPixel(
     RWTexture2D<uint64_t> visBuffer,
 #endif
     RWTexture2D<uint2> debugVisTex,
+    ByteAddressBuffer slab,
     uint2 pixel,
     float3 barycentrics)
 {
@@ -583,11 +585,13 @@ void SWRasterPixel(
     {
         const float3 perspective = barycentrics * tri.invW;
         const float invSum = rcp(perspective.x + perspective.y + perspective.z);
+        // Decoded here because so few triangles cover a sample: decoding per vertex was a
+        // large part of the cost of alpha-tested clusters.
         const float2 texcoord = (
-            gs_texcoord[tri.vertices.x] * perspective.x +
-            gs_texcoord[tri.vertices.y] * perspective.y +
-            gs_texcoord[tri.vertices.z] * perspective.z) * invSum;
-        if (SWAlphaTestFailed(texcoord, gs_setup.materialDataIndex))
+            CLodDecodeUv(slab, output.uvStream, tri.vertices.x) * perspective.x +
+            CLodDecodeUv(slab, output.uvStream, tri.vertices.y) * perspective.y +
+            CLodDecodeUv(slab, output.uvStream, tri.vertices.z) * perspective.z) * invSum;
+        if (SWAlphaTestFailed(output.alphaMaterial, texcoord))
         {
             SWTelemetryAdd(SW_COUNTER_ALPHA_REJECTED_PIXELS, 1u);
             return;
@@ -656,6 +660,22 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
     output.visibleClusterIndex = work.visibleClusterIndex;
     output.debug = SWBuildRasterDebug(work);
     const bool debugEnabled = output.debug.enabled;
+#if CLOD_SW_RASTER_MAY_ALPHA_TEST
+    output.alphaMaterial = (SWAlphaMaterial)0;
+    output.uvStream = (CLodUvStream)0;
+    if (gs_setup.alphaTestEnabled != 0u)
+    {
+        output.alphaMaterial = SWLoadAlphaMaterial(gs_setup.materialDataIndex);
+        output.uvStream = CLodLoadUvStream(
+            slabDescriptorIndex,
+            pageByteOffset,
+            gs_setup.uvSetCount,
+            gs_setup.uvDescriptorOffset,
+            gs_setup.uvBitstreamDirectoryOffset,
+            CLodVisibleClusterLocalMeshletIndex(work.packedCluster),
+            0u);
+    }
+#endif
 
     RWTexture2D<uint2> debugVisTex = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::DebugVisualization)];
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
@@ -687,21 +707,10 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
         float2 s1 = gs_screenPos[vertices.y];
         float2 s2 = gs_screenPos[vertices.z];
 
-        SWRasterTriangle tri;
-        tri.vertices = vertices;
-        tri.triangleIndex = triangleIndex;
-        tri.depths = float3(gs_linearDepth[vertices.x], gs_linearDepth[vertices.y], gs_linearDepth[vertices.z]);
-        tri.invW = float3(gs_invClipW[vertices.x], gs_invClipW[vertices.y], gs_invClipW[vertices.z]);
-
-        if (tri.depths.x <= 0.0f || tri.depths.y <= 0.0f || tri.depths.z <= 0.0f)
-        {
-            SWTelemetryAdd(SW_COUNTER_DEGENERATE_OR_OFFSCREEN, 1u);
-            continue;
-        }
-
         float2 e01 = s1 - s0;
         float2 e02 = s2 - s0;
         float twiceArea = e01.x * e02.y - e01.y * e02.x;
+        bool swappedDepths = false;
         if (debugEnabled)
         {
             // Debug views show both faces.
@@ -714,7 +723,7 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
                 const float2 swappedPosition = s1;
                 s1 = s2;
                 s2 = swappedPosition;
-                tri.depths = tri.depths.xzy;
+                swappedDepths = true;
                 e01 = s1 - s0;
                 e02 = s2 - s0;
                 twiceArea = e01.x * e02.y - e01.y * e02.x;
@@ -726,10 +735,10 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
             continue;
         }
 
-        const float invTwiceArea = -1.0f / twiceArea;
-
-        int2 minPixel = int2(floor(min(min(s0, s1), s2)));
-        int2 maxPixel = int2(floor(max(max(s0, s1), s2)));
+        // Pixels whose centers can be inside the triangle. Most triangles here are smaller than a
+        // pixel and this range is empty for them, so reject before doing any setup.
+        int2 minPixel = int2(ceil(min(min(s0, s1), s2) - 0.5f));
+        int2 maxPixel = int2(floor(max(max(s0, s1), s2) - 0.5f));
         minPixel = max(max(minPixel, scissorMin), int2(0, 0));
         maxPixel = min(maxPixel, scissorMax);
         if (minPixel.x > maxPixel.x || minPixel.y > maxPixel.y)
@@ -751,7 +760,25 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
         }
 #endif
 
+        // Only the few triangles that reach this point need these. Behind-camera vertices project
+        // to meaningless positions, so the survivors still get the near-plane test.
+        SWRasterTriangle tri;
+        tri.vertices = vertices;
+        tri.triangleIndex = triangleIndex;
+        tri.depths = float3(gs_linearDepth[vertices.x], gs_linearDepth[vertices.y], gs_linearDepth[vertices.z]);
+        tri.invW = float3(gs_invClipW[vertices.x], gs_invClipW[vertices.y], gs_invClipW[vertices.z]);
+        if (tri.depths.x <= 0.0f || tri.depths.y <= 0.0f || tri.depths.z <= 0.0f)
+        {
+            SWTelemetryAdd(SW_COUNTER_DEGENERATE_OR_OFFSCREEN, 1u);
+            continue;
+        }
+        if (swappedDepths)
+        {
+            tri.depths = tri.depths.xzy;
+        }
+
         // Barycentrics at the first pixel center, and their steps.
+        const float invTwiceArea = -1.0f / twiceArea;
         const float2 origin = float2(minPixel) + 0.5f;
         const float2 e12 = s2 - s1;
         const float2 e20 = s0 - s2;
@@ -803,6 +830,7 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
                             visBuffer,
 #endif
                             debugVisTex,
+                            slab,
                             uint2(x, y),
                             float3(b0, b1, b2));
                     }
