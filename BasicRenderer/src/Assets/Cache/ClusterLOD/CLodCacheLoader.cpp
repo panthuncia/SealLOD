@@ -1,4 +1,5 @@
 #include <BasicRenderer/Assets/Import/CLodCacheLoader.h>
+#include <BasicRenderer/Assets/CachePack.h>
 
 #include <BasicRenderer/Assets/Import/CLodCache.h>
 #include "Assets/Cache/Skeleton/SkeletonArtifactValidation.h"
@@ -242,6 +243,8 @@ std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& i
 		cached.reset();
 		std::error_code metadataError;
 		std::error_code containerError;
+		CachePack::NoteFileChanged(lookup.metadataPath);
+		CachePack::NoteFileChanged(lookup.containerPath);
 		std::filesystem::remove(lookup.metadataPath, metadataError);
 		std::filesystem::remove(lookup.containerPath, containerError);
 		if (metadataError || containerError) {

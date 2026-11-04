@@ -485,6 +485,7 @@ set(SOURCES
     "src/Transparency/AVBOIT/RenderPasses/AVBOITSetupPass.cpp"
     "src/Transparency/AVBOIT/RenderPasses/AVBOITSparseClearPass.cpp"
     # src/Utilities
+    "src/Assets/Cache/CachePack.cpp"
     "src/Assets/Cache/CachePathUtilities.cpp"
     "src/Assets/Textures/Cache/ProcessedTextureCacheIndex.cpp"
     "src/Utilities/MathUtils.cpp"
@@ -798,6 +799,10 @@ add_executable(BoundedSpscQueueTests "tests/BoundedSpscQueueTests.cpp")
 add_executable(TaskSchedulerManagerTests "tests/TaskSchedulerManagerTests.cpp")
 target_link_libraries(TaskSchedulerManagerTests PRIVATE ${PROJECT_NAME})
 target_compile_features(TaskSchedulerManagerTests PRIVATE cxx_std_23)
+
+add_executable(CachePackTests "tests/CachePackTests.cpp")
+target_link_libraries(CachePackTests PRIVATE ${PROJECT_NAME})
+target_compile_features(CachePackTests PRIVATE cxx_std_23)
 
 add_executable(AsyncStateGraphTests "tests/AsyncStateGraphTests.cpp")
 target_link_libraries(AsyncStateGraphTests PRIVATE ${PROJECT_NAME})
@@ -1872,6 +1877,7 @@ add_test(NAME MaterialOwnershipGuardTests COMMAND MaterialOwnershipGuardTests)
 add_test(NAME VirtualShadowBudgetTests COMMAND VirtualShadowBudgetTests)
 add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
 add_test(NAME TaskSchedulerManagerTests COMMAND TaskSchedulerManagerTests)
+add_test(NAME CachePackTests COMMAND CachePackTests)
 add_test(NAME AsyncStateGraphTests COMMAND AsyncStateGraphTests)
 if(WIN32)
     add_test(NAME GraphJobTests COMMAND GraphJobTests)
@@ -1890,6 +1896,7 @@ if(WIN32)
         VirtualShadowBudgetTests
         BoundedSpscQueueTests
         TaskSchedulerManagerTests
+        CachePackTests
         AsyncStateGraphTests
         GraphJobTests
         CLodCoordinatorTests

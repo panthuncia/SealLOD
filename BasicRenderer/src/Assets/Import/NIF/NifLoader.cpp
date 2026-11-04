@@ -35,6 +35,7 @@
 #include <BasicTelemetry/Tracy.h>
 
 #include <BasicRenderer/Assets/Import/BRNiflyClient.h>
+#include <BasicRenderer/Assets/CachePack.h>
 #include <BasicRenderer/Assets/Import/CLodCache.h>
 #include "Assets/Cache/Skeleton/SkeletonArtifactCache.h"
 #include "BasicRenderer/Assets/USD/USDLoader.h"
@@ -1186,6 +1187,13 @@ public:
     explicit BinaryReader(const fs::path& path)
     {
         BT_ZONE_SCOPE("NifLoader::BinaryReader::OpenMappedFile");
+        if (CachePack::Entry packed{}; CachePack::Find(path, packed) && packed.size <= 512ull * 1024ull * 1024ull) {
+            bytes = reinterpret_cast<const std::uint8_t*>(packed.data);
+            size = static_cast<std::size_t>(packed.size);
+            ownsView = false;
+            valid = true;
+            return;
+        }
         file = CreateFileW(
             path.c_str(),
             GENERIC_READ,
@@ -1218,7 +1226,7 @@ public:
 
     ~BinaryReader()
     {
-        if (bytes) UnmapViewOfFile(bytes);
+        if (bytes && ownsView) UnmapViewOfFile(bytes);
         if (mapping) CloseHandle(mapping);
         if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     }
@@ -1305,6 +1313,7 @@ private:
     std::size_t size{ 0 };
     std::size_t offset{ 0 };
     bool valid{ false };
+    bool ownsView = true;
 };
 
 void WriteMatrix(BinaryWriter& writer, const DirectX::XMMATRIX& matrix)
@@ -2212,6 +2221,7 @@ bool WritePayloadCache(
 		fs::remove(temporaryPath, ec);
 		return false;
 	}
+	CachePack::NoteFileChanged(payloadPath);
 	if (!MoveFileExW(
 		temporaryPath.c_str(),
 		payloadPath.c_str(),

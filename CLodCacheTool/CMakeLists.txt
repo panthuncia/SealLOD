@@ -31,6 +31,7 @@ set(CLOD_SHARED_SOURCES
     "${BR_SRC}/Assets/Import/NIF/BRNiflyClient.cpp"
 
     # CLod build & cache infrastructure
+    "${BR_SRC}/Assets/Cache/CachePack.cpp"
     "${BR_SRC}/Assets/Cache/ClusterLOD/CLodCache.cpp"
     "${BR_SRC}/Assets/Cache/ClusterLOD/CLodCacheLoader.cpp"
     "${BR_SRC}/Assets/Cache/Skeleton/SkeletonArtifactValidation.cpp"

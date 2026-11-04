@@ -1,4 +1,5 @@
 #include <BasicRenderer/Assets/Import/CLodCache.h>
+#include <BasicRenderer/Assets/CachePack.h>
 #include <BasicRenderer/Assets/DefaultCLodSettings.h>
 
 #include <algorithm>
@@ -46,7 +47,7 @@ namespace CLodCache {
 	struct MappedContainerLease::Impl {
 #ifdef _WIN32
 		~Impl() {
-			if (data != nullptr) {
+			if (data != nullptr && !inCachePack) {
 				UnmapViewOfFile(data);
 			}
 			if (mappingHandle != nullptr) {
@@ -63,6 +64,7 @@ namespace CLodCache {
 		const std::byte* data = nullptr;
 		uint64_t fileSize = 0u;
 		uint32_t pageCount = 0u;
+		bool inCachePack = false;
 	};
 
 	MappedContainerLease::MappedContainerLease(
@@ -151,6 +153,16 @@ namespace CLodCache {
 		(void)expectedPageCount;
 		return false;
 #else
+		// Already mapped, so there is nothing to open, retain or share.
+		if (CachePack::Entry packed{}; CachePack::Find(containerPath, packed) && packed.size >= 16u) {
+			auto impl = std::make_shared<MappedContainerLease::Impl>();
+			impl->data = packed.data;
+			impl->fileSize = packed.size;
+			impl->pageCount = expectedPageCount;
+			impl->inCachePack = true;
+			outLease = std::shared_ptr<const MappedContainerLease>(new MappedContainerLease(std::move(impl)));
+			return true;
+		}
 		static std::mutex cacheMutex;
 		struct CacheEntry {
 			std::weak_ptr<const MappedContainerLease> lease;
@@ -775,6 +787,7 @@ namespace CLodCache {
 				}
 			}
 
+			CachePack::NoteFileChanged(cachePath);
 			std::error_code ec;
 			const auto lockIndex = std::hash<std::wstring>{}(cachePath) % replacementLocks.size();
 			{
@@ -809,6 +822,23 @@ namespace CLodCache {
 
 		bool ReadMetadataBlob(const std::wstring& cachePath, std::vector<std::byte>& blob)
 		{
+			if (CachePack::Entry packed{}; CachePack::Find(cachePath, packed)) {
+				constexpr std::size_t kPrefixBytes = sizeof(uint32_t) * 2u + sizeof(uint64_t);
+				uint32_t packedMagic = 0;
+				uint32_t packedVersion = 0;
+				uint64_t packedBlobSize = 0;
+				if (packed.size < kPrefixBytes) {
+					return false;
+				}
+				std::memcpy(&packedMagic, packed.data, sizeof(packedMagic));
+				std::memcpy(&packedVersion, packed.data + sizeof(packedMagic), sizeof(packedVersion));
+				std::memcpy(&packedBlobSize, packed.data + sizeof(packedMagic) + sizeof(packedVersion), sizeof(packedBlobSize));
+				if (packedMagic != kMetadataMagic || packedVersion != kMetadataVersion || packedBlobSize > packed.size - kPrefixBytes) {
+					return false;
+				}
+				blob.assign(packed.data + kPrefixBytes, packed.data + kPrefixBytes + packedBlobSize);
+				return true;
+			}
 			std::ifstream file(cachePath, std::ios::binary);
 			if (!file.is_open()) {
 				return false;
@@ -861,6 +891,7 @@ namespace CLodCache {
 			TracyPlot("CLOD.Cache.SaveContainer.Pages", static_cast<int64_t>(pageCount));
 			outPageLocators.assign(pageCount, {});
 
+			CachePack::NoteFileChanged(containerPath);
 			std::ofstream file(containerPath, std::ios::binary | std::ios::trunc);
 			if (!file.is_open()) {
 				return false;

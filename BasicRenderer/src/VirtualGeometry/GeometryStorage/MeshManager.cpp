@@ -14,6 +14,7 @@
 #include "BasicRenderer/Extensions/Buffers/DynamicBuffer.h"
 #include "BasicRenderer/Extensions/Buffers/PagePool.h"
 #include "Scene/Views/ViewManager.h"
+#include <BasicRenderer/Assets/CachePack.h>
 #include <BasicRenderer/Assets/Import/CLodCache.h>
 #include "BasicRenderer/Assets/Material.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -407,7 +408,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 					result.directStorageGpuUploadPending = true;
 					// Opening a file costs milliseconds and most meshes have their own container.
 					// Do it here, so the launch on the streaming thread only finds the handle.
-					{
+					if (CachePack::Entry packed{}; !CachePack::Find(containerPath, packed)) {
 						ZoneScopedN("CLodDiskStreaming::PrimeDirectStorageFile");
 						(void)DirectStorageManager::GetInstance().PrimeFileHandle(containerPath);
 					}
@@ -3115,10 +3116,16 @@ bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeli
 	std::vector<br::DirectStorageBufferUploadBatchEntry> entries;
 	paths.reserve(launches.size());
 	entries.reserve(launches.size());
-	for (const auto& launch : launches) {
+	for (auto& launch : launches) {
 		paths.push_back(launch.sharedState != nullptr && !launch.sharedState->resolvedContainerPath.empty()
 			? launch.sharedState->resolvedContainerPath
 			: CLodCache::ResolveContainerPath(launch.cacheSource));
+		if (CachePack::Entry packed{}; CachePack::Find(paths.back(), packed)) {
+			paths.back() = CachePack::PackFilePath();
+			for (auto& copy : launch.copies) {
+				copy.sourceOffset += packed.offset;
+			}
+		}
 		entries.push_back({ &paths.back(), &launch.copies });
 	}
 	const uint64_t completionValue =
