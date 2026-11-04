@@ -22,6 +22,10 @@ AsyncStateGraphHostHooks MakeRendererGraphHooks(std::shared_ptr<VersionedBufferR
     hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::ActiveDrawList)].pinExactContent = true;
     hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::StaticTransaction)].allowCoalescing = false;
     hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::BufferVersion)].traceResourceLifetime = true;
+    for (const auto kind : { ArtifactKind::StaticTemplate, ArtifactKind::StaticVariant, ArtifactKind::StaticGroup,
+             ArtifactKind::TextureResidency }) {
+        hooks.artifactPolicies[static_cast<std::size_t>(kind)].bulkCompletions = true;
+    }
     // Static-group preparation is capacity-admitted separately from import
     // service drains; other graph producers use direct CPU scheduling.
     hooks.producerDispatch[static_cast<std::size_t>(TaskDomain::StaticGroupPreparation)] = org::async::TaskDispatch::Controlled;

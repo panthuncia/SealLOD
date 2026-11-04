@@ -499,7 +499,7 @@ void TaskSchedulerManager::Initialize(Config config) {
     // available worker pool while retaining headroom for graph and renderer
     // control work and bounding concurrent decode memory.
     const auto textureLimit = ReadEnvironmentUint("SARP_SCHEDULER_TEXTURE_CONCURRENCY",
-        (std::min)(8u, (m_workerCount + 3u) / 4u));
+        (std::min)(16u, m_workerCount * 2u / 3u + 1u));
     state.domains[static_cast<std::size_t>(TaskDomain::TextureProcessing)].limit =
         (std::min)(m_workerCount, (std::max)(1u, textureLimit));
     state.domains[static_cast<std::size_t>(TaskDomain::ShaderCompile)].limit = shaderLimit;

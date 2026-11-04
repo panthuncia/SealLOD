@@ -2709,7 +2709,7 @@ namespace br::staticimport
 		const auto availableCredits = compatibilityCredits
 			? creditLimit - _state.activePreparationCredits
 			: (std::numeric_limits<std::uint64_t>::max)();
-		constexpr std::size_t maxSubmissionsPerMutation = 32;
+		constexpr std::size_t maxSubmissionsPerMutation = 128;
 		submissions.reserve(compatibilityCredits
 			? static_cast<std::size_t>(availableCredits) : maxSubmissionsPerMutation);
 		intents.reserve(submissions.capacity());
