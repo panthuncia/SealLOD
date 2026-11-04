@@ -112,6 +112,7 @@ struct SWClusterSetup
     uint materialDataIndex;
     uint vertexFlags;
     uint alphaTestEnabled;
+    uint doubleSided;
     uint reverseWinding;
     uint dynamicShadowLayer;
     uint skinningInstanceSlot;
@@ -327,15 +328,24 @@ void SWLoadClusterSetup(SWClusterWork work, uint viewID)
         : 0xFFFFFFFFu;
 #endif
 
-#if defined(PSO_ALPHA_TEST)
-    gs_setup.alphaTestEnabled = 1u;
-#elif defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST)
+#if defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST)
+    // The work graph runs one pipeline for every material, so these come from the material.
     StructuredBuffer<MaterialInfo> materialDataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
-    gs_setup.alphaTestEnabled =
-        (materialDataBuffer[meshData.materialDataIndex].materialFlags & MATERIAL_ALPHA_TEST) != 0u ? 1u : 0u;
+    const uint materialFlags = materialDataBuffer[meshData.materialDataIndex].materialFlags;
+    gs_setup.alphaTestEnabled = (materialFlags & MATERIAL_ALPHA_TEST) != 0u ? 1u : 0u;
+    gs_setup.doubleSided = (materialFlags & MATERIAL_DOUBLE_SIDED) != 0u ? 1u : 0u;
+#else
+#if defined(PSO_ALPHA_TEST)
+    gs_setup.alphaTestEnabled = 1u;
 #else
     gs_setup.alphaTestEnabled = 0u;
+#endif
+#if defined(PSO_DOUBLE_SIDED)
+    gs_setup.doubleSided = 1u;
+#else
+    gs_setup.doubleSided = 0u;
+#endif
 #endif
 
     SWLoadAssemblyState(work, meshData);
@@ -660,7 +670,8 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
     output.viewID = viewID;
     output.visibleClusterIndex = work.visibleClusterIndex;
     output.debug = SWBuildRasterDebug(work);
-    const bool debugEnabled = output.debug.enabled;
+    // Debug views show both faces too.
+    const bool drawBackFaces = output.debug.enabled || gs_setup.doubleSided != 0u;
 #if CLOD_SW_RASTER_MAY_ALPHA_TEST
     output.alphaMaterial = (SWAlphaMaterial)0;
     output.uvStream = (CLodUvStream)0;
@@ -708,32 +719,23 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
         float2 s1 = gs_screenPos[vertices.y];
         float2 s2 = gs_screenPos[vertices.z];
 
-        float2 e01 = s1 - s0;
-        float2 e02 = s2 - s0;
+        const float2 e01 = s1 - s0;
+        const float2 e02 = s2 - s0;
         float twiceArea = e01.x * e02.y - e01.y * e02.x;
-        bool swappedDepths = false;
-        if (debugEnabled)
+        if (twiceArea >= 0.0f)
         {
-            // Debug views show both faces.
-            if (abs(twiceArea) <= 1e-8f)
+            if (!drawBackFaces || twiceArea == 0.0f)
             {
+                SWTelemetryAdd(SW_COUNTER_BACKFACE_CULLED, 1u);
                 continue;
             }
-            if (twiceArea > 0.0f)
-            {
-                const float2 swappedPosition = s1;
-                s1 = s2;
-                s2 = swappedPosition;
-                swappedDepths = true;
-                e01 = s1 - s0;
-                e02 = s2 - s0;
-                twiceArea = e01.x * e02.y - e01.y * e02.x;
-            }
-        }
-        else if (twiceArea >= 0.0f)
-        {
-            SWTelemetryAdd(SW_COUNTER_BACKFACE_CULLED, 1u);
-            continue;
+            // The rest of the rasterizer expects front-face winding. The triangle index is
+            // unchanged, so the visibility buffer is the same as a hardware back face.
+            vertices = vertices.xzy;
+            const float2 swappedPosition = s1;
+            s1 = s2;
+            s2 = swappedPosition;
+            twiceArea = -twiceArea;
         }
 
         // Pixels whose centers can be inside the triangle. Most triangles here are smaller than a
@@ -772,10 +774,6 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
         {
             SWTelemetryAdd(SW_COUNTER_DEGENERATE_OR_OFFSCREEN, 1u);
             continue;
-        }
-        if (swappedDepths)
-        {
-            tri.depths = tri.depths.xzy;
         }
 
         // Barycentrics at the first pixel center, and their steps.
