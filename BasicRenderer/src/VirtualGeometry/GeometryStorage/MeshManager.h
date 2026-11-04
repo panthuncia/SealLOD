@@ -39,7 +39,7 @@ namespace org { class BufferView; }
 class ViewManager;
 class ICLodGeometryStorage;
 class MeshManagerCLodGeometryStorage;
-namespace br::render { class RendererStateRequestService; class CLodResidencyStorageDirectory; }
+namespace br::render { class RendererStateRequestService; class CLodResidencyStorageDirectory; struct GeometryResidencyDelta; struct GeometryResidencyPublication; }
 namespace org::services { class BackingPool; struct PublishedBufferVersion; }
 namespace br::render {
 struct PublishedRendererState;
@@ -336,8 +336,7 @@ private:
 	std::atomic<uint64_t> m_clodStreamingDomainEventGeneration{0};
 	mutable std::mutex m_geometryResidencyPublicationMutex;
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
-	br::render::ArtifactVersionHandle m_geometryResidencyVersion;
-	uint64_t m_geometryResidencyRevision = 0;
+	std::shared_ptr<br::render::GeometryResidencyPublication> m_geometryResidencyPublication;
 	std::atomic<bool> m_clodStreamingDirectStorageEnabled{true};
 	SettingsManager::Subscription m_clodStreamingDirectStorageSubscription;
 
@@ -486,6 +485,7 @@ private:
 
 	void RebuildCLodSharedStreamingRangeIndex();
 	void PublishCLodStreamingDomainEvent(br::render::CLodStreamingDomainEvent event);
+	void EnqueueGeometryResidencyDelta(br::render::GeometryResidencyDelta delta);
 	void PublishGeometryResidencyDelta(const br::render::CLodStreamingDomainEvent& event);
 	void PublishCLodStreamingDomainEventForSharedState(br::render::CLodStreamingDomainEventKind kind, const std::shared_ptr<CLodSharedStreamingState>& sharedState);
 	void RecomputeCLodActiveMaxTraversalDepth();

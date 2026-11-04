@@ -3,6 +3,7 @@
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <stdexcept>
 #include <unordered_map>
@@ -62,38 +63,53 @@ const StaticTransactionGroup* PublishedStaticScenePage::FindGroup(
     return basePage ? basePage->FindGroup(groupID) : nullptr;
 }
 
-void PublishedStaticScenePage::MaterializeGroups(
-    std::vector<StaticTransactionGroup>& out) const {
-    std::map<std::uint64_t, StaticTransactionGroup> effective;
+namespace {
+
+// The newest entry of each group across a page's layers decides it. A layer never
+// removes a group it also adds.
+template <class Record>
+void MaterializeLayers(const PublishedStaticScenePage& top, std::vector<Record>& out,
+    std::vector<Record> PublishedStaticScenePage::*records) {
     std::vector<const PublishedStaticScenePage*> layers;
-    for (auto layer = this; layer != nullptr; layer = layer->basePage.get()) {
+    for (auto layer = std::addressof(top); layer != nullptr; layer = layer->basePage.get()) {
         layers.push_back(layer);
     }
-    for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
-        for (const auto groupID : (*layer)->removedGroupIDs) effective.erase(groupID);
-        for (const auto& group : (*layer)->groups) effective.insert_or_assign(group.groupID, group);
-    }
     out.clear();
-    out.reserve(effective.size());
-    for (auto& [_, group] : effective) out.push_back(std::move(group));
+    // Sorting references moves no records, however deep the chain is.
+    struct Entry {
+        std::uint64_t groupID;
+        std::size_t layer;
+        const Record* record;  // Null for a removal.
+    };
+    std::size_t entryCount = 0;
+    for (const auto* layer : layers) entryCount += (layer->*records).size() + layer->removedGroupIDs.size();
+    std::vector<Entry> entries;
+    entries.reserve(entryCount);
+    for (std::size_t age = 0; age < layers.size(); ++age) {
+        const std::size_t layer = layers.size() - age;
+        for (const auto groupID : layers[age]->removedGroupIDs) entries.push_back({ groupID, layer, nullptr });
+        for (const auto& record : layers[age]->*records) entries.push_back({ record.groupID, layer, std::addressof(record) });
+    }
+    std::ranges::sort(entries, [](const Entry& left, const Entry& right) {
+        return left.groupID != right.groupID ? left.groupID < right.groupID : left.layer < right.layer;
+    });
+    out.reserve(entries.size());
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        const bool newest = index + 1u == entries.size() || entries[index + 1u].groupID != entries[index].groupID;
+        if (newest && entries[index].record) out.push_back(*entries[index].record);
+    }
+}
+
+} // namespace
+
+void PublishedStaticScenePage::MaterializeGroups(
+    std::vector<StaticTransactionGroup>& out) const {
+    MaterializeLayers(*this, out, &PublishedStaticScenePage::groups);
 }
 
 void PublishedStaticScenePage::MaterializeOwners(
     std::vector<StaticSceneGroupOwner>& out) const {
-    std::map<std::uint64_t, StaticSceneGroupOwner> effective;
-    std::vector<const PublishedStaticScenePage*> layers;
-    for (auto layer = this; layer != nullptr; layer = layer->basePage.get()) {
-        layers.push_back(layer);
-    }
-    for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer) {
-        for (const auto groupID : (*layer)->removedGroupIDs) effective.erase(groupID);
-        for (const auto& owner : (*layer)->groupOwners) {
-            effective.insert_or_assign(owner.groupID, owner);
-        }
-    }
-    out.clear();
-    out.reserve(effective.size());
-    for (auto& [_, owner] : effective) out.push_back(std::move(owner));
+    MaterializeLayers(*this, out, &PublishedStaticScenePage::groupOwners);
 }
 
 bool PublishedStaticSceneState::ContainsGroup(std::uint64_t groupID) const noexcept {
@@ -213,6 +229,7 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
         page->placementCount = basePage->placementCount;
     }
     page->groups.reserve(page->groupOwners.size());
+    bool replacedOwner = false;
     for (const auto& owner : page->groupOwners) {
         const auto transactionIt = transactions.find(owner.transaction);
         if (transactionIt == transactions.end()) {
@@ -225,6 +242,7 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
             return ArtifactBuildResult::Failure("static scene page transaction omits its group");
         }
         if (const auto* oldGroup = basePage ? basePage->FindGroup(owner.groupID) : nullptr) {
+            replacedOwner = true;
             page->drawRecordCount -= oldGroup->drawRecordCount;
             page->activeEntryCount -= oldGroup->activeEntryCount;
             page->placementCount -= oldGroup->placementCount;
@@ -246,6 +264,24 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
         page->activeEntryCount -= oldGroup->activeEntryCount;
         page->placementCount -= oldGroup->placementCount;
     }
+    // A delta that only adds groups keeps every transaction its base depends on, so
+    // the set follows from the base without walking the page's membership.
+    const bool additionsOnly = !replacedOwner && page->removedGroupIDs.empty();
+    std::vector<ArtifactVersionID> dependencies;
+    if (additionsOnly) {
+        dependencies.reserve(page->groupOwners.size());
+        for (const auto& owner : page->groupOwners) dependencies.push_back(owner.transaction);
+        std::sort(dependencies.begin(), dependencies.end());
+        dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
+        if (basePage) {
+            std::vector<ArtifactVersionID> merged;
+            merged.reserve(dependencies.size() + basePage->publicationDependencies.size());
+            std::set_union(dependencies.begin(), dependencies.end(),
+                basePage->publicationDependencies.begin(), basePage->publicationDependencies.end(),
+                std::back_inserter(merged));
+            dependencies = std::move(merged);
+        }
+    }
     // Immutable deltas make the common update proportional to its mutation set,
     // but an unbounded shared_ptr chain would retain every historical layer and
     // turn owner lookup into progressively more work. Periodically flatten the
@@ -261,13 +297,15 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
         page->groups = std::move(effectiveGroups);
         page->removedGroupIDs.clear();
     }
-    std::vector<StaticSceneGroupOwner> effectiveOwners;
-    page->MaterializeOwners(effectiveOwners);
-    page->publicationDependencies.reserve(effectiveOwners.size());
-    for (const auto& owner : effectiveOwners) page->publicationDependencies.push_back(owner.transaction);
-    auto& dependencies = page->publicationDependencies;
-    std::sort(dependencies.begin(), dependencies.end());
-    dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
+    if (!additionsOnly) {
+        std::vector<StaticSceneGroupOwner> effectiveOwners;
+        page->MaterializeOwners(effectiveOwners);
+        dependencies.reserve(effectiveOwners.size());
+        for (const auto& owner : effectiveOwners) dependencies.push_back(owner.transaction);
+        std::sort(dependencies.begin(), dependencies.end());
+        dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
+    }
+    page->publicationDependencies = std::move(dependencies);
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<PublishedStaticScenePage>(std::move(page)));
 }

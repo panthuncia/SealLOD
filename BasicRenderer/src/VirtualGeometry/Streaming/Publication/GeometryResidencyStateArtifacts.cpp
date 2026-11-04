@@ -27,19 +27,20 @@ ArtifactBuildResult BuildGeometryResidencyState(const ArtifactBuildContext& cont
 
     // Every published state keeps activeRanges sorted by groupsBase, so a delta
     // edits the predecessor in place instead of scanning and re-sorting it.
-    if (input->kind == GeometryResidencyDeltaKind::Reset) {
-        state->activeRanges = input->resetRanges;
-        std::ranges::sort(state->activeRanges, {}, &GeometryResidencyRange::groupsBase);
-    } else {
+    for (const auto& delta : input->deltas) {
+        if (delta.kind == GeometryResidencyDeltaKind::Reset) {
+            state->activeRanges.clear();
+            continue;
+        }
         auto existing = std::ranges::lower_bound(state->activeRanges,
-            input->range.groupsBase, {}, &GeometryResidencyRange::groupsBase);
+            delta.range.groupsBase, {}, &GeometryResidencyRange::groupsBase);
         const bool found = existing != state->activeRanges.end() &&
-            existing->groupsBase == input->range.groupsBase;
-        if (input->kind == GeometryResidencyDeltaKind::Remove) {
+            existing->groupsBase == delta.range.groupsBase;
+        if (delta.kind == GeometryResidencyDeltaKind::Remove) {
             if (found) state->activeRanges.erase(existing);
-        } else if (input->range.groupCount != 0) {
-            if (found) *existing = input->range;
-            else state->activeRanges.insert(existing, input->range);
+        } else if (delta.range.groupCount != 0) {
+            if (found) *existing = delta.range;
+            else state->activeRanges.insert(existing, delta.range);
         }
     }
 

@@ -27,10 +27,15 @@ enum class GeometryResidencyDeltaKind : std::uint8_t {
     Reset,
 };
 
-struct GeometryResidencyDeltaInput {
+struct GeometryResidencyDelta {
     GeometryResidencyDeltaKind kind = GeometryResidencyDeltaKind::Reset;
     GeometryResidencyRange range;
-    std::vector<GeometryResidencyRange> resetRanges;
+};
+
+// The changes since the predecessor version, in order. A burst of mesh registrations
+// arrives as one version rather than a version per mesh.
+struct GeometryResidencyDeltaInput {
+    std::vector<GeometryResidencyDelta> deltas;
     std::shared_ptr<PagePool> pagePool;
     std::shared_ptr<org::ResourceGroup> slabResources;
     std::uint64_t storageGeneration = 0;

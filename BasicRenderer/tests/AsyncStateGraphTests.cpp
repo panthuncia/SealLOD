@@ -1774,6 +1774,18 @@ int main() {
     graph.WaitIdle();
     const auto replacedPagePayload = graph.Snapshot(deltaPageKey).payload.Get<PublishedStaticScenePage>();
     Check(replacedPagePayload && replacedPagePayload->ContainsGroup(10001));
+    // A page's publication dependencies are exactly the transactions of its effective owners.
+    const auto checkPageDependencies = [](const PublishedStaticScenePage& page) {
+        std::vector<StaticSceneGroupOwner> effectiveOwners;
+        page.MaterializeOwners(effectiveOwners);
+        Check(std::ranges::is_sorted(effectiveOwners, {}, &StaticSceneGroupOwner::groupID));
+        std::vector<ArtifactVersionID> expected;
+        for (const auto& owner : effectiveOwners) expected.push_back(owner.transaction);
+        std::ranges::sort(expected);
+        expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+        Check(page.publicationDependencies == expected);
+    };
+    checkPageDependencies(*replacedPagePayload);
     const auto* replacedGroup = replacedPagePayload ? replacedPagePayload->FindGroup(10001) : nullptr;
     Check(replacedGroup && replacedGroup->drawRecordCount == 7);
 
@@ -1790,6 +1802,23 @@ int main() {
     graph.WaitIdle();
     const auto removedPagePayload = graph.Snapshot(deltaPageKey).payload.Get<PublishedStaticScenePage>();
     Check(removedPagePayload && !removedPagePayload->ContainsGroup(10001));
+    checkPageDependencies(*removedPagePayload);
+
+    // An additions-only delta, on top of the layers above.
+    auto additionDelta = std::make_shared<StaticScenePageBuildInput>();
+    additionDelta->pageIndex = static_cast<std::uint32_t>(deltaPageIndex);
+    additionDelta->sourceFingerprint = 8103;
+    additionDelta->basePage = removedPage.version;
+    additionDelta->basePagePayload = removedPagePayload;
+    additionDelta->groupOwners.push_back({ 10001, staticVersionC.version });
+    const auto addedPage = graph.Request(deltaPageKey, ++staticPageRevisions[deltaPageIndex],
+        { Exact(staticVersionC.version, ArtifactReadiness::GpuReady) },
+        ArtifactPayload::Make<StaticScenePageBuildInput>(std::move(additionDelta)), 8103);
+    Check(addedPage);
+    graph.WaitIdle();
+    const auto addedPagePayload = graph.Snapshot(deltaPageKey).payload.Get<PublishedStaticScenePage>();
+    Check(addedPagePayload && addedPagePayload->ContainsGroup(10001));
+    checkPageDependencies(*addedPagePayload);
     std::vector<StaticTransactionGroup> effectiveGroups;
     removedPagePayload->MaterializeGroups(effectiveGroups);
     Check(std::ranges::none_of(effectiveGroups,
@@ -3125,14 +3154,12 @@ int main() {
             return graph.Request(key, revision, std::move(requirements),
                 ArtifactPayload::Make<GeometryResidencyDeltaInput>(std::move(input)), revision);
         };
-        auto first = request(1, { GeometryResidencyDeltaKind::AddOrReplace,
-            { 10, 4, 3, {} }, {} });
+        auto first = request(1, { { { GeometryResidencyDeltaKind::AddOrReplace, { 10, 4, 3, {} } } } });
         Check(first);
         graph.WaitIdle();
         graph.MarkPublished(first.version);
         graph.WaitIdle();
-        auto second = request(2, { GeometryResidencyDeltaKind::AddOrReplace,
-            { 20, 8, 7, {} }, {} }, first.Handle());
+        auto second = request(2, { { { GeometryResidencyDeltaKind::AddOrReplace, { 20, 8, 7, {} } } } }, first.Handle());
         Check(second);
         graph.WaitIdle();
         graph.MarkPublished(second.version);
@@ -3144,8 +3171,7 @@ int main() {
         Check(state && state->activeRanges.size() == 2);
         Check(state->maxTraversalDepth == 7 && state->maxGroupIndex == 28);
 
-        auto third = request(3, { GeometryResidencyDeltaKind::Remove,
-            { 20, 8, 7, {} }, {} }, second.Handle());
+        auto third = request(3, { { { GeometryResidencyDeltaKind::Remove, { 20, 8, 7, {} } } } }, second.Handle());
         Check(third);
         graph.WaitIdle();
         snapshot = graph.Snapshot(third.version);
@@ -3163,10 +3189,8 @@ int main() {
 
         // Queue multiple deltas before their predecessors publish. Promotion
         // must resolve each exact archived predecessor without losing history.
-        auto fourth = request(4, { GeometryResidencyDeltaKind::AddOrReplace,
-            { 30, 2, 5, {} }, {} }, third.Handle());
-        auto fifth = request(5, { GeometryResidencyDeltaKind::AddOrReplace,
-            { 40, 3, 9, {} }, {} }, fourth.Handle());
+        auto fourth = request(4, { { { GeometryResidencyDeltaKind::AddOrReplace, { 30, 2, 5, {} } } } }, third.Handle());
+        auto fifth = request(5, { { { GeometryResidencyDeltaKind::AddOrReplace, { 40, 3, 9, {} } } } }, fourth.Handle());
         Check(fourth && fifth);
         graph.MarkPublished(third.version);
         graph.WaitIdle();
@@ -3188,7 +3212,7 @@ int main() {
         std::shared_ptr<PagePool> pagePoolLease(
             storageSentinel, reinterpret_cast<PagePool*>(storageSentinel.get()));
         GeometryResidencyDeltaInput retainedInput{
-            GeometryResidencyDeltaKind::AddOrReplace, { 50, 1, 4, {} }, {}};
+            { { GeometryResidencyDeltaKind::AddOrReplace, { 50, 1, 4, {} } } } };
         retainedInput.pagePool = pagePoolLease;
         retainedInput.storageGeneration = 77;
         auto retained = request(6, std::move(retainedInput), fifth.Handle());
@@ -3201,6 +3225,32 @@ int main() {
         state = root ? root->fragment.payload.Get<PublishedGeometryResidencyState>() : nullptr;
         Check(state && state->pagePool && state->storageGeneration == 77);
         Check(!weakStorage.expired());
+
+        // One version applies a burst of deltas in order.
+        auto burst = request(7, { {
+            { GeometryResidencyDeltaKind::AddOrReplace, { 60, 1, 11, {} } },
+            { GeometryResidencyDeltaKind::Remove, { 60, 1, 11, {} } },
+            { GeometryResidencyDeltaKind::AddOrReplace, { 70, 2, 6, {} } },
+            { GeometryResidencyDeltaKind::AddOrReplace, { 70, 5, 8, {} } } } }, retained.Handle());
+        Check(burst);
+        graph.WaitIdle();
+        snapshot = graph.Snapshot(burst.version);
+        root = snapshot.payload.Get<RendererStateFragmentArtifact>();
+        state = root ? root->fragment.payload.Get<PublishedGeometryResidencyState>() : nullptr;
+        Check(state && state->activeRanges.size() == 5);
+        Check(state->activeRanges.back().groupsBase == 70 && state->activeRanges.back().groupCount == 5);
+        Check(state->maxTraversalDepth == 9 && state->maxGroupIndex == 75);
+
+        // A reset discards the predecessor's ranges before later deltas apply.
+        auto reset = request(8, { {
+            { GeometryResidencyDeltaKind::Reset, {} },
+            { GeometryResidencyDeltaKind::AddOrReplace, { 80, 1, 2, {} } } } }, burst.Handle());
+        Check(reset);
+        graph.WaitIdle();
+        snapshot = graph.Snapshot(reset.version);
+        root = snapshot.payload.Get<RendererStateFragmentArtifact>();
+        state = root ? root->fragment.payload.Get<PublishedGeometryResidencyState>() : nullptr;
+        Check(state && state->activeRanges.size() == 1 && state->maxGroupIndex == 81);
     }
 
     {

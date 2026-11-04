@@ -2016,11 +2016,78 @@ void MeshManager::PublishCLodStreamingDomainEvent(br::render::CLodStreamingDomai
 	PublishGeometryResidencyDelta(publicationEvent);
 }
 
+namespace br::render {
+
+	// Residency deltas waiting for the version in flight, and that version. Continuations
+	// of that version reach this through a shared_ptr, not through the manager.
+	struct GeometryResidencyPublication {
+		std::mutex mutex;
+		RendererStateRequestService* service = nullptr;
+		std::vector<GeometryResidencyDelta> pending;
+		std::shared_ptr<PagePool> pagePool;
+		std::shared_ptr<org::ResourceGroup> slabResources;
+		std::uint64_t storageGeneration = 0;
+		ArtifactVersionHandle version;
+		std::uint64_t revision = 0;
+		ArtifactAwaiter awaiter;
+		bool inFlight = false;
+	};
+
+} // namespace br::render
+
+namespace {
+
+	// One version at a time: what arrives while it builds becomes the next version. The
+	// caller holds the publication's mutex.
+	void SubmitGeometryResidency(const std::shared_ptr<br::render::GeometryResidencyPublication>& publication) {
+		auto& state = *publication;
+		if (!state.service || state.pending.empty() || state.inFlight) return;
+
+		auto input = std::make_shared<br::render::GeometryResidencyDeltaInput>();
+		input->deltas = std::move(state.pending);
+		state.pending.clear();
+		input->pagePool = state.pagePool;
+		input->slabResources = state.slabResources;
+		input->storageGeneration = state.storageGeneration;
+
+		std::vector<br::render::ArtifactRequirement> requirements;
+		if (state.version) requirements.push_back(br::render::Exact(state.version));
+		const auto revision = ++state.revision;
+		std::shared_ptr<const br::render::GeometryResidencyDeltaInput> immutableInput = std::move(input);
+		const auto result = state.service->Request(
+			{ br::render::ArtifactKind::GeometryResidency, 1u, 0u }, revision,
+			std::move(requirements),
+			br::render::ArtifactPayload::Make<br::render::GeometryResidencyDeltaInput>(
+				std::move(immutableInput)), revision);
+		if (!result) {
+			basic_telemetry::AddCounter("BasicRenderer.GeometryResidency.RequestRejected");
+			return;
+		}
+		state.version = result.Handle();
+
+		const auto finished = [publication] {
+			std::lock_guard lock(publication->mutex);
+			publication->inFlight = false;
+			SubmitGeometryResidency(publication);
+		};
+		state.awaiter = state.service->AwaitExact(state.version, br::render::ArtifactReadiness::CpuReady,
+			TaskLane::Streaming, TaskDomain::GraphPublication,
+			[finished](const br::render::ArtifactSnapshot&) { finished(); },
+			[finished](const br::render::ArtifactTermination&) { finished(); });
+		state.inFlight = state.awaiter.subscription != 0;
+	}
+
+} // namespace
+
 void MeshManager::SetRendererStateRequestService(br::render::RendererStateRequestService* service) {
 	std::lock_guard lock(m_geometryResidencyPublicationMutex);
+	if (m_geometryResidencyPublication) {
+		std::lock_guard publicationLock(m_geometryResidencyPublication->mutex);
+		m_geometryResidencyPublication->service = nullptr;
+		m_geometryResidencyPublication->pending.clear();
+	}
+	m_geometryResidencyPublication = nullptr;
 	m_rendererStateRequests = service;
-	m_geometryResidencyVersion = {};
-	m_geometryResidencyRevision = 0;
 	{
 		std::lock_guard graphLock(m_geometryBufferGraphMutex);
 		m_clodResidencyStorages = service
@@ -2029,18 +2096,20 @@ void MeshManager::SetRendererStateRequestService(br::render::RendererStateReques
 	}
 	if (service == nullptr) return;
 
-	auto input = std::make_shared<br::render::GeometryResidencyDeltaInput>();
-	input->kind = br::render::GeometryResidencyDeltaKind::Reset;
-	input->pagePool = m_clodPagePool;
-	input->slabResources = GetCLodSlabResourceGroup();
-	input->storageGeneration = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
-	const auto revision = ++m_geometryResidencyRevision;
-	std::shared_ptr<const br::render::GeometryResidencyDeltaInput> immutableInput = std::move(input);
-	const auto result = service->Request(
-		{ br::render::ArtifactKind::GeometryResidency, 1u, 0u }, revision,
-		{}, br::render::ArtifactPayload::Make<br::render::GeometryResidencyDeltaInput>(
-			std::move(immutableInput)), revision);
-	if (result) m_geometryResidencyVersion = result.Handle();
+	m_geometryResidencyPublication = std::make_shared<br::render::GeometryResidencyPublication>();
+	m_geometryResidencyPublication->service = service;
+	EnqueueGeometryResidencyDelta({ br::render::GeometryResidencyDeltaKind::Reset, {} });
+}
+
+void MeshManager::EnqueueGeometryResidencyDelta(br::render::GeometryResidencyDelta delta) {
+	auto& publication = *m_geometryResidencyPublication;
+	auto slabResources = GetCLodSlabResourceGroup();
+	std::lock_guard lock(publication.mutex);
+	publication.pagePool = m_clodPagePool;
+	publication.slabResources = std::move(slabResources);
+	publication.storageGeneration = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
+	publication.pending.push_back(std::move(delta));
+	SubmitGeometryResidency(m_geometryResidencyPublication);
 }
 
 void MeshManager::SetRendererStateServices(br::render::RendererStateRequestService* service,
@@ -2232,62 +2301,41 @@ std::optional<br::render::ArtifactRequirement> MeshManager::DesiredBufferStateRe
 
 std::optional<br::render::ArtifactVersionHandle> MeshManager::GeometryResidencyVersion() const {
 	std::lock_guard lock(m_geometryResidencyPublicationMutex);
-	if (!m_geometryResidencyVersion) return std::nullopt;
-	return m_geometryResidencyVersion;
+	if (!m_geometryResidencyPublication) return std::nullopt;
+	std::lock_guard publicationLock(m_geometryResidencyPublication->mutex);
+	if (!m_geometryResidencyPublication->version) return std::nullopt;
+	return m_geometryResidencyPublication->version;
 }
 
 void MeshManager::PublishGeometryResidencyDelta(const br::render::CLodStreamingDomainEvent& event) {
 	if (event.kind == br::render::CLodStreamingDomainEventKind::SharedMeshAdded) return;
 	std::lock_guard lock(m_geometryResidencyPublicationMutex);
-	if (m_rendererStateRequests == nullptr) return;
+	if (!m_geometryResidencyPublication) return;
 
-	auto input = std::make_shared<br::render::GeometryResidencyDeltaInput>();
-	input->pagePool = m_clodPagePool;
-	input->slabResources = GetCLodSlabResourceGroup();
-	input->storageGeneration = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
+	br::render::GeometryResidencyDelta delta;
 	switch (event.kind) {
 	case br::render::CLodStreamingDomainEventKind::ActiveRangeAdded:
-		input->kind = br::render::GeometryResidencyDeltaKind::AddOrReplace;
+		delta.kind = br::render::GeometryResidencyDeltaKind::AddOrReplace;
 		break;
 	case br::render::CLodStreamingDomainEventKind::ActiveRangeRemoved:
-		input->kind = br::render::GeometryResidencyDeltaKind::Remove;
+		delta.kind = br::render::GeometryResidencyDeltaKind::Remove;
 		break;
 	case br::render::CLodStreamingDomainEventKind::FullReset:
-		input->kind = br::render::GeometryResidencyDeltaKind::Reset;
+		delta.kind = br::render::GeometryResidencyDeltaKind::Reset;
 		break;
 	case br::render::CLodStreamingDomainEventKind::SharedMeshAdded:
 		return;
 	}
-	input->range.groupsBase = event.groupsBase;
-	input->range.groupCount = event.groupCount;
-	input->range.maxTraversalDepth = event.maxTraversalDepth;
+	delta.range.groupsBase = event.groupsBase;
+	delta.range.groupCount = event.groupCount;
+	delta.range.maxTraversalDepth = event.maxTraversalDepth;
 	auto coarsestRanges = std::make_shared<std::vector<std::pair<std::uint32_t, std::uint32_t>>>();
 	coarsestRanges->reserve(event.coarsestRanges.size());
 	for (const auto& range : event.coarsestRanges) {
 		coarsestRanges->emplace_back(range.groupsBase, range.groupCount);
 	}
-	input->range.coarsestRanges = std::move(coarsestRanges);
-
-	std::vector<br::render::ArtifactRequirement> requirements;
-	if (m_geometryResidencyVersion) {
-		requirements.push_back(br::render::Exact(m_geometryResidencyVersion));
-	}
-	const auto revision = ++m_geometryResidencyRevision;
-	const std::uint64_t fingerprint = revision ^
-		(static_cast<std::uint64_t>(event.groupsBase) << 32u) ^ event.groupCount ^
-		(static_cast<std::uint64_t>(event.maxTraversalDepth) << 48u) ^
-		input->storageGeneration;
-	std::shared_ptr<const br::render::GeometryResidencyDeltaInput> immutableInput = std::move(input);
-	const auto result = m_rendererStateRequests->Request(
-		{ br::render::ArtifactKind::GeometryResidency, 1u, 0u }, revision,
-		std::move(requirements),
-		br::render::ArtifactPayload::Make<br::render::GeometryResidencyDeltaInput>(
-			std::move(immutableInput)), fingerprint);
-	if (result) {
-		m_geometryResidencyVersion = result.Handle();
-	} else {
-		basic_telemetry::AddCounter("BasicRenderer.GeometryResidency.RequestRejected");
-	}
+	delta.range.coarsestRanges = std::move(coarsestRanges);
+	EnqueueGeometryResidencyDelta(std::move(delta));
 }
 
 void MeshManager::PublishCLodStreamingDomainEventForSharedState(

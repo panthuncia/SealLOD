@@ -1293,7 +1293,10 @@ inline constexpr uint32_t CLodReyesDiceReplayStrideBytes = sizeof(CLodReyesDiceQ
 inline constexpr uint32_t CLodVoxelRasterThreadsPerGroup = 64u;
 inline constexpr uint32_t CLodReplayBufferNumUints = CLodReplayBufferSizeBytes / sizeof(uint32_t);
 inline constexpr uint32_t CLodMaxViewDepthIndices = 512u;
-inline constexpr uint32_t CLodStreamingInitialGroupCapacity = 1024u;
+// Each growth needs a new bitset filled on the GPU before geometry that references the
+// new groups can publish, which holds back every draw of that geometry. Radius-100
+// worlds reach 65536 groups, so start above that rather than doubling up to it.
+inline constexpr uint32_t CLodStreamingInitialGroupCapacity = 1u << 17u;
 inline constexpr uint32_t CLodStreamingRequestCapacity = (1u << 16);
 inline constexpr uint32_t CLodUsedGroupsCapacity = (1u << 17); // 128K entries for GPU used-groups append buffer
 
