@@ -448,3 +448,39 @@ production fallback.
   cull/hardware ratio was unchanged and the 0.25% total movement was below the
   retention threshold.
 - Decision: rejected and reverted to the conservative memory model.
+
+### Double-sided back faces and leaf LOD (2026-11-04)
+
+SaveLab, world 0x3C, radius 100, saved camera, RTX 5070 Laptop. Telemetry off for all timings.
+
+**Double-sided fix.** Software raster culled back faces on every material. Live A-B-A in one session:
+11.52 -> 12.06 ms (+4.7%). 33K pixels (1.9%) show a nearer surface and 49 are newly covered, mostly in distant
+foliage. No other pass moved.
+
+**Where the software clusters are.** Temporary probe binning alpha-tested software clusters by the view depth of
+the instance origin: none under 15,000 units, 4.8% at 15,000-25,000, 95.2% beyond 25,000. The dynamic wind outer
+radius is 10,000. Only this camera, which is high above the terrain.
+
+**Coverage mode `none` on the 14 NIFs with the most software clusters** (trunks included; rules are per NIF):
+
+| | `prioritizeEdges` | `none` |
+|---|---|---|
+| Software clusters | 1.60M | 0.82M |
+| Hardware clusters | 150K | 155K |
+| Software raster | 12.39 ms | 7.62 ms |
+| Hardware raster | 2.74 ms | 2.88 ms |
+| Cull phase 1 / 2 | 2.05 / 0.41 ms | 1.77 / 0.33 ms |
+| Material evaluation | 2.93 ms | 2.95 ms |
+
+Image, against the control session: 1.28% of pixels farther, 1.52% nearer, 0.24% net nearer, so no net coverage
+loss at this distance. Mid-distance and ground views are not tested. Runs compare across sessions, not A-B-A.
+Selected leaf clusters are still about 90% depth 0, about 27 per tree against 82, so some geometry still does not
+simplify.
+
+**Traps found.**
+- A session shut down with `telemetry_enabled` on starts the next one with culling inflated (phase 1 9.6 ms, shadow
+  cull 6.0 ms) but no telemetry log lines. Setting it off restored 1.77 and 1.18 ms, and the following launch was
+  clean. Where the setting persists was not found.
+- Sessions differ by a forest patch: a captured region is 18-22% nearer in some sessions and 3-4% in others, with
+  per-mesh cluster and instance counts unchanged. It predates these rebuilds. Compare images only between
+  sessions in the same state; the cause is unknown.
