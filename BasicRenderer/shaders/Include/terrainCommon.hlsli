@@ -1194,11 +1194,6 @@ TerrainGlintSample TerrainSampleDominantGlint(uint terrainSetIndex, float3 posit
     [loop]
     for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
     {
-        const float weight = TerrainInterpolateLayerWeight(terrainWeightBlocks, terrain, region, localLayer, regionLocal);
-        if (weight <= bestWeight)
-        {
-            continue;
-        }
         const uint layerRefIndex = terrain.layerRefBase + region.layerRefStart + localLayer;
         if (layerRefIndex >= terrain.layerRefBase + terrain.layerRefCount)
         {
@@ -1207,6 +1202,12 @@ TerrainGlintSample TerrainSampleDominantGlint(uint terrainSetIndex, float3 posit
         const uint layerIndex = min(terrain.layerBase + terrainLayerRefs[layerRefIndex].layerIndex, terrain.layerBase + terrain.layerCount - 1u);
         TerrainLayerInfo layer = terrainLayers[layerIndex];
         if ((layer.flags & TERRAIN_LAYER_FLAG_GLINT) == 0u)
+        {
+            continue;
+        }
+        // Only glint layers compete, and interpolating a weight is much the most expensive step.
+        const float weight = TerrainInterpolateLayerWeight(terrainWeightBlocks, terrain, region, localLayer, regionLocal);
+        if (weight <= bestWeight)
         {
             continue;
         }
