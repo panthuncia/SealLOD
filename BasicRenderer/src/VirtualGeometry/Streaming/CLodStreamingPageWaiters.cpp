@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 void CLodStreamingSystem::ParkReadyCompletionForSharedPage(
     uint32_t groupIndex,
     uint32_t page,
@@ -170,6 +172,51 @@ void CLodStreamingSystem::PruneStaleReadyStreamingCompletions(
         }
         ClearStreamingRequestInProgress(groupIndex);
         ClearPendingLoadPriority(groupIndex);
+    }
+}
+
+void CLodStreamingSystem::LogStuckReadyStreamingCompletions() {
+    // Parked completions normally leave within a few service ticks. If residency stops moving while
+    // some remain and nothing else is in flight, a wake was lost, and this says which wait holds them.
+    constexpr uint64_t kStuckTicks = 600u;
+    const uint32_t otherWork = m_pendingStreamingRequestCount + m_waitingForPagesRequestCount +
+        static_cast<uint32_t>(m_pendingResidencyCommitGroups.size());
+    const uint32_t residentCount = static_cast<uint32_t>(m_groupOwnedPages.size());
+    if (m_readyStreamingCompletionsByGroup.empty() || otherWork != 0u ||
+        residentCount != m_lastReadyCompletionResidentCount) {
+        m_lastReadyCompletionProgressTick = m_streamingDiagnosticTick;
+        m_lastReadyCompletionResidentCount = residentCount;
+        m_stuckReadyCompletionsLogged = false;
+        return;
+    }
+    if (m_stuckReadyCompletionsLogged || m_streamingDiagnosticTick < m_lastReadyCompletionProgressTick + kStuckTicks) {
+        return;
+    }
+    m_stuckReadyCompletionsLogged = true;
+    auto* meshManager = m_geometryStorage;
+    for (const auto& [groupIndex, completion] : m_readyStreamingCompletionsByGroup) {
+        uint32_t parent = UINT32_MAX;
+        const bool hasParent = meshManager != nullptr && meshManager->TryGetCLodParentGroup(groupIndex, parent);
+        const auto at = [groupIndex](const auto& values, auto fallback) {
+            return groupIndex < values.size() ? static_cast<uint64_t>(values[groupIndex]) : static_cast<uint64_t>(fallback);
+        };
+        spdlog::warn(
+            "CLod streaming: ready completion stuck: group={} success={} request_state={} parent={} parent_resident={} parent_state={} parent_owned={} parent_commit={} parent_active={} wait_parent={} wait_page={} retry_queued={} credit_queued={} preallocated={} pinned={}",
+            groupIndex,
+            completion.success,
+            at(m_streamingRequestStateByGroup, 0u),
+            hasParent ? static_cast<int64_t>(parent) : -1,
+            hasParent ? IsGroupResident(parent) : true,
+            hasParent && parent < m_streamingRequestStateByGroup.size() ? static_cast<int>(m_streamingRequestStateByGroup[parent]) : -1,
+            hasParent ? m_groupOwnedPages.contains(parent) : false,
+            hasParent ? m_pendingResidencyCommitGroups.contains(parent) : false,
+            hasParent ? IsGroupActive(parent) : false,
+            at(m_readyStreamingCompletionWaitParentByGroup, UINT32_MAX),
+            at(m_readyStreamingCompletionWaitPageByGroup, UINT32_MAX),
+            at(m_readyStreamingCompletionRetryQueuedByGroup, 0u),
+            at(m_readyStreamingCompletionPageCreditWaitQueuedByGroup, 0u),
+            m_preAllocatedPagesByGroup.contains(groupIndex),
+            IsGroupPinned(groupIndex));
     }
 }
 

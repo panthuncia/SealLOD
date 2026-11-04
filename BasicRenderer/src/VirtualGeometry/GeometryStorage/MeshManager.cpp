@@ -61,13 +61,13 @@ uint64_t CLodIoNowNs() {
 
 uint32_t CLodIoAdmissionTarget() {
 	static const uint32_t target = [] {
-		// Cached/memory-mapped CLOD reads are usually much shorter than one
-		// streaming service interval. Keep a bounded burst available so the I/O
-		// workers do not go idle between service ticks, while remaining far
-		// below the previous 512--2048 fire-and-forget backlog.
+		// A group counts against this until its GPU copy completes, not just
+		// until its read does. A DirectStorage launch holds a whole batch for
+		// several service ticks, so the burst must cover that round trip or
+		// throughput is set by this number rather than by the I/O workers.
 		uint32_t result = std::max<uint32_t>(
-			TaskSchedulerManager::GetInstance().BlockingThreadCount() * 48u,
-			96u);
+			TaskSchedulerManager::GetInstance().BlockingThreadCount() * 192u,
+			384u);
 		char* value = nullptr;
 		size_t length = 0u;
 		if (_dupenv_s(&value, &length, "SARP_CLOD_IO_ADMISSION_DEPTH") == 0 &&
@@ -313,7 +313,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 		for (size_t requestIndex = batchBegin; requestIndex < batchEnd; ++requestIndex) {
 			taskRequests.push_back(std::move(batch[requestIndex]));
 		}
-		scheduler.Submit(TaskLane::Streaming, TaskDomain::AssetImport, "CLodDiskStreaming",
+		scheduler.Submit(TaskLane::Streaming, TaskDomain::GeometryStreaming, "CLodDiskStreaming",
 			[this, requests = std::move(taskRequests)]() mutable {
 			std::vector<CLodDiskStreamingResult> completedResults;
 			completedResults.reserve(requests.size());
@@ -405,6 +405,12 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 				if (loaded) {
 					result.uploadPathLabel = "DirectStorageGpuDirect";
 					result.directStorageGpuUploadPending = true;
+					// Opening a file costs milliseconds and most meshes have their own container.
+					// Do it here, so the launch on the streaming thread only finds the handle.
+					{
+						ZoneScopedN("CLodDiskStreaming::PrimeDirectStorageFile");
+						(void)DirectStorageManager::GetInstance().PrimeFileHandle(containerPath);
+					}
 				}
 				else {
 					tls.file.clear();
@@ -3104,23 +3110,33 @@ bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeli
 	failedCompletions.reserve(launches.size());
 	failedGroups.reserve(launches.size());
 
-	for (auto& launch : launches) {
-		const uint64_t completionValue =
-			m_clodDirectStorageCompletionFenceCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+	// One submission per launch: a per-group Submit, status array and event cost far more than the copies' bookkeeping.
+	std::vector<std::wstring> paths;
+	std::vector<br::DirectStorageBufferUploadBatchEntry> entries;
+	paths.reserve(launches.size());
+	entries.reserve(launches.size());
+	for (const auto& launch : launches) {
+		paths.push_back(launch.sharedState != nullptr && !launch.sharedState->resolvedContainerPath.empty()
+			? launch.sharedState->resolvedContainerPath
+			: CLodCache::ResolveContainerPath(launch.cacheSource));
+		entries.push_back({ &paths.back(), &launch.copies });
+	}
+	const uint64_t completionValue =
+		m_clodDirectStorageCompletionFenceCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+	std::string directStorageMessage;
+	std::vector<bool> accepted;
+	const DirectStorageAsyncRequestHandle batchHandle =
+		DirectStorageManager::GetInstance().EnqueueUploadBufferRegionBatchAfterFence(
+			entries,
+			DirectStorageFencePoint{ waitTimeline, waitValue },
+			DirectStorageFenceWaitMode::BeforeGpuWork,
+			DirectStorageFencePoint{ m_clodDirectStorageCompletionFenceHandle, completionValue },
+			accepted,
+			&directStorageMessage);
 
-		std::string directStorageMessage;
-		DirectStorageAsyncRequestHandle uploadHandle =
-			DirectStorageManager::GetInstance().EnqueueUploadBufferRegionsFromFileAfterFence(
-				launch.sharedState != nullptr && !launch.sharedState->resolvedContainerPath.empty()
-					? launch.sharedState->resolvedContainerPath
-					: CLodCache::ResolveContainerPath(launch.cacheSource),
-				launch.copies,
-				DirectStorageFencePoint{ waitTimeline, waitValue },
-				DirectStorageFenceWaitMode::BeforeGpuWork,
-				DirectStorageFencePoint{ m_clodDirectStorageCompletionFenceHandle, completionValue },
-				&directStorageMessage);
-
-		if (!uploadHandle.IsValid()) {
+	for (size_t launchIndex = 0; launchIndex < launches.size(); ++launchIndex) {
+		auto& launch = launches[launchIndex];
+		if (!batchHandle.IsValid() || !accepted[launchIndex]) {
 			spdlog::error(
 				"CLod streaming: DirectStorage Queue3 page-pool launch failed for group {}: {}",
 				launch.groupGlobalIndex,
@@ -3143,7 +3159,7 @@ bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeli
 		pendingUpload.fetchedPageCount = launch.fetchedPageCount;
 		pendingUpload.totalBlobBytes = launch.totalBlobBytes;
 		pendingUpload.uploadPathLabel = std::move(launch.uploadPathLabel);
-		pendingUpload.uploadHandle = std::move(uploadHandle);
+		pendingUpload.uploadHandle = batchHandle;
 		pendingUpload.pageIds = std::move(launch.pageIds);
 		pendingUpload.prefetchedChildLayouts = std::move(launch.prefetchedChildLayouts);
 		activeUploads.push_back(std::move(pendingUpload));

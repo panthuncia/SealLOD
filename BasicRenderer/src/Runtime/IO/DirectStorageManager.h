@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <span>
 #include <cstdint>
 #include <memory>
 #include <rhi.h>
@@ -53,6 +54,11 @@ struct DirectStorageTextureSubresourceRangeCopy {
     uint32_t uncompressedSizeBytes = 0;
     uint32_t firstSubresource = 0;
     uint32_t subresourceCount = 0;
+};
+
+struct DirectStorageBufferUploadBatchEntry {
+    const std::wstring* path = nullptr;
+    const std::vector<DirectStorageBufferRegionCopy>* regions = nullptr;
 };
 
 struct DirectStorageFencePoint {
@@ -131,12 +137,14 @@ public:
         const std::wstring& path,
         const std::vector<DirectStorageBufferRegionCopy>& regions,
         std::string* outMessage = nullptr);
-    DirectStorageAsyncRequestHandle EnqueueUploadBufferRegionsFromFileAfterFence(
-        const std::wstring& path,
-        const std::vector<DirectStorageBufferRegionCopy>& regions,
+    // One submission for many uploads: a single status, completion signal and Submit, which all accepted entries share.
+    // outAccepted says which entries were enqueued; a rejected entry does not affect the others.
+    DirectStorageAsyncRequestHandle EnqueueUploadBufferRegionBatchAfterFence(
+        std::span<const DirectStorageBufferUploadBatchEntry> entries,
         DirectStorageFencePoint waitPoint,
         DirectStorageFenceWaitMode waitMode,
         DirectStorageFencePoint completionPoint,
+        std::vector<bool>& outAccepted,
         std::string* outMessage = nullptr);
     bool UploadBufferRegionsFromFile(
         const std::wstring& path,

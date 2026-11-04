@@ -700,6 +700,14 @@ CLodStreamingSystem::CLodStreamingSystem() {
         m_streamingStorageGroupCapacity, UINT32_MAX);
     m_readyStreamingCompletionWaitParentGenerationByGroup.assign(
         m_streamingStorageGroupCapacity, 0u);
+    m_usedGroupsBitsCpu.assign(CLodBitsetWordCount(m_streamingStorageGroupCapacity), 0u);
+    m_parentGroupByGroup.assign(m_streamingStorageGroupCapacity, UINT32_MAX);
+    m_waitingForPagesRequestIndexByGroup.assign(m_streamingStorageGroupCapacity, UINT32_MAX);
+    m_virtualShadowDependencyBucketIndexByGroup.assign(m_streamingStorageGroupCapacity, -1);
+    m_virtualShadowResidencyGenerationByGroup.assign(m_streamingStorageGroupCapacity, 1u);
+    m_virtualShadowBatchSourceGenerationByGroup.assign(m_streamingStorageGroupCapacity, 0u);
+    m_virtualShadowBatchSourceChainOffsetByGroup.assign(m_streamingStorageGroupCapacity, 0u);
+    m_virtualShadowBatchSourceChainCountByGroup.assign(m_streamingStorageGroupCapacity, 0u);
     m_streamingDiagnosticsByGroup.resize(m_streamingStorageGroupCapacity);
     MarkStreamingNonResidentBitsDirtyAll();
     MarkStreamingActiveGroupsBitsDirty();
@@ -3340,6 +3348,7 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         }
         PruneStaleReadyStreamingCompletions(
             std::max<uint32_t>(budget, 256u));
+        LogStuckReadyStreamingCompletions();
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::ReconcileStaleDiskIoRequests");
             ReconcileStaleDiskIoRequests(meshManager);

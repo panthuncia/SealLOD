@@ -33,7 +33,10 @@ enum class TaskDomain : std::uint8_t {
     // Texture latches and the streaming manager's drain take microseconds, and every
     // renderable's visibility waits on them. They must not queue behind texture decoding
     // or scene page builds.
-    TextureControl, Count
+    TextureControl,
+    // Mesh page reads and file opens are numerous during a load. Sharing
+    // AssetImport's slots made them delay the imports the scene waits on.
+    GeometryStreaming, Count
 };
 
 // Numeric scheduler trace metadata is deliberately independent of the graph

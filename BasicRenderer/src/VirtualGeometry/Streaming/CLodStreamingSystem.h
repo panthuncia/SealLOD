@@ -185,6 +185,7 @@ private:
         br::render::CLodDiskStreamingCompletion&& completion);
     void WakeReadyPageCreditWaiters(uint32_t availablePageCredits);
     void PruneStaleReadyStreamingCompletions(uint32_t maxCompletions);
+    void LogStuckReadyStreamingCompletions();
     void WakeReadyCompletionsForPage(uint32_t page, uint64_t key);
     void WakeReadyCompletionsForParent(
         uint32_t parentGroupIndex,
@@ -499,6 +500,9 @@ private:
         m_completedStreamingRequestTraces;
     uint64_t m_nextStreamingRequestTraceId = 1u;
     uint64_t m_droppedStreamingRequestTraceCount = 0u;
+    uint64_t m_lastReadyCompletionProgressTick = 0u;
+    uint32_t m_lastReadyCompletionResidentCount = 0u;
+    bool m_stuckReadyCompletionsLogged = false;
     uint32_t m_streamingDiagnosticsDecodedRequestsThisFrame = 0u;
     uint32_t m_streamingDiagnosticsQueuedLoadRequestsThisFrame = 0u;
     uint32_t m_streamingDiagnosticsDuplicateRequestsThisFrame = 0u;

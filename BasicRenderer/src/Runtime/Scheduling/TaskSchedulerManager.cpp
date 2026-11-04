@@ -81,6 +81,7 @@ constexpr DomainPlotNames kDomainPlotNames[]{
     { "Scheduler.GpuBufferBuild.Queued", "Scheduler.GpuBufferBuild.Active" },
     { "Scheduler.StaticGroupPreparation.Queued", "Scheduler.StaticGroupPreparation.Active" },
     { "Scheduler.TextureControl.Queued", "Scheduler.TextureControl.Active" },
+    { "Scheduler.GeometryStreaming.Queued", "Scheduler.GeometryStreaming.Active" },
 };
 static_assert(std::size(kDomainPlotNames) == static_cast<std::size_t>(TaskDomain::Count));
 
@@ -138,6 +139,7 @@ const char* DomainName(TaskDomain domain) {
     case TaskDomain::GpuBufferBuild: return "GpuBufferBuild";
     case TaskDomain::StaticGroupPreparation: return "StaticGroupPreparation";
     case TaskDomain::TextureControl: return "TextureControl";
+    case TaskDomain::GeometryStreaming: return "GeometryStreaming";
     default: return "Unknown";
     }
 }
@@ -493,6 +495,8 @@ void TaskSchedulerManager::Initialize(Config config) {
     state.domains[static_cast<std::size_t>(TaskDomain::RendererState)].limit = 1u;
     state.domains[static_cast<std::size_t>(TaskDomain::AssetImport)].limit = std::clamp(
         ReadEnvironmentUint("SARP_SCHEDULER_ASSET_IMPORT_CONCURRENCY", 4u), 1u, m_workerCount);
+    state.domains[static_cast<std::size_t>(TaskDomain::GeometryStreaming)].limit = std::clamp(
+        ReadEnvironmentUint("SARP_SCHEDULER_GEOMETRY_STREAMING_CONCURRENCY", 16u), 1u, m_workerCount);
     // Texture decode/reload work is the dominant CPU queue during scene import.
     // A fixed limit of two left large machines mostly idle and made queue-drain
     // time proportional to a tuning constant. Scale conservatively with the

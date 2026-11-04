@@ -1,4 +1,5 @@
 #include "Runtime/IO/DirectStorageManager.h"
+#include <tracy/Tracy.hpp>
 
 #include <algorithm>
 #include <cstdlib>
@@ -104,6 +105,7 @@ struct DirectStorageManager::Impl {
     std::mutex systemQueueMutex;
     std::mutex gpuQueueMutex;
     std::unordered_map<std::wstring, Microsoft::WRL::ComPtr<IDStorageFile>> fileCache;
+    std::unordered_map<std::wstring, uint64_t> fileSizes;
     std::vector<DirectStorageAsyncRequestHandle> activeRequests;
     bool hasQueue2 = false;
     bool hasQueue3 = false;
@@ -123,6 +125,7 @@ struct DirectStorageAsyncRequestHandle::State {
     Microsoft::WRL::ComPtr<IDStorageStatusArray> statusArray;
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;
     Microsoft::WRL::ComPtr<IDStorageFile> file;
+    std::vector<Microsoft::WRL::ComPtr<IDStorageFile>> files;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> destinationResources;
     ScopedWinHandle completionEvent;
 #endif
@@ -411,8 +414,10 @@ DirectStorageOpenFileResult DirectStorageManager::PrimeFileHandle(const std::wst
         return result;
     }
 
+    const uint64_t fileSize = GetDirectStorageFileSize(file.Get());
     {
         std::scoped_lock lock(m_impl->fileCacheMutex);
+        m_impl->fileSizes.insert_or_assign(path, fileSize);
         m_impl->fileCache.emplace(path, std::move(file));
     }
 
@@ -878,27 +883,21 @@ DirectStorageAsyncRequestHandle DirectStorageManager::EnqueueUploadBufferRegions
 #endif
 }
 
-DirectStorageAsyncRequestHandle DirectStorageManager::EnqueueUploadBufferRegionsFromFileAfterFence(
-    const std::wstring& path,
-    const std::vector<DirectStorageBufferRegionCopy>& regions,
+DirectStorageAsyncRequestHandle DirectStorageManager::EnqueueUploadBufferRegionBatchAfterFence(
+    std::span<const DirectStorageBufferUploadBatchEntry> entries,
     DirectStorageFencePoint waitPoint,
     DirectStorageFenceWaitMode waitMode,
     DirectStorageFencePoint completionPoint,
+    std::vector<bool>& outAccepted,
     std::string* outMessage) {
+    outAccepted.assign(entries.size(), false);
     if (outMessage) {
         outMessage->clear();
     }
 
-    if (path.empty()) {
+    if (entries.empty()) {
         if (outMessage) {
-            *outMessage = "path is empty";
-        }
-        return {};
-    }
-
-    if (regions.empty()) {
-        if (outMessage) {
-            *outMessage = "no buffer regions were provided";
+            *outMessage = "no uploads were provided";
         }
         return {};
     }
@@ -947,118 +946,123 @@ DirectStorageAsyncRequestHandle DirectStorageManager::EnqueueUploadBufferRegions
         return {};
     }
 
-    auto primeResult = PrimeFileHandle(path);
-    if (!primeResult.success) {
-        if (outMessage) {
-            *outMessage = primeResult.message;
-        }
-        return {};
-    }
-
-    Microsoft::WRL::ComPtr<IDStorageFile> file;
+    // Uploads in a batch mostly share files and slabs, so each is resolved once.
+    struct ResolvedFile {
+        Microsoft::WRL::ComPtr<IDStorageFile> file;
+        uint64_t size = 0u;
+    };
+    std::unordered_map<std::wstring, ResolvedFile> files;
+    std::unordered_map<ID3D12Resource*, Microsoft::WRL::ComPtr<ID3D12Resource>> destinations;
+    std::vector<DSTORAGE_REQUEST> requests;
+    std::string firstRejection;
     {
-        std::scoped_lock fileLock(m_impl->fileCacheMutex);
-        auto it = m_impl->fileCache.find(path);
-        if (it == m_impl->fileCache.end() || it->second == nullptr) {
-            if (outMessage) {
-                *outMessage = "cached DirectStorage file handle missing";
+        ZoneScopedN("DirectStorageManager::EnqueueUploadBufferRegionBatchAfterFence::Prepare");
+        const auto reject = [&](const char* reason) {
+            if (firstRejection.empty()) {
+                firstRejection = reason;
             }
-            return {};
+        };
+        for (size_t entryIndex = 0; entryIndex < entries.size(); ++entryIndex) {
+            const auto& entry = entries[entryIndex];
+            if (entry.path == nullptr || entry.path->empty() || entry.regions == nullptr || entry.regions->empty()) {
+                reject("an upload has no path or no regions");
+                continue;
+            }
+
+            auto fileIt = files.find(*entry.path);
+            if (fileIt == files.end()) {
+                ResolvedFile resolved{};
+                if (PrimeFileHandle(*entry.path).success) {
+                    std::scoped_lock fileLock(m_impl->fileCacheMutex);
+                    if (const auto it = m_impl->fileCache.find(*entry.path); it != m_impl->fileCache.end()) {
+                        resolved.file = it->second;
+                    }
+                    if (const auto it = m_impl->fileSizes.find(*entry.path); it != m_impl->fileSizes.end()) {
+                        resolved.size = it->second;
+                    }
+                }
+                fileIt = files.emplace(*entry.path, std::move(resolved)).first;
+            }
+            if (fileIt->second.size == 0u) {
+                reject("DirectStorage file handle or size unavailable");
+                continue;
+            }
+
+            const size_t requestsBeforeEntry = requests.size();
+            bool entryValid = true;
+            for (const auto& region : *entry.regions) {
+                entryValid = false;
+                if (!region.destinationResource.IsValid() || region.sourceSizeBytes == 0 || region.uncompressedSizeBytes == 0) {
+                    reject("invalid DirectStorage buffer region request");
+                    break;
+                }
+                if (!IsFileRangeValid(fileIt->second.size, region.sourceOffset, region.sourceSizeBytes)) {
+                    reject("DirectStorage buffer upload source range is out of bounds");
+                    break;
+                }
+
+                rhi::D3D12ResourceInfo resourceInfo{};
+                if (!rhi::QueryNativeResource(region.destinationResource, rhi::RHI_IID_D3D12_RESOURCE, &resourceInfo, sizeof(resourceInfo))) {
+                    reject("failed to query native D3D12 buffer resource");
+                    break;
+                }
+
+                auto* nativeResource = static_cast<ID3D12Resource*>(resourceInfo.resource);
+                const D3D12_RESOURCE_DESC resourceDesc = nativeResource->GetDesc();
+                if (resourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+                    reject("DirectStorage buffer upload destination is not a buffer resource");
+                    break;
+                }
+
+                const uint64_t destinationEnd = region.destinationOffset + static_cast<uint64_t>(region.uncompressedSizeBytes);
+                if (destinationEnd < region.destinationOffset || destinationEnd > resourceDesc.Width) {
+                    reject("DirectStorage buffer upload destination range is out of bounds");
+                    break;
+                }
+
+                DSTORAGE_REQUEST request{};
+                request.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+                request.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_BUFFER;
+                request.Options.CompressionFormat = DSTORAGE_COMPRESSION_FORMAT_NONE;
+                request.Source.File.Source = fileIt->second.file.Get();
+                request.Source.File.Offset = region.sourceOffset;
+                request.Source.File.Size = region.sourceSizeBytes;
+                request.Destination.Buffer.Resource = nativeResource;
+                request.Destination.Buffer.Offset = region.destinationOffset;
+                request.Destination.Buffer.Size = region.uncompressedSizeBytes;
+                request.UncompressedSize = region.uncompressedSizeBytes;
+                request.CancellationTag = reinterpret_cast<uint64_t>(this);
+                requests.push_back(request);
+                destinations.try_emplace(nativeResource, AddResourceRef(nativeResource));
+                entryValid = true;
+            }
+
+            if (!entryValid) {
+                requests.resize(requestsBeforeEntry);
+                continue;
+            }
+            outAccepted[entryIndex] = true;
         }
-        file = it->second;
     }
 
-    const uint64_t fileSize = GetDirectStorageFileSize(file.Get());
-    if (fileSize == 0u) {
+    if (requests.empty()) {
+        outAccepted.assign(entries.size(), false);
         if (outMessage) {
-            *outMessage = "failed to query DirectStorage file size";
+            *outMessage = firstRejection.empty() ? "no valid uploads were provided" : firstRejection;
         }
         return {};
     }
 
     ScopedWinHandle completionEvent(CreateEvent(nullptr, TRUE, FALSE, nullptr));
-    if (completionEvent.get() == nullptr) {
-        if (outMessage) {
-            *outMessage = "failed to create DirectStorage GPU completion event";
-        }
-        return {};
-    }
-
-    const HRESULT setEventHr = completionFence->SetEventOnCompletion(completionPoint.value, completionEvent.get());
-    if (FAILED(setEventHr)) {
-        if (outMessage) {
-            *outMessage = "failed to arm DirectStorage GPU completion event";
-        }
-        return {};
-    }
-
     Microsoft::WRL::ComPtr<IDStorageStatusArray> statusArray;
-    const HRESULT createStatusArrayHr = m_impl->factory->CreateStatusArray(1u, "DirectStorageGpuBufferUploadAfterFence", IID_PPV_ARGS(statusArray.ReleaseAndGetAddressOf()));
-    if (FAILED(createStatusArrayHr)) {
+    if (completionEvent.get() == nullptr ||
+        FAILED(completionFence->SetEventOnCompletion(completionPoint.value, completionEvent.get())) ||
+        FAILED(m_impl->factory->CreateStatusArray(1u, "DirectStorageGpuBufferUploadBatch", IID_PPV_ARGS(statusArray.ReleaseAndGetAddressOf())))) {
+        outAccepted.assign(entries.size(), false);
         if (outMessage) {
-            *outMessage = "failed to create DirectStorage upload status array";
+            *outMessage = "failed to create DirectStorage batch completion objects";
         }
         return {};
-    }
-
-    std::vector<DSTORAGE_REQUEST> requests;
-    requests.reserve(regions.size());
-    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> destinationResourceRefs;
-    destinationResourceRefs.reserve(regions.size());
-
-    for (const auto& region : regions) {
-        if (!region.destinationResource.IsValid() || region.sourceSizeBytes == 0 || region.uncompressedSizeBytes == 0) {
-            if (outMessage) {
-                *outMessage = "invalid DirectStorage buffer region request";
-            }
-            return {};
-        }
-        if (!IsFileRangeValid(fileSize, region.sourceOffset, region.sourceSizeBytes)) {
-            if (outMessage) {
-                *outMessage = "DirectStorage buffer upload source range is out of bounds";
-            }
-            return {};
-        }
-
-        rhi::D3D12ResourceInfo resourceInfo{};
-        if (!rhi::QueryNativeResource(region.destinationResource, rhi::RHI_IID_D3D12_RESOURCE, &resourceInfo, sizeof(resourceInfo)) || resourceInfo.resource == nullptr) {
-            if (outMessage) {
-                *outMessage = "failed to query native D3D12 buffer resource";
-            }
-            return {};
-        }
-
-        auto* nativeResource = static_cast<ID3D12Resource*>(resourceInfo.resource);
-        destinationResourceRefs.push_back(AddResourceRef(nativeResource));
-        const D3D12_RESOURCE_DESC resourceDesc = nativeResource->GetDesc();
-        if (resourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
-            if (outMessage) {
-                *outMessage = "DirectStorage buffer upload destination is not a buffer resource";
-            }
-            return {};
-        }
-
-        const uint64_t destinationEnd = region.destinationOffset + static_cast<uint64_t>(region.uncompressedSizeBytes);
-        if (destinationEnd < region.destinationOffset || destinationEnd > resourceDesc.Width) {
-            if (outMessage) {
-                *outMessage = "DirectStorage buffer upload destination range is out of bounds";
-            }
-            return {};
-        }
-
-        DSTORAGE_REQUEST request{};
-        request.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
-        request.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_BUFFER;
-        request.Options.CompressionFormat = DSTORAGE_COMPRESSION_FORMAT_NONE;
-        request.Source.File.Source = file.Get();
-        request.Source.File.Offset = region.sourceOffset;
-        request.Source.File.Size = region.sourceSizeBytes;
-        request.Destination.Buffer.Resource = nativeResource;
-        request.Destination.Buffer.Offset = region.destinationOffset;
-        request.Destination.Buffer.Size = region.uncompressedSizeBytes;
-        request.UncompressedSize = region.uncompressedSizeBytes;
-        request.CancellationTag = reinterpret_cast<uint64_t>(this);
-        requests.push_back(request);
     }
 
     DSTORAGE_ENQUEUE_REQUEST_FLAGS flags = DSTORAGE_ENQUEUE_REQUEST_FLAG_NONE;
@@ -1076,36 +1080,44 @@ DirectStorageAsyncRequestHandle DirectStorageManager::EnqueueUploadBufferRegions
     }
 
     {
+        ZoneScopedN("DirectStorageManager::EnqueueUploadBufferRegionBatchAfterFence::Submit");
         std::scoped_lock queueLock(m_impl->gpuQueueMutex);
-        queue3->EnqueueRequests(
-            requests.data(),
-            static_cast<UINT>(requests.size()),
-            waitFence,
-            waitPoint.value,
-            flags);
+        // One call stays well under the queue's capacity; a full queue makes the next call wait.
+        constexpr size_t kMaxRequestsPerEnqueue = DSTORAGE_MAX_QUEUE_CAPACITY / 2u;
+        for (size_t begin = 0; begin < requests.size(); begin += kMaxRequestsPerEnqueue) {
+            queue3->EnqueueRequests(
+                requests.data() + begin,
+                static_cast<UINT>((std::min)(kMaxRequestsPerEnqueue, requests.size() - begin)),
+                waitFence,
+                waitPoint.value,
+                flags);
+        }
         m_impl->gpuQueue->EnqueueStatus(statusArray.Get(), 0u);
         m_impl->gpuQueue->EnqueueSignal(completionFence, completionPoint.value);
         m_impl->gpuQueue->Submit();
     }
 
-    Microsoft::WRL::ComPtr<ID3D12Fence> completionFenceRef;
-    completionFenceRef = completionFence;
-
     auto state = std::make_shared<DirectStorageAsyncRequestHandle::State>();
     state->queueKind = DirectStorageQueueKind::Gpu;
-    state->pendingMessage = "DirectStorage GPU buffer upload enqueued after fence";
+    state->pendingMessage = "DirectStorage GPU buffer upload batch enqueued after fence";
     state->successMessage = "uploaded buffer regions through DirectStorage GPU queue after fence";
-    state->failureMessage = "DirectStorage GPU buffer upload failed";
-    state->debugLabel = std::filesystem::path(path).string();
+    state->failureMessage = "DirectStorage GPU buffer upload batch failed";
+    state->debugLabel = "buffer upload batch";
     state->fenceValue = completionPoint.value;
     state->statusArray = std::move(statusArray);
-    state->fence = std::move(completionFenceRef);
-    state->file = std::move(file);
-    state->destinationResources = std::move(destinationResourceRefs);
+    state->fence = completionFence;
+    state->files.reserve(files.size());
+    for (auto& [_, resolved] : files) {
+        state->files.push_back(std::move(resolved.file));
+    }
+    state->destinationResources.reserve(destinations.size());
+    for (auto& [_, destination] : destinations) {
+        state->destinationResources.push_back(std::move(destination));
+    }
     state->completionEvent = std::move(completionEvent);
 
     if (outMessage) {
-        *outMessage = state->pendingMessage;
+        *outMessage = firstRejection.empty() ? state->pendingMessage : firstRejection;
     }
 
     DirectStorageAsyncRequestHandle handle(std::move(state));
@@ -1817,6 +1829,7 @@ void DirectStorageManager::ReleaseFileHandle(const std::wstring& path) {
 
     std::scoped_lock lock(m_impl->fileCacheMutex);
     m_impl->fileCache.erase(path);
+    m_impl->fileSizes.erase(path);
 #else
     (void)path;
 #endif
