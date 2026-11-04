@@ -17,6 +17,9 @@
 #include <numeric>
 #include <optional>
 #include <shared_mutex>
+#include <thread>
+
+#include <tbb/concurrent_queue.h>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -1123,6 +1126,97 @@ namespace br::staticimport
 			}
 		}
 
+		// Materials of many templates admitted as one MaterialUsageBatch. Admission runs on
+		// the serial material lane, so one batch per template made it the bottleneck, and two
+		// thirds of all graph builds. Templates join the open batch until the lane starts on
+		// it, so batches grow exactly when the lane is behind.
+		class StaticTemplateMaterialBatch
+		{
+		public:
+			explicit StaticTemplateMaterialBatch(bool refreshTextureBindings) : refreshBindings(refreshTextureBindings) {}
+
+			// Fails once the lane started on the batch or it is full.
+			[[nodiscard]] bool TryJoin(const std::shared_ptr<Material>& material)
+			{
+				// A batch waits for all its materials' textures, so its size bounds how long
+				// one slow texture can hold back unrelated templates.
+				constexpr std::uint32_t kMaxJoins = 256;
+				const auto previous = _state.fetch_add(1, std::memory_order_acq_rel);
+				const bool joined = (previous & kClosed) == 0 &&
+					_joins.fetch_add(1, std::memory_order_relaxed) < kMaxJoins;
+				if (joined) _posted.push(material);
+				_state.fetch_sub(1, std::memory_order_acq_rel);
+				return joined;
+			}
+
+			// The batch's materials with how many templates use each. Lane only.
+			[[nodiscard]] const std::unordered_map<std::uint32_t, std::pair<std::shared_ptr<Material>, std::uint32_t>>& Close()
+			{
+				_state.fetch_or(kClosed, std::memory_order_acq_rel);
+				// Joiners are between two atomic operations, so this wait is a few instructions.
+				while ((_state.load(std::memory_order_acquire) & ~kClosed) != 0) std::this_thread::yield();
+				std::shared_ptr<Material> material;
+				while (_posted.try_pop(material)) {
+					auto& entry = _materials[material->GetMaterialID()];
+					entry.first = material;
+					++entry.second;
+				}
+				return _materials;
+			}
+
+			const bool refreshBindings;
+			br::render::ArtifactVersionHandle handle;
+
+		private:
+			static constexpr std::uint64_t kClosed = 1ull << 63;
+			std::atomic<std::uint64_t> _state{ 0 };
+			std::atomic<std::uint32_t> _joins{ 0 };
+			tbb::concurrent_queue<std::shared_ptr<Material>> _posted;
+			std::unordered_map<std::uint32_t, std::pair<std::shared_ptr<Material>, std::uint32_t>> _materials;
+		};
+
+		[[nodiscard]] br::render::ArtifactVersionHandle JoinStaticTemplateMaterialBatch(
+			br::render::RendererStateRequestService& requests,
+			br::render::StaticMaterialRequestService& materials,
+			const std::shared_ptr<Material>& material,
+			bool refreshTextureBindings)
+		{
+			if (const auto open = _openMaterialBatch.load(std::memory_order_acquire);
+				open && open->refreshBindings == refreshTextureBindings && open->TryJoin(material)) {
+				return open->handle;
+			}
+			auto batch = std::make_shared<StaticTemplateMaterialBatch>(refreshTextureBindings);
+			(void)batch->TryJoin(material);
+			auto batchInput = std::make_shared<br::render::MaterialUsageBatchBuildInput>();
+			batchInput->capture = [materialsService = std::addressof(materials), batch]() {
+				std::vector<br::render::MaterialUsageCapture> captures;
+				const auto& batchMaterials = batch->Close();
+				captures.reserve(batchMaterials.size());
+				for (const auto& [_, entry] : batchMaterials) {
+					captures.push_back(materialsService->CaptureMaterialUsage(*entry.first, entry.second, batch->refreshBindings));
+				}
+				auto captured = std::make_shared<br::render::MaterialUsageAdmission>();
+				captured->reservation = materialsService->ReserveMaterialUsage(captures);
+				captured->entries.reserve(captures.size());
+				for (auto& capture : captures) captured->entries.push_back(std::move(capture.entry));
+				return std::shared_ptr<const br::render::MaterialUsageAdmission>(std::move(captured));
+			};
+			const br::render::ArtifactKey batchKey{
+				br::render::ArtifactKind::MaterialUsageBatch,
+				_importState.nextStaticTemplateMaterialBatchID.fetch_add(1, std::memory_order_relaxed) + 1,
+				0 };
+			const auto requested = requests.Request(batchKey, 1, {},
+				br::render::ArtifactPayload::Make<br::render::MaterialUsageBatchBuildInput>(std::move(batchInput)),
+				batchKey.primaryID);
+			if (!requested) return {};
+			batch->handle = requested.Handle();
+			// Others join only after the handle is set. A racing creator's batch simply stays small.
+			_openMaterialBatch.store(batch, std::memory_order_release);
+			return batch->handle;
+		}
+
+		std::atomic<std::shared_ptr<StaticTemplateMaterialBatch>> _openMaterialBatch;
+
 		br::render::ArtifactBuildResult BuildStaticTemplateArtifact(
 			const br::render::ArtifactBuildContext& context)
 		{
@@ -1220,29 +1314,14 @@ namespace br::staticimport
 				materials->RegisterMaterialSource(materialToAdmit);
 				const bool refreshTextureBindings = _shared.sceneIngestionServices.assetRequests &&
 					_shared.sceneIngestionServices.assetRequests->CanUploadTextures();
-				auto batchInput = std::make_shared<br::render::MaterialUsageBatchBuildInput>();
-				batchInput->capture = [materials, material = std::move(materialToAdmit), refreshTextureBindings]() {
-					std::vector<br::render::MaterialUsageCapture> captures;
-					captures.push_back(materials->CaptureMaterialUsage(*material, 1u, refreshTextureBindings));
-					auto captured = std::make_shared<br::render::MaterialUsageAdmission>();
-					captured->reservation = materials->ReserveMaterialUsage(captures);
-					captured->entries.push_back(std::move(captures.front().entry));
-					return std::shared_ptr<const br::render::MaterialUsageAdmission>(std::move(captured));
-				};
-				const br::render::ArtifactKey batchKey{
-					br::render::ArtifactKind::MaterialUsageBatch,
-					_importState.nextStaticTemplateMaterialBatchID.fetch_add(1, std::memory_order_relaxed) + 1,
-					0 };
-				const auto requested = graphRequests->Request(batchKey, 1, {},
-					br::render::ArtifactPayload::Make<br::render::MaterialUsageBatchBuildInput>(
-						std::move(batchInput)),
-					batchKey.primaryID);
-				if (!requested) {
+				auto batch = JoinStaticTemplateMaterialBatch(
+					*graphRequests, *materials, materialToAdmit, refreshTextureBindings);
+				if (!batch) {
 					return br::render::ArtifactBuildResult::Failure(
 						"static template material admission request was rejected");
 				}
 				auto checkpoint = std::make_shared<StaticTemplateMaterialAdmission>();
-				checkpoint->batch = requested.Handle();
+				checkpoint->batch = std::move(batch);
 				std::vector<br::render::ArtifactRequirement> requirements{
 					br::render::Exact(checkpoint->batch, br::render::ArtifactReadiness::CpuReady) };
 				return br::render::ArtifactBuildResult::Needs(std::move(requirements),

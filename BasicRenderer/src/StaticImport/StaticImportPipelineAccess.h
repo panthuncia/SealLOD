@@ -80,19 +80,21 @@ namespace br::staticimport
 			_drains->ScheduleCoordinatorDrain();
 		}
 
-		void RecordWorkloadCount(const DrawWorkloadKey& workload, std::uint32_t span) override
+		void NotifyHostLivenessChanged() override
 		{
-			_importState->directStaticWorkloadCounts[workload] = span;
+			_importState->staticImportHostLivenessGeneration.fetch_add(1, std::memory_order_acq_rel);
+			_importState->staticImportHostLivenessChanged.store(true, std::memory_order_release);
+			_drains->ScheduleCoordinatorDrain();
 		}
 
 		void AddAppliedPlacements(std::uint64_t placements) override
 		{
-			_importState->staticAppliedPlacementCount += placements;
+			_importState->staticAppliedPlacementCount.fetch_add(placements, std::memory_order_acq_rel);
 		}
 
 		void ReclaimAppliedPlacements(std::uint64_t placements) override
 		{
-			_importState->staticAppliedPlacementCount -= (std::min)(_importState->staticAppliedPlacementCount, placements);
+			SaturatingSubtract(_importState->staticAppliedPlacementCount, placements);
 		}
 
 		void RetireHostGroupPayloads(std::vector<br::render::StaticObjectRemovalPayload>&& payloads) override

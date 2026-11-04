@@ -866,6 +866,21 @@ br::render::DesiredObjectBufferStateCut ObjectManager::DesiredBufferStateCut() c
 	return { m_objectBufferStateVersion, m_objectBufferSubmittedMutationGeneration, m_objectBufferCutVersions };
 }
 
+br::render::DesiredObjectBufferGateState ObjectManager::DesiredBufferGateState() const {
+	std::lock_guard graphStateLock(m_objectBufferGraphStateMutex);
+	br::render::DesiredObjectBufferGateState gate;
+	gate.mutationGeneration = m_objectBufferMutationGeneration.load(std::memory_order_acquire);
+	gate.submittedMutationGeneration = m_objectBufferSubmittedMutationGeneration;
+	gate.stateRevision = m_objectBufferStateRevision;
+	gate.activeStateRevision = m_activeObjectBufferStateRevision.load(std::memory_order_acquire);
+	gate.retirementEpoch = m_rendererStateRequests
+		? m_rendererStateRequests->VersionedBuffers().RetirementEpoch() : 0u;
+	gate.lastPublicationRetirementEpoch = m_lastBufferStatePublicationRetirementEpoch;
+	gate.framesInFlight = m_graphFramesInFlight;
+	gate.dirty = m_objectBufferGraphDirty.load(std::memory_order_acquire);
+	return gate;
+}
+
 void ObjectManager::ObserveResidentGeometry(const br::render::PublishedRendererState& committed) {
 	if (m_residentGeometryCoverage && committed.geometry.revision != 0) {
 		m_residentGeometryCoverage->Observe(committed.geometry.coverage);

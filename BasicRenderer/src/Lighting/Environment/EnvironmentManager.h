@@ -50,6 +50,10 @@ public:
 	// Loads the environment's cached cubemap, or its HDRI, through the texture pipeline;
 	// conversion, prefiltering and SH run once it is resident.
 	void SetFromHDRI(Environment* e, std::string hdriPath);
+	// Once per frame, ahead of the environment job graph. A loaded texture's upload is only posted to the frame graph's
+	// upload pass, which runs after that job graph. Work reading the texture is parked when the load completes and released
+	// one frame update later, by when the frame between them has recorded the upload.
+	void ReleaseUploadedWork();
 	~EnvironmentManager();
 
 	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
@@ -92,6 +96,8 @@ private:
 
 	std::shared_ptr<org::ResourceGroup> m_environmentPrefilteredCubemapGroup;
 	RequestReadbackFn m_requestReadback;
+	std::vector<std::function<void()>> m_workParkedForUpload;
+	std::vector<std::function<void()>> m_workAwaitingFrameUpload;
 
 	friend class Environment;
 };

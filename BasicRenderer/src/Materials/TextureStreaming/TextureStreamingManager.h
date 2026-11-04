@@ -278,6 +278,7 @@ private:
 	mutable std::mutex m_statsMutex;
 	MaterialTextureStreamingStats m_publishedStats;
 	uint64_t m_publishedStatsSequence = 1;
+	std::chrono::steady_clock::time_point m_lastStatsBuild{}; // serialized drain only
 	std::chrono::steady_clock::time_point m_lastTextureUpdateStatsLog = {};
 	uint64_t m_textureDirtyReasonFeedback = 0;
 	uint64_t m_textureDirtyReasonIdleCoarsen = 0;

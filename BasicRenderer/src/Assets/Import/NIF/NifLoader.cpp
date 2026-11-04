@@ -1283,6 +1283,21 @@ public:
         return Bytes(values.data(), size * sizeof(T));
     }
 
+    // Skips what PodVector would read, without touching its pages.
+    template <class T>
+    bool SkipPodVector(std::uint64_t& count)
+    {
+        if (!Pod(count) || count > (256ull * 1024ull * 1024ull / std::max<std::uint64_t>(1, sizeof(T)))) {
+            return false;
+        }
+        const auto bytesToSkip = count * sizeof(T);
+        if (offset > size || size - offset < bytesToSkip) {
+            return false;
+        }
+        offset += static_cast<std::size_t>(bytesToSkip);
+        return true;
+    }
+
 private:
     HANDLE file{ INVALID_HANDLE_VALUE };
     HANDLE mapping{ nullptr };
@@ -1340,8 +1355,16 @@ void WritePrototypeGeometry(BinaryWriter& writer, const br::import::RenderablePr
     writer.PodVector(geometry.indices);
 }
 
-bool ReadPrototypeGeometry(BinaryReader& reader, br::import::RenderablePrototypeGeometry& geometry)
+bool ReadPrototypeGeometry(BinaryReader& reader, br::import::RenderablePrototypeGeometry& geometry, bool load)
 {
+    if (!load) {
+        std::uint64_t vertexCount = 0;
+        std::uint64_t indexCount = 0;
+        return reader.Pod(geometry.vertexFlags) &&
+            reader.SkipPodVector<decltype(geometry.vertices)::value_type>(vertexCount) &&
+            reader.SkipPodVector<decltype(geometry.indices)::value_type>(indexCount) &&
+            vertexCount <= 10000000u && indexCount <= 30000000u;
+    }
     if (!reader.Pod(geometry.vertexFlags) ||
         !reader.PodVector(geometry.vertices) ||
         !reader.PodVector(geometry.indices)) {
@@ -1363,7 +1386,8 @@ void WritePrototypeGeometryVector(
 
 bool ReadPrototypeGeometryVector(
     BinaryReader& reader,
-    std::vector<br::import::RenderablePrototypeGeometry>& geometries)
+    std::vector<br::import::RenderablePrototypeGeometry>& geometries,
+    bool load)
 {
     std::uint64_t size = 0;
     if (!reader.Pod(size) || size > 100000u) {
@@ -1371,7 +1395,7 @@ bool ReadPrototypeGeometryVector(
     }
     geometries.resize(static_cast<std::size_t>(size));
     for (auto& geometry : geometries) {
-        if (!ReadPrototypeGeometry(reader, geometry)) {
+        if (!ReadPrototypeGeometry(reader, geometry, load)) {
             return false;
         }
     }
@@ -2204,7 +2228,8 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     const std::string& pathHash,
     const std::string& contentHash,
     bool loadMaterialTextures,
-    std::string* loadedContentHash = nullptr)
+    std::string* loadedContentHash = nullptr,
+    bool loadPrototypeGeometry = true)
 {
     BT_ZONE_SCOPE("NifLoader::TryLoadPayloadCache");
     const auto cachePathText = cachePath.string();
@@ -2435,7 +2460,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
                 }
                 part.meshes.push_back(payload.meshes[meshIndex]);
             }
-            if (!ReadPrototypeGeometryVector(reader, part.prototypeGeometries)) {
+            if (!ReadPrototypeGeometryVector(reader, part.prototypeGeometries, loadPrototypeGeometry)) {
                 return std::nullopt;
             }
             payload.parts.push_back(std::move(part));
@@ -2490,7 +2515,8 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
                 pathHash,
                 fileContentKey,
                 settings.loadMaterialTextures,
-                std::addressof(loadedContentHash))) {
+                std::addressof(loadedContentHash),
+                settings.loadPrototypeGeometry)) {
             if (!CachedContentHashMatchesNifTreeWindSettings(loadedContentHash, settings)) {
                 continue;
             }

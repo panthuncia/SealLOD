@@ -165,6 +165,7 @@ public:
 	void ScheduleDesiredBufferStatePublish();
 	br::render::ArtifactVersionHandle DesiredBufferStateHandle() const;
 	br::render::DesiredObjectBufferStateCut DesiredBufferStateCut() const;
+	br::render::DesiredObjectBufferGateState DesiredBufferGateState() const;
 	// Static draw records name mesh-template and CLod rows that shaders resolve
 	// through the published Geometry root. Each static transaction records the
 	// geometry mutation sequence current at commit (its templates were accepted

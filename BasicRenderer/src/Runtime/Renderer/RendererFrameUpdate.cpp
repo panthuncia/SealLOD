@@ -1478,7 +1478,10 @@ void Renderer::Update(float elapsedSeconds) {
         });
     }
     // Environment conversion, prefiltering and SH likewise.
-    if (m_environmentJobs) runCapturedStage("EnvironmentJobs", [&]() { m_environmentJobs->Execute(); });
+    if (m_environmentJobs) runCapturedStage("EnvironmentJobs", [&]() {
+        m_pEnvironmentManager->ReleaseUploadedWork();
+        m_environmentJobs->Execute();
+    });
     runCapturedStage("RenderGraphUpdate", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::RenderGraphUpdate");
         if (m_dynamicPresentationColor &&

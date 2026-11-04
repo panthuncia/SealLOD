@@ -49,9 +49,10 @@ public:
     // Streaming worker: the storage's fill has completed on the GPU. Requests
     // its artifact revision and wakes gates it covers.
     void PublishStorage(std::uint32_t capacity, std::shared_ptr<org::Buffer> nonResidentBits);
-    // Gate producer: the newest published storage covering capacity, or an empty
-    // handle and a suspension identity notified when one is published.
-    [[nodiscard]] ArtifactVersionHandle Covering(std::uint32_t capacity, std::uint64_t& waitIdentity);
+    // Gate producer: the fragment of the newest published storage covering
+    // capacity, or an empty payload and a suspension identity notified when one
+    // is published.
+    [[nodiscard]] ArtifactPayload Covering(std::uint32_t capacity, std::uint64_t& waitIdentity);
     // The largest capacity any gate has asked for. The streaming worker grows
     // its storage to cover it, so a gate never waits on capacity nobody builds.
     [[nodiscard]] std::uint32_t RequestedCapacity() const noexcept {
@@ -67,7 +68,8 @@ private:
     std::function<void(std::uint64_t)> m_notify;
     std::mutex m_mutex;
     std::uint64_t m_revision = 0;
-    ArtifactVersionHandle m_newest;
+    std::uint64_t m_newestRevision = 0;
+    ArtifactPayload m_newestPayload;
     std::uint32_t m_newestCapacity = 0;
     std::multimap<std::uint32_t, std::uint64_t> m_waiting;
     // One per published storage; a handful over a session.

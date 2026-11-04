@@ -184,18 +184,6 @@ namespace br::staticimport
 			BT_ZONE_SCOPE("SARP::LiveSceneBridge::StaticImportCoordinator::Tick");
 			bool didWork = false;
 			didWork = ConsumeHostLivenessChange() || didWork;
-			bool drainedExtensionWork = false;
-			for (auto* extension : _extensions) {
-				if (extension->HasPendingCoordinatorWork()) {
-					std::lock_guard publicationLock(_importState->staticImportPublicationWorkerMutex);
-					extension->DrainCoordinatorWork();
-					drainedExtensionWork = true;
-				}
-			}
-			if (drainedExtensionWork) {
-				DropStaleHostGroups(false);
-				didWork = true;
-			}
 			didWork = DrainGroupAcks() || didWork;
 			didWork = DrainTemplateRefs() || didWork;
 			didWork = DrainGroupChanges() || didWork;
@@ -1327,8 +1315,28 @@ namespace br::staticimport
 		if (blockedSuccessorPageCount != 0) {
 			// Publishing the other pages would describe a partial directory as a
 			// complete scene and retire every group in the omitted pages.
+			const auto now = std::chrono::steady_clock::now();
+			if (_state.graphOwnedBlockedSuccessorSince == std::chrono::steady_clock::time_point{}) {
+				_state.graphOwnedBlockedSuccessorSince = now;
+			}
+			if (now - _state.graphOwnedBlockedSuccessorSince >= std::chrono::seconds(5) &&
+				now - _state.graphOwnedLastSceneDiagnostic >= std::chrono::seconds(10)) {
+				_state.graphOwnedLastSceneDiagnostic = now;
+				for (std::size_t index = 0; index < br::render::kStaticScenePageCount; ++index) {
+					const auto& desired = _state.graphOwnedDesiredPages[index];
+					if (!desired || _state.graphOwnedReadyPages[index].Version() == desired.version) continue;
+					const auto snapshot = requests.Snapshot(desired.version);
+					spdlog::warn(
+						"Static scene cut blocked on successor pages: blocked={} desiredPages={} readyDesiredPages={} samplePage={} sampleRevision={} sampleReadiness={} chain='{}'",
+						blockedSuccessorPageCount, desiredPageCount, readyDesiredPageCount, index,
+						desired.version.revision, static_cast<unsigned>(snapshot.readiness),
+						requests.Diagnose(snapshot.key).blockerChain);
+					break;
+				}
+			}
 			return false;
 		}
+		_state.graphOwnedBlockedSuccessorSince = {};
 		if (input->pages.empty() && !_state.graphOwnedGroupVersions.empty()) {
 			const auto now = std::chrono::steady_clock::now();
 			if (_state.graphOwnedLastSceneDiagnostic == std::chrono::steady_clock::time_point{} ||
@@ -1384,7 +1392,27 @@ namespace br::staticimport
 			geometryCoverage > _state.graphOwnedLastSceneGeometryCoverage) {
 			fingerprint ^= geometryBuffers->minimumRevision * 0x9e3779b97f4a7c15ull + 0x47454f4dull;
 		}
-		if (fingerprint == _state.graphOwnedLastSceneFingerprint) return false;
+		if (fingerprint == _state.graphOwnedLastSceneFingerprint) {
+			// Normal when idle; worth reporting only if dirty pages produce no new cut.
+			if (_state.graphOwnedDirtyPages.empty()) {
+				_state.graphOwnedUnchangedDirtyCutSince = {};
+				return false;
+			}
+			const auto now = std::chrono::steady_clock::now();
+			if (_state.graphOwnedUnchangedDirtyCutSince == std::chrono::steady_clock::time_point{}) {
+				_state.graphOwnedUnchangedDirtyCutSince = now;
+			}
+			if (now - _state.graphOwnedUnchangedDirtyCutSince >= std::chrono::seconds(5) &&
+				now - _state.graphOwnedLastSceneDiagnostic >= std::chrono::seconds(10)) {
+				_state.graphOwnedLastSceneDiagnostic = now;
+				spdlog::warn(
+					"Static scene cut unchanged with dirty pages: dirty={} desiredPages={} readyDesiredPages={} groups={} lastSceneGroups={} placements={}",
+					_state.graphOwnedDirtyPages.size(), desiredPageCount, readyDesiredPageCount,
+					cutGroupCount, _state.graphOwnedLastSceneGroupCount, cutPlacementCount);
+			}
+			return false;
+		}
+		_state.graphOwnedUnchangedDirtyCutSince = {};
 		input->sourceFingerprint = fingerprint;
 		const auto result = requests.SubmitLatest({
 			{ br::render::ArtifactKind::StaticScene, 0, 0 },

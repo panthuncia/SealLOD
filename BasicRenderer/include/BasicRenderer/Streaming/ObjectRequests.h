@@ -432,6 +432,18 @@ struct StaticImportBulkPublishResult {
 	std::uint64_t mutationCoverageGeneration = 0;
 };
 
+// The values PublishDesiredBufferState gates a new root on, for stall diagnostics.
+struct DesiredObjectBufferGateState {
+    std::uint64_t mutationGeneration = 0;
+    std::uint64_t submittedMutationGeneration = 0;
+    std::uint64_t stateRevision = 0;
+    std::uint64_t activeStateRevision = 0;
+    std::uint64_t retirementEpoch = 0;
+    std::uint64_t lastPublicationRetirementEpoch = 0;
+    std::uint64_t framesInFlight = 0;
+    bool dirty = false;
+};
+
 struct DesiredObjectBufferStateCut {
 	br::render::ArtifactVersionHandle version;
 	std::uint64_t coveredMutationGeneration = 0;

@@ -553,6 +553,12 @@ MaterialTextureStreamingStats MaterialManager::GetMaterialTextureStreamingStats(
 }
 
 void MaterialManager::ScheduleStreamingStatsRefresh() const {
+	// Runs on the serial acceptance lane, where it delays material admission, and the
+	// caller asks twice per frame. Readers already accept a result one refresh behind.
+	const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+	const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+		std::chrono::milliseconds(100)).count();
+	if (now - m_lastStreamingStatsRefresh.load(std::memory_order_relaxed) < interval) return;
 	bool expected = false;
 	if (!m_streamingStatsRefreshScheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
 	auto* self = const_cast<MaterialManager*>(this);
@@ -563,6 +569,8 @@ void MaterialManager::ScheduleStreamingStatsRefresh() const {
 			[self](const br::TaskContext& context) {
 				MaterialAcceptanceScope acceptance;
 				self->m_streamingStatsRefreshScheduled.store(false, std::memory_order_release);
+				self->m_lastStreamingStatsRefresh.store(
+					std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
 				if (context.StopRequested() || !self->m_textureStreamingManager) return;
 				BT_ZONE_SCOPE("MaterialManager::RefreshStreamingStats");
 				self->DrainPostedMaterialMutations();

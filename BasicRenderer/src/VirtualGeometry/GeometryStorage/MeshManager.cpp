@@ -222,6 +222,7 @@ ICLodGeometryStorage& MeshManager::GetCLodGeometryStorage() noexcept {
 }
 
 MeshManager::~MeshManager() {
+	m_templatePrepareScope.CancelAndWait();
 	for (auto& binding : m_graphBufferBindings) {
 		if (binding.buffer) binding.buffer->SetVersionedGraphMutationCallback({});
 	}
@@ -658,6 +659,8 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 
 bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices) {
 	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
+	// A mesh's prepared container is consumed below, so it must not still be in the queue.
+	DrainPendingTemplatePrepares();
 	ZoneScopedN("MeshManager::AddMesh");
 	if (!mesh) {
 		return false;
@@ -1380,7 +1383,31 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 }
 
 void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<br::render::StaticMeshTemplateRequest>& requests) {
-	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
+	for (const auto& request : requests) m_pendingTemplatePrepares.push(request);
+	bool expected = false;
+	if (!m_templatePrepareScheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+	const bool submitted = m_templatePrepareScope.Valid() &&
+		TaskSchedulerManager::GetInstance().Submit(
+			m_templatePrepareScope, TaskLane::Streaming, TaskDomain::GpuBufferBuild,
+			"MeshManager::PrepareStaticMeshTemplates",
+			[this](const br::TaskContext& context) {
+				// Cleared before draining: a later post either is drained here or schedules again.
+				m_templatePrepareScheduled.store(false, std::memory_order_release);
+				if (context.StopRequested()) return;
+				std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
+				DrainPendingTemplatePrepares();
+			});
+	if (!submitted) m_templatePrepareScheduled.store(false, std::memory_order_release);
+}
+
+void MeshManager::DrainPendingTemplatePrepares() {
+	std::vector<br::render::StaticMeshTemplateRequest> requests;
+	br::render::StaticMeshTemplateRequest request;
+	while (m_pendingTemplatePrepares.try_pop(request)) requests.push_back(std::move(request));
+	if (!requests.empty()) PrepareStaticMeshTemplateResources(requests);
+}
+
+void MeshManager::PrepareStaticMeshTemplateResources(const std::vector<br::render::StaticMeshTemplateRequest>& requests) {
 	ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
 	BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
 	ZoneValue(static_cast<int64_t>(requests.size()));
@@ -1533,6 +1560,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<br::
 
 std::vector<br::render::StaticMeshTemplateRegistration> MeshManager::AddStaticMeshTemplatesBulk(const std::vector<br::render::StaticMeshTemplateRequest>& requests) {
 	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
+	DrainPendingTemplatePrepares();
 	ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk");
 	ZoneValue(static_cast<int64_t>(requests.size()));
 	std::vector<br::render::StaticMeshTemplateRegistration> registrations(requests.size());
@@ -2018,6 +2046,9 @@ void MeshManager::SetRendererStateRequestService(br::render::RendererStateReques
 void MeshManager::SetRendererStateServices(br::render::RendererStateRequestService* service,
 	std::shared_ptr<org::runtime::IUploadService> uploads, std::uint32_t framesInFlight) {
 	SetRendererStateRequestService(service);
+	if (!m_templatePrepareScope.Valid()) {
+		m_templatePrepareScope = TaskSchedulerManager::GetInstance().CreateScope("MeshManager::TemplatePrepare");
+	}
 	m_geometryUploadService = std::move(uploads);
 	m_geometryFramesInFlight = (std::max)(framesInFlight, 1u);
 	if (!service || !m_geometryUploadService || !m_graphBufferBindings.empty()) return;

@@ -149,15 +149,14 @@ namespace br::staticimport
 		virtual void SubmitHostGroup(StaticHostGroupRequest request) = 0;
 
 		// Schedules a coordinator drain, e.g. after an extension queued work that
-		// HasPendingCoordinatorWork or HasCoordinatorResults reports. Safe from any
-		// thread.
+		// HasCoordinatorResults reports. Safe from any thread.
 		virtual void WakeCoordinator() = 0;
 
-		// Records the live draw span of a workload after the extension changed the
-		// visibility of its own groups.
-		virtual void RecordWorkloadCount(const DrawWorkloadKey& workload, std::uint32_t span) = 0;
+		// The answer IsHostGroupCurrent gives changed for some group: the pipeline
+		// re-checks its pending host-resident groups. Safe from any thread.
+		virtual void NotifyHostLivenessChanged() = 0;
 
-		// Placement accounting for host-resident groups.
+		// Placement accounting for host-resident groups. Safe from any thread.
 		virtual void AddAppliedPlacements(std::uint64_t placements) = 0;
 		virtual void ReclaimAppliedPlacements(std::uint64_t placements) = 0;
 
@@ -190,16 +189,6 @@ namespace br::staticimport
 
 		// The pipeline hands the extension its access surface once, before any other hook.
 		virtual void OnAttached(IStaticImportPipelineAccess& pipeline) { (void)pipeline; }
-
-		// ---- Coordinator (serialized coordinator drain, under the publication lock) ----
-
-		// Whether the extension has queued work for DrainCoordinatorWork. Checked on
-		// every coordinator tick, outside the publication lock.
-		[[nodiscard]] virtual bool HasPendingCoordinatorWork() const { return false; }
-
-		// Runs the work HasPendingCoordinatorWork reported. Host-resident groups that
-		// are no longer current afterwards (IsHostGroupCurrent) are dropped.
-		virtual void DrainCoordinatorWork() {}
 
 		// ---- Group lifecycle notifications (any pipeline thread) ----
 
@@ -252,6 +241,10 @@ namespace br::staticimport
 		// ---- Host-resident groups ----
 
 		// Offers a published host-resident group; see StaticHostGroupPublishResult.
+		// Runs on the update thread inside its frame budget, so it must not touch state
+		// another thread owns: hand the group to that state's owner and return. An
+		// accepted group's payload becomes the extension's, even if the owner later
+		// finds it stale (RetireHostGroupPayloads).
 		virtual StaticHostGroupPublishResult PublishHostGroup(StaticHostGroupPublication& publication)
 		{
 			(void)publication;

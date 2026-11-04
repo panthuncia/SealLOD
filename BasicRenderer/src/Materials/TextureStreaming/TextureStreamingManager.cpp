@@ -1975,12 +1975,18 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 		}
 	}
 	{
-		// Build outside the lock: the render thread reads the published stats
-		// every frame and must never wait for this walk.
-		auto built = BuildTextureStreamingStats();
-		std::lock_guard statsLock(m_statsMutex);
-		m_publishedStats = std::move(built);
-		++m_publishedStatsSequence;
+		// These only feed the debug menu and readiness counts, and walking every texture
+		// took 7 ms per frame, so they refresh at a human rate rather than the frame rate.
+		const auto now = std::chrono::steady_clock::now();
+		if (now - m_lastStatsBuild >= std::chrono::milliseconds(100)) {
+			m_lastStatsBuild = now;
+			// Build outside the lock: the render thread reads the published stats
+			// every frame and must never wait for this walk.
+			auto built = BuildTextureStreamingStats();
+			std::lock_guard statsLock(m_statsMutex);
+			m_publishedStats = std::move(built);
+			++m_publishedStatsSequence;
+		}
 	}
 
 }

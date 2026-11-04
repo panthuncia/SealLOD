@@ -227,10 +227,9 @@ MaterialTextureTransferService::EnsureTransferRecordLocked(
 		if (invoke) callback();
 	};
 	auto artifact = std::make_shared<br::render::TextureTransferArtifact>();
-	artifact->image = image;
 	artifact->generation = id;
 	artifact->gpuSubmissions = std::move(submissions);
-	m_records.emplace(id, Record{ State::Pending, 0, transfer, artifact });
+	m_records.emplace(id, Record{ State::Pending, 0, transfer, artifact, image });
 	return artifact;
 }
 
@@ -357,6 +356,26 @@ rhi::TextureBarrier MaterialTextureTransferService::MakeWholeTextureBarrier(
 	return barrier;
 }
 
+void MaterialTextureTransferService::SweepExpiredRecordsLocked(
+	std::vector<std::shared_ptr<TransferState>>& abandoned)
+{
+	if (m_records.size() < m_recordSweepThreshold) return;
+	for (auto record = m_records.begin(); record != m_records.end();) {
+		if (!record->second.image.expired()) {
+			++record;
+			continue;
+		}
+		// Queued and in-flight work holds the image strongly, so only a cancelled
+		// job-processed image can die unfinished. Nothing may wait on it forever.
+		if (record->second.state != State::Ready && record->second.state != State::Failed) {
+			abandoned.push_back(record->second.transferState);
+		}
+		record = m_records.erase(record);
+	}
+	m_recordSweepThreshold = (std::max)(kMinimumRecordSweepThreshold, m_records.size() * 2u);
+	BT_PLOT("MaterialTextureTransfer.Records", static_cast<int64_t>(m_records.size()));
+}
+
 void MaterialTextureTransferService::ReapCompleted()
 {
 	struct ReadyTransfer {
@@ -366,6 +385,7 @@ void MaterialTextureTransferService::ReapCompleted()
 	};
 	std::vector<ReadyTransfer> readyTransfers;
 	std::vector<InFlightBatch::ReadbackCompletion> completedReadbacks;
+	std::vector<std::shared_ptr<TransferState>> abandonedTransfers;
 	{
 		std::scoped_lock lock(m_mutex);
 		if (!m_timeline || !*m_timeline) return;
@@ -390,6 +410,10 @@ void MaterialTextureTransferService::ReapCompleted()
 			m_inFlight[i] = std::move(m_inFlight.back());
 			m_inFlight.pop_back();
 		}
+		SweepExpiredRecordsLocked(abandonedTransfers);
+	}
+	for (const auto& transfer : abandonedTransfers) {
+		PublishTransferState(transfer, State::Failed, 0, "image released before its transfer completed");
 	}
 	for (auto& ready : readyTransfers) {
 		org::RangeSpec whole{};

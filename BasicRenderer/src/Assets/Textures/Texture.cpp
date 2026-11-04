@@ -519,6 +519,8 @@ bool ReadProcessedTextureCacheHeader(const std::wstring& filePath, br::processed
 		outError->clear();
 	}
 
+	if (br::processed_texture_cache::TryFindIndexedHeader(filePath, header)) return true;
+
 	std::ifstream file(filePath, std::ios::binary);
 	if (!file) {
 		if (outError) {
@@ -546,6 +548,7 @@ bool ReadProcessedTextureCacheHeader(const std::wstring& filePath, br::processed
 		return false;
 	}
 
+	br::processed_texture_cache::RecordIndexedHeader(filePath, header);
 	return true;
 }
 
@@ -1532,7 +1535,9 @@ void TextureAsset::RefreshStreamingStateFromDescription() {
 	const uint32_t descMipCount = CalcMipCountFromDescription(m_desc);
 	const uint32_t totalMipCount = (std::max)(1u, m_sourceTotalMipCount);
 
-	m_streamingState.eligible = m_meta.processing.isParticipatingMaterialTexture && totalMipCount > 1u && HasStreamingSourceData();
+	// Cubes and arrays only load as a full chain (the conditioned cache's fullChainOnly), so a coarser
+	// request could never be met and would reload the texture forever.
+	m_streamingState.eligible = m_meta.processing.isParticipatingMaterialTexture && totalMipCount > 1u && HasStreamingSourceData() && !m_desc.isCubemap && m_desc.arraySize <= 1u;
 	if (!wasEligible && m_streamingState.eligible) {
 		m_streamingState.enabled = !m_suppressMipStreaming && IsMaterialTextureStreamingEnabledSetting();
 	}

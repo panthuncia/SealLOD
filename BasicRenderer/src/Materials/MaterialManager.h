@@ -156,6 +156,7 @@ private:
 	mutable uint64_t m_cachedStreamingStatsPublishedSequence = 0;
 	mutable bool m_cachedStreamingStatsValid = false;
 	mutable std::atomic_bool m_streamingStatsRefreshScheduled{ false };
+	mutable std::atomic<std::chrono::steady_clock::rep> m_lastStreamingStatsRefresh{ 0 };
 	void ScheduleStreamingStatsRefresh() const;
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::weak_ptr<Material>> m_ingestedMaterialSourcesByID;

@@ -2,6 +2,7 @@
 #include <ORGModuleServices/Async/SuspensionIdentity.h>
 #include "Runtime/Scheduling/GraphSchedulerAdapter.h"
 #include "Runtime/StateGraph/CapacityProvider.h"
+#include "Runtime/StateGraph/RendererGraphTraceFormat.h"
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 #include <BasicRenderer/Streaming/RendererStateRequestService.h>
 #include "Scene/ECS/RendererECSManager.h"
@@ -835,6 +836,69 @@ int main() {
         Check(wakes.Snapshot(consumer).readiness == ArtifactReadiness::Failed);
         wakes.RemoveReadyCallback(subscription);
         wakes.Shutdown();
+    }
+
+    // Latest edges select only versions that reached their milestone, so a failed
+    // cursor selects nothing. The consumer still has to observe the failure: the
+    // renderer's stalled radius-100 load was a TextureResidency Blocked forever on
+    // a failed TextureProcessed, holding every group that used that texture.
+    {
+        AsyncStateGraph latestFailure(scheduler, "LatestEdgeFailure");
+        // Even revisions build; odd revisions fail.
+        latestFailure.RegisterProducer(ArtifactKind::Generic, {
+            TaskLane::Streaming, TaskDomain::General, "LatestFailureProducer",
+            [](const ArtifactBuildContext& context) {
+                if (context.revision % 2u == 0u) return ArtifactBuildResult::Ready(Payload(context.revision));
+                ArtifactBuildResult failed;
+                failed.error = "injected failure";
+                return failed;
+            }
+        });
+        latestFailure.RegisterProducer(ArtifactKind::Material, {
+            TaskLane::Streaming, TaskDomain::General, "LatestFailureConsumer",
+            [](const ArtifactBuildContext& context) {
+                return ArtifactBuildResult::Ready(Payload(context.revision));
+            }
+        });
+        const auto consumerOf = [&](std::uint64_t id, ArtifactRequirement requirement) {
+            const ArtifactKey key{ ArtifactKind::Material, id, 0 };
+            Check(latestFailure.Request(key, 1, { std::move(requirement) }, Payload(1), 1));
+            return key;
+        };
+
+        // Requested while the dependency is unbuilt, and after it has already failed.
+        const ArtifactKey failing{ ArtifactKind::Generic, 0xf001, 0 };
+        const auto beforeFailure = consumerOf(0xf101, Latest(failing, ArtifactReadiness::CpuReady));
+        Check(latestFailure.Request(failing, 1, {}, Payload(1), 1));
+        latestFailure.WaitIdle();
+        Check(latestFailure.Snapshot(failing).readiness == ArtifactReadiness::Failed);
+        Check(latestFailure.Snapshot(beforeFailure).readiness == ArtifactReadiness::Failed);
+        const auto afterFailure = consumerOf(0xf102, Latest(failing, ArtifactReadiness::CpuReady));
+        latestFailure.WaitIdle();
+        Check(latestFailure.Snapshot(afterFailure).readiness == ArtifactReadiness::Failed);
+
+        // An older ready version still satisfies the edge after a successor fails.
+        const ArtifactKey recovered{ ArtifactKind::Generic, 0xf002, 0 };
+        // Holding the handle keeps the ready version from being reclaimed.
+        const auto recoveredReady = latestFailure.Request(recovered, 2, {}, Payload(2), 2);
+        Check(recoveredReady);
+        latestFailure.WaitIdle();
+        Check(latestFailure.Request(recovered, 3, {}, Payload(3), 3));
+        latestFailure.WaitIdle();
+        Check(latestFailure.Snapshot(recovered).readiness == ArtifactReadiness::Failed);
+        const auto usesOlder = consumerOf(0xf103, LatestAtLeast(recovered, 2, ArtifactReadiness::CpuReady));
+        latestFailure.WaitIdle();
+        Check(latestFailure.Snapshot(usesOlder).readiness == ArtifactReadiness::GpuReady);
+
+        // A failure below the revision floor is not the version being waited for, and
+        // a new revision of a failed address runs: nothing later would hand off to it.
+        const auto awaitsNewer = consumerOf(0xf104, LatestAtLeast(failing, 4, ArtifactReadiness::CpuReady));
+        latestFailure.WaitIdle();
+        Check(latestFailure.Snapshot(awaitsNewer).readiness == ArtifactReadiness::Blocked);
+        Check(latestFailure.Request(failing, 4, {}, Payload(4), 4));
+        latestFailure.WaitIdle();
+        Check(latestFailure.Snapshot(awaitsNewer).readiness == ArtifactReadiness::GpuReady);
+        latestFailure.Shutdown();
     }
 
     AsyncStateGraph graph(scheduler, "AsyncStateGraphTests");
@@ -2625,14 +2689,19 @@ int main() {
     const auto traceDirectory = std::filesystem::temp_directory_path() /
         ("sarp_async_graph_trace_" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
-    graph.StartTrace({ .maximumEvents = 10'000 });
+    graph.StartTrace({ .maximumEvents = 10'000, .includeSchedulerEvents = true });
     Check(graph.TraceActive());
     Check(static_cast<bool>(graph.Request(
         { ArtifactKind::MaterialTable, 101, 0 }, 8, {}, Payload(88), 88)));
     graph.WaitIdle();
-    const auto traceReport = graph.StopTraceAndWriteReport(traceDirectory);
+    const auto traceCapture = graph.StopTraceAndWriteReport(traceDirectory);
     Check(!graph.TraceActive());
-    Check(traceReport.capturedEvents != 0 && traceReport.droppedEvents == 0);
+    Check(traceCapture.capturedEvents != 0 && traceCapture.droppedEvents == 0);
+    // Stopping only dumps the capture; the reports come from expanding it.
+    Check(std::filesystem::exists(traceCapture.rawCapture));
+    Check(traceCapture.eventsCsv.empty());
+    const auto traceReport = ExpandAsyncStateGraphTrace(traceCapture.rawCapture, traceDirectory, { .chromeTrace = true });
+    Check(traceReport.capturedEvents == traceCapture.capturedEvents);
     Check(std::filesystem::exists(traceReport.eventsCsv));
     Check(std::filesystem::exists(traceReport.staticGroupCsv));
     Check(std::filesystem::exists(traceReport.chromeTraceJson));
@@ -2649,7 +2718,9 @@ int main() {
     Check(eventsCsv.contains("SchedulerTaskQueued"));
     Check(eventsCsv.contains("SchedulerTaskStarted"));
     Check(eventsCsv.contains("SchedulerTaskCompleted"));
-    Check(readFile(traceReport.chromeTraceJson).contains("\"traceEvents\""));
+    const auto chromeTrace = readFile(traceReport.chromeTraceJson);
+    Check(chromeTrace.contains("\"traceEvents\""));
+    Check(chromeTrace.contains("\"thread_name\""));
     const auto traceSummary = readFile(traceReport.summaryMarkdown);
     Check(traceSummary.contains("Producer timing by artifact kind"));
     Check(traceSummary.contains("Unified scheduler execution"));
@@ -2661,6 +2732,19 @@ int main() {
     const auto boundedTrace = graph.StopTraceAndWriteReport(traceDirectory / "bounded");
     Check(boundedTrace.capturedEvents == 2);
     Check(boundedTrace.droppedEvents != 0);
+    {
+        // Scheduler events are opt-in, and a capture from another format is refused rather than misread.
+        const auto bounded = ExpandAsyncStateGraphTrace(boundedTrace.rawCapture, traceDirectory / "bounded");
+        Check(bounded.chromeTraceJson.empty());
+        Check(!readFile(bounded.eventsCsv).contains("TaskScheduler"));
+        Check(readFile(bounded.summaryMarkdown).contains("Scheduler events were not captured"));
+        const auto corrupt = traceDirectory / "corrupt.bin";
+        std::ofstream(corrupt, std::ios::binary) << "not a graph trace capture, and long enough to fill the header..........";
+        bool rejected = false;
+        try { (void)ExpandAsyncStateGraphTrace(corrupt, traceDirectory / "corrupt"); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Check(rejected);
+    }
 
     graph.StartTrace({ .maximumEvents = 10'000 });
     std::atomic_bool traceWritersRunning{ true };
@@ -2681,7 +2765,9 @@ int main() {
     traceWriters.clear();
     Check(!graph.TraceActive());
     Check(concurrentStopTrace.capturedEvents != 0);
-    Check(std::filesystem::exists(concurrentStopTrace.eventsCsv));
+    Check(std::filesystem::exists(concurrentStopTrace.rawCapture));
+    Check(std::filesystem::exists(ExpandAsyncStateGraphTrace(
+        concurrentStopTrace.rawCapture, traceDirectory / "concurrent_stop").eventsCsv));
 
     {
         AsyncStateGraph latestGraph(scheduler, "LatestIntentTests");

@@ -37,6 +37,7 @@ void StaticObjectRequestService::RequestStaticImportTransactionResources(const S
 std::uint64_t StaticObjectRequestService::PublishDesiredBufferState() const { return RequireObjects(m_objects).PublishDesiredBufferState(); }
 std::uint64_t StaticObjectRequestService::RequiredGeometryCoverage() const { return RequireObjects(m_objects).RequiredGeometryCoverage(); }
 DesiredObjectBufferStateCut StaticObjectRequestService::DesiredBufferStateCut() const { return RequireObjects(m_objects).DesiredBufferStateCut(); }
+DesiredObjectBufferGateState StaticObjectRequestService::DesiredBufferGateState() const { return RequireObjects(m_objects).DesiredBufferGateState(); }
 StaticImportBulkPublishResult StaticObjectRequestService::PublishStaticImportTransactionsBulk(std::span<MaterializedStaticImportTransaction*> transactions) const { return RequireObjects(m_objects).PublishStaticImportTransactionsBulk(transactions); }
 std::uint64_t StaticObjectRequestService::MakeDeferredRetireFrame() const { return RequireObjects(m_objects).MakeDeferredRetireFrame(); }
 StaticObjectRemovalResult StaticObjectRequestService::RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads, const RemoveObjectsBulkOptions& options) const { return RequireObjects(m_objects).RemoveStaticObjectsBulk(payloads, options); }

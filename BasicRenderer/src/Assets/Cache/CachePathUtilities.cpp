@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
+#include <unordered_map>
 #include <system_error>
 #include <unordered_set>
 #include <vector>
@@ -201,7 +203,30 @@ std::string NormalizeCacheSourcePath(const std::string& path) {
 	}
 
 	std::error_code ec;
-	auto canonical = std::filesystem::weakly_canonical(std::filesystem::path(path), ec);
-	if (ec) return path; // if canonicalisation fails, use original
+	const std::filesystem::path source(path);
+	std::filesystem::path canonical;
+	// A relative path here is a game path, which does not exist beneath the working
+	// directory, so only its directories can affect the result. Canonicalizing walks every
+	// component through the filesystem; thousands of textures share a few hundred folders.
+	if (source.is_relative() && source.has_parent_path() && source.has_filename() &&
+		source.filename() != "." && source.filename() != "..") {
+		static std::shared_mutex parentsMutex;
+		static std::unordered_map<std::wstring, std::filesystem::path> parents;
+		const auto parent = source.parent_path();
+		{
+			std::shared_lock lock(parentsMutex);
+			if (const auto known = parents.find(parent.native()); known != parents.end()) canonical = known->second;
+		}
+		if (canonical.empty()) {
+			canonical = std::filesystem::weakly_canonical(parent, ec);
+			if (ec) return path;
+			std::unique_lock lock(parentsMutex);
+			parents.insert_or_assign(parent.native(), canonical);
+		}
+		canonical /= source.filename();
+	} else {
+		canonical = std::filesystem::weakly_canonical(source, ec);
+		if (ec) return path; // if canonicalisation fails, use original
+	}
 	return RemapBuildOutputAssetPath(canonical).generic_string(); // forward-slash, absolute
 }

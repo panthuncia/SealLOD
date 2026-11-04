@@ -1,5 +1,7 @@
 #pragma once
 
+#include <tbb/concurrent_queue.h>
+
 #include <atomic>
 #include <cstddef>
 #include <functional>
@@ -21,6 +23,7 @@
 #include "Runtime/Settings/SettingsManager.h"
 #include "RenderPasses/Base/PassReturn.h"
 #include <BasicRenderer/Streaming/ArtifactTypes.h>
+#include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "BasicRenderer/Extensions/Buffers/LazyDynamicStructuredBuffer.h"
 #include "BasicRenderer/Extensions/Buffers/PagePool.h"
 #include "Interfaces/IResourceProvider.h"
@@ -87,6 +90,8 @@ public:
 	[[nodiscard]] std::optional<br::render::ArtifactVersionHandle>
 		GeometryResidencyVersion() const;
 	std::vector<br::render::StaticMeshTemplateRegistration> AddStaticMeshTemplatesBulk(const std::vector<br::render::StaticMeshTemplateRequest>& requests);
+	// Posts the requests and returns: preparation runs on one serialized consumer, so
+	// import workers never wait on the authoring registry. Any thread.
 	void PrepareStaticMeshTemplateResourcesAsync(const std::vector<br::render::StaticMeshTemplateRequest>& requests);
 	uint32_t GetCLodMaxTraversalDepth() const { return m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire); }
 
@@ -292,6 +297,12 @@ private:
 	// Serializes the mutable authoring registry. Render consumers never acquire
 	// this lock; they consume immutable geometry-buffer versions from a frame snapshot.
 	mutable std::recursive_mutex m_staticTemplatePublicationMutex;
+	// Both require m_staticTemplatePublicationMutex.
+	void DrainPendingTemplatePrepares();
+	void PrepareStaticMeshTemplateResources(const std::vector<br::render::StaticMeshTemplateRequest>& requests);
+	tbb::concurrent_queue<br::render::StaticMeshTemplateRequest> m_pendingTemplatePrepares;
+	std::atomic_bool m_templatePrepareScheduled{ false };
+	TaskScope m_templatePrepareScope;
 	struct GraphBufferBinding {
 		org::ResourceIdentifier identifier;
 		std::shared_ptr<org::DynamicBuffer> buffer;

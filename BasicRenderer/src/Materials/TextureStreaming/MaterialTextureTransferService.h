@@ -20,8 +20,9 @@ namespace org { class PixelBuffer; }
 namespace org { class Resource; }
 namespace br::render {
 using org::async::GpuSubmissionSet;
+// Does not own the image: the service keeps this for as long as the image lives, and
+// a strong reference here would keep every retired mip generation resident.
 struct TextureTransferArtifact {
-	std::shared_ptr<org::PixelBuffer> image;
 	std::uint64_t generation = 0;
 	std::shared_ptr<const GpuSubmissionSet> gpuSubmissions;
 };
@@ -61,6 +62,7 @@ public:
 	bool HasFailed(const std::shared_ptr<org::PixelBuffer>& image) const;
 
 private:
+	static constexpr std::size_t kMinimumRecordSweepThreshold = 1024;
 	enum class State : uint8_t { Pending, InFlight, Ready, Failed };
 	struct TransferState {
 		std::atomic<State> state{ State::Pending };
@@ -74,6 +76,7 @@ private:
 		uint64_t fenceValue = 0;
 		std::shared_ptr<TransferState> transferState;
 		std::shared_ptr<const br::render::TextureTransferArtifact> artifact;
+		std::weak_ptr<org::PixelBuffer> image;
 	};
 	struct Request {
 		std::shared_ptr<org::PixelBuffer> image;
@@ -113,6 +116,8 @@ private:
 		State state, std::uint64_t fenceValue = 0, std::string error = {});
 
 	void ReapCompleted();
+	// Drops records whose image is gone; amortized against m_recordSweepThreshold.
+	void SweepExpiredRecordsLocked(std::vector<std::shared_ptr<TransferState>>& abandoned);
 	void RejectPendingWork();
 	void PumpWorker();
 	static rhi::TextureBarrier MakeWholeTextureBarrier(
@@ -133,6 +138,7 @@ private:
 	std::vector<ReadbackRequest> m_pendingReadbacks;
 	std::vector<InFlightBatch> m_inFlight;
 	std::unordered_map<uint64_t, Record> m_records;
+	std::size_t m_recordSweepThreshold = kMinimumRecordSweepThreshold;
 	br::TaskScope m_taskScope;
 	br::SerializedTaskPump m_pump;
 	std::atomic_bool m_shuttingDown{ false };

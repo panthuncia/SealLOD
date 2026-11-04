@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <cstdint>
 #include <string_view>
 
@@ -34,6 +35,10 @@ struct FileHeader {
 	uint64_t dataSizeBytes = 0;
 };
 #pragma pack(pop)
+
+// The header of a cache file without opening it, if an earlier run read it. Any thread.
+[[nodiscard]] bool TryFindIndexedHeader(const std::wstring& path, FileHeader& header);
+void RecordIndexedHeader(const std::wstring& path, const FileHeader& header);
 
 inline bool HasFlag(const FileHeader& header, HeaderFlags flag) {
 	return (header.flags & static_cast<uint32_t>(flag)) != 0;

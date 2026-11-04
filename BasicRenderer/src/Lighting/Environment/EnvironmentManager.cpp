@@ -126,6 +126,7 @@ void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::share
 	unsigned int res = m_reflectionCubemapResolution;
 	// An HDRI environment is converted to a cubemap first.
 	std::optional<br::render::EnvironmentConversionWork> conversion;
+	std::function<void()> cacheConvertedCubemap;
 	if (cachedCubemap) {
 		skybox = source;
 		skybox->SetName("Skybox cubemap");
@@ -164,21 +165,11 @@ void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::share
 		conversion = br::render::EnvironmentConversionWork{skyHDR->ImagePtr(), envCubemap, e->GetEnvironmentIndex(),
 			m_workingHDRIGroup, m_environmentUpdateMutex};
 		m_workingHDRIGroup->AddResource(skyHDR->ImagePtr());
-		auto path = GetCacheFilePath(name+L"_environment.dds", L"environments");
-		if (m_requestReadback) {
-			m_requestReadback(envCubemap, path, nullptr, true);
-		}
-		else {
-			spdlog::warn("EnvironmentManager: readback request callback is not configured.");
-		}
-
-		path = GetCacheFilePath(name + L"_prefiltered.dds", L"environments");
-		if (m_requestReadback) {
-			m_requestReadback(e->GetEnvironmentPrefilteredCubemap(), path, nullptr, true);
-		}
-		else {
-			spdlog::warn("EnvironmentManager: readback request callback is not configured.");
-		}
+		cacheConvertedCubemap = [readback = m_requestReadback, envCubemap,
+			path = GetCacheFilePath(name + L"_environment.dds", L"environments")] {
+			if (readback) readback(envCubemap, path, nullptr, true);
+			else spdlog::warn("EnvironmentManager: readback request callback is not configured.");
+		};
 	}
 
 	//Re-create environment cubemap at full res
@@ -220,10 +211,28 @@ void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::share
 		work.prefilter.Enqueue(prefilter);
 	};
 	if (conversion) {
-		conversion->then = std::move(filter);
-		m_workServices.conversion.Enqueue(std::move(*conversion));
+		// The cache copy must follow the conversion: a readback queued sooner saves an unwritten cubemap, and later
+		// launches prefer that file over the HDRI.
+		conversion->then = [filter = std::move(filter), cacheConvertedCubemap = std::move(cacheConvertedCubemap)]() mutable {
+			cacheConvertedCubemap();
+			filter();
+		};
+		m_workParkedForUpload.push_back([work = m_workServices, job = std::move(*conversion), alive]() mutable {
+			if (*alive) work.conversion.Enqueue(std::move(job));
+			else job.Discard();
+		});
 	}
-	else filter();
+	else m_workParkedForUpload.push_back(std::move(filter));
+}
+
+void EnvironmentManager::ReleaseUploadedWork() {
+	std::vector<std::function<void()>> ready;
+	{
+		std::lock_guard lock(*m_environmentUpdateMutex);
+		ready.swap(m_workAwaitingFrameUpload);
+		m_workAwaitingFrameUpload.swap(m_workParkedForUpload);
+	}
+	for (auto& work : ready) work();
 }
 
 void EnvironmentManager::RemoveEnvironment(Environment* e) {

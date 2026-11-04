@@ -118,6 +118,8 @@ namespace br::staticimport
 		std::size_t graphOwnedMembershipChangesSinceCheckpoint{ 0 };
 		std::chrono::steady_clock::time_point graphOwnedDirtySince{};
 		std::chrono::steady_clock::time_point graphOwnedLastSceneDiagnostic{};
+		std::chrono::steady_clock::time_point graphOwnedBlockedSuccessorSince{};
+		std::chrono::steady_clock::time_point graphOwnedUnchangedDirtyCutSince{};
 		std::uint64_t nextPublishTicketID{ 1 };
 		std::uint64_t nextPreparationPacketID{ 1 };
 		// Updated from completed preparation packets. The initial estimate targets

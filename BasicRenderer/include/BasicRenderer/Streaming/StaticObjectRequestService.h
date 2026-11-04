@@ -35,6 +35,7 @@ public:
     void RequestStaticImportTransactionResources(const StaticImportBuildBatch& build) const;
     std::uint64_t PublishDesiredBufferState() const;
     DesiredObjectBufferStateCut DesiredBufferStateCut() const;
+    DesiredObjectBufferGateState DesiredBufferGateState() const;
     // Geometry mutation sequence a Geometry root must cover before the newest
     // static draw records can publish.
     std::uint64_t RequiredGeometryCoverage() const;

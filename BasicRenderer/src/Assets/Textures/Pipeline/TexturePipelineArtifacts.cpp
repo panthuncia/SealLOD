@@ -54,6 +54,7 @@ struct ProcessedCheckpoint {
 struct ResidencyCheckpoint {
     std::shared_ptr<TextureDirectStorageReloadJobHandle> upload;
     std::uint32_t topMip = 0;
+    std::uint32_t pollDelayMs = 1;
 };
 
 bool GpuCompressible(const TextureSourceData& data) {
@@ -145,15 +146,15 @@ ArtifactBuildResult BuildTextureProcessed(const ArtifactBuildContext& context) {
 
         // A hit needs only the cache file's header.
         const auto cachePath = TextureProcessingManager::ConditionedCachePath(input->cacheKey);
-        std::error_code error;
-        if (std::filesystem::exists(cachePath, error) && !error) {
-            if (auto desc = br::textures::ReadConditionedCacheDescription(cachePath)) {
-                auto published = std::make_shared<PublishedTextureProcessed>();
-                published->cacheKey = input->cacheKey;
-                published->fullDesc = std::move(*desc);
-                published->cachePath = cachePath;
-                return ArtifactBuildResult::Ready(ArtifactPayload::Make<PublishedTextureProcessed>(std::move(published)));
-            }
+        if (auto desc = br::textures::ReadConditionedCacheDescription(cachePath)) {
+            auto published = std::make_shared<PublishedTextureProcessed>();
+            published->cacheKey = input->cacheKey;
+            published->fullDesc = std::move(*desc);
+            published->cachePath = cachePath;
+            return ArtifactBuildResult::Ready(ArtifactPayload::Make<PublishedTextureProcessed>(std::move(published)));
+        }
+        // Only a miss pays for this check; a warm load reads the header straight away.
+        if (std::error_code error; std::filesystem::exists(cachePath, error) && !error) {
             spdlog::warn("Texture pipeline: unreadable cache file '{}' for '{}'; reprocessing",
                 ws2s(cachePath), input->request->source.identity);
         }
@@ -298,7 +299,15 @@ ArtifactBuildResult BuildTextureResidency(const ArtifactBuildContext& context) {
                 }
                 return adopt(std::move(image));
             }
-            if (state != TextureDirectStorageReloadJobState::Failed) return ArtifactBuildResult::Retry(1ms, context.checkpoint);
+            if (state != TextureDirectStorageReloadJobState::Failed) {
+                // Polling goes through the whole graph, so back off: an upload takes hundreds
+                // of milliseconds, and at 1 ms its polls would dominate the graph's work.
+                constexpr std::uint32_t kMaxPollDelayMs = 16;
+                auto next = std::make_shared<ResidencyCheckpoint>(*checkpoint);
+                next->pollDelayMs = (std::min)(checkpoint->pollDelayMs * 2u, kMaxPollDelayMs);
+                return ArtifactBuildResult::Retry(std::chrono::milliseconds(checkpoint->pollDelayMs),
+                    ArtifactPayload::Make<ResidencyCheckpoint>(std::move(next)));
+            }
         }
         else if (DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
             if (auto upload = br::textures::BeginCacheWindowUpload(cachePath, topMip, request.allowRTV, request.allowUAV)) {

@@ -132,6 +132,7 @@ namespace br::staticimport
 		void DrainReadyDiffs( std::size_t& applied, std::size_t& pendingOrSkipped, std::size_t& upsertsThisFrame, const StaticStreamBudget& budget, std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher>* dirtyWorkloadSpans = nullptr);
 
 		void LogStaticStreamStatus();
+		void LogStaticPublicationAdmissionStall(std::chrono::steady_clock::time_point now);
 
 		StaticImportShared* _shared;
 		StaticImportWorkBus* _bus;

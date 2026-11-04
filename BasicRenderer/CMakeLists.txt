@@ -372,6 +372,8 @@ set(SOURCES
     "src/Runtime/StateGraph/GraphDiagnostics.h"
     "src/Runtime/StateGraph/GraphTrace.h"
     "src/Runtime/StateGraph/RendererGraphTrace.cpp"
+    "src/Runtime/StateGraph/RendererGraphTraceFormat.h"
+    "src/Runtime/StateGraph/RendererGraphTraceReport.cpp"
     "src/VirtualGeometry/Streaming/Publication/CLodResidencyStorageArtifacts.cpp"
     "src/Runtime/StateGraph/CapacityProvider.cpp"
     "src/Diagnostics/Scene/DebugSceneSnapshotService.cpp"
@@ -484,6 +486,7 @@ set(SOURCES
     "src/Transparency/AVBOIT/RenderPasses/AVBOITSparseClearPass.cpp"
     # src/Utilities
     "src/Assets/Cache/CachePathUtilities.cpp"
+    "src/Assets/Textures/Cache/ProcessedTextureCacheIndex.cpp"
     "src/Utilities/MathUtils.cpp"
     "src/Assets/Textures/Import/StbImage.cpp"
     "src/Utilities/Utilities.cpp"
@@ -770,6 +773,13 @@ else()
 endif()
 add_executable(${BASICRENDERER_DEMO_TARGET} WIN32 "${BASICRENDERER_DEMO_SOURCE}")
 target_include_directories(${BASICRENDERER_DEMO_TARGET} PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
+add_executable(GraphTraceReport
+    "${BASICRENDERER_SOURCE_ROOT}/src/Diagnostics/Telemetry/GraphTraceReport.cpp"
+    "${BASICRENDERER_SOURCE_ROOT}/src/Runtime/StateGraph/RendererGraphTraceReport.cpp")
+target_compile_features(GraphTraceReport PRIVATE cxx_std_23)
+target_include_directories(GraphTraceReport PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
+target_link_libraries(GraphTraceReport PRIVATE BasicRendererHeaders)
+target_compile_definitions(GraphTraceReport PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 add_executable(StatisticalSamplingControl "${BASICRENDERER_SAMPLING_CONTROL_SOURCE}")
 target_compile_features(StatisticalSamplingControl PRIVATE cxx_std_23)
 target_link_libraries(StatisticalSamplingControl PRIVATE nlohmann_json::nlohmann_json)

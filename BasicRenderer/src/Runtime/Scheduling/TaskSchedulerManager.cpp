@@ -64,6 +64,31 @@ constexpr std::uint64_t StableTaskKind(std::string_view value) noexcept {
     return hash == 0 ? 1u : hash;
 }
 
+// Plot names must outlive the capture. Same order as TaskDomain.
+struct DomainPlotNames { const char* queued; const char* active; };
+constexpr DomainPlotNames kDomainPlotNames[]{
+    { "Scheduler.General.Queued", "Scheduler.General.Active" },
+    { "Scheduler.RendererState.Queued", "Scheduler.RendererState.Active" },
+    { "Scheduler.StaticImport.Queued", "Scheduler.StaticImport.Active" },
+    { "Scheduler.AssetImport.Queued", "Scheduler.AssetImport.Active" },
+    { "Scheduler.TextureProcessing.Queued", "Scheduler.TextureProcessing.Active" },
+    { "Scheduler.ShaderCompile.Queued", "Scheduler.ShaderCompile.Active" },
+    { "Scheduler.Cleanup.Queued", "Scheduler.Cleanup.Active" },
+    { "Scheduler.GraphControl.Queued", "Scheduler.GraphControl.Active" },
+    { "Scheduler.GraphPublication.Queued", "Scheduler.GraphPublication.Active" },
+    { "Scheduler.StaticImportControl.Queued", "Scheduler.StaticImportControl.Active" },
+    { "Scheduler.MaterialAcceptance.Queued", "Scheduler.MaterialAcceptance.Active" },
+    { "Scheduler.GpuBufferBuild.Queued", "Scheduler.GpuBufferBuild.Active" },
+    { "Scheduler.StaticGroupPreparation.Queued", "Scheduler.StaticGroupPreparation.Active" },
+};
+static_assert(std::size(kDomainPlotNames) == static_cast<std::size_t>(TaskDomain::Count));
+
+void PlotDomainDepth(TaskDomain domain, std::uint64_t queued, std::uint64_t active) {
+    const auto& names = kDomainPlotNames[static_cast<std::size_t>(domain)];
+    TracyCPlot(names.queued, static_cast<double>(queued));
+    TracyCPlot(names.active, static_cast<double>(active));
+}
+
 void LogLongTask(std::string_view name, TaskDomain domain, std::uint64_t elapsedUs) {
     struct WarningState {
         std::chrono::steady_clock::time_point lastLogged{};
@@ -237,7 +262,18 @@ class CpuSetObserver final : public oneapi::tbb::task_scheduler_observer {
 public:
     CpuSetObserver(oneapi::tbb::task_arena& arena, std::vector<ULONG> ids)
         : oneapi::tbb::task_scheduler_observer(arena), m_ids(std::move(ids)) { observe(true); }
-    void on_scheduler_entry(bool worker) override { if (worker) ApplyCpuSets(m_ids); }
+    void on_scheduler_entry(bool worker) override {
+        if (!worker) return;
+        ApplyCpuSets(m_ids);
+        // Workers re-enter on every arena join, and Tracy keeps every name it is given.
+        thread_local bool named = false;
+        if (named) return;
+        named = true;
+        static std::atomic_uint32_t nextWorker{ 0 };
+        std::array<char, 32> name{};
+        std::snprintf(name.data(), name.size(), "Task Worker %u", nextWorker.fetch_add(1, std::memory_order_relaxed));
+        TracyCSetThreadName(name.data());
+    }
 private:
     std::vector<ULONG> m_ids;
 };
@@ -453,13 +489,15 @@ void TaskSchedulerManager::Initialize(Config config) {
     state.domains[static_cast<std::size_t>(TaskDomain::StaticImport)].limit = staticLimit;
     state.domains[static_cast<std::size_t>(TaskDomain::StaticGroupPreparation)].limit = staticPreparationLimit;
     state.domains[static_cast<std::size_t>(TaskDomain::RendererState)].limit = 1u;
-    state.domains[static_cast<std::size_t>(TaskDomain::AssetImport)].limit = std::min(4u, m_workerCount);
+    state.domains[static_cast<std::size_t>(TaskDomain::AssetImport)].limit = std::clamp(
+        ReadEnvironmentUint("SARP_SCHEDULER_ASSET_IMPORT_CONCURRENCY", 4u), 1u, m_workerCount);
     // Texture decode/reload work is the dominant CPU queue during scene import.
     // A fixed limit of two left large machines mostly idle and made queue-drain
     // time proportional to a tuning constant. Scale conservatively with the
     // available worker pool while retaining headroom for graph and renderer
     // control work and bounding concurrent decode memory.
-    const auto textureLimit = (std::min)(8u, (m_workerCount + 3u) / 4u);
+    const auto textureLimit = ReadEnvironmentUint("SARP_SCHEDULER_TEXTURE_CONCURRENCY",
+        (std::min)(8u, (m_workerCount + 3u) / 4u));
     state.domains[static_cast<std::size_t>(TaskDomain::TextureProcessing)].limit =
         (std::min)(m_workerCount, (std::max)(1u, textureLimit));
     state.domains[static_cast<std::size_t>(TaskDomain::ShaderCompile)].limit = shaderLimit;
@@ -566,6 +604,7 @@ bool TaskSchedulerManager::Submit(const TaskScope& scope, TaskLane lane, TaskDom
         runtime.stats.highWatermark = std::max(runtime.stats.highWatermark, runtime.stats.queued);
         queuedDepth = runtime.stats.queued;
         activeCount = runtime.Active();
+        PlotDomainDepth(domain, queuedDepth, activeCount);
     }
     if (tracing) EmitTaskTrace({ TaskTraceEventID::Queued, trace, traceTaskID,
         0, 0, queuedDepth, activeCount, domain, lane, 0 });
@@ -611,6 +650,7 @@ bool TaskSchedulerManager::SubmitCpu(
             runtime.stats.highWatermark, runtime.stats.queued);
         task->admittedQueuedDepth = runtime.stats.queued;
         task->admittedActiveCount = runtime.Active();
+        PlotDomainDepth(domain, task->admittedQueuedDepth, task->admittedActiveCount);
     }
     if (tracing) {
         EmitTaskTrace({ TaskTraceEventID::Queued, trace, traceTaskID,
@@ -635,6 +675,7 @@ bool TaskSchedulerManager::SubmitCpu(
             runtime.stats.active = runtime.Active();
             queuedDepth = runtime.stats.queued;
             activeCount = runtime.Active();
+            PlotDomainDepth(task->domain, queuedDepth, activeCount);
         }
         const auto bodyReady = std::chrono::steady_clock::now();
         const auto queuedUs = static_cast<std::uint64_t>(
@@ -655,6 +696,7 @@ bool TaskSchedulerManager::SubmitCpu(
         if (!cancelled) {
             TracyCZone(zone, 1);
             TracyCZoneName(zone, task->name.data(), task->name.size());
+            TracyCZoneValue(zone, task->trace.correlationID);
             try { task->body(context); }
             catch (...) { error = std::current_exception(); }
             TracyCZoneEnd(zone);
@@ -672,6 +714,7 @@ bool TaskSchedulerManager::SubmitCpu(
             auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task->domain)];
             --runtime.directActive;
             runtime.stats.active = runtime.Active();
+            PlotDomainDepth(task->domain, runtime.Queued(), runtime.stats.active);
             runtime.stats.queueWaitMicros += queuedUs;
             if (queuedUs > runtime.stats.maxQueueWaitMicros) {
                 runtime.stats.maxQueueWaitMicros = queuedUs;
@@ -739,6 +782,7 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
             launch.back().admittedActiveCount = runtime.Active();
         }
         runtime.stats.queued = runtime.Queued(); runtime.stats.active = runtime.Active();
+        PlotDomainDepth(domain, runtime.stats.queued, runtime.stats.active);
     }
     for (auto& task : launch) {
         if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Admitted,
@@ -758,6 +802,7 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
             const bool prior = g_inSchedulerTask; g_inSchedulerTask = true;
             if (!cancelled) {
                 TracyCZone(zone, 1); TracyCZoneName(zone, task.name.data(), task.name.size());
+                TracyCZoneValue(zone, task.trace.correlationID);
                 try { task.body(context); } catch (...) { error = std::current_exception(); }
                 TracyCZoneEnd(zone);
             }
@@ -772,6 +817,7 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
                 std::lock_guard lock(m_runtimeState->taskMutex);
                 auto& runtime = m_runtimeState->domains[static_cast<std::size_t>(task.domain)];
                 --runtime.active; runtime.stats.active = runtime.Active();
+                PlotDomainDepth(task.domain, runtime.Queued(), runtime.stats.active);
                 runtime.stats.queueWaitMicros += queuedUs;
                 if (queuedUs > runtime.stats.maxQueueWaitMicros) {
                     runtime.stats.maxQueueWaitMicros = queuedUs;
@@ -918,6 +964,7 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
             launch.back().admittedActiveCount = runtime.Active();
             runtime.stats.queued = runtime.Queued();
             runtime.stats.active = runtime.Active();
+            PlotDomainDepth(launch.back().domain, runtime.stats.queued, runtime.stats.active);
         }
     }
     for (auto& task : launch) {
@@ -938,6 +985,7 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
             const bool prior = g_inSchedulerTask; g_inSchedulerTask = true;
             if (!cancelled) {
                 TracyCZone(zone, 1); TracyCZoneName(zone, task.name.data(), task.name.size());
+                TracyCZoneValue(zone, task.trace.correlationID);
                 try { task.body(context); } catch (...) { error = std::current_exception(); }
                 TracyCZoneEnd(zone);
             }
@@ -953,6 +1001,7 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
                 --runtime.active;
                 --m_runtimeState->sceneGraphActive;
                 runtime.stats.active = runtime.Active();
+                PlotDomainDepth(task.domain, runtime.Queued(), runtime.stats.active);
                 runtime.stats.queueWaitMicros += queuedUs;
                 if (queuedUs > runtime.stats.maxQueueWaitMicros) {
                     runtime.stats.maxQueueWaitMicros = queuedUs;

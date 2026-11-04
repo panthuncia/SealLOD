@@ -144,7 +144,9 @@ std::string TryGetSourceVersionTag(const TextureFileMeta& meta) {
 
 	std::error_code ec;
 	const std::filesystem::path path(*candidate);
-	if (!std::filesystem::exists(path, ec) || ec) {
+	// A relative identity is a game path, not a file: nothing on disk can version it.
+	// Probing would only fail, and each probe costs milliseconds under a virtual filesystem.
+	if (path.is_relative() || !std::filesystem::exists(path, ec) || ec) {
 		return {};
 	}
 

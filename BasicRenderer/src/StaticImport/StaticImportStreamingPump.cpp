@@ -1,5 +1,7 @@
 // Method definitions for StaticImportStreamingPump.
 
+#include <algorithm>
+#include <cstdlib>
 #include <BasicRenderer/Streaming/GeometryRequests.h>
 #include <BasicRenderer/Streaming/MaterialRequests.h>
 #include <BasicRenderer/Streaming/ObjectRequests.h>
@@ -447,7 +449,6 @@ namespace br::staticimport
 		std::vector<WorkloadCountUpdate> updates;
 		updates.reserve(dirtyWorkloadSpans.size());
 		for (const auto& [workloadKey, span] : dirtyWorkloadSpans) {
-			_importState->directStaticWorkloadCounts[workloadKey] = span;
 			updates.push_back(WorkloadCountUpdate{
 				.workloadKey = workloadKey,
 				.count = span
@@ -653,6 +654,21 @@ namespace br::staticimport
 		return pushedAny;
 	}
 
+	namespace
+	{
+		std::uint32_t AssetPublishParallelism(std::uint32_t workerCount)
+		{
+			char* configured = nullptr;
+			std::size_t length = 0;
+			std::uint32_t value = 4u;
+			if (_dupenv_s(&configured, &length, "SARP_STATIC_ASSET_PUBLISH_CONCURRENCY") == 0 && configured) {
+				value = static_cast<std::uint32_t>(std::strtoul(configured, nullptr, 10));
+				std::free(configured);
+			}
+			return std::clamp(value, 1u, workerCount);
+		}
+	}
+
 	void StaticImportStreamingPump::EnsureWorkersStarted()
 	{
 		if (_importState->staticImportServiceWorkersStarted) {
@@ -684,7 +700,7 @@ namespace br::staticimport
 		_shared->staticImportWorkScheduler.SetMaxParallelism(
 			StaticImportWorkSource::Publication, 1u);
 		_shared->staticImportWorkScheduler.SetMaxParallelism(
-			StaticImportWorkSource::AssetPublish, (std::min)(4u, workerCount));
+			StaticImportWorkSource::AssetPublish, AssetPublishParallelism(workerCount));
 		_importState->staticImportServiceWorkersStarted = true;
 		_drains->ScheduleCoordinatorDrain();
 		const auto explicitCreditLimit =
@@ -823,10 +839,8 @@ namespace br::staticimport
 			std::vector<StaticRetirementCompletion> completions;
 			_bus->staticRetirementCompletions.Drain(completions, 4096);
 			for (auto& completion : completions) {
-				_importState->staticAppliedPlacementCount -= (std::min)(
-					_importState->staticAppliedPlacementCount, completion.placements);
-				_importState->staticRuntimeGroupActiveCount -= (std::min)(
-					_importState->staticRuntimeGroupActiveCount, completion.groups);
+				SaturatingSubtract(_importState->staticAppliedPlacementCount, completion.placements);
+				SaturatingSubtract(_importState->staticRuntimeGroupActiveCount, completion.groups);
 				_counters->staticDirectGroupsRemoved += completion.groups;
 				_counters->lastStaticGroupsRemovedThisFrame += completion.groups;
 			}
@@ -1135,7 +1149,6 @@ namespace br::staticimport
 				// must precede the GPU-ready cut acceptance below.
 				for (const auto& [workloadKey, span] :
 					pendingResult->publication.activeDrawSetSpans) {
-					_importState->directStaticWorkloadCounts[workloadKey] = span;
 					if (dirtyWorkloadSpans) {
 						(*dirtyWorkloadSpans)[workloadKey] = span;
 					} else if (_shared->sceneIngestionServices.workloads) {
@@ -1207,7 +1220,6 @@ namespace br::staticimport
 					BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainReadyDiffs::RecordWorkloadSpans");
 					BT_ZONE_VALUE(static_cast<int64_t>(publishResult.activeDrawSetSpans.size()));
 					for (auto& [workloadKey, span] : publishResult.activeDrawSetSpans) {
-						_importState->directStaticWorkloadCounts[workloadKey] = span;
 						if (dirtyWorkloadSpans) {
 							(*dirtyWorkloadSpans)[workloadKey] = span;
 						} else if (_shared->sceneIngestionServices.workloads) {
@@ -1706,6 +1718,54 @@ namespace br::staticimport
 		BT_PLOT("SARP.StaticDirect.TransactionReservedThisFrame", static_cast<int64_t>(reservedThisFrame));
 	}
 
+	void StaticImportStreamingPump::LogStaticPublicationAdmissionStall(std::chrono::steady_clock::time_point now)
+	{
+		const bool pending = _importState->staticImportPublicationAdmissionPending.load(std::memory_order_acquire);
+		const auto observed = _importState->staticImportPublicationObservedCoverage.load(std::memory_order_acquire);
+		if (!pending || observed != _importState->admissionStallCoverage ||
+			_importState->admissionStallSince == std::chrono::steady_clock::time_point{}) {
+			_importState->admissionStallCoverage = observed;
+			_importState->admissionStallSince = pending ? now : std::chrono::steady_clock::time_point{};
+			return;
+		}
+		if (now - _importState->admissionStallSince < std::chrono::seconds(5) ||
+			now - _importState->lastAdmissionStallLog < std::chrono::seconds(10)) return;
+		_importState->lastAdmissionStallLog = now;
+		const auto* requests = _shared->hasSceneIngestionServices
+			? _shared->sceneIngestionServices.execution.stateRequests : nullptr;
+		const auto* objects = _shared->hasSceneIngestionServices
+			? _shared->sceneIngestionServices.objects : nullptr;
+		if (!requests || !objects) return;
+		const auto gate = objects->DesiredBufferGateState();
+		const auto logChain = [&](const char* name, br::render::ArtifactKind kind) {
+			const auto diagnostic = requests->Diagnose({ kind, 0, 0 });
+			spdlog::warn(
+				"Static publication admission stalled: {} desiredRevision={} artifactRevision={} readiness={} blockers={} chain='{}'",
+				name, diagnostic.desiredRevision, diagnostic.artifact.revision,
+				static_cast<unsigned>(diagnostic.artifact.readiness), diagnostic.blockers.size(), diagnostic.blockerChain);
+		};
+		spdlog::warn(
+			"Static publication admission stalled: required={} observed={} mutationGeneration={} submittedMutationGeneration={} stateRevision={} activeStateRevision={} retirementEpoch={} lastPublicationRetirementEpoch={} framesInFlight={} dirty={} requiredGeometryCoverage={}",
+			_importState->staticImportPublicationRequiredCoverage.load(std::memory_order_acquire), observed,
+			gate.mutationGeneration, gate.submittedMutationGeneration, gate.stateRevision, gate.activeStateRevision,
+			gate.retirementEpoch, gate.lastPublicationRetirementEpoch, gate.framesInFlight, gate.dirty,
+			objects->RequiredGeometryCoverage());
+		logChain("DrawRecords", br::render::ArtifactKind::DrawRecordPage);
+		logChain("Indirect", br::render::ArtifactKind::IndirectWorkload);
+		logChain("StaticScene", br::render::ArtifactKind::StaticScene);
+		// Diagnose reports the address's cursor; these are the versions the edges require.
+		const auto geometry = requests->Diagnose({ br::render::ArtifactKind::GeometryBufferState, 0, 0 });
+		for (const auto& blocker : geometry.blockers) {
+			const auto current = requests->Diagnose(blocker.key);
+			spdlog::warn(
+				"Static publication admission stalled: GeometryBufferState blocker kind={} primary={} variant={} requiredRevision={} requiredGeneration={} requiredReadiness={} invalidation={} currentRevision={} currentGeneration={} currentReadiness={} desiredRevision={} error='{}'",
+				static_cast<unsigned>(blocker.key.kind), blocker.key.primaryID, blocker.key.variantID,
+				blocker.minimumRevision, blocker.requiredGeneration, static_cast<unsigned>(blocker.requiredReadiness),
+				static_cast<unsigned>(blocker.invalidation), current.artifact.revision, current.artifact.generation,
+				static_cast<unsigned>(current.artifact.readiness), current.desiredRevision, current.error);
+		}
+	}
+
 	void StaticImportStreamingPump::LogStaticStreamStatus()
 	{
 		const auto now = std::chrono::steady_clock::now();
@@ -1717,6 +1777,7 @@ namespace br::staticimport
 				? _hooks.hostObjectCounters() : StaticHostObjectCounters{};
 			const auto publicationWork = _shared->staticImportWorkScheduler.Snapshot(
 				StaticImportWorkSource::Publication);
+			LogStaticPublicationAdmissionStall(now);
 			spdlog::info(
 				"SARP static ownership: completed={} resource_backlog={} materialize_jobs={} materialize_backlog={} validation={} decisions={} decision_backlog={} graph_pending={} group_acks={} group_ack_backlog={} group_results={} template_requests={} transaction_ready(q={} events={} groups={} accepted={} rejected={}) publication(admission_pending={} required_coverage={} observed_coverage={} result_q={} gpu_ready_q={} gpu_pending={} work_published={} work_claimed={} work_active={})",
 				_bus->staticImportCompletedOutput.Size(),

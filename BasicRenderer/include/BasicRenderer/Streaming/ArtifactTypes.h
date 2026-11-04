@@ -235,6 +235,8 @@ using org::async::AsyncStateGraphTracePayload;
 using AsyncStateGraphTraceConfig = org::async::AsyncStateGraphTraceConfig<kArtifactKindCount>;
 
 struct AsyncStateGraphTraceReport {
+    // Stopping a trace only writes this. The other paths are set once it is expanded.
+    std::filesystem::path rawCapture;
     std::filesystem::path eventsCsv;
     std::filesystem::path staticGroupCsv;
     std::filesystem::path chromeTraceJson;

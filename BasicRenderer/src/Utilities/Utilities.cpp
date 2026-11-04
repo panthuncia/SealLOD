@@ -227,6 +227,7 @@ namespace detail {
         const std::wstring& filePath,
         br::processed_texture_cache::FileHeader& header)
     {
+        if (br::processed_texture_cache::TryFindIndexedHeader(filePath, header)) return true;
         std::ifstream file(filePath, std::ios::binary);
         if (!file) {
             return false;
@@ -245,6 +246,7 @@ namespace detail {
             return false;
         }
 
+        br::processed_texture_cache::RecordIndexedHeader(filePath, header);
         return true;
     }
 

@@ -1019,14 +1019,24 @@ namespace CLodCache {
 
 	uint64_t ComputeBuildConfigHash(std::string_view assetIdentifier)
 	{
-		size_t seed = 0;
-		auto hashEnvironmentString = [&seed](const char* name)
+		// This runs for every mesh of every cached asset, and reading the environment takes
+		// the CRT's process-wide lock. The settings are fixed before the renderer starts, so
+		// each worker reads them once.
+		const auto environmentVariable = [](const char* name) -> const std::string&
 		{
-			boost::hash_combine(seed, GetClusterLODEnvironmentVariable(name));
+			thread_local std::unordered_map<std::string_view, std::string> values;
+			const auto [value, inserted] = values.try_emplace(name);
+			if (inserted) value->second = GetClusterLODEnvironmentVariable(name);
+			return value->second;
 		};
-		auto hashEffectiveNodeBoneLimit = [&seed]()
+		size_t seed = 0;
+		auto hashEnvironmentString = [&seed, &environmentVariable](const char* name)
 		{
-			const std::string text = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_NODE_BONE_LIMIT");
+			boost::hash_combine(seed, environmentVariable(name));
+		};
+		auto hashEffectiveNodeBoneLimit = [&seed, &environmentVariable]()
+		{
+			const std::string& text = environmentVariable("BASICRENDERER_CLOD_NODE_BONE_LIMIT");
 			char* end = nullptr;
 			const unsigned long parsed = text.empty() ? 0ul : std::strtoul(text.c_str(), &end, 10);
 			const bool hasValidOverride = !text.empty() && end != text.c_str();

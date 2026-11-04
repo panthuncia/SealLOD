@@ -62,7 +62,7 @@ namespace {
         return channels.empty() ? fallback : channels[0];
     }
 
-    bool HeightAtlasStreamingEnabledForMaterialUpload() {
+    bool ReadHeightAtlasStreamingEnabled() {
         char* value = nullptr;
         size_t valueSize = 0;
         if (_dupenv_s(&value, &valueSize, "SARP_HEIGHT_ATLAS_STREAMING") != 0 || value == nullptr || *value == '\0') {
@@ -77,6 +77,11 @@ namespace {
             return static_cast<char>(std::tolower(c));
         });
         return text != "0" && text != "false" && text != "no" && text != "off";
+    }
+
+    bool HeightAtlasStreamingEnabledForMaterialUpload() {
+        static const bool enabled = ReadHeightAtlasStreamingEnabled();
+        return enabled;
     }
 
     DirectX::XMUINT3 RgbChannelsOrDefault(const std::vector<uint32_t>& channels) {

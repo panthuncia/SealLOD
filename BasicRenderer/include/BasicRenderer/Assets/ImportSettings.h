@@ -25,6 +25,10 @@ struct ImportSettings {
 	// Offline-only. Allows construction of the temporary geometry/material
 	// recipe used to publish Reyes height-atlas variants.
 	bool prepareObjectReyesAtlasRecipes = false;
+	// Source vertices and indices of each part, kept for CPU-side consumers. Rendering
+	// uses the CLod data, so an import nothing inspects can leave them out. Cached NIFs
+	// only: a fresh import has to build this data to cache it.
+	bool loadPrototypeGeometry = true;
 };
 
 } // namespace USDLoader

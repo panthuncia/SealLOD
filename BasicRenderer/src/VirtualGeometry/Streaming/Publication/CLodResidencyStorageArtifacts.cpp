@@ -40,23 +40,19 @@ ArtifactBuildResult BuildCLodResidencyCapacityGate(const ArtifactBuildContext& c
         return ArtifactBuildResult::Failure("CLod residency capacity gate input invalid");
     }
     std::uint64_t waitIdentity = 0;
-    const auto storage = input->directory->Covering(input->capacity, waitIdentity);
-    if (!storage) {
+    auto storage = input->directory->Covering(input->capacity, waitIdentity);
+    if (waitIdentity != 0) {
         return ArtifactBuildResult::Suspend(ArtifactSuspension::External(waitIdentity,
             "geometry waits for a filled CLod residency bitset covering its groups"));
     }
-    // Exact, not Latest: this gate is one immutable version, and a newer storage
-    // must not rebuild it (and with it the geometry cut that requires it).
-    const auto dependency = std::ranges::find_if(context.dependencies, [&](const ArtifactSnapshot& value) {
-        return value.Version() == storage.version;
-    });
-    if (dependency == context.dependencies.end()) {
-        return ArtifactBuildResult::Needs({ Exact(storage, ArtifactReadiness::CpuReady) });
+    if (!storage.Get<RendererStateFragmentArtifact>()) {
+        return ArtifactBuildResult::Failure("CLod residency storage has no fragment");
     }
-    if (!dependency->payload.Get<RendererStateFragmentArtifact>()) {
-        return ArtifactBuildResult::Failure("CLod residency storage dependency has no fragment");
-    }
-    return ArtifactBuildResult::Ready(dependency->payload);
+    // Copied rather than required as an edge: this gate is one immutable version,
+    // so a newer storage must not rebuild it. An exact edge named here would also
+    // strand it, because a newer storage can reclaim that version while this
+    // result waits to be applied.
+    return ArtifactBuildResult::Ready(std::move(storage));
 }
 
 } // namespace
@@ -80,16 +76,16 @@ void CLodResidencyStorageDirectory::PublishStorage(
         basic_telemetry::AddCounter("SARP.CLodResidencyStorage.RequestRejected");
         return;
     }
-    // Gates are handed only versions that have already built, so an exact
-    // requirement on one can never observe it superseded before completion.
+    // Gates are handed only storages that have already built.
     auto awaiter = m_requests.AwaitExact(result.Handle(), ArtifactReadiness::CpuReady,
         TaskLane::FrameCritical, TaskDomain::GraphPublication,
-        [this, handle = result.Handle(), capacity](const ArtifactSnapshot&) {
+        [this, revision = result.Handle().version.revision, capacity](const ArtifactSnapshot& snapshot) {
             std::vector<std::uint64_t> satisfied;
             {
                 std::lock_guard lock(m_mutex);
-                if (m_newest && m_newest.version.revision >= handle.version.revision) return;
-                m_newest = handle;
+                if (m_newestRevision >= revision) return;
+                m_newestRevision = revision;
+                m_newestPayload = snapshot.payload;
                 m_newestCapacity = capacity;
                 const auto end = m_waiting.upper_bound(capacity);
                 for (auto it = m_waiting.begin(); it != end; ++it) satisfied.push_back(it->second);
@@ -108,13 +104,13 @@ void CLodResidencyStorageDirectory::PublishStorage(
     m_awaiters.push_back(std::move(awaiter));
 }
 
-ArtifactVersionHandle CLodResidencyStorageDirectory::Covering(std::uint32_t capacity, std::uint64_t& waitIdentity) {
+ArtifactPayload CLodResidencyStorageDirectory::Covering(std::uint32_t capacity, std::uint64_t& waitIdentity) {
     auto requested = m_requestedCapacity.load(std::memory_order_relaxed);
     while (requested < capacity &&
         !m_requestedCapacity.compare_exchange_weak(requested, capacity, std::memory_order_acq_rel)) {
     }
     std::lock_guard lock(m_mutex);
-    if (m_newest && m_newestCapacity >= capacity) return m_newest;
+    if (m_newestRevision != 0 && m_newestCapacity >= capacity) return m_newestPayload;
     waitIdentity = br::render::AllocateArtifactSuspensionIdentity();
     m_waiting.emplace(capacity, waitIdentity);
     return {};

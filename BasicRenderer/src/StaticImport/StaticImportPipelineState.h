@@ -7,6 +7,7 @@
 // reference to this object (the runtime owns it); the same arrangement as
 // StaticImportWorkBus, which carries the queues that connect the same stages.
 
+#include <algorithm>
 #include <array>
 #include <BasicRenderer/Streaming/ObjectRequests.h>
 #include <atomic>
@@ -85,6 +86,13 @@ namespace br::staticimport
 
 		std::array<Shard, kShardCount> _shards;
 	};
+
+	inline void SaturatingSubtract(std::atomic<std::size_t>& value, std::size_t amount) noexcept
+	{
+		auto current = value.load(std::memory_order_acquire);
+		while (!value.compare_exchange_weak(current, current - (std::min)(current, amount), std::memory_order_acq_rel)) {
+		}
+	}
 
 	struct StaticImportPipelineState
 	{
@@ -184,11 +192,14 @@ namespace br::staticimport
 		std::atomic<std::uint64_t> staticRemovalTelemetryLogCount{ 0 };
 
 		// Live streaming state shared by the pump and the host: applied placement
-		// and active-group counts, workload tallies, and the last status log.
-		std::size_t staticAppliedPlacementCount{ 0 };
-		std::size_t staticRuntimeGroupActiveCount{ 0 };
-		std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> directStaticWorkloadCounts;
+		// and active-group counts, and the last status log. The counts change on the
+		// update thread and on extensions' own threads.
+		std::atomic<std::size_t> staticAppliedPlacementCount{ 0 };
+		std::atomic<std::size_t> staticRuntimeGroupActiveCount{ 0 };
 		std::chrono::steady_clock::time_point lastStaticStreamLog{};
+		std::uint64_t admissionStallCoverage{ 0 };
+		std::chrono::steady_clock::time_point admissionStallSince{};
+		std::chrono::steady_clock::time_point lastAdmissionStallLog{};
 		std::unordered_map<std::uint64_t, std::uint32_t> directStaticPrepareRetries;
 	};
 }
