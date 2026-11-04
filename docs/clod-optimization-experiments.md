@@ -484,3 +484,39 @@ simplify.
 - Sessions differ by a forest patch: a captured region is 18-22% nearer in some sessions and 3-4% in others, with
   per-mesh cluster and instance counts unchanged. It predates these rebuilds. Compare images only between
   sessions in the same state; the cause is unknown.
+
+### Hardware raster on the same scene (2026-11-04)
+
+SaveLab, world 0x3C, radius 100, saved camera, RTX 5070 Laptop. 150K clusters, 8.2M triangles, 7.0M pixel invocations,
+5.6M visibility writes. A-B-A in one session unless stated, in sessions with culling near 2 ms.
+
+| Change | Hardware raster | Decision |
+|---|---|---|
+| Shared cluster loader and precomputed projection rows (across sessions) | 2.74 -> 2.69 ms | Kept. Software raster also went 12.39 -> 11.65 ms |
+| Source group validation off (runtime skip in the A-B-A) | 2.70 -> 2.14 ms, -20.5% | Kept, now opt-in. Compiled out it reaches 1.87 ms across sessions |
+| Remove the unused `drawRecordIndex` interpolant | +0.1%, flat | Kept as cleanup |
+| Compile out pixel telemetry | +0.05%, flat | Not changed |
+| Read before `InterlockedMin` in the pixel shader | +1.3% | Rejected |
+| Depth from `SV_Position.w` | -0.02%, flat | Rejected. Showed -8.5% in a slow session, see below |
+| Cluster setup on lane 0 through groupshared | +12.6% | Rejected. Per-lane loading is cheaper in the mesh shader |
+| `SV_CullPrimitive` for no-sample and back-facing triangles | +48.7% | Rejected. The groupshared positions and barrier cost more than the rasterizer does |
+
+Cost split probes, not candidates: no pixel work brings the pass to 2.00 ms from 2.70, an upper bound because the empty
+visibility buffer also changes culling. Skipping the alpha test makes the pass 4.7% slower, since more pixels survive.
+
+The software raster threshold is flat near 16 after these changes (total of raster, culling and material evaluation):
+
+| Threshold | 8 | 10 | 12 | 14 | 16 | 20 | 24 |
+|---|---|---|---|---|---|---|---|
+| Total ms | 19.88 | 19.48 | 19.36 | 19.33 | 19.20-19.25 | 19.17 | 19.19 |
+
+Left at 16, because this camera does not test near-plane triangles, which software raster drops.
+
+Forcing virtual shadow rendering with the page cache off ran the changed mesh shader path: 3.0M pixel invocations, 3.0M
+writes, no compile failures. No before and after comparison exists for that path.
+
+**Not tried.** A real depth target with early depth: covered pixels are at most 1.75M against 7.0M invocations, so there
+is overdraw to remove, but it needs multi-view C++ work and the no-pixel-work bound limits the gain to about 0.7 ms.
+
+**Trap.** Reject sessions with slow culling (see `docs/open-defects.md` in SARP). A-B-A deltas from such a session are
+not reliable.
