@@ -26,6 +26,11 @@ struct CLodWorkGraphTelemetryBufferTag {};
 // Hardware phase-1 arguments consumed by the primary visibility raster pass.
 // Exposed for readback diagnostics at the producer/consumer boundary.
 struct CLodPrimaryPhase1RasterIndirectArgsTag {};
+// Per-bucket cluster counts and software-raster arguments for the same readback.
+struct CLodPrimaryPhase1RasterHistogramTag {};
+struct CLodPrimaryPhase1SwRasterHistogramTag {};
+struct CLodPrimaryPhase1SwRasterIndirectArgsTag {};
+struct CLodPrimaryPhase1SwVisibleClustersCounterTag {};
 struct CLodOcclusionReplayStateBufferTag {};
 struct CLodReyesDiceQueueTag {};
 struct CLodReyesTessTableConfigsTag {};

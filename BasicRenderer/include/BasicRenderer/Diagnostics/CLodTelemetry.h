@@ -3,7 +3,13 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 enum class CLodWorkGraphCounterIndex : uint32_t {
     ObjectCullThreads = 0,
@@ -234,6 +240,14 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     DynamicWindSkinCacheMetadataBytesUsed,
     RasterArgsNonZeroBuckets,
     RasterArgsDispatchGroups,
+    SWRasterClusters,
+    SWRasterInputTriangles,
+    SWRasterBackfaceCulled,
+    SWRasterDegenerateOrOffscreen,
+    SWRasterNoSampleCovered,
+    SWRasterCoveredPixels,
+    SWRasterAlphaRejectedPixels,
+    SWRasterVisibilityWrites,
 
     Count
 };
@@ -248,6 +262,8 @@ static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCa
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices) == 245u);
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterArgsNonZeroBuckets) == 250u);
 static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterArgsDispatchGroups) == 251u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::SWRasterClusters) == 252u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::SWRasterVisibilityWrites) == 259u);
 
 struct CLodWorkGraphTelemetryCounters {
     std::array<uint32_t, CLodWorkGraphCounterCount> counters{};
@@ -421,14 +437,55 @@ struct CLodDirectionalShadowDebugSnapshot {
     std::array<CLodDirectionalShadowClipmapDebugEntry, CLodDirectionalShadowDebugMaxClipmaps> clipmaps{};
 };
 
-inline std::atomic<uint32_t> g_clodWorkGraphTelemetryEnabled = 0u;
+// Each requester owns one bit. The menu re-evaluates its need every frame during
+// preparation, so a single shared flag would cancel the debug requesters, which
+// only run after preparation has already read the flag.
+enum class CLodWorkGraphTelemetryRequester : uint32_t {
+    Menu = 1u << 0,
+    VisibilityDebug = 1u << 1,
+    VirtualShadowDebug = 1u << 2,
+};
 
-inline void SetCLodWorkGraphTelemetryEnabled(bool enabled) {
-    g_clodWorkGraphTelemetryEnabled.store(enabled ? 1u : 0u, std::memory_order_relaxed);
+inline std::atomic<uint32_t> g_clodWorkGraphTelemetryRequests = 0u;
+
+inline void SetCLodWorkGraphTelemetryRequested(CLodWorkGraphTelemetryRequester requester, bool requested) {
+    const auto bit = static_cast<uint32_t>(requester);
+    if (requested) {
+        g_clodWorkGraphTelemetryRequests.fetch_or(bit, std::memory_order_relaxed);
+    } else {
+        g_clodWorkGraphTelemetryRequests.fetch_and(~bit, std::memory_order_relaxed);
+    }
 }
 
 inline bool IsCLodWorkGraphTelemetryEnabled() {
-    return g_clodWorkGraphTelemetryEnabled.load(std::memory_order_relaxed) != 0u;
+    return g_clodWorkGraphTelemetryRequests.load(std::memory_order_relaxed) != 0u;
+}
+
+// Where a mesh came from, by Mesh::GetGlobalID(), for naming visible clusters in
+// telemetry. The asset source is known only at import, usually before telemetry is
+// enabled, so this is recorded unconditionally: one entry per requested template.
+struct CLodMeshSource {
+    std::string name;
+    uint32_t rasterFlags = 0u; // OR of the mesh's material variants
+};
+
+struct CLodMeshSourceRegistry {
+    std::mutex mutex;
+    std::unordered_map<uint64_t, CLodMeshSource> meshes;
+};
+
+inline CLodMeshSourceRegistry g_clodMeshSources;
+
+inline void RecordCLodMeshSource(uint64_t meshIdentity, std::string_view modelPath, std::string_view partName, uint32_t rasterFlags) {
+    std::lock_guard lock(g_clodMeshSources.mutex);
+    auto& mesh = g_clodMeshSources.meshes[meshIdentity];
+    mesh.rasterFlags |= rasterFlags;
+    if (!mesh.name.empty()) return;
+    mesh.name = modelPath;
+    if (!partName.empty()) {
+        mesh.name += '#';
+        mesh.name += partName;
+    }
 }
 
 inline std::atomic<uint64_t> g_clodDirectionalShadowDebugSequence = 0;

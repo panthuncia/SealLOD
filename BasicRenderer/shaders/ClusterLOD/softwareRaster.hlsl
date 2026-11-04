@@ -399,7 +399,8 @@ float3 SWLoadVertexPosition(SWClusterWork work, ByteAddressBuffer slab, uint pag
         vertexIndex);
 #if defined(PSO_SKINNED)
     return SWApplySkinning(slab, pageByteOffset, vertexIndex, position, work.assemblyTransformIndex);
-#elif !CLOD_WG_RIGID_SW_RASTER
+#elif !CLOD_WG_RIGID_SW_RASTER && defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
+    // Compute dispatches one PSO per bucket, so only the work graph's single library sees both.
     if ((gs_setup.vertexFlags & VERTEX_SKINNED) != 0u)
     {
         return SWApplySkinning(slab, pageByteOffset, vertexIndex, position, work.assemblyTransformIndex);

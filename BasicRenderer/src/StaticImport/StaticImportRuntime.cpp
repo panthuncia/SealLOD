@@ -1,6 +1,7 @@
 // The static import runtime (see StaticImportRuntime.h).
 
 #include <BasicRenderer/StaticImport/StaticImportRuntime.h>
+#include <BasicRenderer/Diagnostics/CLodTelemetry.h>
 
 
 #include <algorithm>
@@ -868,6 +869,7 @@ namespace br::staticimport
 					if (templateRefs.contains(key) || !queuedKeys.insert(key).second) {
 						continue;
 					}
+					RecordCLodMeshSource(key.meshID, group.ModelPath(), part.name, static_cast<std::uint32_t>(key.rasterFlags));
 					outRequests.push_back(StaticTemplateRequest{
 						.key = key,
 						.mesh = mesh,

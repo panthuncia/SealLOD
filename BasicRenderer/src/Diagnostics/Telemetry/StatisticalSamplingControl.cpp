@@ -159,7 +159,7 @@ int main(int argc, char** argv)
 
     const std::string command = positional[0];
     if (response.value("ok", false) && !asynchronous &&
-        (command == "pso.recompile" || command == "pso.activate")) {
+        (command == "pso.recompile" || command == "pso.activate" || command == "frame.capture")) {
         const uint64_t jobId = response.value("job_id", uint64_t{ 0 });
         while (jobId != 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -3,20 +3,31 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
 #include "Scene/ECS/RendererECSManager.h"
+#include "Runtime/Frame/RendererFrameInputs.h"
+#include "VirtualGeometry/GeometryStorage/GeometryBufferStateArtifacts.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
+#include "BasicRenderer/Pipeline/CLodOptions.h"
+#include "BasicRenderer/Pipeline/RasterBucketFlags.h"
 #include "Scene/Objects/IndirectStateArtifacts.h"
 #include <BasicRenderer/Extensions/ResourceComponent.h>
 #include "Scene/Objects/ObjectManager.h"
@@ -66,6 +77,225 @@ bool IsCLodVirtualShadowTelemetryDebugEnabled()
             CLodVirtualShadowTelemetryDebugSettingName)();
 }
 
+// Clears an in-flight flag once every callback holding this has run or been
+// dropped: a capture anchored to a pass that never prepares is discarded without
+// calling back.
+struct ReadbackInFlightRelease {
+    explicit ReadbackInFlightRelease(std::shared_ptr<std::atomic_bool> inFlightFlag) : flag(std::move(inFlightFlag)) {}
+    ReadbackInFlightRelease(const ReadbackInFlightRelease&) = delete;
+    ReadbackInFlightRelease& operator=(const ReadbackInFlightRelease&) = delete;
+    ~ReadbackInFlightRelease() { flag->store(false, std::memory_order_release); }
+
+    std::shared_ptr<std::atomic_bool> flag;
+};
+
+// Joins one phase-1 raster path's histogram (exact clusters per bucket) with its
+// indirect arguments (dispatch groups) and logs them with the bucket's flags.
+struct RasterBucketAudit {
+    const char* path = "";
+    std::uint64_t frame = 0;
+    std::vector<MaterialRasterFlags> flags;
+    std::shared_ptr<ReadbackInFlightRelease> inFlight;
+    std::mutex mutex;
+    std::optional<std::vector<std::byte>> histogram;
+    std::optional<std::vector<std::byte>> args;
+
+    void SetHistogram(std::vector<std::byte> data) {
+        std::lock_guard lock(mutex);
+        histogram = std::move(data);
+        TryReport();
+    }
+
+    void SetArgs(std::vector<std::byte> data) {
+        std::lock_guard lock(mutex);
+        args = std::move(data);
+        TryReport();
+    }
+
+private:
+    void TryReport() const {
+        if (!histogram || !args) return;
+        const auto bucketCount = (std::min)(histogram->size() / sizeof(std::uint32_t),
+            args->size() / sizeof(RasterizeClustersCommand));
+        std::uint32_t nonZero = 0;
+        std::uint64_t totalClusters = 0, totalGroups = 0;
+        std::uint64_t alphaTestClusters = 0, doubleSidedClusters = 0, skinnedClusters = 0;
+        for (std::size_t bucket = 0; bucket < bucketCount; ++bucket) {
+            std::uint32_t clusters = 0;
+            std::memcpy(&clusters, histogram->data() + bucket * sizeof(clusters), sizeof(clusters));
+            RasterizeClustersCommand command{};
+            std::memcpy(&command, args->data() + bucket * sizeof(command), sizeof(command));
+            const std::uint64_t groups = static_cast<std::uint64_t>(command.dispatchX) *
+                command.dispatchY * command.dispatchZ;
+            if (clusters == 0u && groups == 0u) continue;
+
+            const bool flagsKnown = bucket < flags.size();
+            const std::uint32_t bucketFlags = flagsKnown ? static_cast<std::uint32_t>(flags[bucket]) : 0u;
+            const bool alphaTest = (bucketFlags & MaterialRasterFlagsAlphaTest) != 0u;
+            const bool doubleSided = (bucketFlags & MaterialRasterFlagsDoubleSided) != 0u;
+            const bool displacement = (bucketFlags & MaterialRasterFlagsGeometricDisplacement) != 0u;
+            const bool skinned = (bucketFlags & MaterialRasterFlagsSkinned) != 0u;
+            ++nonZero;
+            totalClusters += clusters;
+            totalGroups += groups;
+            if (alphaTest) alphaTestClusters += clusters;
+            if (doubleSided) doubleSidedClusters += clusters;
+            if (skinned) skinnedClusters += clusters;
+            spdlog::info(
+                "SARP CLOD phase-1 raster bucket: frame={} path={} bucket={} clusters={} groups={} "
+                "flags=0x{:x} flags_known={} alpha_test={} double_sided={} displacement={} skinned={}",
+                frame, path, bucket, clusters, groups,
+                bucketFlags, flagsKnown ? 1 : 0, alphaTest ? 1 : 0, doubleSided ? 1 : 0, displacement ? 1 : 0, skinned ? 1 : 0);
+        }
+        spdlog::info(
+            "SARP CLOD phase-1 raster buckets: frame={} path={} buckets={} nonzero={} clusters={} groups={} "
+            "alpha_test_clusters={} double_sided_clusters={} skinned_clusters={}",
+            frame, path, bucketCount, nonZero, totalClusters, totalGroups,
+            alphaTestClusters, doubleSidedClusters, skinnedClusters);
+    }
+};
+
+// The immutable CPU images a visible cluster's mesh and LOD are resolved through.
+// Draw records are not used for identity: the static import path leaves their
+// expectedMeshIdentity fields zero.
+struct VisibleClusterTables {
+    const std::vector<std::byte>& drawRecords;
+    const std::vector<std::byte>& clodOffsets;
+    const std::vector<std::byte>& meshMetadata;
+    const std::vector<std::byte>& groups;
+};
+
+// Attributes phase-1 visible clusters to meshes. Hardware records fill the buffer
+// from the start; software records fill it from the end (index = capacity - 1 - i).
+void LogVisibleClusterAttribution(std::uint64_t frame, const std::vector<std::byte>& records, std::uint32_t hwReported,
+    std::uint32_t swReported, std::uint32_t capacity, const VisibleClusterTables& tables) {
+    constexpr std::size_t recordBytes = sizeof(std::uint32_t) * 4u;
+    constexpr std::size_t kMeshesToLog = 30u;
+    constexpr std::uint32_t kVoxelFlag = 0x80000000u;
+
+    const auto available = static_cast<std::uint32_t>((std::min<std::size_t>)(records.size() / recordBytes, UINT32_MAX));
+    const std::uint32_t recordCapacity = capacity != 0u ? (std::min)(capacity, available) : available;
+    const std::uint32_t hwCount = (std::min)(hwReported, recordCapacity);
+    const std::uint32_t swCount = (std::min)(swReported, recordCapacity - hwCount);
+    const std::size_t drawRecordCount = tables.drawRecords.size() / sizeof(InstanceDrawRecordCB);
+    const std::size_t clodOffsetCount = tables.clodOffsets.size() / sizeof(MeshInstanceClodOffsets);
+    const std::size_t metadataCount = tables.meshMetadata.size() / sizeof(CLodMeshMetadata);
+    const std::size_t groupCount = tables.groups.size() / sizeof(ClusterLODGroup);
+
+    struct MeshRow {
+        std::uint32_t metadataIndex = 0;
+        CLodMeshMetadata metadata{};
+        std::uint32_t sw = 0, hw = 0, instances = 0;
+        std::uint64_t depthSum = 0, depthSamples = 0, atDepth0 = 0;
+        std::uint32_t depthMin = UINT32_MAX, depthMax = 0;
+        CLodMeshSource source;
+        bool hasSource = false;
+    };
+    std::vector<MeshRow> rows;
+    std::unordered_map<std::uint32_t, std::uint32_t> rowByMetadataIndex;
+    constexpr std::int32_t kUnresolved = -1, kInvalid = -2;
+    std::vector<std::int32_t> rowByDrawRecord(drawRecordCount, kUnresolved);
+    std::uint64_t voxelSkipped = 0, invalidRecords = 0, hwAttributed = 0, swAttributed = 0;
+
+    const auto resolveRow = [&](std::uint32_t drawRecordIndex) -> std::int32_t {
+        InstanceDrawRecordCB drawRecord{};
+        std::memcpy(&drawRecord, tables.drawRecords.data() + drawRecordIndex * sizeof(InstanceDrawRecordCB), sizeof(drawRecord));
+        if (drawRecord.clodOffsetIndex >= clodOffsetCount) return kInvalid;
+        MeshInstanceClodOffsets offsets{};
+        std::memcpy(&offsets, tables.clodOffsets.data() + drawRecord.clodOffsetIndex * sizeof(MeshInstanceClodOffsets), sizeof(offsets));
+        if (offsets.clodMeshMetadataIndex >= metadataCount) return kInvalid;
+        const auto [found, inserted] = rowByMetadataIndex.try_emplace(
+            offsets.clodMeshMetadataIndex, static_cast<std::uint32_t>(rows.size()));
+        if (inserted) {
+            auto& row = rows.emplace_back();
+            row.metadataIndex = offsets.clodMeshMetadataIndex;
+            std::memcpy(&row.metadata, tables.meshMetadata.data() + offsets.clodMeshMetadataIndex * sizeof(CLodMeshMetadata), sizeof(CLodMeshMetadata));
+            const std::uint64_t identity = (static_cast<std::uint64_t>(row.metadata.meshIdentityHi) << 32u) | row.metadata.meshIdentityLo;
+            std::lock_guard lock(g_clodMeshSources.mutex);
+            if (const auto known = g_clodMeshSources.meshes.find(identity); known != g_clodMeshSources.meshes.end()) {
+                row.source = known->second;
+                row.hasSource = true;
+            }
+        }
+        return static_cast<std::int32_t>(found->second);
+    };
+
+    const auto visit = [&](std::uint32_t recordIndex, bool software) {
+        std::array<std::uint32_t, 4> words{};
+        std::memcpy(words.data(), records.data() + recordIndex * recordBytes, recordBytes);
+        if ((words[3] & kVoxelFlag) != 0u) {
+            ++voxelSkipped;
+            return;
+        }
+        const std::uint32_t drawRecordIndex = (words[0] >> 8u) & 0xFFFFFFu;
+        if (drawRecordIndex >= drawRecordCount) {
+            ++invalidRecords;
+            return;
+        }
+        auto& rowIndex = rowByDrawRecord[drawRecordIndex];
+        const bool firstClusterOfInstance = rowIndex == kUnresolved;
+        if (firstClusterOfInstance) rowIndex = resolveRow(drawRecordIndex);
+        if (rowIndex == kInvalid) {
+            ++invalidRecords;
+            return;
+        }
+        auto& row = rows[static_cast<std::size_t>(rowIndex)];
+        if (firstClusterOfInstance) ++row.instances;
+        if (software) {
+            ++row.sw;
+            ++swAttributed;
+        } else {
+            ++row.hw;
+            ++hwAttributed;
+        }
+        // The group id is local to the mesh; its depth is 0 at the finest level.
+        const std::uint32_t localGroup = ((words[1] >> 14u) & 0x3FFFFu) | ((words[2] & 0x3u) << 18u);
+        const std::size_t globalGroup = static_cast<std::size_t>(row.metadata.groupsBase) + localGroup;
+        if (localGroup < row.metadata.groupChunkTableCount && globalGroup < groupCount) {
+            std::int32_t storedDepth = 0;
+            std::memcpy(&storedDepth,
+                tables.groups.data() + globalGroup * sizeof(ClusterLODGroup) + offsetof(ClusterLODGroup, depth),
+                sizeof(storedDepth));
+            const auto depth = static_cast<std::uint32_t>((std::max)(storedDepth, 0));
+            row.depthSum += depth;
+            ++row.depthSamples;
+            if (depth == 0u) ++row.atDepth0;
+            row.depthMin = (std::min)(row.depthMin, depth);
+            row.depthMax = (std::max)(row.depthMax, depth);
+        }
+    };
+    for (std::uint32_t i = 0; i < hwCount; ++i) visit(i, false);
+    for (std::uint32_t i = 0; i < swCount; ++i) visit(recordCapacity - 1u - i, true);
+
+    const auto bySoftwareClusters = [](const MeshRow& a, const MeshRow& b) {
+        return a.sw != b.sw ? a.sw > b.sw : a.hw > b.hw;
+    };
+    const std::size_t rowsToLog = (std::min)(rows.size(), kMeshesToLog);
+    std::partial_sort(rows.begin(), rows.begin() + static_cast<std::ptrdiff_t>(rowsToLog), rows.end(), bySoftwareClusters);
+
+    spdlog::info(
+        "SARP CLOD cluster attribution summary: frame={} hw_reported={} sw_reported={} capacity={} hw_clusters={} sw_clusters={} "
+        "voxel_skipped={} invalid_records={} meshes={}",
+        frame, hwReported, swReported, recordCapacity, hwAttributed, swAttributed, voxelSkipped, invalidRecords, rows.size());
+    for (std::size_t rank = 0; rank < rowsToLog; ++rank) {
+        const auto& row = rows[rank];
+        const int alpha = row.hasSource ? ((row.source.rasterFlags & MaterialRasterFlagsAlphaTest) != 0u ? 1 : 0) : -1;
+        const int doubleSided = row.hasSource ? ((row.source.rasterFlags & MaterialRasterFlagsDoubleSided) != 0u ? 1 : 0) : -1;
+        const bool hasDepth = row.depthSamples != 0u;
+        spdlog::info(
+            "SARP CLOD cluster attribution: frame={} rank={} mesh={} name=\"{}\" sw_clusters={} hw_clusters={} instances={} "
+            "alpha={} double_sided={} groups={} lod_levels={} max_depth={} selected_depth_min={} selected_depth_avg={:.2f} "
+            "selected_depth_max={} selected_at_depth0={}",
+            frame, rank, row.metadataIndex, row.source.name.empty() ? "unregistered" : row.source.name.c_str(),
+            row.sw, row.hw, row.instances, alpha, doubleSided,
+            row.metadata.groupChunkTableCount, row.metadata.lodLevelCount, row.metadata.maxDepth,
+            hasDepth ? static_cast<std::int64_t>(row.depthMin) : -1,
+            hasDepth ? static_cast<double>(row.depthSum) / static_cast<double>(row.depthSamples) : -1.0,
+            hasDepth ? static_cast<std::int64_t>(row.depthMax) : -1,
+            row.atDepth0);
+    }
+}
+
 }
 
 void Renderer::MaybeRequestCLodVisibilityTelemetry() {
@@ -75,14 +305,14 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 
     if (!IsCLodVisibilityTelemetryDebugEnabled()) {
         if (m_clodVisibilityTelemetryDebugEnabledByRenderer) {
-            SetCLodWorkGraphTelemetryEnabled(false);
+            SetCLodWorkGraphTelemetryRequested(CLodWorkGraphTelemetryRequester::VisibilityDebug, false);
             m_clodVisibilityTelemetryDebugEnabledByRenderer = false;
             m_loggedCLodVisibilityTelemetryEnabled = false;
         }
         return;
     }
 
-    SetCLodWorkGraphTelemetryEnabled(true);
+    SetCLodWorkGraphTelemetryRequested(CLodWorkGraphTelemetryRequester::VisibilityDebug, true);
     m_clodVisibilityTelemetryDebugEnabledByRenderer = true;
 
     if (!m_loggedCLodVisibilityTelemetryEnabled) {
@@ -171,6 +401,39 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         return;
     }
 
+    const auto firstResource = [](auto query) {
+        std::shared_ptr<org::Resource> found;
+        query.each([&](const Components::Resource& component) {
+            if (!found) found = component.resource.lock();
+        });
+        return found;
+    };
+    const auto hwHistogramResource = firstResource(world.query_builder<const Components::Resource>()
+        .with<CLodPrimaryPhase1RasterHistogramTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build());
+    const auto swHistogramResource = firstResource(world.query_builder<const Components::Resource>()
+        .with<CLodPrimaryPhase1SwRasterHistogramTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build());
+    const auto swArgsResource = firstResource(world.query_builder<const Components::Resource>()
+        .with<CLodPrimaryPhase1SwRasterIndirectArgsTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build());
+
+    const auto swVisibleCounterResource = firstResource(world.query_builder<const Components::Resource>()
+        .with<CLodPrimaryPhase1SwVisibleClustersCounterTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build());
+    std::uint32_t visibleClusterCapacity = 0u;
+    world.query_builder<const CLodVisibleClusterCapacity>()
+        .with<VisibleClustersBufferTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build()
+        .each([&](const CLodVisibleClusterCapacity& capacity) {
+            visibleClusterCapacity = capacity.maxVisibleClusters;
+        });
+
     const uint64_t requestedFrame = m_totalFramesRendered;
     m_lastCLodVisibilityTelemetryRequestFrame = requestedFrame;
     m_clodTelemetryReadbackPending = true;
@@ -184,7 +447,14 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     struct VisibleRecordAudit {
         std::mutex mutex;
         std::optional<std::uint32_t> count;
+        std::optional<std::uint32_t> swCount;
         std::optional<std::vector<std::byte>> indices;
+        std::shared_ptr<const std::vector<std::byte>> drawRecords;
+        std::shared_ptr<const br::render::PublishedGpuBufferVersion> clodOffsetsVersion;
+        std::shared_ptr<const br::render::PublishedGpuBufferVersion> meshMetadataVersion;
+        std::shared_ptr<const br::render::PublishedGpuBufferVersion> groupsVersion;
+        std::uint32_t capacity = 0;
+        bool attributed = false;
         std::unordered_set<std::uint32_t> allowed;
         std::uint32_t residentDrawRecordCount = 0;
         std::uint64_t drawRecordsRevision = 0;
@@ -193,6 +463,19 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 
         void TryReport(std::uint64_t frame) {
             std::lock_guard lock(mutex);
+            if (!attributed && count && swCount && indices && drawRecords) {
+                attributed = true;
+                const auto clodOffsets = clodOffsetsVersion ? clodOffsetsVersion->MaterializeCpuImage() : nullptr;
+                const auto meshMetadata = meshMetadataVersion ? meshMetadataVersion->MaterializeCpuImage() : nullptr;
+                const auto groups = groupsVersion ? groupsVersion->MaterializeCpuImage() : nullptr;
+                if (clodOffsets && meshMetadata && groups) {
+                    LogVisibleClusterAttribution(frame, *indices, *count, *swCount, capacity,
+                        VisibleClusterTables{*drawRecords, *clodOffsets, *meshMetadata, *groups});
+                } else {
+                    spdlog::warn("SARP CLOD cluster attribution: frame={} geometry CPU images unavailable (offsets={} metadata={} groups={}).",
+                        frame, clodOffsets != nullptr, meshMetadata != nullptr, groups != nullptr);
+                }
+            }
             if (reported || !count || !indices) return;
             constexpr std::size_t recordBytes = sizeof(std::uint32_t) * 4u;
             const auto available = static_cast<std::uint32_t>(indices->size() / recordBytes);
@@ -217,6 +500,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         }
     };
     auto visibleTransformAudit = std::make_shared<VisibleRecordAudit>();
+    visibleTransformAudit->capacity = visibleClusterCapacity;
     if (const auto published = m_context.publishedRendererState) {
         visibleTransformAudit->drawRecordsRevision = published->drawRecords.revision;
         visibleTransformAudit->indirectRevision = published->indirectWorkloads.revision;
@@ -227,6 +511,17 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         visibleTransformAudit->residentDrawRecordCount = drawVersion
             ? static_cast<std::uint32_t>((std::min<std::uint64_t>)(drawVersion->elementCount, UINT32_MAX)) : 0u;
         const auto drawBytes = drawVersion ? drawVersion->MaterializeCpuImage() : nullptr;
+        visibleTransformAudit->drawRecords = drawBytes;
+        if (const auto geometry = published->geometry.selectedState.Get<br::render::PublishedGeometryBufferState>()) {
+            // Catalog variants from MeshManager's geometry buffer definitions.
+            constexpr std::uint64_t kClodOffsetsVariant = 3u, kMeshMetadataVariant = 5u, kGroupsVariant = 7u;
+            for (std::size_t i = 0; i < geometry->buffers.size() && i < geometry->versions.size(); ++i) {
+                const auto variant = geometry->buffers[i].catalogVariant;
+                if (variant == kClodOffsetsVariant) visibleTransformAudit->clodOffsetsVersion = geometry->versions[i];
+                else if (variant == kMeshMetadataVariant) visibleTransformAudit->meshMetadataVersion = geometry->versions[i];
+                else if (variant == kGroupsVariant) visibleTransformAudit->groupsVersion = geometry->versions[i];
+            }
+        }
         const auto generationBytes = generationVersion ? generationVersion->MaterializeCpuImage() : nullptr;
         if (drawBytes && generationBytes && indirect) {
             for (const auto& active : indirect->activeListVersions) {
@@ -588,6 +883,18 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedNoValidBoneFallbacks),
 				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedFallbackFrustumRejected));
             spdlog::info(
+                "SARP CLOD SW raster telemetry: frame={} clusters={} input_tris={} backface_culled={} degenerate_or_offscreen={} "
+                "no_sample_covered={} covered_px={} alpha_rejected_px={} vis_writes={}",
+                requestedFrame,
+                counter(CLodWorkGraphCounterIndex::SWRasterClusters),
+                counter(CLodWorkGraphCounterIndex::SWRasterInputTriangles),
+                counter(CLodWorkGraphCounterIndex::SWRasterBackfaceCulled),
+                counter(CLodWorkGraphCounterIndex::SWRasterDegenerateOrOffscreen),
+                counter(CLodWorkGraphCounterIndex::SWRasterNoSampleCovered),
+                counter(CLodWorkGraphCounterIndex::SWRasterCoveredPixels),
+                counter(CLodWorkGraphCounterIndex::SWRasterAlphaRejectedPixels),
+                counter(CLodWorkGraphCounterIndex::SWRasterVisibilityWrites));
+            spdlog::info(
                 "SARP CLOD occlusion replay telemetry: frame={} node_enqueue_attempts={} cluster_enqueue_attempts={} "
                 "phase2_node_launches={} phase2_node_inputs={} phase2_node_emitted={} "
                 "phase2_meshlet_launches={} phase2_meshlet_inputs={} phase2_meshlet_emitted={}",
@@ -602,11 +909,58 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::Phase2ReplayMeshletBucketRecordsEmitted));
         });
 
+    std::vector<MaterialRasterFlags> rasterBucketFlags;
+    if (m_frameInputs && m_frameInputs->Render()) {
+        rasterBucketFlags = m_frameInputs->Render()->preparedRasterBucketFlags;
+    }
+    auto hwRasterBuckets = std::make_shared<RasterBucketAudit>();
+    hwRasterBuckets->path = "hw";
+    hwRasterBuckets->frame = requestedFrame;
+    hwRasterBuckets->flags = rasterBucketFlags;
+    if (hwHistogramResource) {
+        readbackService->RequestReadbackCapture(
+            "CLodOpaque::RasterizeClustersPass1",
+            hwHistogramResource.get(),
+            org::RangeSpec{},
+            [hwRasterBuckets](org::ReadbackCaptureResult&& result) {
+                hwRasterBuckets->SetHistogram(std::move(result.data));
+            });
+    }
+
+    // The software pass exists only in compute software-raster mode. Its captures
+    // stay outside the pending flags above: if the graph has no such pass they are
+    // dropped without a callback, which must not stall the rest of this telemetry.
+    static const auto swRasterBucketsInFlight = std::make_shared<std::atomic_bool>(false);
+    if (swHistogramResource && swArgsResource &&
+        CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance()
+            .getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)()) &&
+        !swRasterBucketsInFlight->exchange(true, std::memory_order_acq_rel)) {
+        auto swRasterBuckets = std::make_shared<RasterBucketAudit>();
+        swRasterBuckets->path = "sw";
+        swRasterBuckets->frame = requestedFrame;
+        swRasterBuckets->flags = std::move(rasterBucketFlags);
+        swRasterBuckets->inFlight = std::make_shared<ReadbackInFlightRelease>(swRasterBucketsInFlight);
+        readbackService->RequestReadbackCapture(
+            "CLodOpaque::RasterBucketsCompactAndArgsPassSW1",
+            swHistogramResource.get(),
+            org::RangeSpec{},
+            [swRasterBuckets](org::ReadbackCaptureResult&& result) {
+                swRasterBuckets->SetHistogram(std::move(result.data));
+            });
+        readbackService->RequestReadbackCapture(
+            "CLodOpaque::RasterBucketsCompactAndArgsPassSW1",
+            swArgsResource.get(),
+            org::RangeSpec{},
+            [swRasterBuckets](org::ReadbackCaptureResult&& result) {
+                swRasterBuckets->SetArgs(std::move(result.data));
+            });
+    }
+
     readbackService->RequestReadbackCapture(
         "CLodOpaque::RasterizeClustersPass1",
         rasterArgsResource.get(),
         org::RangeSpec{},
-        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
+        [this, requestedFrame, hwRasterBuckets](org::ReadbackCaptureResult&& result) {
             m_clodRasterArgsReadbackPending = false;
 
             const size_t commandCount = result.data.size() / sizeof(RasterizeClustersCommand);
@@ -661,7 +1015,28 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 firstNonZero.dispatchX,
                 firstNonZero.dispatchY,
                 firstNonZero.dispatchZ);
+            hwRasterBuckets->SetArgs(std::move(result.data));
         });
+
+    if (swVisibleCounterResource) {
+        readbackService->RequestReadbackCapture(
+            "CLodOpaque::HierarchicalCullingPass2",
+            swVisibleCounterResource.get(),
+            org::RangeSpec{},
+            [requestedFrame, visibleTransformAudit](org::ReadbackCaptureResult&& result) {
+                std::uint32_t swVisibleClusters = 0;
+                if (result.data.size() >= sizeof(swVisibleClusters)) {
+                    std::memcpy(&swVisibleClusters, result.data.data(), sizeof(swVisibleClusters));
+                }
+                {
+                    std::lock_guard lock(visibleTransformAudit->mutex);
+                    visibleTransformAudit->swCount = swVisibleClusters;
+                }
+                visibleTransformAudit->TryReport(requestedFrame);
+            });
+    } else {
+        visibleTransformAudit->swCount = 0u;
+    }
 
     readbackService->RequestReadbackCapture(
         "CLodOpaque::HierarchicalCullingPass2",
@@ -741,6 +1116,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
 {
     if (!currentRenderGraph || !IsCLodVirtualShadowTelemetryDebugEnabled()) {
+        SetCLodWorkGraphTelemetryRequested(CLodWorkGraphTelemetryRequester::VirtualShadowDebug, false);
         m_loggedCLodVirtualShadowTelemetryEnabled = false;
         return;
     }
@@ -751,7 +1127,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
             CLodVirtualShadowTelemetryDebugSettingName);
         m_loggedCLodVirtualShadowTelemetryEnabled = true;
     }
-    SetCLodWorkGraphTelemetryEnabled(true);
+    SetCLodWorkGraphTelemetryRequested(CLodWorkGraphTelemetryRequester::VirtualShadowDebug, true);
 
     constexpr uint64_t kCaptureIntervalFrames = 30u;
     // Startup and resize can replace the aliased shadow resources after the

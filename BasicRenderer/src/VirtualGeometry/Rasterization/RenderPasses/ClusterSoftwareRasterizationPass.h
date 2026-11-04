@@ -104,6 +104,7 @@ private:
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
     bool m_declaredResourcesChanged = true;
+    bool m_telemetryDeclared = false;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     uint32_t m_dynamicWindSkinCacheHashEntryCount = 0u;
     uint32_t m_dynamicWindSkinCachePositionCapacity = 0u;

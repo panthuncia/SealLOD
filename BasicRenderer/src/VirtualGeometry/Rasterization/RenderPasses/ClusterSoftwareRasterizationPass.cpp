@@ -6,6 +6,8 @@
 
 #include <BasicTelemetry/Tracy.h>
 
+#include "BasicRenderer/Diagnostics/CLodTelemetry.h"
+
 #include "Materials/MaterialManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
@@ -38,6 +40,7 @@ br::render::MiscConstants BuildRasterConstants(const ClusterSoftwareRasterBindin
     constants[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = context.Index(bindings.transforms);
     constants[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = frame.viewRasterInfoTable;
     constants[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = context.Index(bindings.mapping);
+    if (bindings.hasTelemetry) constants[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = context.Index(bindings.telemetry);
     if (!bindings.virtualShadow) return constants;
     constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = context.Index(bindings.pageTable);
     constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = context.Index(bindings.clipmapInfo);
@@ -46,7 +49,6 @@ br::render::MiscConstants BuildRasterConstants(const ClusterSoftwareRasterBindin
     constants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
     constants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
     constants[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = frame.virtualResolution;
-    if (bindings.hasTelemetry) constants[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = context.Index(bindings.telemetry);
     if (!bindings.hasSkinCache) return constants;
     constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX] = context.Index(bindings.skinMapping);
     constants[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_HASH_DESCRIPTOR_INDEX] = context.Index(bindings.skinHash);
@@ -337,6 +339,10 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
         bindings.physicalPages = builder->UnorderedAccess(m_virtualShadowPhysicalPagesTexture).View();
         bindings.dynamicPages = builder->UnorderedAccess(m_virtualShadowDynamicPagesTexture).View();
     }
+    else if (m_telemetryDeclared && m_telemetryBuffer) {
+        bindings.telemetry = builder->UnorderedAccess(m_telemetryBuffer).View();
+        bindings.hasTelemetry = true;
+    }
 
     if (m_slabResourceGroup) {
         builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
@@ -350,6 +356,12 @@ void ClusterSoftwareRasterizationPass::Update(const org::UpdateExecutionContext&
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     m_declaredResourcesChanged = m_viewRasterInfoTable.Update(context.Views(), context.ViewCameraBufferSize(), m_outputKind);
+    // Outside virtual shadows the pass touches the telemetry buffer only while requested.
+    const bool telemetryWanted = m_outputKind != CLodRasterOutputKind::VirtualShadow && IsCLodWorkGraphTelemetryEnabled();
+    if (telemetryWanted != m_telemetryDeclared) {
+        m_telemetryDeclared = telemetryWanted;
+        m_declaredResourcesChanged = true;
+    }
 }
 
 bool ClusterSoftwareRasterizationPass::DeclaredResourcesChanged() const {

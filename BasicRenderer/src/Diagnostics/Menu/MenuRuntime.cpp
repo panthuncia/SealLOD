@@ -962,7 +962,8 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
     const float fps = ImGui::GetIO().Framerate;
     const float msPerFrame = fps > 0.0f ? (1000.0f / fps) : 0.0f;
 
-    SetCLodWorkGraphTelemetryEnabled(
+    SetCLodWorkGraphTelemetryRequested(
+        CLodWorkGraphTelemetryRequester::Menu,
         (m_menuEnabled && showCLodTelemetry) ||
         m_clodTelemetry.capturePending ||
         m_clodTelemetry.captureStatsPending ||

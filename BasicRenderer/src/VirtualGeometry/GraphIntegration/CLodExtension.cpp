@@ -699,6 +699,12 @@ void CLodExtension::InitializeCoreResources()
 
     m_rasterBucketsHistogramBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
     m_rasterBucketsHistogramBuffer->SetName(MakeVariantResourceName(traits, "Raster bucket histogram"));
+    if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
+        m_rasterBucketsHistogramBuffer->GetECSEntity()
+            .set<Components::Resource>({ m_rasterBucketsHistogramBuffer })
+            .add<CLodPrimaryPhase1RasterHistogramTag>()
+            .add<CLodExtensionTypeTag>(typeEntity);
+    }
 
     m_visibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
     m_visibleClustersCounterBuffer->SetName(MakeVariantResourceName(traits, "Visible Clusters Counter Buffer"));
@@ -797,6 +803,12 @@ void CLodExtension::InitializeCoreResources()
 
     m_rasterBucketsIndirectArgsBufferSw = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(RasterizeClustersCommand), true, false, false, true);
     m_rasterBucketsIndirectArgsBufferSw->SetName(MakeVariantResourceName(traits, "Raster bucket indirect args SW phase1"));
+    if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
+        m_rasterBucketsIndirectArgsBufferSw->GetECSEntity()
+            .set<Components::Resource>({ m_rasterBucketsIndirectArgsBufferSw })
+            .add<CLodPrimaryPhase1SwRasterIndirectArgsTag>()
+            .add<CLodExtensionTypeTag>(typeEntity);
+    }
 
     m_rasterBucketsIndirectArgsBufferPhase2Sw = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(RasterizeClustersCommand), true, false, false, true);
     m_rasterBucketsIndirectArgsBufferPhase2Sw->SetName(MakeVariantResourceName(traits, "Raster bucket indirect args SW phase2"));
@@ -811,6 +823,12 @@ void CLodExtension::InitializeCoreResources()
 
     m_rasterBucketsHistogramBufferSw = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, true, false);
     m_rasterBucketsHistogramBufferSw->SetName(MakeVariantResourceName(traits, "Raster bucket histogram SW phase1"));
+    if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
+        m_rasterBucketsHistogramBufferSw->GetECSEntity()
+            .set<Components::Resource>({ m_rasterBucketsHistogramBufferSw })
+            .add<CLodPrimaryPhase1SwRasterHistogramTag>()
+            .add<CLodExtensionTypeTag>(typeEntity);
+    }
 
     m_rasterBucketsHistogramBufferPhase2Sw = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, true, false);
     m_rasterBucketsHistogramBufferPhase2Sw->SetName(MakeVariantResourceName(traits, "Raster bucket histogram SW phase2"));
@@ -826,6 +844,12 @@ void CLodExtension::InitializeCoreResources()
 
     m_swVisibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
     m_swVisibleClustersCounterBuffer->SetName(MakeVariantResourceName(traits, "SW Visible Clusters Counter Buffer Phase1"));
+    if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
+        m_swVisibleClustersCounterBuffer->GetECSEntity()
+            .set<Components::Resource>({ m_swVisibleClustersCounterBuffer })
+            .add<CLodPrimaryPhase1SwVisibleClustersCounterTag>()
+            .add<CLodExtensionTypeTag>(typeEntity);
+    }
 
     m_swVisibleClustersCounterBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
     m_swVisibleClustersCounterBufferPhase2->SetName(MakeVariantResourceName(traits, "SW Visible Clusters Counter Buffer Phase2"));
