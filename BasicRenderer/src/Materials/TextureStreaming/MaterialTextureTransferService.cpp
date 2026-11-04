@@ -132,7 +132,7 @@ void MaterialTextureTransferService::Initialize()
 	m_pump.Configure(
 		[this](br::SerializedTaskPump::Task task) {
 			return TaskSchedulerManager::GetInstance().Submit(
-				m_taskScope, TaskLane::Streaming, TaskDomain::TextureProcessing,
+				m_taskScope, TaskLane::Streaming, TaskDomain::TextureControl,
 				"MaterialTextureTransferService::PumpWorker",
 				[task = std::move(task)](const br::TaskContext& context) mutable {
 					if (!context.StopRequested()) task();

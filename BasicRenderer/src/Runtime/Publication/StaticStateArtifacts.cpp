@@ -264,10 +264,10 @@ ArtifactBuildResult BuildStaticScenePage(const ArtifactBuildContext& context) {
     std::vector<StaticSceneGroupOwner> effectiveOwners;
     page->MaterializeOwners(effectiveOwners);
     page->publicationDependencies.reserve(effectiveOwners.size());
-    for (const auto& owner : effectiveOwners) {
-        if (!std::ranges::contains(page->publicationDependencies, owner.transaction))
-            page->publicationDependencies.push_back(owner.transaction);
-    }
+    for (const auto& owner : effectiveOwners) page->publicationDependencies.push_back(owner.transaction);
+    auto& dependencies = page->publicationDependencies;
+    std::sort(dependencies.begin(), dependencies.end());
+    dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
     return ArtifactBuildResult::Ready(
         ArtifactPayload::Make<PublishedStaticScenePage>(std::move(page)));
 }

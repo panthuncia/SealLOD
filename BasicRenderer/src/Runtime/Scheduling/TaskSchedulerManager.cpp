@@ -80,6 +80,7 @@ constexpr DomainPlotNames kDomainPlotNames[]{
     { "Scheduler.MaterialAcceptance.Queued", "Scheduler.MaterialAcceptance.Active" },
     { "Scheduler.GpuBufferBuild.Queued", "Scheduler.GpuBufferBuild.Active" },
     { "Scheduler.StaticGroupPreparation.Queued", "Scheduler.StaticGroupPreparation.Active" },
+    { "Scheduler.TextureControl.Queued", "Scheduler.TextureControl.Active" },
 };
 static_assert(std::size(kDomainPlotNames) == static_cast<std::size_t>(TaskDomain::Count));
 
@@ -136,6 +137,7 @@ const char* DomainName(TaskDomain domain) {
     case TaskDomain::MaterialAcceptance: return "MaterialAcceptance";
     case TaskDomain::GpuBufferBuild: return "GpuBufferBuild";
     case TaskDomain::StaticGroupPreparation: return "StaticGroupPreparation";
+    case TaskDomain::TextureControl: return "TextureControl";
     default: return "Unknown";
     }
 }
@@ -506,6 +508,7 @@ void TaskSchedulerManager::Initialize(Config config) {
     state.domains[static_cast<std::size_t>(TaskDomain::GraphPublication)].limit = 1u;
 	state.domains[static_cast<std::size_t>(TaskDomain::StaticImportControl)].limit = 1u;
     state.domains[static_cast<std::size_t>(TaskDomain::MaterialAcceptance)].limit = 1u;
+    state.domains[static_cast<std::size_t>(TaskDomain::TextureControl)].limit = (std::min)(4u, m_workerCount);
     state.domains[static_cast<std::size_t>(TaskDomain::GpuBufferBuild)].limit =
         (std::min)(4u, m_workerCount);
     state.sceneGraphLimit = m_workerCount;

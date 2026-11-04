@@ -63,7 +63,7 @@ ArtifactBuildResult BuildTextureImageTable(const ArtifactBuildContext& context) 
 
 void RegisterTextureImageTableProducer(AsyncStateGraph& graph) {
     graph.RegisterTypedProducer<TextureImageTableBuildInput, RendererStateFragmentArtifact>(
-        ArtifactKind::TextureImageTable, TaskLane::Streaming, TaskDomain::GraphPublication,
+        ArtifactKind::TextureImageTable, TaskLane::Streaming, TaskDomain::TextureControl,
         "TextureImageTableArtifact::Build",
         [](const ArtifactBuildContext& context,
             std::shared_ptr<const TextureImageTableBuildInput>) {

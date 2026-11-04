@@ -29,7 +29,11 @@ enum class TaskDomain : std::uint8_t {
     // StaticGroup graph producers need bounded admission, but sharing the
     // StaticImport FIFO with service drains creates head-of-line blocking.
     // Keep their capacity and queue independently observable.
-    StaticGroupPreparation, Count
+    StaticGroupPreparation,
+    // Texture latches and the streaming manager's drain take microseconds, and every
+    // renderable's visibility waits on them. They must not queue behind texture decoding
+    // or scene page builds.
+    TextureControl, Count
 };
 
 // Numeric scheduler trace metadata is deliberately independent of the graph

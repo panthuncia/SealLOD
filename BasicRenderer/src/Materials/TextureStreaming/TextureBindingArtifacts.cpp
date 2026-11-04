@@ -44,13 +44,13 @@ ArtifactBuildResult BuildTextureDisplayGate(const ArtifactBuildContext& context)
 
 void RegisterTextureDisplayGateProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::TextureDisplayGate, {
-        TaskLane::Streaming, TaskDomain::TextureProcessing,
+        TaskLane::Streaming, TaskDomain::TextureControl,
         "TextureDisplayGate::Build", BuildTextureDisplayGate });
 }
 
 void RegisterTextureBindingProducer(AsyncStateGraph& graph) {
     graph.RegisterProducer(ArtifactKind::TextureBinding, {
-        TaskLane::Streaming, TaskDomain::TextureProcessing,
+        TaskLane::Streaming, TaskDomain::TextureControl,
         "TextureBindingArtifact::Build", BuildTextureBinding });
 }
 

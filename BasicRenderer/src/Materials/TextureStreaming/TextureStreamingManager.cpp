@@ -247,7 +247,7 @@ void TextureStreamingManager::Initialize(TextureFactory& textureFactory, uint32_
 	m_commandPump.Configure(
 		[this](br::SerializedTaskPump::Task task) {
 			return TaskSchedulerManager::GetInstance().Submit(
-				m_taskScope, TaskLane::Streaming, TaskDomain::TextureProcessing,
+				m_taskScope, TaskLane::Streaming, TaskDomain::TextureControl,
 				"TextureStreamingManager::Drain",
 				[task = std::move(task)](const br::TaskContext& context) mutable {
 					if (!context.StopRequested()) task();
@@ -1124,7 +1124,7 @@ bool TextureStreamingManager::RequestPipelineResidency(const std::shared_ptr<Tex
 	};
 	auto awaiter = m_rendererStateRequests->AwaitExact(request.Handle(),
 		br::render::ArtifactReadiness::CpuReady,
-		TaskLane::Streaming, TaskDomain::TextureProcessing,
+		TaskLane::Streaming, TaskDomain::TextureControl,
 		[finish](const br::render::ArtifactSnapshot&) { finish({}); },
 		[finish](const br::render::ArtifactTermination& termination) {
 			finish(termination.error.empty() ? std::string("texture load terminated") : termination.error);
@@ -1311,7 +1311,7 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 			const auto pendingTextureID = pending->streamingTextureID;
 			auto awaiter = m_rendererStateRequests->AwaitExact(request.Handle(),
 				br::render::ArtifactReadiness::UploadSubmitted,
-				TaskLane::Streaming, TaskDomain::TextureProcessing,
+				TaskLane::Streaming, TaskDomain::TextureControl,
 				[this, pending](const br::render::ArtifactSnapshot&) mutable {
 					if (m_workerQuit.load(std::memory_order_acquire)) {
 						FinishBindingMailboxRequest(pending->streamingTextureID, pending->texture);
@@ -1420,7 +1420,7 @@ void TextureStreamingManager::PublishTextureImageTable()
 		m_textureImageTableBuildInFlight.store(true, std::memory_order_release);
 		auto awaiter = m_rendererStateRequests->AwaitExact(root.Handle(),
 			br::render::ArtifactReadiness::UploadSubmitted,
-			TaskLane::Streaming, TaskDomain::TextureProcessing,
+			TaskLane::Streaming, TaskDomain::TextureControl,
 			[this](const br::render::ArtifactSnapshot&) {
 				m_textureImageTableBuildInFlight.store(false, std::memory_order_release);
 				// A coalesced successor may be waiting; let the drain publish it.
