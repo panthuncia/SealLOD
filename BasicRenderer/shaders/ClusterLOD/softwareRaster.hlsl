@@ -39,6 +39,10 @@
 #define CLOD_WG_RIGID_SW_RASTER CLOD_WG_RIGID_ONLY
 #endif
 
+#define CLOD_RASTER_CLUSTER_VIRTUAL_SHADOW CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+#define CLOD_RASTER_CLUSTER_RIGID_ONLY CLOD_WG_RIGID_SW_RASTER
+#include "include/clodRasterCluster.hlsli"
+
 #if defined(PSO_ALPHA_TEST) || defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST)
 #define CLOD_SW_RASTER_MAY_ALPHA_TEST 1
 #else
@@ -86,293 +90,82 @@ struct SWClusterWork
     uint cachedPositionBase; // 0xFFFFFFFF unless the dynamic wind skin cache has this cluster.
 };
 
-// Published by lane 0.
-struct SWClusterSetup
+// Published by lane 0. These are the parts only software raster uses.
+struct SWClusterFlags
 {
-    float4 modelViewProjectionX;
-    float4 modelViewProjectionY;
-    float4 modelViewProjectionW;
-    float4 modelViewZ;
-
-    uint vertexCount;
-    uint triangleCount;
-    uint positionFormat;
-    uint positionStreamBase; // Page-relative, like every stream offset here.
-    uint positionByteOffset;
-    uint triangleStreamBase;
-    uint triangleByteOffset;
-    uint attributeMask;
-    uint vertexAttributeOffset;
-    uint jointArrayOffset;
-    uint weightArrayOffset;
-    uint uvSetCount;
-    uint uvDescriptorOffset;
-    uint uvBitstreamDirectoryOffset;
-
-    uint materialDataIndex;
-    uint vertexFlags;
     uint alphaTestEnabled;
     uint doubleSided;
-    uint reverseWinding;
-    uint dynamicShadowLayer;
-    uint skinningInstanceSlot;
-    uint activeBoneRemapIndexBase;
-    uint activeBoneRemapIndexCount;
-    uint singleRemappedJoint;
     uint groupFlags;
     uint debugOutputType;
 };
 
-groupshared SWClusterSetup gs_setup;
+groupshared CLodRasterCluster gs_cluster;
+groupshared SWClusterFlags gs_flags;
 groupshared float2 gs_screenPos[SW_RASTER_MAX_VERTS];
 groupshared float gs_linearDepth[SW_RASTER_MAX_VERTS];
 groupshared float gs_invClipW[SW_RASTER_MAX_VERTS];
 
 // ---------------------------------------------------------------------------------------------
-// Skinning
-// ---------------------------------------------------------------------------------------------
-
-uint SWResolveAssemblyBoneIndex(uint localJointId)
-{
-    if (localJointId >= gs_setup.activeBoneRemapIndexCount)
-    {
-        return localJointId;
-    }
-
-    if (gs_setup.activeBoneRemapIndexCount == 1u)
-    {
-        return gs_setup.singleRemappedJoint;
-    }
-
-    StructuredBuffer<uint> remapIndices =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemapIndices)];
-    return remapIndices[gs_setup.activeBoneRemapIndexBase + localJointId];
-}
-
-SkinningInfluences SWResolveAssemblySkinningInfluences(SkinningInfluences skinning)
-{
-    if (gs_setup.activeBoneRemapIndexCount == 0u)
-    {
-        return skinning;
-    }
-
-    if (gs_setup.activeBoneRemapIndexCount == 1u)
-    {
-        skinning.joints0 = select(skinning.joints0 == 0u, gs_setup.singleRemappedJoint.xxxx, skinning.joints0);
-        skinning.joints1 = select(skinning.joints1 == 0u, gs_setup.singleRemappedJoint.xxxx, skinning.joints1);
-        return skinning;
-    }
-
-    skinning.joints0.x = SWResolveAssemblyBoneIndex(skinning.joints0.x);
-    skinning.joints0.y = SWResolveAssemblyBoneIndex(skinning.joints0.y);
-    skinning.joints0.z = SWResolveAssemblyBoneIndex(skinning.joints0.z);
-    skinning.joints0.w = SWResolveAssemblyBoneIndex(skinning.joints0.w);
-    skinning.joints1.x = SWResolveAssemblyBoneIndex(skinning.joints1.x);
-    skinning.joints1.y = SWResolveAssemblyBoneIndex(skinning.joints1.y);
-    skinning.joints1.z = SWResolveAssemblyBoneIndex(skinning.joints1.z);
-    skinning.joints1.w = SWResolveAssemblyBoneIndex(skinning.joints1.w);
-    return skinning;
-}
-
-SkinningInfluences SWDecodePackedSkinning(ByteAddressBuffer slab, uint pageByteOffset, uint vertexIndex)
-{
-    SkinningInfluences skinning = (SkinningInfluences)0;
-    const uint vertexAttributeIndex = gs_setup.vertexAttributeOffset + vertexIndex;
-
-    if ((gs_setup.attributeMask & CLOD_PAGE_ATTRIBUTE_WEIGHTS) != 0u)
-    {
-        const uint weightAddress = pageByteOffset + gs_setup.weightArrayOffset + vertexAttributeIndex * 32u;
-        skinning.weights0 = LoadFloat4(weightAddress, slab);
-        skinning.weights1 = LoadFloat4(weightAddress + 16u, slab);
-    }
-
-    if ((gs_setup.attributeMask & CLOD_PAGE_ATTRIBUTE_JOINTS) != 0u)
-    {
-        const uint jointAddress = pageByteOffset + gs_setup.jointArrayOffset + vertexAttributeIndex * 32u;
-        if (!any(skinning.weights0.yzw != 0.0f) && !any(skinning.weights1 != 0.0f))
-        {
-            skinning.joints0.x = slab.Load(jointAddress);
-        }
-        else
-        {
-            skinning.joints0 = LoadUint4(jointAddress, slab);
-            skinning.joints1 = LoadUint4(jointAddress + 16u, slab);
-        }
-    }
-
-    return skinning;
-}
-
-float3 SWApplySkinning(ByteAddressBuffer slab, uint pageByteOffset, uint vertexIndex, float3 position, uint assemblyTransformIndex)
-{
-    SkinningInfluences skinning = SWDecodePackedSkinning(slab, pageByteOffset, vertexIndex);
-    skinning = SWResolveAssemblySkinningInfluences(skinning);
-    return mul(float4(position, 1.0f), BuildAssemblyLocalSkinMatrix(
-        gs_setup.skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
-}
-
-// ---------------------------------------------------------------------------------------------
 // Stage 1: cluster setup (lane 0)
 // ---------------------------------------------------------------------------------------------
 
-void SWLoadAssemblyState(SWClusterWork work, PerMeshBuffer meshData)
+void SWLoadClusterSetup(SWClusterWork work)
 {
-    gs_setup.activeBoneRemapIndexBase = CLOD_ASSEMBLY_BONE_REMAP_SENTINEL;
-    gs_setup.activeBoneRemapIndexCount = 0u;
-    gs_setup.singleRemappedJoint = 0u;
-    gs_setup.groupFlags = 0u;
+    CLodRasterClusterSource source;
+    source.packedCluster = work.packedCluster;
+    source.assemblyTransformIndex = work.assemblyTransformIndex;
+    source.hasResolvedSkinningSlot = work.hasResolvedSkinningSlot;
+    source.resolvedSkinningSlot = work.resolvedSkinningSlot;
+    CLodRasterCluster cluster;
+    // A cluster that fails to load has no vertices or triangles, so the later stages do nothing.
+    CLodLoadRasterCluster(source, cluster);
+    gs_cluster = cluster;
 
-#if CLOD_WG_RIGID_SW_RASTER
-    const bool needsAssemblyRemap = false;
-#else
-    const bool needsAssemblyRemap =
-        (meshData.vertexFlags & VERTEX_SKINNED) != 0u &&
-        work.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
-#endif
-    const bool needsAssemblyDebug =
-        gs_setup.debugOutputType == OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE ||
-        gs_setup.debugOutputType == OUTPUT_CLOD_ASSEMBLY_PARTS;
-    if (!needsAssemblyRemap && !needsAssemblyDebug)
-    {
-        return;
-    }
-
-    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(CLodVisibleClusterInstanceID(work.packedCluster));
-    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
-
-    if (needsAssemblyRemap && work.assemblyTransformIndex >= metadata.assemblyTransformBase)
-    {
-        const uint localTransformIndex = work.assemblyTransformIndex - metadata.assemblyTransformBase;
-        if (localTransformIndex < metadata.assemblyBoneRemapCount)
-        {
-            StructuredBuffer<ClusterLODAssemblyBoneRemap> remaps =
-                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemaps)];
-            const ClusterLODAssemblyBoneRemap remap = remaps[metadata.assemblyBoneRemapBase + localTransformIndex];
-            if (remap.remapIndexBase != CLOD_ASSEMBLY_BONE_REMAP_SENTINEL && remap.remapIndexCount != 0u)
-            {
-                gs_setup.activeBoneRemapIndexBase = remap.remapIndexBase;
-                gs_setup.activeBoneRemapIndexCount = remap.remapIndexCount;
-                if (remap.remapIndexCount == 1u)
-                {
-                    StructuredBuffer<uint> remapIndices =
-                        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemapIndices)];
-                    gs_setup.singleRemappedJoint = remapIndices[remap.remapIndexBase];
-                }
-            }
-        }
-    }
-
-    if (needsAssemblyDebug)
-    {
-        StructuredBuffer<ClusterLODGroup> groups =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-        gs_setup.groupFlags = groups[metadata.groupsBase + CLodVisibleClusterGroupID(work.packedCluster)].flags;
-    }
-}
-
-void SWLoadClusterSetup(SWClusterWork work, uint viewID)
-{
-    const uint instanceID = CLodVisibleClusterInstanceID(work.packedCluster);
-    const uint slabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(work.packedCluster);
-    const uint pageByteOffset = CLodVisibleClusterPageSlabByteOffset(work.packedCluster);
-
-    // Page and meshlet stream layout.
-    const CLodPageHeader pageHeader = LoadPageHeader(slabDescriptorIndex, pageByteOffset);
-    const CLodMeshletDescriptor descriptor = LoadMeshletDescriptor(
-        slabDescriptorIndex,
-        pageByteOffset,
-        pageHeader.descriptorOffset,
-        CLodVisibleClusterLocalMeshletIndex(work.packedCluster));
-    gs_setup.vertexCount = CLodDescVertexCount(descriptor);
-    gs_setup.triangleCount = CLodDescTriangleCount(descriptor);
-    gs_setup.positionFormat = pageHeader.compressedPositionQuantExp;
-    gs_setup.positionStreamBase = pageHeader.positionBitstreamOffset;
-    gs_setup.positionByteOffset = descriptor.positionBitOffset;
-    gs_setup.triangleStreamBase = pageHeader.triangleStreamOffset;
-    gs_setup.triangleByteOffset = descriptor.triangleByteOffset;
-    gs_setup.attributeMask = pageHeader.attributeMask;
-    gs_setup.vertexAttributeOffset = descriptor.vertexAttributeOffset;
-    gs_setup.jointArrayOffset = pageHeader.jointArrayOffset;
-    gs_setup.weightArrayOffset = pageHeader.weightArrayOffset;
-    gs_setup.uvSetCount = pageHeader.uvSetCount;
-    gs_setup.uvDescriptorOffset = pageHeader.uvDescriptorOffset;
-    gs_setup.uvBitstreamDirectoryOffset = pageHeader.uvBitstreamDirectoryOffset;
-
-    // Mesh and material.
-    const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(instanceID);
-    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDrawRecord(drawRecord);
+    SWClusterFlags flags;
     ConstantBuffer<PerFrameBuffer> perFrameBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    gs_setup.debugOutputType = perFrameBuffer.outputType;
-    StructuredBuffer<PerMeshBuffer> perMeshBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    const PerMeshBuffer meshData = perMeshBuffer[meshInstance.perMeshBufferIndex];
-    gs_setup.materialDataIndex = meshData.materialDataIndex;
-    gs_setup.vertexFlags = meshData.vertexFlags;
-    gs_setup.dynamicShadowLayer = CLodVisibleClusterUsesDynamicShadowLayer(work.packedCluster) ? 1u : 0u;
+    flags.debugOutputType = perFrameBuffer.outputType;
 
-#if CLOD_WG_RIGID_SW_RASTER
-    gs_setup.skinningInstanceSlot = 0xFFFFFFFFu;
-#else
-#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-    const bool allowSkinnedDeformation = gs_setup.dynamicShadowLayer != 0u;
-#else
-    const bool allowSkinnedDeformation = true;
-#endif
-    gs_setup.skinningInstanceSlot = allowSkinnedDeformation && (meshData.vertexFlags & VERTEX_SKINNED) != 0u
-        ? (work.hasResolvedSkinningSlot
-            ? work.resolvedSkinningSlot
-            : ResolveProceduralWindSkinningSlot(instanceID, meshInstance.skinningInstanceSlot))
-        : 0xFFFFFFFFu;
-#endif
+    flags.groupFlags = 0u;
+    if (flags.debugOutputType == OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE ||
+        flags.debugOutputType == OUTPUT_CLOD_ASSEMBLY_PARTS)
+    {
+        const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(cluster.drawRecordIndex);
+        StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+        StructuredBuffer<ClusterLODGroup> groups =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+        flags.groupFlags = groups[metadataBuffer[offsets.clodMeshMetadataIndex].groupsBase +
+            CLodVisibleClusterGroupID(work.packedCluster)].flags;
+    }
 
 #if defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST)
     // The work graph runs one pipeline for every material, so these come from the material.
     StructuredBuffer<MaterialInfo> materialDataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
-    const uint materialFlags = materialDataBuffer[meshData.materialDataIndex].materialFlags;
-    gs_setup.alphaTestEnabled = (materialFlags & MATERIAL_ALPHA_TEST) != 0u ? 1u : 0u;
-    gs_setup.doubleSided = (materialFlags & MATERIAL_DOUBLE_SIDED) != 0u ? 1u : 0u;
+    const uint materialFlags = materialDataBuffer[cluster.materialDataIndex].materialFlags;
+    flags.alphaTestEnabled = (materialFlags & MATERIAL_ALPHA_TEST) != 0u ? 1u : 0u;
+    flags.doubleSided = (materialFlags & MATERIAL_DOUBLE_SIDED) != 0u ? 1u : 0u;
 #else
 #if defined(PSO_ALPHA_TEST)
-    gs_setup.alphaTestEnabled = 1u;
+    flags.alphaTestEnabled = 1u;
 #else
-    gs_setup.alphaTestEnabled = 0u;
+    flags.alphaTestEnabled = 0u;
 #endif
 #if defined(PSO_DOUBLE_SIDED)
-    gs_setup.doubleSided = 1u;
+    flags.doubleSided = 1u;
 #else
-    gs_setup.doubleSided = 0u;
+    flags.doubleSided = 0u;
 #endif
 #endif
-
-    SWLoadAssemblyState(work, meshData);
-
-    // Transform. Only the matrix rows the vertex stage needs.
-    row_major float4x4 model;
-    uint objectFlags;
-    LoadClodRasterTransformForDrawRecord(drawRecord, work.assemblyTransformIndex, model, objectFlags);
-    StructuredBuffer<CullingCameraInfo> cullingCameras =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
-    const CullingCameraInfo camera = cullingCameras[viewID];
-    const row_major float4x4 modelViewProjection = mul(model, camera.viewProjection);
-    gs_setup.modelViewProjectionX = float4(
-        modelViewProjection[0][0], modelViewProjection[1][0], modelViewProjection[2][0], modelViewProjection[3][0]);
-    gs_setup.modelViewProjectionY = float4(
-        modelViewProjection[0][1], modelViewProjection[1][1], modelViewProjection[2][1], modelViewProjection[3][1]);
-    gs_setup.modelViewProjectionW = float4(
-        modelViewProjection[0][3], modelViewProjection[1][3], modelViewProjection[2][3], modelViewProjection[3][3]);
-    gs_setup.modelViewZ = mul(model, camera.viewZ);
-    gs_setup.reverseWinding = (objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u ? 1u : 0u;
+    gs_flags = flags;
 }
 
 // ---------------------------------------------------------------------------------------------
 // Stage 2: vertices
 // ---------------------------------------------------------------------------------------------
 
-void SWRecordCacheTelemetry(SWClusterWork work)
+void SWRecordCacheTelemetry(SWClusterWork work, CLodRasterCluster cluster)
 {
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW && !defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
     if (CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
@@ -383,16 +176,16 @@ void SWRecordCacheTelemetry(SWClusterWork work)
     RWStructuredBuffer<uint> cacheTelemetry = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
     if (work.cachedPositionBase != 0xFFFFFFFFu)
     {
-        InterlockedAdd(cacheTelemetry[244u], gs_setup.vertexCount);
+        InterlockedAdd(cacheTelemetry[244u], cluster.vertexCount);
     }
-    else if ((gs_setup.vertexFlags & VERTEX_SKINNED) != 0u)
+    else if ((cluster.vertexFlags & VERTEX_SKINNED) != 0u)
     {
-        InterlockedAdd(cacheTelemetry[245u], gs_setup.vertexCount);
+        InterlockedAdd(cacheTelemetry[245u], cluster.vertexCount);
     }
 #endif
 }
 
-float3 SWLoadVertexPosition(SWClusterWork work, ByteAddressBuffer slab, uint pageByteOffset, uint vertexIndex)
+float3 SWLoadVertexPosition(SWClusterWork work, CLodRasterCluster cluster, ByteAddressBuffer slab, uint vertexIndex)
 {
     if (work.cachedPositionBase != 0xFFFFFFFFu)
     {
@@ -401,19 +194,14 @@ float3 SWLoadVertexPosition(SWClusterWork work, ByteAddressBuffer slab, uint pag
         return cachedPositions[work.cachedPositionBase + vertexIndex];
     }
 
-    const float3 position = CLodLoadPagePosition(
-        slab,
-        gs_setup.positionFormat,
-        pageByteOffset + gs_setup.positionStreamBase,
-        gs_setup.positionByteOffset,
-        vertexIndex);
+    const float3 position = CLodRasterLoadPosition(cluster, slab, vertexIndex);
 #if defined(PSO_SKINNED)
-    return SWApplySkinning(slab, pageByteOffset, vertexIndex, position, work.assemblyTransformIndex);
+    return CLodRasterSkinPosition(cluster, slab, vertexIndex, position);
 #elif !CLOD_WG_RIGID_SW_RASTER && defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
     // Compute dispatches one PSO per bucket, so only the work graph's single library sees both.
-    if ((gs_setup.vertexFlags & VERTEX_SKINNED) != 0u)
+    if ((cluster.vertexFlags & VERTEX_SKINNED) != 0u)
     {
-        return SWApplySkinning(slab, pageByteOffset, vertexIndex, position, work.assemblyTransformIndex);
+        return CLodRasterSkinPosition(cluster, slab, vertexIndex, position);
     }
     return position;
 #else
@@ -421,29 +209,26 @@ float3 SWLoadVertexPosition(SWClusterWork work, ByteAddressBuffer slab, uint pag
 #endif
 }
 
-void SWTransformVertices(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint GI)
+void SWTransformVertices(SWClusterWork work, CLodRasterCluster cluster, ClodViewRasterInfo rasterInfo, uint GI)
 {
-    const uint pageByteOffset = CLodVisibleClusterPageSlabByteOffset(work.packedCluster);
-    ByteAddressBuffer slab = ResourceDescriptorHeap[CLodVisibleClusterPageSlabDescriptorIndex(work.packedCluster)];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[cluster.slabDescriptorIndex];
 
     const float visWidth = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
     const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
     const float scissorMinX = float(rasterInfo.scissorMinX);
     const float scissorMinY = float(rasterInfo.scissorMinY);
 
-    for (uint v = GI; v < gs_setup.vertexCount; v += SW_CLUSTER_RASTER_THREADS)
+    for (uint v = GI; v < cluster.vertexCount; v += SW_CLUSTER_RASTER_THREADS)
     {
-        const float4 position = float4(SWLoadVertexPosition(work, slab, pageByteOffset, v), 1.0f);
-        const float2 clipXY = float2(
-            dot(position, gs_setup.modelViewProjectionX),
-            dot(position, gs_setup.modelViewProjectionY));
-        const float invW = 1.0f / dot(position, gs_setup.modelViewProjectionW);
-        const float2 ndc = clipXY * invW;
+        const float3 position = SWLoadVertexPosition(work, cluster, slab, v);
+        const float4 clipPosition = CLodRasterClipPosition(cluster, position);
+        const float invW = 1.0f / clipPosition.w;
+        const float2 ndc = clipPosition.xy * invW;
 
         gs_screenPos[v] = float2(
             (ndc.x + 1.0f) * 0.5f * visWidth + scissorMinX,
             (1.0f - ndc.y) * 0.5f * visHeight + scissorMinY);
-        gs_linearDepth[v] = -dot(position, gs_setup.modelViewZ);
+        gs_linearDepth[v] = CLodRasterLinearDepth(cluster, position);
         gs_invClipW[v] = invW;
     }
 }
@@ -468,9 +253,9 @@ struct SWRasterDebug
     uint2 payload;
 };
 
-SWRasterDebug SWBuildRasterDebug(SWClusterWork work)
+SWRasterDebug SWBuildRasterDebug(SWClusterWork work, SWClusterFlags flags)
 {
-    const uint outputType = gs_setup.debugOutputType;
+    const uint outputType = flags.debugOutputType;
     SWRasterDebug debug = (SWRasterDebug)0;
     debug.enabled =
         outputType == OUTPUT_SW_RASTER ||
@@ -481,7 +266,7 @@ SWRasterDebug SWBuildRasterDebug(SWClusterWork work)
         return debug;
     }
 
-    const bool isAssemblyVoxel = (gs_setup.groupFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u;
+    const bool isAssemblyVoxel = (flags.groupFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u;
     if (outputType == OUTPUT_SW_RASTER)
     {
         debug.payload = PackDebugUint(1u);
@@ -497,7 +282,7 @@ SWRasterDebug SWBuildRasterDebug(SWClusterWork work)
         {
             color = max(HashToColor(work.assemblyTransformIndex + 17u), 0.18f.xxx);
         }
-        else if ((gs_setup.groupFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u)
+        else if ((flags.groupFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u)
         {
             color = float3(0.82f, 0.18f, 1.0f);
         }
@@ -572,8 +357,10 @@ struct SWRasterOutput
 {
     uint viewID;
     uint visibleClusterIndex;
+    uint dynamicShadowLayer;
     SWRasterDebug debug;
 #if CLOD_SW_RASTER_MAY_ALPHA_TEST
+    bool alphaTestEnabled;
     SWAlphaMaterial alphaMaterial;
     CLodUvStream uvStream;
 #endif
@@ -592,7 +379,7 @@ void SWRasterPixel(
 {
     SWTelemetryAdd(SW_COUNTER_COVERED_PIXELS, 1u);
 #if CLOD_SW_RASTER_MAY_ALPHA_TEST
-    if (gs_setup.alphaTestEnabled != 0u)
+    if (output.alphaTestEnabled)
     {
         const float3 perspective = barycentrics * tri.invW;
         const float invSum = rcp(perspective.x + perspective.y + perspective.z);
@@ -617,7 +404,7 @@ void SWRasterPixel(
 
     const float depth = dot(barycentrics, tri.depths);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-    SWRasterWriteVirtualShadow(pixel, output.viewID, depth, gs_setup.dynamicShadowLayer != 0u);
+    SWRasterWriteVirtualShadow(pixel, output.viewID, depth, output.dynamicShadowLayer != 0u);
 #else
     InterlockedMin(visBuffer[pixel], PackVisKey(depth, output.visibleClusterIndex, tri.triangleIndex));
 #endif
@@ -653,39 +440,32 @@ void SWClipScanlineConstraint(
     hasPixels = hasPixels && firstPixelOffset <= lastPixelOffset;
 }
 
-void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint GI)
+void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterFlags flags, ClodViewRasterInfo rasterInfo, uint GI)
 {
-    const uint slabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(work.packedCluster);
-    const uint pageByteOffset = CLodVisibleClusterPageSlabByteOffset(work.packedCluster);
-    const uint viewID = CLodVisibleClusterViewID(work.packedCluster);
-    ByteAddressBuffer slab = ResourceDescriptorHeap[slabDescriptorIndex];
+    const uint viewID = cluster.viewID;
+    ByteAddressBuffer slab = ResourceDescriptorHeap[cluster.slabDescriptorIndex];
 
-    const uint triangleCount = gs_setup.triangleCount;
-    const uint triangleStreamAddress = pageByteOffset + gs_setup.triangleStreamBase + gs_setup.triangleByteOffset;
-    const bool reverseWinding = gs_setup.reverseWinding != 0u;
+    const uint triangleCount = cluster.triangleCount;
+    const uint triangleStreamAddress = CLodRasterTriangleStreamAddress(cluster);
+    const bool reverseWinding = cluster.reverseWinding != 0u;
     const int2 scissorMin = int2(rasterInfo.scissorMinX, rasterInfo.scissorMinY);
     const int2 scissorMax = int2(int(rasterInfo.scissorMaxX) - 1, int(rasterInfo.scissorMaxY) - 1);
 
     SWRasterOutput output;
     output.viewID = viewID;
     output.visibleClusterIndex = work.visibleClusterIndex;
-    output.debug = SWBuildRasterDebug(work);
+    output.dynamicShadowLayer = cluster.dynamicShadowLayer;
+    output.debug = SWBuildRasterDebug(work, flags);
     // Debug views show both faces too.
-    const bool drawBackFaces = output.debug.enabled || gs_setup.doubleSided != 0u;
+    const bool drawBackFaces = output.debug.enabled || flags.doubleSided != 0u;
 #if CLOD_SW_RASTER_MAY_ALPHA_TEST
+    output.alphaTestEnabled = flags.alphaTestEnabled != 0u;
     output.alphaMaterial = (SWAlphaMaterial)0;
     output.uvStream = (CLodUvStream)0;
-    if (gs_setup.alphaTestEnabled != 0u)
+    if (output.alphaTestEnabled)
     {
-        output.alphaMaterial = SWLoadAlphaMaterial(gs_setup.materialDataIndex);
-        output.uvStream = CLodLoadUvStream(
-            slabDescriptorIndex,
-            pageByteOffset,
-            gs_setup.uvSetCount,
-            gs_setup.uvDescriptorOffset,
-            gs_setup.uvBitstreamDirectoryOffset,
-            CLodVisibleClusterLocalMeshletIndex(work.packedCluster),
-            0u);
+        output.alphaMaterial = SWLoadAlphaMaterial(cluster.materialDataIndex);
+        output.uvStream = CLodRasterLoadUvStream(cluster, 0u);
     }
 #endif
 
@@ -756,7 +536,7 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
                 uint2(minPixel),
                 uint2(maxPixel),
                 clipmapInfo,
-                (gs_setup.vertexFlags & VERTEX_SKINNED) != 0u,
+                (cluster.vertexFlags & VERTEX_SKINNED) != 0u,
                 pageTable))
         {
             continue;
@@ -856,25 +636,25 @@ void SWRasterTriangles(SWClusterWork work, ClodViewRasterInfo rasterInfo, uint G
 
 void SWRasterCluster(SWClusterWork work, StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer, uint GI)
 {
-    const uint viewID = CLodVisibleClusterViewID(work.packedCluster);
-    const ClodViewRasterInfo rasterInfo = viewRasterInfoBuffer[viewID];
-
     if (GI == 0u)
     {
-        SWLoadClusterSetup(work, viewID);
+        SWLoadClusterSetup(work);
     }
     GroupMemoryBarrierWithGroupSync();
 
+    const CLodRasterCluster cluster = gs_cluster;
+    const SWClusterFlags flags = gs_flags;
+    const ClodViewRasterInfo rasterInfo = viewRasterInfoBuffer[CLodVisibleClusterViewID(work.packedCluster)];
     if (GI == 0u)
     {
-        SWRecordCacheTelemetry(work);
+        SWRecordCacheTelemetry(work, cluster);
         SWTelemetryAdd(SW_COUNTER_CLUSTERS, 1u);
-        SWTelemetryAdd(SW_COUNTER_INPUT_TRIANGLES, gs_setup.triangleCount);
+        SWTelemetryAdd(SW_COUNTER_INPUT_TRIANGLES, cluster.triangleCount);
     }
-    SWTransformVertices(work, rasterInfo, GI);
+    SWTransformVertices(work, cluster, rasterInfo, GI);
     GroupMemoryBarrierWithGroupSync();
 
-    SWRasterTriangles(work, rasterInfo, GI);
+    SWRasterTriangles(work, cluster, flags, rasterInfo, GI);
 }
 
 // ---------------------------------------------------------------------------------------------

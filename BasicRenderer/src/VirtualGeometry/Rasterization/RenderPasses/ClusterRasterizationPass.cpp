@@ -125,6 +125,7 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo,
             Builtin::CameraBuffer,
+            Builtin::CullingCameraBuffer,
             Builtin::CLod::Offsets,
             Builtin::CLod::GroupChunks,
             Builtin::CLod::Groups,

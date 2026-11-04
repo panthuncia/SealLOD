@@ -41,17 +41,11 @@ struct MeshletSetup
     uint drawRecordIndex;
     uint viewID; // Which view this meshlet is being rendered for (for CLod path)
     uint shadowClipmapIndex;
-    uint virtualShadowPayload;
     uint meshletIndex;
     Meshlet meshlet; // Used by non-CLod path
     PerMeshBuffer meshBuffer;
     PerMeshInstanceBuffer meshInstanceBuffer;
     PerObjectBuffer objectBuffer;
-    // The opaque rigid CLod path only needs these members. Keeping that path out
-    // of the full PerObjectBuffer avoids carrying three matrices through every
-    // mesh-shader lane.
-    row_major float4x4 clodRasterModel;
-    uint clodRasterObjectFlags;
     uint vertCount;
     uint triCount;
     uint vertOffset; // Non-CLod: meshlet.VertOffset; CLod: unused (0)
@@ -61,35 +55,10 @@ struct MeshletSetup
     uint prevPostSkinningBufferOffset;
     uint groupMeshletTrianglesByteOffset; // Non-CLod triangle buffer offset
 
-    // Per-meshlet page stream addressing from CLodMeshletDescriptor
-    uint bitsX;
-    uint bitsY;
-    uint bitsZ;
-    int3 minQ;
-    uint positionBitOffset;     // byte offset within page position stream
-    uint vertexAttributeOffset; // element offset within page vertex-attribute arrays
     uint triangleByteOffset;    // byte offset within page triangle stream
-    uint boneListOffset;        // uint offset within page bone-index stream
-    uint boneCount;
-    uint assemblyTransformIndex;
-    CLodMeshMetadata clodMetadata;
-    uint pageAttributeMask;
-    uint uvSetCount;
-    uint uvDescriptorBase;
-    uint uvBitstreamDirectoryBase;
 
     // Page-level stream base byte offsets (absolute in slab)
-    uint pageByteOffset;
-    uint positionBitstreamBase;
-    uint normalArrayBase;
-    uint colorArrayBase;
-    uint jointArrayBase;
-    uint weightArrayBase;
     uint triangleStreamBase;
-    uint boneIndexStreamBase;
-
-    // Mesh-wide quantization
-    uint compressedPositionQuantExp;
 
     // Page-pool addressing (0 = non-CLod / not loaded)
     uint pagePoolSlabDescriptorIndex;  // Descriptor-heap index of the slab ByteAddressBuffer
@@ -110,7 +79,6 @@ bool InitializeMeshletInternal(
     setup.meshInstanceBuffer = meshInstance;
     setup.viewID = 0; // Unused
     setup.shadowClipmapIndex = CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX;
-    setup.virtualShadowPayload = CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX);
 
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     StructuredBuffer<PerObjectBuffer> perObjectBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
@@ -128,31 +96,8 @@ bool InitializeMeshletInternal(
     setup.vertOffset = setup.meshlet.VertOffset;
     setup.groupMeshletTrianglesByteOffset = setup.meshBuffer.clodMeshletTrianglesBufferOffset;
 
-    // CLod per-meshlet fields unused in non-CLod path
-    setup.bitsX = 0;
-    setup.bitsY = 0;
-    setup.bitsZ = 0;
-    setup.minQ = int3(0, 0, 0);
-    setup.positionBitOffset = 0;
-    setup.vertexAttributeOffset = 0;
     setup.triangleByteOffset = 0;
-    setup.boneListOffset = 0;
-    setup.boneCount = 0;
-    setup.assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
-    setup.clodMetadata = (CLodMeshMetadata)0;
-    setup.pageAttributeMask = 0;
-    setup.uvSetCount = 0;
-    setup.uvDescriptorBase = 0;
-    setup.uvBitstreamDirectoryBase = 0;
-    setup.pageByteOffset = 0;
-    setup.positionBitstreamBase = 0;
-    setup.normalArrayBase = 0;
-    setup.colorArrayBase = 0;
-    setup.jointArrayBase = 0;
-    setup.weightArrayBase = 0;
     setup.triangleStreamBase = 0;
-    setup.boneIndexStreamBase = 0;
-    setup.compressedPositionQuantExp = 0;
 
     // setup.vertexBuffer = vertexBuffer;
     // setup.meshletTrianglesBuffer = meshletTrianglesBuffer;
@@ -235,33 +180,6 @@ uint3 DecodeTriangle(uint triLocalIndex, MeshletSetup setup)
     ByteAddressBuffer triangleBuffer = ResourceDescriptorHeap[setup.pagePoolSlabDescriptorIndex];
     uint triOffset = setup.triangleStreamBase + setup.triangleByteOffset + triLocalIndex * 3;
     return DecodeTriangleFromBuffer(triangleBuffer, triOffset);
-}
-
-CLodMeshletUvDescriptor LoadMeshletUvDescriptorAbsolute(MeshletSetup setup, uint uvSetIndex)
-{
-    ByteAddressBuffer slab = ResourceDescriptorHeap[setup.pagePoolSlabDescriptorIndex];
-    uint descriptorIndex = setup.meshletIndex * setup.uvSetCount + uvSetIndex;
-    uint addr = setup.uvDescriptorBase + descriptorIndex * CLOD_MESHLET_UV_DESCRIPTOR_STRIDE;
-    uint4 d0 = slab.Load4(addr + 0u);
-    uint4 d1 = slab.Load4(addr + 16u);
-
-    CLodMeshletUvDescriptor desc;
-    desc.uvBitOffset = d0.x;
-    desc.uvMinU = asfloat(d0.y);
-    desc.uvMinV = asfloat(d0.z);
-    desc.uvScaleU = asfloat(d0.w);
-    desc.uvScaleV = asfloat(d1.x);
-    desc.uvBits = d1.y;
-    desc.reserved0 = d1.z;
-    desc.reserved1 = d1.w;
-    return desc;
-}
-
-uint LoadPageUvBitstreamBaseAbsolute(MeshletSetup setup, uint uvSetIndex)
-{
-    ByteAddressBuffer slab = ResourceDescriptorHeap[setup.pagePoolSlabDescriptorIndex];
-    uint relativeOffset = slab.Load(setup.uvBitstreamDirectoryBase + uvSetIndex * 4u);
-    return setup.pageByteOffset + relativeOffset;
 }
 
 #endif // MESHLET_COMMON_HLSLI

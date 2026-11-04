@@ -122,4 +122,24 @@ float2 CLodDecodeUv(ByteAddressBuffer slab, CLodUvStream stream, uint vertexInde
     return stream.uvMin + float2(encodedU, encodedV) * stream.uvScale;
 }
 
+// Normals are stored octahedral in two snorm16s.
+float3 CLodDecodeNormal(uint packed)
+{
+    const int signedPacked = asint(packed);
+    const float2 encoded = max(
+        float2((signedPacked << 16) >> 16, signedPacked >> 16) / 32767.0f,
+        float2(-1.0f, -1.0f));
+    float3 normal = float3(encoded, 1.0f - abs(encoded.x) - abs(encoded.y));
+    if (normal.z < 0.0f)
+    {
+        normal.xy = (1.0f - abs(normal.yx)) * float2(normal.x >= 0.0f ? 1.0f : -1.0f, normal.y >= 0.0f ? 1.0f : -1.0f);
+    }
+    return normalize(normal);
+}
+
+float3 CLodDecodeColor(uint packed)
+{
+    return float3(packed & 0xffu, (packed >> 8u) & 0xffu, (packed >> 16u) & 0xffu) / 255.0f;
+}
+
 #endif // CLOD_CLUSTER_FORMAT_HLSLI

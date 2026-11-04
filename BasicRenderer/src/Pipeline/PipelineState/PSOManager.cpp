@@ -1389,7 +1389,7 @@ org::PipelineState PSOManager::CreateClusterLODRasterPSO(
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
 
     ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+    shaderInfoBundle.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
     shaderInfoBundle.pixelShader = { L"shaders/ClusterLOD/visibilityOutput.hlsl", L"VisibilityBufferPSMain", L"ps_6_6" };
     shaderInfoBundle.defines = defines;
 
@@ -1435,7 +1435,7 @@ org::PipelineState PSOManager::CreateClusterLODVirtualShadowRasterPSO(
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
 
     ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+    shaderInfoBundle.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
     shaderInfoBundle.pixelShader = { L"shaders/ClusterLOD/VirtualShadowOutput.hlsl", L"VirtualShadowBufferPSMain", L"ps_6_6" };
     shaderInfoBundle.defines = defines;
 
@@ -1479,7 +1479,7 @@ org::PipelineState PSOManager::CreateClusterLODDeepVisibilityRasterPSO(
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
 
     ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+    shaderInfoBundle.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
     shaderInfoBundle.pixelShader = { L"shaders/ClusterLOD/DeepVisibilityOutput.hlsl", L"DeepVisibilityBufferPSMain", L"ps_6_6" };
     shaderInfoBundle.defines = defines;
 
@@ -1533,7 +1533,7 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITRasterPSO(
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
 
     ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+    shaderInfoBundle.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
     shaderInfoBundle.pixelShader = { L"shaders/ClusterLOD/AVBOITCapture.hlsl", L"AVBOITCapturePSMain", L"ps_6_6" };
     shaderInfoBundle.defines = defines;
 
@@ -1589,7 +1589,7 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITOccupancyPSO(
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
 
     ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+    shaderInfoBundle.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
     shaderInfoBundle.pixelShader = { L"shaders/ClusterLOD/AVBOITCapture.hlsl", L"AVBOITCapturePSMain", L"ps_6_6" };
     shaderInfoBundle.defines = defines;
 
@@ -1644,7 +1644,7 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITShadePSO(
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
 
     ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+    shaderInfoBundle.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
     shaderInfoBundle.pixelShader = { L"shaders/ClusterLOD/AVBOITShade.hlsl", L"AVBOITShadePSMain", L"ps_6_6" };
     shaderInfoBundle.defines = defines;
 
@@ -2181,17 +2181,17 @@ void PSOManager::PrecompileShaderArtifact(const ShaderVariantRequest& request)
 		if (normalized.singleView) {
 			defines.push_back({ L"CLOD_RASTER_SINGLE_VIEW", L"1" });
 		}
-        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
         shaderInfo.pixelShader = { L"shaders/ClusterLOD/visibilityOutput.hlsl", L"VisibilityBufferPSMain", L"ps_6_6" };
         break;
     case ShaderVariantKind::ClusterLODVirtualShadowRaster:
         defines.push_back({ L"CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
         defines.push_back({ L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" });
-        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
         shaderInfo.pixelShader = { L"shaders/ClusterLOD/VirtualShadowOutput.hlsl", L"VirtualShadowBufferPSMain", L"ps_6_6" };
         break;
     case ShaderVariantKind::ClusterLODDeepVisibilityRaster:
-        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
         shaderInfo.pixelShader = { L"shaders/ClusterLOD/DeepVisibilityOutput.hlsl", L"DeepVisibilityBufferPSMain", L"ps_6_6" };
         break;
     case ShaderVariantKind::ClusterLODAVBOITOccupancy:
@@ -2202,7 +2202,7 @@ void PSOManager::PrecompileShaderArtifact(const ShaderVariantRequest& request)
             defines.push_back({ L"CLOD_AVBOIT_VBOIT_OCCUPANCY_ONLY", L"1" });
         }
         defines.push_back({ L"CLOD_AVBOIT_LOW_RES_RASTER", L"1" });
-        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
         shaderInfo.pixelShader = { L"shaders/ClusterLOD/AVBOITCapture.hlsl", L"AVBOITCapturePSMain", L"ps_6_6" };
         break;
     case ShaderVariantKind::ClusterLODAVBOITShade: {
@@ -2210,7 +2210,7 @@ void PSOManager::PrecompileShaderArtifact(const ShaderVariantRequest& request)
         defines.insert(defines.end(), lightingDefines.begin(), lightingDefines.end());
         defines.insert(defines.begin(), DxcDefine{ L"CLOD_AVBOIT_REYES_SEPARATE_BATCH", L"1" });
         defines.insert(defines.begin(), DxcDefine{ L"CLOD_AVBOIT_FORWARD_TRANSPARENT", L"1" });
-        shaderInfo.meshShader = { L"shaders/mesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
+        shaderInfo.meshShader = { L"shaders/ClusterLOD/clusterRasterMesh.hlsl", L"ClusterLODBucketMSMain", L"ms_6_6" };
         shaderInfo.pixelShader = { L"shaders/ClusterLOD/AVBOITShade.hlsl", L"AVBOITShadePSMain", L"ps_6_6" };
         break;
     }
