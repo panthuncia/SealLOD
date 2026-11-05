@@ -14,7 +14,7 @@ struct FULLSCREEN_VS_OUTPUT
 FULLSCREEN_VS_OUTPUT FullscreenVSMain(uint vid : SV_VertexID)
 {
     
-    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<Camera> cameraBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     FULLSCREEN_VS_OUTPUT o;
     float2 pos = 0;

@@ -617,7 +617,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         return false;
     }
 
-    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[0];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     Camera cam = cameras[perFrame.mainCameraIndex];
 

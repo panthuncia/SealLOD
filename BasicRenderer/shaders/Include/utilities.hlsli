@@ -2872,7 +2872,7 @@ void SampleMaterialFromUvCache(
     if (uvBindings.hasHeightSource && uvBindings.hasTbnSource)
     {
         MaterialUvSample heightUv = uvCache.samples[uvBindings.heightCacheIndex];
-        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
+        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
         StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
         Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
 
@@ -3079,7 +3079,7 @@ void SampleMaterialFromUvCache(
 #endif
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
     ConstantBuffer<PerFrameBuffer> debugPerFrameBuffer =
-        ResourceDescriptorHeap[0];
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     if (debugPerFrameBuffer.outputType == OUTPUT_TERRAIN_GEOMETRIC_HEIGHT)
     {
         ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
@@ -3120,7 +3120,7 @@ void SampleMaterialEvalFromUvCache(
 #if defined(PSO_PARALLAX)
     if (uvBindings.hasHeightSource && uvBindings.hasTbnSource)
     {
-        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
+        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
         if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
         {
             StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -3440,7 +3440,7 @@ void SampleMaterialFromUvCacheRuntime(
     if ((materialFlags & MATERIAL_PARALLAX) != 0u && uvBindings.hasHeightSource && uvBindings.hasTbnSource)
     {
         MaterialUvSample heightUv = uvCache.samples[uvBindings.heightCacheIndex];
-        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
+        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
         StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
         Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
 
@@ -3688,7 +3688,7 @@ void SampleMaterialCorePrecompiled(
     float2 localDUdy = dUVdy;
 
 #if defined(PSO_PARALLAX)
-    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
 

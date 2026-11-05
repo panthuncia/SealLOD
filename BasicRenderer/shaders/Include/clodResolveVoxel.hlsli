@@ -401,7 +401,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     const row_major matrix localToWorld = mul(skinMatrix, obj.model);
     const row_major matrix worldToLocal = mul(obj.modelInverse, inverseSkinMatrix);
 
-    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[0];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const float2 winSize = float2(perFrame.screenResX, perFrame.screenResY);
     const float2 pixelUv = (float2(pixel) + 0.5f) / winSize;
     const float2 ndc = float2(pixelUv.x * 2.0f - 1.0f, 1.0f - pixelUv.y * 2.0f);

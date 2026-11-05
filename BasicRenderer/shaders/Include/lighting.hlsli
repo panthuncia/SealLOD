@@ -258,7 +258,7 @@ uint3 ComputeClusterID(float2 pixelCoords, float viewDepth,
 }
 
 float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint activeEnvironmentIndex, uint environmentBufferDescriptorIndex) {
-    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     float3 lighting = float3(0.0, 0.0, 0.0);
 
 #if defined(PSO_IMAGE_BASED_LIGHTING)
@@ -482,7 +482,7 @@ float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint act
 }
 
 LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint activeEnvironmentIndex, uint environmentBufferDescriptorIndex, bool isFrontFace) {
-    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[0];
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     float3 lighting = float3(0.0, 0.0, 0.0);
 
 #if defined(PSO_IMAGE_BASED_LIGHTING)
