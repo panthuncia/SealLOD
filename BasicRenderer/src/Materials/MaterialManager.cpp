@@ -1,5 +1,6 @@
 #include "Materials/TextureStreaming/TextureStreamingManager.h"
 #include "Materials/MaterialManager.h"
+#include "Assets/Textures/TextureFactory.h"
 #include "Runtime/Resources/ResourceManager.h"
 
 #include "Materials/MaterialOwnershipGuards.h"
@@ -134,7 +135,17 @@ namespace {
 
 	PerMaterialOpenPBRCB BuildOpenPBRMaterialData(
 		const Material& material,
-		org::runtime::IDescriptorService& descriptorService) {
+		org::runtime::IDescriptorService& descriptorService,
+		const MaterialTextureFallbacks& fallbacks) {
+		// A texture without a published image binds the white fallback: until then it samples 1, as with no texture, and
+		// once published the shader resolves the image through the texture's streaming row.
+		const auto boundIndex = [&](const std::shared_ptr<org::PixelBuffer>& image) {
+			if (image) return image->GetSRVInfo(0).slot.index;
+			if (fallbacks.white == MaterialTextureFallbacks::kUnset) {
+				throw std::logic_error("MaterialManager: an OpenPBR texture has no image, and no fallback textures exist");
+			}
+			return fallbacks.white;
+		};
 		const OpenPBRMaterialParameters& materialParameters = material.GetOpenPBRMaterial();
 		const OpenPBRTextureBindings& textures = material.GetOpenPBRTextures();
 		constexpr uint32_t kInvalidDescriptor = std::numeric_limits<uint32_t>::max();
@@ -196,8 +207,7 @@ namespace {
 				return;
 			}
 
-			auto image = binding.texture->ImagePtr();
-			textureIndex = image ? image->GetSRVInfo(0).slot.index : kInvalidDescriptor;
+			textureIndex = boundIndex(binding.texture->ImagePtr());
 			samplerIndex = binding.texture->SamplerDescriptorIndex(descriptorService);
 			streamingTextureID = IsMaterialTextureStreamingEnabledSetting() ? binding.texture->GetStreamingTextureID() : kInvalidStreamingTextureID;
 			if (binding.channels.size() > 0u) channels.x = binding.channels[0];
@@ -222,8 +232,7 @@ namespace {
 				return;
 			}
 
-			auto image = binding.texture->ImagePtr();
-			textureIndex = image ? image->GetSRVInfo(0).slot.index : kInvalidDescriptor;
+			textureIndex = boundIndex(binding.texture->ImagePtr());
 			samplerIndex = binding.texture->SamplerDescriptorIndex(descriptorService);
 			streamingTextureID = IsMaterialTextureStreamingEnabledSetting() ? binding.texture->GetStreamingTextureID() : kInvalidStreamingTextureID;
 			if (!binding.channels.empty()) {
@@ -521,6 +530,8 @@ void MaterialManager::InitializeTextureStreaming(TextureFactory& textureFactory,
 	if (m_textureStreamingManager) {
 		m_textureStreamingManager->Initialize(textureFactory, framesInFlight);
 	}
+	// After the streaming manager, which attaches the material transfer service the fallbacks upload through.
+	CreateTextureFallbacks(textureFactory);
 }
 void MaterialManager::ShutdownTextureStreaming() {
 	if (m_textureStreamingManager) {
@@ -814,8 +825,12 @@ void MaterialManager::SetDescriptorService(std::shared_ptr<org::runtime::IDescri
 	if (m_descriptorService == descriptors) return;
 	m_descriptorService = std::move(descriptors);
 	if (m_textureStreamingManager) m_textureStreamingManager->SetDescriptorService(m_descriptorService);
-	// Every existing material's descriptor indices are now stale. Re-dirtying
-	// them walks the acceptance domain's own maps, so it runs there.
+	// Every existing material's descriptor indices are now stale.
+	RedirtyAllMaterials();
+}
+
+void MaterialManager::RedirtyAllMaterials() {
+	// Re-dirtying walks the acceptance domain's own maps, so it runs there.
 	const auto redirtyAll = [this] {
 		for (const auto& [materialID, material] : m_activeMaterialsByID) {
 			if (material && m_dirtyMaterialIDSet.insert(materialID).second)
@@ -832,6 +847,39 @@ void MaterialManager::SetDescriptorService(std::shared_ptr<org::runtime::IDescri
 		return;
 	}
 	PostMaterialMutation(redirtyAll);
+}
+
+MaterialTextureFallbacks MaterialManager::TextureFallbacks() const {
+	const auto packed = m_textureFallbackIndices.load(std::memory_order_acquire);
+	if (packed == kNoTextureFallbacks) return {};
+	return { static_cast<uint32_t>(packed & 0xffffffffull), static_cast<uint32_t>(packed >> 32u) };
+}
+
+void MaterialManager::CreateTextureFallbacks(TextureFactory& textureFactory) {
+	if (m_textureFallbackIndices.load(std::memory_order_acquire) != kNoTextureFallbacks) return;
+	// 4x4, one level, uploaded and made shader-ready by the material transfer service like any material texture.
+	const auto makeFallback = [&](std::array<uint8_t, 4> texel, const char* name) {
+		constexpr uint32_t kExtent = 4u;
+		org::TextureDescription desc;
+		desc.channels = 4;
+		desc.format = rhi::Format::R8G8B8A8_UNorm;
+		desc.hasSRV = true;
+		desc.generateMipMaps = false;
+		desc.imageDimensions.push_back({ kExtent, kExtent, kExtent * 4u, kExtent * kExtent * 4u });
+		auto bytes = std::make_shared<std::vector<uint8_t>>();
+		bytes->reserve(kExtent * kExtent * 4u);
+		for (uint32_t texelIndex = 0; texelIndex < kExtent * kExtent; ++texelIndex)
+			bytes->insert(bytes->end(), texel.begin(), texel.end());
+		return textureFactory.CreateMaterialResidentPixelBuffer(
+			std::move(desc), TextureFactory::TextureInitialData::FromBytes({ std::move(bytes) }), name, 1u);
+	};
+	m_whiteFallbackTexture = makeFallback({ 255u, 255u, 255u, 255u }, "Material Fallback White");
+	m_flatNormalFallbackTexture = makeFallback({ 128u, 128u, 255u, 128u }, "Material Fallback Flat Normal");
+	const uint64_t white = m_whiteFallbackTexture->GetSRVInfo(0).slot.index;
+	const uint64_t flatNormal = m_flatNormalFallbackTexture->GetSRVInfo(0).slot.index;
+	m_textureFallbackIndices.store(white | (flatNormal << 32u), std::memory_order_release);
+	// Materials built before now bound no fallbacks.
+	RedirtyAllMaterials();
 }
 
 void MaterialManager::AppendTextureDisplayRequirements(
@@ -866,14 +914,15 @@ br::render::MaterialUsageCapture MaterialManager::CaptureMaterialUsage(
 	// can run concurrently; the refresh rewrites the material's descriptor tuple.
 	static std::array<std::mutex, 64> captureStripes;
 	std::scoped_lock captureLock(captureStripes[material.GetMaterialID() % captureStripes.size()]);
-	if (refreshTextureBindings) material.RefreshTextureBindings(m_descriptorService.get());
+	const auto fallbacks = TextureFallbacks();
+	if (refreshTextureBindings) material.RefreshTextureBindings(m_descriptorService.get(), fallbacks);
 	br::render::MaterialUsageCapture capture{};
 	auto& entry = capture.entry;
 	entry.materialID = material.GetMaterialID();
 	entry.count = count;
 	entry.base = material.GetData();
 	entry.evaluation = BuildMaterialEvalData(material);
-	entry.openPbr = BuildOpenPBRMaterialData(material, *m_descriptorService);
+	entry.openPbr = BuildOpenPBRMaterialData(material, *m_descriptorService, fallbacks);
 	entry.compileFlags = material.Technique().compileFlags;
 	capture.textureServiceInputs = CollectMaterialTextureAssets(material);
 	entry.retainedTextureResources = CollectMaterialTextureResources(material);
@@ -1146,7 +1195,7 @@ void MaterialManager::FlushDirtyMaterial(Material& material, bool refreshTexture
 		ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs");
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::RefreshTextureBindings");
-			material.RefreshTextureBindings(m_descriptorService.get());
+			material.RefreshTextureBindings(m_descriptorService.get(), TextureFallbacks());
 		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Base");
@@ -1161,7 +1210,7 @@ void MaterialManager::FlushDirtyMaterial(Material& material, bool refreshTexture
 			if (!m_descriptorService) {
 				throw std::runtime_error("MaterialManager: descriptor service unavailable while publishing material data");
 			}
-			openPBRData = BuildOpenPBRMaterialData(material, *m_descriptorService);
+			openPBRData = BuildOpenPBRMaterialData(material, *m_descriptorService, TextureFallbacks());
 		}
 	}
 	if (materialSlot >= m_materialUploadSignatures.size()) {

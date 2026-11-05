@@ -705,7 +705,7 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         if (objectReyesAtlasDebugMaterial && materialInfo.heightMapIndex != 0u && materialInfo.heightSamplerIndex != 0u)
         {
             Texture2D<float4> objectReyesAtlasDebugHeightTexture =
-                ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
             SamplerState objectReyesAtlasDebugHeightSampler =
                 SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
             const float objectReyesAtlasDebugHeightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(
@@ -827,7 +827,7 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         if (objectReyesAtlasDebugMaterial && displacementEnabled && materialInfo.heightMapIndex != 0u && materialInfo.heightSamplerIndex != 0u)
         {
             Texture2D<float4> objectReyesAtlasDebugPatchHeightTexture =
-                ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
             SamplerState objectReyesAtlasDebugPatchHeightSampler =
                 SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
             const float2 patchUv0 = saturate(ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary0));

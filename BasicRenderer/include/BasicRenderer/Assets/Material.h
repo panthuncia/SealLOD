@@ -20,6 +20,17 @@ class TextureFactory;
 
 struct TransparencyPick { bool isTransparent = false; bool masked = false; };
 
+// Descriptor indices of the neutral textures a material binds for a texture that has no published image yet
+// (MaterialManager owns them). A shader that samples that texture before its image arrives then reads a neutral value,
+// never whatever resource happens to own descriptor 0. A streamed texture still resolves its published image through
+// its streaming table row; the fallback is only its direct descriptor.
+struct MaterialTextureFallbacks {
+    static constexpr uint32_t kUnset = 0xffffffffu;
+    uint32_t white = kUnset;      // (1, 1, 1, 1): the factor alone, as for a material without the texture
+    uint32_t flatNormal = kUnset; // (0.5, 0.5, 1, 0.5): +Z for RGB, RG and alpha-green normal packings
+    bool Valid() const { return white != kUnset && flatNormal != kUnset; }
+};
+
 inline bool HasMaterialTextureBinding(const TextureAndConstant& binding) {
     return binding.texture != nullptr || !binding.sourcePath.empty();
 }
@@ -379,7 +390,8 @@ public:
         return m_materialData.objectSurfaceSamplingMode == static_cast<uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
     }
     std::shared_ptr<TextureAsset> GetHeightMapTexture() const { return m_heightMap; }
-    void RefreshTextureBindings(org::runtime::IDescriptorService* descriptorService = nullptr);
+    // Rebuilds the material's descriptor tuple. A texture without a published image binds its fallback.
+    void RefreshTextureBindings(org::runtime::IDescriptorService* descriptorService, const MaterialTextureFallbacks& fallbacks);
     void ForEachReferencedTexture(const std::function<void(const std::shared_ptr<TextureAsset>&)>& visitor) const;
 private:
 	// Starts at 1: material ID 0 means "no material" (MaterialManager::ReserveMaterialUsage rejects it).

@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "BasicRenderer/Assets/Material.h"
 #include "Assets/Textures/TextureFactory.h"
 #include "Runtime/Resources/ResourceManager.h"
@@ -437,7 +438,15 @@ std::shared_ptr<Material> Material::GetDefaultMaterial() {
     return defaultMaterial;
 }
 
-void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descriptorService) {
+void Material::RefreshTextureBindings(
+    org::runtime::IDescriptorService* descriptorService, const MaterialTextureFallbacks& fallbacks) {
+    // A texture without a published image binds a neutral fallback. Descriptor 0 belongs to an unrelated resource.
+    const auto fallbackIndex = [&](uint32_t index) {
+        if (index == MaterialTextureFallbacks::kUnset) {
+            throw std::logic_error("Material '" + m_name + "' has a texture without an image, and no fallback textures exist");
+        }
+        return index;
+    };
     const bool textureStreamingEnabled = IsMaterialTextureStreamingEnabledSetting();
 	// Rebuild the complete descriptor tuple from the current TextureAssets.  Leaving
 	// one field untouched when an asset is removed or temporarily has no published
@@ -487,8 +496,8 @@ void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descript
         m_materialData.baseColorChannels = RgbaChannelsOrDefault(m_baseColorChannels);
         m_materialData.baseColorUvSetIndex = m_baseColorUvSetIndex;
         auto image = m_baseColorTexture->ImagePtr();
+        m_materialData.baseColorTextureIndex = image ? image->GetSRVInfo(0).slot.index : fallbackIndex(fallbacks.white);
         if (image) {
-            m_materialData.baseColorTextureIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_baseColorTexture, "BaseColorTexture");
         }
     }
@@ -520,8 +529,8 @@ void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descript
                 NormalTextureFormatName(normalFormat));
         }
         auto image = m_normalTexture->ImagePtr();
+        m_materialData.normalTextureIndex = image ? image->GetSRVInfo(0).slot.index : fallbackIndex(fallbacks.flatNormal);
         if (image) {
-            m_materialData.normalTextureIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_normalTexture, "NormalTexture");
         }
     }
@@ -531,8 +540,8 @@ void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descript
         m_materialData.aoChannel = FirstChannelOrDefault(m_aoChannel, 0u);
         m_materialData.aoUvSetIndex = m_aoUvSetIndex;
         auto image = m_aoMap->ImagePtr();
+        m_materialData.aoMapIndex = image ? image->GetSRVInfo(0).slot.index : fallbackIndex(fallbacks.white);
         if (image) {
-            m_materialData.aoMapIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_aoMap, "AOMap");
         }
     }
@@ -542,8 +551,8 @@ void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descript
         m_materialData.heightChannel = FirstChannelOrDefault(m_heightChannel, 0u);
         m_materialData.heightUvSetIndex = m_heightUvSetIndex;
         auto image = m_heightMap->ImagePtr();
+        m_materialData.heightMapIndex = image ? image->GetSRVInfo(0).slot.index : fallbackIndex(fallbacks.white);
         if (image) {
-            m_materialData.heightMapIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_heightMap, "HeightMap");
         }
     }
@@ -553,8 +562,8 @@ void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descript
         m_materialData.metallicChannel = FirstChannelOrDefault(m_metallicChannel, 0u);
         m_materialData.metallicUvSetIndex = m_metallicUvSetIndex;
         auto image = m_metallicTexture->ImagePtr();
+        m_materialData.metallicTextureIndex = image ? image->GetSRVInfo(0).slot.index : fallbackIndex(fallbacks.white);
         if (image) {
-            m_materialData.metallicTextureIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_metallicTexture, "MetallicTexture");
         }
     }
@@ -564,8 +573,8 @@ void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descript
         m_materialData.roughnessChannel = FirstChannelOrDefault(m_roughnessChannel, 0u);
         m_materialData.roughnessUvSetIndex = m_roughnessUvSetIndex;
         auto image = m_roughnessTexture->ImagePtr();
+        m_materialData.roughnessTextureIndex = image ? image->GetSRVInfo(0).slot.index : fallbackIndex(fallbacks.white);
         if (image) {
-            m_materialData.roughnessTextureIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_roughnessTexture, "RoughnessTexture");
         }
     }
@@ -581,8 +590,8 @@ void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descript
         m_materialData.emissiveChannels = RgbChannelsOrDefault(m_emissiveChannels);
         m_materialData.emissiveUvSetIndex = m_emissiveUvSetIndex;
         auto image = m_emissiveTexture->ImagePtr();
+        m_materialData.emissiveTextureIndex = image ? image->GetSRVInfo(0).slot.index : fallbackIndex(fallbacks.white);
         if (image) {
-            m_materialData.emissiveTextureIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_emissiveTexture, "EmissiveTexture");
         }
     }
@@ -592,8 +601,8 @@ void Material::RefreshTextureBindings(org::runtime::IDescriptorService* descript
         m_materialData.opacityStreamingTextureID = textureStreamingEnabled ? m_opacityTexture->GetStreamingTextureID() : 0u;
         m_materialData.opacityUvSetIndex = m_opacityUvSetIndex;
         auto image = m_opacityTexture->ImagePtr();
+        m_materialData.opacityTextureIndex = image ? image->GetSRVInfo(0).slot.index : fallbackIndex(fallbacks.white);
         if (image) {
-            m_materialData.opacityTextureIndex = image->GetSRVInfo(0).slot.index;
             annotateMaterialTexture(m_opacityTexture, "OpacityTexture");
         }
     }

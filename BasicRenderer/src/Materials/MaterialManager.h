@@ -106,6 +106,9 @@ public:
 	void SetRendererStateServices(br::render::RendererStateRequestService* requests,
 		std::shared_ptr<org::runtime::IUploadService> uploads);
 	void SetDescriptorService(std::shared_ptr<org::runtime::IDescriptorService> descriptors);
+	// The neutral textures a material binds for a texture without a published image (see MaterialTextureFallbacks).
+	// Unset until InitializeTextureStreaming creates them.
+	MaterialTextureFallbacks TextureFallbacks() const;
 	// These read registry state, so they take the registry lock. They are not
 	// on any hot path (the raster-bucket tables are touched at material
 	// admission), which is why they are not served from a published snapshot.
@@ -254,6 +257,13 @@ private:
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	std::shared_ptr<org::runtime::IUploadService> m_uploadService;
 	std::shared_ptr<org::runtime::IDescriptorService> m_descriptorService;
+	static constexpr uint64_t kNoTextureFallbacks = ~0ull;
+	// White in the low half, flat normal in the high half; written once, read by material flushes on any thread.
+	std::atomic<uint64_t> m_textureFallbackIndices{ kNoTextureFallbacks };
+	std::shared_ptr<org::PixelBuffer> m_whiteFallbackTexture;
+	std::shared_ptr<org::PixelBuffer> m_flatNormalFallbackTexture;
+	void CreateTextureFallbacks(TextureFactory& textureFactory);
+	void RedirtyAllMaterials();
 	std::atomic_uint64_t m_materialRowsRevision{ 1 };
 	bool m_materialGraphActive = false;
 	std::uint64_t m_activeMaterialPublishedRevision = 0;

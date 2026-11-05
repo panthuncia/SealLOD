@@ -578,7 +578,7 @@ MaterialInputs CLodResolveEvaluateMaterial(
     {
 #if defined(PSO_NORMAL_MAP)
         const MaterialUvSample objectNormalUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
-        Texture2D<float4> objectNormalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
+        Texture2D<float4> objectNormalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.normalTextureIndex, materialInfo.normalStreamingTextureID))];
         SamplerState objectNormalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
         const float4 objectNormalSample = SampleMaterialTexture2DGrad(
             objectNormalTexture,

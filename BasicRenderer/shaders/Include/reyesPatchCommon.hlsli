@@ -2,6 +2,7 @@
 #define __REYES_PATCH_COMMON_HLSLI__
 
 #include "include/dynamicSwizzle.hlsli"
+#include "include/materialTextureBinding.hlsli"
 #include "include/terrainCommon.hlsli"
 #include "include/clodReyesTransition.hlsli"
 
@@ -730,7 +731,7 @@ float ReyesSampleMaterialDisplacementOffset(
         {
             return 0.0f;
         }
-        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
         const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
@@ -739,7 +740,7 @@ float ReyesSampleMaterialDisplacementOffset(
             heightValue);
     }
 
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float4 heightSample = useUvDerivatives
         ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
@@ -767,7 +768,7 @@ float ReyesSampleMaterialDisplacementOffset(
         {
             return 0.0f;
         }
-        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
         const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
@@ -776,7 +777,7 @@ float ReyesSampleMaterialDisplacementOffset(
             heightValue);
     }
 
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float4 heightSample = useUvDerivatives
         ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
@@ -913,7 +914,7 @@ float ReyesSampleObjectSurfaceDisplacementOffset(MaterialInfo materialInfo, floa
     {
         return 0.0f;
     }
-    Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     float3 dpdxOS;
     float3 dpdyOS;
@@ -939,7 +940,7 @@ float ReyesSampleObjectSurfaceDisplacementOffset(MaterialEvalInfo materialInfo, 
     {
         return 0.0f;
     }
-    Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     float3 dpdxOS;
     float3 dpdyOS;
@@ -1279,7 +1280,7 @@ float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv
         {
             return 0.0f;
         }
-        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
         const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
@@ -1288,7 +1289,7 @@ float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv
             heightValue);
     }
 
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
@@ -1436,7 +1437,7 @@ void ReyesEvaluateDisplacedPatchTriangle(
                 // the object disappears instead of merely rendering flat.
                 if (materialInfo.heightMapIndex != 0u)
                 {
-                    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
                     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
                     const float displacementScale = ReyesGeometricDisplacementGlobalScale(materialInfo);
                     const float displacementRange = materialInfo.geometricDisplacementMax - materialInfo.geometricDisplacementMin;

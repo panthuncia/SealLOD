@@ -16,6 +16,7 @@
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
 #include "include/materialFlags.hlsli"
+#include "include/materialTextureBinding.hlsli"
 #include "PerPassRootConstants/clodWorkGraphRootConstants.h"
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
 #include "include/clodStructs.hlsli"
@@ -323,9 +324,12 @@ SWAlphaMaterial SWLoadAlphaMaterial(uint materialDataIndex)
     material.materialFlags = materialInfo.materialFlags;
     material.baseAlpha = materialInfo.baseColorFactor.a;
     material.alphaCutoff = materialInfo.alphaCutoff;
-    material.baseColorTextureIndex = materialInfo.baseColorTextureIndex;
+    // The images the textures' streaming rows publish, as the hardware rasterizer's alpha test samples.
+    material.baseColorTextureIndex = ResolveMaterialTextureDescriptor(
+        materialInfo.baseColorTextureIndex, materialInfo.baseColorStreamingTextureID);
     material.baseColorSamplerIndex = materialInfo.baseColorSamplerIndex;
-    material.opacityTextureIndex = materialInfo.opacityTextureIndex;
+    material.opacityTextureIndex = ResolveMaterialTextureDescriptor(
+        materialInfo.opacityTextureIndex, materialInfo.opacityStreamingTextureID);
     material.opacitySamplerIndex = materialInfo.opacitySamplerIndex;
     return material;
 }
