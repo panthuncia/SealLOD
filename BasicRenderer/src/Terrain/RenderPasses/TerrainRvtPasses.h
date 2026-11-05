@@ -16,6 +16,7 @@
 #include <BasicRenderer/Extensions/BuiltinResources.h>
 #include "Pipeline/PipelineState/CommandSignatureManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Assets/TechniqueDescriptor.h"
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
@@ -183,12 +184,12 @@ namespace TerrainRvt
         rootConstants[15] = FloatBits(MipOffset());
     }
 
-    inline std::vector<DxcDefine> ShaderDefines()
+    inline std::vector<org::PipelineShaderDefine> ShaderDefines()
     {
         if (!IsTerrainRvtTelemetryDebugEnabled()) {
             return {};
         }
-        return { DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } };
+        return { org::PipelineShaderDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } };
     }
 
     struct PipelineBindings {
@@ -216,16 +217,6 @@ struct TerrainRvtFrameResetFrame {
 class TerrainRvtFrameResetPass final : public org::TypedRenderGraphPass<TerrainRvtFrameResetPass,
     TerrainRvtFrameResetFrame, TerrainRvt::PipelineBindings> {
 public:
-    TerrainRvtFrameResetPass()
-    {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtFrameResetCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.FrameReset.PSO");
-    }
-
     TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
@@ -241,7 +232,8 @@ public:
             Builtin::Terrain::RvtStats);
         b.ShaderResource(Builtin::CameraBuffer, Builtin::Terrain::Sets);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { m_pso };
+        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFrameResetCS",
+            "TerrainRvt.FrameReset.PSO", TerrainRvt::ShaderDefines())) };
     }
 
     TerrainRvtFrameResetFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
@@ -256,9 +248,6 @@ public:
         org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, frame.constants, frame.dispatch.groupsX, frame.dispatch.groupsY);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 struct TerrainRvtMarkVisibilityMaterialPagesBindings {
@@ -272,13 +261,6 @@ class TerrainRvtMarkVisibilityMaterialPagesPass final : public org::TypedRenderG
 public:
     explicit TerrainRvtMarkVisibilityMaterialPagesPass(const MaterialEvaluationBuildInputs& services)
     {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtMarkVisibleClusterPagesCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.MarkVisibleClusterPages.PSO");
-
         m_visibleClustersResource = services.visibleClusters;
         m_visibleClustersCounterResource = services.visibleClusterCounter;
         m_visibleClusterCapacity = services.visibleClusterCapacity;
@@ -288,7 +270,8 @@ public:
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         TerrainRvtMarkVisibilityMaterialPagesBindings bindings{
-            m_pso,
+            b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtMarkVisibleClusterPagesCS",
+                "TerrainRvt.MarkVisibleClusterPages.PSO", TerrainRvt::ShaderDefines())),
             b.ShaderResource(m_visibleClustersResource).View(),
             b.ShaderResource(m_visibleClustersCounterResource).View(),
             m_visibleClusterCapacity};
@@ -332,7 +315,6 @@ public:
     }
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClustersResource;
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClustersCounterResource;
@@ -346,23 +328,6 @@ struct TerrainRvtResolveRequestsBindings {
 class TerrainRvtResolveRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtResolveRequestsPass,
     TerrainRvt::DispatchFrame, TerrainRvtResolveRequestsBindings> {
 public:
-    TerrainRvtResolveRequestsPass()
-    {
-        auto& psoManager = PSOManager::GetInstance();
-        m_clearPso = psoManager.MakeComputePipeline(
-            psoManager.GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtClearGenerationCounterCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.ClearGenerationCounter.PSO");
-        m_resolvePso = psoManager.MakeComputePipeline(
-            psoManager.GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtResolveRequestsCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.ResolveRequests.PSO");
-    }
-
     TerrainRvtResolveRequestsBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
@@ -378,7 +343,10 @@ public:
                 Builtin::Terrain::RvtGenerationList,
                 Builtin::Terrain::RvtStats);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { m_clearPso, m_resolvePso };
+        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearGenerationCounterCS",
+                     "TerrainRvt.ClearGenerationCounter.PSO", TerrainRvt::ShaderDefines())),
+                 b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtResolveRequestsCS",
+                     "TerrainRvt.ResolveRequests.PSO", TerrainRvt::ShaderDefines())) };
     }
 
     TerrainRvt::DispatchFrame Prepare(const TerrainRvtResolveRequestsBindings&, const org::PassPrepareContext&) const
@@ -391,25 +359,11 @@ public:
         br::render::DispatchCompute(context, bindings.clear, {}, 1u, 1u);
         br::render::DispatchCompute(context, bindings.resolve, {}, frame.groupsX, frame.groupsY);
     }
-
-private:
-    org::PipelineState m_clearPso;
-    org::PipelineState m_resolvePso;
 };
 
 class TerrainRvtClearFeedbackRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtClearFeedbackRequestsPass,
     TerrainRvt::DispatchFrame, TerrainRvt::PipelineBindings> {
 public:
-    TerrainRvtClearFeedbackRequestsPass()
-    {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtClearFeedbackRequestsCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.ClearFeedbackRequests.PSO");
-    }
-
     TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
@@ -417,7 +371,8 @@ public:
         b.UnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtCounters);
-        return { m_pso };
+        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearFeedbackRequestsCS",
+            "TerrainRvt.ClearFeedbackRequests.PSO", TerrainRvt::ShaderDefines())) };
     }
 
     TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
@@ -429,24 +384,11 @@ public:
         org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 class TerrainRvtBuildHeightResidentCachePass final : public org::TypedRenderGraphPass<TerrainRvtBuildHeightResidentCachePass,
     TerrainRvt::DispatchFrame, TerrainRvt::PipelineBindings> {
 public:
-    TerrainRvtBuildHeightResidentCachePass()
-    {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtBuildHeightResidentCacheCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.BuildHeightResidentCache.PSO");
-    }
-
     TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
@@ -457,7 +399,8 @@ public:
             Builtin::Terrain::RvtPageKeys);
         b.UnorderedAccess(Builtin::Terrain::RvtHeightResidentCache);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { m_pso };
+        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildHeightResidentCacheCS",
+            "TerrainRvt.BuildHeightResidentCache.PSO", TerrainRvt::ShaderDefines())) };
     }
 
     TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
@@ -469,61 +412,34 @@ public:
         org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 class TerrainRvtBuildGenerateDispatchArgsPass final : public org::TypedRenderGraphPass<TerrainRvtBuildGenerateDispatchArgsPass,
     org::EmptyPassFrameData, TerrainRvt::PipelineBindings> {
 public:
-    TerrainRvtBuildGenerateDispatchArgsPass()
-    {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtBuildGenerateDispatchArgsCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.BuildGenerateDispatchArgs.PSO");
-    }
-
     TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtCounters);
         b.UnorderedAccess(Builtin::Terrain::RvtGenerateDispatchArgs);
-        return { m_pso };
+        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildGenerateDispatchArgsCS",
+            "TerrainRvt.BuildGenerateDispatchArgs.PSO", TerrainRvt::ShaderDefines())) };
     }
 
     static void Record(const TerrainRvt::PipelineBindings& bindings, org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, {}, 1u);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 struct TerrainRvtGeneratePagesBindings {
     org::PipelineState pipeline;
     org::ResourceBindingToken arguments;
-};
-struct TerrainRvtGeneratePagesFrame {
-    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
+    org::CommandSignatureState signature;
 };
 
 class TerrainRvtGeneratePagesPass final : public org::TypedRenderGraphPass<TerrainRvtGeneratePagesPass,
-    TerrainRvtGeneratePagesFrame, TerrainRvtGeneratePagesBindings> {
+    org::EmptyPassFrameData, TerrainRvtGeneratePagesBindings> {
 public:
-    TerrainRvtGeneratePagesPass()
-    {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtGeneratePagesCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.GeneratePages.PSO");
-    }
-
     TerrainRvtGeneratePagesBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
@@ -549,36 +465,19 @@ public:
                 Builtin::Material::TextureStreamingFeedbackBuffer);
         const auto arguments = b.IndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { m_pso, arguments };
+        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtGeneratePagesCS",
+            "TerrainRvt.GeneratePages.PSO", TerrainRvt::ShaderDefines())), arguments,
+            b.CommandSignature(br::render::RawDispatchCommandSignature()) };
     }
 
-    TerrainRvtGeneratePagesFrame Prepare(const TerrainRvtGeneratePagesBindings&, const org::PassPrepareContext&) const
-    {
-        return { CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature() };
+    static void Record(const TerrainRvtGeneratePagesBindings& bindings, org::PassRecordContext& context) {
+        br::render::DispatchComputeIndirect(context, bindings.pipeline, {}, bindings.signature, bindings.arguments);
     }
-
-    static void Record(const TerrainRvtGeneratePagesBindings& bindings, const TerrainRvtGeneratePagesFrame& frame,
-        org::PassRecordContext& context) {
-        br::render::DispatchComputeIndirect(context, bindings.pipeline, {}, frame.signature, bindings.arguments);
-    }
-
-private:
-    org::PipelineState m_pso;
 };
 
 class TerrainRvtFinalizeGeneratedPagesPass final : public org::TypedRenderGraphPass<TerrainRvtFinalizeGeneratedPagesPass,
     TerrainRvt::DispatchFrame, TerrainRvt::PipelineBindings> {
 public:
-    TerrainRvtFinalizeGeneratedPagesPass()
-    {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtFinalizeGeneratedPagesCS",
-            TerrainRvt::ShaderDefines(),
-            "TerrainRvt.FinalizeGeneratedPages.PSO");
-    }
-
     TerrainRvt::PipelineBindings Declare(org::PassBuilder& b)
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
@@ -591,7 +490,8 @@ public:
                 Builtin::Terrain::RvtPageTable,
                 Builtin::Terrain::RvtPhysicalPageOwner);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { m_pso };
+        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFinalizeGeneratedPagesCS",
+            "TerrainRvt.FinalizeGeneratedPages.PSO", TerrainRvt::ShaderDefines())) };
     }
 
     TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
@@ -604,7 +504,4 @@ public:
         br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
         context.UavBarrier();
     }
-
-private:
-    org::PipelineState m_pso;
 };

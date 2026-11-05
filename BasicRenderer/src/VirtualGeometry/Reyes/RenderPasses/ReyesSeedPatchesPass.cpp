@@ -3,6 +3,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
@@ -30,24 +31,6 @@ ReyesSeedPatchesPass::ReyesSeedPatchesPass(
     , m_slabResourceGroup(std::move(slabResourceGroup))
     , m_maxSplitQueueEntries(maxSplitQueueEntries)
     , m_phaseIndex(phaseIndex) {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/reyesSeedPatches.hlsl",
-        L"ReyesSeedPatchesCS",
-        {},
-        "CLod.ReyesSeedPatches.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 ReyesSeedPatchesBindings ReyesSeedPatchesPass::Declare(org::PassBuilder& builder)
@@ -56,7 +39,11 @@ ReyesSeedPatchesBindings ReyesSeedPatchesPass::Declare(org::PassBuilder& builder
     if (m_slabResourceGroup) {
         builder.ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
-    return {m_pso, m_commandSignature, builder.ShaderResource(m_visibleClustersBuffer), builder.ShaderResource(m_ownedClustersBuffer),
+    return {
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesSeedPatches.hlsl",
+            L"ReyesSeedPatchesCS", "CLod.ReyesSeedPatches.PSO")),
+        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        builder.ShaderResource(m_visibleClustersBuffer), builder.ShaderResource(m_ownedClustersBuffer),
         builder.ShaderResource(m_ownedClustersCounterBuffer), builder.UnorderedAccess(m_splitQueueBuffer),
         builder.UnorderedAccess(m_splitQueueCounterBuffer), builder.UnorderedAccess(m_splitQueueOverflowBuffer),
         builder.IndirectArguments(m_indirectArgsBuffer), m_maxSplitQueueEntries, m_phaseIndex};

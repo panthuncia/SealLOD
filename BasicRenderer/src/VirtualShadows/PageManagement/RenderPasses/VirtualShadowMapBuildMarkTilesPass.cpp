@@ -3,6 +3,7 @@
 
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/UploadTypes.h"
@@ -15,19 +16,15 @@ VirtualShadowMapBuildMarkTilesPass::VirtualShadowMapBuildMarkTilesPass(
     : m_tileWorkBuffer(std::move(tileWorkBuffer))
     , m_tileCountBuffer(std::move(tileCountBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowBuildMarkTilesCSMain",
-        {},
-        "CLod.VirtualShadow.BuildMarkTiles.PSO");
 }
 
 VirtualShadowMapBuildMarkTilesBindings VirtualShadowMapBuildMarkTilesPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }));
-    return {m_pso, builder.UnorderedAccess(m_tileWorkBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowBuildMarkTilesCSMain", "CLod.VirtualShadow.BuildMarkTiles.PSO")),
+        builder.UnorderedAccess(m_tileWorkBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
 }
 
 void VirtualShadowMapBuildMarkTilesPass::Initialize() {}

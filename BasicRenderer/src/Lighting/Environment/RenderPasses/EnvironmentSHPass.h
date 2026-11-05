@@ -3,6 +3,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
@@ -48,8 +49,6 @@ public:
 		shSamplerDesc.maxLod = (std::numeric_limits<float>::max)();
 
 		m_samplerIndex = DescriptorService().CreateIndexedSampler(shSamplerDesc);
-
-		CreatePSO();
 	}
 
 	~EnvironmentSHPass() {
@@ -57,7 +56,8 @@ public:
 
 	EnvironmentSHBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-		EnvironmentSHBindings bindings{m_PSO, m_samplerIndex};
+		EnvironmentSHBindings bindings{builder.Pipeline(br::render::ComputePipeline(
+			L"shaders/SphericalHarmonics.hlsl", L"CSMain", "Environment Spherical Harmonics CS")), m_samplerIndex};
 		br::render::EnvironmentSHWorkQueue::Snapshot declared;
 		for (const auto& j : m_pending) {
 			if (!j->work.srcCubemap) continue;
@@ -121,15 +121,5 @@ private:
     br::render::EnvironmentSHWorkQueue::Snapshot m_pending;
 	bool m_declaredResourcesChanged = true;
 
-	void CreatePSO() {
-		m_PSO = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-			L"shaders/SphericalHarmonics.hlsl",
-			L"CSMain",
-			{},
-			"Environment Spherical Harmonics CS");
-	}
-
 	unsigned int m_samplerIndex = 0;
-	org::PipelineState m_PSO;
 };

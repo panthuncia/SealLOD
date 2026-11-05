@@ -22,6 +22,7 @@
 #include "Runtime/Device/DescriptorHeapManager.h"
 #include "Pipeline/PipelineState/CommandSignatureManager.h"
 #include "Runtime/IO/ReadbackManager.h"
+#include "Pipeline/PipelineState/OrgPipelineCompiler.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "Animation/Skeletons/SkeletonManager.h"
 #include "Assets/Textures/TextureFactory.h"
@@ -356,7 +357,8 @@ void Renderer::Initialize(
     // Before the renderer's tracking hooks: the runtime installs ORG's, which these replace.
     m_orgRuntime = org::Runtime::Create({.device = DeviceManager::GetInstance().GetDevice(),
         .backend = DeviceManager::GetInstance().GetBackend(), .slots = m_numFramesInFlight,
-        .tasks = std::make_shared<br::TbbTaskService>()});
+        .tasks = std::make_shared<br::TbbTaskService>(),
+        .pipelineCompiler = CreateOrgPipelineCompiler()});
     org::TrackedEntityToken::Hooks trackedEntityHooks{};
     trackedEntityHooks.createEntity = [](flecs::entity existing) {
             auto& ecsManager = RendererECSManager::GetInstance();
@@ -823,6 +825,17 @@ void Renderer::WaitForFrame(uint8_t currentFrameIndex) {
                     targetValue,
                     completedValue,
                     waitTimeouts);
+                // Where the GPU stopped: each graph queue's submitted and completed values.
+                if (waitTimeouts == 5u && currentRenderGraph) {
+                    auto& queues = currentRenderGraph->GetQueueRegistry();
+                    for (size_t slot = 0; slot < queues.SlotCount(); ++slot) {
+                        const auto index = static_cast<org::QueueSlotIndex>(static_cast<uint8_t>(slot));
+                        const auto next = queues.GetCurrentFenceValue(index);
+                        spdlog::warn("Renderer::WaitForFrame queue slot {} kind={} device={} submitted={} completed={}", slot,
+                            static_cast<uint32_t>(queues.GetKind(index)), static_cast<uint32_t>(static_cast<uint8_t>(queues.GetBackendInstance(index))),
+                            next ? next - 1 : 0, queues.GetFence(index).GetCompletedValue());
+                    }
+                }
             }
         }
         spdlog::debug(

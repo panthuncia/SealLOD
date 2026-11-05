@@ -18,7 +18,7 @@ enum class ReyesClassifyMode : uint32_t
 
 struct ReyesClassifyBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, visibleCounter, readBaseCounter, fullClusters, fullCounter;
     org::DeclaredViewToken ownedClusters, ownedCounter, ownershipBitset, telemetry;
     org::ResourceBindingToken indirectArgs;
@@ -63,6 +63,4 @@ private:
     std::shared_ptr<org::Buffer> m_telemetryBuffer;
     uint32_t m_phaseIndex = 0u;
     ReyesClassifyMode m_classifyMode = ReyesClassifyMode::Default;
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

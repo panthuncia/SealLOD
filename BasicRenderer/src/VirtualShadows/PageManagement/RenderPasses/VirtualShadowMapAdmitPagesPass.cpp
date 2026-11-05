@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -32,26 +33,16 @@ VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
     , m_statsBuffer(std::move(statsBuffer))
     , m_upgradeQueue(std::move(upgradeQueue))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowAdmitPagesCSMain",
-        {},
-        "CLod.VirtualShadow.AdmitPages.PSO");
-    m_applyUpgradesPso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowApplyExactUpgradesCSMain",
-        {},
-        "CLod.VirtualShadow.ApplyUpgrades.PSO");
 }
 
 VirtualShadowMapAdmitPagesBindings VirtualShadowMapAdmitPagesPass::Declare(org::PassBuilder& declaration)
 {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     VirtualShadowMapAdmitPagesBindings bindings{
-        m_pso,
-        m_applyUpgradesPso,
+        declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"CLodVirtualShadowAdmitPagesCSMain", "CLod.VirtualShadow.AdmitPages.PSO")),
+        declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"CLodVirtualShadowApplyExactUpgradesCSMain", "CLod.VirtualShadow.ApplyUpgrades.PSO")),
         declaration.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}),
         declaration.UnorderedAccess(m_dirtyPageFlagsBuffer),
         declaration.UnorderedAccess(m_pageMetadataBuffer),

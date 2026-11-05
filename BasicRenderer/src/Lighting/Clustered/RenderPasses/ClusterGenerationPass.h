@@ -2,6 +2,7 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Runtime/Settings/SettingsManager.h"
@@ -16,8 +17,6 @@ struct ClusterGenerationFrame {
 
 class ClusterGenerationPass : public org::TypedRenderGraphPass<ClusterGenerationPass, ClusterGenerationFrame, ClusterGenerationBindings> {
 public:
-	ClusterGenerationPass() { CreatePSO(); }
-
 	~ClusterGenerationPass() {
 	}
 
@@ -26,7 +25,7 @@ public:
 		builder.UnorderedAccess(Builtin::Light::ClusterBuffer);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
-		return {m_PSO};
+		return {builder.Pipeline(br::render::ComputePipeline(L"shaders/clustering.hlsl", L"CSMain", "Light cluster generation CS"))};
 	}
 
 	ClusterGenerationFrame Prepare(const ClusterGenerationBindings&, const org::PassPrepareContext& preparation) const {
@@ -39,17 +38,4 @@ public:
 	static void Record(const ClusterGenerationBindings& bindings, const ClusterGenerationFrame& frame, org::PassRecordContext& context) {
 		br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY, frame.groupsZ);
 	}
-
-private:
-
-	void CreatePSO() {
-		m_PSO = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-			L"shaders/clustering.hlsl",
-			L"CSMain",
-			{},
-			"Light cluster generation CS");
-	}
-
-	org::PipelineState m_PSO;
 };

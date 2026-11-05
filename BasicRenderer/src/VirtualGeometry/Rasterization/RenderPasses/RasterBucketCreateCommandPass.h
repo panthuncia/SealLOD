@@ -37,7 +37,6 @@ public:
         org::PassRecordContext& context);
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<org::Buffer> m_histogramIndirectCommand;
     std::shared_ptr<org::Buffer> m_occlusionReplayStateBuffer;

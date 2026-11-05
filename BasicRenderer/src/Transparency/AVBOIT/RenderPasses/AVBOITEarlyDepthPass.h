@@ -16,7 +16,7 @@ struct AVBOITEarlyDepthFrameData {
 
 struct AVBOITEarlyDepthBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
+    org::CommandSignatureState signature;
     org::DeclaredViewToken config;
     org::ResourceBindingToken arguments, count;
     org::DeclaredViewToken depth;
@@ -42,6 +42,4 @@ private:
     std::shared_ptr<org::Buffer> m_tileCommandsBuffer;
     std::shared_ptr<org::Buffer> m_tileCountBuffer;
     std::shared_ptr<org::PixelBuffer> m_earlyDepthTexture;
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

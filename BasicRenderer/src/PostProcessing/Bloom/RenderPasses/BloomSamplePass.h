@@ -34,10 +34,6 @@ public:
     // mipIndex selects which mip is used as render target, and which is used as shader resource.
     // E.g. DownsamplePassIndex 0 will downsample from mip 0 to mip 1, and use mip 1 as the render target.
     // If isUpsample is true, it will upsample from mip 1 to mip 0.
-    BloomSamplePass() {
-        CreatePSO();
-    }
-
     BloomSampleBindings Declare(org::PassBuilder& builder) {
 		auto inputs = Inputs<BloomSamplePassInputs>();
         const auto targetMip = inputs.mipIndex + (inputs.isUpsample ? 0u : 1u);
@@ -47,11 +43,11 @@ public:
             const auto source = inputs.mipIndex == 0
                 ? Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 })
                 : Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ inputs.mipIndex, 1 });
-            return {m_downsamplePso, builder.ShaderResource(source, {UINT32_MAX, sourceMip}),
+            return {builder.Pipeline(PipelineDesc(false)), builder.ShaderResource(source, {UINT32_MAX, sourceMip}),
                 builder.RenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1}), {UINT32_MAX, targetMip}),
                 sourceMip, targetMip, false};
         }
-        return {m_upsamplePso, builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1}), {UINT32_MAX, sourceMip}),
+        return {builder.Pipeline(PipelineDesc(true)), builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1}), {UINT32_MAX, sourceMip}),
             builder.RenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1}), {UINT32_MAX, targetMip}),
             sourceMip, targetMip, true};
     }
@@ -90,134 +86,52 @@ public:
     }
 
 private:
-    org::PipelineState m_downsamplePso;
-    org::PipelineState m_upsamplePso;
+    static org::GraphicsPipelineDesc PipelineDesc(bool upsample) {
+        org::GraphicsPipelineDesc desc;
+        desc.name = upsample ? "Bloom.Upsample" : "Bloom.Downsample";
+        desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6"};
+        desc.pixel = upsample
+            ? org::PipelineShaderSource{L"shaders/PostProcessing/bloomUpsample.hlsl", L"upsample", L"ps_6_6"}
+            : org::PipelineShaderSource{L"shaders/PostProcessing/bloomDownsample.hlsl", L"downsample", L"ps_6_6"};
 
+        rhi::RasterState raster{};
+        raster.fill = rhi::FillMode::Solid;
+        raster.cull = rhi::CullMode::None; // fullscreen triangle
+        raster.frontCCW = false;
+        desc.raster = raster;
 
-    void CreatePSOForBackend(org::BackendInstanceId backendInstance) {
-        auto& deviceManager = DeviceManager::GetInstance();
-        auto dev = backendInstance == org::BackendInstanceId::Primary
-            ? deviceManager.GetDevice() : deviceManager.GetPeerDevice();
-        if (!dev) return;
-
-        ShaderInfoBundle sib;
-        sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6" };
-        sib.pixelShader = { L"shaders/PostProcessing/bloomDownsample.hlsl", L"downsample", L"ps_6_6" };
-        auto compiled = PSOManager::GetInstance().CompileShaders(sib, backendInstance);
-
-
-        auto& layout = PSOManager::GetInstance().GetRootSignature(backendInstance);
-        rhi::SubobjLayout soLayout{ layout.GetHandle() };
-        rhi::SubobjShader soVS{ rhi::ShaderStage::Vertex, rhi::DXIL(compiled.vertexShader.Get()), "FullscreenVSNoViewRayMain" };
-
-        rhi::RasterState rs{};
-        rs.fill = rhi::FillMode::Solid;
-        rs.cull = rhi::CullMode::None;    // fullscreen triangle
-        rs.frontCCW = false;
-        rhi::SubobjRaster soRaster{ rs };
-
-        rhi::DepthStencilState ds{};
-        ds.depthEnable = false;
-        ds.depthWrite = false;
-        rhi::SubobjDepth soDepth{ ds };
-
-        rhi::RenderTargets rts{};
-        rts.count = 1;
-        rts.formats[0] = rhi::Format::R16G16B16A16_Float; // RTVFormats[0]
-        rhi::SubobjRTVs soRTVs{ rts };
-
-        rhi::SubobjDSV soDSV{ rhi::Format::D32_Float };   // matches DX psoDesc.DSVFormat
-        rhi::SubobjSample soSample{ rhi::SampleDesc{1, 0} };
-
-        rhi::SubobjShader soPS_down{ rhi::ShaderStage::Pixel, rhi::DXIL(compiled.pixelShader.Get()), "downsample" };
-
-        rhi::BlendState bsDown{};
-        bsDown.alphaToCoverage = false;
-        bsDown.independentBlend = false;
-        bsDown.numAttachments = 1;
-        bsDown.attachments[0].enable = false; // disabled
-        rhi::SubobjBlend soBlendDown{ bsDown };
-        rhi::SubobjPrimitiveTopology soTopo{ rhi::PrimitiveTopology::TriangleStrip };
-
-        {
-            const rhi::PipelineStreamItem items[] = {
-                rhi::Make(soLayout),
-                rhi::Make(soVS),
-                rhi::Make(soPS_down),
-                rhi::Make(soRaster),
-                rhi::Make(soBlendDown),
-                rhi::Make(soDepth),
-                rhi::Make(soRTVs),
-                rhi::Make(soDSV),
-                rhi::Make(soSample),
-				rhi::Make(soTopo),
-            };
-
-            rhi::PipelinePtr pipeline;
-            auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
-            if (Failed(result)) {
-                throw std::runtime_error("Failed to create bloom downsample PSO (RHI)");
-            }
-            pipeline->SetName("Bloom.Downsample");
-            m_downsamplePso.AttachBackendPipeline(
-                backendInstance, std::move(pipeline), compiled.resourceIDsHash,
-                compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout), soLayout.layout);
-        }
-
-
-        sib.pixelShader = { L"shaders/PostProcessing/bloomUpsample.hlsl", L"upsample", L"ps_6_6" };
-        auto compiledUp = PSOManager::GetInstance().CompileShaders(sib, backendInstance);
-        rhi::SubobjShader soPS_up{ rhi::ShaderStage::Pixel, rhi::DXIL(compiledUp.pixelShader.Get()), "upsample" };
-
-        rhi::BlendState bsUp{};
-        bsUp.alphaToCoverage = false;
-        bsUp.independentBlend = false;
-        bsUp.numAttachments = 1;
-        {
-            auto& a0 = bsUp.attachments[0];
+        rhi::BlendState blend{};
+        blend.alphaToCoverage = false;
+        blend.independentBlend = false;
+        blend.numAttachments = 1;
+        if (upsample) {
+            auto& a0 = blend.attachments[0];
             a0.enable = true;
             a0.srcColor = rhi::BlendFactor::One;
             a0.dstColor = rhi::BlendFactor::One;
             a0.colorOp = rhi::BlendOp::Add;
-
             a0.srcAlpha = rhi::BlendFactor::One;
             a0.dstAlpha = rhi::BlendFactor::Zero;
             a0.alphaOp = rhi::BlendOp::Add;
-
             a0.writeMask = rhi::ColorWriteEnable::All;
+        } else {
+            blend.attachments[0].enable = false;
         }
-        rhi::SubobjBlend soBlendUp{ bsUp };
+        desc.blend = blend;
 
-        {
-            const rhi::PipelineStreamItem items[] = {
-                rhi::Make(soLayout),
-                rhi::Make(soVS),
-                rhi::Make(soPS_up),
-                rhi::Make(soRaster),
-                rhi::Make(soBlendUp),
-                rhi::Make(soDepth),
-                rhi::Make(soRTVs),
-                rhi::Make(soDSV),
-                rhi::Make(soSample),
-				rhi::Make(soTopo),
-            };
+        rhi::DepthStencilState depth{};
+        depth.depthEnable = false;
+        depth.depthWrite = false;
+        desc.depth = depth;
 
-            rhi::PipelinePtr pipeline;
-            auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
-            if (Failed(result)) {
-                throw std::runtime_error("Failed to create bloom upsample PSO (RHI)");
-            }
-            pipeline->SetName("Bloom.Upsample");
-            m_upsamplePso.AttachBackendPipeline(
-                backendInstance, std::move(pipeline), compiledUp.resourceIDsHash,
-                compiledUp.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout), soLayout.layout);
-        }
-    }
+        rhi::RenderTargets targets{};
+        targets.count = 1;
+        targets.formats[0] = rhi::Format::R16G16B16A16_Float;
+        desc.renderTargets = targets;
 
-    void CreatePSO() {
-        CreatePSOForBackend(org::BackendInstanceId::Primary);
-        if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
-            CreatePSOForBackend(org::BackendInstanceId::Peer);
-        }
+        desc.depthFormat = rhi::Format::D32_Float;
+        desc.sample = rhi::SampleDesc{1, 0};
+        desc.topology = rhi::PrimitiveTopology::TriangleStrip;
+        return desc;
     }
 };

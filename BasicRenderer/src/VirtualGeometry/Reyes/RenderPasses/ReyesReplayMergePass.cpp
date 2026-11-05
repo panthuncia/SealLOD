@@ -3,6 +3,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BuiltinResources.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Resources/Buffers/Buffer.h"
@@ -29,31 +30,18 @@ ReyesReplayMergePass::ReyesReplayMergePass(
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_destQueueCapacity(destQueueCapacity)
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        kind == ReyesReplayMergeKind::Split ? L"MergeReyesReplaySplitQueueCSMain" : L"MergeReyesReplayDiceQueueCSMain",
-        {},
-        kind == ReyesReplayMergeKind::Split ? "CLod.ReyesReplayMergeSplit.PSO" : "CLod.ReyesReplayMergeDice.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 ReyesReplayMergeBindings ReyesReplayMergePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, m_commandSignature, builder.ShaderResource(m_sourceQueueBuffer), builder.ShaderResource(m_sourceQueueCounterBuffer),
+    return {
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            m_kind == ReyesReplayMergeKind::Split ? L"MergeReyesReplaySplitQueueCSMain" : L"MergeReyesReplayDiceQueueCSMain",
+            m_kind == ReyesReplayMergeKind::Split ? "CLod.ReyesReplayMergeSplit.PSO" : "CLod.ReyesReplayMergeDice.PSO")),
+        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        builder.ShaderResource(m_sourceQueueBuffer), builder.ShaderResource(m_sourceQueueCounterBuffer),
         builder.UnorderedAccess(m_destQueueBuffer), builder.UnorderedAccess(m_destQueueCounterBuffer),
         builder.UnorderedAccess(m_destQueueOverflowBuffer), builder.IndirectArguments(m_indirectArgsBuffer),
         builder.UnorderedAccess(m_telemetryBuffer), m_destQueueCapacity};

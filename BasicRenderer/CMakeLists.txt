@@ -329,7 +329,6 @@ set(SOURCES
     "src/Runtime/IO/ReadbackManager.cpp"
     "src/Runtime/Device/RenderDeviceAccess.cpp"
     "src/Pipeline/PipelineState/CommandSignatureManager.cpp"
-    "src/Pipeline/PipelineState/PipelineAccess.cpp"
     "src/Runtime/Settings/SettingAccess.cpp"
     "src/Runtime/Settings/RendererSettings.cpp"
     # src/PostProcessing
@@ -341,6 +340,7 @@ set(SOURCES
     "src/Terrain/Residency/TerrainManager.cpp"
     # src/Runtime / src/Assets
     "src/Runtime/Device/DeviceManager.cpp"
+    "src/Pipeline/PipelineState/OrgPipelineCompiler.cpp"
     "src/Pipeline/PipelineState/PSOManager.cpp"
     "src/Runtime/Resources/ResourceManager.cpp"
     "src/Pipeline/ShaderCompilation/ShaderArtifactCache.cpp"
@@ -672,7 +672,7 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Diagnostics_SamplingControlServer.cpp"
     "tests/PublicHeaders/Extensions_RenderGraphExtensionRegistration.cpp"
     "tests/PublicHeaders/Extensions_RenderDeviceAccess.cpp"
-    "tests/PublicHeaders/Extensions_PipelineAccess.cpp"
+    "tests/PublicHeaders/Extensions_PipelineDescs.cpp"
     "tests/PublicHeaders/Extensions_ShaderCompilationTypes.cpp"
     "tests/PublicHeaders/Extensions_SettingAccess.cpp"
     "tests/PublicHeaders/Extensions_InputManager.cpp"

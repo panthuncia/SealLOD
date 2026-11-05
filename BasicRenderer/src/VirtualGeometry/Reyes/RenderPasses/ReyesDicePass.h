@@ -12,7 +12,7 @@ namespace org { class Buffer; }
 
 struct ReyesDiceBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken queue;
     org::DeclaredViewToken counter;
     org::DeclaredViewToken readOffset;
@@ -48,6 +48,4 @@ private:
     std::shared_ptr<org::Buffer> m_telemetryBuffer;
     uint32_t m_maxDiceQueueEntries = 0u;
     uint32_t m_phaseIndex = 0u;
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

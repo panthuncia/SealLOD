@@ -20,6 +20,7 @@
 #include "rhi_helpers.h"
 #include "BasicRenderer/Extensions/Buffers/LazyDynamicStructuredBuffer.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Materials/TextureStreaming/MaterialTextureTransferService.h"
@@ -148,27 +149,6 @@ void TextureFactory::BC7CompressionPass::Update(const org::UpdateExecutionContex
     (void)context;
 }
 
-org::PipelineState TextureFactory::BC7CompressionPass::CreatePipeline() const
-{
-    auto& psoManager = PSOManager::GetInstance();
-    return psoManager.MakeComputePipeline(
-        psoManager.GetComputeRootSignature().GetHandle(),
-        L"shaders/Utilities/bc7_compress_mode6.hlsl",
-        L"BC7CompressMode6CS",
-        {},
-        "BC7Compression[Mode6]");
-}
-
-org::PipelineState& TextureFactory::BC7CompressionPass::GetOrCreatePipeline()
-{
-    if (!m_hasPsoMode6) {
-        m_psoMode6 = CreatePipeline();
-        m_hasPsoMode6 = true;
-    }
-
-    return m_psoMode6;
-}
-
 TextureBC7CompressionBindings TextureFactory::BC7CompressionPass::Declare(org::PassBuilder& builder)
 {
     std::scoped_lock lock(m_pendingMutex);
@@ -203,7 +183,10 @@ TextureBC7CompressionBindings TextureFactory::BC7CompressionPass::Declare(org::P
         }
         declared.blocks = builder.UnorderedAccess(job->blockBuffer).View();
     }
-    if (!bindings.jobs.empty()) bindings.pipeline = GetOrCreatePipeline();
+    if (!bindings.jobs.empty()) {
+        bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(
+            L"shaders/Utilities/bc7_compress_mode6.hlsl", L"BC7CompressMode6CS", "BC7Compression[Mode6]"));
+    }
     return bindings;
 }
 

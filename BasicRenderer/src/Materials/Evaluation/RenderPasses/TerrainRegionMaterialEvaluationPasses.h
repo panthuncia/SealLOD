@@ -6,6 +6,7 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "Pipeline/PipelineState/CommandSignatureManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Runtime/Detail/MaterialEvaluationBuildInputs.h"
@@ -37,15 +38,6 @@ namespace TerrainRegionMaterialEval
 class TerrainRegionCounterResetPass : public org::TypedRenderGraphPass<TerrainRegionCounterResetPass,
     org::EmptyPassFrameData, TerrainRegionMaterialEval::PipelineBindings> {
 public:
-    TerrainRegionCounterResetPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/VisUtil.hlsl",
-            L"ClearTerrainRegionCountersCS",
-            {},
-            "VisUtil_ClearTerrainRegionCountersPSO");
-    }
-
     TerrainRegionMaterialEval::PipelineBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
@@ -53,7 +45,8 @@ public:
             "Builtin::VisUtil::TerrainRegionPixelCountBuffer",
             "Builtin::VisUtil::TerrainRegionWriteCursorBuffer",
             "Builtin::VisUtil::TerrainRegionActiveCountBuffer");
-        return {m_pso};
+        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"ClearTerrainRegionCountersCS",
+            "VisUtil_ClearTerrainRegionCountersPSO"))};
     }
 
     static void Record(const TerrainRegionMaterialEval::PipelineBindings& bindings, org::PassRecordContext& context) {
@@ -62,17 +55,14 @@ public:
         br::render::DispatchCompute(context, bindings.pipeline, constants,
             (TerrainRegionMaterialEval::MaxTerrainRegions + 63u) / 64u);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 struct TerrainRegionMaterialRangeBindings {
     org::PipelineState pipeline;
     org::ResourceBindingToken arguments;
+    org::CommandSignatureState signature;
 };
 struct TerrainRegionMaterialRangeFrame {
-    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
     std::vector<uint64_t> argumentOffsets;
 };
 
@@ -80,20 +70,13 @@ template<class Derived>
 class TerrainRegionMaterialRangePassBase : public org::TypedRenderGraphPass<Derived,
     TerrainRegionMaterialRangeFrame, TerrainRegionMaterialRangeBindings> {
 public:
-    explicit TerrainRegionMaterialRangePassBase(const wchar_t* entryPoint, const char* debugName) {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/VisUtil.hlsl",
-            entryPoint,
-            {},
-            debugName);
-    }
+    explicit TerrainRegionMaterialRangePassBase(const wchar_t* entryPoint, const char* debugName)
+        : m_entryPoint(entryPoint), m_debugName(debugName) {}
 
     TerrainRegionMaterialRangeFrame Prepare(const TerrainRegionMaterialRangeBindings&,
         const org::PassPrepareContext& preparation) const {
         const auto& ctx = *preparation.preparationData->Get<UpdateContext>();
         TerrainRegionMaterialRangeFrame frame;
-        frame.signature = CommandSignatureManager::GetInstance().CaptureMaterialEvaluationCommandSignature();
         const uint64_t stride = sizeof(MaterialEvaluationIndirectCommand);
         const auto materialState = ctx.publishedRendererState
             ? ctx.publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>()
@@ -119,16 +102,19 @@ public:
         br::render::MiscConstants constants{};
         constants[0] = TerrainRegionMaterialEval::TerrainSetIndexV1;
         for (const uint64_t argumentOffset : frame.argumentOffsets)
-            br::render::DispatchComputeIndirect(context, bindings.pipeline, constants, frame.signature,
+            br::render::DispatchComputeIndirect(context, bindings.pipeline, constants, bindings.signature,
                 bindings.arguments, argumentOffset);
     }
 
 protected:
     TerrainRegionMaterialRangeBindings DeclareArguments(org::PassBuilder& builder) {
-        return {m_pso, builder.IndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer")};
+        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", m_entryPoint, m_debugName)),
+            builder.IndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer"),
+            builder.CommandSignature(br::render::MaterialEvaluationCommandSignature())};
     }
 
-    org::PipelineState m_pso;
+    std::wstring m_entryPoint;
+    std::string m_debugName;
 };
 
 class TerrainRegionHistogramPass : public TerrainRegionMaterialRangePassBase<TerrainRegionHistogramPass> {
@@ -151,21 +137,11 @@ public:
         b->ConstantBuffer(Builtin::PerFrameBuffer);
         return DeclareArguments(builder);
     }
-
 };
 
 class TerrainRegionBlockScanPass : public org::TypedRenderGraphPass<TerrainRegionBlockScanPass,
     org::EmptyPassFrameData, TerrainRegionMaterialEval::PipelineBindings> {
 public:
-    TerrainRegionBlockScanPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/materialPrefixSum.hlsl",
-            L"TerrainRegionBlockScanCS",
-            {},
-            "VisUtil_TerrainRegionBlockScanPSO");
-    }
-
     TerrainRegionMaterialEval::PipelineBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
@@ -173,7 +149,8 @@ public:
         b->UnorderedAccess(
                 "Builtin::VisUtil::TerrainRegionOffsetBuffer",
                 "Builtin::VisUtil::TerrainRegionBlockSumsBuffer");
-        return {m_pso};
+        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"TerrainRegionBlockScanCS",
+            "VisUtil_TerrainRegionBlockScanPSO"))};
     }
 
     static void Record(const TerrainRegionMaterialEval::PipelineBindings& bindings, org::PassRecordContext& context) {
@@ -182,23 +159,11 @@ public:
         br::render::DispatchCompute(context, bindings.pipeline, constants,
             (TerrainRegionMaterialEval::MaxTerrainRegions + TerrainRegionMaterialEval::PrefixBlockSize - 1u) / TerrainRegionMaterialEval::PrefixBlockSize);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 class TerrainRegionBlockOffsetsPass : public org::TypedRenderGraphPass<TerrainRegionBlockOffsetsPass,
     org::EmptyPassFrameData, TerrainRegionMaterialEval::PipelineBindings> {
 public:
-    TerrainRegionBlockOffsetsPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/materialPrefixSum.hlsl",
-            L"TerrainRegionBlockOffsetsCS",
-            {},
-            "VisUtil_TerrainRegionBlockOffsetsPSO");
-    }
-
     TerrainRegionMaterialEval::PipelineBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
@@ -209,7 +174,8 @@ public:
                 "Builtin::VisUtil::TerrainRegionOffsetBuffer",
                 "Builtin::VisUtil::TerrainRegionScannedBlockSumsBuffer",
                 "Builtin::VisUtil::TerrainRegionTotalPixelCountBuffer");
-        return {m_pso};
+        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"TerrainRegionBlockOffsetsCS",
+            "VisUtil_TerrainRegionBlockOffsetsPSO"))};
     }
 
     static void Record(const TerrainRegionMaterialEval::PipelineBindings& bindings, org::PassRecordContext& context) {
@@ -218,9 +184,6 @@ public:
         constants[1] = (TerrainRegionMaterialEval::MaxTerrainRegions + TerrainRegionMaterialEval::PrefixBlockSize - 1u) / TerrainRegionMaterialEval::PrefixBlockSize;
         br::render::DispatchCompute(context, bindings.pipeline, constants, 1u);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 class TerrainRegionPixelListPass : public TerrainRegionMaterialRangePassBase<TerrainRegionPixelListPass> {
@@ -243,57 +206,34 @@ public:
         b->ConstantBuffer(Builtin::PerFrameBuffer);
         return DeclareArguments(builder);
     }
-
 };
 
 class BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass : public org::TypedRenderGraphPass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass,
     org::EmptyPassFrameData, TerrainRegionMaterialEval::PipelineBindings> {
 public:
-    BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/VisUtil.hlsl",
-            L"BuildTerrainRegionCommandBuildDispatchArgsCS",
-            {},
-            "VisUtil_BuildTerrainRegionCommandBuildDispatchArgsPSO");
-    }
-
     TerrainRegionMaterialEval::PipelineBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
         b->ShaderResource("Builtin::VisUtil::TerrainRegionActiveCountBuffer");
         b->UnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
-        return {m_pso};
+        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildTerrainRegionCommandBuildDispatchArgsCS",
+            "VisUtil_BuildTerrainRegionCommandBuildDispatchArgsPSO"))};
     }
 
     static void Record(const TerrainRegionMaterialEval::PipelineBindings& bindings, org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, {}, 1u);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 struct BuildTerrainRegionMaterialIndirectCommandBufferBindings {
     org::PipelineState pipeline;
     org::ResourceBindingToken dispatchArgs;
-};
-struct BuildTerrainRegionMaterialIndirectCommandBufferFrame {
-    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
+    org::CommandSignatureState signature;
 };
 
 class BuildTerrainRegionMaterialIndirectCommandBufferPass : public org::TypedRenderGraphPass<BuildTerrainRegionMaterialIndirectCommandBufferPass,
-    BuildTerrainRegionMaterialIndirectCommandBufferFrame, BuildTerrainRegionMaterialIndirectCommandBufferBindings> {
+    org::EmptyPassFrameData, BuildTerrainRegionMaterialIndirectCommandBufferBindings> {
 public:
-    BuildTerrainRegionMaterialIndirectCommandBufferPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/VisUtil.hlsl",
-            L"BuildTerrainRegionEvaluateIndirectArgsCS",
-            {},
-            "VisUtil_BuildTerrainRegionEvaluateIndirectArgsPSO");
-    }
-
     BuildTerrainRegionMaterialIndirectCommandBufferBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* b = &builder;
@@ -303,24 +243,18 @@ public:
             "Builtin::VisUtil::TerrainRegionPixelCountBuffer",
             "Builtin::VisUtil::TerrainRegionOffsetBuffer");
         b->UnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
-        return {m_pso, builder.IndirectArguments("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer")};
-    }
-
-    BuildTerrainRegionMaterialIndirectCommandBufferFrame Prepare(const BuildTerrainRegionMaterialIndirectCommandBufferBindings&,
-        const org::PassPrepareContext&) const {
-        return {CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature()};
+        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildTerrainRegionEvaluateIndirectArgsCS",
+            "VisUtil_BuildTerrainRegionEvaluateIndirectArgsPSO")), builder.IndirectArguments("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer"),
+            builder.CommandSignature(br::render::RawDispatchCommandSignature())};
     }
 
     static void Record(const BuildTerrainRegionMaterialIndirectCommandBufferBindings& bindings,
-        const BuildTerrainRegionMaterialIndirectCommandBufferFrame& frame, org::PassRecordContext& context) {
+        org::PassRecordContext& context) {
         br::render::MiscConstants constants{};
         constants[0] = TerrainRegionMaterialEval::MaxTerrainRegions;
         constants[1] = TerrainRegionMaterialEval::TerrainSetIndexV1;
-        br::render::DispatchComputeIndirect(context, bindings.pipeline, constants, frame.signature, bindings.dispatchArgs);
+        br::render::DispatchComputeIndirect(context, bindings.pipeline, constants, bindings.signature, bindings.dispatchArgs);
     }
-
-private:
-    org::PipelineState m_pso;
 };
 
 struct EvaluateTerrainRegionMaterialGroupsBindings {
@@ -328,11 +262,11 @@ struct EvaluateTerrainRegionMaterialGroupsBindings {
     org::DeclaredViewToken visibleClusters, reyesDiceQueue;
     org::DeclaredViewToken reyesTessTableConfigs, reyesTessTableVertices, reyesTessTableTriangles;
     org::ResourceBindingToken arguments, activeCount;
+    org::CommandSignatureState signature;
     bool hasReyesDiceQueue = false, hasReyesTessTables = false;
     uint32_t patchVisibilityIndexBase = 0;
 };
 struct EvaluateTerrainRegionMaterialGroupsFrame {
-    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
     bool useNormalMaps = true;
     float terrainNormalBlend = 0;
     uint32_t terrainNormalMipBias = 0;
@@ -343,18 +277,6 @@ class EvaluateTerrainRegionMaterialGroupsPass : public org::TypedRenderGraphPass
     EvaluateTerrainRegionMaterialGroupsFrame, EvaluateTerrainRegionMaterialGroupsBindings> {
 public:
     explicit EvaluateTerrainRegionMaterialGroupsPass(const MaterialEvaluationBuildInputs& services) {
-        std::vector<DxcDefine> defines;
-        defines.push_back({ L"PSO_TERRAIN", L"1" });
-        defines.push_back({ L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1" });
-        defines.push_back({ L"VISUTIL_USE_COMPACT_MATERIAL_EVAL", L"1" });
-        defines.push_back({ L"CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE", L"1" });
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/VisUtilEvaluateTerrainRegion.hlsl",
-            L"EvaluateTerrainRegionMaterialGroupCS",
-            std::move(defines),
-            "VisUtil_EvaluateTerrainRegionMaterialGroupPSO");
-
         m_visibleClusterResource = services.visibleClusters;
         m_reyesDiceQueueResource = services.reyesDiceQueue;
         m_reyesTessTableConfigsResource = services.reyesTessTableConfigs;
@@ -365,7 +287,14 @@ public:
     }
     EvaluateTerrainRegionMaterialGroupsBindings Declare(org::PassBuilder& builder) {
         EvaluateTerrainRegionMaterialGroupsBindings bindings{};
-        bindings.pipeline = m_pso;
+        bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(
+            L"shaders/VisUtilEvaluateTerrainRegion.hlsl",
+            L"EvaluateTerrainRegionMaterialGroupCS",
+            "VisUtil_EvaluateTerrainRegionMaterialGroupPSO",
+            {{L"PSO_TERRAIN", L"1"},
+             {L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1"},
+             {L"VISUTIL_USE_COMPACT_MATERIAL_EVAL", L"1"},
+             {L"CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE", L"1"}}));
         bindings.visibleClusters = builder.ShaderResource(m_visibleClusterResource).View();
         if (m_reyesDiceQueueResource) {
             bindings.reyesDiceQueue = builder.ShaderResource(m_reyesDiceQueueResource).View();
@@ -448,13 +377,13 @@ public:
         b->ConstantBuffer(Builtin::PerFrameBuffer);
         bindings.arguments = b->IndirectArguments("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
         bindings.activeCount = b->IndirectArguments("Builtin::VisUtil::TerrainRegionActiveCountBuffer");
+        bindings.signature = b->CommandSignature(br::render::TerrainRegionMaterialEvaluationCommandSignature());
         return bindings;
     }
 
     EvaluateTerrainRegionMaterialGroupsFrame Prepare(const EvaluateTerrainRegionMaterialGroupsBindings&,
         const org::PassPrepareContext&) const {
-        return {CommandSignatureManager::GetInstance().CaptureTerrainRegionMaterialEvaluationCommandSignature(),
-            CLodReyesUseNormalMaps(), CLodReyesTerrainNormalBlend(), CLodReyesTerrainNormalMipBias(),
+        return {CLodReyesUseNormalMaps(), CLodReyesTerrainNormalBlend(), CLodReyesTerrainNormalMipBias(),
             CLodReyesObjectNormalMapBlend()};
     }
 
@@ -476,7 +405,7 @@ public:
         constants[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(frame.terrainNormalBlend);
         constants[VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS] = frame.terrainNormalMipBias;
         constants[VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT] = std::bit_cast<uint32_t>(frame.objectNormalMapBlend);
-        br::render::DispatchComputeIndirect(context, bindings.pipeline, constants, frame.signature, bindings.arguments,
+        br::render::DispatchComputeIndirect(context, bindings.pipeline, constants, bindings.signature, bindings.arguments,
             0, TerrainRegionMaterialEval::MaxTerrainRegions, bindings.activeCount);
     }
 
@@ -485,7 +414,6 @@ public:
     }
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterResource;
     std::shared_ptr<org::GloballyIndexedResource> m_reyesDiceQueueResource;

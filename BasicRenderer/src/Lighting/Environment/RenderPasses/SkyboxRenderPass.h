@@ -3,6 +3,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 
 struct SkyboxFrame {
@@ -16,17 +17,13 @@ struct SkyboxBindings {
 class SkyboxRenderPass : public org::TypedRenderGraphPass<SkyboxRenderPass,
     SkyboxFrame, SkyboxBindings> {
 public:
-    SkyboxRenderPass() {
-        CreatePSO();
-    }
-
     SkyboxBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* builder = &declaration;
 		builder->ShaderResource(Builtin::Environment::CurrentCubemap);
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            m_pso,
+            builder->Pipeline(br::render::ComputePipeline(L"shaders/skybox.hlsl", L"SkyboxCSMain", "SkyboxComputePSO")),
             builder->ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
             builder->ShaderResource(Builtin::CameraBuffer),
             builder->ShaderResource(Builtin::Environment::InfoBuffer),
@@ -49,18 +46,5 @@ public:
         constants[3] = context.Index(bindings.hdr);
         constants[4] = context.Index(bindings.motion);
         br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX, frame.groupsY);
-    }
-
-private:
-    org::PipelineState m_pso;
-
-    void CreatePSO() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/skybox.hlsl",
-            L"SkyboxCSMain",
-            {},
-            "SkyboxComputePSO"
-        );
     }
 };

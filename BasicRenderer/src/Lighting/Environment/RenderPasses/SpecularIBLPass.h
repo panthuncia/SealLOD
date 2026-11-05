@@ -22,7 +22,6 @@ class SpecularIBLPass : public org::TypedRenderGraphPass<SpecularIBLPass,
     SpecularIBLFrame, SpecularIBLBindings> {
 public:
     SpecularIBLPass() {
-        CreatePSO();
         auto& settingsManager = SettingsManager::GetInstance();
         m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
     }
@@ -53,7 +52,7 @@ public:
         if (m_gtaoEnabled) {
             builder.ShaderResource(Builtin::GTAO::OutputAOTerm);
         }
-        return {m_pso, builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_gtaoEnabled};
+        return {builder.Pipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_gtaoEnabled};
     }
 
     void Initialize() {}
@@ -78,30 +77,19 @@ public:
 
 private:
 
-    org::PipelineState m_pso;
-
     bool m_gtaoEnabled = true;
 
-    void CreatePSO() {
-        auto dev = DeviceManager::GetInstance().GetDevice();
-
-        // Compile shaders
-        ShaderInfoBundle sib;
-        sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSMain", L"vs_6_6" };
-        sib.pixelShader = { L"shaders/specularIBL.hlsl",   L"PSMain",           L"ps_6_6" };
-        auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-
-        // Subobjects
-        auto& layout = PSOManager::GetInstance().GetRootSignature(); // rhi::PipelineLayout&
-        rhi::SubobjLayout soLayout{ layout.GetHandle() };
-        rhi::SubobjShader soVS{ rhi::ShaderStage::Vertex, rhi::DXIL(compiled.vertexShader.Get()), "FullscreenVSMain" };
-        rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel,  rhi::DXIL(compiled.pixelShader.Get()), "PSMain" };
+    static org::GraphicsPipelineDesc PipelineDesc() {
+        org::GraphicsPipelineDesc desc;
+        desc.name = "SpecularIBL.PSO";
+        desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSMain", L"vs_6_6"};
+        desc.pixel = {L"shaders/specularIBL.hlsl",   L"PSMain",           L"ps_6_6"};
 
         rhi::RasterState rs{};
         rs.fill = rhi::FillMode::Solid;
         rs.cull = rhi::CullMode::None;
         rs.frontCCW = false;
-        rhi::SubobjRaster soRaster{ rs };
+        desc.raster = rs;
 
         rhi::BlendState bs{};
         bs.alphaToCoverage = false;
@@ -120,44 +108,17 @@ private:
 
             a0.writeMask = rhi::ColorWriteEnable::All;
         }
-        rhi::SubobjBlend soBlend{ bs };
+        desc.blend = bs;
 
-        //rhi::DepthStencilState ds{};
-        //ds.depthEnable = false;
-        //ds.depthWrite = false;
-        //ds.depthFunc = rhi::CompareOp::Greater; // kept for parity; ignored when depth off
-        //rhi::SubobjDepth soDepth{ ds };
+        // No depth-stencil state and no DSV format.
 
         rhi::RenderTargets rts{};
         rts.count = 1;
         rts.formats[0] = rhi::Format::R16G16B16A16_Float;
-        rhi::SubobjRTVs soRTVs{ rts };
+        desc.renderTargets = rts;
 
-        //rhi::SubobjDSV    soDSV{ rhi::Format::Unknown }; // no DSV
-        rhi::SubobjSample soSmp{ rhi::SampleDesc{1, 0} };
-        rhi::SubobjPrimitiveTopology soTopo{ rhi::PrimitiveTopology::TriangleStrip };
-
-        const rhi::PipelineStreamItem items[] = {
-            rhi::Make(soLayout),
-            rhi::Make(soVS),
-            rhi::Make(soPS),
-            rhi::Make(soRaster),
-            rhi::Make(soBlend),
-            //rhi::Make(soDepth),
-            rhi::Make(soRTVs),
-            //rhi::Make(soDSV),
-            rhi::Make(soSmp),
-			rhi::Make(soTopo)
-        };
-
-        rhi::PipelinePtr pipeline;
-        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
-        if (Failed(result)) {
-            throw std::runtime_error("Failed to create SpecularIBL PSO (RHI)");
-        }
-        pipeline->SetName("SpecularIBL.PSO");
-        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
-            compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
-            soLayout.layout);
+        desc.sample = rhi::SampleDesc{1, 0};
+        desc.topology = rhi::PrimitiveTopology::TriangleStrip;
+        return desc;
     }
 };

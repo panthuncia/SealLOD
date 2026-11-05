@@ -2,6 +2,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "Pipeline/PipelineState/CommandSignatureManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Materials/Publication/MaterialStateArtifacts.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -19,16 +20,6 @@ struct BuildMaterialIndirectCommandBufferFrame {
 class BuildMaterialIndirectCommandBufferPass : public org::TypedRenderGraphPass<BuildMaterialIndirectCommandBufferPass,
     BuildMaterialIndirectCommandBufferFrame, BuildMaterialIndirectCommandBufferBindings> {
 public:
-    BuildMaterialIndirectCommandBufferPass() {
-        // Build PSO for the args builder kernel
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/VisUtil.hlsl",
-            L"BuildEvaluateIndirectArgsCS",
-            {},
-            "VisUtil_BuildEvaluateIndirectArgsPSO");
-    }
-
     BuildMaterialIndirectCommandBufferBindings Declare(org::PassBuilder& b) {
         b.ShaderResource(
             "Builtin::VisUtil::MaterialPixelCountBuffer",
@@ -36,7 +27,8 @@ public:
         b.UnorderedAccess("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
 		b.ConstantBuffer(Builtin::PerFrameBuffer);
         b.PreferQueue(org::QueueKind::Compute);
-        return {m_pso};
+        return {b.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildEvaluateIndirectArgsCS",
+            "VisUtil_BuildEvaluateIndirectArgsPSO"))};
     }
 
     BuildMaterialIndirectCommandBufferFrame Prepare(const BuildMaterialIndirectCommandBufferBindings&,
@@ -57,7 +49,4 @@ public:
         constants[0] = frame.slotsUsed;
         br::render::DispatchCompute(context, bindings.pipeline, constants, (frame.slotsUsed + 63u) / 64u);
     }
-
-private:
-    org::PipelineState m_pso;
 };

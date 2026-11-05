@@ -21,6 +21,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Render/Runtime/UploadTypes.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
@@ -58,14 +59,6 @@ WorkGraphCullingPass::WorkGraphCullingPass(CullingPassConfig config, CullingPass
     , m_voxelQueueTable(m_config.stablePassIdentifier, "CLod Work Graph Voxel Raster Queue Descriptors",
         m_resources.voxelQueues.Enabled())
 {
-    auto& psoManager = PSOManager::GetInstance();
-    const auto layout = psoManager.GetComputeRootSignature().GetHandle();
-    m_createCommandPipelineState = psoManager.MakeComputePipeline(layout,
-        L"shaders/ClusterLOD/clodUtil.hlsl", L"CreateRasterBucketsHistogramCommandCSMain", {},
-        "HierarchicalLODCommandCreation");
-    m_clearPipelineState = psoManager.MakeComputePipeline(layout,
-        L"shaders/ClusterLOD/clodUtil.hlsl", L"ClearUintStructuredBufferCSMain", {},
-        "HierarchicalCullingClearUintPSO");
     InstallWorkGraph(CompileWorkGraph());
     g_liveWorkGraphCullingPasses.push_back(this);
 }
@@ -336,8 +329,10 @@ WorkGraphCullingBindings WorkGraphCullingPass::Declare(org::PassBuilder& builder
     const auto& outputs = m_resources.outputs;
     const auto& replay = m_resources.occlusionReplay;
     WorkGraphCullingBindings bindings{};
-    bindings.clearPipeline = m_clearPipelineState;
-    bindings.createCommandPipeline = m_createCommandPipelineState;
+    bindings.clearPipeline = builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+        L"ClearUintStructuredBufferCSMain", "HierarchicalCullingClearUintPSO"));
+    bindings.createCommandPipeline = builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+        L"CreateRasterBucketsHistogramCommandCSMain", "HierarchicalLODCommandCreation"));
     bindings.scratch = scratch;
     bindings.maxVisibleClusters = m_config.maxVisibleClusters;
     bindings.reyesDiceQueueCapacity = m_resources.reyes.diceQueueCapacity;

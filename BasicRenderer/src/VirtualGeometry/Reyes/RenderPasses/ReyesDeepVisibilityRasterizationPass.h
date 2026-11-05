@@ -20,7 +20,7 @@ namespace org { class ResourceGroup; }
 
 struct ReyesDeepVisibilityRasterBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
     org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
     org::ResourceBindingToken indirectArgs;
@@ -97,6 +97,4 @@ private:
     std::vector<ViewInput> m_viewInputs;
     std::vector<uint32_t> ViewInputCameras() const;
     bool m_declaredResourcesChanged = true;
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

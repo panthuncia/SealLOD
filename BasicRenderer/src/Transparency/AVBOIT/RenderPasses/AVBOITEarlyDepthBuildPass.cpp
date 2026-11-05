@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/UploadTypes.h"
@@ -20,18 +21,12 @@ AVBOITEarlyDepthBuildPass::AVBOITEarlyDepthBuildPass(
     , m_tileCommandsBuffer(std::move(tileCommandsBuffer))
     , m_tileCountBuffer(std::move(tileCountBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/AVBOITEarlyDepthBuild.hlsl",
-        L"CLodAVBOITEarlyDepthBuildCS",
-        {},
-        "CLod.AVBOITEarlyDepthBuild.PSO");
 }
 
 AVBOITEarlyDepthBuildBindings AVBOITEarlyDepthBuildPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {m_pso, builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_zeroTransmittanceSliceTexture), builder.UnorderedAccess(m_tileCommandsBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
+    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITEarlyDepthBuild.hlsl", L"CLodAVBOITEarlyDepthBuildCS", "CLod.AVBOITEarlyDepthBuild.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_zeroTransmittanceSliceTexture), builder.UnorderedAccess(m_tileCommandsBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
 }
 
 void AVBOITEarlyDepthBuildPass::Update(const org::UpdateExecutionContext& executionContext)

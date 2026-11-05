@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
 
@@ -15,18 +16,12 @@ AVBOITAdaptiveFitUpdatePass::AVBOITAdaptiveFitUpdatePass(
     , m_occupancyHistogramBuffer(std::move(occupancyHistogramBuffer))
     , m_fitStateBuffer(std::move(fitStateBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/AVBOITAdaptiveFit.hlsl",
-        L"CLodAVBOITAdaptiveFitUpdateCS",
-        {},
-        "CLod.AVBOITAdaptiveFitUpdate.PSO");
 }
 
 AVBOITAdaptiveFitUpdateBindings AVBOITAdaptiveFitUpdatePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {m_pso, builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_fitStateBuffer)};
+    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITAdaptiveFit.hlsl", L"CLodAVBOITAdaptiveFitUpdateCS", "CLod.AVBOITAdaptiveFitUpdate.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_fitStateBuffer)};
 }
 
 AVBOITAdaptiveFitUpdateFrame AVBOITAdaptiveFitUpdatePass::Prepare(const AVBOITAdaptiveFitUpdateBindings&, const org::PassPrepareContext&) const {

@@ -49,14 +49,12 @@ public:
     explicit DebugSkeletonPass(std::shared_ptr<br::render::DebugSceneSnapshotService> snapshots)
         : m_snapshots(std::move(snapshots)) {
         m_lineBuffer = DynamicStructuredBuffer<SkeletonDebugLine>::CreateShared(65536, "Debug Skeleton Lines");
-        CreatePSO();
-
     }
 
     DebugSkeletonBindings Declare(org::PassBuilder& declaration)
     {
         auto* builder = &declaration;
-        return {m_pso, builder->ShaderResource(m_lineBuffer),
+        return {builder->Pipeline(PipelineDesc()), builder->ShaderResource(m_lineBuffer),
             builder->ConstantBuffer(Builtin::PerFrameBuffer),
             builder->ShaderResource(Builtin::CameraBuffer),
             builder->RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
@@ -412,25 +410,18 @@ private:
         }
     }
 
-    void CreatePSO()
+    static org::GraphicsPipelineDesc PipelineDesc()
     {
-        auto dev = DeviceManager::GetInstance().GetDevice();
-
-        ShaderInfoBundle sib;
-        sib.meshShader = { L"shaders/debugSkeleton.hlsl", L"MSMain", L"ms_6_6" };
-        sib.pixelShader = { L"shaders/debugSkeleton.hlsl", L"PSMain", L"ps_6_6" };
-        auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-
-        auto& layout = PSOManager::GetInstance().GetRootSignature();
-        rhi::SubobjLayout soLayout{ layout.GetHandle() };
-        rhi::SubobjShader soMS{ rhi::ShaderStage::Mesh, rhi::DXIL(compiled.meshShader.Get()), "MSMain" };
-        rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiled.pixelShader.Get()), "PSMain" };
+        org::GraphicsPipelineDesc desc;
+        desc.name = "DebugSkeleton.PSO";
+        desc.mesh = { L"shaders/debugSkeleton.hlsl", L"MSMain", L"ms_6_6" };
+        desc.pixel = { L"shaders/debugSkeleton.hlsl", L"PSMain", L"ps_6_6" };
 
         rhi::RasterState rs{};
         rs.fill = rhi::FillMode::Solid;
         rs.cull = rhi::CullMode::None;
         rs.frontCCW = false;
-        rhi::SubobjRaster soRaster{ rs };
+        desc.raster = rs;
 
         rhi::BlendState bs{};
         bs.alphaToCoverage = false;
@@ -445,47 +436,26 @@ private:
         attachment.dstAlpha = rhi::BlendFactor::InvSrcAlpha;
         attachment.alphaOp = rhi::BlendOp::Add;
         attachment.writeMask = rhi::ColorWriteEnable::All;
-        rhi::SubobjBlend soBlend{ bs };
+        desc.blend = bs;
 
         rhi::DepthStencilState ds{};
         ds.depthEnable = false;
         ds.depthWrite = false;
         ds.depthFunc = rhi::CompareOp::Always;
-        rhi::SubobjDepth soDepth{ ds };
+        desc.depth = ds;
 
         rhi::RenderTargets rts{};
         rts.count = 1;
         rts.formats[0] = rhi::Format::R8G8B8A8_UNorm;
-        rhi::SubobjRTVs soRTVs{ rts };
-        rhi::SubobjSample soSample{ rhi::SampleDesc{ 1, 0 } };
-        rhi::SubobjPrimitiveTopology soTopology{ rhi::PrimitiveTopology::LineList };
-
-        const rhi::PipelineStreamItem items[] = {
-            rhi::Make(soLayout),
-            rhi::Make(soMS),
-            rhi::Make(soPS),
-            rhi::Make(soRaster),
-            rhi::Make(soBlend),
-            rhi::Make(soDepth),
-            rhi::Make(soRTVs),
-            rhi::Make(soSample),
-            rhi::Make(soTopology),
-        };
-
-        rhi::PipelinePtr pipeline;
-        const auto result = dev.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pipeline);
-        if (Failed(result)) {
-            throw std::runtime_error("Failed to create DebugSkeleton PSO");
-        }
-        pipeline->SetName("DebugSkeleton.PSO");
-        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash, compiled.resourceDescriptorSlots,
-            PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout), soLayout.layout);
+        desc.renderTargets = rts;
+        desc.sample = rhi::SampleDesc{ 1, 0 };
+        desc.topology = rhi::PrimitiveTopology::LineList;
+        return desc;
     }
 
     std::shared_ptr<DynamicStructuredBuffer<SkeletonDebugLine>> m_lineBuffer;
     std::vector<SkeletonDebugLine> m_lines;
     std::vector<DrawRange> m_drawRanges;
     std::shared_ptr<br::render::DebugSceneSnapshotService> m_snapshots;
-    org::PipelineState m_pso;
     bool m_loggedLineDiagnostics = false;
 };

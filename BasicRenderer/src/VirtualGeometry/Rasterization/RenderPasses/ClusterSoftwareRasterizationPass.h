@@ -17,7 +17,7 @@ namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ClusterSoftwareRasterBindings {
-    std::shared_ptr<const rhi::CommandSignaturePtr> rasterSignature, cacheDispatchSignature;
+    org::CommandSignatureState rasterSignature, cacheDispatchSignature;
     org::PipelineState cacheClear, cacheBuild, cacheFinalize, cacheSkin, cacheResolve;
     org::DeclaredViewToken histogram, visible, transforms, mapping;
     org::ResourceBindingToken indirectArgs;
@@ -74,13 +74,6 @@ public:
         org::PassRecordContext& context);
 
 private:
-    std::shared_ptr<rhi::CommandSignaturePtr> m_rasterizationCommandSignature;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_dynamicWindSkinCacheDispatchCommandSignature;
-    org::PipelineState m_dynamicWindSkinCacheBuildPipeline;
-    org::PipelineState m_dynamicWindSkinCacheSkinPipeline;
-    org::PipelineState m_dynamicWindSkinCacheFinalizePipeline;
-    org::PipelineState m_dynamicWindSkinCacheResolvePipeline;
-    org::PipelineState m_dynamicWindSkinCacheClearPipeline;
     std::shared_ptr<org::Buffer> m_compactedVisibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<org::Buffer> m_rasterBucketsHistogramBuffer;

@@ -36,5 +36,4 @@ private:
     std::shared_ptr<org::PixelBuffer> m_scalarExtinctionTexture;
     std::shared_ptr<org::PixelBuffer> m_chromaticExtinctionTexture;
     std::shared_ptr<org::PixelBuffer> m_zeroTransmittanceSliceTexture;
-    org::PipelineState m_pso;
 };

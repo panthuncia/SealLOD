@@ -14,6 +14,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <boost/container_hash/hash.hpp>
 
@@ -140,21 +141,6 @@ public:
     // to them keyed on this generation.
     uint64_t PipelineCacheGeneration() const noexcept { return m_asyncPSOGeneration.load(std::memory_order_acquire); }
 
-    org::PipelineState MakeComputePipeline(rhi::PipelineLayoutHandle layout,
-        const wchar_t* shaderPath,
-        const wchar_t* entryPoint,
-        std::vector<DxcDefine> defines = {},
-        const char* debugName = nullptr,
-        std::shared_ptr<const void> layoutOwner = {});
-	const rhi::Pipeline& ResolvePipeline(const org::PipelineState& pipeline, org::BackendInstanceId backendInstance);
-
-    org::PipelineState RegisterExternalPipeline(
-        org::PipelineState state,
-        std::string id,
-        std::string displayName,
-        br::extensions::PipelineKind kind,
-        std::function<org::PipelineState()> rebuild);
-
     std::shared_ptr<const void> CaptureLayoutOwner(rhi::PipelineLayoutHandle layout) const;
     const rhi::PipelineLayout& GetRootSignature();
     const rhi::PipelineLayout& GetComputeRootSignature();
@@ -178,6 +164,8 @@ public:
 	std::vector<DxcDefine> GetRasterShaderDefines(MaterialRasterFlags materialRasterFlags);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle, org::BackendInstanceId backendInstance);
+	// For org::PipelineLibrary's builds. A reload asks past the artifact cache.
+	ShaderBundle CompileShadersForPipelineLibrary(const ShaderInfoBundle& shaderInfoBundle, org::BackendInstanceId backendInstance, bool bypassCache);
 	void PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags materialCompileFlags);
 	void PrecompileShaderArtifact(const ShaderVariantRequest& request);
 	void PrecompileShaderBundleArtifact(const ShaderInfoBundle& shaderInfoBundle);
@@ -192,6 +180,14 @@ public:
         bool emitSpirv = false);
 
 private:
+    // The permutation caches' compute pipelines (deferred shading, software raster, ...), primary device only. Passes declare
+    // theirs through org::RenderPassBuilder::Pipeline instead.
+    org::PipelineState MakeComputePipeline(rhi::PipelineLayoutHandle layout,
+        const wchar_t* shaderPath,
+        const wchar_t* entryPoint,
+        std::vector<DxcDefine> defines = {},
+        const char* debugName = nullptr,
+        std::shared_ptr<const void> layoutOwner = {});
     struct OwnedDefine {
         std::wstring name;
         std::wstring value;
@@ -219,6 +215,15 @@ private:
         std::map<uint64_t, std::map<std::string, std::string>> generationDefineOverrides;
         bool compiling = false;
     };
+
+    // The pipelines passes declared by description live in org::PipelineLibrary, which also builds and retains them. These
+    // are what the live-pipeline surface adds on top of it.
+    struct LibraryPipelineJobs {
+        std::set<std::string> compiling;
+        std::vector<uint64_t> awaitingPublish;
+        std::map<std::string, std::map<uint64_t, std::map<std::string, std::string>>> defineOverrides;
+    };
+    LibraryPipelineJobs m_libraryJobs; // Guarded by m_livePipelineMutex.
 
     struct PendingPublication {
         uint64_t jobId = 0;
@@ -330,8 +335,6 @@ private:
 
     org::PipelineState CreateDeferredPSO(UINT psoFlags);
     org::PipelineState BuildComputePipeline(const ComputeRecipe& recipe, const br::diagnostics::RecompileOptions* options = nullptr);
-	void BuildComputePipelineForBackend(const ComputeRecipe& recipe, const org::PipelineState& pipeline,
-		org::BackendInstanceId backendInstance);
     org::PipelineState RegisterComputePipeline(org::PipelineState state, ComputeRecipe recipe);
     org::PipelineState RegisterPipeline(
         org::PipelineState state,

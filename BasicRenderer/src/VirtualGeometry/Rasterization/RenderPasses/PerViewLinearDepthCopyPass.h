@@ -44,7 +44,6 @@ public:
         org::PassRecordContext& context);
 
 private:
-    org::PipelineState m_pso;
     struct ViewSnapshot {
         std::shared_ptr<org::PixelBuffer> visibility, linearDepth;
         uint32_t width = 0, height = 0;

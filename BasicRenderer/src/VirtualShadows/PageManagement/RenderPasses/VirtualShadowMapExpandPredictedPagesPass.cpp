@@ -3,6 +3,7 @@
 
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
@@ -34,28 +35,6 @@ VirtualShadowMapExpandPredictedPagesPass::VirtualShadowMapExpandPredictedPagesPa
     , m_pageViewInfoBuffer(std::move(pageViewInfoBuffer))
     , m_physicalPageCount(physicalPageCount)
 {
-    spdlog::info("VirtualShadowMapExpandPredictedPagesPass: stamp pipeline begin");
-    m_stampContentGenerationPso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowStampRenderedPageGenerationsCSMain",
-        {},
-        "CLod.VirtualShadow.StampRenderedPageGenerations.PSO");
-    spdlog::info("VirtualShadowMapExpandPredictedPagesPass: stamp pipeline complete; expand pipeline begin");
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowExpandPredictedPagesCSMain",
-        {},
-        "CLod.VirtualShadow.ExpandPredictedPages.PSO");
-    spdlog::info("VirtualShadowMapExpandPredictedPagesPass: expand pipeline complete; reset pipeline begin");
-    m_resetCandidateCountPso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowResetFallbackCandidateCountCSMain",
-        {},
-        "CLod.VirtualShadow.ResetFallbackCandidateCount.PSO");
-    spdlog::info("VirtualShadowMapExpandPredictedPagesPass: reset pipeline complete");
 }
 
 VirtualShadowMapExpandPredictedPagesBindings VirtualShadowMapExpandPredictedPagesPass::Declare(org::PassBuilder& builder)
@@ -66,7 +45,13 @@ VirtualShadowMapExpandPredictedPagesBindings VirtualShadowMapExpandPredictedPage
             Builtin::CameraBuffer);
 
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_stampContentGenerationPso, m_pso, m_resetCandidateCountPso, builder.UnorderedAccess(m_predictiveCandidatesBuffer),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowStampRenderedPageGenerationsCSMain", "CLod.VirtualShadow.StampRenderedPageGenerations.PSO")),
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowExpandPredictedPagesCSMain", "CLod.VirtualShadow.ExpandPredictedPages.PSO")),
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowResetFallbackCandidateCountCSMain", "CLod.VirtualShadow.ResetFallbackCandidateCount.PSO")),
+        builder.UnorderedAccess(m_predictiveCandidatesBuffer),
         builder.UnorderedAccess(m_predictiveCandidateCountBuffer), builder.UnorderedAccess(m_predictiveRawPagesBuffer),
         builder.UnorderedAccess(m_predictiveRawPageCountBuffer), builder.ShaderResource(m_clipmapInfoBuffer),
         builder.UnorderedAccess(m_scratchBitsetBuffer), builder.UnorderedAccess(m_statsBuffer),

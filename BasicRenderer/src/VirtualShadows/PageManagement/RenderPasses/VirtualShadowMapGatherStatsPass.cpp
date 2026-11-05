@@ -3,6 +3,7 @@
 
 #include "Runtime/Settings/SettingsManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
@@ -29,19 +30,15 @@ VirtualShadowMapGatherStatsPass::VirtualShadowMapGatherStatsPass(
     , m_statsBuffer(std::move(statsBuffer))
     , m_capturePreAllocateState(capturePreAllocateState)
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowGatherStatsCSMain",
-        {},
-        "CLod.VirtualShadow.GatherStats.PSO");
 }
 
 VirtualShadowMapGatherStatsBindings VirtualShadowMapGatherStatsPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_allocationCountBuffer),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowGatherStatsCSMain", "CLod.VirtualShadow.GatherStats.PSO")),
+        builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_allocationCountBuffer),
         builder.ShaderResource(m_allocationIndirectArgsBuffer), builder.ShaderResource(m_pageListHeaderBuffer),
         builder.ShaderResource(m_pageMetadataBuffer), builder.ShaderResource(m_clipmapInfoBuffer),
         builder.UnorderedAccess(m_statsBuffer), m_capturePreAllocateState};

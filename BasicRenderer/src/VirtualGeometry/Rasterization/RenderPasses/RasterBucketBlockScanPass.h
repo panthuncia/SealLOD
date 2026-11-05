@@ -33,7 +33,6 @@ public:
     void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
-    org::PipelineState m_pso;
     uint32_t m_blockSize = 1024;
     std::shared_ptr<org::Buffer> m_histogramBuffer;
     std::shared_ptr<org::Buffer> m_offsetsBuffer;

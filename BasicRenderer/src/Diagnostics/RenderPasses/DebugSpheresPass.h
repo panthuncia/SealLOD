@@ -21,9 +21,8 @@ struct DebugSphereFrameData {
 };
 
 struct DebugSphereBindings {
-	// The mesh pipeline and its small push-constant layout, made outside PipelineState.
-	std::shared_ptr<const rhi::PipelinePtr> pipeline;
-	std::shared_ptr<const rhi::PipelineLayoutPtr> layout;
+	// The mesh pipeline, on its small push-constant layout.
+	org::PipelineState pipeline;
 	org::DeclaredViewToken cameraBuffer, objectBuffer;
 };
 
@@ -32,8 +31,6 @@ class DebugSpherePass
 public:
 	explicit DebugSpherePass(std::shared_ptr<br::render::DebugSceneSnapshotService> snapshots)
 		: m_snapshots(std::move(snapshots)) {
-		CreateDebugRootSignature();
-		CreateDebugMeshPSO();
 	}
 	~DebugSpherePass() {
 	}
@@ -44,7 +41,7 @@ public:
 		builder->DepthReadWrite(Builtin::PrimaryCamera::DepthTexture);
 		builder->IsGeometryPass();
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
-		return {m_pso, m_debugLayout, builder->ShaderResource(Builtin::CameraBuffer),
+		return {builder->Pipeline(PipelineDesc()), builder->ShaderResource(Builtin::CameraBuffer),
 			builder->ShaderResource(Builtin::PerObjectBuffer)};
 	}
 
@@ -67,8 +64,7 @@ public:
 		if (data.spheres.empty()) return;
 		auto& commandList = recording.Commands();
 		commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-		recording.Retain(bindings.layout);
-		recording.BindGraphicsPipeline(bindings.pipeline, (*bindings.layout)->GetHandle());
+		recording.BindGraphicsPipeline(bindings.pipeline);
 		struct Constants {
 			float center[3]; float padding; float radius;
 			uint32_t perObjectIndex, cameraBufferIndex, objectBufferIndex;
@@ -86,48 +82,30 @@ public:
 private:
 	std::shared_ptr<br::render::DebugSceneSnapshotService> m_snapshots;
 
-	void CreateDebugRootSignature() {
-		auto device = DeviceManager::GetInstance().GetDevice();
-
-		rhi::PipelineLayoutDesc desc = {};
-		desc.flags = rhi::PipelineLayoutFlags::PF_AllowInputAssembler;
-		rhi::PushConstantRangeDesc pushConstant = { rhi::ShaderStage::Mesh, 8, 0, 0 };
-
+	static org::GraphicsPipelineDesc PipelineDesc() {
+		org::PipelineLayoutSpec layout;
+		layout.flags = rhi::PipelineLayoutFlags::PF_AllowInputAssembler;
 		rhi::LayoutBindingRange binding = {};
 		binding.set = 0;
 		binding.binding = 0;
 		binding.count = 1;
 		binding.readOnly = true;
 		binding.visibility = rhi::ShaderStage::AllGraphics;
-		desc.ranges = rhi::Span<rhi::LayoutBindingRange>{ &binding, 1 };
-		desc.pushConstants = rhi::Span<rhi::PushConstantRangeDesc>{ &pushConstant };
-		desc.staticSamplers = rhi::Span<rhi::StaticSamplerDesc>{};
-		m_debugLayout = std::make_shared<rhi::PipelineLayoutPtr>();
-		auto result = device.CreatePipelineLayout(desc, *m_debugLayout);
+		layout.ranges = {binding};
+		layout.pushConstants = {rhi::PushConstantRangeDesc{ rhi::ShaderStage::Mesh, 8, 0, 0 }};
+		layout.name = "Debug.Mesh.Wireframe.Layout";
 
-	}
-
-	void CreateDebugMeshPSO() {
-
-		auto dev = DeviceManager::GetInstance().GetDevice();
-
-		// Compile shaders
-		ShaderInfoBundle sib;
-		sib.meshShader = { L"shaders/sphere.hlsl", L"MSMain",        L"ms_6_6" };
-		sib.pixelShader = { L"shaders/sphere.hlsl", L"SpherePSMain",  L"ps_6_6" };
-		auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-
-		// Subobjects
-		rhi::SubobjLayout soLayout{ (*m_debugLayout)->GetHandle() };
-
-		rhi::SubobjShader soMS{ rhi::ShaderStage::Mesh,  rhi::DXIL(compiled.meshShader.Get()), "MSMain" };
-		rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiled.pixelShader.Get()), "SpherePSMain" };
+		org::GraphicsPipelineDesc desc;
+		desc.name = "Debug.Mesh.Wireframe";
+		desc.layout = org::PipelineLayoutRef::Custom(std::move(layout));
+		desc.mesh = {L"shaders/sphere.hlsl", L"MSMain",        L"ms_6_6"};
+		desc.pixel = {L"shaders/sphere.hlsl", L"SpherePSMain",  L"ps_6_6"};
 
 		rhi::RasterState rs{};
 		rs.fill = rhi::FillMode::Wireframe;
 		rs.cull = rhi::CullMode::None;
 		rs.frontCCW = true;
-		rhi::SubobjRaster soRaster{ rs };
+		desc.raster = rs;
 
 		rhi::BlendState bs{};
 		bs.alphaToCoverage = false;
@@ -135,49 +113,28 @@ private:
 		bs.numAttachments = 1;
 		bs.attachments[0].enable = false;                     // no blending
 		bs.attachments[0].writeMask = rhi::ColorWriteEnable::All;
-		rhi::SubobjBlend soBlend{ bs };
+		desc.blend = bs;
 
 		rhi::DepthStencilState ds{};
 		ds.depthEnable = true;
 		ds.depthWrite = false;                                  // D3D12_DEPTH_WRITE_MASK_ZERO
 		ds.depthFunc = rhi::CompareOp::Less;                   // default in your DX path
-		rhi::SubobjDepth soDepth{ ds };
+		desc.depth = ds;
 
 		rhi::RenderTargets rts{};
 		rts.count = 1;
 		rts.formats[0] = rhi::Format::R8G8B8A8_UNorm;
-		rhi::SubobjRTVs soRTVs{ rts };
+		desc.renderTargets = rts;
 
 		// Your original used D24_UNORM_S8_UINT. If your RHI format enum doesn�t carry D24,
 		// you can either set Unknown (let backend infer) or use D32_Float consistently.
-		rhi::SubobjDSV    soDSV{ rhi::Format::D32_Float };
-		rhi::SubobjSample soSmp{ rhi::SampleDesc{1, 0} };
-
-		const rhi::PipelineStreamItem items[] = {
-			rhi::Make(soLayout),
-			rhi::Make(soMS),
-			rhi::Make(soPS),
-			rhi::Make(soRaster),
-			rhi::Make(soBlend),
-			rhi::Make(soDepth),
-			rhi::Make(soRTVs),
-			rhi::Make(soDSV),
-			rhi::Make(soSmp),
-		};
-
-		m_pso = std::make_shared<rhi::PipelinePtr>();
-		auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), *m_pso);
-		if (Failed(result)) {
-			throw std::runtime_error("Failed to create Debug Mesh PSO (RHI)");
-		}
-		(*m_pso)->SetName("Debug.Mesh.Wireframe");
-
+		desc.depthFormat = rhi::Format::D32_Float;
+		desc.sample = rhi::SampleDesc{1, 0};
+		return desc;
 	}
 
 	std::vector<DebugSphereFrameData::Sphere> m_spheres;
 	mutable std::mutex m_spheresMutex;
-	std::shared_ptr<rhi::PipelineLayoutPtr> m_debugLayout;
-	std::shared_ptr<rhi::PipelinePtr> m_pso;
 	bool m_wireframe;
 
 };

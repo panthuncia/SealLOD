@@ -5,6 +5,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 
 struct PrimaryDepthCopyBindings {
@@ -16,17 +17,14 @@ struct PrimaryDepthCopyFrame {
 
 class PrimaryDepthCopyPass : public org::TypedRenderGraphPass<PrimaryDepthCopyPass, PrimaryDepthCopyFrame, PrimaryDepthCopyBindings> {
 public:
-	PrimaryDepthCopyPass() {
-		CreatePSO();
-	}
-
 	PrimaryDepthCopyBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         auto* builder = &declaration;
 		builder->ShaderResource(Builtin::PrimaryCamera::VisibilityTexture);
 		builder->UnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap);
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
-		return {m_pso};
+		return {builder->Pipeline(br::render::ComputePipeline(L"shaders/canonicalSurface.hlsl", L"PrimaryDepthCopyCS",
+			"PrimaryDepthCopyPSO"))};
 	}
 
     PrimaryDepthCopyFrame Prepare(const PrimaryDepthCopyBindings&, const org::PassPrepareContext& preparation) const {
@@ -37,18 +35,4 @@ public:
     static void Record(const PrimaryDepthCopyBindings& bindings, const PrimaryDepthCopyFrame& frame, org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
     }
-
-private:
-
-	org::PipelineState m_pso;
-
-	void CreatePSO() {
-		m_pso = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-			L"shaders/canonicalSurface.hlsl",
-			L"PrimaryDepthCopyCS",
-			{},
-			"PrimaryDepthCopyPSO"
-		);
-	}
 };

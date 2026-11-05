@@ -5,6 +5,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Scene/Views/ViewManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/UploadTypes.h"
@@ -80,72 +81,6 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     , m_outputKind(outputKind)
     , m_voxelWorkCapacity(voxelWorkCapacity)
 {
-    auto& psoManager = PSOManager::GetInstance();
-    const auto computeLayout = psoManager.GetComputeRootSignature().GetHandle();
-    const std::string pipelineSuffix =
-        outputKind == CLodRasterOutputKind::VirtualShadow ? ".VirtualShadow" : "";
-    const auto pipelineId = [&pipelineSuffix](std::string_view base) {
-        return std::string(base) + pipelineSuffix;
-    };
-    std::vector<DxcDefine> defines = {
-        { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", outputKind == CLodRasterOutputKind::VirtualShadow ? L"1" : L"0" },
-        { L"CLOD_VSM_TWO_LAYER_VOXEL_VERSION", outputKind == CLodRasterOutputKind::VirtualShadow ? L"2" : L"0" },
-        { L"CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT", L"1" },
-        { L"CLOD_VOXEL_RASTER_CUBE_BATCH_SIZE", L"16" },
-    };
-    const std::string buildArgsPipelineId = pipelineId("CLod.VoxelRaster.BuildDispatchArgs");
-    m_buildArgsPso = psoManager.MakeComputePipeline(
-        computeLayout,
-        L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
-        L"VoxelRasterBuildDispatchArgsCS",
-        defines,
-        buildArgsPipelineId.c_str());
-
-    auto skinnedDefines = defines;
-    skinnedDefines.push_back({ L"PSO_SKINNED", L"1" });
-    auto telemetryDefines = defines;
-    telemetryDefines.push_back({ L"CLOD_VOXEL_RASTER_TELEMETRY", L"1" });
-    auto skinnedTelemetryDefines = skinnedDefines;
-    skinnedTelemetryDefines.push_back({ L"CLOD_VOXEL_RASTER_TELEMETRY", L"1" });
-
-    const std::string rigidPipelineId = pipelineId("CLod.VoxelRaster.Rasterize.Rigid");
-    const std::string skinnedPipelineId = pipelineId("CLod.VoxelRaster.Rasterize.Skinned");
-    const std::string rigidTelemetryPipelineId = pipelineId("CLod.VoxelRaster.Rasterize.Rigid.Telemetry");
-    const std::string skinnedTelemetryPipelineId = pipelineId("CLod.VoxelRaster.Rasterize.Skinned.Telemetry");
-    m_rigidRasterPso = psoManager.MakeComputePipeline(
-        computeLayout,
-        L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
-        L"VoxelRasterCS",
-        defines,
-        rigidPipelineId.c_str());
-    m_skinnedRasterPso = psoManager.MakeComputePipeline(
-        computeLayout,
-        L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
-        L"VoxelRasterCS",
-        skinnedDefines,
-        skinnedPipelineId.c_str());
-    m_rigidTelemetryRasterPso = psoManager.MakeComputePipeline(
-        computeLayout,
-        L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
-        L"VoxelRasterCS",
-        telemetryDefines,
-        rigidTelemetryPipelineId.c_str());
-    m_skinnedTelemetryRasterPso = psoManager.MakeComputePipeline(
-        computeLayout,
-        L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
-        L"VoxelRasterCS",
-        skinnedTelemetryDefines,
-        skinnedTelemetryPipelineId.c_str());
-
-    rhi::IndirectArg args[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-    rhi::CommandSignaturePtr commandSignature;
-    DeviceManager::GetInstance().GetDevice().CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 1), sizeof(CLodVoxelRasterDispatchCommand) },
-        computeLayout,
-        commandSignature);
-    m_dispatchCommandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 VoxelSoftwareRasterizationPass::~VoxelSoftwareRasterizationPass() = default;
@@ -193,8 +128,36 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
     if (m_slabResourceGroup) {
         builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
-    VoxelRasterBindings bindings{m_buildArgsPso, {m_rigidRasterPso, m_skinnedRasterPso},
-        {m_rigidTelemetryRasterPso, m_skinnedTelemetryRasterPso}, m_dispatchCommandSignature,
+    const std::string pipelineSuffix =
+        m_outputKind == CLodRasterOutputKind::VirtualShadow ? ".VirtualShadow" : "";
+    const auto pipelineId = [&pipelineSuffix](std::string_view base) {
+        return std::string(base) + pipelineSuffix;
+    };
+    std::vector<org::PipelineShaderDefine> defines = {
+        { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", m_outputKind == CLodRasterOutputKind::VirtualShadow ? L"1" : L"0" },
+        { L"CLOD_VSM_TWO_LAYER_VOXEL_VERSION", m_outputKind == CLodRasterOutputKind::VirtualShadow ? L"2" : L"0" },
+        { L"CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT", L"1" },
+        { L"CLOD_VOXEL_RASTER_CUBE_BATCH_SIZE", L"16" },
+    };
+    auto skinnedDefines = defines;
+    skinnedDefines.push_back({ L"PSO_SKINNED", L"1" });
+    auto telemetryDefines = defines;
+    telemetryDefines.push_back({ L"CLOD_VOXEL_RASTER_TELEMETRY", L"1" });
+    auto skinnedTelemetryDefines = skinnedDefines;
+    skinnedTelemetryDefines.push_back({ L"CLOD_VOXEL_RASTER_TELEMETRY", L"1" });
+    const auto rasterPipeline = [&](std::string_view base, std::vector<org::PipelineShaderDefine> rasterDefines) {
+        return builder->Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
+            L"VoxelRasterCS", pipelineId(base), std::move(rasterDefines)));
+    };
+
+    VoxelRasterBindings bindings{
+        builder->Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
+            L"VoxelRasterBuildDispatchArgsCS", pipelineId("CLod.VoxelRaster.BuildDispatchArgs"), defines)),
+        {rasterPipeline("CLod.VoxelRaster.Rasterize.Rigid", defines),
+            rasterPipeline("CLod.VoxelRaster.Rasterize.Skinned", skinnedDefines)},
+        {rasterPipeline("CLod.VoxelRaster.Rasterize.Rigid.Telemetry", telemetryDefines),
+            rasterPipeline("CLod.VoxelRaster.Rasterize.Skinned.Telemetry", skinnedTelemetryDefines)},
+        builder->CommandSignature(br::render::RawDispatchCommandSignature()),
         builder->ShaderResource(m_visibleClustersBuffer).View(),
         builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         {}};

@@ -9,6 +9,7 @@
 #include "Materials/MaterialManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -61,35 +62,16 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
     , m_buildSoftwareRasterDispatch(buildSoftwareRasterDispatch)
     , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly)
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/clodUtil.hlsl",
-        L"CompactClustersAndBuildIndirectArgsCS",
-        {},
-        "CLod_RasterBucketsCompactAndArgsPSO");
-    m_clearPipeline = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClearUintStructuredBufferCSMain",
-        {},
-        "CLod_RasterBucketsClearUintPSO");
-
-    rhi::IndirectArg args[] = {
-        {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 2 } } },
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 2), sizeof(RasterBucketsHistogramIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_compactionCommandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 RasterBucketCompactAndArgsBindings RasterBucketCompactAndArgsPass::Declare(org::PassBuilder& builder) {
-    RasterBucketCompactAndArgsBindings bindings{m_clearPipeline, m_pso, m_compactionCommandSignature,
+    RasterBucketCompactAndArgsBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+            L"ClearUintStructuredBufferCSMain", "CLod_RasterBucketsClearUintPSO")),
+        builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+            L"CompactClustersAndBuildIndirectArgsCS", "CLod_RasterBucketsCompactAndArgsPSO")),
+        builder.CommandSignature(br::render::ConstantsDispatchCommandSignature(2,
+            sizeof(RasterBucketsHistogramIndirectCommand), "CLod_RasterBucketsCompactAndArgs.Signature")),
         builder.ShaderResource(m_visibleClustersBuffer),
         builder.ShaderResource(m_visibleClusterTransformIndicesBuffer),
         builder.ShaderResource(m_visibleClustersCounterBuffer),

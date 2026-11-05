@@ -3,6 +3,7 @@
 
 #include "Runtime/Settings/SettingsManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
@@ -26,19 +27,15 @@ VirtualShadowMapBuildPageListsPass::VirtualShadowMapBuildPageListsPass(
     , m_reusablePhysicalPagesBuffer(std::move(reusablePhysicalPagesBuffer))
     , m_pageListHeaderBuffer(std::move(pageListHeaderBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowBuildPageListsCSMain",
-        {},
-        "CLod.VirtualShadow.BuildPageLists.PSO");
 }
 
 VirtualShadowMapBuildPageListsBindings VirtualShadowMapBuildPageListsPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_pageMetadataBuffer),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowBuildPageListsCSMain", "CLod.VirtualShadow.BuildPageLists.PSO")),
+        builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_pageMetadataBuffer),
         builder.ShaderResource(m_allocationCountBuffer), builder.UnorderedAccess(m_freePhysicalPagesBuffer),
         builder.UnorderedAccess(m_reusablePhysicalPagesBuffer), builder.UnorderedAccess(m_pageListHeaderBuffer)};
 }

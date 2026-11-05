@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 #include <Render/PassBuilders.h>
+#include <Render/RenderGraph/RenderGraph.h>
 
 namespace br::validation {
 namespace {
@@ -51,6 +52,32 @@ void SARPInteropValidation::ApplyPassPolicy(std::string_view passName, org::Rend
 	if (peerApi == rhi::Backend::Null)
 		throw std::runtime_error("SARP interop validation requested peer placement without an initialized peer API");
 	builder.RequireAPI(peerApi);
+}
+
+void SARPInteropValidation::ApplyNamedPasses(org::RenderGraph& graph, rhi::Backend peerApi) {
+	char* raw = nullptr;
+	size_t length = 0;
+	if (_dupenv_s(&raw, &length, "SARP_INTEROP_VALIDATION_PASSES") != 0 || !raw) return;
+	const std::string list(raw);
+	std::free(raw);
+	if (list.empty()) return;
+	if (peerApi == rhi::Backend::Null)
+		throw std::runtime_error("SARP_INTEROP_VALIDATION_PASSES needs BASICRENDERER_MULTI_RHI=1");
+	size_t start = 0;
+	while (start <= list.size()) {
+		const auto end = std::min(list.find(',', start), list.size());
+		const auto name = list.substr(start, end - start);
+		start = end + 1;
+		if (name.empty()) continue;
+		auto* builder = graph.FindPassBuilder(name);
+		if (!builder) {
+			// Graphs differ with the features enabled (and the graph is rebuilt), so a pass missing from one is not an error.
+			spdlog::warn("SARP interop validation: this graph has no pass '{}' to require on the peer", name);
+			continue;
+		}
+		builder->RequireAPI(peerApi);
+		spdlog::info("SARP interop validation: pass '{}' required on the peer API", name);
+	}
 }
 
 } // namespace br::validation

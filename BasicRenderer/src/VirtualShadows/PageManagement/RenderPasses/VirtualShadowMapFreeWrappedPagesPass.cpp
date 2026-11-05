@@ -3,6 +3,7 @@
 
 #include "Runtime/Settings/SettingsManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
@@ -20,18 +21,14 @@ VirtualShadowMapFreeWrappedPagesPass::VirtualShadowMapFreeWrappedPagesPass(
     , m_clipmapInfoBuffer(std::move(clipmapInfoBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowFreeWrappedPagesCSMain",
-        {},
-        "CLod.VirtualShadow.FreeWrappedPages.PSO");
 }
 
 VirtualShadowMapFreeWrappedPagesBindings VirtualShadowMapFreeWrappedPagesPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {m_pso, builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowFreeWrappedPagesCSMain", "CLod.VirtualShadow.FreeWrappedPages.PSO")),
+        builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
         builder.ShaderResource(m_clipmapInfoBuffer), builder.UnorderedAccess(m_statsBuffer)};
 }
 

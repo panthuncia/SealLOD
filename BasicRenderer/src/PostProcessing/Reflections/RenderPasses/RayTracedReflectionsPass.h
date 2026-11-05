@@ -2,6 +2,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "VirtualGeometry/RayTracing/CLodRayTracingSystem.h"
 #include "Render/PipelineState.h"
@@ -34,28 +35,22 @@ class RayTracedReflectionsPass
           RayTracedReflectionsFrameData, RayTracedReflectionsBindings>,
       public org::IDynamicDeclaredResources {
 public:
-    RayTracedReflectionsPass() {
-        auto& manager = PSOManager::GetInstance();
-        m_setupPso = manager.MakeComputePipeline(manager.GetComputeRootSignature().GetHandle(),
-            L"Shaders/ClusterLOD/rayTracingSetup.hlsl", L"CLodRayTracingSetupCSMain", {},
-            "CLod.RayTracing.Setup.PSO");
-        m_tlasSetupPso = manager.MakeComputePipeline(manager.GetComputeRootSignature().GetHandle(),
-            L"Shaders/ClusterLOD/rayTracingTlasSetup.hlsl", L"CLodRayTracingTlasSetupCSMain", {},
-            "CLod.RayTracing.TLASSetup.PSO");
-    }
-
     RayTracedReflectionsBindings Declare(org::PassBuilder& builder) {
         builder.ShaderResource(Builtin::Color::HDRColorTarget,
             Builtin::PrimaryCamera::DepthTexture, Builtin::Surface::NormalRoughness,
             Builtin::Surface::SpecularAo, Builtin::CameraBuffer,
             Builtin::Environment::CurrentPrefilteredCubemap);
         RayTracedReflectionsBindings bindings{};
-        bindings.setupPipeline = m_setupPso;
-        bindings.tlasSetupPipeline = m_tlasSetupPso;
         const auto output = builder.UnorderedAccessClear(Builtin::PostProcessing::ScreenSpaceReflections);
         bindings.outputShader = output.View(0);
         bindings.outputCpu = output.View(1);
         if (m_pageSources && m_buildInfos) {
+            // Record binds these only with the service's resources declared.
+            bindings.setupPipeline = builder.Pipeline(br::render::ComputePipeline(
+                L"Shaders/ClusterLOD/rayTracingSetup.hlsl", L"CLodRayTracingSetupCSMain", "CLod.RayTracing.Setup.PSO"));
+            bindings.tlasSetupPipeline = builder.Pipeline(br::render::ComputePipeline(
+                L"Shaders/ClusterLOD/rayTracingTlasSetup.hlsl", L"CLodRayTracingTlasSetupCSMain",
+                "CLod.RayTracing.TLASSetup.PSO"));
             bindings.pageSources = builder.ShaderResource(m_pageSources).View();
             bindings.buildInfos = builder.UnorderedAccess(m_buildInfos).View();
             if (m_clasData) builder.UnorderedAccess(m_clasData);
@@ -217,7 +212,6 @@ public:
     }
 
 private:
-    org::PipelineState m_setupPso, m_tlasSetupPso;
     std::shared_ptr<org::PixelBuffer> m_output;
     std::shared_ptr<br::render::CLodRayTracingSystem> m_service;
     std::shared_ptr<org::Buffer> m_pageSources, m_buildInfos, m_clasData, m_clasAddresses;

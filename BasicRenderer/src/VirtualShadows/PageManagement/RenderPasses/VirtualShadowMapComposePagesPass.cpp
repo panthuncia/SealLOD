@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
@@ -20,18 +21,15 @@ VirtualShadowMapComposePagesPass::VirtualShadowMapComposePagesPass(
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowComposePhysicalPagesCSMain",
-        { { L"CLOD_VSM_TWO_LAYER_COMPOSE_VERSION", L"2" } },
-        "CLod.VirtualShadow.ComposePhysicalPages.PSO");
 }
 
 VirtualShadowMapComposePagesBindings VirtualShadowMapComposePagesPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {m_pso, builder.ShaderResource(m_staticPagesTexture), builder.UnorderedAccess(m_dynamicPagesTexture),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowComposePhysicalPagesCSMain", "CLod.VirtualShadow.ComposePhysicalPages.PSO",
+                {{L"CLOD_VSM_TWO_LAYER_COMPOSE_VERSION", L"2"}})),
+        builder.ShaderResource(m_staticPagesTexture), builder.UnorderedAccess(m_dynamicPagesTexture),
         builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_pageMetadataBuffer),
         builder.UnorderedAccess(m_statsBuffer)};
 }

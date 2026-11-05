@@ -9,6 +9,7 @@
 #include "Scene/Views/ViewManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -60,24 +61,6 @@ ReyesDeepVisibilityRasterizationPass::ReyesDeepVisibilityRasterizationPass(
     , m_slabResourceGroup(std::move(slabResourceGroup))
     , m_viewRasterInfoPublisher(std::string(resourceName))
     , m_patchVisibilityIndexBase(patchVisibilityIndexBase) {
-
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/reyesPatchDeepVisibilityRaster.hlsl",
-        L"ReyesPatchDeepVisibilityRasterCS",
-        IsTerrainRvtTelemetryDebugEnabled() ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } } : std::vector<DxcDefine>{},
-        "CLod.ReyesPatchDeepVisibilityRaster.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>();
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        *m_commandSignature);
 }
 
 ReyesDeepVisibilityRasterBindings ReyesDeepVisibilityRasterizationPass::Declare(org::PassBuilder& declaration)
@@ -128,7 +111,13 @@ ReyesDeepVisibilityRasterBindings ReyesDeepVisibilityRasterizationPass::Declare(
             Builtin::Terrain::RvtStats);
     builder->ConstantBuffer(Builtin::PerFrameBuffer);
 
-    ReyesDeepVisibilityRasterBindings bindings{m_pso, m_commandSignature,
+    ReyesDeepVisibilityRasterBindings bindings{
+        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesPatchDeepVisibilityRaster.hlsl",
+            L"ReyesPatchDeepVisibilityRasterCS", "CLod.ReyesPatchDeepVisibilityRaster.PSO",
+            IsTerrainRvtTelemetryDebugEnabled()
+                ? std::vector<org::PipelineShaderDefine>{{L"TERRAIN_RVT_TELEMETRY", L"1"}}
+                : std::vector<org::PipelineShaderDefine>{})),
+        builder->CommandSignature(br::render::RawDispatchCommandSignature()),
         builder->ShaderResource(m_visibleClustersBuffer).View(), builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         builder->ShaderResource(m_diceQueueBuffer).View(), builder->ShaderResource(m_diceQueueCounterBuffer).View(),
         builder->ShaderResource(m_rasterWorkBuffer).View(), builder->ShaderResource(m_rasterWorkCounterBuffer).View(),

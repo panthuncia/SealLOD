@@ -50,8 +50,6 @@ public:
         const VirtualShadowMapAdmitPagesFrame&, org::PassRecordContext&);
 
 private:
-    org::PipelineState m_pso;
-    org::PipelineState m_applyUpgradesPso;
     std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
     std::shared_ptr<org::Buffer> m_dirtyPageFlagsBuffer;
     std::vector<std::shared_ptr<org::Buffer>> m_upgradeInputBuffers;

@@ -7,6 +7,7 @@
 #include "Materials/MaterialManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -31,24 +32,6 @@ RasterBucketHistogramPass::RasterBucketHistogramPass(
     if (visibleClustersCapacity == 0u) {
         throw std::invalid_argument("RasterBucketHistogramPass requires a non-zero visible-cluster capacity");
     }
-    CreatePipelines(
-        DeviceManager::GetInstance().GetDevice(),
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        m_histogramPipeline,
-        m_clearPipeline);
-
-    rhi::IndirectArg rasterizeClustersArgs[] = {
-        {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 2 } } },
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr histogramCommandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(rasterizeClustersArgs, 2), sizeof(RasterBucketsHistogramIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(), histogramCommandSignature);
-    m_histogramCommandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(histogramCommandSignature));
-
     m_visibleClustersBuffer = std::move(visibleClustersBuffer);
     m_visibleClustersCounterBuffer = std::move(visibleClustersCounterBuffer);
     m_histogramIndirectCommand = std::move(histogramIndirectCommand);
@@ -64,7 +47,13 @@ RasterBucketHistogramPass::RasterBucketHistogramPass(
 RasterBucketHistogramPass::~RasterBucketHistogramPass() = default;
 
 RasterBucketHistogramBindings RasterBucketHistogramPass::Declare(org::PassBuilder& builder) {
-    RasterBucketHistogramBindings bindings{m_clearPipeline, m_histogramPipeline, m_histogramCommandSignature,
+    RasterBucketHistogramBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"ClearUintStructuredBufferCSMain", "ClearUintStructuredBufferCSMain")),
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"ClusterRasterBucketsHistogramCSMain", "ClusterRasterBucketsHistogramCSMain")),
+        builder.CommandSignature(br::render::ConstantsDispatchCommandSignature(2,
+            sizeof(RasterBucketsHistogramIndirectCommand), "CLod_RasterBucketsHistogram.Signature")),
         builder.ShaderResource(m_visibleClustersBuffer), builder.ShaderResource(m_visibleClustersCounterBuffer),
         builder.IndirectArguments(m_histogramIndirectCommand), builder.UnorderedAccess(m_histogramBuffer)};
     builder.ShaderResource(
@@ -147,21 +136,4 @@ void RasterBucketHistogramPass::Update(const org::UpdateExecutionContext& execut
         m_histogramBuffer->ResizeStructured(numBuckets);
     }
 
-}
-
-void RasterBucketHistogramPass::CreatePipelines(
-    rhi::Device device,
-    rhi::PipelineLayoutHandle globalRootSignature,
-    org::PipelineState& outHistogramPipeline,
-    org::PipelineState& outClearPipeline)
-{
-    (void)device;
-    outHistogramPipeline = PSOManager::GetInstance().MakeComputePipeline(
-        globalRootSignature,
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClusterRasterBucketsHistogramCSMain");
-    outClearPipeline = PSOManager::GetInstance().MakeComputePipeline(
-        globalRootSignature,
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClearUintStructuredBufferCSMain");
 }

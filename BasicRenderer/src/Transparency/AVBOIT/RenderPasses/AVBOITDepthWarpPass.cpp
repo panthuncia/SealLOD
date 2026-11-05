@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
@@ -16,18 +17,12 @@ AVBOITDepthWarpPass::AVBOITDepthWarpPass(
     , m_occupancyHistogramBuffer(std::move(occupancyHistogramBuffer))
     , m_depthWarpLUTBuffer(std::move(depthWarpLUTBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/AVBOITDepthWarp.hlsl",
-        L"CLodAVBOITDepthWarpCS",
-        {},
-        "CLod.AVBOITDepthWarp.PSO");
 }
 
 AVBOITDepthWarpBindings AVBOITDepthWarpPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {m_pso, builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_depthWarpLUTBuffer)};
+    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITDepthWarp.hlsl", L"CLodAVBOITDepthWarpCS", "CLod.AVBOITDepthWarp.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_depthWarpLUTBuffer)};
 }
 
 AVBOITDepthWarpFrame AVBOITDepthWarpPass::Prepare(const AVBOITDepthWarpBindings&, const org::PassPrepareContext&) const {

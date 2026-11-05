@@ -3,6 +3,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BuiltinResources.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -50,24 +51,6 @@ ReyesBuildRasterWorkPass::ReyesBuildRasterWorkPass(
     , m_rasterWorkCapacity(rasterWorkCapacity)
     , m_phaseIndex(phaseIndex)
     , m_replayDiceQueueCapacity(replayDiceQueueCapacity) {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/reyesBuildRasterWork.hlsl",
-        L"BuildReyesRasterWorkCS",
-        {},
-        "CLod.ReyesBuildRasterWork.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 ReyesBuildRasterWorkBindings ReyesBuildRasterWorkPass::Declare(org::PassBuilder& builder)
@@ -91,7 +74,11 @@ ReyesBuildRasterWorkBindings ReyesBuildRasterWorkPass::Declare(org::PassBuilder&
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    ReyesBuildRasterWorkBindings bindings{m_pso, m_commandSignature, builder.ShaderResource(m_diceQueueBuffer).View(),
+    ReyesBuildRasterWorkBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesBuildRasterWork.hlsl",
+            L"BuildReyesRasterWorkCS", "CLod.ReyesBuildRasterWork.PSO")),
+        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        builder.ShaderResource(m_diceQueueBuffer).View(),
         builder.ShaderResource(m_diceQueueCounterBuffer).View()};
     if (m_diceQueueReadOffsetBuffer) {
         bindings.readOffset = builder.ShaderResource(m_diceQueueReadOffsetBuffer).View();

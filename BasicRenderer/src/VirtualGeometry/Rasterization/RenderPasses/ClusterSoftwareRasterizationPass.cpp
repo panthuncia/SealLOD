@@ -11,6 +11,7 @@
 #include "Materials/MaterialManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "Scene/Views/ViewManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -148,27 +149,6 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
     , m_slabResourceGroup(std::move(slabResourceGroup))
     , m_outputKind(outputKind)
     , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly) {
-    rhi::IndirectArg args[] = {
-        {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    m_rasterizationCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 2), sizeof(RasterizeClustersCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        *m_rasterizationCommandSignature);
-
-    rhi::IndirectArg dispatchArg[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-    m_dynamicWindSkinCacheDispatchCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArg, 1), 12u },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        *m_dynamicWindSkinCacheDispatchCommandSignature);
-
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow &&
         SettingsManager::GetInstance().getSettingGetter<bool>(
             CLodDynamicWindVertexCacheEnabledSettingName)()) {
@@ -232,43 +212,6 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
                 org::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheAllocatorBuffer, "DynamicWind VSM vertex cache");
                 org::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheWorkRecordsBuffer, "DynamicWind VSM vertex cache");
                 org::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheIndirectArgsBuffer, "DynamicWind VSM vertex cache");
-
-                std::vector<DxcDefine> defines = {
-                    { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" },
-                    { L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" }
-                };
-                auto& psoManager = PSOManager::GetInstance();
-                const auto rootSignature = psoManager.GetComputeRootSignature().GetHandle();
-                m_dynamicWindSkinCacheBuildPipeline = psoManager.MakeComputePipeline(
-                    rootSignature,
-                    L"Shaders/ClusterLOD/dynamicWindSkinCache.hlsl",
-                    L"DynamicWindSkinCacheBuildCS",
-                    defines,
-                    "CLod_DynamicWindSkinCacheBuild");
-                m_dynamicWindSkinCacheSkinPipeline = psoManager.MakeComputePipeline(
-                    rootSignature,
-                    L"Shaders/ClusterLOD/dynamicWindSkinCache.hlsl",
-                    L"DynamicWindSkinCacheSkinWorkCS",
-                    defines,
-                    "CLod_DynamicWindSkinCacheSkinWork");
-                m_dynamicWindSkinCacheFinalizePipeline = psoManager.MakeComputePipeline(
-                    rootSignature,
-                    L"Shaders/ClusterLOD/dynamicWindSkinCache.hlsl",
-                    L"DynamicWindSkinCacheFinalizeCS",
-                    defines,
-                    "CLod_DynamicWindSkinCacheFinalize");
-                m_dynamicWindSkinCacheResolvePipeline = psoManager.MakeComputePipeline(
-                    rootSignature,
-                    L"Shaders/ClusterLOD/dynamicWindSkinCache.hlsl",
-                    L"DynamicWindSkinCacheResolveCS",
-                    defines,
-                    "CLod_DynamicWindSkinCacheResolve");
-                m_dynamicWindSkinCacheClearPipeline = psoManager.MakeComputePipeline(
-                    rootSignature,
-                    L"Shaders/ClusterLOD/clodUtil.hlsl",
-                    L"ClearUintStructuredBufferCSMain",
-                    {},
-                    "CLod_DynamicWindSkinCacheClear");
             }
         }
     }
@@ -300,11 +243,30 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
             Builtin::SkeletonResources::SkinningInstanceInfo);
     builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     builder->UnorderedAccess(Builtin::DebugVisualization);
-    ClusterSoftwareRasterBindings bindings{m_rasterizationCommandSignature,
-        m_dynamicWindSkinCacheDispatchCommandSignature,
-        m_dynamicWindSkinCacheClearPipeline, m_dynamicWindSkinCacheBuildPipeline,
-        m_dynamicWindSkinCacheFinalizePipeline, m_dynamicWindSkinCacheSkinPipeline,
-        m_dynamicWindSkinCacheResolvePipeline,
+    // The skin cache pipelines exist only with the cache's buffers.
+    const bool skinCache = static_cast<bool>(m_dynamicWindSkinCacheHashBuffer);
+    const std::vector<org::PipelineShaderDefine> skinCacheDefines = {
+        { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" },
+        { L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" }
+    };
+    const auto skinCachePipeline = [&](const wchar_t* entry, const char* name) {
+        return skinCache
+            ? builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/dynamicWindSkinCache.hlsl",
+                entry, name, skinCacheDefines))
+            : org::PipelineState{};
+    };
+    ClusterSoftwareRasterBindings bindings{
+        builder->CommandSignature(br::render::ConstantsDispatchCommandSignature(3, sizeof(RasterizeClustersCommand),
+            "CLod_ClusterSoftwareRaster.Signature")),
+        builder->CommandSignature(br::render::RawDispatchCommandSignature()),
+        skinCache
+            ? builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"ClearUintStructuredBufferCSMain", "CLod_DynamicWindSkinCacheClear"))
+            : org::PipelineState{},
+        skinCachePipeline(L"DynamicWindSkinCacheBuildCS", "CLod_DynamicWindSkinCacheBuild"),
+        skinCachePipeline(L"DynamicWindSkinCacheFinalizeCS", "CLod_DynamicWindSkinCacheFinalize"),
+        skinCachePipeline(L"DynamicWindSkinCacheSkinWorkCS", "CLod_DynamicWindSkinCacheSkinWork"),
+        skinCachePipeline(L"DynamicWindSkinCacheResolveCS", "CLod_DynamicWindSkinCacheResolve"),
         builder->ShaderResource(m_rasterBucketsHistogramBuffer).View(),
         builder->ShaderResource(m_compactedVisibleClustersBuffer).View(),
         builder->ShaderResource(m_compactedVisibleClusterTransformIndicesBuffer).View(),

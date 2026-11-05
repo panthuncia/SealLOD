@@ -35,7 +35,6 @@ public:
     void ShutdownPass();
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::Buffer> m_tileWorkBuffer;
     std::shared_ptr<org::Buffer> m_tileCountBuffer;
 };

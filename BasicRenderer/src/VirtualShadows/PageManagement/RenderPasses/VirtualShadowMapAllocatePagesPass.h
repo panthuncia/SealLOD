@@ -5,6 +5,7 @@
 #include <rhi.h>
 
 #include "Render/PipelineState.h"
+#include "Render/PipelineDesc.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -13,7 +14,7 @@ namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapAllocatePagesBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken requests, requestCount;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken clipmapInfo, pageTable;
@@ -48,8 +49,6 @@ public:
         const VirtualShadowMapAllocatePagesFrame&, org::PassRecordContext&);
 
 private:
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
     std::shared_ptr<org::Buffer> m_allocationRequestsBuffer;
     std::shared_ptr<org::Buffer> m_allocationCountBuffer;
     std::shared_ptr<org::Buffer> m_indirectArgsBuffer;

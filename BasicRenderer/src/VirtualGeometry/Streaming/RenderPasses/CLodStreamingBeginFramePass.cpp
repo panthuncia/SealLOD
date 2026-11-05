@@ -5,6 +5,7 @@
 
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Render/PassBuilders.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/UploadTypes.h"
@@ -35,17 +36,14 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     , m_processStreamingRequests(std::move(processStreamingRequests))
     , m_getUploadInstance(std::move(getUploadInstance))
 {
-    m_clearUintPipeline = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClearUintStructuredBufferCSMain",
-        {},
-        "CLodStreamingBeginFrameClearUint");
 }
 
 CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBuilder& builder) {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    CLodStreamingBeginFrameBindings bindings{m_clearUintPipeline, builder.UnorderedAccess(m_loadCounter),
+    CLodStreamingBeginFrameBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"ClearUintStructuredBufferCSMain", "CLodStreamingBeginFrameClearUint")),
+        builder.UnorderedAccess(m_loadCounter),
         builder.UnorderedAccess(m_loadRequestKeys), builder.UnorderedAccess(m_usedGroupsCounter)};
     builder.UnorderedAccess(m_runtimeState);
     if (m_sourceGroupMismatchCounter) {

@@ -4,6 +4,7 @@
 #include <array>
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/UploadTypes.h"
@@ -22,18 +23,12 @@ AVBOITOccupancyHistogramPass::AVBOITOccupancyHistogramPass(
     , m_occupancySliceMaskTexture(std::move(occupancySliceMaskTexture))
     , m_occupancyHistogramBuffer(std::move(occupancyHistogramBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/AVBOITOccupancyHistogram.hlsl",
-        L"CLodAVBOITOccupancyHistogramCS",
-        {},
-        "CLod.AVBOITOccupancyHistogram.PSO");
 }
 
 AVBOITOccupancyHistogramBindings AVBOITOccupancyHistogramPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {m_pso, 
+    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITOccupancyHistogram.hlsl", L"CLodAVBOITOccupancyHistogramCS", "CLod.AVBOITOccupancyHistogram.PSO")), 
         builder.ShaderResource(m_configBuffer),
         builder.UnorderedAccess(m_occupancyTexture),
         builder.UnorderedAccess(m_occupancySliceMaskTexture),

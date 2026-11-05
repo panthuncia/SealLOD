@@ -2,6 +2,7 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Utilities/Utilities.h"
 #include "../shaders/PerPassRootConstants/luminanceHistogramAverageRootConstants.h"
@@ -17,14 +18,11 @@ struct LuminanceHistogramAverageFrame {
 
 class LuminanceHistogramAveragePass : public org::TypedRenderGraphPass<LuminanceHistogramAveragePass, LuminanceHistogramAverageFrame, LuminanceHistogramAverageBindings> {
 public:
-    LuminanceHistogramAveragePass() {
-        CreateComputePSO();
-    }
-
     LuminanceHistogramAverageBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         builder.UnorderedAccess(Builtin::PostProcessing::LuminanceHistogram, Builtin::PostProcessing::AdaptedLuminance, "FFX::LPMConstants");
-        return {m_pso};
+        return {builder.Pipeline(br::render::ComputePipeline(
+            L"shaders/PostProcessing/LuminanceHistogramAverage.hlsl", L"CSMain", "LuminanceHistogramAverageCS"))};
     }
 
     void Initialize() {
@@ -50,18 +48,5 @@ public:
 
     void ShutdownPass() {
         // Cleanup if necessary
-    }
-
-private:
-    org::PipelineState m_pso;
-
-    void CreateComputePSO()
-    {
-		m_pso = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-			L"shaders/PostProcessing/LuminanceHistogramAverage.hlsl",
-			L"CSMain",
-			{},
-			"LuminanceHistogramAverageCS");
     }
 };

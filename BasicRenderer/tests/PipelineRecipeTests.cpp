@@ -240,7 +240,7 @@ struct CullingFixture {
     {
         auto& b = bindings;
         b.programs = {Pipeline(1), Pipeline(2), Pipeline(3), Pipeline(4), Pipeline(5), Pipeline(6),
-            Pipeline(7), Pipeline(8), Pipeline(9), Pipeline(10), Pipeline(11), Pipeline(12), Signature(40)};
+            Pipeline(7), Pipeline(8), Pipeline(9), Pipeline(10), Pipeline(11), Pipeline(12), org::CommandSignatureState(Signature(40))};
         b.visibleClusters = declared.Declare();
         b.visibleClusterTransformIndices = declared.Declare();
         b.visibleClustersCounter = declared.Declare();
@@ -859,8 +859,8 @@ void TestSoftwareRasterRecording()
     using Kind = DeclaredFrame::Kind;
     constexpr uint64_t stride = sizeof(RasterizeClustersCommand);
     const auto declareCommon = [](DeclaredFrame& declared, ClusterSoftwareRasterBindings& bindings) {
-        bindings.rasterSignature = Signature(20);
-        bindings.cacheDispatchSignature = Signature(21);
+        bindings.rasterSignature = org::CommandSignatureState(Signature(20));
+        bindings.cacheDispatchSignature = org::CommandSignatureState(Signature(21));
         bindings.histogram = declared.Declare(Kind::ShaderResource);
         bindings.visible = declared.Declare(Kind::ShaderResource);
         bindings.transforms = declared.Declare(Kind::ShaderResource);

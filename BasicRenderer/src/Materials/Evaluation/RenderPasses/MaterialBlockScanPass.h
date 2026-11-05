@@ -1,6 +1,7 @@
 #pragma once
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Materials/Publication/MaterialStateArtifacts.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -17,20 +18,12 @@ struct MaterialBlockScanFrame {
 // Dispatch dimension: x = numBlocks, where numBlocks = ceil(NumMaterials / blockSize).
 class MaterialBlockScanPass : public org::TypedRenderGraphPass<MaterialBlockScanPass, MaterialBlockScanFrame, MaterialBlockScanBindings> {
 public:
-    explicit MaterialBlockScanPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/materialPrefixSum.hlsl",
-            L"BlockScanCS",
-            {},
-            "VisUtil_BlockScanPSO");
-    }
-
     MaterialBlockScanBindings Declare(org::PassBuilder& b) {
         b.ShaderResource("Builtin::VisUtil::MaterialPixelCountBuffer");
         b.UnorderedAccess("Builtin::VisUtil::MaterialOffsetBuffer", "Builtin::VisUtil::BlockSumsBuffer");
         b.PreferQueue(org::QueueKind::Compute);
-        return {m_pso, m_blockSize};
+        return {b.Pipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"BlockScanCS",
+            "VisUtil_BlockScanPSO")), m_blockSize};
     }
 
     MaterialBlockScanFrame Prepare(const MaterialBlockScanBindings&, const org::PassPrepareContext& preparation) const {
@@ -53,7 +46,6 @@ public:
     }
 
 private:
-        org::PipelineState m_pso;
         // block size used by the shader (materialPrefixSum.hlsl). Keep in sync.
         uint32_t m_blockSize = 1024;
 };

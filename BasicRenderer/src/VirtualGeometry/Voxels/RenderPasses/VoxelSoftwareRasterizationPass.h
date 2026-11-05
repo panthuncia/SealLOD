@@ -21,7 +21,7 @@ struct VoxelRasterBindings {
     org::PipelineState buildArgs;
     // Rigid then skinned, without and with telemetry.
     std::array<org::PipelineState, 2> raster, telemetryRaster;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, transforms, telemetry;
     std::array<org::DeclaredViewToken, 2> workRecords, workCounters, indirectArgs;
     org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages;
@@ -66,12 +66,6 @@ public:
         org::PassRecordContext& context);
 
 private:
-    org::PipelineState m_buildArgsPso;
-    org::PipelineState m_rigidRasterPso;
-    org::PipelineState m_skinnedRasterPso;
-    org::PipelineState m_rigidTelemetryRasterPso;
-    org::PipelineState m_skinnedTelemetryRasterPso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_dispatchCommandSignature;
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_visibleClusterTransformIndicesBuffer;
     std::array<std::shared_ptr<org::Buffer>, 2> m_voxelWorkRecordsBuffers;

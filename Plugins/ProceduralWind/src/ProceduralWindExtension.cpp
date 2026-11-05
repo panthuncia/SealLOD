@@ -4,12 +4,12 @@
 #include "ProceduralWind/DynamicWindGPU.h"
 
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
-#include <BasicRenderer/Extensions/PipelineAccess.h>
 #include <BasicRenderer/Extensions/RenderDeviceAccess.h>
 #include <BasicRenderer/Extensions/SettingAccess.h>
 #include <BasicRenderer/Extensions/BuiltinResources.h>
 #include <BasicRenderer/Extensions/IndirectCommand.h>
 #include "Render/PassBuilders.h"
+#include <Render/PipelineDesc.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include <BasicRenderer/Diagnostics/OutputTypes.h>
 #include <BasicRenderer/Pipeline/RendererSettings.h>
@@ -984,7 +984,7 @@ void ResolveVisibleSkeletonViews(WindTransientConstants& constants, const org::P
 
 struct WindPassBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
+    org::CommandSignatureState signature;
     WindTransientViews views;
     WindVisibleSkeletonViews visibleViews;
     org::DeclaredViewToken diagnostics, processedCounts, deferredEntries, baseTypeLookup;
@@ -1008,15 +1008,13 @@ struct WindIndirectFrame {
 class WindResetPass final : public org::TypedRenderGraphPass<WindResetPass, WindDispatchFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
-    explicit WindResetPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources))
-    {
-        m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(),
-            L"SARPShaders/ProceduralWind.hlsl", L"ResetWindTransientCS", {}, "ProceduralWind.ResetTransient");
-    }
+    explicit WindResetPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources)) {}
     WindPassBindings Declare(org::PassBuilder& builder)
     {
         WindPassBindings bindings{};
-        bindings.pipeline = m_pso;
+        bindings.pipeline = builder.Pipeline(org::ComputePipelineDesc{
+            .shader = {L"SARPShaders/ProceduralWind.hlsl", L"ResetWindTransientCS"},
+            .name = "ProceduralWind.ResetTransient"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
         m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.visibleViews = DeclareVisibleSkeletonViews(builder, *m_resources);
@@ -1054,22 +1052,19 @@ public:
 private:
     std::shared_ptr<WindSharedResources> m_resources;
     bool m_declaredInverseBind = false;
-    org::PipelineState m_pso;
 };
 
 class WindActivatePass final : public org::TypedRenderGraphPass<WindActivatePass, WindDispatchFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
     WindActivatePass(std::shared_ptr<WindSharedResources> resources, bool latePhase)
-        : m_resources(std::move(resources)), m_latePhase(latePhase)
-    {
-        m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(),
-            L"SARPShaders/ProceduralWind.hlsl", L"ActivateWindInstancesCS", {}, "ProceduralWind.ActivateInstances");
-    }
+        : m_resources(std::move(resources)), m_latePhase(latePhase) {}
     WindPassBindings Declare(org::PassBuilder& builder)
     {
         WindPassBindings bindings{};
-        bindings.pipeline = m_pso;
+        bindings.pipeline = builder.Pipeline(org::ComputePipelineDesc{
+            .shader = {L"SARPShaders/ProceduralWind.hlsl", L"ActivateWindInstancesCS"},
+            .name = "ProceduralWind.ActivateInstances"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
         m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
@@ -1135,7 +1130,6 @@ public:
 private:
     std::shared_ptr<WindSharedResources> m_resources;
     bool m_declaredInverseBind = false;
-    org::PipelineState m_pso;
     bool m_latePhase = false;
 };
 
@@ -1143,13 +1137,12 @@ class WindBuildCommandsPass final : public org::TypedRenderGraphPass<WindBuildCo
     public org::IDynamicDeclaredResources {
 public:
     WindBuildCommandsPass(std::shared_ptr<WindSharedResources> r, bool latePhase)
-        : m_resources(std::move(r)), m_latePhase(latePhase) {
-        m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(),
-            L"SARPShaders/ProceduralWind.hlsl", L"BuildWindCommandsCS", {}, "ProceduralWind.BuildCommands");
-    }
+        : m_resources(std::move(r)), m_latePhase(latePhase) {}
     WindPassBindings Declare(org::PassBuilder& b) {
         WindPassBindings bindings{};
-        bindings.pipeline = m_pso;
+        bindings.pipeline = b.Pipeline(org::ComputePipelineDesc{
+            .shader = {L"SARPShaders/ProceduralWind.hlsl", L"BuildWindCommandsCS"},
+            .name = "ProceduralWind.BuildCommands"});
         bindings.views = DeclareWindTransientViews(b, *m_resources);
         m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
@@ -1178,22 +1171,19 @@ public:
         constants.fieldSlice0 = recording.Index(bindings.processedCounts);
         br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
-private: std::shared_ptr<WindSharedResources> m_resources; bool m_declaredInverseBind = false; org::PipelineState m_pso; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; bool m_declaredInverseBind = false; bool m_latePhase = false;
 };
 
 class WindFinalizeAllocationsPass final : public org::TypedRenderGraphPass<WindFinalizeAllocationsPass, WindDispatchFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
 	explicit WindFinalizeAllocationsPass(std::shared_ptr<WindSharedResources> resources)
-		: m_resources(std::move(resources)) {
-		m_pso = br::extensions::MakeComputePipeline(
-			br::extensions::GetComputePipelineLayout(),
-			L"SARPShaders/ProceduralWind.hlsl", L"FinalizeWindAllocationsCS", {},
-			"ProceduralWind.FinalizeAllocations");
-	}
+		: m_resources(std::move(resources)) {}
 	WindPassBindings Declare(org::PassBuilder& builder) {
         WindPassBindings bindings{};
-        bindings.pipeline = m_pso;
+        bindings.pipeline = builder.Pipeline(org::ComputePipelineDesc{
+            .shader = {L"SARPShaders/ProceduralWind.hlsl", L"FinalizeWindAllocationsCS"},
+            .name = "ProceduralWind.FinalizeAllocations"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
         m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.visibleViews = DeclareVisibleSkeletonViews(builder, *m_resources);
@@ -1227,24 +1217,23 @@ public:
 private:
 	std::shared_ptr<WindSharedResources> m_resources;
     bool m_declaredInverseBind = false;
-	org::PipelineState m_pso;
 };
 
 class WindIndirectSimulatePass final : public org::TypedRenderGraphPass<WindIndirectSimulatePass, WindIndirectFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
 public:
     WindIndirectSimulatePass(std::shared_ptr<WindSharedResources> r, bool latePhase = false)
-        : m_resources(std::move(r)), m_latePhase(latePhase) {
-        m_pso = br::extensions::MakeComputePipeline(br::extensions::GetComputePipelineLayout(), L"SARPShaders/ProceduralWind.hlsl", L"SimulateWindInstancesCS", {}, "ProceduralWind.SimulateIndirect");
-        rhi::IndirectArg args[] = {{.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},{.kind=rhi::IndirectArgKind::Dispatch}};
-        auto signature = std::make_shared<rhi::CommandSignaturePtr>();
-        br::extensions::GetRenderDevice().CreateCommandSignature({rhi::Span<rhi::IndirectArg>(args,2),sizeof(WindIndirectCommand)}, br::extensions::GetComputePipelineLayout(), *signature);
-        m_signature = std::move(signature);
-    }
+        : m_resources(std::move(r)), m_latePhase(latePhase) {}
     WindPassBindings Declare(org::PassBuilder& b) {
         WindPassBindings bindings{};
-        bindings.pipeline = m_pso;
-        bindings.signature = m_signature;
+        bindings.pipeline = b.Pipeline(org::ComputePipelineDesc{
+            .shader = {L"SARPShaders/ProceduralWind.hlsl", L"SimulateWindInstancesCS"},
+            .name = "ProceduralWind.SimulateIndirect"});
+        org::CommandSignatureDesc signature;
+        signature.args = {{.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},{.kind=rhi::IndirectArgKind::Dispatch}};
+        signature.byteStride = sizeof(WindIndirectCommand);
+        signature.name = "ProceduralWind.SimulateIndirect.Signature";
+        bindings.signature = b.CommandSignature(std::move(signature));
         bindings.views = DeclareWindTransientViews(b, *m_resources);
         m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
@@ -1276,7 +1265,7 @@ public:
         br::render::DispatchComputeIndirect(recording, bindings.pipeline, PackTransientConstants(constants),
             bindings.signature, bindings.argumentsBinding, 0, frame.maximumCount, bindings.countBinding, sizeof(uint32_t));
     }
-private: std::shared_ptr<WindSharedResources> m_resources; bool m_declaredInverseBind = false; org::PipelineState m_pso; std::shared_ptr<const rhi::CommandSignaturePtr> m_signature; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; bool m_declaredInverseBind = false; bool m_latePhase = false;
 };
 
 struct WindSkeletonDebugFrameData {
@@ -1289,7 +1278,7 @@ struct WindSkeletonDebugFrameData {
 
 struct WindSkeletonDebugBindings {
     org::PipelineState skeletonPipeline, spherePipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
+    org::CommandSignatureState signature;
     org::ResourceBindingToken indirectCommands{}, allocationCounters{};
     org::DeclaredViewToken target{};
     org::DeclaredViewToken types, bones, activeInstances, forwardSkin, inverseBind, skinningInfo;
@@ -1301,70 +1290,46 @@ class WindSkeletonDebugPass final
     : public org::TypedRenderGraphPass<WindSkeletonDebugPass,
         WindSkeletonDebugFrameData, WindSkeletonDebugBindings>, public org::IDynamicDeclaredResources {
 public:
-    explicit WindSkeletonDebugPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources))
-    {
-        ShaderInfoBundle shaders;
-        shaders.meshShader = { L"shaders/debugSkeleton.hlsl", L"MSWindMain", L"ms_6_6" };
-        shaders.pixelShader = { L"shaders/debugSkeleton.hlsl", L"PSWindMain", L"ps_6_6" };
-        const auto compiled = br::extensions::CompileShaders(shaders);
-        auto layout = br::extensions::GetGraphicsPipelineLayout();
-        rhi::SubobjLayout soLayout{ layout };
-        rhi::SubobjShader soMS{ rhi::ShaderStage::Mesh, rhi::DXIL(compiled.meshShader.Get()), "MSWindMain" };
-        rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiled.pixelShader.Get()), "PSWindMain" };
-        rhi::RasterState raster{}; raster.fill = rhi::FillMode::Solid; raster.cull = rhi::CullMode::None;
-        rhi::SubobjRaster soRaster{ raster };
-        rhi::BlendState blend{}; blend.numAttachments = 1; blend.attachments[0].writeMask = rhi::ColorWriteEnable::All;
-        rhi::SubobjBlend soBlend{ blend };
-        rhi::DepthStencilState depth{}; depth.depthEnable = false; depth.depthWrite = false; depth.depthFunc = rhi::CompareOp::Always;
-        rhi::SubobjDepth soDepth{ depth };
-        rhi::RenderTargets targets{}; targets.count = 1; targets.formats[0] = rhi::Format::R8G8B8A8_UNorm;
-        rhi::SubobjRTVs soTargets{ targets };
-        rhi::SubobjSample soSample{ rhi::SampleDesc{1, 0} };
-        rhi::SubobjPrimitiveTopology soTopology{ rhi::PrimitiveTopology::LineList };
-        const rhi::PipelineStreamItem items[] = { rhi::Make(soLayout), rhi::Make(soMS), rhi::Make(soPS),
-            rhi::Make(soRaster), rhi::Make(soBlend), rhi::Make(soDepth), rhi::Make(soTargets),
-            rhi::Make(soSample), rhi::Make(soTopology) };
-        rhi::PipelinePtr skeletonPso;
-        if (Failed(br::extensions::GetRenderDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), skeletonPso)))
-            throw std::runtime_error("Failed to create procedural-wind skeleton debug PSO");
-        skeletonPso->SetName("ProceduralWind.SkeletonDebug.PSO");
-        m_skeletonPipeline = org::PipelineState(std::move(skeletonPso), compiled.resourceIDsHash,
-            compiled.resourceDescriptorSlots, {}, layout);
-
-        ShaderInfoBundle sphereShaders;
-        sphereShaders.meshShader = { L"shaders/debugSkeleton.hlsl", L"MSWindAssemblySphereMain", L"ms_6_6" };
-        sphereShaders.pixelShader = { L"shaders/debugSkeleton.hlsl", L"PSWindAssemblySphereMain", L"ps_6_6" };
-        const auto compiledSphere = br::extensions::CompileShaders(sphereShaders);
-        rhi::SubobjShader sphereMS{ rhi::ShaderStage::Mesh, rhi::DXIL(compiledSphere.meshShader.Get()), "MSWindAssemblySphereMain" };
-        rhi::SubobjShader spherePS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiledSphere.pixelShader.Get()), "PSWindAssemblySphereMain" };
-        rhi::RasterState sphereRaster{}; sphereRaster.fill = rhi::FillMode::Wireframe; sphereRaster.cull = rhi::CullMode::None;
-        rhi::SubobjRaster sphereRasterState{ sphereRaster };
-        rhi::SubobjPrimitiveTopology sphereTopology{ rhi::PrimitiveTopology::TriangleList };
-        const rhi::PipelineStreamItem sphereItems[] = { rhi::Make(soLayout), rhi::Make(sphereMS), rhi::Make(spherePS),
-            rhi::Make(sphereRasterState), rhi::Make(soBlend), rhi::Make(soDepth), rhi::Make(soTargets),
-            rhi::Make(soSample), rhi::Make(sphereTopology) };
-        rhi::PipelinePtr spherePso;
-        if (Failed(br::extensions::GetRenderDevice().CreatePipeline(
-                sphereItems, static_cast<uint32_t>(std::size(sphereItems)), spherePso)))
-            throw std::runtime_error("Failed to create procedural-wind assembly-sphere debug PSO");
-        spherePso->SetName("ProceduralWind.AssemblySphereDebug.PSO");
-        m_spherePipeline = org::PipelineState(std::move(spherePso), compiledSphere.resourceIDsHash,
-            compiledSphere.resourceDescriptorSlots, {}, layout);
-        rhi::IndirectArg args[] = {
-            {.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},
-            {.kind=rhi::IndirectArgKind::DispatchMesh}
-        };
-        auto signature = std::make_shared<rhi::CommandSignaturePtr>();
-        br::extensions::GetRenderDevice().CreateCommandSignature(
-            {rhi::Span<rhi::IndirectArg>(args, 2), sizeof(WindIndirectCommand)}, layout, *signature);
-        m_signature = std::move(signature);
-    }
+    explicit WindSkeletonDebugPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources)) {}
     WindSkeletonDebugBindings Declare(org::PassBuilder& declaration)
     {
         WindSkeletonDebugBindings bindings{};
-        bindings.skeletonPipeline = m_skeletonPipeline;
-        bindings.spherePipeline = m_spherePipeline;
-        bindings.signature = m_signature;
+        // Both overlays share every state but the shaders, the fill mode and the topology.
+        org::GraphicsPipelineDesc skeleton;
+        skeleton.name = "ProceduralWind.SkeletonDebug.PSO";
+        skeleton.mesh = { L"shaders/debugSkeleton.hlsl", L"MSWindMain", L"ms_6_6" };
+        skeleton.pixel = { L"shaders/debugSkeleton.hlsl", L"PSWindMain", L"ps_6_6" };
+        rhi::RasterState raster{}; raster.fill = rhi::FillMode::Solid; raster.cull = rhi::CullMode::None;
+        skeleton.raster = raster;
+        rhi::BlendState blend{}; blend.numAttachments = 1; blend.attachments[0].writeMask = rhi::ColorWriteEnable::All;
+        skeleton.blend = blend;
+        rhi::DepthStencilState depth{}; depth.depthEnable = false; depth.depthWrite = false; depth.depthFunc = rhi::CompareOp::Always;
+        skeleton.depth = depth;
+        rhi::RenderTargets targets{}; targets.count = 1; targets.formats[0] = rhi::Format::R8G8B8A8_UNorm;
+        skeleton.renderTargets = targets;
+        skeleton.sample = rhi::SampleDesc{1, 0};
+        skeleton.topology = rhi::PrimitiveTopology::LineList;
+
+        auto sphere = skeleton;
+        sphere.name = "ProceduralWind.AssemblySphereDebug.PSO";
+        sphere.mesh = { L"shaders/debugSkeleton.hlsl", L"MSWindAssemblySphereMain", L"ms_6_6" };
+        sphere.pixel = { L"shaders/debugSkeleton.hlsl", L"PSWindAssemblySphereMain", L"ps_6_6" };
+        rhi::RasterState sphereRaster{}; sphereRaster.fill = rhi::FillMode::Wireframe; sphereRaster.cull = rhi::CullMode::None;
+        sphere.raster = sphereRaster;
+        sphere.topology = rhi::PrimitiveTopology::TriangleList;
+
+        bindings.skeletonPipeline = declaration.Pipeline(std::move(skeleton));
+        bindings.spherePipeline = declaration.Pipeline(std::move(sphere));
+
+        org::CommandSignatureDesc signature;
+        signature.args = {
+            {.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},
+            {.kind=rhi::IndirectArgKind::DispatchMesh}
+        };
+        signature.byteStride = sizeof(WindIndirectCommand);
+        signature.layout = org::PipelineLayoutRef::StandardGraphics();
+        signature.name = "ProceduralWind.SkeletonDebug.Signature";
+        bindings.signature = declaration.CommandSignature(std::move(signature));
         m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.types = declaration.ShaderResource(m_resources->windTypes).View();
         bindings.bones = declaration.ShaderResource(m_resources->boneEntries).View();
@@ -1448,9 +1413,6 @@ public:
 private:
     std::shared_ptr<WindSharedResources> m_resources;
     bool m_declaredInverseBind = false;
-    org::PipelineState m_skeletonPipeline;
-    org::PipelineState m_spherePipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> m_signature;
 };
 
 } // namespace

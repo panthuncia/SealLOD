@@ -48,5 +48,4 @@ private:
     std::function<void()> m_processStreamingRequests;
     std::function<org::UploadInstance*()> m_getUploadInstance;
     std::vector<uint32_t> m_nonResidentBitsUploadScratch;
-    org::PipelineState m_clearUintPipeline;
 };

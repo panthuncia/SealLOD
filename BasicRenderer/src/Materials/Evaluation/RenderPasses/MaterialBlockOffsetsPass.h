@@ -1,6 +1,7 @@
 #pragma once
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Materials/Publication/MaterialStateArtifacts.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -17,21 +18,13 @@ struct MaterialBlockOffsetsFrame {
 // Dispatch dimension: x = 1 (single group), unless we implement recursive scan for very large numBlocks.
 class MaterialBlockOffsetsPass : public org::TypedRenderGraphPass<MaterialBlockOffsetsPass, MaterialBlockOffsetsFrame, MaterialBlockOffsetsBindings> {
 public:
-    MaterialBlockOffsetsPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/materialPrefixSum.hlsl",
-            L"BlockOffsetsCS",
-            {},
-            "VisUtil_BlockOffsetsPSO");
-    }
-
     MaterialBlockOffsetsBindings Declare(org::PassBuilder& b) {
         b.ShaderResource("Builtin::VisUtil::MaterialPixelCountBuffer", "Builtin::VisUtil::BlockSumsBuffer");
         b.UnorderedAccess("Builtin::VisUtil::MaterialOffsetBuffer", "Builtin::VisUtil::ScannedBlockSumsBuffer",
             "Builtin::VisUtil::TotalPixelCountBuffer");
         b.PreferQueue(org::QueueKind::Compute);
-        return {m_pso, m_blockSize};
+        return {b.Pipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"BlockOffsetsCS",
+            "VisUtil_BlockOffsetsPSO")), m_blockSize};
     }
 
     MaterialBlockOffsetsFrame Prepare(const MaterialBlockOffsetsBindings&, const org::PassPrepareContext& preparation) const {
@@ -54,6 +47,5 @@ public:
     }
 
 private:
-    org::PipelineState m_pso;
     uint32_t m_blockSize = 1024;
 };

@@ -23,7 +23,7 @@ struct ReyesSplitFrameData {
 struct ReyesSplitBindings {
     org::PipelineState clearCountersPipeline;
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, inputQueue, inputCounter, outputQueue, outputCounter, outputOverflow;
     org::DeclaredViewToken diceQueue, diceCounter, diceOverflow, tessConfigs, tessVertices, tessTriangles;
     org::DeclaredViewToken shadowClipmap, shadowDirty, telemetry;
@@ -102,7 +102,4 @@ private:
     uint32_t m_splitPassIndex = 0u;
     uint32_t m_maxSplitPassCount = 0u;
     uint32_t m_phaseIndex = 0u;
-    org::PipelineState m_clearCountersPso;
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

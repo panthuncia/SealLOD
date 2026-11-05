@@ -37,8 +37,6 @@ public:
 
 private:
 
-    org::PipelineState m_clearStatePso;
-    org::PipelineState m_deduplicatePso;
     std::shared_ptr<org::Buffer> m_predictiveRawPagesBuffer;
     std::shared_ptr<org::Buffer> m_predictiveRawPageCountBuffer;
     std::shared_ptr<org::Buffer> m_predictedScratchBitsetBuffer;

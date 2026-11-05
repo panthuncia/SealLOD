@@ -561,6 +561,10 @@ void Renderer::CreateRenderGraph() {
     }
 
     probeGraphBuildPhase("CreateRenderGraph before CompileStructural");
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+    if (DeviceManager::GetInstance().IsMultiRHIEnabled())
+        br::validation::SARPInteropValidation::ApplyNamedPasses(*newGraph, DeviceManager::GetInstance().GetPeerBackend());
+#endif
 
     newGraph->SetStructuralMaterializeCheckpointCallback([](std::string_view passName) {
         if (!passName.starts_with("CLodShadow::")) {

@@ -36,9 +36,6 @@ public:
     static void Record(const VirtualShadowMapExpandPredictedPagesBindings&, org::PassRecordContext&);
 
 private:
-    org::PipelineState m_stampContentGenerationPso;
-    org::PipelineState m_pso;
-    org::PipelineState m_resetCandidateCountPso;
     std::shared_ptr<org::Buffer> m_predictiveCandidatesBuffer;
     std::shared_ptr<org::Buffer> m_predictiveCandidateCountBuffer;
     std::shared_ptr<org::Buffer> m_predictiveRawPagesBuffer;

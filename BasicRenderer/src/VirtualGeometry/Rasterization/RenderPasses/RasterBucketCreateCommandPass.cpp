@@ -3,6 +3,7 @@
 
 #include "Materials/MaterialManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -24,16 +25,13 @@ RasterBucketCreateCommandPass::RasterBucketCreateCommandPass(
     , m_visibleClustersCapacity(visibleClustersCapacity)
     , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly)
     , m_patchReplayNodeInputs(patchReplayNodeInputs) {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CreateRasterBucketsHistogramCommandCSMain",
-        {},
-        "CLod_RasterBucketsCreateCommandPSO");
 }
 
 RasterBucketCreateCommandBindings RasterBucketCreateCommandPass::Declare(org::PassBuilder& builder) {
-    RasterBucketCreateCommandBindings bindings{m_pso, builder.ShaderResource(m_visibleClustersCounterBuffer),
+    RasterBucketCreateCommandBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"CreateRasterBucketsHistogramCommandCSMain", "CLod_RasterBucketsCreateCommandPSO")),
+        builder.ShaderResource(m_visibleClustersCounterBuffer),
         builder.UnorderedAccess(m_histogramIndirectCommand)};
     if (m_patchReplayNodeInputs) {
         bindings.replayState = builder.ShaderResource(m_occlusionReplayStateBuffer);

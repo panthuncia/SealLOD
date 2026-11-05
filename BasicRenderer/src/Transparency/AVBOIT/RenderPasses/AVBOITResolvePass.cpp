@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
@@ -18,19 +19,13 @@ AVBOITResolvePass::AVBOITResolvePass(
     , m_normalizationTexture(std::move(normalizationTexture))
     , m_shadingExtinctionTexture(std::move(shadingExtinctionTexture))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/AVBOITResolve.hlsl",
-        L"CLodAVBOITResolveCS",
-        {},
-        "CLod.AVBOITResolve.PSO");
 }
 
 AVBOITResolveBindings AVBOITResolvePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.UnorderedAccess(Builtin::Color::HDRColorTarget);
-    return {m_pso, 
+    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITResolve.hlsl", L"CLodAVBOITResolveCS", "CLod.AVBOITResolve.PSO")), 
         builder.ShaderResource(m_configBuffer),
         builder.ShaderResource(m_accumulationTexture),
         builder.ShaderResource(m_normalizationTexture),

@@ -20,6 +20,7 @@
 #include "rhi_helpers.h"
 #include "BasicRenderer/Extensions/Buffers/LazyDynamicStructuredBuffer.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Materials/TextureStreaming/MaterialTextureTransferService.h"
@@ -70,21 +71,18 @@ bool TextureFactory::MipmappingPass::TryGetValueType(const org::PixelBuffer& tex
     }
 }
 
-org::PipelineState TextureFactory::MipmappingPass::CreatePipeline(MipmapValueType valueType, bool isArray) const
+org::ComputePipelineDesc TextureFactory::MipmappingPass::PipelineDesc(MipmapValueType valueType, bool isArray)
 {
-    auto& psoManager = PSOManager::GetInstance();
-    auto& layout = psoManager.GetComputeRootSignature();
-
-    std::vector<DxcDefine> defines;
+    std::vector<org::PipelineShaderDefine> defines;
     if (valueType == MipmapValueType::Float1) {
-        defines.push_back(DxcDefine{ L"MIPMAP_FLOAT1", L"1" });
+        defines.push_back(org::PipelineShaderDefine{ L"MIPMAP_FLOAT1", L"1" });
     }
     else if (valueType == MipmapValueType::Float2) {
-        defines.push_back(DxcDefine{ L"MIPMAP_FLOAT2", L"1" });
+        defines.push_back(org::PipelineShaderDefine{ L"MIPMAP_FLOAT2", L"1" });
     }
 
     if (isArray) {
-        defines.push_back(DxcDefine{ L"MIPMAP_ARRAY", L"1" });
+        defines.push_back(org::PipelineShaderDefine{ L"MIPMAP_ARRAY", L"1" });
     }
 
     const char* debugName = nullptr;
@@ -99,81 +97,21 @@ org::PipelineState TextureFactory::MipmappingPass::CreatePipeline(MipmapValueTyp
         debugName = isArray ? "MipmapSPD[Float4Array]" : "MipmapSPD[Float42D]";
         break;
     }
+    if (!debugName) throw std::runtime_error("MipmappingPass: unsupported pipeline variant");
 
-    return psoManager.MakeComputePipeline(
-        layout.GetHandle(),
+    return br::render::ComputePipeline(
         L"shaders/Utilities/mipmapping.hlsl",
         L"MipmapCSMain",
-        std::move(defines),
+        debugName,
+        std::move(defines));
+}
+
+org::ComputePipelineDesc TextureFactory::MipmappingPass::AlphaPipelineDesc(const wchar_t* entryPoint, const char* debugName)
+{
+    return br::render::ComputePipeline(
+        L"shaders/Utilities/alphaCoverageMipmapping.hlsl",
+        entryPoint,
         debugName);
-}
-
-org::PipelineState& TextureFactory::MipmappingPass::GetOrCreateAlphaPipeline(
-    const wchar_t* entryPoint,
-    org::PipelineState& pso,
-    bool& hasPso,
-    const char* debugName)
-{
-    if (!hasPso) {
-        auto& psoManager = PSOManager::GetInstance();
-        pso = psoManager.MakeComputePipeline(
-            psoManager.GetComputeRootSignature().GetHandle(),
-            L"shaders/Utilities/alphaCoverageMipmapping.hlsl",
-            entryPoint,
-            {},
-            debugName);
-        hasPso = true;
-    }
-    return pso;
-}
-
-org::PipelineState& TextureFactory::MipmappingPass::GetOrCreatePipeline(MipmapValueType valueType, bool isArray)
-{
-    switch (valueType) {
-    case MipmapValueType::Float1:
-        if (isArray) {
-            if (!m_hasPsoFloat1_Array) {
-                m_psoFloat1_Array = CreatePipeline(valueType, true);
-                m_hasPsoFloat1_Array = true;
-            }
-            return m_psoFloat1_Array;
-        }
-        if (!m_hasPsoFloat1_2D) {
-            m_psoFloat1_2D = CreatePipeline(valueType, false);
-            m_hasPsoFloat1_2D = true;
-        }
-        return m_psoFloat1_2D;
-
-    case MipmapValueType::Float2:
-        if (isArray) {
-            if (!m_hasPsoFloat2_Array) {
-                m_psoFloat2_Array = CreatePipeline(valueType, true);
-                m_hasPsoFloat2_Array = true;
-            }
-            return m_psoFloat2_Array;
-        }
-        if (!m_hasPsoFloat2_2D) {
-            m_psoFloat2_2D = CreatePipeline(valueType, false);
-            m_hasPsoFloat2_2D = true;
-        }
-        return m_psoFloat2_2D;
-
-    case MipmapValueType::Float4:
-        if (isArray) {
-            if (!m_hasPsoFloat4_Array) {
-                m_psoFloat4_Array = CreatePipeline(valueType, true);
-                m_hasPsoFloat4_Array = true;
-            }
-            return m_psoFloat4_Array;
-        }
-        if (!m_hasPsoFloat4_2D) {
-            m_psoFloat4_2D = CreatePipeline(valueType, false);
-            m_hasPsoFloat4_2D = true;
-        }
-        return m_psoFloat4_2D;
-    }
-
-    throw std::runtime_error("MipmappingPass: unsupported pipeline variant");
 }
 
 bool TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<org::PixelBuffer>& tex, bool isSrgb, bool preserveAlphaCoverage) {
@@ -324,15 +262,15 @@ TextureMipmappingBindings TextureFactory::MipmappingPass::Declare(org::PassBuild
             auto use = builder->ShaderResource(Subresources(tex, org::Mip{ 0, j.mipsToGenerate }),
                 std::span<const org::SrvView>(requests));
             views.alphaSources = std::move(use.views);
-            bindings.alphaReset = GetOrCreateAlphaPipeline(L"AlphaMipResetStatsCS", m_psoAlphaReset, m_hasPsoAlphaReset, "AlphaMip[ResetStats]");
-            bindings.alphaDownsample = GetOrCreateAlphaPipeline(L"AlphaMipDownsampleCS", m_psoAlphaDownsample, m_hasPsoAlphaDownsample, "AlphaMip[Downsample]");
-            bindings.alphaResolveScale = GetOrCreateAlphaPipeline(L"AlphaMipResolveScaleCS", m_psoAlphaResolveScale, m_hasPsoAlphaResolveScale, "AlphaMip[ResolveScale]");
-            bindings.alphaApplyScale = GetOrCreateAlphaPipeline(L"AlphaMipApplyScaleCS", m_psoAlphaApplyScale, m_hasPsoAlphaApplyScale, "AlphaMip[ApplyScale]");
+            bindings.alphaReset = builder->Pipeline(AlphaPipelineDesc(L"AlphaMipResetStatsCS", "AlphaMip[ResetStats]"));
+            bindings.alphaDownsample = builder->Pipeline(AlphaPipelineDesc(L"AlphaMipDownsampleCS", "AlphaMip[Downsample]"));
+            bindings.alphaResolveScale = builder->Pipeline(AlphaPipelineDesc(L"AlphaMipResolveScaleCS", "AlphaMip[ResolveScale]"));
+            bindings.alphaApplyScale = builder->Pipeline(AlphaPipelineDesc(L"AlphaMipApplyScaleCS", "AlphaMip[ApplyScale]"));
         }
         else {
             views.source = builder->ShaderResource(Subresources(tex, org::Mip{ 0, 1 }),
                 org::SrvView{j.isArray ? static_cast<uint32_t>(org::SRVViewType::Texture2DArray) : UINT32_MAX}).View();
-            views.pipeline = GetOrCreatePipeline(j.valueType, j.isArray);
+            views.pipeline = builder->Pipeline(PipelineDesc(j.valueType, j.isArray));
         }
         if (j.mipsToGenerate > 0) {
             std::vector<org::UavView> requests;

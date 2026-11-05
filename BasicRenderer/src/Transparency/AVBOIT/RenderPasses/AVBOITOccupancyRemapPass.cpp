@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
@@ -18,19 +19,13 @@ AVBOITOccupancyRemapPass::AVBOITOccupancyRemapPass(
     , m_occupancySliceMaskTexture(std::move(occupancySliceMaskTexture))
     , m_depthWarpLUTBuffer(std::move(depthWarpLUTBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/AVBOITOccupancyRemap.hlsl",
-        L"CLodAVBOITOccupancyRemapCS",
-        {},
-        "CLod.AVBOITOccupancyRemap.PSO");
 }
 
 AVBOITOccupancyRemapBindings AVBOITOccupancyRemapPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.UnorderedAccess(m_occupancySliceMaskTexture);
-    return {m_pso, builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_depthWarpLUTBuffer), builder.UnorderedAccess(m_occupancyTexture)};
+    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITOccupancyRemap.hlsl", L"CLodAVBOITOccupancyRemapCS", "CLod.AVBOITOccupancyRemap.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_depthWarpLUTBuffer), builder.UnorderedAccess(m_occupancyTexture)};
 }
 
 AVBOITOccupancyRemapFrame AVBOITOccupancyRemapPass::Prepare(const AVBOITOccupancyRemapBindings& bindings, const org::PassPrepareContext& preparation) const {

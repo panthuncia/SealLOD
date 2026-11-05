@@ -6,6 +6,7 @@
 #include "Scene/Views/ViewManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -58,28 +59,6 @@ ReyesVirtualShadowRasterizationPass::ReyesVirtualShadowRasterizationPass(
     m_viewRasterInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodViewRasterInfo), false, false, false, false);
     m_viewRasterInfoBuffer->SetName(std::string(resourceName));
     org::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD Reyes virtual shadow");
-
-    auto defines = IsTerrainRvtTelemetryDebugEnabled()
-        ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } }
-        : std::vector<DxcDefine>{};
-    defines.push_back({ L"CLOD_VSM_TWO_LAYER_REYES_VERSION", L"2" });
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/reyesPatchVirtualShadowRaster.hlsl",
-        L"ReyesPatchVirtualShadowRasterCS",
-        defines,
-        "CLod.ReyesPatchVirtualShadowRaster.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>();
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        *m_commandSignature);
 }
 
 ReyesVirtualShadowRasterBindings ReyesVirtualShadowRasterizationPass::Declare(org::PassBuilder& declaration)
@@ -131,7 +110,17 @@ ReyesVirtualShadowRasterBindings ReyesVirtualShadowRasterizationPass::Declare(or
     if (m_slabResourceGroup) {
         builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
-    return {m_pso, m_commandSignature, builder->ShaderResource(m_visibleClustersBuffer).View(), builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
+    auto defines = IsTerrainRvtTelemetryDebugEnabled()
+        ? std::vector<org::PipelineShaderDefine>{ org::PipelineShaderDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } }
+        : std::vector<org::PipelineShaderDefine>{};
+    defines.push_back({ L"CLOD_VSM_TWO_LAYER_REYES_VERSION", L"2" });
+    org::CommandSignatureDesc signature;
+    signature.args = {{.kind = rhi::IndirectArgKind::Dispatch}};
+    signature.byteStride = sizeof(CLodReyesDispatchIndirectCommand);
+    signature.name = "CLod.ReyesPatchVirtualShadowRaster.Signature";
+    return {builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesPatchVirtualShadowRaster.hlsl",
+                L"ReyesPatchVirtualShadowRasterCS", "CLod.ReyesPatchVirtualShadowRaster.PSO", std::move(defines))),
+        builder->CommandSignature(std::move(signature)), builder->ShaderResource(m_visibleClustersBuffer).View(), builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         builder->ShaderResource(m_diceQueueBuffer).View(), builder->ShaderResource(m_diceQueueCounterBuffer).View(),
         builder->ShaderResource(m_rasterWorkBuffer).View(), builder->ShaderResource(m_rasterWorkCounterBuffer).View(),
         builder->ShaderResource(m_tessTableConfigsBuffer).View(), builder->ShaderResource(m_tessTableVerticesBuffer).View(),

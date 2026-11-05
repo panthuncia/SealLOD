@@ -3,6 +3,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodReyesDiceRootConstants.h"
@@ -25,30 +26,16 @@ ReyesDicePass::ReyesDicePass(
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_maxDiceQueueEntries(maxDiceQueueEntries)
     , m_phaseIndex(phaseIndex) {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/reyesDice.hlsl",
-        L"ReyesDiceCS",
-        {},
-        "CLod.ReyesDice.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 ReyesDiceBindings ReyesDicePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    ReyesDiceBindings bindings{m_pso, m_commandSignature, builder.ShaderResource(m_diceQueueBuffer),
+    ReyesDiceBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesDice.hlsl",
+            L"ReyesDiceCS", "CLod.ReyesDice.PSO")),
+        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        builder.ShaderResource(m_diceQueueBuffer),
         builder.ShaderResource(m_diceQueueCounterBuffer)};
     if (m_diceQueueReadOffsetBuffer) {
         bindings.readOffset = builder.ShaderResource(m_diceQueueReadOffsetBuffer);

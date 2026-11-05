@@ -2,6 +2,8 @@
 #include "Render/PassBuilders.h"
 
 #include <algorithm>
+#include <atomic>
+#include <stdexcept>
 #include <span>
 #include <string>
 #include <vector>
@@ -14,6 +16,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/Runtime/UploadTypes.h"
 #include "Resources/Buffers/Buffer.h"
@@ -50,7 +53,6 @@ ComputeCullingPass::ComputeCullingPass(CullingPassConfig config, CullingPassReso
 {
     CreateWindCache();
     CreateFrontiers();
-    CreatePrograms();
 }
 
 ComputeCullingPass::~ComputeCullingPass() = default;
@@ -107,32 +109,29 @@ void ComputeCullingPass::CreateFrontiers()
     f.clusterDispatchArgs = scalar(sizeof(DispatchArguments), "CLod Pure Compute Cluster Dispatch Args");
 }
 
-void ComputeCullingPass::CreatePrograms()
+ComputeCullingPrograms ComputeCullingPass::DeclarePrograms(org::PassBuilder& builder) const
 {
     const std::wstring voxelTableDefine = m_voxelQueueTable.ShaderDefine();
-    std::vector<DxcDefine> defines = {
+    std::vector<org::PipelineShaderDefine> defines = {
         { L"CLOD_WG_ENABLE_SW_CLASSIFICATION", m_config.UsesSWClassification() ? L"1" : L"0" },
         { L"CLOD_WG_ENABLE_SW_NODE_OUTPUT", L"0" },
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", m_config.UsesVirtualShadowOutput() ? L"1" : L"0" },
         { L"CLOD_VSM_TWO_LAYER_COMPUTE_CULL_VERSION", m_config.UsesVirtualShadowOutput() ? L"2" : L"0" },
         { L"CLOD_WG_ENABLE_VOXEL_OUTPUT", m_voxelQueueTable.Enabled() ? L"1" : L"0" },
         { L"CLOD_COMPUTE_INCLUDE_ONLY", L"1" },
-        { L"CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID", voxelTableDefine.c_str() },
+        { L"CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID", voxelTableDefine },
     };
-    std::vector<DxcDefine> leafDefines = defines;
+    auto leafDefines = defines;
     leafDefines.push_back({ L"CLOD_PC_LEAF_ONLY", L"1" });
 
-    auto& psoManager = PSOManager::GetInstance();
-    const auto layout = psoManager.GetComputeRootSignature().GetHandle();
-    const auto culling = [&](const wchar_t* entry, const std::vector<DxcDefine>& programDefines, const char* name) {
-        return psoManager.MakeComputePipeline(layout, L"shaders/ClusterLOD/computeCulling.hlsl", entry,
-            programDefines, name);
+    const auto culling = [&](const wchar_t* entry, const std::vector<org::PipelineShaderDefine>& programDefines, const char* name) {
+        return builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/computeCulling.hlsl", entry, name, programDefines));
     };
-    auto& p = m_programs;
-    p.clearCounter = psoManager.MakeComputePipeline(layout, L"shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClearUintStructuredBufferCSMain", {}, "HierarchicalDispatchCulling.ClearUint");
-    p.createRasterBucketCommand = psoManager.MakeComputePipeline(layout, L"shaders/ClusterLOD/clodUtil.hlsl",
-        L"CreateRasterBucketsHistogramCommandCSMain", {}, "HierarchicalDispatchCulling.CreateRasterBucketsHistogramCommand");
+    ComputeCullingPrograms p;
+    p.clearCounter = builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+        L"ClearUintStructuredBufferCSMain", "HierarchicalDispatchCulling.ClearUint"));
+    p.createRasterBucketCommand = builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+        L"CreateRasterBucketsHistogramCommandCSMain", "HierarchicalDispatchCulling.CreateRasterBucketsHistogramCommand"));
     p.buildDispatchArgs = culling(L"BuildPureComputeDispatchArgsCS", defines, "CLod.PureCompute.BuildDispatchArgs");
     p.buildDualDispatchArgs = culling(L"BuildPureComputeDualDispatchArgsCS", defines, "CLod.PureCompute.BuildDualDispatchArgs");
     p.clearTraversalCounters = culling(L"ClearPureComputeTraversalCountersCS", defines, "CLod.PureCompute.ClearTraversalCounters");
@@ -143,23 +142,26 @@ void ComputeCullingPass::CreatePrograms()
     p.traverseNodes = culling(L"PureComputeTraverseFrontierCS", defines, "CLod.PureCompute.Traverse");
     p.traverseLeaves = culling(L"PureComputeTraverseFrontierCS", leafDefines, "CLod.PureCompute.Leaf");
     p.cullClusters = culling(L"PureComputeDenseClusterWorkCS", defines, "CLod.PureCompute.DenseClusterCull");
+    return p;
+}
 
-    // Traversal emits voxel work; nothing else may read the voxel table.
-    const bool voxels = m_voxelQueueTable.Enabled();
-    m_voxelQueueTable.ValidateInterface(p.objectCull.GetResourceDescriptorSlots(), false, "object-cull");
-    m_voxelQueueTable.ValidateInterface(p.traverseNodes.GetResourceDescriptorSlots(), voxels, "traverse");
-    m_voxelQueueTable.ValidateInterface(p.traverseLeaves.GetResourceDescriptorSlots(), voxels, "leaf");
-    m_voxelQueueTable.ValidateInterface(p.cullClusters.GetResourceDescriptorSlots(), false, "dense-cluster");
-
-    rhi::IndirectArg dispatchArg[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
+// Traversal emits voxel work; nothing else may read the voxel table. Checked against each device's build once: builds land
+// before the pass is first prepared on a device, and a rebuild may not change a shader's resource interface.
+void ComputeCullingPass::ValidatePrograms(const ComputeCullingPrograms& p, org::BackendInstanceId device) const
+{
+    const auto* identity = p.objectCull.GetPayload(device).get();
+    if (m_validatedPrograms.load(std::memory_order_acquire) == identity) return;
+    const auto slots = [&](const org::PipelineState& pipeline) -> const org::PipelineResources& {
+        const auto payload = pipeline.GetPayload(device);
+        if (!payload || !payload->pso) throw std::logic_error("Compute culling prepared before its pipelines were built");
+        return payload->pipelineResources;
     };
-    rhi::CommandSignaturePtr signature;
-    DeviceManager::GetInstance().GetDevice().CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArg, 1), sizeof(DispatchArguments) },
-        layout,
-        signature);
-    p.dispatchSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(signature));
+    const bool voxels = m_voxelQueueTable.Enabled();
+    m_voxelQueueTable.ValidateInterface(slots(p.objectCull), false, "object-cull");
+    m_voxelQueueTable.ValidateInterface(slots(p.traverseNodes), voxels, "traverse");
+    m_voxelQueueTable.ValidateInterface(slots(p.traverseLeaves), voxels, "leaf");
+    m_voxelQueueTable.ValidateInterface(slots(p.cullClusters), false, "dense-cluster");
+    m_validatedPrograms.store(identity, std::memory_order_release);
 }
 
 br::render::CullingUploader ComputeCullingPass::Uploader() const
@@ -214,7 +216,8 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     const auto& f = m_frontiers;
 
     ComputeCullingBindings bindings{};
-    bindings.programs = m_programs;
+    bindings.programs = DeclarePrograms(builder);
+    bindings.programs.dispatchSignature = builder.CommandSignature(br::render::RawDispatchCommandSignature());
     bindings.maxVisibleClusters = m_config.maxVisibleClusters;
     bindings.isFirstPass = m_config.isFirstPass;
     bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();
@@ -346,6 +349,7 @@ ComputeCullingFrame ComputeCullingPass::Prepare(
     auto* renderContext = preparation.preparationData
         ? preparation.preparationData->Get<RenderContext>() : nullptr;
     if (!renderContext || !preparation.bindings) return {};
+    ValidatePrograms(declared.programs, preparation.backendInstance);
 
     if (declared.voxelQueues) {
         const auto& queues = *declared.voxelQueues;

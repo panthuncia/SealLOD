@@ -10,7 +10,7 @@ namespace org { class Buffer; }
 
 struct RasterBucketCompactAndArgsBindings {
     org::PipelineState clearPipeline, compactPipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visibleClusters, visibleTransforms, visibleCount, compactedBaseCount, readBaseCount;
     org::ResourceBindingToken indirectCommand;
     org::DeclaredViewToken histogram, offsets, writeCursor, compactedClusters;
@@ -62,10 +62,6 @@ public:
     void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
-    org::PipelineState m_pso;
-    org::PipelineState m_clearPipeline;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_compactionCommandSignature;
-
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;

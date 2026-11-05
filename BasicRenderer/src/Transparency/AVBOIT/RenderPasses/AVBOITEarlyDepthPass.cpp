@@ -3,6 +3,7 @@
 
 #include "BuiltinResources.h"
 #include "Runtime/Device/DeviceManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
@@ -20,87 +21,54 @@ AVBOITEarlyDepthPass::AVBOITEarlyDepthPass(
     , m_tileCountBuffer(std::move(tileCountBuffer))
     , m_earlyDepthTexture(std::move(earlyDepthTexture))
 {
-    auto dev = DeviceManager::GetInstance().GetDevice();
-
-    ShaderInfoBundle shaderInfoBundle;
-    shaderInfoBundle.vertexShader = { L"shaders/ClusterLOD/AVBOITEarlyDepth.hlsl", L"AVBOITEarlyDepthTileVSMain", L"vs_6_6" };
-    shaderInfoBundle.pixelShader = { L"shaders/ClusterLOD/AVBOITEarlyDepth.hlsl", L"AVBOITEarlyDepthPSMain", L"ps_6_6" };
-    auto compiledBundle = PSOManager::GetInstance().CompileShaders(shaderInfoBundle);
-
-    auto& layout = PSOManager::GetInstance().GetRootSignature();
-    rhi::SubobjLayout soLayout{ layout.GetHandle() };
-    rhi::SubobjShader soVS{ rhi::ShaderStage::Vertex, rhi::DXIL(compiledBundle.vertexShader.Get()), "AVBOITEarlyDepthTileVSMain" };
-    rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiledBundle.pixelShader.Get()), "AVBOITEarlyDepthPSMain" };
-
-    rhi::RasterState rasterState{};
-    rasterState.fill = rhi::FillMode::Solid;
-    rasterState.cull = rhi::CullMode::None;
-    rasterState.frontCCW = false;
-    rhi::SubobjRaster soRaster{ rasterState };
-
-    rhi::BlendState blendState{};
-    blendState.alphaToCoverage = false;
-    blendState.independentBlend = false;
-    blendState.numAttachments = 0;
-    rhi::SubobjBlend soBlend{ blendState };
-
-    rhi::DepthStencilState depthState{};
-    depthState.depthEnable = true;
-    depthState.depthWrite = true;
-    depthState.depthFunc = rhi::CompareOp::Always;
-    rhi::SubobjDepth soDepth{ depthState };
-
-    rhi::RenderTargets renderTargets{};
-    renderTargets.count = 0;
-    rhi::SubobjRTVs soRTV{ renderTargets };
-    rhi::SubobjDSV soDSV{ rhi::Format::D32_Float };
-    rhi::SubobjSample soSample{ rhi::SampleDesc{ 1, 0 } };
-    rhi::SubobjPrimitiveTopology soTopology{ rhi::PrimitiveTopology::TriangleStrip };
-
-    const rhi::PipelineStreamItem items[] = {
-        rhi::Make(soLayout),
-        rhi::Make(soVS),
-        rhi::Make(soPS),
-        rhi::Make(soRaster),
-        rhi::Make(soBlend),
-        rhi::Make(soDepth),
-        rhi::Make(soRTV),
-        rhi::Make(soDSV),
-        rhi::Make(soSample),
-        rhi::Make(soTopology),
-    };
-
-    rhi::PipelinePtr pso;
-    auto result = dev.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pso);
-    if (Failed(result)) {
-        throw std::runtime_error("Failed to create CLod AVBOIT early depth PSO");
-    }
-
-    pso->SetName("CLod.AVBOITEarlyDepth.PSO");
-    m_pso = org::PipelineState(std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots,
-        PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout), soLayout.layout);
-
-    rhi::IndirectArg args[] = {
-        {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
-        {.kind = rhi::IndirectArgKind::Draw }
-    };
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>();
-    result = dev.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 2), sizeof(CLodAVBOITEarlyDepthTileIndirectCommand) },
-        layout.GetHandle(),
-        *m_commandSignature);
-    if (Failed(result)) {
-        throw std::runtime_error("Failed to create CLod AVBOIT early depth command signature");
-    }
 }
 
 AVBOITEarlyDepthBindings AVBOITEarlyDepthPass::Declare(org::PassBuilder& builder)
 {
     builder.ShaderResource(Builtin::CameraBuffer);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
+    org::GraphicsPipelineDesc pipeline;
+    pipeline.name = "CLod.AVBOITEarlyDepth.PSO";
+    pipeline.vertex = org::PipelineShaderSource{ L"shaders/ClusterLOD/AVBOITEarlyDepth.hlsl", L"AVBOITEarlyDepthTileVSMain", L"vs_6_6" };
+    pipeline.pixel = org::PipelineShaderSource{ L"shaders/ClusterLOD/AVBOITEarlyDepth.hlsl", L"AVBOITEarlyDepthPSMain", L"ps_6_6" };
+
+    rhi::RasterState rasterState{};
+    rasterState.fill = rhi::FillMode::Solid;
+    rasterState.cull = rhi::CullMode::None;
+    rasterState.frontCCW = false;
+    pipeline.raster = rasterState;
+
+    rhi::BlendState blendState{};
+    blendState.alphaToCoverage = false;
+    blendState.independentBlend = false;
+    blendState.numAttachments = 0;
+    pipeline.blend = blendState;
+
+    rhi::DepthStencilState depthState{};
+    depthState.depthEnable = true;
+    depthState.depthWrite = true;
+    depthState.depthFunc = rhi::CompareOp::Always;
+    pipeline.depth = depthState;
+
+    rhi::RenderTargets renderTargets{};
+    renderTargets.count = 0;
+    pipeline.renderTargets = renderTargets;
+    pipeline.depthFormat = rhi::Format::D32_Float;
+    pipeline.sample = rhi::SampleDesc{ 1, 0 };
+    pipeline.topology = rhi::PrimitiveTopology::TriangleStrip;
+
+    org::CommandSignatureDesc signature;
+    signature.args = {
+        {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
+        {.kind = rhi::IndirectArgKind::Draw }
+    };
+    signature.byteStride = sizeof(CLodAVBOITEarlyDepthTileIndirectCommand);
+    signature.layout = org::PipelineLayoutRef::StandardGraphics();
+    signature.name = "CLod.AVBOITEarlyDepth.Signature";
+
     return {
-        m_pso,
-        m_commandSignature,
+        builder.Pipeline(std::move(pipeline)),
+        builder.CommandSignature(std::move(signature)),
         builder.ShaderResource(m_configBuffer),
         builder.IndirectArguments(m_tileCommandsBuffer),
         builder.IndirectArguments(m_tileCountBuffer),

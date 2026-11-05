@@ -7,6 +7,7 @@
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -35,18 +36,14 @@ public:
         , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
         , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly)
     {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
-            L"CLodVirtualShadowBuildRasterArgsCSMain",
-            {},
-            "CLod_VirtualShadowBuildRasterArgsPSO");
     }
 
     VirtualShadowBuildRasterArgsBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         declaration.ConstantBuffer(Builtin::PerFrameBuffer);
-        return {m_pso, declaration.ShaderResource(m_histogramBuffer),
+        return {declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
+                    L"CLodVirtualShadowBuildRasterArgsCSMain", "CLod_VirtualShadowBuildRasterArgsPSO")),
+            declaration.ShaderResource(m_histogramBuffer),
             declaration.ShaderResource(m_offsetsBuffer),
             declaration.UnorderedAccess(m_indirectArgsBuffer)};
     }
@@ -89,7 +86,6 @@ public:
     }
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::Buffer> m_histogramBuffer;
     std::shared_ptr<org::Buffer> m_offsetsBuffer;
     std::shared_ptr<org::Buffer> m_indirectArgsBuffer;

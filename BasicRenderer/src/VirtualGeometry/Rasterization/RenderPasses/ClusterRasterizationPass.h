@@ -33,7 +33,7 @@ struct ClusterRasterizationPassInputs {
 };
 
 struct ClusterRasterBindings {
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken histogram, visible, transforms, mapping;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken telemetry, mismatchCounter, mismatchDetails;
@@ -160,7 +160,6 @@ private:
 
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
 
-    std::shared_ptr<rhi::CommandSignaturePtr> m_rasterizationCommandSignature;
 
     uint32_t m_passWidth = 1;
     uint32_t m_passHeight = 1;

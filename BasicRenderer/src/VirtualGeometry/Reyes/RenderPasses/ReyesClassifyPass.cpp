@@ -3,6 +3,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BuiltinResources.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
@@ -38,24 +39,6 @@ ReyesClassifyPass::ReyesClassifyPass(
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_phaseIndex(phaseIndex)
     , m_classifyMode(classifyMode) {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/reyesClassify.hlsl",
-        L"ReyesClassifyCS",
-        {},
-        "CLod.ReyesClassify.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 ReyesClassifyBindings ReyesClassifyPass::Declare(org::PassBuilder& builder)
@@ -80,7 +63,11 @@ ReyesClassifyBindings ReyesClassifyPass::Declare(org::PassBuilder& builder)
             Builtin::SkeletonResources::SkinningInstanceInfo);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
-    ReyesClassifyBindings bindings{m_pso, m_commandSignature, builder.ShaderResource(m_visibleClustersBuffer).View(),
+    ReyesClassifyBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesClassify.hlsl",
+            L"ReyesClassifyCS", "CLod.ReyesClassify.PSO")),
+        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        builder.ShaderResource(m_visibleClustersBuffer).View(),
         builder.ShaderResource(m_visibleClustersCounterBuffer).View()};
     bindings.fullClusters = builder.UnorderedAccess(m_fullClusterOutputsBuffer).View();
     bindings.fullCounter = builder.UnorderedAccess(m_fullClusterCounterBuffer).View();

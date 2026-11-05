@@ -4,6 +4,7 @@
 #include "BuiltinResources.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -36,31 +37,19 @@ VirtualShadowMapAllocatePagesPass::VirtualShadowMapAllocatePagesPass(
     , m_pageListHeaderBuffer(std::move(pageListHeaderBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowAllocatePagesCSMain",
-        {},
-        "CLod.VirtualShadow.AllocatePages.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 VirtualShadowMapAllocatePagesBindings VirtualShadowMapAllocatePagesPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, m_commandSignature, builder.ShaderResource(m_allocationRequestsBuffer), builder.ShaderResource(m_allocationCountBuffer),
+    org::CommandSignatureDesc signature;
+    signature.args = {{.kind = rhi::IndirectArgKind::Dispatch}};
+    signature.byteStride = sizeof(CLodReyesDispatchIndirectCommand);
+    signature.name = "CLod.VirtualShadow.AllocatePages.Signature";
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowAllocatePagesCSMain", "CLod.VirtualShadow.AllocatePages.PSO")),
+        builder.CommandSignature(std::move(signature)), builder.ShaderResource(m_allocationRequestsBuffer), builder.ShaderResource(m_allocationCountBuffer),
         builder.IndirectArguments(m_indirectArgsBuffer), builder.ShaderResource(m_clipmapInfoBuffer),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
         builder.UnorderedAccess(m_dirtyPageFlagsBuffer), builder.ShaderResource(m_freePhysicalPagesBuffer),

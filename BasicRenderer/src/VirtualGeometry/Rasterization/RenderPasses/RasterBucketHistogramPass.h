@@ -10,7 +10,7 @@ namespace org { class Buffer; }
 
 struct RasterBucketHistogramBindings {
     org::PipelineState clearPipeline, histogramPipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visibleClusters, visibleCount;
     org::ResourceBindingToken indirectArguments;
     org::DeclaredViewToken histogram, reyesOwnership, telemetry, readBaseCounter;
@@ -50,15 +50,6 @@ public:
     void Update(const org::UpdateExecutionContext& executionContext) override;
 
 private:
-    void CreatePipelines(
-        rhi::Device device,
-        rhi::PipelineLayoutHandle globalRootSignature,
-        org::PipelineState& outHistogramPipeline,
-        org::PipelineState& outClearPipeline);
-
-    org::PipelineState m_histogramPipeline;
-    org::PipelineState m_clearPipeline;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_histogramCommandSignature;
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<org::Buffer> m_histogramIndirectCommand;

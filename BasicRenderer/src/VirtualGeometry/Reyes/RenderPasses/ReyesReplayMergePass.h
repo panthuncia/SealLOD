@@ -18,7 +18,7 @@ enum class ReyesReplayMergeKind
 
 struct ReyesReplayMergeBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken source;
     org::DeclaredViewToken sourceCounter;
     org::DeclaredViewToken dest;
@@ -57,6 +57,4 @@ private:
     std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
     std::shared_ptr<org::Buffer> m_telemetryBuffer;
     uint32_t m_destQueueCapacity = 0u;
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

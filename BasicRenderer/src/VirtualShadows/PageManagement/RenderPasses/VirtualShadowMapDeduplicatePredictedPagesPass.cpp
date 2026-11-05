@@ -3,6 +3,7 @@
 
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
@@ -33,26 +34,17 @@ VirtualShadowMapDeduplicatePredictedPagesPass::VirtualShadowMapDeduplicatePredic
     , m_dirtyFlagsBuffer(std::move(dirtyFlagsBuffer))
     , m_physicalPageCount(physicalPageCount)
 {
-    m_clearStatePso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowClearPredictedPageDedupStateCSMain",
-        {},
-        "CLod.VirtualShadow.ClearPredictedPageDedupState.PSO");
-
-    m_deduplicatePso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowDeduplicatePredictedPagesCSMain",
-        {},
-        "CLod.VirtualShadow.DeduplicatePredictedPages.PSO");
 }
 
 VirtualShadowMapDeduplicatePredictedPagesBindings VirtualShadowMapDeduplicatePredictedPagesPass::Declare(org::PassBuilder& declaration)
 {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     declaration.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_clearStatePso, m_deduplicatePso, declaration.ShaderResource(m_predictiveRawPagesBuffer),
+    return {declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowClearPredictedPageDedupStateCSMain", "CLod.VirtualShadow.ClearPredictedPageDedupState.PSO")),
+        declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowDeduplicatePredictedPagesCSMain", "CLod.VirtualShadow.DeduplicatePredictedPages.PSO")),
+        declaration.ShaderResource(m_predictiveRawPagesBuffer),
         declaration.ShaderResource(m_predictiveRawPageCountBuffer),
         declaration.UnorderedAccess(m_predictedScratchBitsetBuffer),
         declaration.UnorderedAccess(m_predictedPagesBuffer),

@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
@@ -28,19 +29,13 @@ AVBOITIntegratePass::AVBOITIntegratePass(
     , m_integratedTransmittanceTexture(std::move(integratedTransmittanceTexture))
     , m_zeroTransmittanceSliceTexture(std::move(zeroTransmittanceSliceTexture))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/AVBOITIntegrate.hlsl",
-        L"CLodAVBOITIntegrateCS",
-        {},
-        "CLod.AVBOITIntegrate.PSO");
 }
 
 AVBOITIntegrateBindings AVBOITIntegratePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     AVBOITIntegrateBindings bindings{
-        m_pso,
+        builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITIntegrate.hlsl", L"CLodAVBOITIntegrateCS", "CLod.AVBOITIntegrate.PSO")),
         builder.ShaderResource(m_configBuffer),
         builder.ShaderResource(m_fitStateBuffer),
         builder.UnorderedAccess(m_occupancyTexture) };

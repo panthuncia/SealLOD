@@ -3,6 +3,7 @@
 
 #include "Runtime/Settings/SettingsManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
@@ -18,12 +19,6 @@ VirtualShadowMapDirtyHierarchyPass::VirtualShadowMapDirtyHierarchyPass(
     , m_dirtyHierarchyTexture(std::move(dirtyHierarchyTexture))
     , m_clipmapInfoBuffer(std::move(clipmapInfoBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowBuildDirtyHierarchyCSMain",
-        {},
-        "CLod.VirtualShadow.DirtyHierarchy.PSO");
 }
 
 VirtualShadowMapDirtyHierarchyBindings VirtualShadowMapDirtyHierarchyPass::Declare(org::PassBuilder& builder)
@@ -35,7 +30,8 @@ VirtualShadowMapDirtyHierarchyBindings VirtualShadowMapDirtyHierarchyPass::Decla
         mipViews.push_back({static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull), mip});
     auto hierarchy = builder.UnorderedAccess(Subresources(m_dirtyHierarchyTexture, org::FromMip{0}), std::span<const org::UavView>{mipViews});
     return {
-        m_pso,
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"CLodVirtualShadowBuildDirtyHierarchyCSMain", "CLod.VirtualShadow.DirtyHierarchy.PSO")),
         builder.ShaderResource(Subresources(m_pageTableTexture, org::Mip{0, 1}), {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),
         std::move(hierarchy.views),
         builder.ShaderResource(m_clipmapInfoBuffer)};

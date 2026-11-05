@@ -33,5 +33,4 @@ private:
     std::shared_ptr<org::PixelBuffer> m_zeroTransmittanceSliceTexture;
     std::shared_ptr<org::Buffer> m_tileCommandsBuffer;
     std::shared_ptr<org::Buffer> m_tileCountBuffer;
-    org::PipelineState m_pso;
 };

@@ -16,15 +16,13 @@ struct LuminanceHistogramFrame {
 
 class LuminanceHistogramPass : public org::TypedRenderGraphPass<LuminanceHistogramPass, LuminanceHistogramFrame, LuminanceHistogramBindings> {
 public:
-    LuminanceHistogramPass() {
-        CreateComputePSO();
-    }
-
     LuminanceHistogramBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         builder.ShaderResource(Builtin::Color::HDRColorTarget);
         builder.UnorderedAccess(Builtin::PostProcessing::LuminanceHistogram);
-        return {m_pso};
+        return {builder.Pipeline(org::ComputePipelineDesc{
+            .shader = {L"shaders/PostProcessing/LuminanceHistogram.hlsl", L"CSMain"},
+            .name = "LuminanceHistogramPassCS"})};
     }
 
     void Initialize() {
@@ -35,10 +33,6 @@ public:
 
     LuminanceHistogramFrame Prepare(const LuminanceHistogramBindings& bindings, const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
-        // A peer device (interop validation) binds its own build of the pipeline.
-        if (preparation.backendInstance != org::BackendInstanceId::Primary) {
-            PSOManager::GetInstance().ResolvePipeline(bindings.pipeline, preparation.backendInstance); // Builds the peer's pipeline once.
-        }
         const auto sampledWidth = (context->renderResolution.x + 3u) / 4u;
         const auto sampledHeight = (context->renderResolution.y + 3u) / 4u;
         return {(sampledWidth + 15u) / 16u, (sampledHeight + 15u) / 16u};
@@ -53,18 +47,5 @@ public:
 
     void ShutdownPass() {
         // Cleanup if necessary
-    }
-
-private:
-    org::PipelineState m_pso;
-
-    void CreateComputePSO()
-    {
-		m_pso = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-			L"shaders/PostProcessing/LuminanceHistogram.hlsl",
-			L"CSMain",
-		    {},
-            "LuminanceHistogramPassCS");
     }
 };

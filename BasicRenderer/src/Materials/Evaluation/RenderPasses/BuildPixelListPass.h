@@ -3,6 +3,7 @@
 #include "Render/PassBuilders.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -30,18 +31,12 @@ public:
         : m_visibleClusterResource(inputs.visibleClusters),
           m_reyesDiceQueueResource(inputs.reyesDiceQueue),
           m_patchVisibilityIndexBase(CLodReyesPatchVisibilityIndexBase(inputs.visibleClusterCapacity)) {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/VisUtil.hlsl",
-            L"BuildPixelListCS",
-            {},
-            "BuildPixelListPSO");
-
         if (!m_visibleClusterResource)
             throw std::invalid_argument("BuildPixelListPass requires the published visible-cluster resource");
     }
     BuildPixelListBindings Declare(org::PassBuilder& b) {
-        BuildPixelListBindings bindings{m_pso, b.ShaderResource(m_visibleClusterResource)};
+        BuildPixelListBindings bindings{b.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildPixelListCS", "BuildPixelListPSO")),
+            b.ShaderResource(m_visibleClusterResource)};
         if (m_reyesDiceQueueResource) {
             bindings.reyesDiceQueue = b.ShaderResource(m_reyesDiceQueueResource);
             bindings.hasReyesDiceQueue = true;
@@ -93,7 +88,6 @@ public:
     }
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterResource;
     std::shared_ptr<org::GloballyIndexedResource> m_reyesDiceQueueResource;
 	uint32_t m_patchVisibilityIndexBase = 0u;

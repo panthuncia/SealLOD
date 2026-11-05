@@ -7,6 +7,7 @@
 #include "Scene/Views/ViewManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -49,35 +50,6 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
     , m_maxDiceQueueEntries(maxDiceQueueEntries)
     , m_phaseIndex(phaseIndex)
     , m_patchVisibilityIndexBase(patchVisibilityIndexBase) {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/reyesPatchRaster.hlsl",
-        L"ReyesPatchRasterCS",
-        [] {
-            // reyesPatchRaster.hlsl carries both telemetry blocks behind defines
-            // that default to 0, so neither costs anything in a normal run.
-            std::vector<DxcDefine> defines;
-            if (IsTerrainRvtTelemetryDebugEnabled()) {
-                defines.push_back(DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" });
-            }
-            if (IsObjectReyesAtlasTelemetryDebugEnabled()) {
-                defines.push_back(DxcDefine{ L"CLOD_REYES_PATCH_RASTER_ATLAS_DEBUG_TELEMETRY", L"1" });
-            }
-            return defines;
-        }(),
-        "CLod.ReyesPatchRaster.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& builder)
@@ -126,7 +98,21 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
             Builtin::Terrain::RvtCounters,
             Builtin::Terrain::RvtStats);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    ReyesPatchRasterBindings bindings{m_pso, m_commandSignature,
+    ReyesPatchRasterBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesPatchRaster.hlsl",
+            L"ReyesPatchRasterCS", "CLod.ReyesPatchRaster.PSO", [] {
+                // reyesPatchRaster.hlsl carries both telemetry blocks behind defines
+                // that default to 0, so neither costs anything in a normal run.
+                std::vector<org::PipelineShaderDefine> defines;
+                if (IsTerrainRvtTelemetryDebugEnabled()) {
+                    defines.push_back({L"TERRAIN_RVT_TELEMETRY", L"1"});
+                }
+                if (IsObjectReyesAtlasTelemetryDebugEnabled()) {
+                    defines.push_back({L"CLOD_REYES_PATCH_RASTER_ATLAS_DEBUG_TELEMETRY", L"1"});
+                }
+                return defines;
+            }())),
+        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
         builder.ShaderResource(m_visibleClustersBuffer).View(), builder.ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         builder.ShaderResource(m_diceQueueBuffer).View(), builder.ShaderResource(m_diceQueueCounterBuffer).View(),
         builder.ShaderResource(m_rasterWorkBuffer).View(), builder.ShaderResource(m_rasterWorkCounterBuffer).View(),

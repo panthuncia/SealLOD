@@ -4,8 +4,8 @@
 
 #include <tracy/Tracy.hpp>
 
-#include "Pipeline/PipelineState/CommandSignatureManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/PassBuilders.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -33,52 +33,23 @@ CLodStreamingFeedbackSortPass::CLodStreamingFeedbackSortPass(
     , m_constants(std::move(constants))
     , m_countScatterArgs(std::move(countScatterArgs))
     , m_reduceScanArgs(std::move(reduceScanArgs)) {
-    auto& psoManager = PSOManager::GetInstance();
-    const auto computeRootSignature = psoManager.GetComputeRootSignature().GetHandle();
-    constexpr const wchar_t* shaderPath = L"Shaders/FidelityFX/ParallelSort/clodStreamingFeedbackSort.hlsl";
-
-    m_setupPso = psoManager.MakeComputePipeline(
-        computeRootSignature,
-        shaderPath,
-        L"CLodStreamingFeedbackSortSetupCS",
-        {},
-        "CLod.StreamingFeedbackSort.Setup.PSO");
-    m_countPso = psoManager.MakeComputePipeline(
-        computeRootSignature,
-        shaderPath,
-        L"CLodStreamingFeedbackSortCountCS",
-        {},
-        "CLod.StreamingFeedbackSort.Count.PSO");
-    m_reducePso = psoManager.MakeComputePipeline(
-        computeRootSignature,
-        shaderPath,
-        L"CLodStreamingFeedbackSortReduceCS",
-        {},
-        "CLod.StreamingFeedbackSort.Reduce.PSO");
-    m_scanPso = psoManager.MakeComputePipeline(
-        computeRootSignature,
-        shaderPath,
-        L"CLodStreamingFeedbackSortScanCS",
-        {},
-        "CLod.StreamingFeedbackSort.Scan.PSO");
-    m_scanAddPso = psoManager.MakeComputePipeline(
-        computeRootSignature,
-        shaderPath,
-        L"CLodStreamingFeedbackSortScanAddCS",
-        {},
-        "CLod.StreamingFeedbackSort.ScanAdd.PSO");
-    m_scatterPso = psoManager.MakeComputePipeline(
-        computeRootSignature,
-        shaderPath,
-        L"CLodStreamingFeedbackSortScatterCS",
-        {},
-        "CLod.StreamingFeedbackSort.Scatter.PSO");
 }
 
 StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBuilder& declaration) {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     StreamingFeedbackSortBindings bindings;
-    bindings.pipelines = {m_setupPso, m_countPso, m_reducePso, m_scanPso, m_scanAddPso, m_scatterPso};
+    constexpr const wchar_t* shaderPath = L"Shaders/FidelityFX/ParallelSort/clodStreamingFeedbackSort.hlsl";
+    const auto pipeline = [&](const wchar_t* entry, const char* name) {
+        return declaration.Pipeline(br::render::ComputePipeline(shaderPath, entry, name));
+    };
+    bindings.pipelines = {
+        pipeline(L"CLodStreamingFeedbackSortSetupCS", "CLod.StreamingFeedbackSort.Setup.PSO"),
+        pipeline(L"CLodStreamingFeedbackSortCountCS", "CLod.StreamingFeedbackSort.Count.PSO"),
+        pipeline(L"CLodStreamingFeedbackSortReduceCS", "CLod.StreamingFeedbackSort.Reduce.PSO"),
+        pipeline(L"CLodStreamingFeedbackSortScanCS", "CLod.StreamingFeedbackSort.Scan.PSO"),
+        pipeline(L"CLodStreamingFeedbackSortScanAddCS", "CLod.StreamingFeedbackSort.ScanAdd.PSO"),
+        pipeline(L"CLodStreamingFeedbackSortScatterCS", "CLod.StreamingFeedbackSort.Scatter.PSO")};
+    bindings.signature = declaration.CommandSignature(br::render::RawDispatchCommandSignature());
     bindings.requestCounter = declaration.ShaderResource(m_requestCounter);
     const std::shared_ptr<org::Buffer> uavs[] = {m_requestKeys, m_requests, m_keyScratch, m_payloadScratch,
         m_sumTable, m_reduceTable, m_constants};
@@ -90,13 +61,8 @@ StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBu
     return bindings;
 }
 
-StreamingFeedbackSortFrameData CLodStreamingFeedbackSortPass::Prepare(
-    const StreamingFeedbackSortBindings&, const org::PassPrepareContext&) const {
-    return {CommandSignatureManager::GetInstance().CaptureRawDispatchCommandSignature()};
-}
-
 void CLodStreamingFeedbackSortPass::Record(const StreamingFeedbackSortBindings& bindings,
-    const StreamingFeedbackSortFrameData& frame, org::PassRecordContext& context) {
+    org::PassRecordContext& context) {
     const auto& uavs = bindings.uavs;
     const auto constants = [&](const org::DeclaredViewToken& sourceKeys, const org::DeclaredViewToken& destKeys,
         const org::DeclaredViewToken& sourcePayloads, const org::DeclaredViewToken& destPayloads) {
@@ -129,7 +95,7 @@ void CLodStreamingFeedbackSortPass::Record(const StreamingFeedbackSortBindings& 
         context.BindComputePipeline(bindings.pipelines[pipelineIndex]);
         br::render::PushMiscConstants(context, c);
         if (argumentIndex < 0) context.Commands().Dispatch(1, 1, 1);
-        else context.ExecuteIndirect(frame.signature, indirect[argumentIndex]);
+        else context.ExecuteIndirect(bindings.signature, indirect[argumentIndex]);
         uavBarrier();
     };
     dispatch(0, pingPong[0], -1);

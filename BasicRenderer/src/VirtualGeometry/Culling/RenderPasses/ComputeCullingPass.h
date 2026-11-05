@@ -4,6 +4,7 @@
 // traversal one level per indirect dispatch, then dense cluster culling. See
 // ComputeCullingCommands.h for the command structure.
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -36,7 +37,8 @@ public:
 private:
     void CreateWindCache();
     void CreateFrontiers();
-    void CreatePrograms();
+    ComputeCullingPrograms DeclarePrograms(org::PassBuilder& builder) const;
+    void ValidatePrograms(const ComputeCullingPrograms& programs, org::BackendInstanceId device) const;
     ComputeCullingShadowViews DeclareVirtualShadow(org::PassBuilder& builder) const;
     void UpdateTraversalDepth(const UpdateContext& context);
     br::render::CullingUploader Uploader() const;
@@ -44,7 +46,7 @@ private:
     CullingPassConfig m_config;
     CullingPassResources m_resources;
     br::render::CullingVoxelQueueTable m_voxelQueueTable;
-    ComputeCullingPrograms m_programs;
+    mutable std::atomic<const org::PipelineStatePayload*> m_validatedPrograms{nullptr};
     ComputeCullingFrontiers m_frontiers;
     ComputeCullingWindCache m_windCache;
     uint32_t m_sizedFrontierCapacity = 0u;

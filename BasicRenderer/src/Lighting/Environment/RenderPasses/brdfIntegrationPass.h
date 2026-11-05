@@ -22,12 +22,10 @@ class BRDFIntegrationPass
           BRDFIntegrationFrame, BRDFIntegrationBindings> {
 public:
     // Renders the LUT into `target` once, in a graph of its own (Renderer::EnsureBrdfLut).
-    explicit BRDFIntegrationPass(std::shared_ptr<org::PixelBuffer> target) : m_target(std::move(target)) {
-        CreatePSO();
-    }
+    explicit BRDFIntegrationPass(std::shared_ptr<org::PixelBuffer> target) : m_target(std::move(target)) {}
 
     BRDFIntegrationBindings Declare(org::PassBuilder& builder) {
-        return {PSO, builder.RenderTarget(m_target).View()};
+        return {builder.Pipeline(PipelineDesc()), builder.RenderTarget(m_target).View()};
     }
 
     BRDFIntegrationFrame Prepare(const BRDFIntegrationBindings& bindings,
@@ -49,28 +47,19 @@ public:
 
 private:
     std::shared_ptr<org::PixelBuffer> m_target;
-    org::PipelineState PSO;
 
-    void CreatePSO() {
-        auto dev = DeviceManager::GetInstance().GetDevice();
-
-        // Compile shaders
-        ShaderInfoBundle sib;
-        sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6" };
-        sib.pixelShader = { L"shaders/brdfIntegration.hlsl", L"PSMain", L"ps_6_6" };
-        auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-
-        // Subobjects
-        auto& layout = PSOManager::GetInstance().GetRootSignature(); // rhi::PipelineLayout&
-        rhi::SubobjLayout soLayout{ layout.GetHandle() };
-        rhi::SubobjShader soVS{ rhi::ShaderStage::Vertex, rhi::DXIL(compiled.vertexShader.Get()), "FullscreenVSNoViewRayMain" };
-        rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel,  rhi::DXIL(compiled.pixelShader.Get()), "PSMain" };
+    static org::GraphicsPipelineDesc PipelineDesc() {
+        org::GraphicsPipelineDesc desc;
+        desc.name = "BRDFIntegration.PSO";
+        desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6"};
+        desc.pixel = {L"shaders/brdfIntegration.hlsl", L"PSMain", L"ps_6_6"};
+        desc.topology = rhi::PrimitiveTopology::TriangleStrip;
 
         rhi::RasterState rs{};
         rs.fill = rhi::FillMode::Solid;
         rs.cull = rhi::CullMode::None;
         rs.frontCCW = false;
-        rhi::SubobjRaster soRaster{ rs };
+        desc.raster = rs;
 
         rhi::BlendState bs{};
         bs.alphaToCoverage = false;
@@ -78,49 +67,21 @@ private:
         bs.numAttachments = 1;
         bs.attachments[0].enable = false;                    // no blending
         bs.attachments[0].writeMask = rhi::ColorWriteEnable::All;
-        rhi::SubobjBlend soBlend{ bs };
+        desc.blend = bs;
 
         rhi::DepthStencilState ds{};
         ds.depthEnable = false;      // depth disabled (write mask ignored)
         ds.depthWrite = false;
         ds.depthFunc = rhi::CompareOp::Less;
-        rhi::SubobjDepth soDepth{ ds };
+        desc.depth = ds;
 
         rhi::RenderTargets rts{};
         rts.count = 1;
         rts.formats[0] = rhi::Format::R16G16_Float;
-        rhi::SubobjRTVs soRTVs{ rts };
+        desc.renderTargets = rts;
 
-        rhi::SubobjDSV soDSV{ rhi::Format::D32_Float };
-        rhi::SubobjSample soSmp{ rhi::SampleDesc{1, 0} };
-		rhi::SubobjPrimitiveTopology soTopo{ rhi::PrimitiveTopology::TriangleStrip };
-
-        const rhi::PipelineStreamItem items[] = {
-            rhi::Make(soLayout),
-            rhi::Make(soVS),
-            rhi::Make(soPS),
-			rhi::Make(soTopo),
-            rhi::Make(soRaster),
-            rhi::Make(soBlend),
-            rhi::Make(soDepth),
-            rhi::Make(soRTVs),
-            rhi::Make(soDSV),
-            rhi::Make(soSmp),
-        };
-
-        rhi::PipelinePtr pipeline;
-        auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
-        if (Failed(result)) {
-            throw std::runtime_error(
-                std::string("Failed to create BRDF integration PSO (RHI): ") +
-                rhi::ResultName(result) +
-                " (" +
-                std::to_string(static_cast<uint32_t>(result)) +
-                ")");
-        }
-        pipeline->SetName("BRDFIntegration.PSO");
-        PSO = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
-            compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
-            soLayout.layout);
+        desc.depthFormat = rhi::Format::D32_Float;
+        desc.sample = rhi::SampleDesc{1, 0};
+        return desc;
     }
 };

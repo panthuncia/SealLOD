@@ -7,6 +7,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "../shaders/PerPassRootConstants/debugGridRootConstants.h"
 
@@ -57,7 +58,6 @@ public:
     explicit DebugGridPass(const Params& p)
         : m_params(p)
     {
-        CreatePSO();
     }
 
     DebugGridBindings Declare(org::PassBuilder& declaration);
@@ -67,8 +67,6 @@ public:
     const Params& GetParams() const { return m_params; }
 
 private:
-    org::PipelineState m_pso;
-
     Params m_params;
 
     static uint32_t PackFloat(float v)
@@ -77,17 +75,6 @@ private:
         static_assert(sizeof(u) == sizeof(v));
         std::memcpy(&u, &v, sizeof(u));
         return u;
-    }
-
-    void CreatePSO()
-    {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/DebugGrid.hlsl",
-            L"DebugGridCSMain",
-            {},
-            "DebugGridComputePSO"
-        );
     }
 };
 
@@ -99,7 +86,7 @@ inline DebugGridBindings DebugGridPass::Declare(org::PassBuilder& declaration) {
     // Needs UAV, since compute will read-modify-write (manual blend)
     builder->UnorderedAccess(Builtin::Color::HDRColorTarget);
     builder->ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, m_params};
+    return {builder->Pipeline(br::render::ComputePipeline(L"shaders/DebugGrid.hlsl", L"DebugGridCSMain", "DebugGridComputePSO")), m_params};
 }
 
 inline DebugGridFrame DebugGridPass::Prepare(const DebugGridBindings&, const org::PassPrepareContext& preparation) const {

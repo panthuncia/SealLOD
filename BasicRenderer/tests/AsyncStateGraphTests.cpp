@@ -185,7 +185,7 @@ int main() {
         signature.vt = &signatureTable;
 
         ClusterRasterBindings raster{};
-        raster.commandSignature = std::make_shared<const rhi::CommandSignaturePtr>(rhi::Device{}, signature, nullptr);
+        raster.commandSignature = org::CommandSignatureState(std::make_shared<const rhi::CommandSignaturePtr>(rhi::Device{}, signature, nullptr));
         raster.histogram = {layout, 0, 0};
         raster.visible = {layout, 1, 0};
         raster.transforms = {layout, 2, 0};

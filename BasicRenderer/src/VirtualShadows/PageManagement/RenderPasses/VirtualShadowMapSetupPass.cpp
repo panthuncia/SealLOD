@@ -9,6 +9,7 @@
 #include "Scene/ECS/RendererECSManager.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Scene/Views/ViewManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include <BasicRenderer/Extensions/VirtualShadowCasterProvider.h>
@@ -140,12 +141,6 @@ VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
     , m_virtualShadowCasters(std::move(virtualShadowCasters))
     , m_forceResetResources(forceResetResources)
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowSetupCSMain",
-        {},
-        "CLod.VirtualShadow.Setup.PSO");
 }
 
 VirtualShadowMapSetupBindings VirtualShadowMapSetupPass::Declare(org::PassBuilder& builder)
@@ -156,7 +151,9 @@ VirtualShadowMapSetupBindings VirtualShadowMapSetupPass::Declare(org::PassBuilde
         m_compactShadowCameraBuffer);
 
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowSetupCSMain", "CLod.VirtualShadow.Setup.PSO")),
+        builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
         builder.UnorderedAccess(m_allocationCountBuffer), builder.UnorderedAccess(m_dirtyPageFlagsBuffer),
         builder.UnorderedAccess(m_clipmapInfoBuffer), builder.UnorderedAccess(m_markClipmapDataBuffer),
         builder.UnorderedAccess(m_statsBuffer), builder.UnorderedAccess(m_runtimeStateBuffer),

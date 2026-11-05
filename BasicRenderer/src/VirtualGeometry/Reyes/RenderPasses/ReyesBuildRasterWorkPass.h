@@ -16,7 +16,7 @@ namespace org { class ResourceGroup; }
 
 struct ReyesBuildRasterWorkBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken diceQueue, diceCounter, readOffset, tessConfigs, output, outputCounter, telemetry;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken visibleClusters, visibleTransforms, replayQueue, replayCounter, replayOverflow;
@@ -86,6 +86,4 @@ private:
     uint32_t m_rasterWorkCapacity = 0u;
     uint32_t m_phaseIndex = 0u;
     uint32_t m_replayDiceQueueCapacity = 0u;
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

@@ -38,7 +38,7 @@ struct ComputeCullingPrograms {
     org::PipelineState traverseNodes;
     org::PipelineState traverseLeaves;
     org::PipelineState cullClusters;
-    std::shared_ptr<const rhi::CommandSignaturePtr> dispatchSignature;
+    org::CommandSignatureState dispatchSignature;
 };
 
 // Traversal working set. Node and leaf frontiers ping-pong between levels;

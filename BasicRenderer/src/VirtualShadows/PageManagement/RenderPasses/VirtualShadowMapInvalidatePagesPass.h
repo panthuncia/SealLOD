@@ -46,8 +46,6 @@ public:
         const VirtualShadowMapInvalidatePagesFrame&, org::PassRecordContext&);
 
 private:
-    org::PipelineState m_pso;
-    org::PipelineState m_boundsPso;
     std::shared_ptr<org::Buffer> m_invalidationInputsBuffer;
     std::shared_ptr<org::Buffer> m_invalidationCountBuffer;
     std::shared_ptr<org::Buffer> m_invalidatedInstancesBitsetBuffer;

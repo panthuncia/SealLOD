@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -31,18 +32,14 @@ VirtualShadowMapResolveMarkedBlocksPass::VirtualShadowMapResolveMarkedBlocksPass
     , m_directionalPageViewInfoBuffer(std::move(directionalPageViewInfoBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowResolveMarkedBlocksCSMain",
-        {},
-        "CLod.VirtualShadow.ResolveMarkedBlocks.PSO");
 }
 
 VirtualShadowMapResolveMarkedBlocksBindings VirtualShadowMapResolveMarkedBlocksPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {m_pso, builder.ShaderResource(m_markedBlocksMaskBuffer), builder.ShaderResource(m_markedBlocksListBuffer),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowResolveMarkedBlocksCSMain", "CLod.VirtualShadow.ResolveMarkedBlocks.PSO")),
+        builder.ShaderResource(m_markedBlocksMaskBuffer), builder.ShaderResource(m_markedBlocksListBuffer),
         builder.ShaderResource(m_markedBlocksCountBuffer), builder.UnorderedAccess(m_allocationRequestsBuffer),
         builder.UnorderedAccess(m_allocationCountBuffer), builder.ShaderResource(m_markClipmapDataBuffer),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_dirtyPageFlagsBuffer),

@@ -3,6 +3,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/IDescriptorService.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -21,7 +22,6 @@ class GTAODenoisePass : public org::TypedRenderGraphPass<GTAODenoisePass,
 public:
     GTAODenoisePass() {
         CreatePointClampSampler();
-        CreateXeGTAOComputePSO();
     }
 
     GTAODenoiseBindings Declare(org::PassBuilder& builder) {
@@ -29,7 +29,10 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            DenoiseLastPassPSO,
+            builder.Pipeline(org::ComputePipelineDesc{
+                .shader = {L"shaders/GTAO.hlsl", L"CSDenoiseLastPass"},
+                .name = "GTAO Denoise Last Pass",
+                .layout = org::PipelineLayoutRef::StandardGraphics()}),
             m_samplerIndex,
             builder.ShaderResource(Builtin::GTAO::WorkingAOTerm1),
             builder.ShaderResource(Builtin::GTAO::WorkingEdges),
@@ -64,8 +67,6 @@ public:
     }
 
 private:
-    org::PipelineState DenoisePassPSO;
-    org::PipelineState DenoiseLastPassPSO;
     uint32_t m_samplerIndex = 0;
 
     void CreatePointClampSampler()
@@ -84,25 +85,5 @@ private:
         samplerDesc.minLod = 0.0f;
         samplerDesc.maxLod = 0.0f;
         m_samplerIndex = DescriptorService().CreateIndexedSampler(samplerDesc);
-    }
-
-    void CreateXeGTAOComputePSO()
-    {
-        auto device = DeviceManager::GetInstance().GetDevice();
-
-		auto& psoManager = PSOManager::GetInstance();
-        DenoisePassPSO = psoManager.MakeComputePipeline(
-            psoManager.GetRootSignature().GetHandle(),
-            L"shaders/GTAO.hlsl",
-            L"CSDenoisePass",
-            {},
-			"GTAO Denoise Pass");
-
-		DenoiseLastPassPSO = psoManager.MakeComputePipeline(
-			psoManager.GetRootSignature().GetHandle(),
-			L"shaders/GTAO.hlsl",
-			L"CSDenoiseLastPass",
-			{},
-			"GTAO Denoise Last Pass");
     }
 };

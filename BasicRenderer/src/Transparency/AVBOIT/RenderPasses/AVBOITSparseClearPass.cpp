@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
@@ -22,12 +23,6 @@ AVBOITSparseClearPass::AVBOITSparseClearPass(
     , m_chromaticExtinctionTexture(std::move(chromaticExtinctionTexture))
     , m_zeroTransmittanceSliceTexture(std::move(zeroTransmittanceSliceTexture))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/ClusterLOD/AVBOITSparseClear.hlsl",
-        L"CLodAVBOITSparseClearCS",
-        {},
-        "CLod.AVBOITSparseClear.PSO");
 }
 
 AVBOITSparseClearBindings AVBOITSparseClearPass::Declare(org::PassBuilder& builder)
@@ -38,7 +33,7 @@ AVBOITSparseClearBindings AVBOITSparseClearPass::Declare(org::PassBuilder& build
             m_scalarExtinctionTexture,
             m_chromaticExtinctionTexture,
             m_zeroTransmittanceSliceTexture);
-    return {m_pso, builder.ShaderResource(m_configBuffer), builder.UnorderedAccess(m_occupancyTexture)};
+    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITSparseClear.hlsl", L"CLodAVBOITSparseClearCS", "CLod.AVBOITSparseClear.PSO")), builder.ShaderResource(m_configBuffer), builder.UnorderedAccess(m_occupancyTexture)};
 }
 
 AVBOITSparseClearFrame AVBOITSparseClearPass::Prepare(const AVBOITSparseClearBindings& bindings, const org::PassPrepareContext& preparation) const {

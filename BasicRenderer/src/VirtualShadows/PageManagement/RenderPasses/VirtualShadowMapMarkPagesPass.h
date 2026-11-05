@@ -8,6 +8,7 @@
 #include <rhi.h>
 
 #include "Render/PipelineState.h"
+#include "Render/PipelineDesc.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -23,7 +24,7 @@ struct VirtualShadowMarkFrameData {
 
 struct VirtualShadowMapMarkPagesBindings {
     org::PipelineState markPipeline, clearPipeline, clearUint2Pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken tileWork, tileCount;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken clipmapData;
@@ -53,10 +54,6 @@ public:
 
 private:
 
-    org::PipelineState m_pso;
-    org::PipelineState m_clearPso;
-    org::PipelineState m_clearUint2Pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
     std::shared_ptr<org::Buffer> m_tileWorkBuffer;
     std::shared_ptr<org::Buffer> m_tileCountBuffer;
     std::shared_ptr<org::Buffer> m_indirectArgsBuffer;

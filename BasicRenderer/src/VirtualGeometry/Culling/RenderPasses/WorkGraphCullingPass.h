@@ -132,8 +132,6 @@ private:
     std::shared_ptr<org::Buffer> m_scratchBuffer;
     std::shared_ptr<WorkGraphInitializationState> m_workGraphInitialization =
         std::make_shared<WorkGraphInitializationState>();
-    org::PipelineState m_createCommandPipelineState;
-    org::PipelineState m_clearPipelineState;
 
     // Tables the graph reads. They embed descriptors, so they are published
     // during preparation from the frame's bindings.

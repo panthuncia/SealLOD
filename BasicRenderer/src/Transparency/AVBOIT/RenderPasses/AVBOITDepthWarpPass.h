@@ -29,5 +29,4 @@ private:
     std::shared_ptr<org::Buffer> m_configBuffer;
     std::shared_ptr<org::Buffer> m_occupancyHistogramBuffer;
     std::shared_ptr<org::Buffer> m_depthWarpLUTBuffer;
-    org::PipelineState m_pso;
 };

@@ -36,13 +36,11 @@ class EnvironmentFilterPass : public org::TypedRenderGraphPass<EnvironmentFilter
     EnvironmentFilterFrame, EnvironmentFilterBindings>, public org::IDynamicDeclaredResources {
 public:
     // Runs in the environment job graph (EnvironmentJobGraph): it takes its work queue directly.
-    explicit EnvironmentFilterPass(br::render::EnvironmentPrefilterWorkQueue work) : m_work(std::move(work)) {
-        CreatePrefilterPSO();
-    }
+    explicit EnvironmentFilterPass(br::render::EnvironmentPrefilterWorkQueue work) : m_work(std::move(work)) {}
 
     EnvironmentFilterBindings Declare(org::PassBuilder& builder) {
         EnvironmentFilterBindings bindings;
-        bindings.pipeline = m_pso;
+        bindings.pipeline = builder.Pipeline(PipelineDesc());
         for (const auto& j : m_pending) {
             if (!j->work.srcCubemap || !j->work.dstPrefilteredCubemap) continue;
             EnvironmentFilterBindings::Job job{};
@@ -115,11 +113,7 @@ private:
     br::render::EnvironmentPrefilterWorkQueue::Snapshot m_pending;
     bool m_declaredResourcesChanged = true;
 
-    org::PipelineState m_pso;
-
-    void CreatePrefilterPSO() {
-        auto dev = DeviceManager::GetInstance().GetDevice();
-
+    static org::ComputePipelineDesc PipelineDesc() {
         // Static sampler s0 (linear clamp)
         rhi::StaticSamplerDesc s{};
         s.visibility = rhi::ShaderStage::Compute;
@@ -140,35 +134,16 @@ private:
         pc.set = 0;   // space0
         pc.binding = 0;   // b0
 
-        rhi::PipelineLayoutDesc ld{};
-        ld.flags = rhi::PipelineLayoutFlags::PF_None;
-        ld.pushConstants = { &pc, 1 };
-        ld.staticSamplers = { &s, 1 };
-        auto layout = std::make_shared<rhi::PipelineLayoutPtr>();
-        auto result = dev.CreatePipelineLayout(ld, *layout);
-        if (!*layout || !layout->Get().IsValid()) throw std::runtime_error("EnvFilter: layout failed");
-        layout->Get().SetName("EnvFilter.ComputeLayout");
+        org::PipelineLayoutSpec layout;
+        layout.flags = rhi::PipelineLayoutFlags::PF_None;
+        layout.pushConstants = {pc};
+        layout.staticSamplers = {s};
+        layout.name = "EnvFilter.ComputeLayout";
 
-        // Compile compute shader
-        ShaderInfoBundle sib;
-        sib.computeShader = { L"shaders/blurEnvironment.hlsl", L"CSMain", L"cs_6_6" };
-        auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-
-        // Create compute PSO
-        rhi::SubobjLayout soLayout{ layout->Get().GetHandle() };
-        rhi::SubobjShader soCS{ rhi::ShaderStage::Compute, rhi::DXIL(compiled.computeShader.Get()), "CSMain" };
-
-        const rhi::PipelineStreamItem items[] = {
-            rhi::Make(soLayout),
-            rhi::Make(soCS),
-        };
-        rhi::PipelinePtr pipeline;
-        result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
-        if (Failed(result)) {
-            throw std::runtime_error("EnvFilter: PSO failed");
-        }
-        pipeline->SetName("EnvFilter.ComputePSO");
-        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
-            compiled.resourceDescriptorSlots, layout, soLayout.layout);
+        org::ComputePipelineDesc desc;
+        desc.shader = {L"shaders/blurEnvironment.hlsl", L"CSMain", L"cs_6_6"};
+        desc.name = "EnvFilter.ComputePSO";
+        desc.layout = org::PipelineLayoutRef::Custom(std::move(layout));
+        return desc;
     }
 };

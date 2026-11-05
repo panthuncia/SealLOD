@@ -69,6 +69,4 @@ private:
     uint32_t m_phaseIndex = 0u;
     bool m_clearDiceQueueCounter = true;
     uint32_t m_ownershipBitsetWordCount = 0u;
-    org::PipelineState m_clearCountersPso;
-    org::PipelineState m_clearOwnershipBitsetPso;
 };

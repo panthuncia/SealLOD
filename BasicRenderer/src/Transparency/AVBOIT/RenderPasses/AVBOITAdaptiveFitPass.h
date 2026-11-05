@@ -30,5 +30,4 @@ public:
 private:
     std::shared_ptr<org::Buffer> m_configBuffer;
     std::shared_ptr<org::Buffer> m_fitStateBuffer;
-    org::PipelineState m_pso;
 };

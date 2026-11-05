@@ -42,6 +42,15 @@ inline void DispatchComputeIndirect(org::RecordingContext& context, const org::P
     context.ExecuteIndirect(signature, arguments, argumentOffset, maxCommandCount, count, countOffset);
 }
 
+inline void DispatchComputeIndirect(org::RecordingContext& context, const org::PipelineState& pipeline,
+    const MiscConstants& constants, const org::CommandSignatureState& signature,
+    org::ResourceBindingToken arguments, uint64_t argumentOffset = 0, uint32_t maxCommandCount = 1,
+    std::optional<org::ResourceBindingToken> count = std::nullopt, uint64_t countOffset = 0) {
+    context.BindComputePipeline(pipeline);
+    PushMiscConstants(context, constants);
+    context.ExecuteIndirect(signature, arguments, argumentOffset, maxCommandCount, count, countOffset);
+}
+
 // One full-screen triangle into `color`.
 inline void DrawFullscreen(org::RecordingContext& context, const org::PipelineState& pipeline,
     const MiscConstants& constants, const rhi::ColorAttachment& color, uint32_t width, uint32_t height,

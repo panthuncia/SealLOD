@@ -3,6 +3,7 @@
 
 #include "Runtime/Settings/SettingsManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
@@ -29,12 +30,6 @@ VirtualShadowMapClearPagesPass::VirtualShadowMapClearPagesPass(
     , m_pageViewInfoBuffer(std::move(pageViewInfoBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowClearPhysicalPagesCSMain",
-        { { L"CLOD_VSM_TWO_LAYER_CLEAR_VERSION", L"2" } },
-        "CLod.VirtualShadow.ClearPhysicalPages.PSO");
 }
 
 VirtualShadowMapClearPagesBindings VirtualShadowMapClearPagesPass::Declare(org::PassBuilder& builder)
@@ -42,7 +37,10 @@ VirtualShadowMapClearPagesBindings VirtualShadowMapClearPagesPass::Declare(org::
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(Builtin::CameraBuffer);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, builder.UnorderedAccess(m_staticPagesTexture), builder.UnorderedAccess(m_dynamicPagesTexture),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowClearPhysicalPagesCSMain", "CLod.VirtualShadow.ClearPhysicalPages.PSO",
+                {{L"CLOD_VSM_TWO_LAYER_CLEAR_VERSION", L"2"}})),
+        builder.UnorderedAccess(m_staticPagesTexture), builder.UnorderedAccess(m_dynamicPagesTexture),
         builder.UnorderedAccess(m_dirtyPageFlagsBuffer), builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}),
         builder.UnorderedAccess(m_pageMetadataBuffer), builder.ShaderResource(m_clipmapInfoBuffer),
         builder.UnorderedAccess(m_pageViewInfoBuffer), builder.UnorderedAccess(m_statsBuffer),

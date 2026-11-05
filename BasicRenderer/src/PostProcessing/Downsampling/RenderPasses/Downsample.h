@@ -12,6 +12,7 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/Buffers/LazyDynamicStructuredBuffer.h"
@@ -49,10 +50,6 @@ class DownsamplePass : public org::TypedRenderGraphPass<DownsamplePass,
     org::EmptyPassFrameData, DownsampleBindings>, public org::IDynamicDeclaredResources {
 public:
 
-    DownsamplePass()
-    {
-        CreateDownsampleComputePSO();
-    }
     ~DownsamplePass() {
     }
 
@@ -60,11 +57,22 @@ public:
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         SyncMapInfos(m_activeDepthMaps);
         DownsampleBindings bindings;
-        bindings.standardPipeline = downsamplePassPSO;
-        bindings.arrayPipeline = downsampleArrayPSO;
         bindings.maps.reserve(m_perMapInfo.size());
+        bool declaredStandard = false, declaredArray = false;
         for (auto& [resourceID, map] : m_perMapInfo) {
             (void)resourceID;
+            // Only the variants some map binds.
+            if (map.isArrayLike && !declaredArray) {
+                bindings.arrayPipeline = declaration.Pipeline(br::render::ComputePipeline(
+                    L"shaders/downsample.hlsl", L"DownsampleCSMain", "DownsampleCS[Array]",
+                    {{L"DOWNSAMPLE_ARRAY", L"1"}}));
+                declaredArray = true;
+            }
+            else if (!map.isArrayLike && !declaredStandard) {
+                bindings.standardPipeline = declaration.Pipeline(br::render::ComputePipeline(
+                    L"shaders/downsample.hlsl", L"DownsampleCSMain", "DownsampleCS"));
+                declaredStandard = true;
+            }
             const uint32_t variant = map.isArrayLike
                 ? static_cast<uint32_t>(org::SRVViewType::Texture2DArray) : UINT32_MAX;
             auto source = declaration.ShaderResource(
@@ -180,8 +188,6 @@ private:
     std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>> m_activeDepthMaps;
 
 
-    org::PipelineState downsamplePassPSO;
-	org::PipelineState downsampleArrayPSO;
     bool m_declaredResourcesChanged = true;
 
     static std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>> CollectActiveDepthMaps(
@@ -323,30 +329,6 @@ private:
         for (const auto& [resourceID, depthMap] : activeDepthMaps) {
             CreateOrUpdateMapInfo(resourceID, depthMap);
         }
-    }
-
-    void CreateDownsampleComputePSO()
-    {
-		auto& psoManager = PSOManager::GetInstance();
-        auto& layout = psoManager.GetComputeRootSignature();
-
-        // Plain downsample
-        downsamplePassPSO = psoManager.MakeComputePipeline(
-            layout.GetHandle(),
-            L"shaders/downsample.hlsl",
-            L"DownsampleCSMain",
-            {},                         // no defines
-            "DownsampleCS"
-        );
-
-        // Array variant (DOWNSAMPLE_ARRAY=1)
-        downsampleArrayPSO = psoManager.MakeComputePipeline(
-            layout.GetHandle(),
-            L"shaders/downsample.hlsl",
-            L"DownsampleCSMain",
-            { DxcDefine{ L"DOWNSAMPLE_ARRAY", L"1" } },
-            "DownsampleCS[Array]"
-        );
     }
 
 };

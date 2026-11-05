@@ -1,4 +1,8 @@
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <OpenRenderGraph/Runtime.h>
+#include <Render/PipelineLibrary.h>
+#include <format>
+#include <variant>
 #include "Runtime/Settings/RendererSettingsHelpers.h"
 #include <ORGModuleServices/CompileFlightRegistry.h>
 
@@ -1891,48 +1895,6 @@ org::PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe,
     return out;
 }
 
-void PSOManager::BuildComputePipelineForBackend(const ComputeRecipe& recipe, const org::PipelineState& pipeline,
-	org::BackendInstanceId backendInstance) {
-	if (backendInstance == org::BackendInstanceId::Primary || pipeline.HasBackendPipeline(backendInstance)) return;
-	std::vector<DxcDefine> defines;
-	defines.reserve(recipe.defines.size());
-	for (const OwnedDefine& define : recipe.defines) defines.push_back({ define.name.c_str(), define.value.c_str() });
-	ShaderInfoBundle sib;
-	sib.computeShader = { recipe.shaderPath, recipe.entryPoint, L"cs_6_6" };
-	sib.defines = defines;
-	auto compiled = CompileShaders(sib, backendInstance);
-	rhi::SubobjLayout layout{ GetComputeRootSignature(backendInstance).GetHandle() };
-	rhi::SubobjShader shader{ rhi::ShaderStage::Compute, rhi::DXIL(compiled.computeShader.Get()), ws2s(recipe.entryPoint) };
-	const rhi::PipelineStreamItem items[] = { rhi::Make(layout), rhi::Make(shader) };
-	rhi::PipelinePtr pso;
-	auto device = backendInstance == org::BackendInstanceId::Primary
-		? DeviceManager::GetInstance().GetDevice() : DeviceManager::GetInstance().GetPeerDevice();
-	const auto result = device.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pso);
-	if (Failed(result)) throw std::runtime_error("Failed to create backend-local compute PSO");
-	if (!recipe.debugName.empty()) {
-		const std::string name = recipe.debugName + ".backend" + std::to_string(static_cast<uint8_t>(backendInstance));
-		pso->SetName(name.c_str());
-	}
-	pipeline.AttachBackendPipeline(backendInstance, std::move(pso), compiled.resourceIDsHash,
-		compiled.resourceDescriptorSlots, CaptureLayoutOwner(layout.layout), layout.layout);
-	spdlog::info("PSOManager materialized compute pipeline '{}' for backend instance {}",
-		recipe.debugName, static_cast<uint8_t>(backendInstance));
-}
-
-const rhi::Pipeline& PSOManager::ResolvePipeline(const org::PipelineState& pipeline, org::BackendInstanceId backendInstance) {
-	if (backendInstance == org::BackendInstanceId::Primary) return pipeline.GetAPIPipelineState();
-	if (!pipeline.HasBackendPipeline(backendInstance)) {
-		std::scoped_lock lock(m_livePipelineMutex);
-		for (auto& [id, entry] : m_livePipelines) {
-			if (entry.state.GetSlot() == pipeline.GetSlot() && !entry.computeRecipe.shaderPath.empty()) {
-				BuildComputePipelineForBackend(entry.computeRecipe, pipeline, backendInstance);
-				break;
-			}
-		}
-	}
-	return pipeline.GetAPIPipelineState(backendInstance);
-}
-
 org::PipelineState PSOManager::RegisterComputePipeline(org::PipelineState state, ComputeRecipe recipe)
 {
     std::scoped_lock lock(m_livePipelineMutex);
@@ -2007,21 +1969,6 @@ org::PipelineState PSOManager::RegisterPipeline(
     entry.generations.push_back(state.GetPayload());
     m_livePipelines.emplace(id, std::move(entry));
     return state;
-}
-
-org::PipelineState PSOManager::RegisterExternalPipeline(
-    org::PipelineState state,
-    std::string id,
-    std::string displayName,
-    br::extensions::PipelineKind kind,
-    std::function<org::PipelineState()> rebuild)
-{
-    return RegisterPipeline(
-        std::move(state),
-        std::move(id),
-        std::move(displayName),
-        kind,
-        std::move(rebuild));
 }
 
 std::vector<DxcDefine> PSOManager::GetRasterShaderDefines(MaterialRasterFlags rasterFlags) {
@@ -2703,6 +2650,12 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info, org::Backe
 	return CompileShadersForBackend(info, backend);
 }
 
+ShaderBundle PSOManager::CompileShadersForPipelineLibrary(const ShaderInfoBundle& info, org::BackendInstanceId backendInstance, bool bypassCache) {
+	if (!bypassCache) return CompileShaders(info, backendInstance);
+	ScopedShaderArtifactCacheBypass bypass;
+	return CompileShaders(info, backendInstance);
+}
+
 // for string delimiter
 std::vector<std::string> split(std::string s, std::string delimiter) {
     size_t pos_start = 0, pos_end, delim_len = delimiter.length();
@@ -3174,6 +3127,49 @@ const rhi::PipelineLayout& PSOManager::GetComputeRootSignature(org::BackendInsta
 	return m_layoutGeneration->peerComputeRootSignature.Get();
 }
 
+namespace {
+struct LibraryPipeline {
+    std::string id;
+    org::PipelineLibraryEntryPtr entry;
+};
+
+// The library's live pipelines under stable ids: the pipeline's name, and its content key when several share the name.
+std::vector<LibraryPipeline> ListLibraryPipelines() {
+    std::vector<LibraryPipeline> result;
+    const auto* runtime = org::Runtime::Current();
+    if (!runtime || !runtime->Pipelines()) return result;
+    std::map<std::string, uint32_t> nameCounts;
+    auto entries = runtime->Pipelines()->LiveEntries();
+    for (const auto& entry : entries) ++nameCounts[entry->Name()];
+    result.reserve(entries.size());
+    for (auto& entry : entries) {
+        auto id = entry->Name();
+        if (nameCounts[id] > 1) id += std::format("#{:016x}", entry->Key());
+        result.push_back({std::move(id), std::move(entry)});
+    }
+    return result;
+}
+
+std::optional<LibraryPipeline> FindLibraryPipeline(const std::string& id) {
+    for (auto& pipeline : ListLibraryPipelines()) if (pipeline.id == id) return std::move(pipeline);
+    return std::nullopt;
+}
+
+std::vector<std::string> LibraryPipelineShaderPaths(const org::PipelineDesc& desc) {
+    std::vector<std::string> paths;
+    std::visit([&](const auto& value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, org::ComputePipelineDesc>) {
+            paths.push_back(ws2s(value.shader.path));
+        } else {
+            for (const auto* shader : {&value.vertex, &value.amplification, &value.mesh, &value.pixel})
+                if (*shader) paths.push_back(ws2s((*shader)->path));
+        }
+    }, desc);
+    return paths;
+}
+}
+
 bool PSOManager::RebuildAllPipelines(std::string& error) {
     struct RebuildTarget {
         std::string id;
@@ -3238,6 +3234,34 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
         error = "unknown shader compilation failure";
     }
 
+    // The library's pipelines, on every device they were built for. The caller stalled the GPU and rebuilds the graph after.
+    org::PipelineLibrary* library = nullptr;
+    if (const auto* runtime = org::Runtime::Current()) library = runtime->Pipelines().get();
+    size_t libraryRebuilt = 0;
+    if (error.empty() && library) {
+        auto pipelines = ListLibraryPipelines();
+        auto remaining = std::make_shared<std::atomic<size_t>>(pipelines.size());
+        auto failureMutex = std::make_shared<std::mutex>();
+        auto failure = std::make_shared<std::string>();
+        for (const auto& pipeline : pipelines) {
+            org::PipelineRebuildOptions rebuild;
+            rebuild.bypassCache = false;
+            rebuild.allowInterfaceChange = true;
+            rebuild.completed = [remaining, failureMutex, failure, id = pipeline.id](const std::string& buildError) {
+                if (!buildError.empty()) {
+                    std::scoped_lock failureLock(*failureMutex);
+                    if (failure->empty()) *failure = "pipeline '" + id + "': " + buildError;
+                }
+                if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) remaining->notify_all();
+            };
+            library->Rebuild(pipeline.entry, std::move(rebuild));
+        }
+        for (auto left = remaining->load(); left; left = remaining->load()) remaining->wait(left);
+        std::scoped_lock failureLock(*failureMutex);
+        error = *failure;
+        libraryRebuilt = pipelines.size();
+    }
+
     std::scoped_lock lock(m_livePipelineMutex);
     if (!error.empty()) {
         for (const RebuildTarget& target : targets) {
@@ -3291,8 +3315,9 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
         }
         entry.compiling = false;
     }
+    if (library) library->PublishRebuilt();
     m_pipelineEpoch.fetch_add(1, std::memory_order_acq_rel);
-    spdlog::info("PSOManager: globally rebuilt {} registered pipelines", candidates.size());
+    spdlog::info("PSOManager: globally rebuilt {} registered and {} described pipelines", candidates.size(), libraryRebuilt);
     return true;
 }
 
@@ -3301,6 +3326,26 @@ std::vector<br::diagnostics::LivePipelineInfo> PSOManager::ListPipelines() const
     std::scoped_lock lock(m_livePipelineMutex);
     std::vector<br::diagnostics::LivePipelineInfo> result;
     result.reserve(m_livePipelines.size());
+    for (const auto& pipeline : ListLibraryPipelines()) {
+        const auto payload = pipeline.entry->State().GetPayload();
+        br::diagnostics::LivePipelineInfo info;
+        info.id = pipeline.id;
+        info.displayName = pipeline.entry->Name();
+        info.kind = std::holds_alternative<org::ComputePipelineDesc>(pipeline.entry->Desc())
+            ? br::extensions::PipelineKind::Compute : br::extensions::PipelineKind::Graphics;
+        info.shaderPaths = LibraryPipelineShaderPaths(pipeline.entry->Desc());
+        info.activeGeneration = payload ? payload->generation : 0;
+        info.sourceHash = payload ? payload->sourceHash : 0;
+        info.bytecodeHash = payload ? payload->bytecodeHash : 0;
+        info.label = payload ? payload->label : std::string{};
+        if (payload) {
+            if (const auto ids = m_libraryJobs.defineOverrides.find(pipeline.id); ids != m_libraryJobs.defineOverrides.end())
+                if (const auto generation = ids->second.find(payload->generation); generation != ids->second.end())
+                    info.defineOverrides = generation->second;
+        }
+        info.compiling = m_libraryJobs.compiling.contains(pipeline.id);
+        result.push_back(std::move(info));
+    }
     for (const auto& [_, entry] : m_livePipelines) {
         const auto payload = entry.state.GetPayload();
         br::diagnostics::LivePipelineInfo info;
@@ -3342,7 +3387,42 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, br::diagnos
         std::scoped_lock lock(m_livePipelineMutex);
         auto entryIt = m_livePipelines.find(pipelineId);
         if (entryIt == m_livePipelines.end()) {
-            throw std::runtime_error("Unknown live pipeline '" + pipelineId + "'");
+            auto library = FindLibraryPipeline(pipelineId);
+            if (!library) throw std::runtime_error("Unknown live pipeline '" + pipelineId + "'");
+            if (!m_libraryJobs.compiling.insert(pipelineId).second)
+                throw std::runtime_error("Pipeline '" + pipelineId + "' already has a live compile in progress");
+            m_liveJobs.emplace(jobId, br::diagnostics::LiveJobInfo{
+                .id = jobId,
+                .pipelineId = pipelineId,
+                .state = br::diagnostics::LiveJobState::Compiling
+            });
+            org::PipelineRebuildOptions rebuild;
+            rebuild.label = options.label;
+            std::map<std::string, std::string> defineOverrides;
+            for (const auto& [name, value] : options.defineOverrides) {
+                rebuild.defineOverrides.push_back({name, value});
+                defineOverrides.emplace(ws2s(name), ws2s(value));
+            }
+            rebuild.completed = [this, jobId, pipelineId](const std::string& error) {
+                // Rebuild can complete inline, under this function's lock, when the task service refuses the build.
+                TaskSchedulerManager::GetInstance().Submit(TaskLane::Background, TaskDomain::ShaderCompile, "PSOManager::LiveRecompileDone",
+                    [this, jobId, pipelineId, error] {
+                        std::scoped_lock lock(m_livePipelineMutex);
+                        m_libraryJobs.compiling.erase(pipelineId);
+                        auto& job = m_liveJobs.at(jobId);
+                        if (error.empty()) {
+                            job.state = br::diagnostics::LiveJobState::ReadyToPublish;
+                            m_libraryJobs.awaitingPublish.push_back(jobId);
+                        } else {
+                            job.state = br::diagnostics::LiveJobState::Failed;
+                            job.error = error;
+                        }
+                    });
+            };
+            const auto generation = org::Runtime::Current()->Pipelines()->Rebuild(library->entry, std::move(rebuild));
+            m_liveJobs.at(jobId).generation = generation;
+            m_libraryJobs.defineOverrides[pipelineId][generation] = std::move(defineOverrides);
+            return jobId;
         }
         if (entryIt->second.compiling) {
             throw std::runtime_error("Pipeline '" + pipelineId + "' already has a live compile in progress");
@@ -3437,7 +3517,20 @@ uint64_t PSOManager::RequestActivation(const std::string& pipelineId, uint64_t g
     std::scoped_lock lock(m_livePipelineMutex);
     const auto entryIt = m_livePipelines.find(pipelineId);
     if (entryIt == m_livePipelines.end()) {
-        throw std::runtime_error("Unknown live pipeline '" + pipelineId + "'");
+        auto library = FindLibraryPipeline(pipelineId);
+        if (!library) throw std::runtime_error("Unknown live pipeline '" + pipelineId + "'");
+        if (m_libraryJobs.compiling.contains(pipelineId))
+            throw std::runtime_error("Pipeline '" + pipelineId + "' has a live compile in progress");
+        if (!org::Runtime::Current()->Pipelines()->Activate(library->entry, generation))
+            throw std::runtime_error("Pipeline '" + pipelineId + "' has no retained generation " + std::to_string(generation));
+        m_liveJobs.emplace(jobId, br::diagnostics::LiveJobInfo{
+            .id = jobId,
+            .pipelineId = pipelineId,
+            .state = br::diagnostics::LiveJobState::ReadyToPublish,
+            .generation = generation
+        });
+        m_libraryJobs.awaitingPublish.push_back(jobId);
+        return jobId;
     }
     if (entryIt->second.compiling) {
         throw std::runtime_error("Pipeline '" + pipelineId + "' has a live compile in progress");
@@ -3470,6 +3563,15 @@ bool PipelineResourcesMatch(const org::PipelineResources& left, const org::Pipel
 void PSOManager::PublishPendingLivePipelines(std::vector<PipelineRetirementPoint> retirementPoints)
 {
     std::scoped_lock lock(m_livePipelineMutex);
+    // The library published a job's result before reporting it, or does so here.
+    if (const auto* runtime = org::Runtime::Current(); runtime && runtime->Pipelines()) runtime->Pipelines()->PublishRebuilt();
+    for (const auto jobId : m_libraryJobs.awaitingPublish) {
+        auto& job = m_liveJobs.at(jobId);
+        job.state = br::diagnostics::LiveJobState::Published;
+        m_pipelineEpoch.fetch_add(1, std::memory_order_acq_rel);
+        spdlog::info("PSOManager: published live pipeline '{}' generation={}", job.pipelineId, job.generation);
+    }
+    m_libraryJobs.awaitingPublish.clear();
     while (!m_pendingLivePublications.empty()) {
         PendingPublication publication = std::move(m_pendingLivePublications.front());
         m_pendingLivePublications.pop_front();

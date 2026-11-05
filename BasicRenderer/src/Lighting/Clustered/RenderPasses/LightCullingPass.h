@@ -2,6 +2,7 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Runtime/Settings/SettingsManager.h"
@@ -18,8 +19,6 @@ struct LightCullingFrame {
 
 class LightCullingPass : public org::TypedRenderGraphPass<LightCullingPass, LightCullingFrame, LightCullingBindings> {
 public:
-	LightCullingPass() { CreatePSO(); }
-
 	~LightCullingPass() {
 	}
 
@@ -28,7 +27,7 @@ public:
 		builder.UnorderedAccess(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer, Builtin::Light::PagesCounter);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
-		return {m_PSO};
+		return {builder.Pipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"CSMain", "Light Culling CS"))};
 	}
 
 	void Initialize() {
@@ -68,15 +67,4 @@ private:
 
 	org::Buffer* m_pLightPagesCounter = nullptr;
 	org::ResourceRegistry::RegistryHandle m_lightPagesCounterHandle;
-
-	void CreatePSO() {
-		m_PSO = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-			L"shaders/lightCulling.hlsl",
-			L"CSMain",
-			{},
-			"Light Culling CS");
-	}
-
-	org::PipelineState m_PSO;
 };

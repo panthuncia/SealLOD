@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Scene/ECS/RendererECSManager.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "BuiltinResources.h"
@@ -39,18 +40,6 @@ VirtualShadowMapInvalidatePagesPass::VirtualShadowMapInvalidatePagesPass(
     , m_statsBuffer(std::move(statsBuffer))
     , m_extensionInvalidations(std::move(extensionInvalidations))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowInvalidatePagesCSMain",
-        {},
-        "CLod.VirtualShadow.InvalidatePages.PSO");
-    m_boundsPso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowInvalidateBoundsCSMain",
-        {},
-        "CLod.VirtualShadow.InvalidateBounds.PSO");
     m_boundsInvalidationBuffer = org::DynamicBuffer::CreateShared(
         sizeof(float) * 4u + sizeof(uint32_t) * 4u,
         CLodVirtualShadowMaxInvalidationInputs,
@@ -74,7 +63,11 @@ VirtualShadowMapInvalidatePagesBindings VirtualShadowMapInvalidatePagesPass::Dec
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, m_boundsPso, builder.ShaderResource(m_invalidationInputsBuffer), builder.ShaderResource(m_invalidationCountBuffer),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowInvalidatePagesCSMain", "CLod.VirtualShadow.InvalidatePages.PSO")),
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowInvalidateBoundsCSMain", "CLod.VirtualShadow.InvalidateBounds.PSO")),
+        builder.ShaderResource(m_invalidationInputsBuffer), builder.ShaderResource(m_invalidationCountBuffer),
         builder.ShaderResource(m_clipmapInfoBuffer), builder.ShaderResource(m_boundsInvalidationBuffer),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_dirtyPageFlagsBuffer),
         builder.UnorderedAccess(m_pageMetadataBuffer), builder.UnorderedAccess(m_directionalPageViewInfoBuffer),

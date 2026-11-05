@@ -94,18 +94,6 @@ ClusterRasterizationPass::ClusterRasterizationPass(
     m_getPunctualLightingEnabled = settingsManager.getSettingGetter<bool>("enablePunctualLighting");
     m_getShadowsEnabled = settingsManager.getSettingGetter<bool>("enableShadows");
     m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
-
-
-    rhi::IndirectArg args[] = {
-        {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
-        {.kind = rhi::IndirectArgKind::DispatchMesh }
-    };
-    auto device = DeviceManager::GetInstance().GetDevice();
-    m_rasterizationCommandSignature = std::make_shared<rhi::CommandSignaturePtr>();
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 2), sizeof(RasterizeClustersCommand) },
-        PSOManager::GetInstance().GetRootSignature().GetHandle(),
-        *m_rasterizationCommandSignature);
 }
 
 ClusterRasterizationPass::~ClusterRasterizationPass() = default;
@@ -138,7 +126,17 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
     builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     builder.IsGeometryPass();
     ClusterRasterBindings bindings;
-    bindings.commandSignature = m_rasterizationCommandSignature;
+    {
+        org::CommandSignatureDesc signature;
+        signature.args = {
+            {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
+            {.kind = rhi::IndirectArgKind::DispatchMesh }
+        };
+        signature.byteStride = sizeof(RasterizeClustersCommand);
+        signature.layout = org::PipelineLayoutRef::StandardGraphics();
+        signature.name = "CLod.ClusterRasterization.Signature";
+        bindings.commandSignature = builder.CommandSignature(std::move(signature));
+    }
     bindings.histogram = builder.ShaderResource(m_rasterBucketsHistogramBuffer);
     bindings.visible = builder.ShaderResource(m_compactedVisibleClustersBuffer);
     bindings.transforms = builder.ShaderResource(m_compactedVisibleClusterTransformIndicesBuffer);

@@ -3,6 +3,7 @@
 
 #include "Scene/Views/ViewManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
 #include "Resources/PixelBuffer.h"
@@ -13,17 +14,12 @@
 
 PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass(bool writeProjectedDepth)
     : m_writeProjectedDepth(writeProjectedDepth) {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"shaders/canonicalSurface.hlsl",
-        L"PerViewPrimaryDepthCopyCS",
-        {},
-        "PerViewPrimaryDepthCopyPSO");
 }
 
 PerViewLinearDepthCopyBindings PerViewLinearDepthCopyPass::Declare(org::PassBuilder& builder) {
     PerViewLinearDepthCopyBindings bindings{};
-    bindings.pipeline = m_pso;
+    bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(
+        L"shaders/canonicalSurface.hlsl", L"PerViewPrimaryDepthCopyCS", "PerViewPrimaryDepthCopyPSO"));
     bindings.views.reserve(m_views.size());
     for (const auto& view : m_views) {
         bindings.views.push_back({builder.ShaderResource(view.visibility),

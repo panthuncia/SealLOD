@@ -40,7 +40,6 @@ public:
     void ShutdownPass();
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
     std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
     std::shared_ptr<org::Buffer> m_allocationCountBuffer;

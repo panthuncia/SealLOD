@@ -3,6 +3,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BuiltinResources.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -29,36 +30,6 @@ VirtualShadowMapMarkPagesPass::VirtualShadowMapMarkPagesPass(
     , m_markedBlocksCountBuffer(std::move(markedBlocksCountBuffer))
     , m_receiverSubpageMaskBuffer(std::move(receiverSubpageMaskBuffer))
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowMarkBlocksCSMain",
-        {},
-        "CLod.VirtualShadow.MarkPages.PSO");
-
-    m_clearPso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClearUintStructuredBufferCSMain",
-        {},
-        "CLod.VirtualShadow.MarkBlocks.Clear.PSO");
-    m_clearUint2Pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClearUint2StructuredBufferCSMain",
-        {},
-        "CLod.VirtualShadow.ReceiverMask.ClearUint2.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>();
-    auto device = DeviceManager::GetInstance().GetDevice();
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        *m_commandSignature);
 }
 
 VirtualShadowMapMarkPagesBindings VirtualShadowMapMarkPagesPass::Declare(org::PassBuilder& declaration)
@@ -66,8 +37,18 @@ VirtualShadowMapMarkPagesBindings VirtualShadowMapMarkPagesPass::Declare(org::Pa
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     builder->ShaderResource(Builtin::Shadows::CLodCompactMainCamera);
+    org::CommandSignatureDesc signature;
+    signature.args = {{.kind = rhi::IndirectArgKind::Dispatch}};
+    signature.byteStride = sizeof(CLodReyesDispatchIndirectCommand);
+    signature.name = "CLod.VirtualShadow.MarkPages.Signature";
     VirtualShadowMapMarkPagesBindings bindings{
-        m_pso, m_clearPso, m_clearUint2Pso, m_commandSignature,
+        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"CLodVirtualShadowMarkBlocksCSMain", "CLod.VirtualShadow.MarkPages.PSO")),
+        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"ClearUintStructuredBufferCSMain", "CLod.VirtualShadow.MarkBlocks.Clear.PSO")),
+        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"ClearUint2StructuredBufferCSMain", "CLod.VirtualShadow.ReceiverMask.ClearUint2.PSO")),
+        builder->CommandSignature(std::move(signature)),
         builder->ShaderResource(m_tileWorkBuffer), builder->ShaderResource(m_tileCountBuffer),
         builder->IndirectArguments(m_indirectArgsBuffer), builder->ShaderResource(m_markClipmapDataBuffer),
         builder->UnorderedAccess(m_markedBlocksMaskBuffer), builder->UnorderedAccess(m_markedBlocksListBuffer),

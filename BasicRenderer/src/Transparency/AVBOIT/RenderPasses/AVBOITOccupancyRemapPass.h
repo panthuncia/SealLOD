@@ -32,5 +32,4 @@ private:
     std::shared_ptr<org::PixelBuffer> m_occupancyTexture;
     std::shared_ptr<org::PixelBuffer> m_occupancySliceMaskTexture;
     std::shared_ptr<org::Buffer> m_depthWarpLUTBuffer;
-    org::PipelineState m_pso;
 };

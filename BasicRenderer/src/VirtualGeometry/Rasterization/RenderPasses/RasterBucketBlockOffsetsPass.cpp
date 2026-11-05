@@ -3,6 +3,7 @@
 
 #include "Materials/MaterialManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -20,17 +21,13 @@ RasterBucketBlockOffsetsPass::RasterBucketBlockOffsetsPass(
     , m_scannedBlockSumsBuffer(std::move(scannedBlockSumsBuffer))
     , m_totalCountBuffer(std::move(totalCountBuffer))
     , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly) {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"RasterBucketsBlockOffsetsCS",
-        {},
-        "CLod_RasterBucketsBlockOffsetsPSO");
 }
 
 RasterBucketBlockOffsetsBindings RasterBucketBlockOffsetsPass::Declare(org::PassBuilder& builder) {
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, builder.UnorderedAccess(m_offsetsBuffer), builder.ShaderResource(m_blockSumsBuffer),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"RasterBucketsBlockOffsetsCS", "CLod_RasterBucketsBlockOffsetsPSO")),
+        builder.UnorderedAccess(m_offsetsBuffer), builder.ShaderResource(m_blockSumsBuffer),
         builder.UnorderedAccess(m_scannedBlockSumsBuffer), builder.UnorderedAccess(m_totalCountBuffer)};
 }
 

@@ -13,7 +13,7 @@ namespace org { class ResourceGroup; }
 
 struct ReyesSeedPatchesBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible;
     org::DeclaredViewToken owned;
     org::DeclaredViewToken ownedCounter;
@@ -54,6 +54,4 @@ private:
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     uint32_t m_maxSplitQueueEntries = 0u;
     uint32_t m_phaseIndex = 0u;
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

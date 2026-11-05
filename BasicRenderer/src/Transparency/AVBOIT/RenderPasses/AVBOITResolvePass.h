@@ -35,5 +35,4 @@ private:
     std::shared_ptr<org::PixelBuffer> m_accumulationTexture;
     std::shared_ptr<org::PixelBuffer> m_normalizationTexture;
     std::shared_ptr<org::PixelBuffer> m_shadingExtinctionTexture;
-    org::PipelineState m_pso;
 };

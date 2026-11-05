@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/Runtime/UploadTypes.h"
 #include "BuiltinResources.h"
@@ -37,21 +38,9 @@ ReyesQueueResetPass::ReyesQueueResetPass(
     , m_replayDiceQueueOverflowCounter(std::move(replayDiceQueueOverflowCounter))
     , m_phaseIndex(phaseIndex) {
     m_clearDiceQueueCounter = clearDiceQueueCounter;
-    m_clearCountersPso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClearReyesQueueCountersCSMain",
-        {},
-        "CLod.ReyesQueueReset.ClearCounters.PSO");
 
     if (m_ownershipBitsetBuffer) {
         m_ownershipBitsetWordCount = static_cast<uint32_t>(m_ownershipBitsetBuffer->GetSize() / sizeof(uint32_t));
-        m_clearOwnershipBitsetPso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"Shaders/ClusterLOD/clodUtil.hlsl",
-            L"ClearReyesOwnershipBitsetCSMain",
-            {},
-            "CLod.ReyesQueueReset.ClearOwnershipBitset.PSO");
     }
 }
 
@@ -60,8 +49,12 @@ ReyesQueueResetBindings ReyesQueueResetPass::Declare(org::PassBuilder& declarati
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     ReyesQueueResetBindings bindings{
-        m_clearCountersPso,
-        m_clearOwnershipBitsetPso,
+        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"ClearReyesQueueCountersCSMain", "CLod.ReyesQueueReset.ClearCounters.PSO")),
+        m_ownershipBitsetBuffer
+            ? builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"ClearReyesOwnershipBitsetCSMain", "CLod.ReyesQueueReset.ClearOwnershipBitset.PSO"))
+            : org::PipelineState{},
         builder->UnorderedAccess(m_fullClusterCounter),
         builder->UnorderedAccess(m_ownedClusterCounter),
         {}, {},

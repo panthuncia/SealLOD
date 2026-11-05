@@ -3,6 +3,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BuiltinResources.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -62,31 +63,6 @@ ReyesSplitPass::ReyesSplitPass(
     , m_splitPassIndex(splitPassIndex)
     , m_maxSplitPassCount(maxSplitPassCount)
     , m_phaseIndex(phaseIndex) {
-    m_clearCountersPso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"ClearReyesSplitOutputCountersCSMain",
-        {},
-        "CLod.ReyesSplit.ClearCounters.PSO");
-
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/reyesSplit.hlsl",
-        L"ReyesSplitCS",
-        {},
-        "CLod.ReyesSplit.PSO");
-
-    rhi::IndirectArg dispatchArgs[] = {
-        {.kind = rhi::IndirectArgKind::Dispatch }
-    };
-
-    auto device = DeviceManager::GetInstance().GetDevice();
-    rhi::CommandSignaturePtr commandSignature;
-    device.CreateCommandSignature(
-        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(dispatchArgs, 1), sizeof(CLodReyesDispatchIndirectCommand) },
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        commandSignature);
-    m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>(std::move(commandSignature));
 }
 
 ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
@@ -106,9 +82,11 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
             Builtin::CameraBuffer);
     builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     ReyesSplitBindings bindings;
-    bindings.clearCountersPipeline = m_clearCountersPso;
-    bindings.pipeline = m_pso;
-    bindings.commandSignature = m_commandSignature;
+    bindings.clearCountersPipeline = builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        L"ClearReyesSplitOutputCountersCSMain", "CLod.ReyesSplit.ClearCounters.PSO"));
+    bindings.pipeline = builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesSplit.hlsl",
+        L"ReyesSplitCS", "CLod.ReyesSplit.PSO"));
+    bindings.commandSignature = builder->CommandSignature(br::render::RawDispatchCommandSignature());
     bindings.visible = builder->ShaderResource(m_visibleClustersBuffer).View();
     bindings.inputQueue = builder->ShaderResource(m_inputSplitQueueBuffer).View();
     bindings.inputCounter = builder->ShaderResource(m_inputSplitQueueCounterBuffer).View();

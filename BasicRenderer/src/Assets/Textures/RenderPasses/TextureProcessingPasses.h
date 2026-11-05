@@ -2,6 +2,7 @@
 
 #include "Assets/Textures/TextureFactory.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <Render/PipelineDesc.h>
 #include <vector>
 
 // The mip chains taken at declaration, in queue order, with everything their dispatches need.
@@ -143,32 +144,9 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
         std::shared_ptr<org::runtime::IUploadService> m_uploads;
         org::runtime::FrameWorkQueue<Job> m_jobs;
 
-        org::PipelineState m_psoFloat1_2D;
-        org::PipelineState m_psoFloat1_Array;
-        org::PipelineState m_psoFloat2_2D;
-        org::PipelineState m_psoFloat2_Array;
-        org::PipelineState m_psoFloat4_2D;
-        org::PipelineState m_psoFloat4_Array;
-        org::PipelineState m_psoAlphaReset;
-        org::PipelineState m_psoAlphaDownsample;
-        org::PipelineState m_psoAlphaResolveScale;
-        org::PipelineState m_psoAlphaApplyScale;
-
-        bool m_hasPsoFloat1_2D = false;
-        bool m_hasPsoFloat1_Array = false;
-        bool m_hasPsoFloat2_2D = false;
-        bool m_hasPsoFloat2_Array = false;
-        bool m_hasPsoFloat4_2D = false;
-        bool m_hasPsoFloat4_Array = false;
-        bool m_hasPsoAlphaReset = false;
-        bool m_hasPsoAlphaDownsample = false;
-        bool m_hasPsoAlphaResolveScale = false;
-        bool m_hasPsoAlphaApplyScale = false;
-
         static bool TryGetValueType(const org::PixelBuffer& tex, MipmapValueType& outValueType);
-        org::PipelineState& GetOrCreatePipeline(MipmapValueType valueType, bool isArray);
-        org::PipelineState CreatePipeline(MipmapValueType valueType, bool isArray) const;
-        org::PipelineState& GetOrCreateAlphaPipeline(const wchar_t* entryPoint, org::PipelineState& pso, bool& hasPso, const char* debugName);
+        static org::ComputePipelineDesc PipelineDesc(MipmapValueType valueType, bool isArray);
+        static org::ComputePipelineDesc AlphaPipelineDesc(const wchar_t* entryPoint, const char* debugName);
 
         std::atomic_bool m_declaredResourcesChanged = true;
     };
@@ -213,8 +191,6 @@ class TextureFactory::BC7CompressionPass
         bool HasPendingJobs() const { std::scoped_lock lock(m_pendingMutex); return !m_pending.empty(); }
 
     private:
-        org::PipelineState& GetOrCreatePipeline();
-        org::PipelineState CreatePipeline() const;
 
         // The jobs Declare took, in the order of TextureBC7CompressionBindings::jobs.
         struct DeclaredJob {
@@ -224,8 +200,6 @@ class TextureFactory::BC7CompressionPass
         std::shared_ptr<const std::vector<DeclaredJob>> m_declaredJobs = std::make_shared<const std::vector<DeclaredJob>>();
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         mutable std::mutex m_pendingMutex;
-        org::PipelineState m_psoMode6;
-        bool m_hasPsoMode6 = false;
         std::atomic_bool m_declaredResourcesChanged = true;
     };
 

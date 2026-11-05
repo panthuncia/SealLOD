@@ -33,7 +33,6 @@ public:
     void ShutdownPass();
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::Buffer> m_sourceCounterBuffer;
     std::shared_ptr<org::Buffer> m_indirectArgsBuffer;
     std::shared_ptr<org::Buffer> m_sourceBaseCounterBuffer;

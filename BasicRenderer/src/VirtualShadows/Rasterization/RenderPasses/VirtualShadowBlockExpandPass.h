@@ -10,6 +10,7 @@
 #include "Materials/MaterialManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -34,7 +35,7 @@ struct VirtualShadowBlockFrameData {
 
 struct VirtualShadowBlockBindings {
     org::PipelineState rigidPipeline, skinnedPipeline, clearPipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     VirtualShadowBlockExpandMode mode = VirtualShadowBlockExpandMode::Histogram;
     uint32_t expandedRecordCapacity = 0;
     org::DeclaredViewToken sourceVisible, sourceTransforms, sourceHistogram;
@@ -84,47 +85,6 @@ public:
         , m_slabResourceGroup(std::move(slabResourceGroup))
         , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly)
     {
-        rhi::IndirectArg args[] = {
-            {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
-            {.kind = rhi::IndirectArgKind::Dispatch }
-        };
-
-        auto device = DeviceManager::GetInstance().GetDevice();
-        m_commandSignature = std::make_shared<rhi::CommandSignaturePtr>();
-        device.CreateCommandSignature(
-            rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 2), sizeof(RasterizeClustersCommand) },
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            *m_commandSignature);
-
-        const wchar_t* entryPoint = mode == VirtualShadowBlockExpandMode::Histogram
-            ? L"CLodVirtualShadowBlockHistogramCSMain"
-            : L"CLodVirtualShadowBlockEmitCSMain";
-        const char* rigidName = mode == VirtualShadowBlockExpandMode::Histogram
-            ? "CLod_VirtualShadowBlockHistogramPSO"
-            : "CLod_VirtualShadowBlockEmitPSO";
-        const char* skinnedName = mode == VirtualShadowBlockExpandMode::Histogram
-            ? "CLod_VirtualShadowBlockHistogramSkinnedPSO"
-            : "CLod_VirtualShadowBlockEmitSkinnedPSO";
-
-        m_rigidPso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
-            entryPoint,
-            {},
-            rigidName);
-        std::vector<DxcDefine> skinnedDefines = { DxcDefine{ L"PSO_SKINNED", L"1" } };
-        m_skinnedPso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
-            entryPoint,
-            skinnedDefines,
-            skinnedName);
-        m_clearPso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"Shaders/ClusterLOD/clodUtil.hlsl",
-            L"ClearUintStructuredBufferCSMain",
-            {},
-            "CLod_VirtualShadowBlockExpandClearUintPSO");
     }
 
     VirtualShadowBlockBindings Declare(org::PassBuilder& declaration)
@@ -150,8 +110,25 @@ public:
         if (m_slabResourceGroup) {
             builder->ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
         }
+        const wchar_t* entryPoint = m_mode == VirtualShadowBlockExpandMode::Histogram
+            ? L"CLodVirtualShadowBlockHistogramCSMain"
+            : L"CLodVirtualShadowBlockEmitCSMain";
+        const char* rigidName = m_mode == VirtualShadowBlockExpandMode::Histogram
+            ? "CLod_VirtualShadowBlockHistogramPSO"
+            : "CLod_VirtualShadowBlockEmitPSO";
+        const char* skinnedName = m_mode == VirtualShadowBlockExpandMode::Histogram
+            ? "CLod_VirtualShadowBlockHistogramSkinnedPSO"
+            : "CLod_VirtualShadowBlockEmitSkinnedPSO";
         VirtualShadowBlockBindings bindings{
-            m_rigidPso, m_skinnedPso, m_clearPso, m_commandSignature, m_mode, m_expandedRecordCapacity,
+            builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
+                entryPoint, rigidName)),
+            builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
+                entryPoint, skinnedName, {{L"PSO_SKINNED", L"1"}})),
+            builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"ClearUintStructuredBufferCSMain", "CLod_VirtualShadowBlockExpandClearUintPSO")),
+            builder->CommandSignature(br::render::ConstantsDispatchCommandSignature(
+                3, sizeof(RasterizeClustersCommand), "CLod.VirtualShadowBlockExpand.Signature")),
+            m_mode, m_expandedRecordCapacity,
             builder->ShaderResource(m_sourceVisibleClustersBuffer),
             builder->ShaderResource(m_sourceVisibleClusterTransformIndicesBuffer),
             builder->ShaderResource(m_sourceHistogramBuffer),
@@ -256,10 +233,6 @@ public:
 
 private:
     VirtualShadowBlockExpandMode m_mode = VirtualShadowBlockExpandMode::Histogram;
-    org::PipelineState m_rigidPso;
-    org::PipelineState m_skinnedPso;
-    org::PipelineState m_clearPso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
     std::shared_ptr<org::Buffer> m_sourceVisibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_sourceVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<org::Buffer> m_sourceHistogramBuffer;

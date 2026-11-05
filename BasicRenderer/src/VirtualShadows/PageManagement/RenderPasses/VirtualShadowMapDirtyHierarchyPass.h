@@ -36,7 +36,6 @@ public:
         const VirtualShadowMapDirtyHierarchyFrame&, org::PassRecordContext&);
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::PixelBuffer> m_pageTableTexture;
     std::shared_ptr<org::PixelBuffer> m_dirtyHierarchyTexture;
     std::shared_ptr<org::Buffer> m_clipmapInfoBuffer;

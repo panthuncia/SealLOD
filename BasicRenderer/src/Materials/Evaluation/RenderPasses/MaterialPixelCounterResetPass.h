@@ -1,6 +1,7 @@
 #pragma once
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Materials/Publication/MaterialStateArtifacts.h"
 #include "BasicRenderer/Assets/TechniqueDescriptor.h"
@@ -15,21 +16,13 @@ struct MaterialUAVResetFrame {
 
 class MaterialUAVResetPass : public org::TypedRenderGraphPass<MaterialUAVResetPass, MaterialUAVResetFrame, MaterialUAVResetBindings> {
 public:
-    MaterialUAVResetPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/VisUtil.hlsl",
-            L"ClearMaterialCountersCS",
-            {},
-            "ClearMaterialCountersPSO");
-    }
-
     MaterialUAVResetBindings Declare(org::PassBuilder& builder) {
         builder.UnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer",
             "Builtin::VisUtil::MaterialWriteCursorBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.PreferQueue(org::QueueKind::Compute);
-        return {m_pso};
+        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"ClearMaterialCountersCS",
+            "ClearMaterialCountersPSO"))};
     }
 
     MaterialUAVResetFrame Prepare(const MaterialUAVResetBindings&, const org::PassPrepareContext& preparation) const {
@@ -49,7 +42,4 @@ public:
         constants[0] = frame.slotsUsed;
         br::render::DispatchCompute(context, bindings.pipeline, constants, (frame.slotsUsed + 63u) / 64u);
     }
-
-private:
-    org::PipelineState m_pso;
 };

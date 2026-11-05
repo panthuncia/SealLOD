@@ -1,7 +1,6 @@
 #pragma once
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
-#include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/PixelBuffer.h"
 #include "ThirdParty/XeGTAO.h"
@@ -23,7 +22,6 @@ class GTAOMainPass : public org::TypedRenderGraphPass<GTAOMainPass,
 public:
     GTAOMainPass() {
         CreatePointClampSampler();
-        CreateXeGTAOComputePSO();
     }
 
     GTAOMainBindings Declare(org::PassBuilder& builder) {
@@ -32,7 +30,10 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            GTAOHighPSO,
+            builder.Pipeline(org::ComputePipelineDesc{
+                .shader = {L"shaders/GTAO.hlsl", L"CSGTAOHigh"},
+                .name = "GTAO High Quality",
+                .layout = org::PipelineLayoutRef::StandardGraphics()}),
             m_samplerIndex,
             builder.ShaderResource(Builtin::GTAO::WorkingDepths),
             builder.ShaderResource(Builtin::Surface::NormalRoughness),
@@ -74,15 +75,6 @@ public:
 
 private:
 
-    org::PipelineState PrefilterDepths16x16PSO;
-    org::PipelineState GTAOLowPSO;
-    org::PipelineState GTAOMediumPSO;
-    org::PipelineState GTAOHighPSO;
-    org::PipelineState GTAOUltraPSO;
-    org::PipelineState DenoisePassPSO;
-    org::PipelineState DenoiseLastPassPSO;
-    org::PipelineState GenerateNormalsPSO;
-
     uint32_t m_samplerIndex = 0;
 
     void CreatePointClampSampler()
@@ -101,37 +93,5 @@ private:
         samplerDesc.minLod = 0.0f;
         samplerDesc.maxLod = 0.0f;
         m_samplerIndex = DescriptorService().CreateIndexedSampler(samplerDesc);
-    }
-
-    void CreateXeGTAOComputePSO() {
-
-		GTAOUltraPSO = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetRootSignature().GetHandle(),
-			L"shaders/GTAO.hlsl",
-			L"CSGTAOUltra",
-			{},
-			"GTAO Ultra Quality");
-
-		GTAOHighPSO = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetRootSignature().GetHandle(),
-			L"shaders/GTAO.hlsl",
-			L"CSGTAOHigh",
-			{},
-			"GTAO High Quality");
-
-		GTAOMediumPSO = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetRootSignature().GetHandle(),
-			L"shaders/GTAO.hlsl",
-			L"CSGTAOMedium",
-			{},
-			"GTAO Medium Quality");
-
-		GTAOLowPSO = PSOManager::GetInstance().MakeComputePipeline(
-			PSOManager::GetInstance().GetRootSignature().GetHandle(),
-			L"shaders/GTAO.hlsl",
-			L"CSGTAOLow",
-			{},
-			"GTAO Low Quality");
-
     }
 };

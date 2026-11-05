@@ -30,14 +30,11 @@ class EnvironmentConversionPass : public org::TypedRenderGraphPass<EnvironmentCo
     EnvironmentConversionFrame, EnvironmentConversionBindings>, public org::IDynamicDeclaredResources {
 public:
     // Runs in the environment job graph (EnvironmentJobGraph): it takes its work queue directly.
-    explicit EnvironmentConversionPass(br::render::EnvironmentConversionWorkQueue work) : m_work(std::move(work)) {
-
-        CreateEnvironmentConversionPSO();
-    }
+    explicit EnvironmentConversionPass(br::render::EnvironmentConversionWorkQueue work) : m_work(std::move(work)) {}
 
     EnvironmentConversionBindings Declare(org::PassBuilder& builder) {
         EnvironmentConversionBindings bindings;
-        bindings.pipeline = m_pso;
+        bindings.pipeline = builder.Pipeline(PipelineDesc());
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         for (const auto& j : m_pending) {
             if (!j->work.srcTexture || !j->work.dstCubemap) continue;
@@ -103,11 +100,7 @@ private:
     br::render::EnvironmentConversionWorkQueue::Snapshot m_pending;
     bool m_declaredResourcesChanged = true;
 
-    org::PipelineState m_pso;
-
-    void CreateEnvironmentConversionPSO() {
-        auto dev = DeviceManager::GetInstance().GetDevice();
-
+    static org::ComputePipelineDesc PipelineDesc() {
         rhi::StaticSamplerDesc s{};
         s.visibility = rhi::ShaderStage::Compute;
         s.set = 0;   // space0
@@ -126,33 +119,16 @@ private:
         pc.set = 0;    // space0
         pc.binding = 0;    // b0
 
-        rhi::PipelineLayoutDesc ld{};
-        ld.flags = rhi::PipelineLayoutFlags::PF_None;
-        ld.pushConstants = { &pc, 1 };
-        ld.staticSamplers = { &s, 1 };
-        auto layout = std::make_shared<rhi::PipelineLayoutPtr>();
-        auto result = dev.CreatePipelineLayout(ld, *layout);
-        if (!*layout || !layout->Get().IsValid()) throw std::runtime_error("EnvConvert: layout failed");
-        layout->Get().SetName("EnvConvert.ComputeLayout");
+        org::PipelineLayoutSpec layout;
+        layout.flags = rhi::PipelineLayoutFlags::PF_None;
+        layout.pushConstants = {pc};
+        layout.staticSamplers = {s};
+        layout.name = "EnvConvert.ComputeLayout";
 
-        ShaderInfoBundle sib;
-        sib.computeShader = { L"shaders/envToCubemap.hlsl", L"CSMain", L"cs_6_6" };
-        auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-
-        rhi::SubobjLayout soLayout{ layout->Get().GetHandle() };
-        rhi::SubobjShader soCS{ rhi::ShaderStage::Compute, rhi::DXIL(compiled.computeShader.Get()), "CSMain" };
-
-        const rhi::PipelineStreamItem items[] = {
-            rhi::Make(soLayout),
-            rhi::Make(soCS),
-        };
-        rhi::PipelinePtr pipeline;
-        result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
-        if (Failed(result)) {
-            throw std::runtime_error("EnvConvert: PSO failed");
-        }
-        pipeline->SetName("EnvConvert.ComputePSO");
-        m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
-            compiled.resourceDescriptorSlots, layout, soLayout.layout);
+        org::ComputePipelineDesc desc;
+        desc.shader = {L"shaders/envToCubemap.hlsl", L"CSMain", L"cs_6_6"};
+        desc.name = "EnvConvert.ComputePSO";
+        desc.layout = org::PipelineLayoutRef::Custom(std::move(layout));
+        return desc;
     }
 };

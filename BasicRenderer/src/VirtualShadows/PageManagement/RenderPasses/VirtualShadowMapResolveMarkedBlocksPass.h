@@ -44,7 +44,6 @@ public:
     void ShutdownPass();
 
 private:
-    org::PipelineState m_pso;
     std::shared_ptr<org::Buffer> m_markedBlocksMaskBuffer;
     std::shared_ptr<org::Buffer> m_markedBlocksListBuffer;
     std::shared_ptr<org::Buffer> m_markedBlocksCountBuffer;

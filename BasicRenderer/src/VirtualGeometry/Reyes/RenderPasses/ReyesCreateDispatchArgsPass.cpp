@@ -2,6 +2,7 @@
 #include "Render/PassBuilders.h"
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "../shaders/PerPassRootConstants/clodReyesCreateDispatchArgsRootConstants.h"
@@ -18,18 +19,15 @@ ReyesCreateDispatchArgsPass::ReyesCreateDispatchArgsPass(
     , m_threadsPerGroup(threadsPerGroup)
     , m_maxWorkItemCount(maxWorkItemCount)
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"BuildReyesDispatchArgsCSMain",
-        {},
-        "CLod.ReyesCreateDispatchArgs.PSO");
 }
 
 ReyesCreateDispatchArgsBindings ReyesCreateDispatchArgsPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    ReyesCreateDispatchArgsBindings bindings{m_pso, builder.ShaderResource(m_sourceCounterBuffer),
+    ReyesCreateDispatchArgsBindings bindings{
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"BuildReyesDispatchArgsCSMain", "CLod.ReyesCreateDispatchArgs.PSO")),
+        builder.ShaderResource(m_sourceCounterBuffer),
         builder.UnorderedAccess(m_indirectArgsBuffer)};
     if (m_sourceBaseCounterBuffer) {
         bindings.sourceBaseCounter = builder.ShaderResource(m_sourceBaseCounterBuffer);

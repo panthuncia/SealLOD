@@ -2,6 +2,7 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "ThirdParty/XeGTAO.h"
@@ -28,7 +29,6 @@ class GTAOFilterPass : public org::TypedRenderGraphPass<GTAOFilterPass,
 public:
     GTAOFilterPass() {
         CreatePointClampSampler();
-        CreateXeGTAOComputePSO();
     }
 
     void Initialize() {
@@ -65,7 +65,10 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         GTAOFilterBindings bindings{};
-        bindings.pipeline = PrefilterDepths16x16PSO;
+        bindings.pipeline = builder.Pipeline(org::ComputePipelineDesc{
+            .shader = {L"shaders/GTAO.hlsl", L"CSPrefilterDepths16x16"},
+            .name = "CSPrefilterDepths16x16",
+            .layout = org::PipelineLayoutRef::StandardGraphics()});
         bindings.samplerIndex = m_samplerIndex;
         bindings.depth = builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })).View();
         std::array<org::UavView, 5> views{};
@@ -99,7 +102,6 @@ public:
 
 private:
 
-    org::PipelineState PrefilterDepths16x16PSO;
     uint32_t m_samplerIndex = 0;
     org::ResourceRegistry::RegistryHandle m_gtaoConstantsHandle;
 
@@ -119,15 +121,5 @@ private:
         samplerDesc.minLod = 0.0f;
         samplerDesc.maxLod = 0.0f;
         m_samplerIndex = DescriptorService().CreateIndexedSampler(samplerDesc);
-    }
-
-    void CreateXeGTAOComputePSO()
-    {
-        auto& psoManager = PSOManager::GetInstance();
-        PrefilterDepths16x16PSO = psoManager.MakeComputePipeline(
-            psoManager.GetRootSignature().GetHandle(),
-            L"shaders/GTAO.hlsl",
-            L"CSPrefilterDepths16x16"
-		);
     }
 };

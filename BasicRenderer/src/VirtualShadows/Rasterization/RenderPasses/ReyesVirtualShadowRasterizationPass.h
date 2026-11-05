@@ -8,6 +8,7 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "Render/PipelineState.h"
+#include "Render/PipelineDesc.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
@@ -17,7 +18,7 @@ namespace org { class ResourceGroup; }
 
 struct ReyesVirtualShadowRasterBindings {
     org::PipelineState pipeline;
-    std::shared_ptr<const rhi::CommandSignaturePtr> commandSignature;
+    org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
     org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
     org::ResourceBindingToken indirectArgs;
@@ -83,6 +84,4 @@ private:
     std::vector<CLodViewRasterInfo> m_viewRasterInfos;
     bool m_declaredResourcesChanged = true;
     CLodVirtualShadowResolutionConfig m_shadowConfig{};
-    org::PipelineState m_pso;
-    std::shared_ptr<rhi::CommandSignaturePtr> m_commandSignature;
 };

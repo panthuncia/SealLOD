@@ -2,6 +2,7 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -16,19 +17,11 @@ struct DilateMotionVectorsFrame {
 class DilateMotionVectorsPass : public org::TypedRenderGraphPass<DilateMotionVectorsPass,
     DilateMotionVectorsFrame, DilateMotionVectorsBindings> {
 public:
-    DilateMotionVectorsPass() {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-            L"shaders/PostProcessing/dilateMotionVectors.hlsl",
-            L"DilateMotionVectorsCS",
-            {},
-            "DilateMotionVectorsCS");
-    }
-
     DilateMotionVectorsBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         return {
-            m_pso,
+            builder.Pipeline(br::render::ComputePipeline(
+                L"shaders/PostProcessing/dilateMotionVectors.hlsl", L"DilateMotionVectorsCS", "DilateMotionVectorsCS")),
             builder.ShaderResource(Builtin::Surface::Motion),
             builder.ShaderResource(Builtin::PrimaryCamera::ProjectedDepthTexture),
             builder.UnorderedAccess(Builtin::Surface::DilatedMotion) };
@@ -53,7 +46,4 @@ public:
     }
 
     void ShutdownPass() {}
-
-private:
-    org::PipelineState m_pso;
 };

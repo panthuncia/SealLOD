@@ -3,6 +3,7 @@
 
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
@@ -19,19 +20,16 @@ VirtualShadowMapBuildActiveBlocksPass::VirtualShadowMapBuildActiveBlocksPass(
     , m_activeBlockMetadataBuffer(std::move(activeBlockMetadataBuffer))
     , m_dynamicPages(dynamicPages)
 {
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowBuildActiveBlocksCSMain",
-        { { L"CLOD_VSM_TWO_LAYER_ACTIVE_BLOCKS_VERSION", L"2" } },
-        "CLod.VirtualShadow.BuildActiveBlocks.PSO");
 }
 
 VirtualShadowMapBuildActiveBlocksBindings VirtualShadowMapBuildActiveBlocksPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {m_pso, builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),
+    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+                L"CLodVirtualShadowBuildActiveBlocksCSMain", "CLod.VirtualShadow.BuildActiveBlocks.PSO",
+                {{L"CLOD_VSM_TWO_LAYER_ACTIVE_BLOCKS_VERSION", L"2"}})),
+        builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),
         builder.ShaderResource(m_clipmapInfoBuffer),
         builder.UnorderedAccess(m_activeBlockMetadataBuffer), m_dynamicPages};
 }

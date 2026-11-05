@@ -3,6 +3,7 @@
 
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BuiltinResources.h"
@@ -25,13 +26,6 @@ VirtualShadowMapClearDirtyBitsPass::VirtualShadowMapClearDirtyBitsPass(
     (void)allocationRequestsBuffer;
     (void)allocationCountBuffer;
     (void)indirectArgsBuffer;
-
-    m_pso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowClearDirtyBitsCSMain",
-        {},
-        "CLod.VirtualShadow.ClearDirtyBits.PSO");
 }
 
 VirtualShadowMapClearDirtyBitsBindings VirtualShadowMapClearDirtyBitsPass::Declare(org::PassBuilder& builder)
@@ -39,7 +33,8 @@ VirtualShadowMapClearDirtyBitsBindings VirtualShadowMapClearDirtyBitsPass::Decla
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return {
-        m_pso,
+        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            L"CLodVirtualShadowClearDirtyBitsCSMain", "CLod.VirtualShadow.ClearDirtyBits.PSO")),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}),
         builder.UnorderedAccess(m_dirtyFlagsBuffer),
         builder.UnorderedAccess(m_statsBuffer)};

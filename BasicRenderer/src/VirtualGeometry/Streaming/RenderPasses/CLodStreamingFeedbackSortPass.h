@@ -11,13 +11,10 @@
 
 namespace org { class Buffer; }
 
-struct StreamingFeedbackSortFrameData {
-    std::shared_ptr<const rhi::CommandSignaturePtr> signature;
-};
-
 struct StreamingFeedbackSortBindings {
     // Setup, count, reduce, scan, scan-add, scatter.
     std::array<org::PipelineState, 6> pipelines;
+    org::CommandSignatureState signature;
     org::DeclaredViewToken requestCounter;
     std::array<org::DeclaredViewToken, 7> uavs;
     org::DeclaredViewToken countScatterUav, reduceScanUav;
@@ -25,7 +22,7 @@ struct StreamingFeedbackSortBindings {
 };
 
 class CLodStreamingFeedbackSortPass final : public org::TypedRenderGraphPass<CLodStreamingFeedbackSortPass,
-    StreamingFeedbackSortFrameData, StreamingFeedbackSortBindings> {
+    org::EmptyPassFrameData, StreamingFeedbackSortBindings> {
 public:
     CLodStreamingFeedbackSortPass(
         std::shared_ptr<org::Buffer> requestKeys,
@@ -40,19 +37,9 @@ public:
         std::shared_ptr<org::Buffer> reduceScanArgs);
 
     StreamingFeedbackSortBindings Declare(org::PassBuilder& builder);
-    StreamingFeedbackSortFrameData Prepare(const StreamingFeedbackSortBindings&,
-        const org::PassPrepareContext& preparation) const;
-    static void Record(const StreamingFeedbackSortBindings& bindings,
-        const StreamingFeedbackSortFrameData& frame, org::PassRecordContext& context);
+    static void Record(const StreamingFeedbackSortBindings& bindings, org::PassRecordContext& context);
 
 private:
-    org::PipelineState m_setupPso;
-    org::PipelineState m_countPso;
-    org::PipelineState m_reducePso;
-    org::PipelineState m_scanPso;
-    org::PipelineState m_scanAddPso;
-    org::PipelineState m_scatterPso;
-
     std::shared_ptr<org::Buffer> m_requestKeys;
     std::shared_ptr<org::Buffer> m_requests;
     std::shared_ptr<org::Buffer> m_requestCounter;

@@ -18,14 +18,10 @@ class DebugResolvePass
     : public org::TypedRenderGraphPass<DebugResolvePass,
           DebugResolveFrame, DebugResolveBindings> {
 public:
-	DebugResolvePass() {
-		CreatePSO();
-	}
-
 	DebugResolveBindings Declare(org::PassBuilder& builder) {
 		builder.ShaderResource(Builtin::DebugVisualization, Builtin::CameraBuffer);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
-		return {m_pso, builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
+		return {builder.Pipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
 	}
 
 	DebugResolveFrame Prepare(const DebugResolveBindings&,
@@ -41,26 +37,17 @@ public:
 	}
 
 private:
-	org::PipelineState m_pso;
-
-	void CreatePSO() {
-		auto dev = DeviceManager::GetInstance().GetDevice();
-
-		ShaderInfoBundle sib;
-		sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6" };
-		sib.pixelShader = { L"shaders/PostProcessing/debugResolve.hlsl", L"PSMain", L"ps_6_6" };
-		auto compiled = PSOManager::GetInstance().CompileShaders(sib);
-
-		auto& layout = PSOManager::GetInstance().GetRootSignature();
-		rhi::SubobjLayout soLayout{ layout.GetHandle() };
-		rhi::SubobjShader soVS{ rhi::ShaderStage::Vertex, rhi::DXIL(compiled.vertexShader.Get()), "FullscreenVSNoViewRayMain" };
-		rhi::SubobjShader soPS{ rhi::ShaderStage::Pixel, rhi::DXIL(compiled.pixelShader.Get()), "PSMain" };
+	static org::GraphicsPipelineDesc PipelineDesc() {
+		org::GraphicsPipelineDesc desc;
+		desc.name = "DebugResolve.PSO";
+		desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6"};
+		desc.pixel = {L"shaders/PostProcessing/debugResolve.hlsl", L"PSMain", L"ps_6_6"};
 
 		rhi::RasterState rs{};
 		rs.fill = rhi::FillMode::Solid;
 		rs.cull = rhi::CullMode::None;
 		rs.frontCCW = false;
-		rhi::SubobjRaster soRaster{ rs };
+		desc.raster = rs;
 
 		rhi::BlendState bs{};
 		bs.alphaToCoverage = false;
@@ -77,44 +64,22 @@ private:
 			a0.alphaOp = rhi::BlendOp::Add;
 			a0.writeMask = rhi::ColorWriteEnable::All;
 		}
-		rhi::SubobjBlend soBlend{ bs };
+		desc.blend = bs;
 
 		rhi::DepthStencilState ds{};
 		ds.depthEnable = false;
 		ds.depthWrite = false;
 		ds.depthFunc = rhi::CompareOp::Greater;
-		rhi::SubobjDepth soDepth{ ds };
+		desc.depth = ds;
 
 		rhi::RenderTargets rts{};
 		rts.count = 1;
 		rts.formats[0] = rhi::Format::R8G8B8A8_UNorm;
-		rhi::SubobjRTVs soRTVs{ rts };
+		desc.renderTargets = rts;
 
-		rhi::SubobjDSV    soDSV{ rhi::Format::D32_Float };
-		rhi::SubobjSample soSmp{ rhi::SampleDesc{1, 0} };
-		rhi::SubobjPrimitiveTopology soTopo{ rhi::PrimitiveTopology::TriangleStrip };
-
-		const rhi::PipelineStreamItem items[] = {
-			rhi::Make(soLayout),
-			rhi::Make(soVS),
-			rhi::Make(soPS),
-			rhi::Make(soRaster),
-			rhi::Make(soBlend),
-			rhi::Make(soDepth),
-			rhi::Make(soRTVs),
-			rhi::Make(soDSV),
-			rhi::Make(soSmp),
-			rhi::Make(soTopo)
-		};
-
-		rhi::PipelinePtr pipeline;
-		auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
-		if (Failed(result)) {
-			throw std::runtime_error("Failed to create DebugResolve PSO");
-		}
-		pipeline->SetName("DebugResolve.PSO");
-		m_pso = org::PipelineState(std::move(pipeline), compiled.resourceIDsHash,
-            compiled.resourceDescriptorSlots, PSOManager::GetInstance().CaptureLayoutOwner(soLayout.layout),
-            soLayout.layout);
+		desc.depthFormat = rhi::Format::D32_Float;
+		desc.sample = rhi::SampleDesc{1, 0};
+		desc.topology = rhi::PrimitiveTopology::TriangleStrip;
+		return desc;
 	}
 };
