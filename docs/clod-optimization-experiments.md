@@ -564,3 +564,31 @@ Final, fresh launch: hardware raster 1.84 ms, software raster 3.30 ms, material 
 **Not changed.** Parallax is a quality setting, not waste: the loop already reuses its page cursor. Skipping emissive and
 payload writes would need those targets cleared each frame, for 0.06 ms. The identity target stores a record index that
 can be derived from the pixel, which could save part of the 0.16 ms, but it changes what consumers read.
+
+### Terrain parallax march (2026-11-04)
+
+SaveLab, world 0x3C, radius 100, RTX 5070 Laptop, ground camera. 520,863 terrain pixels, median ray 8.8 px, 95th
+percentile 13.8 px. The old RVT path was already a linear search plus 3 secant samples; 25 was its maximum step count,
+scaled down by view angle. Error is against a reference of up to 64 linear steps and 8 secant samples: final height
+difference converted to pixels along the ray. Timings are sequential runs in one session with probe writes active, so
+they compare settings but are not a clean A-B-A.
+
+| Search | Secant samples | Samples per pixel | Offset error over 1 px | Color differs by over 8/255 | Material evaluation |
+|---|---|---|---|---|---|
+| Old: 25 steps by view angle | 3 | 12.0 | 1.8% | 0.62% | 2.54 ms |
+| Old search | 1 | 10.0 | 1.8% | 0.67% | 2.50 ms |
+| 8 steps by view angle | 2 | 6.6 | 3.8% | 1.11% | 2.38 ms |
+| 1 step per 2 px | 1 | 5.4 | 3.8% | 1.21% | 2.33 ms |
+| 1 step per 1 px, half of surface gap | 1 | 5.6 | 2.2% | 0.80% | 2.30 ms |
+| **1 step per 0.5 px, half of surface gap** | **1** | **6.3** | **1.4%** | **0.54%** | **2.34 ms** |
+| 1 step per 0.5 px, 75% of surface gap | 1 | 4.7 | 3.3% | 1.08% | 2.27 ms |
+
+At four times the height scale, median ray 35 px: the old search used 11.6 samples, 13.7% over 3 px, 2.70% color, 2.59 ms.
+The chosen settings used 6.0 samples, 15.4% over 3 px, 3.55% color, 2.44 ms.
+
+**Kept** the bold row, shared by RVT terrain, direct terrain and object parallax. Only RVT terrain was measured. The
+direct terrain and object paths were compiled but not run on this camera. The final code without probes has no A-B-A:
+the attempt was stopped when the session dropped to about 1 fps, see `docs/open-defects.md` in SARP.
+
+**Not tried.** Cone maps and min/max pyramids need precomputed data per height page. Robust Cone Step Mapping (Ban,
+Valasek, Balint and Vad, EGSR 2024) would be the next reference if thin features start to matter.

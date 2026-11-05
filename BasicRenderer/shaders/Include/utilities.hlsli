@@ -2880,12 +2880,11 @@ void SampleMaterialFromUvCache(
 
         if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
         {
-            float3 uvh;
             if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
             {
                 Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
                 SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
-                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                parallaxUv = ParallaxOcclusionUv(
                     parallaxTexture,
                     parallaxSamplerState,
                     3u,
@@ -2899,11 +2898,12 @@ void SampleMaterialFromUvCache(
             }
             else
             {
-                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
                 SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
-                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                parallaxUv = ParallaxOcclusionUv(
                     parallaxTexture,
                     parallaxSamplerState,
+                    0u,
                     TBN,
                     heightUv.uv,
                     viewDir,
@@ -2913,7 +2913,6 @@ void SampleMaterialFromUvCache(
                     heightUv.dUVdy);
             }
 
-            parallaxUv = uvh.xy;
             parallaxDUdx = heightUv.dUVdx;
             parallaxDUdy = heightUv.dUVdy;
             hasParallaxResolvedUv = true;
@@ -3152,12 +3151,11 @@ void SampleMaterialEvalFromUvCache(
             const uint parallaxStepCount = max(
                 4u,
                 (uint)ceil(16.0f * parallaxFade));
-            float3 uvh;
             if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
             {
                 Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
                 SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
-                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                parallaxUv = ParallaxOcclusionUv(
                     parallaxTexture,
                     parallaxSamplerState,
                     3u,
@@ -3171,11 +3169,12 @@ void SampleMaterialEvalFromUvCache(
             }
             else
             {
-                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
                 SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
-                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                parallaxUv = ParallaxOcclusionUv(
                     parallaxTexture,
                     parallaxSamplerState,
+                    0u,
                     parallaxTBN,
                     heightUv.uv,
                     viewDir,
@@ -3185,7 +3184,6 @@ void SampleMaterialEvalFromUvCache(
                     heightUv.dUVdy);
             }
 
-            parallaxUv = uvh.xy;
             parallaxDUdx = heightUv.dUVdx;
             parallaxDUdy = heightUv.dUVdy;
             hasParallaxResolvedUv = true;
@@ -3450,12 +3448,11 @@ void SampleMaterialFromUvCacheRuntime(
 
         if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
         {
-            float3 uvh;
             if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
             {
                 Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
                 SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
-                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                parallaxUv = ParallaxOcclusionUv(
                     parallaxTexture,
                     parallaxSamplerState,
                     3u,
@@ -3469,11 +3466,12 @@ void SampleMaterialFromUvCacheRuntime(
             }
             else
             {
-                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
                 SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
-                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                parallaxUv = ParallaxOcclusionUv(
                     parallaxTexture,
                     parallaxSamplerState,
+                    0u,
                     TBN,
                     heightUv.uv,
                     viewDir,
@@ -3483,7 +3481,6 @@ void SampleMaterialFromUvCacheRuntime(
                     heightUv.dUVdy);
             }
 
-            parallaxUv = uvh.xy;
             parallaxDUdx = heightUv.dUVdx;
             parallaxDUdy = heightUv.dUVdy;
             hasParallaxResolvedUv = true;
@@ -3697,13 +3694,13 @@ void SampleMaterialCorePrecompiled(
 
     float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS.xyz);
 
-    Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
     SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
 
-    // IMPORTANT: inside getParallaxOcclusionMappingCoordsAndHeight, use SampleGrad too.
-    float3 uvh = getParallaxOcclusionMappingCoordsAndHeight(
+    localUV = ParallaxOcclusionUv(
         parallaxTexture,
         parallaxSamplerState,
+        0u,
         TBN,
         localUV,
         viewDir,
@@ -3712,8 +3709,6 @@ void SampleMaterialCorePrecompiled(
         localDUdx,
         localDUdy
     );
-
-    localUV = uvh.xy;
 
     // If you *don't* implement derivative correction for parallax, keeping the original gradients
     // is the common approximation (it's usually fine).

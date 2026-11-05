@@ -724,22 +724,15 @@ float2 TerrainParallaxCoords(
     float2 dUVdx,
     float2 dUVdy)
 {
-    float3 viewDirTS = ParallaxViewDirectionTS(TBN, viewDir);
-    float2 parallaxDirection = viewDirTS.xy;
-
-    float maxHeight = max(heightmapScale, 0.0f);
+    const float maxHeight = max(heightmapScale, 0.0f);
     if (maxHeight <= 1.0e-5f)
     {
         return uv;
     }
 
-    uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
-    numSteps = (numSteps + 3u) & ~3u;
-    float stepSize = rcp((float)numSteps);
-    float2 offsetPerStep = parallaxDirection * maxHeight * stepSize;
-    uint refineSteps = numSteps;
+    const float2 rayPerBound = ParallaxViewDirectionTS(TBN, viewDir).xy * maxHeight;
     TerrainStochasticContext parallaxHeightContext = (TerrainStochasticContext)0;
-    bool hasParallaxHeightContext = TerrainTryBuildLayerParallaxHeightContext(
+    const bool hasParallaxHeightContext = TerrainTryBuildLayerParallaxHeightContext(
         layer,
         stochasticLayer,
         hasStochasticLayer,
@@ -753,101 +746,25 @@ float2 TerrainParallaxCoords(
         dUVdy,
         parallaxHeightContext);
 
-    float prevBound = 1.0f;
-    float2 prevUv = uv + parallaxDirection * (maxHeight * 0.5f);
-    float prevHeight = TerrainSampleLayerHeightWithParallaxContext(
-        layer,
-        stochasticLayer,
-        hasStochasticLayer,
-        terrainStochasticHeightEnabled,
-        terrainGaussianStochasticEnabled,
-        useStochasticContext,
-        hasParallaxHeightContext,
-        parallaxHeightContext,
-        prevUv,
-        dUVdx,
-        dUVdy);
-    float2 pt1 = float2(0.0f, 0.0f);
-    float2 pt2 = float2(prevBound, prevHeight);
-    float2 hitUv = uv;
-    bool foundIntersection = false;
-    bool contactRefinement = false;
-
-    [loop] while (numSteps > 0u)
+    ParallaxMarch march = ParallaxMarchBegin(1.0f, ParallaxRayLengthPixels(rayPerBound, dUVdx, dUVdy), maxSteps);
+    [loop]
+    while (!march.finished)
     {
-        float4 currentUv01 = prevUv.xyxy - offsetPerStep.xyxy * float4(1.0f, 1.0f, 2.0f, 2.0f);
-        float4 currentUv23 = prevUv.xyxy - offsetPerStep.xyxy * float4(3.0f, 3.0f, 4.0f, 4.0f);
-        float4 currentBound = prevBound.xxxx - stepSize.xxxx * float4(1.0f, 2.0f, 3.0f, 4.0f);
-        float4 currentHeight;
-        currentHeight.x = TerrainSampleLayerHeightWithParallaxContext(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, hasParallaxHeightContext, parallaxHeightContext, currentUv01.xy, dUVdx, dUVdy);
-        currentHeight.y = TerrainSampleLayerHeightWithParallaxContext(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, hasParallaxHeightContext, parallaxHeightContext, currentUv01.zw, dUVdx, dUVdy);
-        currentHeight.z = TerrainSampleLayerHeightWithParallaxContext(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, hasParallaxHeightContext, parallaxHeightContext, currentUv23.xy, dUVdx, dUVdy);
-        currentHeight.w = TerrainSampleLayerHeightWithParallaxContext(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, hasParallaxHeightContext, parallaxHeightContext, currentUv23.zw, dUVdx, dUVdy);
-
-        bool4 hit = currentHeight >= currentBound;
-        if (any(hit))
-        {
-            foundIntersection = true;
-            if (hit.w)
-            {
-                hitUv = currentUv23.zw;
-                pt1 = float2(currentBound.w, currentHeight.w);
-                pt2 = float2(currentBound.z, currentHeight.z);
-            }
-            if (hit.z)
-            {
-                hitUv = currentUv23.xy;
-                pt1 = float2(currentBound.z, currentHeight.z);
-                pt2 = float2(currentBound.y, currentHeight.y);
-            }
-            if (hit.y)
-            {
-                hitUv = currentUv01.zw;
-                pt1 = float2(currentBound.y, currentHeight.y);
-                pt2 = float2(currentBound.x, currentHeight.x);
-            }
-            if (hit.x)
-            {
-                hitUv = prevUv;
-                pt1 = float2(currentBound.x, currentHeight.x);
-                pt2 = float2(prevBound, prevHeight);
-            }
-
-            if (contactRefinement)
-            {
-                break;
-            }
-
-            contactRefinement = true;
-            prevUv = hitUv;
-            prevBound = pt2.x;
-            prevHeight = pt2.y;
-            numSteps = refineSteps;
-            stepSize *= rcp((float)refineSteps);
-            offsetPerStep *= rcp((float)refineSteps);
-            continue;
-        }
-
-        prevUv = currentUv23.zw;
-        prevBound = currentBound.w;
-        prevHeight = currentHeight.w;
-        numSteps -= 4u;
+        const float height = TerrainSampleLayerHeightWithParallaxContext(
+            layer,
+            stochasticLayer,
+            hasStochasticLayer,
+            terrainStochasticHeightEnabled,
+            terrainGaussianStochasticEnabled,
+            useStochasticContext,
+            hasParallaxHeightContext,
+            parallaxHeightContext,
+            uv + rayPerBound * (march.bound - 0.5f),
+            dUVdx,
+            dUVdy);
+        ParallaxMarchAdvance(march, height);
     }
-
-    if (!foundIntersection)
-    {
-        return uv - parallaxDirection * (maxHeight * 0.5f);
-    }
-
-    float delta2 = pt2.x - pt2.y;
-    float delta1 = pt1.x - pt1.y;
-    float denominator = delta2 - delta1;
-    float parallaxAmount = abs(denominator) > 1.0e-5f
-        ? (pt1.x * delta2 - pt2.x * delta1) / denominator
-        : pt1.x;
-    parallaxAmount = saturate(parallaxAmount);
-    float offset = (1.0f - parallaxAmount) * -maxHeight + maxHeight * 0.5f;
-    return uv + parallaxDirection * offset;
+    return uv + rayPerBound * (ParallaxMarchResult(march) - 0.5f);
 }
 
 float3 TerrainSampleStochasticNormalDerivative(
@@ -1277,18 +1194,13 @@ float3 TerrainRvtParallaxPosition(
         return positionWS;
     }
 
-    uint maxSteps = clamp(perFrameBuffer.terrainParallaxMaxSteps, 4u, 64u);
-    maxSteps = max(4u, (uint)ceil((float)maxSteps * terrainParallaxFade));
-    const uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
-    const float stepSize = localHeightScale * rcp((float)numSteps);
-    const float centeredHeight = localHeightScale * 0.5f;
     const TerrainRvtSampleContext heightSampleContext = TerrainRvtLoadSampleContext(terrainSetIndex);
     const bool terrainRvtTelemetryEnabled = TERRAIN_RVT_TELEMETRY_ENABLED(perFrameBuffer);
     const float2 heightSkyrimXYDdx = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS);
     const float2 heightSkyrimXYDdy = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS);
+    const float centeredHeight = localHeightScale * 0.5f;
+    const float2 rayPerBound = parallaxDirection * heightToWorldScale;
 
-    float prevBound = localHeightScale;
-    float2 prevSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (prevBound - centeredHeight));
     TerrainRvtHeightPageCursor heightPageCursor;
     if (!TerrainRvtTryInitHeightPageCursor(
         heightSampleContext,
@@ -1300,79 +1212,21 @@ float3 TerrainRvtParallaxPosition(
         return positionWS;
     }
 
-    float prevHeight = 0.0f;
-    TerrainRvtTrySampleHeightCursor(
-        heightSampleContext,
-        heightPageCursor,
-        prevSkyrimXY,
-        terrainRvtTelemetryEnabled,
-        prevHeight);
-    float prevF = prevBound - prevHeight;
-    float hitBound = 0.0f;
-    float hitF = prevF;
-    float missBound = prevBound;
-    float missF = prevF;
-    bool foundIntersection = false;
-
+    const float rayLengthPixels = ParallaxRayLengthPixels(rayPerBound * localHeightScale, heightSkyrimXYDdx, heightSkyrimXYDdy);
+    ParallaxMarch march = ParallaxMarchBegin(localHeightScale, rayLengthPixels, clamp(perFrameBuffer.terrainParallaxMaxSteps, 4u, 64u));
     [loop]
-    for (uint i = 1u; i <= numSteps; ++i)
+    while (!march.finished)
     {
-        const float currentBound = max(localHeightScale - (float)i * stepSize, 0.0f);
-        const float2 currentSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (currentBound - centeredHeight));
-        float currentHeight = 0.0f;
+        float height = 0.0f;
         TerrainRvtTrySampleHeightCursor(
             heightSampleContext,
             heightPageCursor,
-            currentSkyrimXY,
+            baseSkyrimXY + rayPerBound * (march.bound - centeredHeight),
             terrainRvtTelemetryEnabled,
-            currentHeight);
-        const float currentF = currentBound - currentHeight;
-
-        if (currentF <= 0.0f)
-        {
-            hitBound = currentBound;
-            hitF = currentF;
-            missBound = prevBound;
-            missF = prevF;
-            foundIntersection = true;
-            break;
-        }
-
-        prevBound = currentBound;
-        prevF = currentF;
+            height);
+        ParallaxMarchAdvance(march, height);
     }
-
-    float2 parallaxSkyrimXY = baseSkyrimXY - parallaxDirection * (heightToWorldScale * centeredHeight);
-    if (foundIntersection)
-    {
-        [unroll]
-        for (uint refine = 0u; refine < 3u; ++refine)
-        {
-            const float rootBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
-            const float2 rootSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (rootBound - centeredHeight));
-            float rootHeight = 0.0f;
-            TerrainRvtTrySampleHeightCursor(
-                heightSampleContext,
-                heightPageCursor,
-                rootSkyrimXY,
-                terrainRvtTelemetryEnabled,
-                rootHeight);
-            const float rootF = rootBound - rootHeight;
-            if (rootF <= 0.0f)
-            {
-                hitBound = rootBound;
-                hitF = rootF;
-            }
-            else
-            {
-                missBound = rootBound;
-                missF = rootF;
-            }
-        }
-
-        const float finalBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
-        parallaxSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (finalBound - centeredHeight));
-    }
+    const float2 parallaxSkyrimXY = baseSkyrimXY + rayPerBound * (ParallaxMarchResult(march) - centeredHeight);
 
     applied = true;
     return float3(parallaxSkyrimXY.x, positionWS.y, -parallaxSkyrimXY.y);
@@ -1875,7 +1729,6 @@ void ApplyTerrainMaterialInternal(
             perFrameBuffer.heightFadeStartDistance,
             perFrameBuffer.heightFadeEndDistance);
         terrainParallaxEnabled = terrainParallaxFade > TERRAIN_PARALLAX_MIN_FADE;
-        terrainParallaxMaxSteps = max(4u, (uint)ceil((float)terrainParallaxMaxSteps * terrainParallaxFade));
     }
 
     float3 blendedBaseColor = 0.0f.xxx;
