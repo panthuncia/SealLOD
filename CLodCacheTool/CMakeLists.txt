@@ -1,212 +1,43 @@
-# CLodCacheTool – Offline ClusterLOD cache builder (CLI)
-# Shares the geometry-extraction & CLod-build sources with BasicRenderer
-# but has NO GPU/D3D12 dependencies.
+# CLodCacheTool: builds complete ClusterLOD caches from the command line, with no GPU.
 #
-# TBB dependency note: the prebuilt OpenUSD packages can define TBB::tbb for
-# their bundled TBB runtime, while vcpkg Embree uses oneTBB (whose current
-# Windows import library is named tbb12).  Until OpenUSD and Embree are built
-# against one shared TBB package, do not assume TBB::tbb satisfies both or
-# hard-code a vcpkg triplet.  The explicit Embree-side library lookup below is
-# intentionally derived from vcpkg's active installed root and triplet.
+# It links the renderer library because the USD whole-asset importer lives there and works on its runtime
+# types, but it never creates a device. d3d12 and dxgi are delay-loaded, so they only enter the process if
+# something calls them, and the tool fails at exit if they did. That is what keeps this true: see main.cpp.
+#
+# Edits to the generator (CLodCore) relink this tool without rebuilding CLodCapture or CLodEval.
 
 cmake_minimum_required(VERSION 3.16)
 
-if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
-    project(CLodCacheTool LANGUAGES CXX)
-endif()
+get_filename_component(CLOD_CACHE_TOOL_BR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../BasicRenderer" ABSOLUTE)
+set(CLOD_CACHE_TOOL_RUNTIME_ROOT "${CMAKE_BINARY_DIR}/BasicRenderer")
 
-# Paths into the BasicRenderer tree
-get_filename_component(BR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../BasicRenderer" ABSOLUTE)
-set(BR_SRC      "${BR_ROOT}/src")
-set(BR_INCLUDE  "${BR_ROOT}/include")
-set(BR_SHADERS  "${BR_ROOT}/shaders")   # for Common/defines.h
-
-# Shared sources (compiled independently from BasicRenderer)
-set(CLOD_SHARED_SOURCES
-    # Geometry extractors
-    "${BR_SRC}/Assets/Import/GlTF/GlTFGeometryExtractor.cpp"
-    "${BR_SRC}/Assets/Import/Assimp/AssimpGeometryExtractor.cpp"
-    "${BR_SRC}/Assets/Import/USD/USDGeometryExtractor.cpp"
-    "${BR_SRC}/Assets/Import/USD/USDMaterialCache.cpp"
-    "${BR_SRC}/Assets/Import/NIF/BRNiflyClient.cpp"
-
-    # CLod build & cache infrastructure
-    "${BR_SRC}/Assets/Cache/CachePack.cpp"
-    "${BR_SRC}/Assets/Cache/ClusterLOD/CLodCache.cpp"
-    "${BR_SRC}/Assets/Cache/ClusterLOD/CLodCacheLoader.cpp"
-    "${BR_SRC}/Assets/Cache/Skeleton/SkeletonArtifactValidation.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/DefaultCLodSettings.cpp"
-    "${BR_SRC}/Assets/Geometry/MeshIngestBuilder.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLOD.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODClustering.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODValidation.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePacking.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODAssembly.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelOnly.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.cpp"
-    "${BR_SRC}/Assets/GeometryProcessing/Voxels/VoxelGroupBuilder.cpp"
-    "${BR_SRC}/VirtualGeometry/Reyes/Tessellation/ReyesTessellationTable.cpp"
-    "${BR_SRC}/VirtualGeometry/Reyes/Tessellation/ReyesTessellationGeneratedReferenceSource.cpp"
-
-    # Utilities
-    "${BR_SRC}/Assets/Cache/CachePathUtilities.cpp"
-
-    # Singletons needed by the pipeline
-    "${BR_SRC}/Runtime/Scheduling/TaskSchedulerManager.cpp"
-
-    # Telemetry used by TaskSchedulerManager
-    "${BR_SRC}/Diagnostics/Telemetry/FrameTaskGraphTelemetry.cpp"
-)
-
+# The renderer has no Assimp importer, so this format stays here.
+find_package(assimp REQUIRED CONFIG)
 add_executable(CLodCacheTool
     "main.cpp"
-    ${CLOD_SHARED_SOURCES}
+    "${CLOD_CACHE_TOOL_BR_ROOT}/src/Assets/Import/Assimp/AssimpGeometryExtractor.cpp"
 )
-
-set_target_properties(CLodCacheTool PROPERTIES
-    CXX_STANDARD          23
-    CXX_STANDARD_REQUIRED ON
-    # Output the exe next to BasicRenderer.exe so it can find the
-    # same USD / TBB / Assimp DLLs that are already synced there.
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/BasicRenderer"
-)
-
-# Include directories
-target_include_directories(CLodCacheTool PRIVATE
-    "${BR_INCLUDE}"
-    "${BR_SRC}"
-    "${BR_SHADERS}"          # ClusterLODClustering.cpp includes "../shaders/Common/defines.h"
-    "${BR_ROOT}/generated"
-)
-
-# The shaders include is for the relative-path include in ClusterLODUtilities.
-# That file does  #include "../shaders/Common/defines.h"  which resolves relative
-# to the .cpp location (BasicRenderer/src/Mesh/).  We add the parent of "shaders"
-# so that  ../shaders/Common/defines.h  resolves correctly.
-target_include_directories(CLodCacheTool PRIVATE "${BR_ROOT}")
-
-if(TARGET BasicRHI::BasicRHI)
-    target_include_directories(CLodCacheTool PRIVATE
-        $<TARGET_PROPERTY:BasicRHI::BasicRHI,INTERFACE_INCLUDE_DIRECTORIES>
-    )
-    target_compile_definitions(CLodCacheTool PRIVATE
-        $<TARGET_PROPERTY:BasicRHI::BasicRHI,INTERFACE_COMPILE_DEFINITIONS>
-    )
-else()
-    get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-    target_include_directories(CLodCacheTool PRIVATE "${REPO_ROOT}/BasicRHI")
-endif()
-
-if(TARGET OpenRenderGraph::OpenRenderGraph)
-    target_include_directories(CLodCacheTool PRIVATE
-        $<TARGET_PROPERTY:OpenRenderGraph::OpenRenderGraph,INTERFACE_INCLUDE_DIRECTORIES>
-    )
-    target_compile_definitions(CLodCacheTool PRIVATE
-        $<TARGET_PROPERTY:OpenRenderGraph::OpenRenderGraph,INTERFACE_COMPILE_DEFINITIONS>
-    )
-else()
-    get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-    target_include_directories(CLodCacheTool PRIVATE "${REPO_ROOT}/OpenRenderGraph/include")
-endif()
-
-# Find packages (same vcpkg packages BasicRenderer uses) 
-find_package(spdlog       REQUIRED CONFIG)
-find_package(assimp       REQUIRED CONFIG)
-find_package(nlohmann_json REQUIRED CONFIG)
-find_package(Boost        REQUIRED CONFIG COMPONENTS container_hash)
-find_package(DirectX-Headers CONFIG REQUIRED)
-find_package(Tracy REQUIRED CONFIG)
-find_package(embree CONFIG REQUIRED)
-find_package(flecs CONFIG REQUIRED)
-find_package(lz4 CONFIG REQUIRED)
-
-# OpenUSD – prefix path already set by the top-level CMakeLists.txt
-find_package(pxr REQUIRED CONFIG)
-if(NOT TARGET TBB::tbb)
-    find_package(TBB CONFIG REQUIRED)
-endif()
-
-set(_clod_cache_tool_vcpkg_installed_dir "${VCPKG_INSTALLED_DIR}")
-if(NOT _clod_cache_tool_vcpkg_installed_dir)
-    set(_clod_cache_tool_vcpkg_installed_dir "${_VCPKG_INSTALLED_DIR}")
-endif()
-find_library(
-    CLOD_CACHE_TOOL_TBB12_LIBRARY
-    NAMES tbb12
-    PATHS "${_clod_cache_tool_vcpkg_installed_dir}/${VCPKG_TARGET_TRIPLET}/lib"
-    NO_DEFAULT_PATH
-)
-if(NOT CLOD_CACHE_TOOL_TBB12_LIBRARY)
-    message(FATAL_ERROR
-        "CLodCacheTool requires the vcpkg oneTBB library used by Embree; "
-        "it was not found for triplet '${VCPKG_TARGET_TRIPLET}' under "
-        "'${_clod_cache_tool_vcpkg_installed_dir}'"
-    )
-endif()
-if(COMMAND basicrenderer_use_release_library_for_debug)
-    basicrenderer_use_release_library_for_debug(fmt::fmt)
-    basicrenderer_use_release_library_for_debug(Tracy::TracyClient)
-endif()
-
-# meshoptimizer is added via ThirdParty/meshoptimizer1.2
-
-# Link libraries
 target_link_libraries(CLodCacheTool PRIVATE
-	BasicTelemetry::Core
-	${BASICRENDERER_SPDLOG_TARGET}
+    BasicRenderer
+    ${BASICRENDERER_SPDLOG_TARGET}
+    Pix::headers
+    "${CLOD_CACHE_TOOL_BR_ROOT}/WinPixEventRuntime.lib"
     assimp::assimp
-    nlohmann_json::nlohmann_json
-    meshoptimizer
-    Boost::container_hash
-    Tracy::TracyClient
-    embree
-    flecs::flecs_static
-    bcrypt.lib
-    lz4::lz4
-    "${CLOD_CACHE_TOOL_TBB12_LIBRARY}"
-
-    # OpenUSD libs needed by CLodCache / CLodCacheLoader / USDGeometryExtractor
-    usd
-    sdf
-    tf
-    vt
-    arch
-    plug
-    ar
-    usdShade
-    usdSkel
+    delayimp
 )
-
-# DirectXMath (header-only, from DirectX-Headers)
-target_include_directories(CLodCacheTool PRIVATE ${DIRECTX_HEADERS_INCLUDE_DIR})
-
-# OpenUSD headers
-get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
-# This target lives at BasicRenderer/CLodCacheTool, so its repository root is
-# two parents up. The previous one-parent calculation pointed to a
-# non-existent BasicRenderer/ThirdParty directory after a fresh checkout.
-set(BASICRENDERER_USD_ROOT_TOOL "${REPO_ROOT}/ThirdParty" CACHE PATH "" FORCE)
-target_include_directories(CLodCacheTool BEFORE PRIVATE
-    "${BASICRENDERER_USD_ROOT_TOOL}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>/include/"
+target_link_options(CLodCacheTool PRIVATE "LINKER:/DELAYLOAD:d3d12.dll" "LINKER:/DELAYLOAD:dxgi.dll")
+target_include_directories(CLodCacheTool PRIVATE "${CLOD_CACHE_TOOL_BR_ROOT}/src")
+set_target_properties(CLodCacheTool PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    # Beside the renderer, so it finds the same USD, TBB and Assimp DLLs.
+    RUNTIME_OUTPUT_DIRECTORY "${CLOD_CACHE_TOOL_RUNTIME_ROOT}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CLOD_CACHE_TOOL_RUNTIME_ROOT}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CLOD_CACHE_TOOL_RUNTIME_ROOT}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CLOD_CACHE_TOOL_RUNTIME_ROOT}"
 )
-
-# MSVC tweaks
-if (MSVC)
-    target_compile_options(CLodCacheTool PRIVATE
-        /Zc:preprocessor
-        /EHsc
-        /bigobj
-        /wd4828 /wd4514 /wd5038 /wd4100 /wd5219
-        /wd4625 /wd4626 /wd4820 /wd4365 /wd4464
-        /wd4062 /wd5026 /wd5027 /wd5246 /wd4191
-        /wd4061 /wd4623 /wd4710 /wd4324 /wd5267
-        /wd5045
-    )
-    target_compile_options(CLodCacheTool PRIVATE /external:anglebrackets /external:W0)
+if(MSVC)
+    target_compile_options(CLodCacheTool PRIVATE /Zc:preprocessor /EHsc /bigobj)
 endif()
-
+add_dependencies(CLodCacheTool tbb_config_sync)
 target_compile_definitions(CLodCacheTool PRIVATE NOMINMAX _UNICODE UNICODE)

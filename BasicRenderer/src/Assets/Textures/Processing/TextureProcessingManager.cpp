@@ -229,39 +229,18 @@ bool TryWriteConditionedTextureCache(const std::wstring& cachePath, const Textur
 		return false;
 	}
 
-	auto* nativeDevice = rhi::dx12::get_device(DeviceManager::GetInstance().GetDevice());
-	if (nativeDevice == nullptr) {
-		return false;
+	// Computed, not asked of a device, so tools with no GPU can write this file.
+	const auto block = rhi::GetBlockInfo(sourceData.desc.format);
+	std::vector<br::processed_texture_cache::SubresourcePlacement> placements(subresourceCount);
+	uint64_t totalBytes = 0;
+	for (uint32_t subresourceIndex = 0; subresourceIndex < subresourceCount; ++subresourceIndex) {
+		const auto& dims = sourceData.desc.imageDimensions[subresourceIndex];
+		placements[subresourceIndex] = br::processed_texture_cache::PlaceSubresource(
+			totalBytes, dims.width, dims.height, block.blockWidth, block.blockHeight, block.bytesPerBlock);
+		totalBytes = br::processed_texture_cache::EndOfSubresource(placements[subresourceIndex]);
 	}
 
-	D3D12_RESOURCE_DESC resourceDesc{};
-	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-	resourceDesc.Alignment = 0;
-	resourceDesc.Width = sourceData.desc.imageDimensions[0].width;
-	resourceDesc.Height = sourceData.desc.imageDimensions[0].height;
-	resourceDesc.DepthOrArraySize = static_cast<uint16_t>(totalArraySlices);
-	resourceDesc.MipLevels = static_cast<uint16_t>(mipLevels);
-	resourceDesc.Format = rhi::ToDxgi(sourceData.desc.format);
-	resourceDesc.SampleDesc.Count = 1;
-	resourceDesc.SampleDesc.Quality = 0;
-	resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-	resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-	std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts(subresourceCount);
-	std::vector<UINT> numRows(subresourceCount);
-	std::vector<UINT64> rowSizes(subresourceCount);
-	UINT64 totalBytes = 0;
-	nativeDevice->GetCopyableFootprints(
-		&resourceDesc,
-		0,
-		subresourceCount,
-		0,
-		layouts.data(),
-		numRows.data(),
-		rowSizes.data(),
-		&totalBytes);
-
-	if (totalBytes == 0 || totalBytes > static_cast<UINT64>((std::numeric_limits<size_t>::max)())) {
+	if (totalBytes == 0 || totalBytes > static_cast<uint64_t>((std::numeric_limits<size_t>::max)())) {
 		return false;
 	}
 
@@ -273,17 +252,15 @@ bool TryWriteConditionedTextureCache(const std::wstring& cachePath, const Textur
 			return false;
 		}
 
-		const auto& layout = layouts[subresourceIndex];
-		const size_t copyRowSize = static_cast<size_t>(rowSizes[subresourceIndex]);
+		const auto& placement = placements[subresourceIndex];
 		const size_t srcRowPitch = static_cast<size_t>(dims.rowPitch);
-		const size_t dstRowPitch = static_cast<size_t>(layout.Footprint.RowPitch);
-		uint8_t* dstBase = conditionedData.data() + static_cast<size_t>(layout.Offset);
+		uint8_t* dstBase = conditionedData.data() + static_cast<size_t>(placement.offset);
 		const uint8_t* srcBase = bytes->data();
-		for (UINT row = 0; row < numRows[subresourceIndex]; ++row) {
+		for (uint32_t row = 0; row < placement.rowCount; ++row) {
 			std::memcpy(
-				dstBase + static_cast<size_t>(row) * dstRowPitch,
+				dstBase + static_cast<size_t>(row) * placement.rowPitch,
 				srcBase + static_cast<size_t>(row) * srcRowPitch,
-				copyRowSize);
+				placement.rowSize);
 		}
 	}
 
@@ -1106,7 +1083,10 @@ void ApplyDiffuseDecorrelation(std::vector<std::array<float, 4>>& pixels, Stocha
 	result.colorSpaceVector2 = { v2[0], v2[1], v2[2] };
 }
 
-constexpr bool kEnableGpuBc7Compression = true;
+// Off because the GPU route corrupts sRGB base colors, and its result varies between runs: lower mips come back
+// blank, which the check in CompleteGpuProcessing catches, or too bright, which nothing can catch. Mip generation
+// alone passes BR_TEXTURE_JOB_SELF_TEST, so look at sRGB mips and at BC7 compression before turning this back on.
+constexpr bool kEnableGpuBc7Compression = false;
 
 struct PreparedTextureProcessingData {
 	std::shared_ptr<TextureSourceData> preparedSourceData;
@@ -1268,6 +1248,15 @@ std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
 		if (FAILED(hr)) {
 			throw std::runtime_error("TextureProcessingManager: DirectXTex GenerateMipMaps failed");
 		}
+		// Alpha-tested foliage thins out at a distance unless each mip keeps the first mip's coverage.
+		if (ShouldPreserveAlphaCoverage(meta, *preparedSourceData)) {
+			constexpr float kCoverageAlphaReference = 0.5f;
+			hr = ScaleMipMapsAlphaForCoverage(
+				mipChainImage.GetImages(), mipChainImage.GetImageCount(), mipChainImage.GetMetadata(), 0u, kCoverageAlphaReference, mipChainImage);
+			if (FAILED(hr)) {
+				throw std::runtime_error("TextureProcessingManager: DirectXTex ScaleMipMapsAlphaForCoverage failed");
+			}
+		}
 		preparedImage = std::move(mipChainImage);
 	}
 
@@ -1357,10 +1346,15 @@ bool HasNonTransparentPreparedPixels(const TextureSourceData& sourceData)
 	return false;
 }
 
+// Not stripSrgb: it leaves block-compressed formats alone, which would skip every sRGB base color.
+bool IsBc7Format(rhi::Format format)
+{
+	return format == rhi::Format::BC7_UNorm || format == rhi::Format::BC7_UNorm_sRGB;
+}
+
 bool IsCanonicalTransparentBlackBc7Chain(const TextureSourceData& sourceData)
 {
-	const auto format = rhi::helpers::stripSrgb(sourceData.desc.format);
-	if (format != rhi::Format::BC7_UNorm || sourceData.subresources.empty()) {
+	if (!IsBc7Format(sourceData.desc.format) || sourceData.subresources.empty()) {
 		return false;
 	}
 
@@ -1382,6 +1376,26 @@ bool IsCanonicalTransparentBlackBc7Chain(const TextureSourceData& sourceData)
 		}
 	}
 	return sawBlock;
+}
+
+// True when a mip below the first decodes to nothing. The GPU route has produced chains with a good
+// first mip and blank lower mips, which read as black beyond the distance where the first mip is used.
+bool HasBlankLowerBc7Mip(const TextureSourceData& sourceData)
+{
+	if (!IsBc7Format(sourceData.desc.format) || sourceData.subresources.size() < 2u) {
+		return false;
+	}
+	const auto isBlank = [](const std::shared_ptr<std::vector<uint8_t>>& subresource) {
+		if (!subresource || subresource->empty() || (subresource->size() % 16u) != 0u) return false;
+		for (size_t offset = 0; offset < subresource->size(); offset += 16u) {
+			if ((*subresource)[offset] != 0x40u) return false;
+			for (size_t byte = 1u; byte < 16u; ++byte) {
+				if ((*subresource)[offset + byte] != 0u) return false;
+			}
+		}
+		return true;
+	};
+	return std::any_of(sourceData.subresources.begin() + 1, sourceData.subresources.end(), isBlank);
 }
 
 PreparedTextureProcessingData ProcessTextureSourceData(
@@ -1747,13 +1761,13 @@ void TextureProcessingManager::CompleteGpuProcessing(
 		processingKey = handle->processingKey;
 	}
 
-	// Mode 6 encodes transparent black as 40 00 ... 00. A complete chain made
+	// Mode 6 encodes transparent black as 40 00 ... 00. A chain with a mip made
 	// only of that block cannot be correct when the uploaded RGBA source has
 	// visible pixels. Never persist such an artifact: retry just this texture on
 	// the CPU so an ordering regression cannot poison the durable cache again.
 	if (result && preparedSourceData &&
 		HasNonTransparentPreparedPixels(*preparedSourceData) &&
-		IsCanonicalTransparentBlackBc7Chain(*result))
+		(IsCanonicalTransparentBlackBc7Chain(*result) || HasBlankLowerBc7Mip(*result)))
 	{
 		spdlog::error(
 			"TextureProcessingManager: rejected unexpected transparent-black GPU BC7 output for '{}'; retrying this texture on CPU",

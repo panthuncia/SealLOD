@@ -869,7 +869,9 @@ namespace br::staticimport
 					if (templateRefs.contains(key) || !queuedKeys.insert(key).second) {
 						continue;
 					}
-					RecordCLodMeshSource(key.meshID, group.ModelPath(), part.name, static_cast<std::uint32_t>(key.rasterFlags));
+					const auto& cacheSource = mesh->GetCLodCacheSource();
+					RecordCLodMeshSource(key.meshID, group.ModelPath(), part.name, static_cast<std::uint32_t>(key.rasterFlags),
+						cacheSource.sourceIdentifier, cacheSource.primPath, cacheSource.subsetName);
 					outRequests.push_back(StaticTemplateRequest{
 						.key = key,
 						.mesh = mesh,

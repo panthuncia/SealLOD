@@ -219,6 +219,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>(CLodForceTraversalDepthRootSettingName, CLodForceTraversalDepthRootDisabled);
     settingsManager.registerSetting<uint32_t>(CLodVisibleClusterCapacitySettingName, CLodDefaultVisibleClusterCapacity);
     settingsManager.registerSetting<bool>(CLodFrustumCullingSettingName, true);
+    settingsManager.registerSetting<float>(CLodLodErrorPixelsSettingName, 1.0f);
     settingsManager.registerSetting<uint32_t>(
         CLodPureComputePhase2ExpansionFactorSettingName,
         CLodPureComputePhase2ExpansionFactorDefault);

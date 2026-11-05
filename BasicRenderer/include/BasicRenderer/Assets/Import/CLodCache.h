@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -160,5 +161,35 @@ bool LoadMeshPagesSelectiveDirectStorage(
 bool OpenContainerFile(const ClusterLODCacheSource& cacheSource,
 	std::ifstream& outFile,
 	uint32_t& outPageCount);
+bool OpenContainerFile(const std::filesystem::path& containerPath,
+	std::ifstream& outFile,
+	uint32_t& outPageCount);
+
+// Opening a cache by file, for tools that inspect a cache without knowing its key or build hash.
+enum class OpenMetadataStatus {
+	Ok,
+	NotFound,
+	BadHeader,
+	SchemaMismatch,
+	Corrupt,
+};
+
+struct OpenedMetadata {
+	OpenMetadataStatus status = OpenMetadataStatus::NotFound;
+	uint32_t foundSchemaVersion = 0;  // valid from SchemaMismatch and Ok
+	CacheData data;
+	std::filesystem::path containerPath;  // beside the metadata, named by the metadata
+};
+
+OpenedMetadata OpenMetadataFile(const std::filesystem::path& metadataPath);
+
+// Cache-only mode makes a cache miss an error instead of a silent rebuild, so a tool can be sure
+// it is rendering the cache it was given. Builder entry points call ThrowIfCacheOnly. Importers
+// may catch that exception and carry on without the mesh, so the count lets the caller check
+// afterwards that nothing was asked to build.
+void SetCacheOnlyMode(bool enabled);
+bool IsCacheOnlyMode();
+void ThrowIfCacheOnly(std::string_view builder);
+uint64_t GetCacheOnlyViolationCount();
 
 }

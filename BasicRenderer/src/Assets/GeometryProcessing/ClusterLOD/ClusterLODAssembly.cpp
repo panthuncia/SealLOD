@@ -1,3 +1,4 @@
+#include <BasicRenderer/Assets/Import/CLodCache.h>
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h"
@@ -466,6 +467,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	uint32_t preferredNodeWidth,
 	bool synthesizeVoxelParents)
 {
+	CLodCache::ThrowIfCacheOnly("BuildClusterLODAssemblyArtifacts");
 	if (parts.empty())
 	{
 		throw std::runtime_error("ClusterLOD assembly: at least one part is required");
@@ -1591,6 +1593,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifactsPreservingTriangleOn
 	const ClusterLODBuilderSettings& settings,
 	uint32_t preferredNodeWidth)
 {
+	// Checked here as well because the try below would treat the error as a reason to retry.
+	CLodCache::ThrowIfCacheOnly("BuildClusterLODAssemblyArtifactsPreservingTriangleOnly");
 	try
 	{
 		return BuildClusterLODAssemblyArtifacts(parts, instances, settings, preferredNodeWidth, true);

@@ -18,8 +18,6 @@
 
 namespace
 {
-    constexpr float kClusterLodErrorPixels = 1.0f;
-
     float ComputeErrorOverDistanceThreshold(const CameraInfo& cameraInfo, float errorPixels)
     {
         const float projY = DirectX::XMVectorGetY(cameraInfo.jitteredProjection.r[1]);
@@ -62,7 +60,7 @@ namespace
         cullInfo.projX = DirectX::XMVectorGetX(cameraInfo.jitteredProjection.r[0]);
         cullInfo.projY = DirectX::XMVectorGetY(cameraInfo.jitteredProjection.r[1]);
         cullInfo.zNear = cameraInfo.zNear;
-        cullInfo.errorOverDistanceThreshold = ComputeErrorOverDistanceThreshold(cameraInfo, kClusterLodErrorPixels);
+        cullInfo.errorOverDistanceThreshold = ComputeErrorOverDistanceThreshold(cameraInfo, br::extensions::MakeSettingGetter<float>(CLodLodErrorPixelsSettingName)());
         cullInfo.isOrtho = cameraInfo.isOrtho;
         cullInfo.viewportWidth = static_cast<float>(cameraInfo.depthResX);
         cullInfo.viewportHeight = static_cast<float>(cameraInfo.depthResY);

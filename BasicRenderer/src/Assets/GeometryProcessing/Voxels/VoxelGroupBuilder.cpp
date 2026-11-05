@@ -2052,7 +2052,14 @@ namespace
 {
 	RTCDevice GetVoxelCoverageEmbreeDevice()
 	{
-		static RTCDevice device = rtcNewDevice(nullptr);
+		static RTCDevice device = []() {
+			RTCDevice created = rtcNewDevice(nullptr);
+			// A failed commit leaves an empty scene that misses every ray, which otherwise looks like geometry with no coverage.
+			rtcSetDeviceErrorFunction(created, [](void*, RTCError code, const char* message) {
+				spdlog::error("Voxel coverage Embree error {}: {}", static_cast<int>(code), message != nullptr ? message : "");
+			}, nullptr);
+			return created;
+		}();
 		return device;
 	}
 

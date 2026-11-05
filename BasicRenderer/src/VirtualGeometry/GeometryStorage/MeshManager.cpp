@@ -208,6 +208,11 @@ MeshManager::MeshManager() {
 		// Full-Skyrim telemetry: 1/1/1/2/3 slabs for 16/32/64/128/256 KiB.
 		// This consumes the same eight 128 MiB slabs as the old fixed pool.
 		ppConfig.initialStreamingSlabs = { 2u, 2u, 2u, 4u, 6u };
+		// Forced-leaf evaluation renders of one large asset can need more than the cap, and over it they evict their
+		// own pages and fall back to coarser groups without saying so. See docs/clod-evaluation.md.
+		if (const char* slabs = std::getenv("BASICRENDERER_CLOD_PAGE_POOL_SLABS")) {
+			ppConfig.numStreamingSlabs = std::max(ppConfig.numStreamingSlabs, static_cast<uint32_t>(std::strtoul(slabs, nullptr, 10)));
+		}
 		ppConfig.debugName    = "CLodPagePool";
 		m_clodPagePool = std::make_shared<PagePool>(ppConfig);
 	}

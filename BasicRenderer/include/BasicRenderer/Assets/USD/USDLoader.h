@@ -62,6 +62,9 @@ namespace USDLoader {
 		// ordinary expanded payload, because that would report a cache build as
 		// successful without publishing anything the runtime can reopen.
 		bool requireWholeAssetAssembly = false;
+		// A discovered assembly that fails to build normally falls back to a plain import, which skips PointInstancers.
+		// That suits a running game. A tool writing a cache must report it instead, because the result is incomplete.
+		bool failIfAssemblyBuildFails = false;
 	};
 
 	using RenderablePartPayload = br::import::RenderablePartPayload;
@@ -73,6 +76,16 @@ namespace USDLoader {
 		std::uint64_t meshPreprocessMs = 0;
 		std::uint64_t payloadParseMs = 0;
 	};
+
+	struct CachedAssemblyTextureStats {
+		std::uint32_t referenced = 0;
+		std::uint32_t built = 0;
+	};
+
+	// Writes the processed cache entry of every texture a published material assembly names, on the calling
+	// thread with no GPU, so a cache built offline needs no texture work at load. Empty when the asset
+	// published no assembly. Throws if a texture cannot be conditioned.
+	std::optional<CachedAssemblyTextureStats> ConditionCachedAssemblyTexturesOnCpu(const InMemoryStageOptions& options);
 
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromFile(
 		const std::string& filePath,

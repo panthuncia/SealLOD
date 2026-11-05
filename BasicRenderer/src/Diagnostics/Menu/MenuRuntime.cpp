@@ -970,15 +970,22 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         m_shadowClodTelemetry.capturePending ||
         m_shadowClodTelemetry.captureStatsPending);
 
+    if (m_externalPanel) {
+        m_externalPanel();
+    }
+
     if (!m_menuEnabled) {
-        ImGui::SetNextWindowBgAlpha(0.8f);
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Menu", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize |
-            ImGuiWindowFlags_NoCollapse);
-        ImGui::Checkbox("Enable Menu", &m_menuEnabled);
-        ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", msPerFrame, fps);
-        ImGui::End();
+        // A host with its own panel has its own way back to the menu.
+        if (!m_externalPanel) {
+            ImGui::SetNextWindowBgAlpha(0.8f);
+            ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Menu", nullptr,
+                ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoCollapse);
+            ImGui::Checkbox("Enable Menu", &m_menuEnabled);
+            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", msPerFrame, fps);
+            ImGui::End();
+        }
 
 		ImGui::Render();
 		if (!commandList) return;

@@ -268,6 +268,8 @@ set(SOURCES
     "src/Diagnostics/Renderer/RendererDiagnostics.cpp"
     "src/Terrain/Diagnostics/TerrainRvtTelemetry.cpp"
     "src/Diagnostics/Renderer/RendererTelemetryRequests.cpp"
+    "src/Diagnostics/Menu/ExternalUi.cpp"
+    "src/Diagnostics/Renderer/RendererCLodInspection.cpp"
     "src/Diagnostics/Renderer/RendererCLodTelemetryRequests.cpp"
     # src/Factories
     "src/Assets/Textures/TextureFactory.cpp"
@@ -279,9 +281,8 @@ set(SOURCES
     "src/PostProcessing/FidelityFX/Backend/FfxBackendVulkan.cpp"
     # src/Import
     "src/Assets/Import/NIF/BRNiflyClient.cpp"
-    "src/Assets/Cache/ClusterLOD/CLodCache.cpp"
-    "src/Assets/Cache/ClusterLOD/CLodCacheLoader.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/DefaultCLodSettings.cpp"
+    "src/Assets/Cache/ClusterLOD/CLodCacheDirectStorage.cpp"
+    "src/Assets/Cache/ClusterLOD/CLodCacheIdentityUsd.cpp"
     "src/Assets/Import/GlTF/GlTFGeometryExtractor.cpp"
     "src/Assets/Import/GlTF/GlTFLoader.cpp"
     "src/Assets/Import/ModelLoader.cpp"
@@ -289,7 +290,6 @@ set(SOURCES
     "src/Assets/GeometryProcessing/Reyes/ObjectReyesAtlasBaker.cpp"
     "src/Assets/Import/RenderableAsset.cpp"
     "src/Assets/Cache/Skeleton/SkeletonArtifactCache.cpp"
-    "src/Assets/Cache/Skeleton/SkeletonArtifactValidation.cpp"
     "src/Assets/Import/USD/USDGeometryExtractor.cpp"
     "src/Assets/Import/USD/USDLoader.cpp"
     "src/Assets/Import/USD/USDStageEntryPoints.cpp"
@@ -344,27 +344,13 @@ set(SOURCES
     "src/Pipeline/PipelineState/PSOManager.cpp"
     "src/Runtime/Resources/ResourceManager.cpp"
     "src/Pipeline/ShaderCompilation/ShaderArtifactCache.cpp"
-    "src/Runtime/Scheduling/TaskSchedulerManager.cpp"
     "src/Runtime/Scheduling/GraphSchedulerAdapter.h"
     "src/Runtime/Scheduling/GraphSchedulerAdapter.cpp"
     # src/Mesh
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLOD.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODClustering.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODValidation.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePacking.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODAssembly.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelOnly.cpp"
-    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.cpp"
     "src/Assets/Geometry/Mesh.cpp"
-    "src/Assets/Geometry/MeshIngestBuilder.cpp"
     "src/Assets/Geometry/MeshInstance.cpp"
     "src/Assets/Geometry/MeshInstanceFactory.cpp"
     "src/VirtualGeometry/GeometryStorage/MeshManager.cpp"
-    "src/Assets/GeometryProcessing/Voxels/VoxelGroupBuilder.cpp"
     # src/Render
     "src/Runtime/StateGraph/AsyncStateGraph.cpp"
     "src/Runtime/StateGraph/RendererGraphAdapters.h"
@@ -468,7 +454,6 @@ set(SOURCES
     "src/StaticImport/StaticImportStreamingPump.cpp"
     "src/StaticImport/StaticSceneRecipe.cpp"
     # src/Telemetry
-    "src/Diagnostics/Telemetry/FrameTaskGraphTelemetry.cpp"
     "src/Diagnostics/Telemetry/NvPerfIntegration.cpp"
     "src/Diagnostics/Telemetry/SamplingControlServer.cpp"
     "src/Diagnostics/Telemetry/StatisticalSampler.cpp"
@@ -485,8 +470,6 @@ set(SOURCES
     "src/Transparency/AVBOIT/RenderPasses/AVBOITSetupPass.cpp"
     "src/Transparency/AVBOIT/RenderPasses/AVBOITSparseClearPass.cpp"
     # src/Utilities
-    "src/Assets/Cache/CachePack.cpp"
-    "src/Assets/Cache/CachePathUtilities.cpp"
     "src/Assets/Textures/Cache/ProcessedTextureCacheIndex.cpp"
     "src/Utilities/MathUtils.cpp"
     "src/Assets/Textures/Import/StbImage.cpp"
@@ -522,8 +505,6 @@ set(SOURCES
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesReplayMergePass.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesSeedPatchesPass.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesSplitPass.cpp"
-    "src/VirtualGeometry/Reyes/Tessellation/ReyesTessellationGeneratedReferenceSource.cpp"
-    "src/VirtualGeometry/Reyes/Tessellation/ReyesTessellationTable.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesTessellationTableUploadPass.cpp"
     # src/VirtualGeometry/Streaming
     "src/VirtualGeometry/Streaming/CLodPageLRU.cpp"
@@ -803,6 +784,11 @@ target_compile_features(TaskSchedulerManagerTests PRIVATE cxx_std_23)
 add_executable(CachePackTests "tests/CachePackTests.cpp")
 target_link_libraries(CachePackTests PRIVATE ${PROJECT_NAME})
 target_compile_features(CachePackTests PRIVATE cxx_std_23)
+
+add_executable(CLodCacheFormatTests "tests/CLodCacheFormatTests.cpp")
+target_link_libraries(CLodCacheFormatTests PRIVATE CLodBuildCore)
+target_compile_features(CLodCacheFormatTests PRIVATE cxx_std_23)
+target_compile_definitions(CLodCacheFormatTests PRIVATE NOMINMAX)
 
 add_executable(AsyncStateGraphTests "tests/AsyncStateGraphTests.cpp")
 target_link_libraries(AsyncStateGraphTests PRIVATE ${PROJECT_NAME})
@@ -1632,6 +1618,7 @@ PRIVATE
     usdShade
     usdSkel
     implot::implot
+    CLodBuildCore
     OpenRenderGraph::OpenRenderGraph
     BasicScene::BasicScene
     BasicRHI::BasicRHI
@@ -1878,6 +1865,7 @@ add_test(NAME VirtualShadowBudgetTests COMMAND VirtualShadowBudgetTests)
 add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
 add_test(NAME TaskSchedulerManagerTests COMMAND TaskSchedulerManagerTests)
 add_test(NAME CachePackTests COMMAND CachePackTests)
+add_test(NAME CLodCacheFormatTests COMMAND CLodCacheFormatTests)
 add_test(NAME AsyncStateGraphTests COMMAND AsyncStateGraphTests)
 if(WIN32)
     add_test(NAME GraphJobTests COMMAND GraphJobTests)
@@ -1897,6 +1885,7 @@ if(WIN32)
         BoundedSpscQueueTests
         TaskSchedulerManagerTests
         CachePackTests
+        CLodCacheFormatTests
         AsyncStateGraphTests
         GraphJobTests
         CLodCoordinatorTests

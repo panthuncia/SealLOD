@@ -877,6 +877,34 @@ uint64_t Scene::GetSceneID() const {
 	return m_sceneID;
 }
 
+void Scene::SetCameraProjection(float fov, float aspect, float zNear, float zFar) {
+	if (!m_primaryCamera.is_valid()) {
+		return;
+	}
+	const auto* current = m_primaryCamera.try_get<Components::Camera>();
+	if (current == nullptr) {
+		return;
+	}
+	Components::Camera camera = *current;
+	auto planes = GetFrustumPlanesPerspective(aspect, fov, zNear, zFar);
+	DisableFarClipPlane(planes);
+	camera.fov = fov;
+	camera.aspect = aspect;
+	camera.zNear = zNear;
+	camera.zFar = zFar;
+	camera.info.unjitteredProjection = MakeInfiniteReverseZPerspectiveFovRH(fov, aspect, zNear);
+	camera.info.jitteredProjection = camera.info.unjitteredProjection;
+	camera.info.projectionInverse = XMMatrixInverse(nullptr, camera.info.unjitteredProjection);
+	for (size_t plane = 0; plane < planes.size(); ++plane) {
+		camera.info.clippingPlanes[plane] = planes[plane];
+	}
+	camera.info.zNear = zNear;
+	camera.info.zFar = zFar;
+	camera.info.aspectRatio = aspect;
+	camera.info.fov = fov;
+	m_primaryCamera.set<Components::Camera>(camera);
+}
+
 void Scene::SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, XMFLOAT3 up, float fov, float aspect, float zNear, float zFar) {
 		
     if (m_primaryCamera.is_valid()) {

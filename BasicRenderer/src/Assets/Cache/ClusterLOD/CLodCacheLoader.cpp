@@ -1,4 +1,4 @@
-#include <BasicRenderer/Assets/Import/CLodCacheLoader.h>
+#include <BasicRenderer/Assets/CLodCacheStore.h>
 #include <BasicRenderer/Assets/CachePack.h>
 
 #include <BasicRenderer/Assets/Import/CLodCache.h>
@@ -13,9 +13,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include <pxr/usd/sdf/layer.h>
-#include <pxr/usd/sdf/propertySpec.h>
-#include <pxr/usd/usd/attribute.h>
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
@@ -74,78 +71,6 @@ namespace {
 		return key;
 	}
 
-	struct LayerPrimIdentity {
-		std::string sourceIdentifier;
-		std::string primPath;
-	};
-
-	std::string GetLayerCacheSourceIdentifier(const pxr::SdfLayerHandle& layer)
-	{
-		if (!layer) {
-			return {};
-		}
-
-		const std::string& realPath = layer->GetRealPath();
-		return NormalizeCacheSourcePath(realPath.empty() ? layer->GetIdentifier() : realPath);
-	}
-
-	std::optional<LayerPrimIdentity> GetStrongestAuthoredValueIdentity(
-		const pxr::UsdAttribute& attr,
-		pxr::UsdTimeCode geomTimeCode)
-	{
-		if (!attr) {
-			return std::nullopt;
-		}
-
-		for (const auto& spec : attr.GetPropertyStack(geomTimeCode)) {
-			if (!spec || !spec->GetLayer()) {
-				continue;
-			}
-
-			const bool hasTimeSamples =
-				!spec->GetLayer()->ListTimeSamplesForPath(spec->GetPath()).empty();
-			if (!spec->HasDefaultValue() && !hasTimeSamples) {
-				continue;
-			}
-
-			LayerPrimIdentity identity{};
-			identity.sourceIdentifier = GetLayerCacheSourceIdentifier(spec->GetLayer());
-			identity.primPath = spec->GetPath().GetPrimPath().GetString();
-			if (!identity.sourceIdentifier.empty() && !identity.primPath.empty()) {
-				return identity;
-			}
-		}
-
-		return std::nullopt;
-	}
-
-	std::optional<LayerPrimIdentity> GetReferencedGeometryIdentity(
-		const pxr::UsdGeomMesh& mesh,
-		pxr::UsdTimeCode geomTimeCode)
-	{
-		const std::optional<LayerPrimIdentity> pointsIdentity =
-			GetStrongestAuthoredValueIdentity(mesh.GetPointsAttr(), geomTimeCode);
-		const std::optional<LayerPrimIdentity> countsIdentity =
-			GetStrongestAuthoredValueIdentity(mesh.GetFaceVertexCountsAttr(), geomTimeCode);
-		const std::optional<LayerPrimIdentity> indicesIdentity =
-			GetStrongestAuthoredValueIdentity(mesh.GetFaceVertexIndicesAttr(), geomTimeCode);
-
-		if (!pointsIdentity || !countsIdentity || !indicesIdentity) {
-			return std::nullopt;
-		}
-
-		const auto matchesPoints = [&pointsIdentity](const LayerPrimIdentity& other) {
-			return other.sourceIdentifier == pointsIdentity->sourceIdentifier &&
-				other.primPath == pointsIdentity->primPath;
-		};
-
-		if (!matchesPoints(*countsIdentity) || !matchesPoints(*indicesIdentity)) {
-			return std::nullopt;
-		}
-
-		return pointsIdentity;
-	}
-
 	void LogBuildConfigOnce(uint64_t buildHash, std::string_view assetIdentifier)
 	{
 		static std::mutex loggedHashesMutex;
@@ -179,42 +104,6 @@ namespace {
 	}
 }
 
-MeshCacheIdentity BuildIdentity(
-	const pxr::UsdGeomMesh& mesh,
-	const pxr::UsdStageRefPtr& stage,
-	const std::string& subsetName,
-	pxr::UsdTimeCode geomTimeCode)
-{
-	MeshCacheIdentity identity{};
-	if (stage && stage->GetRootLayer()) {
-		identity.sourceIdentifier = NormalizeCacheSourcePath(
-			stage->GetRootLayer()->GetIdentifier());
-	}
-	identity.primPath = mesh.GetPrim().GetPath().GetString();
-	identity.subsetName = subsetName;
-
-	if (auto referencedGeometryIdentity = GetReferencedGeometryIdentity(mesh, geomTimeCode)) {
-		identity.sourceIdentifier = std::move(referencedGeometryIdentity->sourceIdentifier);
-		identity.primPath = std::move(referencedGeometryIdentity->primPath);
-	}
-
-	return identity;
-}
-
-MeshCacheIdentity BuildIdentity(
-	const pxr::UsdGeomMesh& mesh,
-	const pxr::UsdStageRefPtr& stage,
-	const std::string& subsetName,
-	pxr::UsdTimeCode geomTimeCode,
-	const std::string& sourceIdentifierOverride)
-{
-	MeshCacheIdentity identity = BuildIdentity(mesh, stage, subsetName, geomTimeCode);
-	if (!sourceIdentifierOverride.empty()) {
-		identity.sourceIdentifier = NormalizeCacheSourcePath(sourceIdentifierOverride);
-	}
-	return identity;
-}
-
 std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& identity)
 {
 	ZoneScopedN("CLodCacheLoader::TryLoadPrebuilt");
@@ -241,6 +130,10 @@ std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& i
 			cached->prebuiltData.assemblySkeletonArtifact.id.ToString(),
 			skeletonArtifactError);
 		cached.reset();
+		if (CLodCache::IsCacheOnlyMode()) {
+			// Leave the entry in place: the caller treats this as a miss, and the cache belongs to whoever built it.
+			return std::nullopt;
+		}
 		std::error_code metadataError;
 		std::error_code containerError;
 		CachePack::NoteFileChanged(lookup.metadataPath);

@@ -1,3 +1,4 @@
+#include <BasicRenderer/Assets/Import/CLodCache.h>
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h"
@@ -1840,6 +1841,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const VoxelCoverageMaterialSampler* coverageMaterialSampler)
 {
 	ZoneScopedN("ClusterLODUtilities::BuildClusterLODArtifactsFromGeometry");
+	CLodCache::ThrowIfCacheOnly("BuildClusterLODArtifactsFromGeometry");
 	ClusterLODBuildState state{};
 
 	const unsigned int* idx = reinterpret_cast<const unsigned int*>(indices.data());

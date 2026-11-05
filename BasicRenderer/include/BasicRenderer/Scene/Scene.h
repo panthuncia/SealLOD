@@ -62,6 +62,8 @@ public:
     flecs::entity GetRoot() const;
     uint64_t GetSceneID() const;
     void SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, DirectX::XMFLOAT3 up, float fov, float aspect, float zNear, float zFar);
+    // Changes the primary camera's lens in place, keeping its view and its renderer state.
+    void SetCameraProjection(float fov, float aspect, float zNear, float zFar);
     flecs::entity& GetPrimaryCamera();
     bool HasUsablePrimaryCamera() const;
     Components::Position& GetPrimaryCameraPosition();
