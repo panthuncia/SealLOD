@@ -189,12 +189,21 @@ void DeviceManager::Initialize() {
     }
 
 	const bool multiRHI = IsMultiRHIRequested();
-	if (multiRHI && enableStreamline) {
-		// Streamline wraps the D3D12 device and queues. External-memory handles
-		// must be created from the native device, so keep the experimental
+	const rhi::Backend backend = GetRequestedBackend();
+	if ((multiRHI || backend == rhi::Backend::Vulkan) && enableStreamline) {
+		// Multi-RHI: Streamline wraps the D3D12 device and queues. External-memory
+		// handles must be created from the native device, so keep the experimental
 		// multi-device path free of proxy ownership ambiguity.
-		spdlog::info("DeviceManager::Initialize disabling Streamline in multi-RHI mode");
+		// Vulkan: upscaling is forced off (see UpscalingManager), and initializing
+		// Streamline corrupts the process heap during startup.
+		spdlog::info("DeviceManager::Initialize disabling Streamline: multiRHI={} backend={}", multiRHI, static_cast<uint32_t>(backend));
 		enableStreamline = false;
+		try {
+			settingsManager.getSettingSetter<bool>("enableStreamline")(false); // UpscalingManager reads this.
+		}
+		catch (const std::exception&) {
+			// Not registered in this process, so nothing else reads it.
+		}
 	}
 
     spdlog::info(
@@ -205,8 +214,6 @@ void DeviceManager::Initialize() {
         enableSynchronousRecording,
         enableTexelAddressing,
         numFramesInFlight);
-
-    const rhi::Backend backend = GetRequestedBackend();
 
     const rhi::DeviceCreateInfo createInfo{
         .backend = backend,

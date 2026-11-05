@@ -28,6 +28,8 @@ namespace {
     // Bump this whenever the shader compiler argument set changes in a way that affects
     // the generated shader bytecode container, especially debug payload availability.
     constexpr uint64_t kShaderCompilerArgumentFingerprint = 6u;
+    // The same, for arguments only SPIR-V receives. A change here leaves cached DXIL valid.
+    constexpr uint64_t kSpirvCompilerArgumentFingerprint = 1u;
 
     // Live optimization jobs must observe source edits immediately. The ordinary
     // runtime path still uses the artifact cache; only the worker servicing an
@@ -377,6 +379,9 @@ uint64_t ComputeShaderCacheBuildConfigHash(shadercache::BinaryFormat binaryForma
     util::hash_combine_u64(seed, static_cast<uint8_t>(binaryFormat));
     util::hash_combine_u64(seed, kBRSLPreprocessVersion);
     util::hash_combine_u64(seed, kShaderCompilerArgumentFingerprint);
+    if (binaryFormat == shadercache::BinaryFormat::Spirv) {
+        util::hash_combine_u64(seed, kSpirvCompilerArgumentFingerprint);
+    }
 #if WRITE_DEBUG_FILES
     util::hash_combine_u64(seed, 1u);
 #else

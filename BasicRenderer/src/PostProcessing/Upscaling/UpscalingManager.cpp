@@ -134,6 +134,11 @@ void UpscalingManager::SyncSettingsFromSettingsManager()
 {
     m_upscalingMode = ReadUpscalingModeSetting(m_upscalingMode);
     m_upscaleQualityMode = ReadUpscalingQualityModeSetting(m_upscaleQualityMode);
+    // Without Streamline (multi-RHI turns it off after the setting is registered) DLSS cannot run. The mode
+    // still selects jitter and DLSS-only passes, so it must not linger.
+    if (m_upscalingMode == UpscalingMode::DLSS && !IsStreamlineEnabledSetting()) {
+        m_upscalingMode = UpscalingMode::None;
+    }
     // Vulkan temporal upscaling is not yet stable (including the single-device
     // path, where Streamline can fail while setting constants and corrupt its
     // teardown state). Keep it disabled until that integration is validated;

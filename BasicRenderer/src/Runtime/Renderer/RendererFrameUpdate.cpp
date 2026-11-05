@@ -270,6 +270,11 @@ void Renderer::Update(float elapsedSeconds) {
         spdlog::warn("Renderer: bridged primary camera is unavailable after scene sync. Skipping frame update work.");
         return;
     }
+    // m_context was captured by the previous Render. A resize since then recreated the primary view and its depth maps.
+    m_context.primaryViewID = camera.get<Components::RenderViewRef>().viewID;
+    if (const auto* depthMap = camera.try_get<Components::DepthMap>()) {
+        m_context.primaryDepthMap = *depthMap;
+    }
     unsigned int cameraIndex = m_pViewManager->Get(camera.get<Components::RenderViewRef>().viewID)->gpu.cameraBufferIndex;
 
     runCapturedStage("WaitForFrame", [&]() {
