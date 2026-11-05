@@ -109,6 +109,12 @@ namespace br::textures
 	// initialization only.
 	bool WaitForTexture(const std::shared_ptr<TextureAsset>& texture, std::chrono::milliseconds timeout);
 
+	enum class TextureConditionResult { AlreadyCached, Built, NotProcessed };
+
+	// Writes a pipeline texture's processed cache entry on the calling thread, with no GPU and no running
+	// pipeline, so offline tools can finish a cache the renderer then reads as a hit. Throws on failure.
+	TextureConditionResult ConditionTextureOnCpu(const std::shared_ptr<TextureAsset>& texture);
+
 	// Decodes a request's source to pixels, unprocessed, on the calling thread: for CPU
 	// consumers of texture data (preprocessing tools). Throws on failure.
 	[[nodiscard]] std::shared_ptr<TextureSourceData> DecodeTextureSource(const TextureRequest& request);

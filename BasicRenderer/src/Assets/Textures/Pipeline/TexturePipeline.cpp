@@ -133,6 +133,27 @@ namespace br::textures
 		return texture;
 	}
 
+	TextureConditionResult ConditionTextureOnCpu(const std::shared_ptr<TextureAsset>& texture)
+	{
+		if (!texture || !texture->IsPipelineTexture()) throw std::runtime_error("ConditionTextureOnCpu: not a pipeline texture");
+		const TextureRequest& request = *texture->PipelineRequest();
+		if (request.preparation == TexturePreparation::LoadOnly) return TextureConditionResult::NotProcessed;
+
+		const std::string& cacheKey = texture->PipelineCacheKey();
+		if (ReadConditionedCacheDescription(TextureProcessingManager::ConditionedCachePath(cacheKey))) {
+			return TextureConditionResult::AlreadyCached;
+		}
+		const TextureFileMeta meta = TextureProcessingMeta(request);
+		auto processed = TextureProcessingManager::GetInstance().Process(DecodeTextureSource(request), meta);
+		const auto result = processed.gpuCompression
+			? TextureProcessingManager::FinalizeOnCpu(processed.prepared, meta)
+			: processed.result;
+		if (!result || TextureProcessingManager::WriteCache(cacheKey, *result).empty()) {
+			throw std::runtime_error("ConditionTextureOnCpu: could not write the cache for '" + request.source.identity + "'");
+		}
+		return TextureConditionResult::Built;
+	}
+
 	std::shared_ptr<TextureSourceData> DecodeTextureSource(const TextureRequest& request)
 	{
 		const auto& source = request.source;

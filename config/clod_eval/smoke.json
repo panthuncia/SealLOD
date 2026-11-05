@@ -1,0 +1,30 @@
+{
+  "name": "smoke",
+  "assets": [
+    { "name": "dragon", "path": "../../models/dragon.glb" }
+  ],
+  "variants": [
+    {
+      "name": "triangles",
+      "settings": { "BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE": "prioritizeEdges" }
+    },
+    {
+      "name": "voxel",
+      "settings": { "BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE": "voxel" }
+    },
+    {
+      "name": "voxel-coarse",
+      "settings": {
+        "BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE": "voxel",
+        "BASICRENDERER_CLOD_VOXEL_SCALE": "5.0"
+      }
+    }
+  ],
+  "budgets": [
+    { "metric": "validity.bad_pages", "value": 0 },
+    { "metric": "validity.bad_segment_page", "value": 0 },
+    { "metric": "validity.page_kind_mismatch", "value": 0 },
+    { "metric": "validity.bad_node_range", "value": 0 },
+    { "metric": "validity.unreachable_groups", "value": 0 }
+  ]
+}

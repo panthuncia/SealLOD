@@ -13,6 +13,25 @@
 
 namespace {
 
+// The traversal stages keep every shared slot they emit voxel clusters through, so their own
+// outputs must not reuse one. Sharing a slot sends those writes to the wrong buffer without any error.
+constexpr bool TraversalOutputsKeepSharedSlots()
+{
+    constexpr uint32_t outputs[] = {CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX, CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX,
+        CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX, CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX, CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX,
+        CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX, CLOD_PC_LEAF_OUTPUT_DESCRIPTOR_INDEX, CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX};
+    constexpr uint32_t shared[] = {CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX, CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX,
+        CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX, CLOD_WG_HW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX,
+        CLOD_WG_SW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX, CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX, CLOD_WG_VISIBLE_CLUSTERS_CAPACITY};
+    for (const uint32_t output : outputs) {
+        for (const uint32_t slot : shared) {
+            if (output == slot) return false;
+        }
+    }
+    return true;
+}
+static_assert(TraversalOutputsKeepSharedSlots());
+
 static_assert(
     CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS >
         CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&

@@ -44,6 +44,11 @@ See [renderer architecture](docs/renderer-architecture.md) for current migration
 | `Lighting/`, `VirtualShadows/`, `Transparency/`, `PostProcessing/` | Feature-owned CPU state, integration, and passes. |
 | `Diagnostics/` | Telemetry, debug rendering, and menu implementation. |
 
+Beside `BasicRenderer/`, `CLodCore/` builds the generator and cache format from these sources into
+libraries the renderer and tools share, so a tool can link them without the renderer. `CLodEval/` is an
+executable built on those. `CLodCacheTool/` links the renderer library for its USD importer, but must never create a
+device: it fails at exit if `d3d12.dll` or `dxgi.dll` was loaded.
+
 Pass code lives in each owning subfeature's `RenderPasses/` directory, alongside CPU
 architecture rather than in a global pass bucket. TextureFactory retains ownership
 of its nested passes, whose definitions live in `Assets/Textures/RenderPasses`.
@@ -110,6 +115,10 @@ include audit is `python scripts/Audit-RendererBoundaries.py`; its fixtures are
 `python scripts/TestRendererBoundaries.py`. Explicit source-list and header-smoke
 coverage is checked by `python scripts/Audit-RendererBuildInputs.py`. Independent installed first-party
 package consumption is checked by `scripts/Test-InstalledPackages.ps1`.
+
+`CLodCacheFormatTests` and `CLodEvalTests` are the tests that run the CLod generator, cache and page
+decoding. To measure a generator change, use `CLodEval`: see
+[docs/clod-evaluation.md](docs/clod-evaluation.md).
 
 CPU tests do not draw frames. For changes that could affect execution or lifetimes,
 use SARP's documented exit-on-stability harness and inspect its reports. Structural

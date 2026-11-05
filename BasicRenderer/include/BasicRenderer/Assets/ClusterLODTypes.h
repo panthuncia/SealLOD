@@ -319,6 +319,9 @@ struct ClusterLODBuilderSettings
 	float voxelFallbackOpacityThreshold = 0.0f;
 	uint32_t voxelTailMaxLevels = 4u;
 	float voxelTailGrowthFactor = 1.5f;
+	// Most of a group's traced surface a proposed voxelization may lose before the group stays triangles. See VoxelSurfaceTrace.h.
+	// 0 turns the test off.
+	float voxelSurfaceLossLimit = 0.0f;
 	bool doubleSidedVoxelSourceNormals = false;
 };
 
@@ -409,6 +412,7 @@ inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(Clus
 	readUint("BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS", settings.voxelTailMaxLevels);
 	readUint("BASICRENDERER_CLOD_NODE_BONE_LIMIT", settings.nodeBoneLimit);
 	readFloat("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH", settings.voxelTailGrowthFactor);
+	readFloat("BASICRENDERER_CLOD_VOXEL_SURFACE_LOSS", settings.voxelSurfaceLossLimit);
 	readBool("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", settings.disableSloppyFallback);
 	readFloat("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", settings.sloppyFallbackErrorFactor);
 

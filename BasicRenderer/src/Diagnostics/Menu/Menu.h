@@ -85,12 +85,19 @@ public:
         DirectX::XMUINT2 outputResolution);
     bool HandleInput(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 	void SetRenderGraph(org::RenderGraph* renderGraph) { m_renderGraph = renderGraph; }
+    // Drawn every frame between ImGui's NewFrame and Render, for tools that link the renderer.
+    void SetExternalPanel(std::function<void()> panel) { m_externalPanel = std::move(panel); }
+    void SetMenuEnabled(bool enabled) { m_menuEnabled = enabled; }
     void Cleanup();
 
     // ImGui descriptor heap allocator for user textures (slot 0 reserved for font atlas).
     uint32_t AllocateImGuiDescriptor();
     void FreeImGuiDescriptor(uint32_t index);
     ImTextureID GetImGuiGpuDescriptorHandle(uint32_t index);
+    uint64_t GetImGuiCpuDescriptorHandle(uint32_t index) const {
+        return rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get())->GetCPUDescriptorHandleForHeapStart().ptr +
+            static_cast<uint64_t>(index) * imguiHeapIncrementSize_;
+    }
     rhi::DescriptorHeapHandle GetImGuiHeapHandle() const {
 		if (!g_pd3dSrvDescHeap) {
 			return {};
@@ -299,6 +306,7 @@ private:
 
 	bool m_meshShadersSupported = false;
     bool m_menuEnabled = true;
+    std::function<void()> m_externalPanel;
     
     std::filesystem::path environmentsDir;
 

@@ -149,6 +149,20 @@ public:
     const br::render::SceneIngestionServices& GetSceneIngestionServices() const { return m_sceneIngestionServices; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
     org::RenderGraph* GetRenderGraph() { return currentRenderGraph; }
+    // Reads the primary view's visibility and visible clusters from one frame, so a tool can say what
+    // drew each pixel. done runs on a readback thread. Returns false, without calling it, if the frame
+    // has no such resources yet. Each call copies both resources, so this is not for every frame.
+    struct CLodInspectionFrame {
+        uint64_t frame = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::vector<uint64_t> visibility;  // width * height keys
+        std::vector<std::byte> visibleClusters;
+        std::shared_ptr<const std::vector<std::byte>> drawRecords;
+        std::shared_ptr<const std::vector<std::byte>> clodOffsets;
+        std::shared_ptr<const std::vector<std::byte>> meshMetadata;
+    };
+    bool RequestCLodInspectionFrame(std::function<void(CLodInspectionFrame&&)> done);
     const org::RenderGraph* GetRenderGraph() const { return currentRenderGraph; }
     bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
     void StartAsyncStateGraphTrace(br::render::AsyncStateGraphTraceConfig config = {});

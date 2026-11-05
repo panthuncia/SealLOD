@@ -467,6 +467,10 @@ inline bool IsCLodWorkGraphTelemetryEnabled() {
 struct CLodMeshSource {
     std::string name;
     uint32_t rasterFlags = 0u; // OR of the mesh's material variants
+    // The cache entry behind the mesh, which is how a tool finds the hierarchy of a visible cluster.
+    std::string cacheSourceIdentifier;
+    std::string cachePrimPath;
+    std::string cacheSubsetName;
 };
 
 struct CLodMeshSourceRegistry {
@@ -476,11 +480,15 @@ struct CLodMeshSourceRegistry {
 
 inline CLodMeshSourceRegistry g_clodMeshSources;
 
-inline void RecordCLodMeshSource(uint64_t meshIdentity, std::string_view modelPath, std::string_view partName, uint32_t rasterFlags) {
+inline void RecordCLodMeshSource(uint64_t meshIdentity, std::string_view modelPath, std::string_view partName, uint32_t rasterFlags,
+    std::string_view cacheSourceIdentifier = {}, std::string_view cachePrimPath = {}, std::string_view cacheSubsetName = {}) {
     std::lock_guard lock(g_clodMeshSources.mutex);
     auto& mesh = g_clodMeshSources.meshes[meshIdentity];
     mesh.rasterFlags |= rasterFlags;
     if (!mesh.name.empty()) return;
+    mesh.cacheSourceIdentifier = cacheSourceIdentifier;
+    mesh.cachePrimPath = cachePrimPath;
+    mesh.cacheSubsetName = cacheSubsetName;
     mesh.name = modelPath;
     if (!partName.empty()) {
         mesh.name += '#';

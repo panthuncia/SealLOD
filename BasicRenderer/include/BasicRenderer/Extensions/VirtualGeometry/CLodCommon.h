@@ -37,6 +37,7 @@ inline constexpr const char* CLodPureComputePhase2ExpansionFactorSettingName = "
 inline constexpr const char* CLodPureComputeReplayExpansionFactorSettingName = "clodPureComputeReplayExpansionFactor";
 inline constexpr const char* CLodFrustumCullingSettingName = "clodFrustumCulling";
 inline constexpr const char* CLodLodHeightModeSettingName = "clodLodHeightMode";
+inline constexpr const char* CLodLodErrorPixelsSettingName = "clodLodErrorPixels";
 // The large-scene streaming stress workload peaks at roughly 0.52M opaque
 // visible clusters. Keep nearly 4x headroom while avoiding capacity-scaling
 // every visible-cluster and pure-compute frontier resource to 8M entries.

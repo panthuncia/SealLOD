@@ -16,6 +16,7 @@
 #include <mutex>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -35,9 +36,6 @@
 #include <Windows.h>
 #endif
 
-#if BASICRENDERER_HAS_DIRECTSTORAGE
-#include "Runtime/IO/DirectStorageManager.h"
-#endif
 #include <BasicRenderer/Assets/CachePaths.h>
 
 #include "../shaders/Common/defines.h"
@@ -1114,6 +1112,10 @@ namespace CLodCache {
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH");
+		// Only when set, so that adding this test does not invalidate every cache already built without it.
+		if (!GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_SURFACE_LOSS").empty()) {
+			hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_SURFACE_LOSS");
+		}
 		hashEffectiveNodeBoneLimit();
 		hashEnvironmentString("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK");
 		hashEnvironmentString("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR");
@@ -1452,129 +1454,6 @@ namespace CLodCache {
 		return true;
 	}
 
-	bool LoadMeshPagesSelectiveDirectStorage(
-		const std::wstring& containerPath,
-		std::span<const ClusterLODGroupDiskLocator> pageLocators,
-		uint32_t firstPage,
-		uint32_t pageCount,
-		const std::vector<bool>& pageNeedsFetch,
-		LoadedGroupPayload& outPayload,
-		std::string* outMessage)
-	{
-#if !BASICRENDERER_HAS_DIRECTSTORAGE
-		(void)containerPath;
-		(void)pageLocators;
-		(void)firstPage;
-		(void)pageCount;
-		(void)pageNeedsFetch;
-		(void)outPayload;
-		if (outMessage) {
-			*outMessage = "DirectStorage support is not compiled into this target";
-		}
-		return false;
-#else
-		if (outMessage) {
-			outMessage->clear();
-		}
-		if (!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::SystemMemory)) {
-			if (outMessage) {
-				*outMessage = "DirectStorage system-memory queue unavailable";
-			}
-			return false;
-		}
-		outPayload.pageBlobs.assign(pageCount, {});
-		const uint64_t endPage = static_cast<uint64_t>(firstPage) + static_cast<uint64_t>(pageCount);
-		if (endPage > pageLocators.size()) {
-			return false;
-		}
-		for (uint32_t pageOffset = 0; pageOffset < pageCount; ++pageOffset) {
-			if (!pageNeedsFetch.empty() &&
-				pageOffset < static_cast<uint32_t>(pageNeedsFetch.size()) &&
-				!pageNeedsFetch[pageOffset]) {
-				continue;
-			}
-			const ClusterLODGroupDiskLocator& locator = pageLocators[firstPage + pageOffset];
-			std::string readMessage;
-			if (!DirectStorageManager::GetInstance().ReadFileRegionToMemory(
-				containerPath,
-				locator.blobOffset,
-				locator.blobSizeBytes,
-				outPayload.pageBlobs[pageOffset],
-				&readMessage)) {
-				if (outMessage) {
-					*outMessage = readMessage.empty() ? "DirectStorage CLod page read failed" : readMessage;
-				}
-				return false;
-			}
-		}
-		if (outMessage) {
-			*outMessage = "loaded selected CLod mesh pages through DirectStorage";
-		}
-		return true;
-#endif
-	}
-
-	bool LoadMeshPagesSelectiveDirectStorage(
-		const std::wstring& containerPath,
-		std::span<const ClusterLODGroupDiskLocator> pageLocators,
-		std::span<const uint32_t> meshPageIndices,
-		const std::vector<bool>& pageNeedsFetch,
-		LoadedGroupPayload& outPayload,
-		std::string* outMessage)
-	{
-#if !BASICRENDERER_HAS_DIRECTSTORAGE
-		(void)containerPath;
-		(void)pageLocators;
-		(void)meshPageIndices;
-		(void)pageNeedsFetch;
-		(void)outPayload;
-		if (outMessage) {
-			*outMessage = "DirectStorage support is not compiled into this target";
-		}
-		return false;
-#else
-		if (outMessage) {
-			outMessage->clear();
-		}
-		if (!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::SystemMemory)) {
-			if (outMessage) {
-				*outMessage = "DirectStorage system-memory queue unavailable";
-			}
-			return false;
-		}
-		outPayload.pageBlobs.assign(meshPageIndices.size(), {});
-		for (uint32_t pageOffset = 0; pageOffset < static_cast<uint32_t>(meshPageIndices.size()); ++pageOffset) {
-			if (!pageNeedsFetch.empty() &&
-				pageOffset < static_cast<uint32_t>(pageNeedsFetch.size()) &&
-				!pageNeedsFetch[pageOffset]) {
-				continue;
-			}
-			const uint32_t meshPageIndex = meshPageIndices[pageOffset];
-			if (meshPageIndex >= pageLocators.size()) {
-				return false;
-			}
-			const ClusterLODGroupDiskLocator& locator = pageLocators[meshPageIndex];
-			std::string readMessage;
-			if (!DirectStorageManager::GetInstance().ReadFileRegionToMemory(
-				containerPath,
-				locator.blobOffset,
-				locator.blobSizeBytes,
-				outPayload.pageBlobs[pageOffset],
-				&readMessage)) {
-				if (outMessage) {
-					*outMessage = readMessage.empty() ? "DirectStorage CLod page read failed" : readMessage;
-				}
-				return false;
-			}
-		}
-		if (outMessage) {
-			*outMessage = "loaded selected CLod mesh pages through DirectStorage";
-		}
-		return true;
-#endif
-	}
-
-
 	bool OpenContainerFile(const ClusterLODCacheSource& cacheSource,
 		std::ifstream& outFile,
 		uint32_t& outPageCount)
@@ -1584,7 +1463,14 @@ namespace CLodCache {
 			return false;
 		}
 
-		const std::wstring containerPath = ResolveContainerPath(cacheSource);
+		return OpenContainerFile(std::filesystem::path(ResolveContainerPath(cacheSource)), outFile, outPageCount);
+	}
+
+	bool OpenContainerFile(const std::filesystem::path& containerPath,
+		std::ifstream& outFile,
+		uint32_t& outPageCount)
+	{
+		outPageCount = 0u;
 		outFile.open(containerPath, std::ios::binary);
 		if (!outFile.is_open()) {
 			return false;
@@ -1599,6 +1485,68 @@ namespace CLodCache {
 
 		outPageCount = header.pageCount;
 		return true;
+	}
+
+	OpenedMetadata OpenMetadataFile(const std::filesystem::path& metadataPath)
+	{
+		OpenedMetadata result;
+		std::error_code existsError;
+		if (!std::filesystem::exists(metadataPath, existsError)) {
+			return result;
+		}
+
+		std::vector<std::byte> blob;
+		if (!ReadMetadataBlob(metadataPath.wstring(), blob)) {
+			result.status = OpenMetadataStatus::BadHeader;
+			return result;
+		}
+		size_t offset = 0;
+		if (!ReadPod(blob, offset, result.foundSchemaVersion)) {
+			result.status = OpenMetadataStatus::Corrupt;
+			return result;
+		}
+		if (result.foundSchemaVersion != kSchemaVersion) {
+			result.status = OpenMetadataStatus::SchemaMismatch;
+			return result;
+		}
+		if (!DeserializeMetadata(blob, result.data)) {
+			result.status = OpenMetadataStatus::Corrupt;
+			return result;
+		}
+		result.containerPath = metadataPath.parent_path() / result.data.prebuiltData.cacheSource.containerFileName;
+		result.status = OpenMetadataStatus::Ok;
+		return result;
+	}
+
+	namespace {
+		std::atomic<bool> g_cacheOnlyMode{ false };
+		std::atomic<uint64_t> g_cacheOnlyViolations{ 0u };
+	}
+
+	void SetCacheOnlyMode(bool enabled)
+	{
+		g_cacheOnlyMode.store(enabled, std::memory_order_relaxed);
+	}
+
+	bool IsCacheOnlyMode()
+	{
+		return g_cacheOnlyMode.load(std::memory_order_relaxed);
+	}
+
+	void ThrowIfCacheOnly(std::string_view builder)
+	{
+		if (!IsCacheOnlyMode()) {
+			return;
+		}
+		g_cacheOnlyViolations.fetch_add(1u, std::memory_order_relaxed);
+		const std::string message = "CLod cache-only mode: " + std::string(builder) + " was asked to build after a cache miss";
+		spdlog::critical("{}", message);
+		throw std::runtime_error(message);
+	}
+
+	uint64_t GetCacheOnlyViolationCount()
+	{
+		return g_cacheOnlyViolations.load(std::memory_order_relaxed);
 	}
 
 }

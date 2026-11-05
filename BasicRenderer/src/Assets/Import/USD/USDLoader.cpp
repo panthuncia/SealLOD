@@ -84,6 +84,7 @@
 #include "Assets/Textures/Processing/TextureProcessingManager.h"
 
 #include "BasicRenderer/Assets/USD/USDLoader.h"
+#include <BasicRenderer/Assets/TexturePipeline.h>
 #include "Assets/Import/USD/USDImportState.h"
 #include "Assets/Import/USD/USDMaterialConversion.h"
 #include "Assets/Import/USD/USDSkeletonConversion.h"
@@ -488,7 +489,7 @@ namespace USDLoader {
 				"USD payload whole-asset assembly build failed for '{}': {}",
 				options.sourceIdentifier,
 				assemblyBuildFailureReason.empty() ? "builder produced no renderables" : assemblyBuildFailureReason);
-			if (options.requireWholeAssetAssembly) {
+			if (options.requireWholeAssetAssembly || options.failIfAssemblyBuildFails) {
 				loadingCache.Clear();
 				return std::nullopt;
 			}
@@ -542,6 +543,39 @@ namespace USDLoader {
 			loadingCache.Clear();
 			throw;
 		}
+	}
+
+	std::optional<CachedAssemblyTextureStats> ConditionCachedAssemblyTexturesOnCpu(const InMemoryStageOptions& options) {
+		ZoneScopedN("USDLoader::ConditionCachedAssemblyTexturesOnCpu");
+		auto manifest = USDMaterialCache::LoadAssemblyMaterialManifest(options.sourceIdentifier);
+		if (!manifest || manifest->empty()) return std::nullopt;
+
+		loadingCache.textureSearchRoots = options.textureSearchRoots;
+		if (!options.sourceDirectory.empty() &&
+			std::find(loadingCache.textureSearchRoots.begin(), loadingCache.textureSearchRoots.end(), options.sourceDirectory) == loadingCache.textureSearchRoots.end()) {
+			loadingCache.textureSearchRoots.push_back(options.sourceDirectory);
+		}
+		std::vector<std::shared_ptr<TextureAsset>> textures;
+		std::unordered_set<std::string> seen;
+		for (auto& entry : *manifest) {
+			MaterialDescription& material = entry.material;
+			LoadSourcePathTextures(material, {}, true);
+			for (const TextureAndConstant* binding : {
+				&material.baseColor, &material.metallic, &material.roughness, &material.emissive, &material.opacity, &material.aoMap,
+				&material.heightMap, &material.normal, &material.openPBRTextures.coatColor, &material.openPBRTextures.coatWeight,
+				&material.openPBRTextures.coatRoughness, &material.openPBRTextures.fuzzColor, &material.openPBRTextures.fuzzWeight,
+				&material.openPBRTextures.fuzzRoughness }) {
+				if (binding->texture && seen.insert(binding->texture->PipelineCacheKey()).second) textures.push_back(binding->texture);
+			}
+		}
+		loadingCache.Clear();
+
+		CachedAssemblyTextureStats stats;
+		stats.referenced = static_cast<std::uint32_t>(textures.size());
+		for (const auto& texture : textures) {
+			if (br::textures::ConditionTextureOnCpu(texture) == br::textures::TextureConditionResult::Built) ++stats.built;
+		}
+		return stats;
 	}
 
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromFile(

@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <fstream>
 #include <iomanip>
@@ -27,9 +28,12 @@
 #include <mutex>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
+
+#include <objbase.h>
 
 #include <nlohmann/json.hpp>
 
@@ -41,9 +45,12 @@
 #include <BasicRenderer/Assets/Import/GlTFGeometryExtractor.h>
 #include <BasicRenderer/Assets/Import/AssimpGeometryExtractor.h>
 #include <BasicRenderer/Assets/Import/USDGeometryExtractor.h>
+#include <BasicRenderer/Assets/USD/USDLoader.h>
+#include <BasicRenderer/StaticImport/ImportedAssetLibrary.h>
 #include <BasicRenderer/Assets/Import/USDMaterialCache.h>
 #include <BasicRenderer/Assets/Import/BRNiflyClient.h>
 #include <BasicRenderer/Assets/CachePaths.h>
+#include <BasicRenderer/Assets/Import/CLodCache.h>
 
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/usd/primFlags.h>
@@ -1131,6 +1138,93 @@ static void WriteClusterLODReport(
     out << "\n\n";
 }
 
+static constexpr std::string_view kCacheRootPrefix = "--cache-root=";
+static fs::path g_manifestPath;
+
+struct ManifestFileResult {
+    std::string path;
+    bool succeeded = false;
+    double milliseconds = 0.0;
+};
+
+// Lists what this run left in the cache root, so a caller can open each cache by file. A run writing
+// to a shared root will also list what earlier runs left there; give each build its own root.
+static bool WriteBuildManifest(const fs::path& manifestPath, const std::vector<ManifestFileResult>& files) {
+    nlohmann::json manifest;
+    manifest["manifest_version"] = 1;
+    manifest["schema_version"] = CLodCache::kSchemaVersion;
+    manifest["cache_root"] = fs::absolute(GetCacheRootPath()).string();
+    manifest["cache_only"] = CLodCache::IsCacheOnlyMode();
+
+    // These feed the build-config hash, so a consumer must apply the same values to load these caches.
+    nlohmann::json settings = nlohmann::json::object();
+    for (const char* name : {
+             "BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE", "BASICRENDERER_CLOD_VOXEL_GRID", "BASICRENDERER_CLOD_VOXEL_MIN_RES",
+             "BASICRENDERER_CLOD_VOXEL_RAYS", "BASICRENDERER_CLOD_VOXEL_SCALE", "BASICRENDERER_CLOD_VOXEL_RETRIES",
+             "BASICRENDERER_CLOD_VOXEL_GROWTH", "BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS", "BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD",
+             "BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS", "BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH", "BASICRENDERER_CLOD_VOXEL_SURFACE_LOSS", "BASICRENDERER_CLOD_NODE_BONE_LIMIT",
+             "BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", "BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", "SARP_ASSET_SETTINGS_CONFIG" }) {
+        if (const std::string value = GetClusterLODEnvironmentVariable(name); !value.empty()) {
+            settings[name] = value;
+        }
+    }
+    manifest["settings"] = std::move(settings);
+
+    nlohmann::json fileEntries = nlohmann::json::array();
+    for (const ManifestFileResult& file : files) {
+        fileEntries.push_back({ { "path", file.path }, { "succeeded", file.succeeded }, { "milliseconds", file.milliseconds } });
+    }
+    manifest["files"] = std::move(fileEntries);
+
+    nlohmann::json meshes = nlohmann::json::array();
+    std::error_code walkError;
+    for (fs::recursive_directory_iterator it(GetCacheRootPath(), walkError), end; !walkError && it != end; it.increment(walkError)) {
+        if (!it->is_regular_file() || it->path().extension() != L".clodmeta") {
+            continue;
+        }
+        const CLodCache::OpenedMetadata opened = CLodCache::OpenMetadataFile(it->path());
+        if (opened.status != CLodCache::OpenMetadataStatus::Ok) {
+            spdlog::warn("Manifest: could not open '{}'", it->path().string());
+            continue;
+        }
+        const ClusterLODPrebuiltData& prebuilt = opened.data.prebuiltData;
+        std::error_code sizeError;
+        meshes.push_back({
+            { "source_identifier", prebuilt.cacheSource.sourceIdentifier },
+            { "prim_path", prebuilt.cacheSource.primPath },
+            { "subset_name", prebuilt.cacheSource.subsetName },
+            { "build_config_hash", std::format("{:016X}", opened.data.buildConfigHash) },
+            { "metadata_path", it->path().string() },
+            { "container_path", opened.containerPath.string() },
+            { "metadata_bytes", fs::file_size(it->path(), sizeError) },
+            { "container_bytes", fs::file_size(opened.containerPath, sizeError) },
+            { "groups", prebuilt.groups.size() },
+            { "triangle_pages", prebuilt.trianglePageCount },
+            { "voxel_pages", prebuilt.voxelPageCount },
+        });
+    }
+    manifest["meshes"] = std::move(meshes);
+
+    // Written beside the target and moved into place, so a manifest on disk is a finished one.
+    std::error_code directoryError;
+    if (manifestPath.has_parent_path()) {
+        fs::create_directories(manifestPath.parent_path(), directoryError);
+    }
+    fs::path temporaryPath = manifestPath;
+    temporaryPath += L".tmp";
+    {
+        std::ofstream output(temporaryPath, std::ios::trunc);
+        output << manifest.dump(2) << '\n';
+        output.flush();
+        if (!output) {
+            return false;
+        }
+    }
+    std::error_code renameError;
+    fs::rename(temporaryPath, manifestPath, renameError);
+    return !renameError;
+}
+
 static bool TryConsumeOption(const std::string& arg) {
     if (arg == "--debug") {
         spdlog::set_level(spdlog::level::debug);
@@ -1138,6 +1232,7 @@ static bool TryConsumeOption(const std::string& arg) {
         return true;
     }
 
+    constexpr const char* manifestPrefix = "--manifest=";
     constexpr const char* reportPrefix = "--clod-report=";
     constexpr const char* tessellationPrefix = "--usd-tessellation-factor=";
     constexpr const char* modePrefix = "--clod-coverage-preservation-mode=";
@@ -1153,6 +1248,22 @@ static bool TryConsumeOption(const std::string& arg) {
     constexpr const char* disableSloppyPrefix = "--clod-disable-sloppy-fallback=";
     constexpr const char* sloppyFactorPrefix = "--clod-sloppy-error-factor=";
     constexpr const char* assetOverridesPrefix = "--asset-overrides=";
+
+    if (arg == "--cache-only") {
+        CLodCache::SetCacheOnlyMode(true);
+        return true;
+    }
+
+    // Read before anything else runs, because the cache root is resolved once per process.
+    if (arg.rfind(kCacheRootPrefix, 0) == 0) {
+        return true;
+    }
+
+    const std::string manifestPrefixString(manifestPrefix);
+    if (arg.rfind(manifestPrefixString, 0) == 0) {
+        g_manifestPath = arg.substr(manifestPrefixString.size());
+        return true;
+    }
 
     const std::string assetOverridesPrefixString(assetOverridesPrefix);
     if (arg.rfind(assetOverridesPrefixString, 0) == 0) {
@@ -1252,33 +1363,43 @@ static bool ProcessFile(const fs::path& path) {
             const uint64_t sourceTriangles = CountUsdStageSourceTriangles(stage);
             spdlog::info("  USD source geometry: triangles={} (scene instances included)", sourceTriangles);
             WriteUsdAssemblyReport(canonical, "USD source", stage);
-            USDGeometryExtractor::ExtractOptions extractOptions{};
-            extractOptions.retainClusterLODArtifacts = true;
-            // Material-bucket assembly baking needs retained child artifacts even when
-            // each child already has a disk cache.
-            extractOptions.skipCachedClusterLODMeshBuilds = false;
-            extractOptions.buildPointInstancerAssemblyCaches = false;
-            // The material-bucket whole-asset builder in USDLoader owns this
-            // format because it also expands UsdSkel and DynamicWind metadata.
-            // The geometry-only extractor cannot safely publish a manifest for
-            // skinned assets.
-            extractOptions.buildWholeAssetAssemblyCaches = false;
-            extractOptions.importSkinningAsRigidBindPose = true;
-            USDGeometryExtractor::StageExtractionResult result;
+            // The whole-asset importer owns this format: it expands UsdSkel and DynamicWind metadata, and it
+            // publishes the material manifest the runtime opens. Running that same code is what makes these
+            // the caches the runtime loads. No device exists in this process, so nothing here can use a GPU.
+            USDLoader::InMemoryStageOptions importOptions{};
+            // Spelled as the runtime spells it, since the manifest and the texture cache keys depend on the path.
+            const std::string runtimeKey = sourceOverride != g_sourceIdentifierOverrides.end()
+                ? pathStr : br::staticimport::ImportedAssetLibrary::MakeAssetKey(pathStr);
+            importOptions.sourceIdentifier = sourceOverride != g_sourceIdentifierOverrides.end() ? sourceIdentifier : runtimeKey;
+            importOptions.sourceDirectory = fs::path(runtimeKey).parent_path().string();
+            importOptions.layerIdentifierHint = canonical.filename().string();
+            importOptions.isUsdPackage = ToLower(canonical.extension().string()) == ".usdz";
+            // Texture loading stays on: it only records requests here, nothing decodes or uploads, and turning
+            // it off changes material factors in the manifest.
+            importOptions.failIfAssemblyBuildFails = true;
+            const USDLoader::ImportSettings importSettings{};
+            std::optional<USDLoader::ImportedAssetPayload> payload;
             {
-                ZoneScopedN("CLodCacheTool::USD::ExtractAllFromStage");
-                result = USDGeometryExtractor::ExtractAllFromStage(stage, sourceIdentifier, g_usdTessellationFactor, extractOptions);
+                ZoneScopedN("CLodCacheTool::USD::Import");
+                payload = USDLoader::LoadImportedAssetFromFile(runtimeKey, importOptions, importSettings);
             }
-            spdlog::info("  USD result: meshes={}, submeshes={}, caches_built={}, source_triangles={}",
-                         result.meshesProcessed,
-                         result.submeshesProcessed,
-                         result.cachesBuilt,
-                         sourceTriangles);
-            for (size_t i = 0; i < result.submeshes.size(); ++i) {
-                WriteClusterLODReport(canonical, "USD submesh " + std::to_string(i), result.submeshes[i]);
+            if (!payload) {
+                spdlog::error("  USD import failed: {}", pathStr);
+                return false;
             }
-            if (result.meshesProcessed == 0)
-                spdlog::warn("  No UsdGeomMesh prims found in stage!");
+            spdlog::info("  USD result: meshes={}, source_triangles={}", payload->meshes.size(), sourceTriangles);
+            if (payload->meshes.empty())
+                spdlog::warn("  No renderable meshes found in stage!");
+            {
+                ZoneScopedN("CLodCacheTool::USD::ConditionTextures");
+                const auto textures = USDLoader::ConditionCachedAssemblyTexturesOnCpu(importOptions);
+                if (textures) {
+                    spdlog::info("  USD textures: referenced={}, built_on_cpu={}", textures->referenced, textures->built);
+                }
+                else {
+                    spdlog::info("  USD textures: no material assembly was published, so the runtime will condition them");
+                }
+            }
             break;
         }
         case AssetFormat::GlTF: {
@@ -1403,6 +1524,19 @@ int main(int argc, char* argv[]) {
     spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] %v");
     spdlog::flush_on(spdlog::level::info);
 
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg(argv[i]);
+        if (arg.starts_with(kCacheRootPrefix)) {
+            SetProcessEnvironment("SARP_CACHE_ROOT", std::string(arg.substr(kCacheRootPrefix.size())));
+        }
+    }
+
+    // Texture decoding uses WIC, and joining the multithreaded apartment here covers the worker threads too.
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+        spdlog::error("Could not initialize COM");
+        return 1;
+    }
+
     spdlog::info("CLodCacheTool starting  (argc={})", argc);
     spdlog::info("Working directory: {}", fs::current_path().string());
 
@@ -1417,7 +1551,7 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) {
         spdlog::error("No arguments provided.");
-            std::cerr << "Usage: CLodCacheTool [--asset-overrides=config.json] [--clod-report=path] [--usd-tessellation-factor=N] [--clod-coverage-preservation-mode=none|prioritizeEdges|voxel] <file1|dir1> [file2|dir2 ...]\n";
+            std::cerr << "Usage: CLodCacheTool [--cache-root=dir] [--manifest=path] [--cache-only] [--asset-overrides=config.json] [--clod-report=path] [--usd-tessellation-factor=N] [--clod-coverage-preservation-mode=none|prioritizeEdges|voxel] <file1|dir1> [file2|dir2 ...]\n";
         return 1;
     }
 
@@ -1567,12 +1701,19 @@ int main(int argc, char* argv[]) {
 
     std::atomic<int> successes{ 0 };
     std::atomic<int> failures{ 0 };
+    std::vector<ManifestFileResult> fileResults;
 
     {
         ZoneScopedN("CLodCacheTool::ProcessFiles");
         TracyPlot("CLOD.Tool.Files", static_cast<int64_t>(files.size()));
+        fileResults.resize(files.size());
         scheduler.ParallelFor("CLodCacheTool::ProcessOverrideAssets", files.size(), [&](std::size_t index) {
-            if (ProcessFile(files[index]))
+            const auto fileStart = std::chrono::steady_clock::now();
+            const bool succeeded = ProcessFile(files[index]);
+            fileResults[index].path = files[index].string();
+            fileResults[index].succeeded = succeeded;
+            fileResults[index].milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fileStart).count();
+            if (succeeded)
                 successes.fetch_add(1, std::memory_order_relaxed);
             else
                 failures.fetch_add(1, std::memory_order_relaxed);
@@ -1602,6 +1743,20 @@ int main(int argc, char* argv[]) {
                          cacheFileCount, cacheBytes / (1024.0 * 1024.0));
         } else {
             spdlog::warn("Cache directory was NOT created - no caches were written.");
+        }
+    }
+
+    if (!g_manifestPath.empty() && !WriteBuildManifest(g_manifestPath, fileResults)) {
+        spdlog::error("Failed to write manifest '{}'", g_manifestPath.string());
+        failures.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // The promise this tool makes: d3d12 and dxgi are delay-loaded, so if either is in the process, something
+    // in the build reached for a GPU. Fail rather than let a machine without one find out later.
+    for (const wchar_t* module : { L"d3d12.dll", L"dxgi.dll" }) {
+        if (GetModuleHandleW(module) != nullptr) {
+            spdlog::error("A GPU library was loaded during a build that must not need one: {}", WideToUtf8Lossy(module));
+            failures.fetch_add(1, std::memory_order_relaxed);
         }
     }
 

@@ -160,6 +160,7 @@ namespace
         ReadSetting(object, "voxelFallbackOpacityThreshold", settings.voxelFallbackOpacityThreshold);
         ReadSetting(object, "voxelTailMaxLevels", settings.voxelTailMaxLevels);
         ReadSetting(object, "voxelTailGrowthFactor", settings.voxelTailGrowthFactor);
+        ReadSetting(object, "voxelSurfaceLossLimit", settings.voxelSurfaceLossLimit);
         ReadSetting(object, "doubleSidedVoxelSourceNormals", settings.doubleSidedVoxelSourceNormals);
     }
 }

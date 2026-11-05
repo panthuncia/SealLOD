@@ -1,3 +1,4 @@
+#include <BasicRenderer/Assets/Import/CLodCache.h>
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelPacking.h"
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.h"
@@ -75,6 +76,7 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 	uint32_t maxCubesPerCluster)
 {
 	ZoneScopedN("ClusterLODUtilities::BuildVoxelOnlyClusterLODArtifactsFromPayload");
+	CLodCache::ThrowIfCacheOnly("BuildVoxelOnlyClusterLODArtifactsFromPayload");
 	ClusterLODPrebuildArtifacts artifacts{};
 	if (payload.activeCells.empty() || payload.resolution == 0u || !(payload.voxelWidth > 0.0f))
 	{
@@ -228,6 +230,7 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	uint32_t maxCubesPerCluster)
 {
 	ZoneScopedN("ClusterLODUtilities::BuildVoxelOnlyClusterLODArtifactsFromGeometry");
+	CLodCache::ThrowIfCacheOnly("BuildVoxelOnlyClusterLODArtifactsFromGeometry");
 	ClusterLODPrebuildArtifacts artifacts{};
 	const size_t vertexStrideBytes = vertexSize;
 	const size_t vertexCount = vertexStrideBytes != 0u ? vertices.size() / vertexStrideBytes : 0u;
